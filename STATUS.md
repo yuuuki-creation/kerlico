@@ -4,7 +4,7 @@
 
 仓库名称：`kerlico`。用户指定的公开发布目标：`yuuuki-creation/kerlico`。文档、说明和提交说明统一使用简体中文；匿名提交约束继续生效。
 
-发布状态：公开仓库 [yuuuki-creation/kerlico](https://github.com/yuuuki-creation/kerlico) 已创建，本地资料已经完成首次匿名提交，正在准备首轮推送。GitHub 命名空间已核实，作者与提交者继续使用固定匿名身份。
+发布状态：公开仓库 [yuuuki-creation/kerlico](https://github.com/yuuuki-creation/kerlico) 已创建，首轮资料已推送至 `main`。已从 GitHub 回读核实公开属性、提交一致性、匿名作者/提交者及无签名状态。VPN 实现仍未开始。
 
 当前阶段：**讨论、设计与仓库结构维护**。尚未获得开始编写 VPN 实现的明确指令；没有建立 Cargo 工程、Rust 内核实现或内核测试。匿名 Git 配置与校验钩子仅属于仓库管理。
 
@@ -30,7 +30,7 @@
 | 文档、状态与决策的存放约定 | 已记录并用于维护 | [仓库文档约定](docs/repository-workflow.md)、[决策目录](docs/decisions/README.md) |
 | 借鉴依据到本项目设计的映射 | 已形成草案 | [借鉴映射](reference/design-map.md)；未据此宣称实现或验证完成 |
 | 强制匿名提交与内容约束 | 已配置并通过行为检查 | [匿名规则](docs/anonymity.md)、版本化身份配置与提交/推送钩子；公开发布前继续复核实际对象 |
-| GitHub 公开仓库 | 已创建，准备首次推送 | [yuuuki-creation/kerlico](https://github.com/yuuuki-creation/kerlico)，资料采用简体中文 |
+| GitHub 公开仓库与首次资料发布 | 已完成 | [yuuuki-creation/kerlico](https://github.com/yuuuki-creation/kerlico)，`main` 已发布简体中文资料，提交身份匿名且无签名 |
 
 这里的“已完成”只描述对应资料工作，不表示功能已经实现。
 
@@ -58,7 +58,7 @@
 
 ## 下一步
 
-完成首轮匿名资料推送并核对远端。随后继续讨论产品范围和首版行为；围绕选定的数据路径查阅固定上游源码，用[借鉴映射](reference/design-map.md)追踪依据，重要选择先形成草案决策。仍不进入 VPN 编码。
+继续讨论产品范围和首版行为；围绕选定的数据路径查阅固定上游源码，用[借鉴映射](reference/design-map.md)追踪依据，重要选择先形成草案决策。仍不进入 VPN 编码。
 
 ## 实现与验证状态
 
@@ -69,6 +69,6 @@
 
 ## 最近变化
 
-- 2026-10-30：确定仓库名 `kerlico`、公开目标 `yuuuki-creation/kerlico` 及简体中文要求；公开仓库已建立，准备首轮资料推送。
+- 2026-10-30：确定仓库名 `kerlico`、公开目标 `yuuuki-creation/kerlico` 及简体中文要求；公开仓库与首轮匿名资料发布已完成，并已核对远端。
 - 2026-10-30：落实用户强制匿名要求，初始化本地 Git 并启用固定身份与校验钩子；未创建项目提交或推送。
 - 2026-10-30：建立统一状态入口、文档存放与决策记录约定，并将现有上游研究映射到本项目设计草案。
