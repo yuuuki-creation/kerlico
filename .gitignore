@@ -10,3 +10,7 @@
 .env.*
 !.env.example
 *.log
+
+# Rust 构建及本地验证产物不提交。
+/target/
+__pycache__/

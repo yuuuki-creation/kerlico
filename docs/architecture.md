@@ -1,6 +1,6 @@
 # 项目结构与单文件交付规划
 
-状态：规划草案。日期：2026-10-30，Asia/Shanghai。本文记录推荐方案与取舍，不授权开始实现。
+状态：目标布局与取舍，2026-10-30，Asia/Shanghai。用户已另行授权当前实现；真实范围见[实现接口](interfaces/README.md)，未来目标不代表已有功能。
 
 ## 目标与“单文件”的含义
 
@@ -10,11 +10,11 @@
 
 建议采用 **Cargo workspace + 按职责划分的库 package + 一个二进制 package**。协议以独立 package 隔离，功能内部再按普通 Rust module 分文件；不要求每个小模块都变成一个 package。workspace 负责统一管理成员、锁文件与构建设置。依据：[Cargo workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html)。
 
-这比把所有功能放进一个 crate 增加了清单和接口维护成本，但能用依赖声明约束协议边界，也便于协议独立编译和选择性包含。该选择是本轮建议，尚未创建 workspace。
+这比单 crate 增加清单和接口维护成本，但能约束依赖边界并支持选择性编译。当前已按 [0003](decisions/0003-vless-first-implementation.md) 建立最小 workspace；实际接口见[实现文档](interfaces/README.md)，后续功能按需要增加。
 
 ## 目标目录
 
-下面是逐步建立的目标布局，**不是本轮实际创建的目录或代码骨架**。`protocol-socks5`、`protocol-trojan`、`protocol-vless` 仅示范命名与隔离方式；候选清单、顺序与独立框架阶段见[协议路线](protocol-roadmap.md)，当前不预建这些协议目录。
+下面是逐步建立的目标布局，包含已存在和未来部分，不表示全部模块均已实现。实际支持范围和状态见[总表](../reference/reports/三核心%20协议%20组合支持.md)及[接口文档](interfaces/README.md)；当前只建立已使用的框架与 VLESS 模块，不预建其他协议目录。
 
 ```text
 kerlico/
@@ -156,7 +156,7 @@ Cargo features 用于条件编译和可选依赖，其启用会在相关依赖�
 | [协议与组合总表](../reference/reports/三核心%20协议%20组合支持.md) | 统一支持清单、组合限制与任务编号 |
 | [协议阶段与路线](protocol-roadmap.md) | 框架验收与逐项开发的工作流 |
 
-本轮只细化文档。后续通过首个和第二个协议验证这些边界；没有因文档出现类型名或文件名就开始创建接口骨架。
+当前已建立最小框架并接入普通 VLESS，精确范围见接口文档。后续仍用真实协议接入检验这些边界，不预建空协议或把目标目录视为已有功能。
 
 ## 借鉴依据与维护
 

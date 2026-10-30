@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "type": "vless",
+      "options": {
+        "server": { "host": "server.invalid", "port": 443 },
+        "uuid": "00000000-0000-0000-0000-000000000000",
+        "transport": "tcp",
+        "flow": "",
+        "encryption": "none",
+        "security": { "type": "tls", "server_name": "server.invalid" }
+      }
+    }
+  ],
+  "inbounds": [
+    {
+      "tag": "local",
+      "type": "tcp-forward",
+      "listen": "127.0.0.1:1088",
+      "target": { "host": "target.invalid", "port": 443 },
+      "outbound": "proxy"
+    }
+  ]
+}

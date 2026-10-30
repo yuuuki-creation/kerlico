@@ -1,8 +1,8 @@
 # VPN 内核参考调研
 
-本目录记录 mihomo、sing-box、Xray-core 的官方文档与源码调研，用于讨论未来 Rust VPN 内核的需求和设计。**当前仍处于讨论与仓库结构维护阶段，调研结论不代表已经选定架构，也不授权开始实现。**
+本目录保存 mihomo、sing-box、Xray-core 的参考证据。上游能力、kerlico 实现与验证状态分别记录；当前已进入框架与 VLESS 开发，进度见 [STATUS.md](../STATUS.md)，真实接口见[实现文档](../docs/interfaces/README.md)。
 
-调研日期：**2026-10-30，Asia/Shanghai**。本轮只做静态源码和文档阅读，未构建或运行上游核心，未进行互通、性能或系统 VPN 实机测试。
+调研日期：**2026-10-30，Asia/Shanghai**。集中支持调研为静态源码与文档核验；后续普通 VLESS 的实际构建和互通另见[验证记录](../docs/testing/vless-ordinary-flow.md)，不覆盖其余组合或完整系统 VPN。
 
 ## 阅读入口
 

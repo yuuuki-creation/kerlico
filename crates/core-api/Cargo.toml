@@ -1,0 +1,15 @@
+[package]
+name = "kerlico-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tokio-util.workspace = true
+thiserror.workspace = true
+idna.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "kerlico"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = ["protocol-vless"]
+protocol-vless = ["dep:kerlico-vless"]
+
+[dependencies]
+kerlico-core.workspace = true
+kerlico-config.workspace = true
+kerlico-engine.workspace = true
+kerlico-net.workspace = true
+kerlico-vless = { workspace = true, optional = true }
+tokio.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true
