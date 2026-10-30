@@ -84,6 +84,8 @@ def check_effective_identity():
 
 def check_entry(mode, oid, name):
     scan_text(name)
+    if b".private" in name.replace(b"\\", b"/").lower().split(b"/"):
+        raise Rejected("private-local-file")
     basename = name.rsplit(b"/", 1)[-1].lower()
     if basename in (b".ds_store", b"id_rsa", b"id_ed25519", b"credentials") or basename == b".env" or basename.startswith(b".env.") and basename != b".env.example":
         raise Rejected("sensitive-file")

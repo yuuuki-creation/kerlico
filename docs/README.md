@@ -9,6 +9,9 @@
 | [文档与资料约定](repository-workflow.md) | docs、STATUS、决策与上游源码分别怎样存和维护 |
 | [强制匿名规则](anonymity.md) | 作者、提交者、内容、签名与发布历史怎样满足匿名要求 |
 | [总体结构](architecture.md) | 单文件如何交付，各 package 怎样组织，编译依赖指向哪里 |
+| [协议与组合总表](../reference/reports/三核心%20协议%20组合支持.md) | 唯一协议/组合清单：三个核心的角色、限制、证据和建议任务编号 |
+| [协议阶段与路线](protocol-roadmap.md) | 框架范围、逐项开发阶段和开工前研究/验证流程 |
+| [编译与测试安排](build-and-test.md) | 三台 worker 的建议分工、本地凭证隔离、连接准备状态与验证边界 |
 | [核心契约](core-contracts.md) | 模块之间交换哪些信息，谁拥有和修改这些信息，公共接口怎样保持小而稳定 |
 | [数据路径](data-paths.md) | TCP、UDP、TUN、DNS 怎样协作，首包、嗅探和回写怎样处理 |
 | [运行与配置生命周期](runtime-lifecycle.md) | 怎样启动、更新、排空和停止，独占系统资源怎样管理 |

@@ -1,6 +1,9 @@
 # 按需下载的上游只读源码缓存；固定来源记录在 reference/README.md。
 /reference/.upstream/
 
+# 机器清单、凭证及连接资料仅供本地使用，禁止提交。
+/.private/
+
 # 个人环境与本地产物不进入仓库。
 .DS_Store
 .env
