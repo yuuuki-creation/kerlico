@@ -1,0 +1,16 @@
+[user]
+	name = Anonymous
+	email = anonymous@example.invalid
+	useConfigOnly = true
+[author]
+	name = Anonymous
+	email = anonymous@example.invalid
+[committer]
+	name = Anonymous
+	email = anonymous@example.invalid
+[commit]
+	gpgSign = false
+[tag]
+	gpgSign = false
+[core]
+	hooksPath = .githooks

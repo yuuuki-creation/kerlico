@@ -1,0 +1,9 @@
+# 按需下载的上游只读源码缓存；固定来源记录在 reference/README.md。
+/reference/.upstream/
+
+# 个人环境与本地产物不进入仓库。
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log

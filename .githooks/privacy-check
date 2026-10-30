@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""仓库匿名检查；不得回显检测到的身份信息。"""
+
+import getpass
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import sys
+
+
+EMAIL = "anonymous@example.invalid"
+IDENT_PATTERN = re.compile(rb"Anonymous <anonymous@example\.invalid> [0-9]+ [+-][0-9]{4}")
+EMAIL_PATTERN = re.compile(r"[a-z0-9._%+-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}", re.I)
+FORBIDDEN = (
+    ("machine-path", re.compile(r"/(?:Users|home)/[^/\s]+|[a-z]:[\\/](?:Users|Documents and Settings)[\\/][^\\/\s]+", re.I)),
+    ("identity-trailer", re.compile(r"^\s*(?:co-authored-by|signed-off-by|reviewed-by|acked-by)\s*:", re.I | re.M)),
+    ("private-key", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")),
+    ("public-key", re.compile(r"^(?:ssh-(?:rsa|ed25519)|ecdsa-sha2-\S+)\s+[a-z0-9+/]{32,}", re.I | re.M)),
+    ("credential-url", re.compile(r"[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@", re.I)),
+    ("access-token", re.compile(r"\b(?:gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b", re.I)),
+)
+
+
+class Rejected(Exception):
+    pass
+
+
+def git(*args):
+    result = subprocess.run(["git", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        raise Rejected("git-check-failed")
+    return result.stdout
+
+
+def local_identifiers():
+    values = {getpass.getuser(), Path.home().name, socket.gethostname()}
+    try:
+        import pwd
+        values.add(pwd.getpwuid(os.getuid()).pw_gecos.split(",", 1)[0])
+    except (ImportError, KeyError, AttributeError):
+        pass
+    generic = {"anonymous", "root", "user", "runner", "localhost"}
+    return {value.casefold() for value in values if len(value) >= 4 and value.casefold() not in generic}
+
+
+LOCAL_IDENTIFIERS = local_identifiers()
+CHECKED_BLOBS = set()
+
+
+def scan_text(data):
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Rejected("unreviewed-binary")
+    if "\0" in text:
+        raise Rejected("unreviewed-binary")
+    if any(value in text.casefold() for value in LOCAL_IDENTIFIERS):
+        raise Rejected("local-identifier")
+    for match in EMAIL_PATTERN.finditer(text):
+        if match.group().casefold() != EMAIL:
+            raise Rejected("non-anonymous-email")
+    for reason, pattern in FORBIDDEN:
+        if pattern.search(text):
+            raise Rejected(reason)
+
+
+def check_identity(value):
+    if not IDENT_PATTERN.fullmatch(value.strip()):
+        raise Rejected("non-anonymous-identity")
+
+
+def check_effective_identity():
+    check_identity(git("var", "GIT_AUTHOR_IDENT"))
+    check_identity(git("var", "GIT_COMMITTER_IDENT"))
+    for key in ("commit.gpgSign", "tag.gpgSign"):
+        if git("config", "--bool", "--get", key).strip() != b"false":
+            raise Rejected("signing-enabled")
+    result = subprocess.run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode == 0:
+        scan_text(result.stdout)
+
+
+def check_entry(mode, oid, name):
+    scan_text(name)
+    basename = name.rsplit(b"/", 1)[-1].lower()
+    if basename in (b".ds_store", b"id_rsa", b"id_ed25519", b"credentials") or basename == b".env" or basename.startswith(b".env.") and basename != b".env.example":
+        raise Rejected("sensitive-file")
+    if mode == b"160000":
+        raise Rejected("unreviewed-submodule")
+    if oid not in CHECKED_BLOBS:
+        scan_text(git("cat-file", "blob", oid.decode("ascii")))
+        CHECKED_BLOBS.add(oid)
+
+
+def check_index():
+    for entry in git("ls-files", "--stage", "-z").split(b"\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split(b"\t", 1)
+        mode, oid, stage = metadata.split()
+        if stage != b"0":
+            raise Rejected("unmerged-index")
+        check_entry(mode, oid, name)
+
+
+def check_tree(commit):
+    for entry in git("ls-tree", "-r", "-z", "--full-tree", commit).split(b"\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split(b"\t", 1)
+        mode, kind, oid = metadata.split()
+        check_entry(mode, oid, name)
+
+
+def check_object(oid, kind, fields):
+    raw = git("cat-file", kind, oid)
+    header = raw.split(b"\n\n", 1)[0]
+    for field in fields:
+        values = [line[len(field) + 1:] for line in header.splitlines() if line.startswith(field + b" ")]
+        if len(values) != 1:
+            raise Rejected("invalid-identity-header")
+        check_identity(values[0])
+    if any(line.startswith((b"gpgsig ", b"gpgsig-sha256 ", b"mergetag ")) for line in header.splitlines()) or b"-----BEGIN PGP SIGNATURE-----" in raw or b"-----BEGIN SSH SIGNATURE-----" in raw:
+        raise Rejected("signed-object")
+    scan_text(raw)
+    return header
+
+
+def check_push():
+    tips = set()
+    for line in sys.stdin.buffer:
+        parts = line.split()
+        if len(parts) != 4:
+            raise Rejected("invalid-push-input")
+        local_ref, oid, remote_ref, remote_oid = parts
+        scan_text(local_ref)
+        scan_text(remote_ref)
+        if set(oid) == {ord("0")}:
+            continue
+        if not re.fullmatch(rb"[0-9a-f]{40}|[0-9a-f]{64}", oid):
+            raise Rejected("invalid-object-id")
+        tip = oid.decode("ascii")
+        while git("cat-file", "-t", tip).strip() == b"tag":
+            header = check_object(tip, "tag", (b"tagger",))
+            targets = [value[7:] for value in header.splitlines() if value.startswith(b"object ")]
+            if len(targets) != 1:
+                raise Rejected("invalid-tag")
+            tip = targets[0].decode("ascii")
+        if git("cat-file", "-t", tip).strip() != b"commit":
+            raise Rejected("non-commit-ref")
+        tips.add(tip)
+    if tips:
+        for commit in git("rev-list", *sorted(tips)).decode("ascii").splitlines():
+            check_object(commit, "commit", (b"author", b"committer"))
+            check_tree(commit)
+
+
+def main():
+    action = sys.argv[1]
+    if action in ("pre-commit", "prepare-commit-msg"):
+        check_effective_identity()
+        check_index()
+    elif action == "commit-msg":
+        check_effective_identity()
+        scan_text(Path(sys.argv[2]).read_bytes())
+    elif action == "pre-push":
+        check_push()
+    else:
+        raise Rejected("unknown-check")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (Rejected, OSError, ValueError, IndexError, UnicodeError) as error:
+        reason = str(error) if isinstance(error, Rejected) else "check-failed"
+        print("匿名规则拒绝操作（" + reason + "）。请脱敏后重试；不会输出匹配内容。", file=sys.stderr)
+        sys.exit(1)
