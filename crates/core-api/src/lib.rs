@@ -3,6 +3,8 @@
 use std::{fmt, future::Future, io, net::IpAddr, pin::Pin, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
 pub use tokio_util::sync::CancellationToken;
+mod relay;
+pub use relay::relay_tcp;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -161,6 +163,118 @@ pub trait Outbound: Send + Sync {
         target: &'a Destination,
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramChannel>>;
+}
+
+/// 所有接入协议使用的目标访问边界，提供方绑定节点身份与出口策略。
+pub trait AccessService: Send + Sync {
+    fn connect_tcp<'a>(
+        &'a self,
+        target: &'a Destination,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<BoxStream>>;
+    fn connect_udp<'a>(
+        &'a self,
+        target: &'a Destination,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<DatagramChannel>>;
+}
+
+#[derive(Clone)]
+pub struct InboundContext {
+    pub cancel: CancellationToken,
+    pub connect_timeout: Duration,
+    pub idle_timeout: Duration,
+    pub drain_timeout: Duration,
+    pub max_datagram_size: usize,
+    pub max_streams: usize,
+    pub stream_budget: StreamBudget,
+    pub events: std::sync::Arc<dyn NodeObserver>,
+}
+
+#[derive(Clone, Copy)]
+pub enum NodeEvent {
+    Accepted,
+    Completed,
+    Failed,
+    Dropped,
+}
+pub trait NodeObserver: Send + Sync {
+    fn record(&self, event: NodeEvent);
+}
+
+#[derive(Clone)]
+pub struct StreamBudget {
+    global: std::sync::Arc<tokio::sync::Semaphore>,
+    node: std::sync::Arc<tokio::sync::Semaphore>,
+}
+pub struct StreamLease {
+    _global: tokio::sync::OwnedSemaphorePermit,
+    _node: tokio::sync::OwnedSemaphorePermit,
+}
+impl StreamBudget {
+    pub fn new(
+        global: std::sync::Arc<tokio::sync::Semaphore>,
+        node: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> Self {
+        Self { global, node }
+    }
+    /// 载体已占一个会话名额；附加逻辑流还需取得同一全局和节点预算。
+    pub fn is_closed(&self) -> bool {
+        self.global.is_closed() || self.node.is_closed()
+    }
+    pub fn try_acquire(&self) -> Result<StreamLease> {
+        Ok(StreamLease {
+            _global: self
+                .global
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| Error::ResourceLimit)?,
+            _node: self
+                .node
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| Error::ResourceLimit)?,
+        })
+    }
+}
+
+/// 协议节点只持有本节点凭据，目标连接必须交给注入的统一访问服务。
+pub trait InboundProtocol: Send + Sync {
+    /// 仅用于配置阶段拒绝跨节点复用认证凭据；不得写入日志。
+    fn credential_fingerprints(&self) -> Vec<[u8; 32]>;
+    fn requires_loopback(&self) -> bool {
+        true
+    }
+    fn supports_tcp(&self) -> bool {
+        true
+    }
+    fn supports_udp(&self) -> bool {
+        false
+    }
+    fn supports_virtual(&self) -> bool {
+        false
+    }
+    fn handle<'a>(
+        &'a self,
+        stream: BoxStream,
+        access: std::sync::Arc<dyn AccessService>,
+        context: InboundContext,
+    ) -> BoxFuture<'a, Result<()>>;
+    fn handle_udp<'a>(
+        &'a self,
+        _socket: std::sync::Arc<tokio::net::UdpSocket>,
+        _access: std::sync::Arc<dyn AccessService>,
+        _context: InboundContext,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Err(Error::Unsupported("节点未提供 UDP 监听")) })
+    }
+    fn handle_virtual<'a>(
+        &'a self,
+        _access: std::sync::Arc<dyn AccessService>,
+        _context: InboundContext,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Err(Error::Unsupported("节点未提供虚拟载体监听")) })
+    }
 }
 
 #[cfg(test)]

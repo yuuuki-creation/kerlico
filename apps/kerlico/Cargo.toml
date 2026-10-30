@@ -6,8 +6,12 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-default = ["protocol-vless"]
+default = ["protocol-vless", "protocol-anytls", "protocol-ss2022"]
 protocol-vless = ["dep:kerlico-vless"]
+protocol-anytls = ["dep:kerlico-anytls"]
+protocol-ss2022 = ["dep:kerlico-ss2022"]
+anytls = ["protocol-anytls"]
+ss2022 = ["protocol-ss2022"]
 
 [dependencies]
 kerlico-core.workspace = true
@@ -15,6 +19,8 @@ kerlico-config.workspace = true
 kerlico-engine.workspace = true
 kerlico-net.workspace = true
 kerlico-vless = { workspace = true, optional = true }
+kerlico-anytls = { workspace = true, optional = true }
+kerlico-ss2022 = { workspace = true, optional = true }
 tokio.workspace = true
 clap.workspace = true
 

@@ -1,6 +1,6 @@
-# 配置与命令行接口 0.1
+# 配置与命令行接口（开发快照）
 
-更新日期：2026-10-30。当前仅接受 JSON，结构版本为 `1`。这是 kerlico 自身格式，不兼容三个参考核心的完整配置。
+更新日期：2026-10-31。最新共享生命周期增量尚未复验，见[状态](../../STATUS.md)。当前仅接受 JSON，结构版本为 `1`。这是 kerlico 自身格式，不兼容三个参考核心的完整配置。
 
 ## 根结构与工厂
 
@@ -8,12 +8,13 @@
 | --- | --- |
 | `version` | 必填，当前只接受 1 |
 | `outbounds` | 必填数组；每项有 `tag`、`type` 与可选 `options` 对象 |
-| `inbounds` | 必填数组；`check` 可检查空数组，`run` 拒绝没有入口的配置 |
+| `inbounds` | 必填数组；`check` 可检查空数组，`run` 拒绝入口与节点均为空的配置 |
+| `nodes` | 可选数组；每项含 `tag/type/listen/outbound/options`，可设 `max_sessions`；见[节点接口](node-egress.md) |
 | `limits` | 可选，未给出的字段取下表默认值 |
 
 标签限 1 至 64 个 ASCII 字母、数字、横线或下划线，同一角色内不能重复。出站 `type` 必须在当前构建注册；每个工厂独立解释其 options，外层不认识具体协议的字段。未知字段、失效引用和不兼容能力都报错，不静默忽略或改走直连。
 
-当前工厂为 `direct`、`reject` 和可选 `vless`。基础处理器的 options 只能为空对象，VLESS 字段见[协议接口](vless.md)。`Registry::prepare` 只构造和校验本地对象，不创建监听器或业务连接。
+当前出站工厂为 `direct`、`reject` 和可裁剪的 `vless`、`anytls`、`ss2022`；后三者另有独立节点工厂。基础处理器的 options 只能为空对象，VLESS 字段见[协议接口](vless.md)。`Registry::prepare` 只构造和校验本地对象，不创建监听器或业务连接。
 
 ## 固定目标入口
 
@@ -47,10 +48,10 @@ VLESS 的建立预算截至载体建立与请求头发送；远端业务解析�
 
 | 命令 | 行为 |
 | --- | --- |
-| `kerlico modules` | 列出当前二进制真实注册的出站类型 |
+| `kerlico modules` | 按 inbound/outbound 角色列出当前二进制真实注册类型 |
 | `kerlico check -c <文件>` | 检查文件大小、JSON、工厂和引用/能力；不监听、不拨号 |
 | `kerlico run -c <文件>` | 绑定全部入口，完成后运行；部分绑定失败会回收此前资源 |
 
-配置文件上限为 1 MiB。默认构建包含 `protocol-vless`；以 `--no-default-features` 构建程序后只注册基础处理器，VLESS 配置明确失败。框架和具体协议分离，不以源码存在来宣称当前二进制支持。
+配置文件上限为 1 MiB。默认构建包含 `protocol-vless`、`protocol-anytls`、`protocol-ss2022`；以 `--no-default-features` 构建程序后只注册基础处理器，三个协议的配置明确失败。框架和具体协议分离，不以源码存在来宣称当前二进制支持。
 
 Ctrl-C 或 SIGTERM（Unix）停止新接入，按预算排空，随后取消剩余任务。没有在线配置替换或自动远端重试。正常退出为 0，配置/运行失败为非零；具体故障依据接口错误和受控诊断定位，不打印 UUID 或完整配置。

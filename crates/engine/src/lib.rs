@@ -1,21 +1,19 @@
-//! 固定目标转发调度；协议通过 Outbound 注入，不按协议名称分支。
+//! 转发入口与协议节点调度；核心不按协议名称分支。
 
-use kerlico_config::{ForwardKind, ForwardSpec, Limits, PreparedConfig};
+use kerlico_config::{ForwardKind, ForwardSpec, Limits, PreparedConfig, PreparedNode};
 use kerlico_core::{
-    BoxStream, CancellationToken, ConnectContext, Destination, Error, Outbound, Result,
+    BoxStream, CancellationToken, ConnectContext, Destination, Error, InboundContext, Outbound,
+    Result,
 };
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{BTreeMap, HashMap, hash_map::Entry},
     net::SocketAddr,
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    task::{Context, Poll},
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpStream, UdpSocket},
     sync::{Semaphore, mpsc, watch},
     task::JoinSet,
@@ -42,25 +40,107 @@ enum Socket {
     Udp(Arc<UdpSocket>),
 }
 
+struct BoundNode {
+    spec: PreparedNode,
+    tcp: Option<TcpListener>,
+    udp: Option<Arc<UdpSocket>>,
+}
+#[derive(Clone)]
+struct NodeResources {
+    global: Arc<Semaphore>,
+    slots: Arc<Semaphore>,
+    stats: Arc<Stats>,
+    local_stats: Arc<Stats>,
+}
+struct Observer {
+    global: Arc<Stats>,
+    local: Arc<Stats>,
+}
+impl kerlico_core::NodeObserver for Observer {
+    fn record(&self, event: kerlico_core::NodeEvent) {
+        for stats in [&self.global, &self.local] {
+            let counter = match event {
+                kerlico_core::NodeEvent::Accepted => &stats.accepted,
+                kerlico_core::NodeEvent::Completed => &stats.completed,
+                kerlico_core::NodeEvent::Failed => &stats.failed,
+                kerlico_core::NodeEvent::Dropped => &stats.dropped,
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+fn node_context(
+    limits: &Limits,
+    node: &PreparedNode,
+    cancel: CancellationToken,
+    resources: &NodeResources,
+) -> InboundContext {
+    InboundContext {
+        cancel,
+        connect_timeout: limits.connect_timeout(),
+        idle_timeout: limits.idle_timeout(),
+        drain_timeout: limits.drain_timeout(),
+        max_datagram_size: limits.max_datagram_size,
+        max_streams: node.max_sessions.min(256),
+        stream_budget: kerlico_core::StreamBudget::new(
+            resources.global.clone(),
+            resources.slots.clone(),
+        ),
+        events: Arc::new(Observer {
+            global: resources.stats.clone(),
+            local: resources.local_stats.clone(),
+        }),
+    }
+}
+fn node_socket(address: SocketAddr, udp: bool) -> Result<socket2::Socket> {
+    let socket = socket2::Socket::new(
+        if address.is_ipv6() {
+            socket2::Domain::IPV6
+        } else {
+            socket2::Domain::IPV4
+        },
+        if udp {
+            socket2::Type::DGRAM
+        } else {
+            socket2::Type::STREAM
+        },
+        Some(if udp {
+            socket2::Protocol::UDP
+        } else {
+            socket2::Protocol::TCP
+        }),
+    )?;
+    if address.is_ipv6() {
+        socket.set_only_v6(true)?;
+    }
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&address.into())?;
+    Ok(socket)
+}
+
 pub struct Engine {
     inbounds: Vec<Inbound>,
+    nodes: Vec<BoundNode>,
+    node_stats: BTreeMap<String, Arc<Stats>>,
     limits: Limits,
     stats: Arc<Stats>,
 }
 
 impl Engine {
     pub async fn bind(config: PreparedConfig) -> Result<Self> {
-        if config.inbounds.is_empty() {
+        if config.inbounds.is_empty() && config.nodes.is_empty() {
             return Err(Error::Config("没有配置入站".into()));
         }
         let mut inbounds = Vec::new();
         for spec in config.inbounds {
             let target = spec.target.destination()?;
-            let outbound = config
+            let raw_outbound = config
                 .outbounds
                 .get(&spec.outbound)
                 .ok_or_else(|| Error::Config("出站引用不存在".into()))?
                 .clone();
+            let outbound: Arc<dyn Outbound> = Arc::new(kerlico_egress::Egress::new(raw_outbound));
             let socket = match spec.kind {
                 ForwardKind::Tcp => Socket::Tcp(TcpListener::bind(spec.listen).await?),
                 ForwardKind::Udp => Socket::Udp(Arc::new(UdpSocket::bind(spec.listen).await?)),
@@ -72,15 +152,47 @@ impl Engine {
                 socket,
             });
         }
+        let mut nodes = Vec::new();
+        let mut node_stats = BTreeMap::new();
+        for mut node in config.nodes {
+            let tcp = if node.protocol.supports_tcp() {
+                let socket = node_socket(node.listen, false)?;
+                socket.listen(1024)?;
+                let listener = TcpListener::from_std(socket.into())?;
+                node.listen = listener.local_addr()?;
+                Some(listener)
+            } else {
+                None
+            };
+            let udp = if node.protocol.supports_udp() {
+                let socket = node_socket(node.listen, true)?;
+                let socket = Arc::new(UdpSocket::from_std(socket.into())?);
+                if tcp.is_none() {
+                    node.listen = socket.local_addr()?;
+                }
+                Some(socket)
+            } else {
+                None
+            };
+            node_stats.insert(node.tag.clone(), Arc::new(Stats::default()));
+            nodes.push(BoundNode {
+                spec: node,
+                tcp,
+                udp,
+            });
+        }
         Ok(Self {
             inbounds,
+            nodes,
+            node_stats,
             limits: config.limits,
             stats: Arc::new(Stats::default()),
         })
     }
 
     pub fn listeners(&self) -> Result<Vec<(String, SocketAddr)>> {
-        self.inbounds
+        let mut result: Vec<_> = self
+            .inbounds
             .iter()
             .map(|inbound| {
                 let address = match &inbound.socket {
@@ -89,11 +201,23 @@ impl Engine {
                 };
                 Ok((inbound.spec.tag.clone(), address))
             })
-            .collect()
+            .collect::<Result<_>>()?;
+        for node in &self.nodes {
+            if let Some(listener) = &node.tcp {
+                result.push((node.spec.tag.clone(), listener.local_addr()?));
+            } else if let Some(socket) = &node.udp {
+                result.push((node.spec.tag.clone(), socket.local_addr()?));
+            }
+        }
+        Ok(result)
     }
 
     pub fn stats(&self) -> Arc<Stats> {
         self.stats.clone()
+    }
+
+    pub fn node_stats(&self) -> BTreeMap<String, Arc<Stats>> {
+        self.node_stats.clone()
     }
 
     pub async fn run(self, cancel: CancellationToken) -> Result<()> {
@@ -101,6 +225,10 @@ impl Engine {
         let _guard = scope.clone().drop_guard();
         let semaphore = Arc::new(Semaphore::new(self.limits.max_sessions));
         let mut workers = JoinSet::new();
+        for bound in self.nodes {
+            let resources=NodeResources {global:semaphore.clone(),slots:Arc::new(Semaphore::new(bound.spec.max_sessions)),stats:self.stats.clone(),local_stats:self.node_stats.get(&bound.spec.tag).expect("节点统计已构造").clone()};
+            workers.spawn(serve_bound_node(bound,self.limits.clone(),scope.clone(),resources));
+        }
         for inbound in self.inbounds {
             let limits = self.limits.clone();
             let token = scope.clone();
@@ -151,6 +279,70 @@ impl Engine {
         }
         failure.map_or(Ok(()), Err)
     }
+}
+
+async fn serve_bound_node(bound:BoundNode,limits:Limits,stop:CancellationToken,resources:NodeResources)->Result<()> {
+    // 同一节点的 TCP/UDP/虚拟入口共用生命周期，单个入口结束不能取消另一入口的业务。
+    let force=CancellationToken::new();let _guard=force.clone().drop_guard();let mut handlers=JoinSet::new();let node=bound.spec;
+    if let Some(listener)=bound.tcp {handlers.spawn(serve_node(node.clone(),listener,limits.clone(),stop.clone(),resources.clone(),force.clone()));}
+    if bound.udp.is_some()||node.protocol.supports_virtual() {
+        let force=force.clone();handlers.spawn(async move {
+            let context=node_context(&limits,&node,force.clone(),&resources);let access:Arc<dyn kerlico_core::AccessService>=Arc::new(kerlico_egress::Egress::new(node.outbound.clone()));
+            let running=async {if let Some(socket)=bound.udp {node.protocol.handle_udp(socket,access,context).await}else{node.protocol.handle_virtual(access,context).await}};tokio::pin!(running);
+            tokio::select! {result=&mut running=>result,_=stop.cancelled()=>{resources.slots.close();if timeout(limits.drain_timeout(),&mut running).await.is_err(){force.cancel();}Ok(())}}
+        });
+    }
+    while let Some(result)=handlers.join_next().await {let error=match result {Ok(Ok(()))=>continue,Ok(Err(error))=>error,Err(_)=>Error::Protocol("节点入口任务异常退出")};force.cancel();handlers.abort_all();while handlers.join_next().await.is_some(){}return Err(error);}
+    Ok(())
+}
+
+async fn serve_node(
+    node: PreparedNode,
+    listener: TcpListener,
+    limits: Limits,
+    stop: CancellationToken,
+    resources: NodeResources,
+    force:CancellationToken,
+) -> Result<()> {
+    let shared = resources.clone();
+    let NodeResources {
+        global,
+        slots,
+        stats,
+        local_stats,
+    } = resources;
+    let access: Arc<dyn kerlico_core::AccessService> =
+        Arc::new(kerlico_egress::Egress::new(node.outbound.clone()));
+    let mut sessions = JoinSet::new();
+    let mut failure = None;
+    loop {
+        tokio::select! {
+            biased;
+            _=stop.cancelled()=>break,
+            result=sessions.join_next(),if !sessions.is_empty()=>{if result.is_some_and(|r|r.is_err()){stats.failed.fetch_add(1,Ordering::Relaxed);local_stats.failed.fetch_add(1,Ordering::Relaxed);}},
+            accepted=listener.accept()=>{
+                let (stream,_)=match accepted {Ok(v)=>v,Err(error)=>{failure=Some(Error::Io(error));break;}};
+                let (Ok(global_permit),Ok(node_permit))=(global.clone().try_acquire_owned(),slots.clone().try_acquire_owned()) else {stats.dropped.fetch_add(1,Ordering::Relaxed);local_stats.dropped.fetch_add(1,Ordering::Relaxed);continue;};
+                let _=stream.set_nodelay(true);
+                let protocol=node.protocol.clone();let access=access.clone();let token=force.child_token();let stats=stats.clone();let local_stats=local_stats.clone();
+                let context=node_context(&limits,&node,token.clone(),&shared);
+                stats.accepted.fetch_add(1,Ordering::Relaxed);
+                local_stats.accepted.fetch_add(1,Ordering::Relaxed);
+                sessions.spawn(async move {
+                    let _global=global_permit;let _node=node_permit;
+                    let result=tokio::select! {_=token.cancelled()=>Err(Error::Cancelled),r=protocol.handle(Box::new(stream),access,context)=>r};
+                    if result.is_ok(){stats.completed.fetch_add(1,Ordering::Relaxed);local_stats.completed.fetch_add(1,Ordering::Relaxed);}else{stats.failed.fetch_add(1,Ordering::Relaxed);local_stats.failed.fetch_add(1,Ordering::Relaxed);}
+                });
+            }
+        }
+    }
+    slots.close();
+    drop(listener);
+    if failure.is_some() {
+        force.cancel();
+    }
+    drain(&mut sessions, &force, &limits).await;
+    failure.map_or(Ok(()), Err)
 }
 
 async fn drain<T: Send + 'static>(
@@ -230,65 +422,7 @@ async fn relay(
     limits: &Limits,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let (activity, mut observed) = watch::channel(Instant::now());
-    let mut a = ActiveIo {
-        inner: a,
-        activity: activity.clone(),
-    };
-    let mut b = ActiveIo { inner: b, activity };
-    let copy = tokio::io::copy_bidirectional(&mut a, &mut b);
-    tokio::pin!(copy);
-    let timer = tokio::time::sleep(limits.idle_timeout());
-    tokio::pin!(timer);
-    loop {
-        tokio::select! {
-            biased;
-            _=cancel.cancelled()=>return Err(Error::Cancelled),
-            result=&mut copy=>return result.map(|_|()).map_err(Error::Io),
-            changed=observed.changed()=>{ if changed.is_ok() { timer.as_mut().reset(*observed.borrow_and_update()+limits.idle_timeout()); } },
-            _=&mut timer=>return Err(Error::Timeout),
-        }
-    }
-}
-
-struct ActiveIo {
-    inner: BoxStream,
-    activity: watch::Sender<Instant>,
-}
-impl AsyncRead for ActiveIo {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        let previous = buffer.filled().len();
-        let result = Pin::new(&mut this.inner).poll_read(cx, buffer);
-        if matches!(result, Poll::Ready(Ok(()))) && buffer.filled().len() > previous {
-            this.activity.send_replace(Instant::now());
-        }
-        result
-    }
-}
-impl AsyncWrite for ActiveIo {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        let this = self.get_mut();
-        let result = Pin::new(&mut this.inner).poll_write(cx, buffer);
-        if matches!(result,Poll::Ready(Ok(count)) if count>0) {
-            this.activity.send_replace(Instant::now());
-        }
-        result
-    }
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
-    }
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
-    }
+    kerlico_core::relay_tcp(a, b, limits.idle_timeout(), cancel).await
 }
 
 async fn serve_udp(

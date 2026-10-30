@@ -207,3 +207,24 @@ async fn failed_bind_releases_prepared_listeners() {
     assert!(Engine::bind(config).await.is_err());
     assert!(TcpListener::bind(free).await.is_ok());
 }
+
+#[tokio::test]
+async fn sibling_transport_keeps_node_context_alive_during_drain() {
+    use kerlico_core::{AccessService,BoxFuture,BoxStream,InboundContext,InboundProtocol,Result};
+    use std::sync::{Arc,Mutex,atomic::{AtomicBool,Ordering}};
+    struct Protocol {tcp:Mutex<Option<CancellationToken>>,ready:tokio::sync::Notify,checked:AtomicBool}
+    impl InboundProtocol for Protocol {
+        fn credential_fingerprints(&self)->Vec<[u8;32]>{vec![[41;32]]}
+        fn supports_udp(&self)->bool{true}
+        fn handle<'a>(&'a self,_:BoxStream,_:Arc<dyn AccessService>,context:InboundContext)->BoxFuture<'a,Result<()>> {Box::pin(async move {*self.tcp.lock().unwrap()=Some(context.cancel);self.ready.notify_one();Ok(())})}
+        fn handle_udp<'a>(&'a self,_:Arc<UdpSocket>,_:Arc<dyn AccessService>,context:InboundContext)->BoxFuture<'a,Result<()>> {Box::pin(async move {while !context.stream_budget.is_closed(){tokio::time::sleep(Duration::from_millis(1)).await;}tokio::time::sleep(Duration::from_millis(40)).await;assert!(!self.tcp.lock().unwrap().as_ref().unwrap().is_cancelled());self.checked.store(true,Ordering::SeqCst);Ok(())})}
+    }
+    struct Factory(Arc<Protocol>);
+    impl kerlico_config::NodeFactory for Factory {fn kind(&self)->&'static str{"lifecycle-test"}fn build(&self,_:&serde_json::Value)->Result<Arc<dyn InboundProtocol>>{Ok(self.0.clone())}}
+    let protocol=Arc::new(Protocol {tcp:Mutex::new(None),ready:tokio::sync::Notify::new(),checked:AtomicBool::new(false)});
+    let mut registry=Registry::default();registry.register(DirectFactory).unwrap();registry.register_node(Factory(protocol.clone())).unwrap();
+    let value=json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[{"tag":"test-node","type":"lifecycle-test","listen":"127.0.0.1:0","outbound":"direct","options":{}}],"limits":{"max_sessions":8,"drain_timeout_ms":200}});
+    let engine=Engine::bind(registry.prepare(parse(&serde_json::to_vec(&value).unwrap()).unwrap()).unwrap()).await.unwrap();let address=engine.listeners().unwrap()[0].1;
+    let cancel=CancellationToken::new();let running=tokio::spawn(engine.run(cancel.clone()));let connection=TcpStream::connect(address).await.unwrap();protocol.ready.notified().await;drop(connection);cancel.cancel();
+    timeout(Duration::from_secs(1),running).await.unwrap().unwrap().unwrap();assert!(protocol.checked.load(Ordering::SeqCst));
+}

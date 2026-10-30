@@ -1,6 +1,6 @@
 //! JSON 外层配置和工厂契约；协议字段由对应工厂解释。
 
-use kerlico_core::{Capabilities, Destination, Error, Outbound, Result};
+use kerlico_core::{Capabilities, Destination, Error, InboundProtocol, Outbound, Result};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -17,6 +17,8 @@ pub struct Config {
     pub outbounds: Vec<OutboundSpec>,
     pub inbounds: Vec<ForwardSpec>,
     #[serde(default)]
+    pub nodes: Vec<NodeSpec>,
+    #[serde(default)]
     pub limits: Limits,
 }
 
@@ -28,6 +30,34 @@ pub struct OutboundSpec {
     pub kind: String,
     #[serde(default = "empty_object")]
     pub options: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeSpec {
+    pub tag: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub listen: SocketAddr,
+    pub outbound: String,
+    pub options: Value,
+    #[serde(default)]
+    pub max_sessions: Option<usize>,
+}
+
+pub trait NodeFactory: Send + Sync {
+    fn kind(&self) -> &'static str;
+    /// 只解析和构造，不绑定端口或拨号。
+    fn build(&self, options: &Value) -> Result<Arc<dyn InboundProtocol>>;
+}
+
+#[derive(Clone)]
+pub struct PreparedNode {
+    pub tag: String,
+    pub listen: SocketAddr,
+    pub protocol: Arc<dyn InboundProtocol>,
+    pub outbound: Arc<dyn Outbound>,
+    pub max_sessions: usize,
 }
 
 fn empty_object() -> Value {
@@ -125,6 +155,7 @@ pub trait OutboundFactory: Send + Sync {
 #[derive(Default)]
 pub struct Registry {
     factories: BTreeMap<&'static str, Arc<dyn OutboundFactory>>,
+    node_factories: BTreeMap<&'static str, Arc<dyn NodeFactory>>,
 }
 
 impl Registry {
@@ -139,12 +170,24 @@ impl Registry {
     pub fn kinds(&self) -> impl Iterator<Item = &&'static str> {
         self.factories.keys()
     }
+    pub fn register_node(&mut self, factory: impl NodeFactory + 'static) -> Result<()> {
+        let kind = factory.kind();
+        if self.node_factories.contains_key(kind) {
+            return Err(Error::Config("节点类型重复注册".into()));
+        }
+        self.node_factories.insert(kind, Arc::new(factory));
+        Ok(())
+    }
+    pub fn node_kinds(&self) -> impl Iterator<Item = &&'static str> {
+        self.node_factories.keys()
+    }
     pub fn prepare(&self, config: Config) -> Result<PreparedConfig> {
         if config.version != 1 {
             return Err(Error::Config("仅支持配置版本 1".into()));
         }
         config.limits.validate()?;
         let mut outbounds = BTreeMap::new();
+        let mut templates = BTreeMap::new();
         for spec in config.outbounds {
             validate_tag(&spec.tag)?;
             if outbounds.contains_key(&spec.tag) {
@@ -154,13 +197,14 @@ impl Registry {
                 .factories
                 .get(spec.kind.as_str())
                 .ok_or_else(|| Error::Config("出站类型未注册或未编译".into()))?;
-            outbounds.insert(spec.tag, factory.build(&spec.options)?);
+            outbounds.insert(spec.tag.clone(), factory.build(&spec.options)?);
+            templates.insert(spec.tag, (factory.clone(), spec.options));
         }
         let mut tags = BTreeSet::new();
         let mut listeners = BTreeSet::new();
         for inbound in &config.inbounds {
             validate_tag(&inbound.tag)?;
-            if !tags.insert(&inbound.tag) {
+            if !tags.insert(inbound.tag.clone()) {
                 return Err(Error::Config("入站标签重复".into()));
             }
             if !inbound.listen.ip().is_loopback() {
@@ -182,10 +226,69 @@ impl Registry {
                 return Err(Error::Config("出站不支持入站需要的数据能力".into()));
             }
         }
+        let mut credentials = BTreeSet::new();
+        let mut nodes = Vec::new();
+        for node in config.nodes {
+            validate_tag(&node.tag)?;
+            if !tags.insert(node.tag.clone()) {
+                return Err(Error::Config("节点与入站标签重复".into()));
+            }
+            if node.listen.ip().to_canonical() != node.listen.ip() {
+                return Err(Error::Config(
+                    "节点不能使用 IPv4-mapped IPv6 监听地址".into(),
+                ));
+            }
+            let max_sessions = node.max_sessions.unwrap_or(config.limits.max_sessions);
+            if max_sessions == 0 || max_sessions > config.limits.max_sessions {
+                return Err(Error::Config("节点会话上限必须在全局限额内".into()));
+            }
+            let factory = self
+                .node_factories
+                .get(node.kind.as_str())
+                .ok_or_else(|| Error::Config("节点协议未注册或未编译".into()))?;
+            let protocol = factory.build(&node.options)?;
+            if protocol.requires_loopback() && !node.listen.ip().is_loopback() {
+                return Err(Error::Config("无传输安全的节点仅允许回环监听".into()));
+            }
+            if !protocol.supports_tcp() && !protocol.supports_udp() && !protocol.supports_virtual()
+            {
+                return Err(Error::Config("节点没有可用监听能力".into()));
+            }
+            for tcp in [true, false] {
+                if (tcp && protocol.supports_tcp() || !tcp && protocol.supports_udp())
+                    && !listeners.insert((node.listen, tcp))
+                {
+                    return Err(Error::Config("监听地址重复".into()));
+                }
+            }
+            let fingerprints = protocol.credential_fingerprints();
+            if fingerprints.is_empty() {
+                return Err(Error::Config("节点必须配置独立认证凭据".into()));
+            }
+            for key in fingerprints {
+                if !credentials.insert((node.kind.clone(), key)) {
+                    return Err(Error::Config(
+                        "节点认证凭据重复，IPv4/IPv6 节点必须分别配置".into(),
+                    ));
+                }
+            }
+            // 每个节点重新构造出口实例，避免跨节点共享认证连接池与会话票据。
+            let (outbound_factory, options) = templates
+                .get(&node.outbound)
+                .ok_or_else(|| Error::Config("节点引用的出站不存在".into()))?;
+            nodes.push(PreparedNode {
+                tag: node.tag,
+                listen: node.listen,
+                protocol,
+                outbound: outbound_factory.build(options)?,
+                max_sessions,
+            });
+        }
         Ok(PreparedConfig {
             outbounds,
             inbounds: config.inbounds,
             limits: config.limits,
+            nodes,
         })
     }
 }
@@ -208,6 +311,7 @@ pub struct PreparedConfig {
     pub outbounds: BTreeMap<String, Arc<dyn Outbound>>,
     pub inbounds: Vec<ForwardSpec>,
     pub limits: Limits,
+    pub nodes: Vec<PreparedNode>,
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Config> {

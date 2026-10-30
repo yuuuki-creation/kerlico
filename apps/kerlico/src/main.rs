@@ -14,14 +14,14 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 列出当前构建真实注册的出站模块。
+    /// 按角色列出当前构建真实注册的模块。
     Modules,
     /// 校验配置和模块能力，不监听或拨号。
     Check {
         #[arg(short, long)]
         config: PathBuf,
     },
-    /// 启动固定目标的回环 TCP/UDP 转发入口。
+    /// 启动配置的客户端转发入口与服务端节点。
     Run {
         #[arg(short, long)]
         config: PathBuf,
@@ -34,6 +34,18 @@ fn registry() -> Result<Registry> {
     registry.register(RejectFactory)?;
     #[cfg(feature = "protocol-vless")]
     registry.register(kerlico_vless::VlessFactory)?;
+    #[cfg(feature = "protocol-vless")]
+    registry.register_node(kerlico_vless::VlessNodeFactory)?;
+    #[cfg(feature = "protocol-anytls")]
+    {
+        registry.register(kerlico_anytls::AnyTlsFactory)?;
+        registry.register_node(kerlico_anytls::AnyTlsNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-ss2022")]
+    {
+        registry.register(kerlico_ss2022::Ss2022Factory)?;
+        registry.register_node(kerlico_ss2022::Ss2022NodeFactory)?;
+    }
     Ok(registry)
 }
 
@@ -51,7 +63,10 @@ async fn execute() -> Result<()> {
     let (config, run) = match args.command {
         Command::Modules => {
             for kind in registry.kinds() {
-                println!("{kind}");
+                println!("outbound/{kind}");
+            }
+            for kind in registry.node_kinds() {
+                println!("inbound/{kind}");
             }
             return Ok(());
         }

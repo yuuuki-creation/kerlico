@@ -2,7 +2,7 @@
 
 更新日期：2026-10-30。本文整理已有固定版本调研，未进行新一轮上游核验、构建或实测。固定基线、许可证观察与来源异常以 [reference/README.md](README.md)为入口。
 
-表中的本项目落点均是**设计草案**。本轮没有把任何条目标为已确认技术决策、已实现或已验证；“借鉴”不表示复制代码，也不表示完全兼容其配置或行为。
+REF-001–008 保留首轮**设计草案**，后续条目单独标明实现与验证状态；“借鉴”不表示复制代码，也不表示完全兼容其配置或行为。
 
 ## REF-001 元数据与目标演进
 
@@ -87,3 +87,32 @@
 ## 后续维护
 
 已有条目保持稳定编号；发现证据有误时注明修正，不静默换成另一个上游版本。新版本调研另存记录，映射说明所用基线。用户明确确认某项选择后补上决策链接；实现与验证进展链接到 [STATUS.md](../STATUS.md)，不直接把整篇调研标成“已实现”。
+
+
+## REF-009 双端节点与统一出口
+
+**依据：**用户对独立 IPv4/IPv6 节点、独立凭据和统一目标访问的明确确认，见 [0005](../docs/decisions/0005-separate-nodes-unified-egress.md)、[0006](../docs/decisions/0006-unified-client-server-core.md)。注册与角色分离继续参考 REF-003。
+
+**实现：**`core-api` 的 `InboundProtocol`/`AccessService`、配置层独立节点工厂、引擎按能力绑定 TCP/UDP/虚拟入口、`egress` 的系统解析与 IPv4 优先；[接口](../docs/interfaces/node-egress.md)。节点凭据、身份池和配额按实例隔离，网站地址族不跟随接入地址族。
+
+**验证：**AnyTLS 与 SS2022 的正式 CLI 集成已覆盖单进程双角色、独立双栈节点和两类业务目标；VLESS 扩展仍按其测试快照登记。尚未据此实现 DNS/Fake-IP 或完整路由语言。
+
+## REF-010 AnyTLS
+
+**固定证据：**[sing-anytls](https://github.com/anytls/sing-anytls/tree/130d2e61b8895727bfed4942c535e91b246a9603)、[mihomo 出站](https://github.com/MetaCubeX/mihomo/blob/3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8/adapter/outbound/anytls.go)，详细文件与许可证见[研究记录](research_notes/anytls-implementation.md)。
+
+**实现：**`crates/protocol-anytls` 自主 Rust 会话、TLS、认证、padding、连接池与 UoT v2；不运行或链接 Go 代理。节点端通过 `AccessService` 访问目标，原生池按实例隔离。[接口](../docs/interfaces/anytls.md)与[真实 sing-box 互通、19 项 CLI 集成结果](../docs/testing/anytls.md)分别维护；未执行 mihomo 程序互通。
+
+## REF-011 Shadowsocks 2022
+
+**固定证据：**[SIP022](https://shadowsocks.org/doc/sip022.html)、三个核心的单用户/EIH 分支，以及 `shadowsocks` 1.25.0 的 [固定 Rust 原语](https://github.com/shadowsocks/shadowsocks-rust/tree/ab388c7466d21f979430e33cc9ef10e22fb05955)。精确 Go 文件、依赖与许可证见[研究记录](research_notes/ss2022-implementation.md)。
+
+**实现：**`crates/protocol-ss2022` 使用该库 TCP/UDP 密码原语，自己适配节点认证、回放窗口、UDP 多目标与地址迁移、配额和退出；三算法双端，AES 支持终端 EIH 多用户和客户端身份链。[接口](../docs/interfaces/ss2022.md)与[88 项互通、17 组 CLI 集成结果](../docs/testing/ss2022.md)独立登记。relay 服务端、插件、UoT 和通用 Mux 未实现。
+
+## REF-012 VLESS 扩展
+
+**固定证据：**Xray 请求、Vision、Encryption、Mux、XHTTP 与 XDRIVE 源码，以及 mihomo/sing-box 合法组合，见[本轮研究](research_notes/vless-combinations-implementation.md)。
+
+**实现：**`crates/protocol-vless` 分离组合校验、载体、payload、服务端安全、HTTP/H3、Mux 和 XDRIVE；Rust 密码/传输原语与来源见[依赖记录](../docs/vless-dependencies.md)。不复用外部核心的配置、路由、管理端或程序入口。
+
+**验证：**旧客户端快照 394 个 Xray 配置已通过，基础服务端普通流/Vision 分别通过 11/9 项；新扩展仍在统一远端验证，不能把上游支持或既有快照替代最终源码的验收。

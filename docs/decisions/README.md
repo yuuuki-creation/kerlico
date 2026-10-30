@@ -7,8 +7,12 @@
 | 记录 | 状态 | 范围 |
 | --- | --- | --- |
 | [0001 先框架、逐个协议、开发时调研](0001-development-sequence.md) | 已取代 | 原调研时机由 0002 调整，保留历史 |
-| [0002 先形成支持总表，再按最小组合开发](0002-support-catalog-before-implementation.md) | 已确认工作流程 | 总表先行、框架优先、逐项实现；后续实现授权与选择见 0003 |
+| [0002 先形成支持总表，再按最小组合开发](0002-support-catalog-before-implementation.md) | 部分由 0007 调整 | 总表与固定证据规则保留，首轮编码/测试顺序以 0007 为准 |
 | [0003 最小框架与普通 VLESS 首次实现](0003-vless-first-implementation.md) | 已采用，用户授权自主决策 | 当前实际接口、工具链与首个组合范围；实现授权已给出 |
+| [0004 VLESS 剩余组合与远端验证](0004-vless-combinations-and-remote-verification.md) | 已采用，开发中 | 剩余组合实现方法与所有构建/测试在 worker 执行的约束 |
+| [0005 节点分别建立，目标访问统一](0005-separate-nodes-unified-egress.md) | 原则已确认，待实现 | 节点地址与凭据独立，目标访问统一且默认优先 IPv4 |
+| [0006 客户端与服务端一体](0006-unified-client-server-core.md) | 架构方向已确认，待实现 | 同一个可执行程序按配置装配入站、出站及共享目标访问服务 |
+| [0007 协议开发固定顺序](0007-protocol-development-cycle.md) | 已确认 | 调研 → 完整首轮编写 → 集中远端测试 → 修改及复验 |
 
 其他方案仍按[状态入口](../../STATUS.md)和各设计文档中的状态理解。
 

@@ -31,12 +31,16 @@ struct WireAddons {
 }
 
 pub(crate) fn validate_addons(bytes: &[u8]) -> Result<()> {
-    let addons =
-        WireAddons::decode(bytes).map_err(|_| Error::Protocol("VLESS 附加信息格式不合法"))?;
-    if !addons.flow.is_empty() {
+    if !decode_flow(bytes)?.is_empty() {
         return Err(Error::Unsupported("VLESS flow"));
     }
     Ok(())
+}
+
+pub(crate) fn decode_flow(bytes: &[u8]) -> Result<String> {
+    let addons =
+        WireAddons::decode(bytes).map_err(|_| Error::Protocol("VLESS 附加信息格式不合法"))?;
+    Ok(addons.flow)
 }
 
 pub async fn write_request<W: AsyncWrite + Unpin + ?Sized>(

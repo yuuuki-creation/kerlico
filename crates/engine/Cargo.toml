@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 kerlico-core.workspace = true
 kerlico-config.workspace = true
+kerlico-egress.workspace = true
+socket2.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

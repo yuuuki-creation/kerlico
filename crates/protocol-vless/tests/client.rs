@@ -194,7 +194,7 @@ fn configuration_fails_closed_and_user_ids_are_redacted() {
     assert!(VlessFactory.build(&base).is_ok());
     for (key, value) in [
         ("transport", json!("xhttp")),
-        ("flow", json!("xtls-rprx-vision")),
+        ("flow", json!("xtls-rprx-vision-future")),
         ("encryption", json!("future")),
         ("security", json!({"type":"reality"})),
         ("mux", json!(true)),
@@ -231,4 +231,12 @@ fn eof_dependent_forward_requires_a_compatible_outbound() {
     let prepared =
         registry.prepare(kerlico_config::parse(&serde_json::to_vec(&config).unwrap()).unwrap());
     assert!(matches!(prepared,Err(Error::Config(message)) if message.contains("EOF")));
+}
+
+
+#[test]
+fn xhttp_tcp_mux_rejected_and_udp_mux_kept_separate() {
+    let mut options=json!({"server":{"host":"127.0.0.1","port":443},"uuid":"00000000-0000-0000-0000-000000000045","security":{"type":"none"},"transport":{"type":"xhttp","settings":{"mode":"stream-one","http_version":"h1"}},"mux":{"enabled":true,"tcp":true,"udp":true}});
+    let error=VlessFactory.build(&options).err().unwrap().to_string();assert!(error.contains("XHTTP"));
+    options["mux"]["tcp"]=json!(false);assert!(VlessFactory.build(&options).is_ok());
 }
