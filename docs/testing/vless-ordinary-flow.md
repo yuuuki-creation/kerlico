@@ -2,6 +2,8 @@
 
 更新日期：2026-10-30。当前代码关联任务 `K-F0`、`K-V1`，固定目标 UDP 单独验收。本文件记录实际观察，不把测试文件存在或一次旧缓存运行当成成功证据。
 
+实现提交为 [`6d80350381b80e9dc92fd4105dc1ed5cd3f37e66`](https://github.com/yuuuki-creation/kerlico/commit/6d80350381b80e9dc92fd4105dc1ed5cd3f37e66)。下述输入和工具摘要已与该提交核对，后续纯文档更新不改变这些已测试输入。
+
 ## 本次范围
 
 目标为 `version=0`、TCP/RAW 承载、TLS 正常证书校验、空 flow、`encryption=none` 的客户端出站。TCP、固定目标 UDP、域名/IPv6 目的地址、并发隔离、失败路径和有界退出分别验证。当前无 REALITY、Vision、XHTTP、Mux/XUDP 或 Encryption 实现。

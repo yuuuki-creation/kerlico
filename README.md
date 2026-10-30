@@ -21,6 +21,7 @@ cargo run --locked -p kerlico -- check -c examples/vless-tls.json
 | [文档与资料约定](docs/repository-workflow.md) | docs、STATUS、决策和上游源码的存放与维护方式 |
 | [匿名提交规则](docs/anonymity.md) | 固定匿名身份、提交内容要求、钩子与克隆后的启用 |
 | [参考项目调研](reference/README.md) | 三个项目的固定源码研究、横向对照与借鉴映射 |
+| [协议与组合总表](reference/reports/三核心%20协议%20组合支持.md) | 三核心支持范围、组合限制与 kerlico 后续任务的唯一主清单 |
 | [协作约定](AGENTS.md) | 当前阶段及开始编写实现的边界 |
 
 当前不包含 SOCKS/HTTP 代理入站、TUN、REALITY、Vision、XHTTP、Mux/XUDP 或 VLESS Encryption。已实现的功能与未来规划分开记录；文档和提交说明使用简体中文，提交身份保持匿名。
