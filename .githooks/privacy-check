@@ -58,10 +58,13 @@ def scan_text(data):
         raise Rejected("unreviewed-binary")
     if any(value in text.casefold() for value in LOCAL_IDENTIFIERS):
         raise Rejected("local-identifier")
-    for match in EMAIL_PATTERN.finditer(text):
-        if match.group().casefold() != EMAIL:
-            raise Rejected("non-anonymous-email")
+    if "@" in text:
+        for match in EMAIL_PATTERN.finditer(text):
+            if match.group().casefold() != EMAIL:
+                raise Rejected("non-anonymous-email")
     for reason, pattern in FORBIDDEN:
+        if reason == "credential-url" and ("@" not in text or "://" not in text):
+            continue
         if pattern.search(text):
             raise Rejected(reason)
 

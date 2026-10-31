@@ -1,7 +1,12 @@
 [workspace]
 members = ["apps/kerlico", "crates/*"]
 default-members = ["apps/kerlico"]
-exclude = ["third_party/ml-kem-legacy"]
+exclude = [
+    "third_party/ml-kem-legacy",
+    "third_party/h3",
+    "crates/protocol-shadowquic/vendor/quinn-jls",
+    "crates/protocol-shadowquic/vendor/quinn-proto-jls",
+]
 resolver = "3"
 
 [workspace.package]
@@ -19,6 +24,24 @@ kerlico-vless = { path = "crates/protocol-vless" }
 kerlico-egress = { path = "crates/egress" }
 kerlico-anytls = { path = "crates/protocol-anytls" }
 kerlico-ss2022 = { path = "crates/protocol-ss2022" }
+kerlico-socks = { path = "crates/protocol-socks" }
+kerlico-shadowsocks = { path = "crates/protocol-shadowsocks" }
+kerlico-trojan = { path = "crates/protocol-trojan" }
+kerlico-vmess = { path = "crates/protocol-vmess" }
+kerlico-http = { path = "crates/protocol-http" }
+kerlico-snell = { path = "crates/protocol-snell" }
+kerlico-tuic = { path = "crates/protocol-tuic" }
+kerlico-hysteria2 = { path = "crates/protocol-hysteria2" }
+kerlico-ssh = { path = "crates/protocol-ssh" }
+kerlico-shadowquic = { path = "crates/protocol-shadowquic" }
+kerlico-hysteria1 = { path = "crates/protocol-hysteria1" }
+kerlico-shadowsocksr = { path = "crates/protocol-shadowsocksr" }
+kerlico-shadowtls = { path = "crates/protocol-shadowtls" }
+kerlico-mieru = { path = "crates/protocol-mieru" }
+kerlico-gost-relay = { path = "crates/protocol-gost-relay" }
+kerlico-trusttunnel = { path = "crates/protocol-trusttunnel" }
+kerlico-naive = { path = "crates/protocol-naive" }
+kerlico-sudoku = { path = "crates/protocol-sudoku" }
 tokio = { version = "1", features = ["io-util", "net", "fs", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
@@ -64,6 +87,7 @@ crc32fast = "1"
 
 [patch.crates-io]
 ml-kem = { path = "third_party/ml-kem-legacy" }
+h3 = { path = "third_party/h3" }
 rustls = { git = "https://github.com/aimalygin/shaped-rustls", rev = "3a131beaef0183b0cb61e5a9070a703b6be39ed3" }
 quinn = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d37466492242a1827f9a16aa91ca4c1b00be" }
 quinn-proto = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d37466492242a1827f9a16aa91ca4c1b00be" }

@@ -95,6 +95,8 @@ async fn fixture_with_budget(
             let node = node.clone();
             let access = access.clone();
             let context = InboundContext {
+            peer_addr: None,
+            local_addr: None,
                 events: Arc::new(Observer),
                 cancel: stop.clone(),
                 connect_timeout: Duration::from_secs(3),

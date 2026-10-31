@@ -20,11 +20,19 @@ use tokio::{
     time::{Instant, timeout},
 };
 
+/// 运行期累计事件计数，供调用方观测；不是活跃连接数或业务成功数。
+///
+/// 各原子计数独立更新，读取多个字段不形成一致事务快照。
+/// 调用方应只读；当前公开原子字段并未在类型层面禁止外部写入。
 #[derive(Default)]
 pub struct Stats {
+    /// 接纳的会话或逻辑处理单元数，不代表鉴权或目标连接成功。
     pub accepted: AtomicU64,
+    /// 正常结束的处理单元数，不代表应用层请求成功。
     pub completed: AtomicU64,
+    /// 失败事件数，可包含载体和逻辑流各自报告的事件。
     pub failed: AtomicU64,
+    /// 因队列、配额等边界丢弃的事件数，可按数据报计数。
     pub dropped: AtomicU64,
 }
 
@@ -76,6 +84,8 @@ fn node_context(
     resources: &NodeResources,
 ) -> InboundContext {
     InboundContext {
+        peer_addr: None,
+        local_addr: None,
         cancel,
         connect_timeout: limits.connect_timeout(),
         idle_timeout: limits.idle_timeout(),
@@ -119,6 +129,7 @@ fn node_socket(address: SocketAddr, udp: bool) -> Result<socket2::Socket> {
     Ok(socket)
 }
 
+/// 已持有监听器的运行实例；通过统一出口调度固定入口和独立协议节点。
 pub struct Engine {
     inbounds: Vec<Inbound>,
     nodes: Vec<BoundNode>,
@@ -128,6 +139,10 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// 绑定全部入口及节点监听器，不建立业务目标连接。
+    ///
+    /// 任一绑定失败会释放此前取得的监听资源；没有入口时返回配置错误。
+    /// 节点 IPv6 监听显式仅接收 IPv6，节点身份及带身份的资源分别管理。
     pub async fn bind(config: PreparedConfig) -> Result<Self> {
         if config.inbounds.is_empty() && config.nodes.is_empty() {
             return Err(Error::Config("没有配置入站".into()));
@@ -190,6 +205,9 @@ impl Engine {
         })
     }
 
+    /// 返回入口标签与实际绑定地址，包括端口 `0` 分配后的结果。
+    ///
+    /// 同一节点的 TCP、UDP 共用绑定端口时只列一项；虚拟入口没有物理地址可列。
     pub fn listeners(&self) -> Result<Vec<(String, SocketAddr)>> {
         let mut result: Vec<_> = self
             .inbounds
@@ -212,22 +230,42 @@ impl Engine {
         Ok(result)
     }
 
+    /// 获取全局累计统计的共享观测句柄；计数仍随运行更新，不是值拷贝快照。
     pub fn stats(&self) -> Arc<Stats> {
         self.stats.clone()
     }
 
+    /// 返回按节点标签索引的统计句柄，包含本地协议入口；原子计数仍实时更新。
     pub fn node_stats(&self) -> BTreeMap<String, Arc<Stats>> {
         self.node_stats.clone()
     }
 
+    /// 消费本实例并运行入口，直到取消或入口调度失败；调用方应等待返回以完成回收。
+    ///
+    /// 取消后停止新接入，给予已有任务有限排空时间，再取消并回收。
+    /// 单个业务会话失败通常计入统计，不意味着此方法一定返回错误；成功返回也不代表全部业务成功。
     pub async fn run(self, cancel: CancellationToken) -> Result<()> {
         let scope = cancel.child_token();
         let _guard = scope.clone().drop_guard();
         let semaphore = Arc::new(Semaphore::new(self.limits.max_sessions));
         let mut workers = JoinSet::new();
         for bound in self.nodes {
-            let resources=NodeResources {global:semaphore.clone(),slots:Arc::new(Semaphore::new(bound.spec.max_sessions)),stats:self.stats.clone(),local_stats:self.node_stats.get(&bound.spec.tag).expect("节点统计已构造").clone()};
-            workers.spawn(serve_bound_node(bound,self.limits.clone(),scope.clone(),resources));
+            let resources = NodeResources {
+                global: semaphore.clone(),
+                slots: Arc::new(Semaphore::new(bound.spec.max_sessions)),
+                stats: self.stats.clone(),
+                local_stats: self
+                    .node_stats
+                    .get(&bound.spec.tag)
+                    .expect("节点统计已构造")
+                    .clone(),
+            };
+            workers.spawn(serve_bound_node(
+                bound,
+                self.limits.clone(),
+                scope.clone(),
+                resources,
+            ));
         }
         for inbound in self.inbounds {
             let limits = self.limits.clone();
@@ -281,18 +319,46 @@ impl Engine {
     }
 }
 
-async fn serve_bound_node(bound:BoundNode,limits:Limits,stop:CancellationToken,resources:NodeResources)->Result<()> {
+async fn serve_bound_node(
+    bound: BoundNode,
+    limits: Limits,
+    stop: CancellationToken,
+    resources: NodeResources,
+) -> Result<()> {
     // 同一节点的 TCP/UDP/虚拟入口共用生命周期，单个入口结束不能取消另一入口的业务。
-    let force=CancellationToken::new();let _guard=force.clone().drop_guard();let mut handlers=JoinSet::new();let node=bound.spec;
-    if let Some(listener)=bound.tcp {handlers.spawn(serve_node(node.clone(),listener,limits.clone(),stop.clone(),resources.clone(),force.clone()));}
-    if bound.udp.is_some()||node.protocol.supports_virtual() {
-        let force=force.clone();handlers.spawn(async move {
+    let force = CancellationToken::new();
+    let _guard = force.clone().drop_guard();
+    let mut handlers = JoinSet::new();
+    let node = bound.spec;
+    if let Some(listener) = bound.tcp {
+        handlers.spawn(serve_node(
+            node.clone(),
+            listener,
+            limits.clone(),
+            stop.clone(),
+            resources.clone(),
+            force.clone(),
+        ));
+    }
+    if bound.udp.is_some() || node.protocol.supports_virtual() {
+        let force = force.clone();
+        handlers.spawn(async move {
             let context=node_context(&limits,&node,force.clone(),&resources);let access:Arc<dyn kerlico_core::AccessService>=Arc::new(kerlico_egress::Egress::new(node.outbound.clone()));
             let running=async {if let Some(socket)=bound.udp {node.protocol.handle_udp(socket,access,context).await}else{node.protocol.handle_virtual(access,context).await}};tokio::pin!(running);
             tokio::select! {result=&mut running=>result,_=stop.cancelled()=>{resources.slots.close();if timeout(limits.drain_timeout(),&mut running).await.is_err(){force.cancel();}Ok(())}}
         });
     }
-    while let Some(result)=handlers.join_next().await {let error=match result {Ok(Ok(()))=>continue,Ok(Err(error))=>error,Err(_)=>Error::Protocol("节点入口任务异常退出")};force.cancel();handlers.abort_all();while handlers.join_next().await.is_some(){}return Err(error);}
+    while let Some(result) = handlers.join_next().await {
+        let error = match result {
+            Ok(Ok(())) => continue,
+            Ok(Err(error)) => error,
+            Err(_) => Error::Protocol("节点入口任务异常退出"),
+        };
+        force.cancel();
+        handlers.abort_all();
+        while handlers.join_next().await.is_some() {}
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -302,7 +368,7 @@ async fn serve_node(
     limits: Limits,
     stop: CancellationToken,
     resources: NodeResources,
-    force:CancellationToken,
+    force: CancellationToken,
 ) -> Result<()> {
     let shared = resources.clone();
     let NodeResources {
@@ -321,11 +387,12 @@ async fn serve_node(
             _=stop.cancelled()=>break,
             result=sessions.join_next(),if !sessions.is_empty()=>{if result.is_some_and(|r|r.is_err()){stats.failed.fetch_add(1,Ordering::Relaxed);local_stats.failed.fetch_add(1,Ordering::Relaxed);}},
             accepted=listener.accept()=>{
-                let (stream,_)=match accepted {Ok(v)=>v,Err(error)=>{failure=Some(Error::Io(error));break;}};
+                let (stream,peer_addr)=match accepted {Ok(v)=>v,Err(error)=>{failure=Some(Error::Io(error));break;}};
                 let (Ok(global_permit),Ok(node_permit))=(global.clone().try_acquire_owned(),slots.clone().try_acquire_owned()) else {stats.dropped.fetch_add(1,Ordering::Relaxed);local_stats.dropped.fetch_add(1,Ordering::Relaxed);continue;};
                 let _=stream.set_nodelay(true);
                 let protocol=node.protocol.clone();let access=access.clone();let token=force.child_token();let stats=stats.clone();let local_stats=local_stats.clone();
-                let context=node_context(&limits,&node,token.clone(),&shared);
+                let mut context=node_context(&limits,&node,token.clone(),&shared);
+                context.peer_addr=Some(peer_addr);context.local_addr=stream.local_addr().ok();
                 stats.accepted.fetch_add(1,Ordering::Relaxed);
                 local_stats.accepted.fetch_add(1,Ordering::Relaxed);
                 sessions.spawn(async move {

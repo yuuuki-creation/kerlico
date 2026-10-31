@@ -1,0 +1,12 @@
+{
+  "purpose": "公开已拒绝SPKI证书，仅用于防御拒绝测试；不含私钥",
+  "url": "https://repository.emsign.com/certs/EMDVTLSCAG3C.crt",
+  "sha256_der": "0164d7ceae5bb909c272af151ff44b1177ae9b47d9424b94f1d9558c30934d19",
+  "upstream_blocklist": "https://github.com/klzgrad/naiveproxy/blob/d04efe1ea4477c2db24a7d0e2f068b3bee931e45/src/net/cert/cert_verify_proc_blocklist.inc",
+  "byte_len": 876,
+  "sha256_spki": "49dd353dc2b919a3770645117d0e60c16115e7d1bc259eefe734b00ea434fe5f",
+  "representation": "x509-der",
+  "license_status": "redistribution-not-established",
+  "distribution": "metadata-only",
+  "relative_path": "naive/blocked-intermediate.der"
+}

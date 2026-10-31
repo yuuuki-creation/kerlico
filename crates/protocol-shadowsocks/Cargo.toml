@@ -1,0 +1,19 @@
+[package]
+name = "kerlico-shadowsocks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+kerlico-core.workspace = true
+kerlico-config.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+bytes.workspace = true
+shadowsocks = { version = "=1.25.0", default-features = false, features = ["aead-cipher", "aead-cipher-extra", "stream-cipher", "security-replay-attack-detect"] }
+
+[lints]
+workspace = true

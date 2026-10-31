@@ -1,0 +1,40 @@
+{
+  "purpose": "仅用于官方 UDP nonce 复用的合成研究，不作为生产支持验收",
+  "go_version": "go1.26.10",
+  "go_archive_sha256": "ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5",
+  "results": [
+    {
+      "known_metadata_recovered_payload_bytes": 32,
+      "network_used": false,
+      "tcp_implicit_nonce_breaks_relation": true,
+      "udp_shared_nonce_xor_relation": true,
+      "version": "v3.38.1",
+      "source": {
+        "version": "v3.38.1",
+        "sha": "a2208ee7a38fb41d843a13ecdde858e67ef2f485",
+        "archive_sha256": "fdc42f6abc8d5fdee35d510bc1c2309d1a767add23032ad8d6c479e9d2d22bce",
+        "url": "https://codeload.github.com/enfein/mieru/tar.gz/a2208ee7a38fb41d843a13ecdde858e67ef2f485"
+      },
+      "binary_sha256": "800dea00938336ed2499bb3348a9b405f45a974e05e6040d492b57df9687d163"
+    },
+    {
+      "known_metadata_recovered_payload_bytes": 32,
+      "network_used": false,
+      "tcp_implicit_nonce_breaks_relation": true,
+      "udp_shared_nonce_xor_relation": true,
+      "version": "v3.39.0",
+      "source": {
+        "version": "v3.39.0",
+        "sha": "bcd14b88d0fb7e7707bb80e5d7f6c33675d26c06",
+        "archive_sha256": "8853a026abf90b35036e3bc3ebf441d6123ee7e94ce490a64165342805416db7",
+        "url": "https://codeload.github.com/enfein/mieru/tar.gz/bcd14b88d0fb7e7707bb80e5d7f6c33675d26c06"
+      },
+      "binary_sha256": "ebcd880f753a2d5da53c5136ccb988bad7e6913a2ac5a152a16954c7ee968729"
+    }
+  ],
+  "probe_sources": {
+    "main.go": "fd2972fcd182f8f710c9a53c2092faa4f9cc6a19c0a54ee558e89898c9186e50",
+    "go.mod": "dc9cb620b05c935e7af31ed17323ed3e0e44959379260f70b1f5b83c5e8223c8",
+    "go.sum": "0ff73b6a36ec41a59b407adbd643fdbe2c25881d080d8899416f898c0ebe7742"
+  }
+}

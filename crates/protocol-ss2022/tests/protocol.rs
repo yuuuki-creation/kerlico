@@ -61,6 +61,8 @@ impl NodeObserver for Events {
 }
 fn context() -> InboundContext {
     InboundContext {
+        peer_addr: None,
+        local_addr: None,
         cancel: CancellationToken::new(),
         connect_timeout: Duration::from_secs(2),
         idle_timeout: Duration::from_secs(2),

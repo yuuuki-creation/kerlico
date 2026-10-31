@@ -1,0 +1,19 @@
+{
+  "source": {
+    "commit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+    "url": "https://codeload.github.com/MetaCubeX/mihomo/tar.gz/3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+    "sha256": "ecda5f8c8a8a1d60bc088c2640c85d92c8f002c0686234a26bdf671735afe216"
+  },
+  "go": {
+    "version": "go1.26.10",
+    "url": "https://go.dev/dl/go1.26.10.linux-amd64.tar.gz",
+    "sha256": "ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5"
+  },
+  "binary_sha256": "104f9a91caf8ac9416bb40eeeac03fd1df25be06d16119f3d463179c12fe4050",
+  "result_sha256": "92f66a1a565b429f595fd1f196adf15e4fbd7c8ed4659759f06cd315d4c6a5fd",
+  "go_mod_sha256": "d5a479970850a5a898d882f7cbac4bc878df513be5e6d90dc2e677dea12e5d44",
+  "go_sum_sha256": "b7630227bd6af83e20ff48dba17528b26bdd4a2c60a9012ea38c5b12aee4dc2a",
+  "probe_source_sha256": "6d5007f688460207b3da35d44e477ecc400374debf3c1690cc999b41bd7acb44",
+  "identity_records": 10,
+  "vector_records": 8
+}

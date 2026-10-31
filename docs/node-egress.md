@@ -1,6 +1,6 @@
 # 客户端、服务端节点与统一目标访问
 
-状态：用户已确认双端一体及节点/目标职责边界；基础节点与统一出口已实现；最新生命周期增量仍待复验。日期：2026-10-30。确认依据见 [0005](decisions/0005-separate-nodes-unified-egress.md)、[0006](decisions/0006-unified-client-server-core.md)，实际接口与开发状态见 [interfaces](interfaces/README.md)。
+状态：用户已确认双端一体及节点/目标职责边界；节点、凭据隔离和统一Egress已落地，21模块发行树尚待统一验收。日期：2026-10-31。本文保留目标设计；实际签名及限定验证见[interfaces](interfaces/README.md)，确认依据见[0005](decisions/0005-separate-nodes-unified-egress.md)、[0006](decisions/0006-unified-client-server-core.md)。
 
 ## 同一程序承担两个角色
 
@@ -92,10 +92,10 @@ TCP 已发送业务数据后不能换地址重放。UDP 目标流建立后保持
 | `crates/config/src/nodes.rs` | 节点身份、接入地址及凭据/策略引用校验 |
 | `crates/engine/src/nodes/` | 节点实例装配、启停和生命周期 |
 
-这些路径尚未创建。现有 `Outbound` 可作为所选出口的基础契约继续演进；不能仅给它改名，就登记为已经实现新的接入节点与统一访问职责。
+此表是目标拆分布局，不是现有文件清单。当前实现集中在core-api、config、engine与egress各自的lib.rs及相关模块；例如egress/src/lib.rs已经存在，而单独的service.rs/policy.rs等布局未逐项形成。不能把文件尚未按目标拆分理解为已有服务契约未实现。
 
 ## 当前差距与验收目标
 
-现有程序提供回环固定转发入口和 VLESS 客户端出站。它没有本设计的服务端节点管理、独立节点凭据、统一目标访问模块、完整访问策略或明确的 IPv4 优先候选安排。本轮澄清并保存双端设计，未改写这些实现，也未新增构建或测试。
+现有程序已有固定转发、协议节点/local_inbounds、真实凭据及额外秘密隔离、每节点出口实例、AccessService/Egress和系统解析下的IPv4优先候选。公共契约与各模块按冻结快照保留结果，不代表当前21模块全部发行验收。完整规则路由、独立DNS/Fake-IP、TUN和热重载仍不在当前交付内；本次仅校正文档，没有新增构建或测试。
 
 后续在授权 worker 验证：IPv4/IPv6 节点各自接受正确凭据并拒绝另一节点凭据；不同协议调用同一访问服务；两类接入均可访问两类目标；域名选择遵守 IPv4 优先与回退预算；节点取消、配额和 UDP 回包不串用；已有业务数据不会跨候选重放。

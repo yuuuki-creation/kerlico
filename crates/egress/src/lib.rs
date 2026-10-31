@@ -1,8 +1,9 @@
 //! 与协议无关的目标访问；域名优先 IPv4，候选只在建立阶段切换。
 
 use kerlico_core::{
-    AccessService, Address, BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel,
-    Destination, Error, Outbound, Result,
+    AccessService, Address, BoxFuture, BoxStream, Capabilities, ConnectContext,
+    DatagramAssociation, DatagramAssociationSender, DatagramChannel, DatagramReceiver, Destination,
+    Error, Outbound, Result,
 };
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::time::Instant;
@@ -11,12 +12,48 @@ pub struct Egress {
     outbound: Arc<dyn Outbound>,
 }
 
+struct ResolvedReceiver {
+    inner: Box<dyn DatagramReceiver>,
+    target: Destination,
+}
+
+struct ResolvedAssociationSender {
+    inner: Box<dyn DatagramAssociationSender>,
+    context: ConnectContext,
+}
+
+impl DatagramAssociationSender for ResolvedAssociationSender {
+    fn send_to<'a>(
+        &'a mut self,
+        packet: &'a [u8],
+        target: &'a Destination,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            self.context
+                .run(async {
+                    let targets = Egress::candidates(target).await?;
+                    self.inner.send_to(packet, &targets[0]).await
+                })
+                .await
+        })
+    }
+}
+
+impl DatagramReceiver for ResolvedReceiver {
+    fn peer_addr(&self) -> Option<Destination> {
+        Some(self.target.clone())
+    }
+    fn recv(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>>> {
+        self.inner.recv()
+    }
+}
+
 impl Egress {
     pub fn new(outbound: Arc<dyn Outbound>) -> Self {
         Self { outbound }
     }
 
-    async fn candidates(&self, target: &Destination) -> Result<Vec<Destination>> {
+    async fn candidates(target: &Destination) -> Result<Vec<Destination>> {
         if matches!(target.address(), Address::Ip(_)) {
             return Ok(vec![target.clone()]);
         }
@@ -38,7 +75,7 @@ impl Egress {
         let deadline = Instant::now() + context.timeout;
         context
             .run(async {
-                let candidates = self.candidates(target).await?;
+                let candidates = Self::candidates(target).await?;
                 let mut last = Error::InvalidAddress;
                 for (index, candidate) in candidates.iter().enumerate() {
                     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -69,13 +106,14 @@ impl Egress {
         let deadline = Instant::now() + context.timeout;
         context
             .run(async {
-                let candidates = self.candidates(target).await?;
+                let candidates = Self::candidates(target).await?;
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     return Err(Error::Timeout);
                 }
                 // 数据报建立不证明远端可达，固定首个候选后不靠收包超时重发。
-                self.outbound
+                let channel = self
+                    .outbound
                     .connect_udp(
                         &candidates[0],
                         &ConnectContext {
@@ -83,13 +121,44 @@ impl Egress {
                             timeout: remaining,
                         },
                     )
-                    .await
+                    .await?;
+                Ok(DatagramChannel {
+                    sender: channel.sender,
+                    receiver: Box::new(ResolvedReceiver {
+                        inner: channel.receiver,
+                        target: candidates[0].clone(),
+                    }),
+                })
+            })
+            .await
+    }
+
+    async fn association(&self, context: &ConnectContext) -> Result<DatagramAssociation> {
+        context
+            .run(async {
+                let association = self.outbound.associate_udp(context).await?;
+                Ok(DatagramAssociation {
+                    sender: Box::new(ResolvedAssociationSender {
+                        inner: association.sender,
+                        context: context.clone(),
+                    }),
+                    receiver: association.receiver,
+                })
             })
             .await
     }
 }
 
 impl Outbound for Egress {
+    fn supports_udp_association(&self) -> bool {
+        self.outbound.supports_udp_association()
+    }
+    fn associate_udp<'a>(
+        &'a self,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<DatagramAssociation>> {
+        Box::pin(self.association(context))
+    }
     fn capabilities(&self) -> Capabilities {
         self.outbound.capabilities()
     }
@@ -109,6 +178,15 @@ impl Outbound for Egress {
     }
 }
 impl AccessService for Egress {
+    fn supports_udp_association(&self) -> bool {
+        self.outbound.supports_udp_association()
+    }
+    fn associate_udp<'a>(
+        &'a self,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<DatagramAssociation>> {
+        Box::pin(self.association(context))
+    }
     fn connect_tcp<'a>(
         &'a self,
         target: &'a Destination,

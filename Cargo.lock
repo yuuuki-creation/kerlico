@@ -81,6 +81,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes-gcm-siv"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c32325128cb24de2a2d14d92da7569dae7073f9e47334521d494747fa94d902"
+dependencies = [
+ "aead 0.6.1",
+ "aes 0.9.3",
+ "cipher 0.5.2",
+ "ctr 0.10.1",
+ "ctutils",
+ "polyval 0.7.3",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -358,6 +372,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bloomfilter"
+version = "3.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31e5ceddd1bbfd0277575e19e3c248840a8b5c3c9643a7e0418830f6cd5eb2c5"
+dependencies = [
+ "getrandom 0.2.17",
+ "siphasher",
+]
+
+[[package]]
 name = "brotli"
 version = "8.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -397,6 +421,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "camellia"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3ed33f9863ee76491bbe0d7e16a225c694d8525287e320dc7fbe71ee212254c"
+dependencies = [
+ "cipher 0.5.2",
+]
+
+[[package]]
 name = "cc"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -406,6 +439,18 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
+]
+
+[[package]]
+name = "ccm"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0be9b34d99d395af800e996c5784f810f8400ccd64202f91859dc677825b5378"
+dependencies = [
+ "aead 0.6.1",
+ "cipher 0.5.2",
+ "ctr 0.10.1",
+ "ctutils",
 ]
 
 [[package]]
@@ -1716,9 +1761,14 @@ dependencies = [
  "kerlico-config",
  "kerlico-core",
  "kerlico-engine",
+ "kerlico-http",
  "kerlico-net",
+ "kerlico-shadowsocks",
+ "kerlico-socks",
  "kerlico-ss2022",
+ "kerlico-trojan",
  "kerlico-vless",
+ "kerlico-vmess",
  "tokio",
 ]
 
@@ -1786,6 +1836,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "kerlico-http"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "kerlico-config",
+ "kerlico-core",
+ "kerlico-engine",
+ "kerlico-net",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "kerlico-net"
 version = "0.1.0"
 dependencies = [
@@ -1796,9 +1870,38 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "socket2",
  "tokio",
  "tokio-rustls",
  "webpki-roots",
+]
+
+[[package]]
+name = "kerlico-shadowsocks"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "kerlico-config",
+ "kerlico-core",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "shadowsocks",
+ "tokio",
+]
+
+[[package]]
+name = "kerlico-socks"
+version = "0.1.0"
+dependencies = [
+ "kerlico-config",
+ "kerlico-core",
+ "kerlico-engine",
+ "kerlico-net",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]
@@ -1815,6 +1918,38 @@ dependencies = [
  "sha2 0.10.9",
  "shadowsocks",
  "tokio",
+]
+
+[[package]]
+name = "kerlico-trojan"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "kerlico-config",
+ "kerlico-core",
+ "kerlico-engine",
+ "kerlico-net",
+ "prost",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "webpki-roots",
+ "xray-routing",
+ "xray-transport",
 ]
 
 [[package]]
@@ -1863,6 +1998,45 @@ dependencies = [
  "xray-routing",
  "xray-transport",
  "xray-vless-encryption",
+]
+
+[[package]]
+name = "kerlico-vmess"
+version = "0.1.0"
+dependencies = [
+ "aes 0.8.4",
+ "aes-gcm 0.10.3",
+ "base64 0.23.1",
+ "bytes",
+ "chacha20poly1305 0.10.1",
+ "crc32fast",
+ "futures-util",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "kerlico-config",
+ "kerlico-core",
+ "kerlico-net",
+ "md-5 0.10.6",
+ "prost",
+ "rand 0.8.8",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha3 0.10.9",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "uuid",
+ "webpki-roots",
+ "xray-routing",
+ "xray-transport",
+ "zeroize",
 ]
 
 [[package]]
@@ -3130,6 +3304,7 @@ dependencies = [
  "aes 0.9.3",
  "base64 0.23.1",
  "blake3",
+ "bloomfilter",
  "byte_string",
  "bytes",
  "cfg-if",
@@ -3163,14 +3338,26 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b404a62ebea5003f44b9a2748dee7555c5f9ae39896508e466a2a91ee6fa5df5"
 dependencies = [
+ "aead 0.6.1",
  "aes 0.9.3",
  "aes-gcm 0.11.1",
+ "aes-gcm-siv",
  "aws-lc-rs",
  "blake3",
  "bytes",
+ "camellia",
+ "ccm",
  "cfg-if",
+ "chacha20 0.10.2",
  "chacha20poly1305 0.11.0",
+ "ctr 0.10.1",
+ "ghash 0.6.0",
+ "hkdf 0.13.0",
+ "md-5 0.11.0",
  "rand 0.10.3",
+ "sha1 0.11.0",
+ "sm4",
+ "subtle",
 ]
 
 [[package]]
@@ -3241,10 +3428,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "siphasher"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "sm4"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff2d621883cdeeaee6759d39f4bc8cd314b29db72b6ac3d6714b31422512ee11"
+dependencies = [
+ "cipher 0.5.2",
+]
 
 [[package]]
 name = "smallvec"

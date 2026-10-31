@@ -154,6 +154,8 @@ mod tests {
     #[tokio::test]
     async fn unfinished_header_has_timeout_and_cancellation() {
         let mut context = InboundContext {
+            peer_addr: None,
+            local_addr: None,
             events: Arc::new(Observer),
             cancel: kerlico_core::CancellationToken::new(),
             connect_timeout: std::time::Duration::from_millis(10),

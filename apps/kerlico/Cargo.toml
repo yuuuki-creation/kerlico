@@ -6,10 +6,50 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-default = ["protocol-vless", "protocol-anytls", "protocol-ss2022"]
+default = [
+    "protocol-vless",
+    "protocol-anytls",
+    "protocol-ss2022",
+    "protocol-socks",
+    "protocol-shadowsocks",
+    "protocol-trojan",
+    "protocol-vmess",
+    "protocol-http",
+    "protocol-snell",
+    "protocol-tuic",
+    "protocol-hysteria2",
+    "protocol-ssh",
+    "protocol-shadowquic",
+    "protocol-hysteria1",
+    "protocol-shadowsocksr",
+    "protocol-shadowtls",
+    "protocol-mieru",
+    "protocol-gost-relay",
+    "protocol-trusttunnel",
+    "protocol-naive",
+    "protocol-sudoku",
+]
 protocol-vless = ["dep:kerlico-vless"]
 protocol-anytls = ["dep:kerlico-anytls"]
 protocol-ss2022 = ["dep:kerlico-ss2022"]
+protocol-socks = ["dep:kerlico-socks"]
+protocol-shadowsocks = ["dep:kerlico-shadowsocks"]
+protocol-trojan = ["dep:kerlico-trojan"]
+protocol-vmess = ["dep:kerlico-vmess"]
+protocol-http = ["dep:kerlico-http"]
+protocol-snell = ["dep:kerlico-snell"]
+protocol-tuic = ["dep:kerlico-tuic"]
+protocol-hysteria2 = ["dep:kerlico-hysteria2"]
+protocol-ssh = ["dep:kerlico-ssh"]
+protocol-shadowquic = ["dep:kerlico-shadowquic"]
+protocol-hysteria1 = ["dep:kerlico-hysteria1"]
+protocol-shadowsocksr = ["dep:kerlico-shadowsocksr"]
+protocol-shadowtls = ["dep:kerlico-shadowtls"]
+protocol-mieru = ["dep:kerlico-mieru"]
+protocol-gost-relay = ["dep:kerlico-gost-relay"]
+protocol-trusttunnel = ["dep:kerlico-trusttunnel"]
+protocol-naive = ["dep:kerlico-naive"]
+protocol-sudoku = ["dep:kerlico-sudoku"]
 anytls = ["protocol-anytls"]
 ss2022 = ["protocol-ss2022"]
 
@@ -21,6 +61,24 @@ kerlico-net.workspace = true
 kerlico-vless = { workspace = true, optional = true }
 kerlico-anytls = { workspace = true, optional = true }
 kerlico-ss2022 = { workspace = true, optional = true }
+kerlico-socks = { workspace = true, optional = true }
+kerlico-shadowsocks = { workspace = true, optional = true }
+kerlico-trojan = { workspace = true, optional = true }
+kerlico-vmess = { workspace = true, optional = true }
+kerlico-http = { workspace = true, optional = true }
+kerlico-snell = { workspace = true, optional = true }
+kerlico-tuic = { workspace = true, optional = true }
+kerlico-hysteria2 = { workspace = true, optional = true }
+kerlico-ssh = { workspace = true, optional = true }
+kerlico-shadowquic = { workspace = true, optional = true }
+kerlico-hysteria1 = { workspace = true, optional = true }
+kerlico-shadowsocksr = { workspace = true, optional = true }
+kerlico-shadowtls = { workspace = true, optional = true }
+kerlico-mieru = { workspace = true, optional = true }
+kerlico-gost-relay = { workspace = true, optional = true }
+kerlico-trusttunnel = { workspace = true, optional = true }
+kerlico-naive = { workspace = true, optional = true }
+kerlico-sudoku = { workspace = true, optional = true }
 tokio.workspace = true
 clap.workspace = true
 

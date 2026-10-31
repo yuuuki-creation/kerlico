@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+socket2.workspace = true
 kerlico-core.workspace = true
 kerlico-config.workspace = true
 tokio.workspace = true

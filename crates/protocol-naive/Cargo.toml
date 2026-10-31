@@ -1,0 +1,40 @@
+[package]
+name = "kerlico-naive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+kerlico-core.workspace = true
+kerlico-config.workspace = true
+kerlico-net.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+http.workspace = true
+h2 = "=0.4.20"
+h3.workspace = true
+h3-quinn.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+webpki-roots.workspace = true
+socket2.workspace = true
+base64.workspace = true
+sha2.workspace = true
+rand.workspace = true
+futures-util.workspace = true
+x509-parser = { version = "=0.18.1", default-features = false }
+zeroize = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-std"] }
+kerlico-http = { path = "../protocol-http" }
+kerlico-egress.workspace = true
+rcgen.workspace = true
+
+[lints]
+workspace = true

@@ -73,6 +73,8 @@ async fn udp_budget_denial_and_cancel_release_resources() {
     let cancel = CancellationToken::new();
     let access = Arc::new(DenyTarget(AtomicUsize::new(0)));
     let context = InboundContext {
+            peer_addr: None,
+            local_addr: None,
         cancel: cancel.clone(),
         connect_timeout: Duration::from_secs(1),
         idle_timeout: Duration::from_secs(1),

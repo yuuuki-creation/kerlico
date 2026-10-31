@@ -10,6 +10,9 @@ kerlico-core.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+kerlico-shadowsocks.workspace = true
+kerlico-ss2022.workspace = true
+base64.workspace = true
 kerlico-net.workspace = true
 kerlico-config.workspace = true
 serde_json.workspace = true

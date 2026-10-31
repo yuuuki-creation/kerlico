@@ -1,0 +1,95 @@
+{
+  "status": "两项Go纯导出测试已通过，Rust/CLI及网络互通待验证",
+  "mihomo": {
+    "repository": "https://github.com/MetaCubeX/mihomo",
+    "commit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+    "archive_url": "https://codeload.github.com/MetaCubeX/mihomo/tar.gz/3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+    "archive_sha256": "ecda5f8c8a8a1d60bc088c2640c85d92c8f002c0686234a26bdf671735afe216",
+    "license": "GPL-3.0",
+    "files": {
+      "adapter/outbound/sudoku.go": "0442c0ad521b967eb6d50dd08e0170ce626b52c9ba6bf0c5e208e2bca2a237d4",
+      "listener/config/sudoku.go": "875af3f3d4f902cd17670ce786a9c6b6aaa460ffd4a0de861823d6bea9d7aab8",
+      "transport/sudoku/session_keys.go": "d9e0c95349a9fd137c1708f26d4717d64f5c5cea44713e5d349b76491cf34619",
+      "transport/sudoku/kip.go": "9b8b4fabd5c11d5d126a1eaf605a10aa09002ee80fb32b14fca081a08985fa66",
+      "transport/sudoku/uot.go": "fe82fb6bb06a6ad09d90681f7d5c92b945d7dc58317eb789bf6beb3aebba51bf",
+      "transport/sudoku/crypto/record_conn.go": "4187a42b8bc14d26069e63283462871f7a1c27e3571f9daed3a0dedbed90ac16"
+    }
+  },
+  "official": {
+    "repository": "https://github.com/SUDOKU-ASCII/sudoku",
+    "tag": "v0.5.2.0",
+    "commit": "56ce6f1aeea18aa69b9bc1d57557ed312b59e5f5",
+    "archive_url": "https://codeload.github.com/SUDOKU-ASCII/sudoku/tar.gz/56ce6f1aeea18aa69b9bc1d57557ed312b59e5f5",
+    "license": "GPL-3.0-or-later及原命名/关联限制，保持原程序名称",
+    "minimum_go_from_go_mod": "1.27.2",
+    "files": {
+      "go.mod": "8e14eb463421dcb36ab18c454d54c13ae8689b976ffebb96f2f6be90accb88ad",
+      "go.sum": "2fb9edb7b49045d9542762088fdfadc83386d534a1f27087db976f4c0f512963"
+    },
+    "boundaries": [
+      "原程序client/server均通配监听；运行完整参考程序必须处于独立临时网络命名空间",
+      "原生配置不提供服务端证书/私钥，TLS服务端组合不得伪装直接支持",
+      "名单/管理API和反向隧道不属于本轮内核交付"
+    ],
+    "archive_sha256": "feba7fd0770b3af2fbc747b9d55d58764ef0470b5fedbabd21fc917e9d56625a",
+    "archive_size": 410551,
+    "go_toolchain": {
+      "version": "go1.27.2",
+      "platform": "linux-amd64",
+      "url": "https://go.dev/dl/go1.27.2.linux-amd64.tar.gz",
+      "sha256": "ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5",
+      "size": 70590635,
+      "downloaded": true,
+      "archive_verified": true,
+      "worker": "perf-01"
+    }
+  },
+  "vectors": {
+    "source": "固定Mihomo原算法，在隔离副本追加两个同包_test.go导出桥接",
+    "control_test": "TestKerlicoExportControlVectors",
+    "record_test": "TestKerlicoExportRecordVectors",
+    "network_connections": 0,
+    "production_source_changes": 0,
+    "synthetic_material_only": true,
+    "worker": "perf-01",
+    "fixture_sha256": "d8c50710da063a40288ca15a3a957e2fb6254737ad32b7fd921614effaa86321",
+    "control_test_exit": 0,
+    "record_test_exit": 0,
+    "testify_prefetch": "v1.12.1及其固定依赖仅构建准备时下载，导出测试GOPROXY=off/GOSUMDB=off",
+    "production_files_unchanged_after_tests": true
+  },
+  "native_reference_builds": {
+    "worker": "perf-01",
+    "go_version": "go version go1.27.2 linux/amd64",
+    "go_archive_sha256": "ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5",
+    "go_binary_sha256": "548d3c32f83fa81152f543eb1526be7884cfe0526eb5e9ce29d3eca14786e7e0",
+    "build_jobs": 1,
+    "gomemlimit": "768MiB",
+    "listeners_started": 0,
+    "interop_executed": false,
+    "peers": {
+      "mihomo": {
+        "commit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+        "archive_sha256": "ecda5f8c8a8a1d60bc088c2640c85d92c8f002c0686234a26bdf671735afe216",
+        "binary_sha256": "d015330c36f054434c6fab4dd6d53d41d9294dfb7750c9d7066712f8eebdfd5a",
+        "returncode": 0,
+        "source_file_count": 1045,
+        "source_manifest_sha256": "2fc4f9d7e82693ddd7cdbda592e15a45ff0160c34f4e7872b53416f10d62b737",
+        "source_manifest_encoding": "JSON sorted keys, compact separators",
+        "production_source_changes": 0,
+        "build_log_sha256": "bc374edf76d379b08f41092ae6c3ca873b8b3d7271b1ba48043c81be10343a19"
+      },
+      "official": {
+        "commit": "56ce6f1aeea18aa69b9bc1d57557ed312b59e5f5",
+        "archive_sha256": "feba7fd0770b3af2fbc747b9d55d58764ef0470b5fedbabd21fc917e9d56625a",
+        "binary_sha256": "b11ae3465759ceba45fd5bd43fe303c7c9c114ca0149063a38a84bafb05da9ff",
+        "returncode": 0,
+        "source_file_count": 318,
+        "source_manifest_sha256": "3a3d43f45fbed5b57b946264f1a02613901d331e81dce598fe5fab9f35fd7b38",
+        "source_manifest_encoding": "JSON sorted keys, compact separators",
+        "production_source_changes": 0,
+        "build_log_sha256": "b85e03c7258cb6cd9a92affa2bce96e1b52b84d2243764a4a2a48f44a73afeb0"
+      }
+    }
+  }
+}

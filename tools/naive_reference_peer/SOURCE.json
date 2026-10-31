@@ -1,0 +1,53 @@
+{
+  "purpose": "独立测试对端，不属于kerlico业务运行时",
+  "sing_box": {
+    "version": "v1.14.4",
+    "sha": "c005f35300ce76427dc285481ec5695f5b179cd2",
+    "archive_sha256": "1c4d2b3bf261a8d98e1b026be0bbcddbcb3f53bbca77eb15e8f25f7d4e602e59",
+    "license": "GPL-3.0-or-later",
+    "change": "只在worker可写测试副本增加ReferencePadding导出；不修改padding算法；原只读缓存不改"
+  },
+  "uot": {
+    "module": "github.com/sagernet/sing",
+    "sha": "5dc452e537bf75c5c51c54c8c4a4be1d19d85c4f",
+    "license": "GPL-3.0-or-later"
+  },
+  "caddy": {
+    "version": "v2.11.7",
+    "sha": "72dd0fb067f6d7826c7f79907670ba4a713bfe37",
+    "license": "Apache-2.0",
+    "archive_sha256": "e86c49311c0c9f7e9b3b80527f0139e5739dfe28effeaa41c444dd743f0bbd7e",
+    "build_workflow": "https://github.com/klzgrad/forwardproxy/blob/e747854e78743dba85c039b38ed185fb11d93667/.github/workflows/build.yml",
+    "upstream_patches": {
+      "caddy-sing-quic-bbrv1.patch": "298a057cf1640718a14157bcd22a37575538adffba5189e7a7ecd54bffe7cb8e",
+      "caddy-read-idle-timeout.patch": "02583f364374e9461cee9b954349b87e0390d600319beafcf52ebcc5e2947eab"
+    },
+    "boundary": "原插件+stock Caddy编译失败；仅固定上游发布流程两补丁构建用于互通"
+  },
+  "forwardproxy": {
+    "version": "v2.11.7-naive2",
+    "sha": "e747854e78743dba85c039b38ed185fb11d93667",
+    "license": "Apache-2.0",
+    "changes": "插件源码不改；Caddy使用同固定插件仓库随附的两项发布流程补丁"
+  },
+  "official_client": {
+    "version": "v154.0.8037.49-5",
+    "sha": "d04efe1ea4477c2db24a7d0e2f068b3bee931e45",
+    "asset": "naiveproxy-v154.0.8037.49-5-linux-x64.tar.xz",
+    "github_release_digest": "sha256:80214dfea1767f6ecf63a3a79dc9f48b203460f51abc609357fff48dd5844c7d",
+    "changes": "无；取用前校验归档并另记二进制摘要"
+  },
+  "rust_h3": "复用共享third_party/h3受控CONNECT修正；来源与独立回归由共享修正任务记录",
+  "reference_binaries_sha256": {
+    "naive-reference": "c99a61cf7eea18da948e21d70df2dcc152ad648ac054de201ebb0348ea9e70e6",
+    "caddy-naive-reference": "73a3b466fa68b4d18ab71ffabed3e6aa1ead140dcde937938fac6d17a3147291",
+    "naive-official": "f86c52be454eebc9134aad476f3fe91fcf90df7200c3df262a4d0a3d2de85464"
+  },
+  "verification": {
+    "worker": "perf-03",
+    "scope": "Linux amd64; native-r12; interop-full-r1; coexist-r1",
+    "go_toolchain": "go1.26.10",
+    "source_export_quic": "v0.61.0-sing-box-mod.12",
+    "caddy_quic": "v0.61.0-sing-box-mod.9"
+  }
+}

@@ -1,0 +1,39 @@
+[package]
+name = "kerlico-trojan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+kerlico-core.workspace = true
+kerlico-config.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle = "2"
+rustls.workspace = true
+rustls-pemfile.workspace = true
+webpki-roots.workspace = true
+tokio-rustls.workspace = true
+xray-transport.workspace = true
+xray-routing.workspace = true
+http.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+tokio-stream.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+prost.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+kerlico-engine.workspace = true
+kerlico-net.workspace = true
+rcgen.workspace = true
+
+[lints]
+workspace = true

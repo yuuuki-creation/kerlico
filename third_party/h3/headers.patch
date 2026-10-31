@@ -1,0 +1,464 @@
+--- a/src/proto/headers.rs
++++ b/src/proto/headers.rs
+@@ -206,9 +206,31 @@
+     fn try_from(headers: Vec<HeaderField>) -> Result<Self, Self::Error> {
+         let mut fields = HeaderMap::with_capacity(headers.len());
+         let mut pseudo = Pseudo::default();
++        let mut ordinary_seen = false;
++        let mut pseudo_seen = 0u8;
+ 
+         for field in headers.into_iter() {
+             let (name, value) = field.into_inner();
++            // 在原始字段顺序仍可见时拒绝覆盖，不能留到Request/Response还原之后。
++            if name.starts_with(b":") {
++                let bit = match name.as_ref() {
++                    b":method" => 1,
++                    b":scheme" => 2,
++                    b":authority" => 4,
++                    b":path" => 8,
++                    b":status" => 16,
++                    b":protocol" => 32,
++                    _ => 0,
++                };
++                if ordinary_seen || (pseudo_seen & bit) != 0 {
++                    return Err(HeaderError::InvalidHeaderName(
++                        "伪头字段重复或位于普通字段之后".into(),
++                    ));
++                }
++                pseudo_seen |= bit;
++            } else {
++                ordinary_seen = true;
++            }
+             match Field::parse(name, value)? {
+                 Field::Method(m) => {
+                     pseudo.method = Some(m);
+@@ -383,7 +405,19 @@
+             None
+         };
+ 
+-        let len = 3 + authority.is_some() as usize + protocol.is_some() as usize;
++        // 回移官方#322：没有:protocol的classic CONNECT只发送方法与authority。
++        let (scheme, path) = if method == Method::CONNECT && protocol.is_none() {
++            (None, None)
++        } else {
++            (scheme.or(Some(Scheme::HTTPS)), Some(path))
++        };
++
++        // 按实际存在的字段计数；普通请求和extended CONNECT的计数保持原值。
++        let len = 1
++            + scheme.is_some() as usize
++            + authority.is_some() as usize
++            + path.is_some() as usize
++            + protocol.is_some() as usize;
+ 
+         //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+         //= type=implication
+@@ -398,9 +432,9 @@
+         //# CONNECT request; see Section 4.4.
+         Self {
+             method: Some(method),
+-            scheme: scheme.or(Some(Scheme::HTTPS)),
++            scheme,
+             authority,
+-            path: Some(path),
++            path,
+             status: None,
+             protocol,
+             len,
+@@ -483,6 +517,396 @@
+ mod tests {
+     use super::*;
+     use assert_matches::assert_matches;
++
++    fn qpack_fields(fields: Vec<HeaderField>) -> Vec<HeaderField> {
++        let mut wire = bytes::BytesMut::new();
++        crate::qpack::encode_stateless(&mut wire, fields).unwrap();
++        crate::qpack::decode_stateless(&mut wire.as_ref(), u64::MAX)
++            .unwrap()
++            .fields
++    }
++
++    #[test]
++    fn duplicate_pseudo_fields_never_overwrite_identical_or_distinct_values() {
++        for (name, first, second) in [
++            (":method", "CONNECT", "GET"),
++            (":scheme", "https", "http"),
++            (":authority", "example.invalid:443", "other.invalid:8443"),
++            (":path", "/first", "/second"),
++            (":status", "200", "403"),
++            (":protocol", "webtransport", "connect-udp"),
++        ] {
++            assert!(Header::try_from(vec![(name, first).into()]).is_ok());
++            for repeated in [first, second] {
++                let fields = qpack_fields(vec![(name, first).into(), (name, repeated).into()]);
++                assert_matches!(
++                    Header::try_from(fields),
++                    Err(HeaderError::InvalidHeaderName(_))
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn classic_connect_rejects_duplicate_method_and_authority_after_qpack() {
++        for duplicate in [
++            (":method", "CONNECT"),
++            (":method", "GET"),
++            (":authority", "example.invalid:443"),
++            (":authority", "other.invalid:8443"),
++        ] {
++            let fields = qpack_fields(vec![
++                (":method", "CONNECT").into(),
++                (":authority", "example.invalid:443").into(),
++                duplicate.into(),
++            ]);
++            assert_matches!(
++                Header::try_from(fields),
++                Err(HeaderError::InvalidHeaderName(_))
++            );
++        }
++    }
++
++    #[test]
++    fn response_rejects_duplicate_status_after_qpack() {
++        for repeated in ["200", "407"] {
++            let fields = qpack_fields(vec![
++                (":status", "200").into(),
++                (":status", repeated).into(),
++            ]);
++            assert_matches!(
++                Header::try_from(fields),
++                Err(HeaderError::InvalidHeaderName(_))
++            );
++        }
++    }
++
++    #[test]
++    fn every_pseudo_field_must_precede_all_ordinary_fields() {
++        for pseudo in [
++            (":method", "CONNECT"),
++            (":scheme", "https"),
++            (":authority", "example.invalid:443"),
++            (":path", "/"),
++            (":status", "200"),
++            (":protocol", "webtransport"),
++        ] {
++            let fields = qpack_fields(vec![("x-test", "ordinary").into(), pseudo.into()]);
++            assert_matches!(
++                Header::try_from(fields),
++                Err(HeaderError::InvalidHeaderName(_))
++            );
++        }
++    }
++
++    #[test]
++    fn arbitrary_valid_pseudo_order_keeps_repeated_ordinary_fields() {
++        let pseudo: Vec<HeaderField> = vec![
++            (":method", "GET").into(),
++            (":scheme", "https").into(),
++            (":authority", "example.invalid:443").into(),
++            (":path", "/resource").into(),
++        ];
++        for rotation in 0..pseudo.len() {
++            let mut fields = pseudo.clone();
++            fields.rotate_left(rotation);
++            fields.extend([("x-test", "first").into(), ("x-test", "second").into()]);
++            let rebuilt = Header::try_from(qpack_fields(fields)).unwrap();
++            let (method, uri, _, fields) = rebuilt.into_request_parts().unwrap();
++            assert_eq!(method, Method::GET);
++            assert_eq!(uri.to_string(), "https://example.invalid:443/resource");
++            let values: Vec<_> = fields
++                .get_all("x-test")
++                .iter()
++                .map(|v| v.as_bytes())
++                .collect();
++            assert_eq!(values, [b"first".as_slice(), b"second".as_slice()]);
++        }
++    }
++
++    // 用独立列出的标准字段比较请求构造、迭代、QPACK和接收还原，避免只检查内部Option。
++    fn assert_fields_and_qpack(header: Header, expected: Vec<HeaderField>) -> Header {
++        assert_eq!(header.len(), expected.len());
++        assert_eq!(header.size(), expected.len());
++        assert_eq!(header.clone().into_iter().collect::<Vec<_>>(), expected);
++        let expected_size = expected.iter().map(HeaderField::mem_size).sum::<usize>() as u64;
++        let mut wire = bytes::BytesMut::new();
++        let encoded_size = crate::qpack::encode_stateless(&mut wire, header).unwrap();
++        let mut canonical = bytes::BytesMut::new();
++        let canonical_size =
++            crate::qpack::encode_stateless(&mut canonical, expected.clone()).unwrap();
++        assert_eq!(wire, canonical);
++        assert_eq!(encoded_size, canonical_size);
++        assert_eq!(encoded_size, expected_size);
++        let mut input = wire.as_ref();
++        let decoded = crate::qpack::decode_stateless(&mut input, expected_size).unwrap();
++        assert!(input.is_empty());
++        assert_eq!(decoded.fields, expected);
++        assert_eq!(decoded.mem_size, expected_size);
++        let mut limited = wire.as_ref();
++        assert_matches!(
++            crate::qpack::decode_stateless(&mut limited, expected_size - 1),
++            Err(crate::qpack::DecoderError::HeaderTooLong(size)) if size == expected_size
++        );
++        let rebuilt = Header::try_from(decoded.fields).unwrap();
++        assert_eq!(rebuilt.len(), expected.len());
++        assert_eq!(rebuilt.clone().into_iter().collect::<Vec<_>>(), expected);
++        rebuilt
++    }
++
++    fn classic(authority: &str) -> Header {
++        Header::request(
++            Method::CONNECT,
++            Uri::builder().authority(authority).build().unwrap(),
++            HeaderMap::new(),
++            Extensions::new(),
++        )
++        .unwrap()
++    }
++
++    #[test]
++    fn classic_connect_omits_scheme_path_and_reports_exact_count() {
++        for authority in ["example.invalid:443", "127.0.0.1:8443", "[::1]:443"] {
++            let header = classic(authority);
++            assert_eq!(header.pseudo.len(), 2);
++            assert!(header.pseudo.scheme.is_none());
++            assert!(header.pseudo.path.is_none());
++            assert!(header.pseudo.protocol.is_none());
++            assert_fields_and_qpack(
++                header,
++                vec![
++                    (":method", "CONNECT").into(),
++                    (":authority", authority).into(),
++                ],
++            );
++        }
++    }
++
++    #[test]
++    fn classic_connect_absolute_uri_also_omits_scheme_path() {
++        let header = Header::request(
++            Method::CONNECT,
++            "https://example.invalid:443/ignored?query=ignored"
++                .parse()
++                .unwrap(),
++            HeaderMap::new(),
++            Extensions::new(),
++        )
++        .unwrap();
++        assert_fields_and_qpack(
++            header,
++            vec![
++                (":method", "CONNECT").into(),
++                (":authority", "example.invalid:443").into(),
++            ],
++        );
++    }
++
++    #[test]
++    fn classic_connect_qpack_serialization_and_limits() {
++        let mut fields = HeaderMap::new();
++        fields.append("x-test", "first".parse().unwrap());
++        fields.append("x-test", "second".parse().unwrap());
++        let header = Header::request(
++            Method::CONNECT,
++            Uri::builder()
++                .authority("example.invalid:443")
++                .build()
++                .unwrap(),
++            fields,
++            Extensions::new(),
++        )
++        .unwrap();
++        assert_fields_and_qpack(
++            header,
++            vec![
++                (":method", "CONNECT").into(),
++                (":authority", "example.invalid:443").into(),
++                ("x-test", "first").into(),
++                ("x-test", "second").into(),
++            ],
++        );
++    }
++
++    #[test]
++    fn classic_connect_authority_only_decode_accepts_tunnel_tokens() {
++        for authority in [
++            "_udp2",
++            "_check",
++            "_icmp",
++            "example.invalid:443",
++            "[::1]:8443",
++        ] {
++            let rebuilt = assert_fields_and_qpack(
++                classic(authority),
++                vec![
++                    (":method", "CONNECT").into(),
++                    (":authority", authority).into(),
++                ],
++            );
++            let (method, uri, protocol, fields) = rebuilt.into_request_parts().unwrap();
++            assert_eq!(method, Method::CONNECT);
++            assert_eq!(uri.authority().unwrap().as_str(), authority);
++            assert!(uri.scheme().is_none());
++            assert!(uri.path_and_query().is_none());
++            assert!(protocol.is_none());
++            assert!(fields.is_empty());
++        }
++    }
++
++    #[test]
++    fn ordinary_get_post_pseudo_fields_and_qpack_unchanged() {
++        for method in [Method::GET, Method::POST] {
++            for (uri, scheme, authority, path) in [
++                ("https://example.invalid", "https", "example.invalid", "/"),
++                (
++                    "https://example.invalid/resource?query=value",
++                    "https",
++                    "example.invalid",
++                    "/resource?query=value",
++                ),
++                (
++                    "http://127.0.0.1:8080/upload",
++                    "http",
++                    "127.0.0.1:8080",
++                    "/upload",
++                ),
++            ] {
++                let mut fields = HeaderMap::new();
++                fields.insert("x-test", "value".parse().unwrap());
++                let header = Header::request(
++                    method.clone(),
++                    uri.parse().unwrap(),
++                    fields,
++                    Extensions::new(),
++                )
++                .unwrap();
++                assert_eq!(header.pseudo.len(), 4);
++                let rebuilt = assert_fields_and_qpack(
++                    header,
++                    vec![
++                        (":method", method.as_str()).into(),
++                        (":scheme", scheme).into(),
++                        (":authority", authority).into(),
++                        (":path", path).into(),
++                        ("x-test", "value").into(),
++                    ],
++                );
++                let (received_method, uri, protocol, _) = rebuilt.into_request_parts().unwrap();
++                assert_eq!(received_method, method);
++                assert_eq!(uri.scheme_str(), Some(scheme));
++                assert_eq!(uri.authority().unwrap().as_str(), authority);
++                assert_eq!(uri.path_and_query().unwrap().as_str(), path);
++                assert!(protocol.is_none());
++            }
++        }
++    }
++
++    #[test]
++    fn ordinary_authority_and_origin_forms_keep_defaults() {
++        for method in [Method::GET, Method::POST] {
++            let header = Header::request(
++                method.clone(),
++                Uri::builder()
++                    .authority("example.invalid:443")
++                    .build()
++                    .unwrap(),
++                HeaderMap::new(),
++                Extensions::new(),
++            )
++            .unwrap();
++            assert_fields_and_qpack(
++                header,
++                vec![
++                    (":method", method.as_str()).into(),
++                    (":scheme", "https").into(),
++                    (":authority", "example.invalid:443").into(),
++                    (":path", "/").into(),
++                ],
++            );
++            let mut fields = HeaderMap::new();
++            fields.insert("host", "example.invalid:443".parse().unwrap());
++            let header = Header::request(
++                method.clone(),
++                "/origin?query=value".parse().unwrap(),
++                fields,
++                Extensions::new(),
++            )
++            .unwrap();
++            assert_fields_and_qpack(
++                header,
++                vec![
++                    (":method", method.as_str()).into(),
++                    (":scheme", "https").into(),
++                    (":path", "/origin?query=value").into(),
++                    ("host", "example.invalid:443").into(),
++                ],
++            );
++        }
++    }
++
++    #[test]
++    fn extended_connect_protocols_preserve_pseudo_fields_and_qpack() {
++        for protocol in [Protocol::WEB_TRANSPORT, Protocol::CONNECT_UDP] {
++            for (uri, path) in [
++                (
++                    "https://example.invalid/tunnel?query=value"
++                        .parse()
++                        .unwrap(),
++                    "/tunnel?query=value",
++                ),
++                (
++                    Uri::builder().authority("example.invalid").build().unwrap(),
++                    "/",
++                ),
++            ] {
++                let mut ext = Extensions::new();
++                ext.insert(protocol);
++                let header = Header::request(Method::CONNECT, uri, HeaderMap::new(), ext).unwrap();
++                assert_eq!(header.pseudo.len(), 5);
++                let rebuilt = assert_fields_and_qpack(
++                    header,
++                    vec![
++                        (":method", "CONNECT").into(),
++                        (":scheme", "https").into(),
++                        (":authority", "example.invalid").into(),
++                        (":path", path).into(),
++                        (":protocol", protocol.as_str()).into(),
++                    ],
++                );
++                let (method, uri, received_protocol, _) = rebuilt.into_request_parts().unwrap();
++                assert_eq!(method, Method::CONNECT);
++                assert_eq!(received_protocol, Some(protocol));
++                assert_eq!(uri.scheme_str(), Some("https"));
++                assert_eq!(uri.path_and_query().unwrap().as_str(), path);
++            }
++        }
++    }
++
++    #[test]
++    fn non_connect_protocol_extension_remains_ignored() {
++        for method in [Method::GET, Method::POST] {
++            let mut ext = Extensions::new();
++            ext.insert(Protocol::WEB_TRANSPORT);
++            let header = Header::request(
++                method.clone(),
++                "https://example.invalid/".parse().unwrap(),
++                HeaderMap::new(),
++                ext,
++            )
++            .unwrap();
++            assert_eq!(header.pseudo.len(), 4);
++            assert_fields_and_qpack(
++                header,
++                vec![
++                    (":method", method.as_str()).into(),
++                    (":scheme", "https").into(),
++                    (":authority", "example.invalid").into(),
++                    (":path", "/").into(),
++                ],
++            );
++        }
++    }
+ 
+     #[test]
+     fn request_has_no_authority_nor_host() {

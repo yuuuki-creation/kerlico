@@ -1,0 +1,19 @@
+{
+  "package": "h3",
+  "version": "0.0.8",
+  "registry_checksum": "10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be",
+  "release_commit": "22c1aa3f44d1463cd7644c8f654fffc9a6da305c",
+  "official_connect_fix": "e07e69412876f7e26f026bd75a48b2704d8c8283",
+  "checked_upstream_head": "43745ad87e95b0c035ac9c547aad467303213425",
+  "checked_date": "2026-10-31",
+  "license": "MIT",
+  "license_sha256": "a0d039cdafe68f363893abddb5e4d50dbe6f8b56611e2650aaab4237103285f1",
+  "base_headers_sha256": "2bc91c1a90441c80fc467eec4aa9657c774e3f0ecded8d20d3244b4280217311",
+  "registry_archive_verified_sha256": "10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be",
+  "cached_src_verified_against_registry_archive": true,
+  "patched_src_sha256": "bc8781bbbb1dae4552ac663d83b4a622e56e1e51bd5f5d4a87e3bdbcd0e9cc9b",
+  "patched_headers_sha256": "484e98d6507cc5abc6a7d1d03a8a2e9e36a33ca32258e2170b1fcf583a852805",
+  "classic_connect_verified_source_sha256": "5f5e413390b41101b8d63e93dcd1ff099b5fbd2d6667e110571909757bd450e7",
+  "classic_connect_verified_headers_sha256": "bfed028d619cbb5755f35a03357c69dab2cba3f0aa50cea004fe26e8d03723c3",
+  "pseudo_validation_reference": "https://www.rfc-editor.org/rfc/rfc9114.html#section-4.3"
+}

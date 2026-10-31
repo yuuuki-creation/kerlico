@@ -46,6 +46,90 @@ fn registry() -> Result<Registry> {
         registry.register(kerlico_ss2022::Ss2022Factory)?;
         registry.register_node(kerlico_ss2022::Ss2022NodeFactory)?;
     }
+    #[cfg(feature = "protocol-socks")]
+    {
+        registry.register(kerlico_socks::SocksFactory)?;
+        registry.register_node(kerlico_socks::SocksNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-trojan")]
+    {
+        registry.register(kerlico_trojan::TrojanFactory)?;
+        registry.register_node(kerlico_trojan::TrojanNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-vmess")]
+    {
+        registry.register(kerlico_vmess::VmessFactory)?;
+        registry.register_node(kerlico_vmess::VmessNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-http")]
+    {
+        registry.register(kerlico_http::HttpFactory)?;
+        registry.register_node(kerlico_http::HttpNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-snell")]
+    {
+        registry.register(kerlico_snell::SnellFactory)?;
+        registry.register_node(kerlico_snell::SnellNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-tuic")]
+    {
+        registry.register(kerlico_tuic::TuicFactory)?;
+        registry.register_node(kerlico_tuic::TuicNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-hysteria2")]
+    {
+        registry.register(kerlico_hysteria2::Hysteria2Factory)?;
+        registry.register_node(kerlico_hysteria2::Hysteria2NodeFactory)?;
+    }
+    #[cfg(feature = "protocol-ssh")]
+    registry.register(kerlico_ssh::SshFactory)?;
+    #[cfg(feature = "protocol-gost-relay")]
+    registry.register(kerlico_gost_relay::GostRelayFactory)?;
+    #[cfg(feature = "protocol-trusttunnel")]
+    {
+        registry.register(kerlico_trusttunnel::TrustTunnelFactory)?;
+        registry.register_node(kerlico_trusttunnel::TrustTunnelNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-naive")]
+    {
+        registry.register(kerlico_naive::NaiveFactory)?;
+        registry.register_node(kerlico_naive::NaiveNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-sudoku")]
+    {
+        registry.register(kerlico_sudoku::SudokuFactory)?;
+        registry.register_node(kerlico_sudoku::SudokuNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-shadowquic")]
+    {
+        registry.register(kerlico_shadowquic::ShadowQuicFactory)?;
+        registry.register_node(kerlico_shadowquic::ShadowQuicNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-hysteria1")]
+    {
+        registry.register(kerlico_hysteria1::Hysteria1Factory)?;
+        registry.register_node(kerlico_hysteria1::Hysteria1NodeFactory)?;
+    }
+    #[cfg(feature = "protocol-shadowsocksr")]
+    {
+        registry.register(kerlico_shadowsocksr::ShadowsocksRFactory)?;
+        registry.register_node(kerlico_shadowsocksr::ShadowsocksRNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-shadowtls")]
+    {
+        registry.register(kerlico_shadowtls::ShadowTlsFactory)?;
+        registry.register_node(kerlico_shadowtls::ShadowTlsNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-mieru")]
+    {
+        registry.register(kerlico_mieru::MieruFactory)?;
+        registry.register_node(kerlico_mieru::MieruNodeFactory)?;
+    }
+    #[cfg(feature = "protocol-shadowsocks")]
+    {
+        registry.register(kerlico_shadowsocks::ShadowsocksFactory)?;
+        registry.register_node(kerlico_shadowsocks::ShadowsocksNodeFactory)?;
+    }
     Ok(registry)
 }
 

@@ -1,0 +1,33 @@
+[package]
+name = "kerlico-hysteria1"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+kerlico-core.workspace = true
+kerlico-config.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rand.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+webpki-roots.workspace = true
+quinn.workspace = true
+socket2.workspace = true
+base64.workspace = true
+quinn-proto = { version = "=0.11.16", default-features = false }
+subtle = "2"
+
+[dev-dependencies]
+kerlico-net.workspace = true
+kerlico-egress.workspace = true
+kerlico-engine.workspace = true
+rcgen.workspace = true
+
+[lints]
+workspace = true

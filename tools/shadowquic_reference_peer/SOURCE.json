@@ -1,0 +1,52 @@
+{
+  "sources": {
+    "jls-quic-go": {
+      "commit": "732f2fc9a34de12a58020a0ca75bf336095aed93",
+      "url": "https://codeload.github.com/metacubex/jls-quic-go/tar.gz/732f2fc9a34de12a58020a0ca75bf336095aed93",
+      "sha256": "e25f4a453645447beb43ce66c53122e02ddd9aa2b16d28dcfe105576218c7462"
+    },
+    "mihomo": {
+      "commit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+      "url": "https://codeload.github.com/MetaCubeX/mihomo/tar.gz/3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+      "sha256": "ecda5f8c8a8a1d60bc088c2640c85d92c8f002c0686234a26bdf671735afe216"
+    },
+    "go": {
+      "version": "go1.26.10",
+      "url": "https://go.dev/dl/go1.26.10.linux-amd64.tar.gz",
+      "sha256": "ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5"
+    }
+  },
+  "before": {
+    "connection.go": "7860dd1e6f98a81ca4ecfda2624a639e270fd03e8d33d41f539712b9f56b6459",
+    "internal/wire/transport_parameters.go": "8e7363c28feb32324e8efdb63cb27222fdea7884ed3e7474cd1e3bb1f86f0a72",
+    "internal/handshake/updatable_aead.go": "1a800a10d14874b3dea2a8c1e7c3a8ef8cebc32cb189409fb13ffdd78e2a75e2"
+  },
+  "controlled_source": {
+    "connection.go": "4413ac87d127c65c5ce1a8870a77353a4dbca53ecfcb1b1b14d16599b09cfbef",
+    "internal/wire/transport_parameters.go": "ffab0745bb0dc8bb2fff5e6501967a0f3b285dad4a6b63b3f1939020b885405a",
+    "internal/handshake/updatable_aead.go": "e4fddd12166abf6db9101d47a238f15528827178281f9adf2e043fdcb1bc7215"
+  },
+  "patches": {
+    "version-information.patch": "e40dad14d911c84058b0ea3dce1d9adf053ef75a10147b7eeb2a6dbac906c6e8",
+    "key-update-label.patch": "56bcd579ea650533e9cc2bacd5f157884550ed214c007e5ce229dd3d2952b934",
+    "fault-injection.patch": "3df318f67db4e499d55425d46f33156a793060dfbd6f2841b80656f769e97655"
+  },
+  "binaries": {
+    "shadowquic-reference-wrong": "01a629d60fdadc6732e8e5406b199c3001cafc8a007366d41f32fdc7bb91d14a",
+    "shadowquic-reference": "eda3e99c2ee79b2ffc7e48705ecf2e594751e8f5381add9a72990887aeeee517",
+    "shadowquic-reference-omit": "2ad119a2660eab840b9cfd52a7a92da0e87c022efddef6b7f7a145cf88d10d12"
+  },
+  "peer_sources": {
+    "main.go": "8f964e76d0864369d105efd00e3dd962de8311e73c48634cdc6c0e734e3803d6",
+    "main_test.go": "8e61f0be0bf0085042236864172130a8f12b6a4e8050f461a3c48da088e78ac8",
+    "go.mod": "98c6c6d34c4b97a9414f285b34245ebd6f973c30d865bfc92784f0e5473d9d46",
+    "go.sum": "08b7414fc0e29efeaacf873247bd561bfc9858e0405866fc71b5d7acc32f73d2"
+  },
+  "go_mod_sha256": "98c6c6d34c4b97a9414f285b34245ebd6f973c30d865bfc92784f0e5473d9d46",
+  "go_sum_sha256": "08b7414fc0e29efeaacf873247bd561bfc9858e0405866fc71b5d7acc32f73d2",
+  "parameter_only_reference_sha256": "430f2b5151ed7e36d04f0b1fff7ee5922806f17db9524f7b6e2e8fe722e479ac",
+  "official_mihomo_sha256": "817f50b3ac6a8b1c4360c5cf2961906057f3a883d970ebbcb0028a01632b620f",
+  "reference_only": true,
+  "build_script_sha256": "e2181b09ab6ac17515c4b95b27439b6e74573a738a61780721689b71a41452b0",
+  "key_update_vector_sha256": "75dc493f8fc071cd6ecc5146178c7cafe16eec6f4c81596e12b1639bf905c720"
+}

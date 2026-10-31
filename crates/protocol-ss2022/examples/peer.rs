@@ -72,6 +72,8 @@ impl NodeObserver for Observer {
 }
 fn context() -> InboundContext {
     InboundContext {
+        peer_addr: None,
+        local_addr: None,
         cancel: Default::default(),
         connect_timeout: Duration::from_secs(3),
         idle_timeout: Duration::from_secs(5),

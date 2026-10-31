@@ -1,0 +1,74 @@
+--- a/internal/wire/transport_parameters.go
++++ b/internal/wire/transport_parameters.go
+@@ -66,6 +66,9 @@
+ 
+ // TransportParameters are parameters sent to the peer during the handshake
+ type TransportParameters struct {
++	// RFC9368：列表有界，当前参照只使用显式固定版本。
++	ChosenVersion protocol.Version
++	AvailableVersions []protocol.Version
+ 	InitialMaxStreamDataBidiLocal  protocol.ByteCount
+ 	InitialMaxStreamDataBidiRemote protocol.ByteCount
+ 	InitialMaxStreamDataUni        protocol.ByteCount
+@@ -139,6 +142,17 @@
+ 		}
+ 		parameterIDs = append(parameterIDs, paramID)
+ 		switch paramID {
++		case 0x11:
++			if paramLen < 4 || paramLen > 256 || paramLen % 4 != 0 { return errors.New("版本信息长度不合法") }
++			p.ChosenVersion = protocol.Version(binary.BigEndian.Uint32(b[:4]))
++			if p.ChosenVersion == 0 { return errors.New("选定版本不能为零") }
++			for i := uint64(4); i < paramLen; i += 4 {
++				v := protocol.Version(binary.BigEndian.Uint32(b[i:i+4]))
++				if v == 0 { return errors.New("可用版本不能为零") }
++				p.AvailableVersions = append(p.AvailableVersions, v)
++			}
++			if sentBy == protocol.PerspectiveClient && !slices.Contains(p.AvailableVersions, p.ChosenVersion) { return errors.New("客户端列表缺少选定版本") }
++			b = b[paramLen:]
+ 		case maxIdleTimeoutParameterID,
+ 			maxUDPPayloadSizeParameterID,
+ 			initialMaxDataParameterID,
+@@ -361,6 +375,12 @@
+ 	// especially the lengths of the Connection IDs.
+ 	// Allocate 256 bytes, so we won't have to grow the slice in any case.
+ 	b := make([]byte, 0, 256)
++	if p.ChosenVersion != 0 {
++		b = quicvarint.Append(b, 0x11)
++		b = quicvarint.Append(b, uint64(4 + 4*len(p.AvailableVersions)))
++		b = binary.BigEndian.AppendUint32(b, uint32(p.ChosenVersion))
++		for _, v := range p.AvailableVersions { b = binary.BigEndian.AppendUint32(b, uint32(v)) }
++	}
+ 
+ 	// add a greased value
+ 	random := make([]byte, 18)
+--- a/connection.go
++++ b/connection.go
+@@ -336,6 +336,8 @@
+ 	// JLS END
+ 	statelessResetToken := statelessResetter.GetStatelessResetToken(srcConnID)
+ 	params := &wire.TransportParameters{
++		ChosenVersion: v,
++		AvailableVersions: []protocol.Version{v},
+ 		InitialMaxStreamDataBidiLocal:   protocol.ByteCount(s.config.InitialStreamReceiveWindow),
+ 		InitialMaxStreamDataBidiRemote:  protocol.ByteCount(s.config.InitialStreamReceiveWindow),
+ 		InitialMaxStreamDataUni:         protocol.ByteCount(s.config.InitialStreamReceiveWindow),
+@@ -474,6 +476,8 @@
+ 	// JLS END
+ 	oneRTTStream := newCryptoStream()
+ 	params := &wire.TransportParameters{
++		ChosenVersion: v,
++		AvailableVersions: []protocol.Version{v},
+ 		InitialMaxStreamDataBidiRemote: protocol.ByteCount(s.config.InitialStreamReceiveWindow),
+ 		InitialMaxStreamDataBidiLocal:  protocol.ByteCount(s.config.InitialStreamReceiveWindow),
+ 		InitialMaxStreamDataUni:        protocol.ByteCount(s.config.InitialStreamReceiveWindow),
+@@ -2440,6 +2444,10 @@
+ }
+ 
+ func (c *Conn) handleTransportParameters(params *wire.TransportParameters) error {
++	// RFC9369 v2 必须提供版本信息；不允许受认证信息与载体版本不同。
++	if params.ChosenVersion != 0 && params.ChosenVersion != c.version || c.version == protocol.Version2 && params.ChosenVersion == 0 {
++		return &qerr.TransportError{ErrorCode: qerr.TransportErrorCode(0x11), ErrorMessage: "版本信息缺失或与当前版本不一致"}
++	}
+ 	if c.qlogger != nil {
+ 		c.qlogTransportParameters(params, c.perspective.Opposite(), false)
+ 	}

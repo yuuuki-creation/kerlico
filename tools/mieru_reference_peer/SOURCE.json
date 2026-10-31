@@ -1,0 +1,42 @@
+{
+  "purpose": "仅用于专用 worker 的独立官方 API 对端，不属于内核运行依赖",
+  "go_version": "go1.26.10",
+  "go_archive_sha256": "ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5",
+  "references": [
+    {
+      "version": "v3.38.1",
+      "source": {
+        "commit": "a2208ee7a38fb41d843a13ecdde858e67ef2f485",
+        "url": "https://codeload.github.com/enfein/mieru/tar.gz/a2208ee7a38fb41d843a13ecdde858e67ef2f485",
+        "sha256": "fdc42f6abc8d5fdee35d510bc1c2309d1a767add23032ad8d6c479e9d2d22bce"
+      },
+      "runtime_source_unmodified": true,
+      "binary_sha256": "a2620b98159c305739a3872091c50964f4981399ac2e5ef2868fa7f849778c83",
+      "vectors_sha256": "f1d4998bf9190a396f9d8837d16a421281ed061070694bd9260f95da53139a3d",
+      "peer_sources": {
+        "main.go": "24aade8dcac48f879b2986e388fe2f265accf1e4c222788b040b5e829edbf370",
+        "go.mod": "4630a9b301b070b5a402fba767ebaee615c862758d167b554a6e2e6dcadf0881",
+        "go.sum": "7f5f5429f535530cb13eae08e9aa170860bfa3b03b51d7c194b3d72bc5a9aed1"
+      },
+      "fixture_sha256": "ac5a0f5f7044222a6446d935c01851a7a56035b5aaf2b36373d72675d3c41f4f"
+    },
+    {
+      "version": "v3.39.0",
+      "source": {
+        "commit": "bcd14b88d0fb7e7707bb80e5d7f6c33675d26c06",
+        "url": "https://codeload.github.com/enfein/mieru/tar.gz/bcd14b88d0fb7e7707bb80e5d7f6c33675d26c06",
+        "sha256": "8853a026abf90b35036e3bc3ebf441d6123ee7e94ce490a64165342805416db7"
+      },
+      "runtime_source_unmodified": true,
+      "binary_sha256": "2440d093fbc788e6f3fae9c97616d428a482c957e87c3085ee078e37fe3e9b22",
+      "vectors_sha256": "1f311020191589a8b5f9e38964705e999d3efbe8ccdbb81e2f5eac25dbfb4127",
+      "peer_sources": {
+        "main.go": "24aade8dcac48f879b2986e388fe2f265accf1e4c222788b040b5e829edbf370",
+        "go.mod": "a98f5fe91e31489e5a9b262100ffd37ea635bb862a4083db00c2b2adff3e52c1",
+        "go.sum": "7f5f5429f535530cb13eae08e9aa170860bfa3b03b51d7c194b3d72bc5a9aed1"
+      },
+      "fixture_sha256": "ac5a0f5f7044222a6446d935c01851a7a56035b5aaf2b36373d72675d3c41f4f"
+    }
+  ],
+  "builder_sha256": "0cd630e15be2cafba2bce76d31ae6d1ec5d961b680c6d6e0e084f942908e79ea"
+}

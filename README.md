@@ -2,7 +2,7 @@
 
 计划使用 Rust 开发客户端与服务端一体的 VPN 内核，参考 mihomo、sing-box 和 Xray-core。目标是同一个可执行程序按配置承担两种角色；节点凭据独立，统一目标访问模块默认优先 IPv4，详见[双端设计](docs/node-egress.md)。
 
-本次保存三协议双端的开发快照。已验证结果与最新未复验增量分别见[项目状态](STATUS.md)和[VLESS 扩展记录](docs/testing/vless-combinations.md)，不作为完整验收的发行版。当前构建基线为 Rust 1.99.1、Linux x86_64。源码按功能和协议分开，以下构建与运行命令在专用 worker 执行：
+当前按用户要求停止修复并保存开发快照，已有21个协议模块，验证结果与未复验增量见[项目状态](STATUS.md)。具体角色、组合与限制见[实现接口](docs/interfaces/README.md)和模块测试记录；1.0.0尚未完成发行验收或发布。当前构建基线为 Rust 1.99.1、Linux x86_64。源码按功能和协议分开，以下命令仅供后续获得继续指令后在专用worker执行：
 
 ```sh
 cargo build --locked --release -p kerlico
@@ -16,7 +16,7 @@ cargo run --locked -p kerlico -- check -c examples/vless-tls.json
 | --- | --- |
 | [项目状态](STATUS.md) | 当前进度、已明确要求、待决项、下一步与验证状态 |
 | [架构设计导航](docs/README.md) | 总体结构、核心契约、数据路径、生命周期与协议模块 |
-| [实现接口](docs/interfaces/README.md) | 核心、配置、节点与三种协议的真实接口和边界 |
+| [实现接口](docs/interfaces/README.md) | 核心、配置、节点及各协议的真实接口和边界 |
 | [扩展验证快照](docs/testing/vless-combinations.md) | 三协议装配、VLESS 双端与明确未完成项 |
 | [VLESS 0.1 历史记录](docs/testing/vless-ordinary-flow.md) | 旧版普通流验证，不外推新代码 |
 | [文档与资料约定](docs/repository-workflow.md) | docs、STATUS、决策和上游源码的存放与维护方式 |

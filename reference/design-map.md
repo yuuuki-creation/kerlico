@@ -116,3 +116,89 @@ REF-001–008 保留首轮**设计草案**，后续条目单独标明实现与�
 **实现：**`crates/protocol-vless` 分离组合校验、载体、payload、服务端安全、HTTP/H3、Mux 和 XDRIVE；Rust 密码/传输原语与来源见[依赖记录](../docs/vless-dependencies.md)。不复用外部核心的配置、路由、管理端或程序入口。
 
 **验证：**旧客户端快照 394 个 Xray 配置已通过，基础服务端普通流/Vision 分别通过 11/9 项；新扩展仍在统一远端验证，不能把上游支持或既有快照替代最终源码的验收。
+
+## REF-013 SOCKS 与 HTTP 代理
+
+**证据：**SOCKS 的 RFC 1928/1929、4/4a 线协议以及 HTTP 的 RFC 9110/9112/7617；固定三核心入口见总表 P-01/P-02，具体来源与边界见[SOCKS 研究](research_notes/socks.md)和[HTTP 研究](research_notes/http-proxy.md)。
+
+**实现：**独立 `protocol-socks`、`protocol-http` 双端工厂；节点目标访问交给 AccessService。物理 TCP 地址由引擎注入，SOCKS UDP 按真实来源绑定；HTTP 普通请求使用 Hyper 流式解析并剥离代理认证与逐跳字段。
+
+**验证：**SOCKS 11 项、HTTP 7 项包级回归通过；固定 sing-box 52 项检查通过，4 项参考入口零包限制单列。认证、来源、帧边界、排空和回收范围分别见[SOCKS](../docs/testing/socks.md)、[HTTP](../docs/testing/http-proxy.md)，不由联合节点测试继承全部对端能力。
+
+## REF-014 Shadowsocks AEAD 与 legacy
+
+**证据与实现：**总表 P-03/P-05、固定 Shadowsocks Rust 密码依赖及[详细研究](research_notes/shadowsocks.md)对应 `protocol-shadowsocks`，与 SS2022 独立注册；接口列出具体方法、允许旧式模式的显式边界、UDP 重放与节点预算。
+
+**验证：**45 方法自端、9 项 Rust 和 312 项限定独立对端检查通过；旧式方法与大包边界见[测试](../docs/testing/shadowsocks.md)。none/plain 后续改为真实无认证本地入口，并经 24 项外部检查复验；流连接器增量另做包级回归。
+
+## REF-015 Trojan 与 VMess
+
+**证据与实现：**总表 P-09/P-07、固定 Xray 和 Rust 传输依赖，分别见[Trojan 研究](research_notes/trojan.md)、[VMess 研究](research_notes/vmess.md)。两者各自实现双端，载体不得由 VLESS 的通过状态继承；VMess 服务端另实现请求认证、记录边界与有界重放缓存。
+
+**验证：**Trojan 11 项 Rust 与固定 Xray 20/20 组合通过；VMess 11 项 Rust、Xray 48/48 和 sing-box RAW 16/16 配置通过。角色、载体、大包和地址族边界分别见[Trojan](../docs/testing/trojan.md)、[VMess](../docs/testing/vmess.md)，不把旧算法或未验载体纳入结果。
+
+## REF-016 Snell
+
+**固定证据与实现：**P-10、固定 sing-snell 与其版本/角色区别，见[详细研究](research_notes/snell.md)。`protocol-snell` 独立实现 v4 出站/v5 节点、v6 三模式，保持记录边界、密码状态和顺序复用；域名 UDP 仅使用统一出口业务元数据。
+
+**验证：**14 项 Rust、64 组独立 profile/KDF/记录向量与固定 sing-box 36/36 组合通过；原有大包截短、物理 EOF 和回包限额修正保留记录，见[测试](../docs/testing/snell.md)。不能继承 v5 QUIC 模式或其他版本方向。
+
+## REF-017 TUIC
+
+**固定证据与实现：**P-13、v4/v5 规范和固定 mihomo/sing-quic，见[详细研究](research_notes/tuic.md)。`protocol-tuic` 原生双端，单个 UDP association 通过统一服务保持一个出口 socket；没有用多个固定目标通道替代 Full Cone。
+
+**验证：**9 项 Rust、mihomo 48/48、sing-box v5 24/24 配置及 8/8 生命周期场景通过；角色、包长、分片、认证和来源边界见[测试](../docs/testing/tuic.md)，没有性能等同结论。
+
+## REF-018 Hysteria2
+
+**固定证据与实现：**P-12、固定官方 v2.13.0 与三个参考核心，见[详细研究](research_notes/hysteria2.md)。`protocol-hysteria2` 使用唯一双向 stream 接纳器区分 HTTP/3 与原生 TCP，UDP 使用统一关联与有界分片，不把现有客户端依赖当作完整双端。
+
+**验证：**8 项 Rust、自端 CLI 160 项及 sing-box/Xray/官方各 128 项通过，见[测试](../docs/testing/hysteria2.md)。标准自适应拥塞、Salamander 与已验证数据语义分别记录，不将其写作 Brutal、Gecko 或端口跳跃支持。
+
+## REF-019 Hysteria v1
+
+**固定证据与实现：**P-11、官方 v1.3.5 与固定 sing-box，见[研究](research_notes/hysteria1.md)。`protocol-hysteria1` 独立实现双端、认证、普通/WeChat-video 载体、xplus 和业务 UDP 关联，不继承 Hysteria2 的握手或支持结论。
+
+**验证：**16 项 Rust、官方 24/24 与 sing-box 12/12 限定组合通过；实际大包截断、空包与 FIN 边界见[测试](../docs/testing/hysteria1.md)。标准控制器和协商 pacer 不称为 Brutal。
+
+## REF-020 ShadowQUIC
+
+**固定证据与实现：**P-14、固定 Mihomo/JLS、RFC9368/9369，见[研究](research_notes/shadowquic.md)。独立 Rust 双端使用受控 JLS 依赖、真实 QUIC 回退和有界来源映射，不用普通 QUIC 冒充 JLS。
+
+**验证：**16 项 Rust、v1 原固定 Mihomo 24 配置通过；v2 受控 Go 参照 24 配置及标准负例通过。原固定 Mihomo 缺少版本参数的 24 项 v2 失败、参照两次标准修正分别保留，见[测试](../docs/testing/shadowquic.md)，不登记原资产 v2 兼容。
+
+## REF-021 SSH
+
+**固定证据与实现：**P-20、russh 0.64.1 和独立 OpenSSH，见[研究](research_notes/ssh.md)。`protocol-ssh` 仅提供原生 direct-tcpip 出站，使用显式认证和主机 SHA256 固定，连接取消实际关闭底层 TCP；不运行系统 SSH 承载业务。
+
+**验证：**6 项 Rust、OpenSSH 原生 140 项及同进程 HTTP→SSH 200 项检查通过，见[测试](../docs/testing/ssh.md)。没有 SSH 服务端、UDP、Shell、SFTP 或隐式 agent/known_hosts。
+
+## REF-022 Gost Relay
+
+**固定证据与实现：**P-19、固定Mihomo出站、GOST v3.3.2/x v0.27.2/relay v0.7.0与SMUX v1，见[研究](research_notes/gost-relay.md)。`protocol-gost-relay` 原生CONNECT出站，经TCP/TLS和可选单流SMUX v1传递固定TCP/UDP，已知转发目标必须实际匹配，不忽略网站地址。
+
+**验证：**15项Rust、固定官方64配置704条记录及28项原始FIN阶段通过，见[测试](../docs/testing/gost-relay.md)。参考JSON整数被忽略导致的首轮失败保留；官方零包丢弃和65507→32768截断由直接目标控制区分，不改内核截包或登记Full Cone。没有Relay服务端、BIND、多流池、SMUX v2或其他物理载体。
+
+## REF-023 Sudoku
+
+**固定证据与首轮范围：**P-17、Mihomo固定3f27ef39和官方v0.5.2.0，见[详细研究](research_notes/sudoku.md)。独立Go探针已在worker取得8组table/编码向量与10条early鉴权语义/控制记录，固定来源、锁和产物见tools/sudoku_reference_probe/SOURCE.json；探针使用原生参考包，不进入Rust业务路径。
+
+**实现状态：**已停止保存快照；r4库49/49、预算/HTTP及协议11/12通过，Mux期限失败与r5诊断保留。最后两文件性能增量未经过任何验证，原生互通未开始。实际边界见[接口](../docs/interfaces/sudoku.md)与[测试](../docs/testing/sudoku.md)。UserHash不作为独立身份，旧快照不外推新源码。
+
+## REF-024 Mieru
+
+**固定证据与实现：**P-16、Mihomo固定3f27ef39及官方API v3.38.1/v3.39.0，见[研究](research_notes/mieru.md)。原生双端、复用及Full Cone通过统一出口；实际秘密与用户名身份分别隔离。原UDP线格式存在nonce复用风险，仅显式本机兼容，不向公网放开。
+
+**验证：**21项模块Rust、3项配置测试、格式与严格Clippy；三个参考对端分别88配置176普通检查通过，空包/大包/退出和原Mihomo边界独立记录，见[测试](../docs/testing/mieru.md)。冻结快照和同一CLI摘要可追溯，未验当前全工作区或其他平台。
+
+## REF-025 TrustTunnel
+
+**固定证据与实现：**P-18、固定官方endpoint/client及Mihomo，见[研究](research_notes/trusttunnel.md)。H1/H2/H3 TLS双端与固定UDP、Basic多用户和可选mTLS已写；真实Basic指纹与HTTP同域，不用密码额外隔离域代替实际认证。共享h3补丁来源及独立原语边界见third_party/h3/PATCHES.md。
+
+**验证状态：**新h3快照20项Rust及选定检查、自端CLI240记录通过；新增H2窗口兼容修正与外部矩阵仍待验，官方client回环强制旁路的成功不计互通，见[测试](../docs/testing/trusttunnel.md)。不登记Full Cone或ICMP支持。
+
+## REF-026 Naive
+
+**固定证据与实现：**P-21、固定sing-box/官方Naive/forwardproxy/Cronet，见[研究](research_notes/naive.md)。双端H1/H2/H3、应用padding、UoT和实际HTTP凭据域已写；应用协议和Chrome网络栈行为分开，不宣称根证书/CT/CRLSet/ECH/指纹等价。
+
+**验证状态：**26项Rust/严格检查、156配置900常规及同进程28检查通过；证书资产迁移后26项/6资产控制复验通过，原资产0/65507/EOF边界单列，见[测试](../docs/testing/naive.md)。不外推整树或正式发行。
