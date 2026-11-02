@@ -16,8 +16,6 @@ struct Socket {
     pollers: Mutex<Vec<Weak<Mutex<PollState>>>>,
     reader: Mutex<Option<Waker>>,
     address: SocketAddr,
-    segments: (usize, usize),
-    fragment: bool,
 }
 impl std::fmt::Debug for Socket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -25,6 +23,13 @@ impl std::fmt::Debug for Socket {
     }
 }
 impl Socket {
+    /// quinn-udp 在设备拒绝 GSO 后会把段数降到 1；这里缓存旧值会让 quinn 继续组批，发出的包全部被丢弃。
+    fn native<T>(&self, closed: T, read: impl FnOnce(&dyn AsyncUdpSocket) -> T) -> T {
+        match self.inner.lock().ok().as_deref() {
+            Some(Some(inner)) => read(inner.as_ref()),
+            _ => closed,
+        }
+    }
     fn close(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.take();
@@ -127,21 +132,21 @@ impl AsyncUdpSocket for Socket {
         Ok(self.address)
     }
     fn max_transmit_segments(&self) -> usize {
-        self.segments.0
+        self.native(1, |inner| inner.max_transmit_segments())
     }
     fn max_receive_segments(&self) -> usize {
-        self.segments.1
+        self.native(1, |inner| inner.max_receive_segments())
     }
     fn may_fragment(&self) -> bool {
-        self.fragment
+        self.native(false, |inner| inner.may_fragment())
     }
 }
 pub fn wrap(socket: UdpSocket) -> io::Result<(Arc<dyn AsyncUdpSocket>, Close)> {
-    let inner = quinn::TokioRuntime.wrap_udp_socket(socket)?;
+    wrap_native(quinn::TokioRuntime.wrap_udp_socket(socket)?)
+}
+fn wrap_native(inner: Arc<dyn AsyncUdpSocket>) -> io::Result<(Arc<dyn AsyncUdpSocket>, Close)> {
     let socket = Arc::new(Socket {
         address: inner.local_addr()?,
-        segments: (inner.max_transmit_segments(), inner.max_receive_segments()),
-        fragment: inner.may_fragment(),
         inner: Mutex::new(Some(inner)),
         pollers: Mutex::new(Vec::new()),
         reader: Mutex::new(None),
@@ -153,6 +158,41 @@ pub fn wrap(socket: UdpSocket) -> io::Result<(Arc<dyn AsyncUdpSocket>, Close)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Debug)]
+    struct NativeWithoutGso(AtomicUsize);
+    impl AsyncUdpSocket for NativeWithoutGso {
+        fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+            unreachable!("段数测试不发送")
+        }
+        fn try_send(&self, _: &udp::Transmit) -> io::Result<()> {
+            unreachable!("段数测试不发送")
+        }
+        fn poll_recv(
+            &self,
+            _: &mut Context<'_>,
+            _: &mut [IoSliceMut<'_>],
+            _: &mut [udp::RecvMeta],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok("127.0.0.1:1".parse().unwrap())
+        }
+        fn max_transmit_segments(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+    #[test]
+    fn segment_limit_follows_native_socket_after_gso_is_halted() {
+        let native = Arc::new(NativeWithoutGso(AtomicUsize::new(64)));
+        let (socket, close) = wrap_native(native.clone()).unwrap();
+        assert_eq!(socket.max_transmit_segments(), 64);
+        native.0.store(1, Ordering::SeqCst);
+        assert_eq!(socket.max_transmit_segments(), 1);
+        close.close();
+        assert_eq!(socket.max_transmit_segments(), 1);
+    }
     #[tokio::test]
     async fn closing_quic_socket_releases_bind_even_when_native_pollers_are_still_owned() {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
