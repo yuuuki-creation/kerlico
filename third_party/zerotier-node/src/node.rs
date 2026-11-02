@@ -1348,12 +1348,13 @@ impl Node {
         then: AfterCheck,
         limit: usize,
     ) {
-        let address = identity.address();
+        // Dedup on the whole identity: the address is only a claim until the check passes, so
+        // a forged claim must not displace the real identity behind the same address.
         if self.identity_checks.len() >= limit
             || self
                 .identity_checks
                 .values()
-                .any(|check| check.identity.address() == address)
+                .any(|check| check.identity == identity)
         {
             return;
         }
