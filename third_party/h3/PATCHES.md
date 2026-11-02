@@ -14,6 +14,10 @@ Naive首轮负例复核发现，0.0.8的Header::try_from直接覆盖重复伪头
 
 最新51文件src集合SHA256为 `bc8781bbbb1dae4552ac663d83b4a622e56e1e51bd5f5d4a87e3bdbcd0e9cc9b`，headers.rs为 `484e98d6507cc5abc6a7d1d03a8a2e9e36a33ca32258e2170b1fcf583a852805`；锁文件保持下文相同摘要。worker格式化文件已取回，完整差异更新于headers.patch，UPSTREAM.json另保留原CONNECT验证摘要。TrustTunnel/Naive旧冻结输入仍按原摘要登记，只有各自实际复验后才能登记新依赖输入。
 
+## CONNECT-IP 协议常量
+
+`src/ext.rs` 的 `Protocol` 增加 `CONNECT_IP`（`:protocol=connect-ip`，RFC 9484），供 `kerlico-masque` 使用。`Protocol` 是封闭类型，上层无法自行构造新值。
+
 ## 固定来源
 
 基准为crates.io的h3 0.0.8发布包，源码提交 `22c1aa3f44d1463cd7644c8f654fffc9a6da305c`，发布包校验及LICENSE摘要见UPSTREAM.json。已将本项目只读缓存的src逐文件与官方发布包核对一致，未修改reference/.upstream。LICENSE原文保留。

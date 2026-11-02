@@ -3252,6 +3252,7 @@ dependencies = [
  "kerlico-http",
  "kerlico-hysteria1",
  "kerlico-hysteria2",
+ "kerlico-masque",
  "kerlico-mieru",
  "kerlico-naive",
  "kerlico-net",
@@ -3517,6 +3518,28 @@ dependencies = [
  "sha2 0.10.9",
  "socket2",
  "subtle",
+ "tokio",
+ "webpki-roots",
+]
+
+[[package]]
+name = "kerlico-masque"
+version = "1.2.0"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "h3",
+ "h3-quinn",
+ "http",
+ "kerlico-config",
+ "kerlico-core",
+ "kerlico-http-carrier",
+ "kerlico-wireguard",
+ "quinn",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
  "tokio",
  "webpki-roots",
 ]
