@@ -146,6 +146,15 @@ enum Neighbor {
     },
 }
 
+impl Neighbor {
+    fn last_update(&self) -> i64 {
+        match self {
+            Self::Known { learned, .. } => *learned,
+            Self::Resolving { last_query, .. } => *last_query,
+        }
+    }
+}
+
 pub(crate) struct Interface {
     pub tunnel: ClientTunnel,
     pub plan: Plan,
@@ -242,10 +251,7 @@ impl Interface {
                 }
             }
             _ => {
-                if self.neighbors.len() >= MAX_NEIGHBORS && !self.neighbors.contains_key(&hop) {
-                    return;
-                }
-                self.neighbors.insert(
+                self.insert_neighbor(
                     hop,
                     Neighbor::Resolving {
                         queued: VecDeque::from([packet]),
@@ -276,10 +282,23 @@ impl Interface {
         }
     }
 
+    /// 同网成员可用伪造的发送方地址填满此表，因此表满时淘汰最旧项，新下一跳总能开始解析。
+    fn insert_neighbor(&mut self, address: IpAddr, neighbor: Neighbor) -> Option<Neighbor> {
+        if self.neighbors.len() >= MAX_NEIGHBORS
+            && !self.neighbors.contains_key(&address)
+            && let Some(oldest) = self
+                .neighbors
+                .iter()
+                .min_by_key(|(_, neighbor)| neighbor.last_update())
+                .map(|(address, _)| *address)
+        {
+            self.neighbors.remove(&oldest);
+        }
+        self.neighbors.insert(address, neighbor)
+    }
+
     fn learn(&mut self, node: &mut Node, now: i64, address: IpAddr, mac: Mac) {
-        let previous = self
-            .neighbors
-            .insert(address, Neighbor::Known { mac, learned: now });
+        let previous = self.insert_neighbor(address, Neighbor::Known { mac, learned: now });
         if let Some(Neighbor::Resolving { queued, .. }) = previous {
             for packet in queued {
                 if let Some((ethertype, _)) = ip_destination(&packet) {
@@ -313,7 +332,12 @@ impl Interface {
         if arp.target_ip != own || arp.sender_mac != frame.from {
             return;
         }
-        self.learn(node, now, IpAddr::V4(arp.sender_ip), arp.sender_mac);
+        let sender = IpAddr::V4(arp.sender_ip);
+        // 应答只用于本机问过或已知的地址；请求的发送方可以学习，RFC 826 要求回复它。
+        if arp.operation != 1 && !self.neighbors.contains_key(&sender) {
+            return;
+        }
+        self.learn(node, now, sender, arp.sender_mac);
         if arp.operation == 1 {
             let reply = arp_packet(2, self.mac, own, arp.sender_mac, arp.sender_ip);
             node.send_frame(now, arp.sender_mac, ETHERTYPE_ARP, &reply);
@@ -333,7 +357,7 @@ impl Interface {
                 let reply = neighbor_advertisement(self.mac, own, message.source);
                 node.send_frame(now, frame.from, ETHERTYPE_IPV6, &reply);
             }
-            NEIGHBOR_ADVERTISEMENT => {
+            NEIGHBOR_ADVERTISEMENT if self.neighbors.contains_key(&IpAddr::V6(message.target)) => {
                 self.learn(node, now, IpAddr::V6(message.target), frame.from);
             }
             _ => {}
@@ -478,6 +502,101 @@ mod tests {
 
     fn mac(last: u8) -> Mac {
         Mac::from_bytes(&[2, 0, 0, 0, 0, last])
+    }
+
+    const OWN_V4: Ipv4Addr = Ipv4Addr::new(10, 9, 0, 7);
+    const OWN_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 7);
+
+    fn parts() -> (Interface, Node) {
+        let config = Arc::new(NetworkConfig::empty(1, zerotier_node::Address::new(1)));
+        let plan = plan(&[("10.9.0.7", 24), ("fd00::7", 64)], Vec::new()).unwrap();
+        let interface = Interface::new(plan, config, mac(7), &CancellationToken::new()).unwrap();
+        let node = Node::new(zerotier_node::NodeOptions {
+            identity: zerotier_node::Identity::parse(
+                "26fdbcd524:0:ade8db815db56cb544adea61ef3023deacbf7194352d2d353477505b179a0248cbf8091d5f179fe4ea1db72bcea0162c4775f47088aa688f7fc7d70ccb7b74c6:a0ed2afd4e7a3bbaef3887e362496efa83b1c0e32596c09f427afecd6fa60a97bac7c41e0931fb6c64d498d60d0b2f9df24d39283db2eb734693864b7c4399ca",
+            )
+            .unwrap(),
+            network_id: 1,
+            roots: Vec::new(),
+            peers: Vec::new(),
+        })
+        .unwrap();
+        (interface, node)
+    }
+
+    fn ipv6_packet_to(destination: Ipv6Addr) -> Vec<u8> {
+        let mut packet = vec![0u8; 40];
+        packet[0] = 0x60;
+        packet[24..40].copy_from_slice(&destination.octets());
+        packet
+    }
+
+    fn arp_from(sender: Ipv4Addr, operation: u16, at: Mac) -> Frame {
+        Frame {
+            from: at,
+            to: mac(7),
+            ethertype: ETHERTYPE_ARP,
+            payload: arp_packet(operation, at, sender, mac(7), OWN_V4),
+        }
+    }
+
+    fn advertisement(target: Ipv6Addr, at: Mac) -> Frame {
+        Frame {
+            from: at,
+            to: mac(7),
+            ethertype: ETHERTYPE_IPV6,
+            payload: neighbor_advertisement(at, target, OWN_V6),
+        }
+    }
+
+    #[test]
+    fn full_neighbor_table_evicts_oldest_so_new_next_hops_still_resolve() {
+        let (mut interface, mut node) = parts();
+        for index in 0..MAX_NEIGHBORS as u32 + 40 {
+            let sender = Ipv4Addr::from(0x0a09_1000 + index);
+            let now = i64::from(index);
+            interface.receive(&mut node, now, arp_from(sender, 1, mac(9)));
+        }
+        assert_eq!(interface.neighbors.len(), MAX_NEIGHBORS);
+        assert!(
+            !interface
+                .neighbors
+                .contains_key(&IpAddr::V4(Ipv4Addr::from(0x0a09_1000)))
+        );
+
+        let hop: Ipv6Addr = "fd00::20".parse().unwrap();
+        interface.send_ip(&mut node, 1000, ipv6_packet_to(hop));
+        assert!(matches!(
+            interface.neighbors.get(&IpAddr::V6(hop)),
+            Some(Neighbor::Resolving { .. })
+        ));
+        assert_eq!(interface.neighbors.len(), MAX_NEIGHBORS);
+    }
+
+    #[test]
+    fn neighbor_replies_only_answer_what_was_asked_or_is_known() {
+        let (mut interface, mut node) = parts();
+        let asked: Ipv6Addr = "fd00::20".parse().unwrap();
+        let stranger: Ipv6Addr = "fd00::21".parse().unwrap();
+        interface.receive(&mut node, 1, advertisement(stranger, mac(8)));
+        interface.receive(
+            &mut node,
+            1,
+            arp_from(Ipv4Addr::new(10, 9, 0, 21), 2, mac(8)),
+        );
+        assert!(interface.neighbors.is_empty());
+
+        interface.send_ip(&mut node, 2, ipv6_packet_to(asked));
+        interface.receive(&mut node, 3, advertisement(asked, mac(8)));
+        assert!(matches!(
+            interface.neighbors.get(&IpAddr::V6(asked)),
+            Some(Neighbor::Known { mac: known, .. }) if *known == mac(8)
+        ));
+        interface.receive(&mut node, 4, advertisement(asked, mac(9)));
+        assert!(matches!(
+            interface.neighbors.get(&IpAddr::V6(asked)),
+            Some(Neighbor::Known { mac: known, .. }) if *known == mac(9)
+        ));
     }
 
     fn route(target: &str, prefix: u8, via: Option<&str>) -> Route {

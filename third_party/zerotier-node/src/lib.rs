@@ -26,5 +26,5 @@ pub use address::{Address, Mac, MulticastGroup};
 pub use certificate::CertificateOfMembership;
 pub use identity::{Identity, IdentityError};
 pub use network::{NetworkConfig, Route, embedded_address};
-pub use node::{Event, Frame, JoinStatus, Node, NodeOptions, Seed};
+pub use node::{Event, Frame, IdentityCheck, IdentityVerdict, JoinStatus, Node, NodeOptions, Seed};
 pub use world::default_planet_roots;

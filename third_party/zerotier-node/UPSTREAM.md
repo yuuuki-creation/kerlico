@@ -28,3 +28,8 @@ This crate is a Rust translation of parts of ZeroTierOne and is licensed under M
 - Cryptographic primitives and LZ4 come from Rust crates instead of the upstream C++: `x25519-dalek`, `ed25519-dalek`, `salsa20`, `poly1305`, `sha2`, `lz4_flex`.
 - Reduced to a sans-IO client for one network. Removed: relaying, the flow rule engine, bridging, multipath and bonding, AES-GMAC-SIV, extended armor, trusted paths, moons and world updates, tracing and metrics.
 - HELLO advertises protocol version 11 and software version 1.4.8, the last versions before AES-GMAC-SIV, so peers select Salsa20/12 with Poly1305.
+- Hardening with no upstream counterpart, written for this crate under the same license:
+  - Identity proof of work runs outside the node through `Event::IdentityCheck`, at most three at a time. A HELLO from a stranger is checked for its MAC before the per-network gate.
+  - WHOIS is rate limited. Sources of unauthenticated packets have their own table with oldest-first eviction, and their lookups have their own expected-reply table.
+  - An expected reply is bound to the asked peer and verb, expires after 60 s and answers once. The network config request is the exception, because `Node::ncSendConfig` repeats its ID on every chunk.
+  - Each peer remembers about 2048 recent packet IDs and drops repeats.
