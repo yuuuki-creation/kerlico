@@ -93,6 +93,8 @@ fn registry() -> Result<Registry> {
     }
     #[cfg(feature = "protocol-masque")]
     registry.register(kerlico_masque::MasqueFactory)?;
+    #[cfg(feature = "protocol-openvpn")]
+    registry.register(kerlico_openvpn::OpenVpnFactory)?;
     #[cfg(feature = "protocol-tun")]
     registry.register_node(kerlico_tun::TunNodeFactory)?;
     #[cfg(feature = "protocol-vless")]

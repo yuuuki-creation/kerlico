@@ -47,6 +47,7 @@
 | [Tor](tor.md) | 基于 `arti-client` 的原生客户端 TCP 出站、目录权限校验与电路隔离 |
 | [WireGuard](wireguard.md) | 基于 Boringtun + smoltcp 的原生双端 TCP/UDP 隧道与多用户 peer 隔离 |
 | [MASQUE](masque.md) | HTTP/3 CONNECT-IP 客户端出站，经用户态 IP 数据面提供 TCP/UDP |
+| [OpenVPN](openvpn.md) | 原生 2.x 客户端出站：UDP/TCP、tls-auth/tls-crypt、AEAD P_DATA_V2、推送配置与换钥 |
 
 ## 集成与专项验证记录
 

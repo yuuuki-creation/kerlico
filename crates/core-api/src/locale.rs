@@ -8,6 +8,7 @@ mod protocol_messages;
 mod protocol_messages_batch2;
 mod protocol_messages_batch3;
 mod protocol_messages_masque;
+mod protocol_messages_openvpn;
 mod protocol_messages_sudoku;
 mod protocol_messages_vless;
 
@@ -177,6 +178,7 @@ fn diagnostics() -> impl Iterator<Item = &'static (&'static str, &'static str)> 
         .chain(protocol_messages_batch2::DIAGNOSTICS)
         .chain(protocol_messages_batch3::DIAGNOSTICS)
         .chain(protocol_messages_masque::DIAGNOSTICS)
+        .chain(protocol_messages_openvpn::DIAGNOSTICS)
         .chain(protocol_messages_vless::DIAGNOSTICS)
         .chain(protocol_messages_sudoku::DIAGNOSTICS)
 }

@@ -56,6 +56,7 @@ kerlico-sudoku = { path = "crates/protocol-sudoku" }
 kerlico-tor = { path = "crates/protocol-tor" }
 kerlico-wireguard = { path = "crates/protocol-wireguard" }
 kerlico-masque = { path = "crates/protocol-masque" }
+kerlico-openvpn = { path = "crates/protocol-openvpn" }
 tokio = { version = "1", features = ["io-util", "net", "fs", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
