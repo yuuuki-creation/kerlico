@@ -226,21 +226,6 @@ impl RouteTable {
         self.rules.iter().map(|rule| &rule.outbound)
     }
 
-    /// 可能选中的出站；限定到其他入站或另一网络类型的规则到不了这里。
-    pub fn outbounds_reaching(
-        &self,
-        node: &NodeId,
-        network: Network,
-    ) -> impl Iterator<Item = &OutId> {
-        self.rules
-            .iter()
-            .filter(move |rule| {
-                (rule.node.is_empty() || rule.node.contains(node))
-                    && rule.network.is_none_or(|value| value == network)
-            })
-            .map(|rule| &rule.outbound)
-    }
-
     pub fn nodes(&self) -> impl Iterator<Item = &NodeId> {
         self.rules.iter().flat_map(|rule| &rule.node)
     }

@@ -72,7 +72,7 @@
 
 ## 固定目标入口与全局限制（`limits`）
 
-固定转发入口（`inbounds`）包含 `tag`、`type`（`tcp-forward` 或 `udp-forward`）、`listen`（必须为回环地址，端口 `0` 表示系统动态分配）、`target.host`/`port`、`outbound` 及可选 `mode`、`require_remote_eof`（默认 `false`；设为 `true` 时要求所选出站及路由可能把该入口转到的每个出站都具备 `tcp_eof` 能力，限定到其他入站或仅匹配 UDP 的规则不算）。
+固定转发入口（`inbounds`）包含 `tag`、`type`（`tcp-forward` 或 `udp-forward`）、`listen`（必须为回环地址，端口 `0` 表示系统动态分配）、`target.host`/`port`、`outbound` 及可选 `mode`、`require_remote_eof`（默认 `false`；设为 `true` 时要求该入口实际使用的出站具备 `tcp_eof` 能力：以 `target`、TCP 和本入口为条件按序匹配 `routes`，首条命中的规则决定出站，未命中时使用 `outbound`）。
 
 | `limits` 字段 | 默认值 | 有效范围与说明 |
 | --- | --- | --- |

@@ -2,7 +2,7 @@
 
 use kerlico_core::{
     Capabilities, CredentialIssuer, CredentialPurpose, CredentialSet, Destination, Error,
-    FamilyMode, InboundProtocol, Membership, NodeId, OutId, Result, UserId,
+    FamilyMode, InboundProtocol, Membership, NodeId, OutId, Result, Source, UserId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -454,24 +454,27 @@ impl Registry {
             if spec.listen.port() != 0 && !listeners.insert((spec.listen, tcp)) {
                 return Err(Error::Config("监听地址重复".into()));
             }
-            spec.target.destination()?;
+            let target = spec.target.destination()?;
             let outbound = OutId::parse(&spec.outbound)?;
             let (
                 Capabilities {
                     tcp: supports_tcp,
                     udp,
-                    tcp_eof,
+                    ..
                 },
                 _,
             ) = profiles
                 .get(&outbound)
                 .ok_or_else(|| Error::Config("引用的出站不存在".into()))?;
-            let routed_without_eof = || {
-                routes
-                    .outbounds_reaching(&node, Network::Tcp)
-                    .any(|id| profiles.get(id).is_none_or(|(routed, _)| !routed.tcp_eof))
-            };
-            if spec.require_remote_eof && (!tcp || !tcp_eof || routed_without_eof()) {
+            // 固定入口的目标、网络和来源在准备阶段已知，这里的选择与运行时一致。
+            let source = Source::Local { node: node.clone() };
+            let selected = routes
+                .select(&target, Network::Tcp, &source)
+                .unwrap_or(&outbound);
+            let selected_eof = profiles
+                .get(selected)
+                .is_some_and(|(selected, _)| selected.tcp_eof);
+            if spec.require_remote_eof && (!tcp || !selected_eof) {
                 return Err(Error::Config("出站不提供所需的远端 EOF 能力".into()));
             }
             if tcp && !supports_tcp || !tcp && !udp {
