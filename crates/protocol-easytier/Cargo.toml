@@ -1,0 +1,22 @@
+[package]
+name = "kerlico-easytier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+kerlico-core.workspace = true
+kerlico-config.workspace = true
+kerlico-wireguard.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# 上游库（LGPL-3.0）提供握手、加密、路由同步与转发；构建需要 protoc，见 tools/fetch_protoc.sh。
+easytier = { git = "https://github.com/EasyTier/EasyTier", tag = "v2.6.4", default-features = false, features = ["aes-gcm", "zstd"] }
+cidr = "0.3"
+url = "2"
+
+[lints]
+workspace = true

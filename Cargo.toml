@@ -59,6 +59,7 @@ kerlico-masque = { path = "crates/protocol-masque" }
 kerlico-openvpn = { path = "crates/protocol-openvpn" }
 kerlico-openconnect = { path = "crates/protocol-openconnect" }
 kerlico-tailscale = { path = "crates/protocol-tailscale" }
+kerlico-easytier = { path = "crates/protocol-easytier" }
 tokio = { version = "1", features = ["io-util", "net", "fs", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }

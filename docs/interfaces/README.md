@@ -50,6 +50,7 @@
 | [OpenVPN](openvpn.md) | 原生 2.x 客户端出站：UDP/TCP、tls-auth/tls-crypt、AEAD P_DATA_V2、推送配置与换钥 |
 | [OpenConnect](openconnect.md) | 原生 AnyConnect 客户端出站：XML 口令认证、TLS 上的 CSTP 隧道、DPD 与 keepalive（无 DTLS） |
 | [Tailscale](tailscale.md) | pre-auth key 原生加入 tailnet 的客户端出站：TS2021 控制面、DERP、直连 UDP、出口节点与子网路由 |
+| [EasyTier](easytier.md) | 以 peer 身份加入 EasyTier 网络，经用户态栈访问虚拟 IP 与子网代理的客户端出站 |
 
 ## 集成与专项验证记录
 

@@ -17,6 +17,7 @@
 - 项目的匿名提交规则仅针对本项目提交者身份，不删除上游开源项目要求保留的作者署名与许可证通知。
 - `third_party/shadowsocks` 保留 MIT 许可证，补丁见该目录 `PATCHES.md`。
 - `third_party/shaped-rustls` 保留固定上游版本的 Apache-2.0 / ISC / MIT 许可证与源码；TLS 1.2 显式扩展省略的补丁和独立清单调整见该目录 `PATCHES.md`。
+- `kerlico-easytier` 以 Git 依赖固定使用上游 EasyTier 2.6.4（LGPL-3.0），未内置其源码，见 [EasyTier 出站接口](interfaces/easytier.md)。
 
 ## 二进制发行合规要求
 

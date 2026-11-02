@@ -16,7 +16,7 @@ cd '$root/src'
 export CARGO_TARGET_DIR='$root/target' CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUST_TEST_THREADS=1
 export KERLICO_TEST_ASSETS_DIR='${root%/gate}/resume-test-assets' KERLICO_WORKER_ALIAS='$alias'
-export PATH="\$HOME/.cargo/bin:\$PATH"
+export PATH="\$HOME/.cargo/bin:\$PATH" PROTOC="\$(bash tools/fetch_protoc.sh '${root%/gate}')"
 step() { echo "=== \$1"; shift; "\$@"; echo "=== exit \$?"; }
 set +e
 step fmt cargo fmt --all --check
