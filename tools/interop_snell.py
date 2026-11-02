@@ -146,7 +146,8 @@ def case(args, root, mode, obfs, reuse, multi, direction):
                         checks.append("节点" + str(index) + "双族 TCP 与完整 EOF")
                         banner_tcp(rules[-1][2], b"after-server-first")
                         checks.append("节点" + str(index) + "目标先发数据")
-                        for rule in rules[2:5]:
+                        # sing-box 1.14.4 的 Snell 入站回写域名目标的 UDP 时报 "udp response source is not an ip" 并关闭，只能在 kerlico 节点方向验证域名。
+                        for rule in rules[2:5] if direction == "server" else rules[2:4]:
                             try:
                                 if mode == "v4":
                                     native_limit = 1402 if direction == "client" else 1162

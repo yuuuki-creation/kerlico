@@ -140,7 +140,10 @@ def main():
         for cipher in ("aes-128-gcm", "chacha20-poly1305"):
             for network in (("tcp", "ws", "httpupgrade", "grpc") if args.full else ("tcp",)):
                 for tls in (False, True):
-                    for multi in ((False, True) if network == "grpc" else (False,)):
+                    # sing-box 1.14.4 没有 gRPC multi 模式，其 HTTPUpgrade 入站拒绝带 Sec-WebSocket-Key 的请求（Xray 与 kerlico 都发）。
+                    if args.backend == "sing-box" and network == "httpupgrade" and direction == "client":
+                        continue
+                    for multi in ((False, True) if network == "grpc" and args.backend != "sing-box" else (False,)):
                         for auth in ((False, True) if network == "tcp" else (False,)):
                             try:
                                 checks.extend(run_case(args, root, cert, key, cipher, network, tls, multi, direction, auth))
