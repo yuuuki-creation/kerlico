@@ -52,7 +52,9 @@ openssl req -x509 -newkey ed25519 -nodes -days 2 -subj /CN=localhost -addext sub
 - tls：split的H1/H2和WS H1；自端可强制版本。参考client只有自动版本时另记边界和auto结果，不把它记作强制H1/H2通过。原参考server无证书/私钥字段，工具不添加外部终止器冒充原生服务端TLS。
 - rekey：两AEAD、raw/stream/poll/ws、mux on，真实33MiB双向内容和尾部检查，不修改阈值。
 - credentials：先用同参数正确seed完成真实TCP控制，再换错误seed，有界拒绝且无目标数据，不得回退到其他身份；配置工具另查双节点独立/重复seed和none门槛。
-- lifecycle：有活动流时停止该标签服务进程，观察关闭，再在同端点重启并读写。固定官方split客户端的旧会话关闭与恢复限制记为`reference_boundary`，随后重建参考客户端，另记`restart-fresh-reference-client`结果。首次新请求前的参考端停滞与业务数据丢失分开记录，部分数据或尾部丢失仍计失败。只终止自身创建的进程组，不接触其他服务。
+- lifecycle：有活动流时停止该标签服务进程，观察关闭，再在同端点重启并读写。固定官方与Mihomo split客户端的旧会话关闭与恢复限制记为`reference_boundary`，随后重建参考客户端，另记`restart-fresh-reference-client`结果。首次新请求前的参考端停滞与业务数据丢失分开记录，部分数据或尾部丢失仍计失败。只终止自身创建的进程组，不接触其他服务。
+
+Mihomo在监听打开后才进入运行状态，之前到达的连接被直接关闭，工具用`tools/mihomo_ready.py`的DIRECT探针等它运行后才发业务。Mihomo的UDP路径把数据报截断到16384字节，更大的包记`reference_boundary`。
 
 TCP目标包括IPv4、IPv6和localhost域名，后者只使用本地解析。每包UDP记录0/17/4096/64000/65507字节和来源；参考client经一个原生SOCKS控制连接访问多目标并检查跨族源端口。kerlico client的UDP-forward逐入口固定目标，不把它称为共享多目标关联；真实Full Cone及未预联系来源另由Rust Direct出口集成测试验收。SOCKS入口增加地址首部后可能先超过本地UDP65507上限；该包尚未进入Sudoku，记录entry_limit，不把不发送视作通过。
 

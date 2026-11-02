@@ -23,6 +23,7 @@ import sys
 import time
 
 import interop_vless as h
+from mihomo_ready import add_probe, wait_running
 
 NAME = "tt.example.invalid"
 PASSWORDS = ("tt-node4-only-secret", "tt-node6-only-secret")
@@ -307,7 +308,7 @@ def mihomo_node(host, number, password, transport, certs, mtls):
     if mtls:
         listener.update({"client-auth-cert": certs["ca"].read_text(encoding="ascii")})
     config.update({"listeners": [listener], "rules": ["MATCH,DIRECT"]})
-    return config
+    return add_probe(config)
 
 
 def official_client(directory, host, number, password, transport, certs, socks, dns):
@@ -324,7 +325,7 @@ def mihomo_client(host, number, password, transport, certs, socks, mtls):
     if mtls:
         proxy.update(certificate=certs["client"].read_text(encoding="ascii"), **{"private-key": certs["client_key"].read_text(encoding="ascii")})
     config.update({"socks-port": socks, "proxies": [proxy], "rules": ["MATCH,proxy"]})
-    return config
+    return add_probe(config)
 
 
 def socks_open(number, target, command=1):
@@ -517,6 +518,7 @@ def observe_tls_probe(args, directory, server, host, number, password, transport
         with process([args.peer, "-d", str(directory/"reference-state"), "-f", str(path)], directory, "client") as client:
             try:
                 ready(client, "127.0.0.1", socks)
+                wait_running(client, config)
                 start = log_path.stat().st_size
                 state = ProbeState.REQUEST_FAILED
                 if network == "tcp":
@@ -610,6 +612,8 @@ def verify(args, root, certs, direction, transport, version, host, index, record
                 ready(server, host, number)
             else:
                 ready_udp(server, host, number)
+            if direction == "client" and args.mode == "mihomo":
+                wait_running(server, config)
         variants = ["wrong", "valid"]
         if args.mode == "mihomo" and direction == "node":
             variants += ["wrong-ca", "wrong-name"]
@@ -661,6 +665,8 @@ def verify(args, root, certs, direction, transport, version, host, index, record
                     client = stack.enter_context(process(command, sub, "client"))
                 with setup("client-ready", sub):
                     ready(client, "127.0.0.1", socks)
+                    if args.mode == "mihomo":
+                        wait_running(client, config)
             def open_tcp(site_index):
                 target = (targets[site_index][0], targets[site_index][1])
                 if forwards:
@@ -725,7 +731,9 @@ def verify(args, root, certs, direction, transport, version, host, index, record
                 udp_eligible.append((i,site_label))
                 for size in [17, 4096, 12000]+([65000] if args.mode=="official" else []):
                     payload = bytes([size % 251])*size
-                    record(records, label+f"-udp-{site_label}-{size}", lambda i=i, p=payload: check_equal(udp(i, p), p))
+                    # 官方 endpoint 的 H3 回写丢弃 16000 字节及以上的数据报；官方客户端接它同样超时。
+                    record(records, label+f"-udp-{site_label}-{size}", lambda i=i, p=payload: check_equal(udp(i, p), p),
+                           boundary=args.mode == "official" and direction == "client" and transport == "h3" and size == 65000)
                 if args.mode == "wire":
                     def isolated_unknown_flows(i=i):
                         target = (targets[i][0], targets[i][2])
