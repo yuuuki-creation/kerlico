@@ -50,6 +50,7 @@ kerlico/
 │   ├── routing/                  # 规则匹配，由 egress 的 Dispatcher 调用
 │   ├── dns/                      # 上游解析、缓存与静态 hosts
 │   ├── protocol-tun/             # 系统 TUN 入站
+│   ├── protocol-zerotier/        # ZeroTier 客户端出站（协议实现在 third_party/zerotier-node，MPL-2.0）
 │   ├── platform/                 # (规划) 宿主/OS 网络与防回环操作
 │   ├── policy/                   # (规划) 出站选择组与健康观测
 │   └── control/                  # 只读 HTTP 控制接口
@@ -75,6 +76,7 @@ kerlico/
 | `routing` | 按目标、网络、节点和用户匹配规则 | 纯逻辑；不查询 DNS |
 | `dns` | 上游解析、缓存与静态 hosts，由 `egress` 的 `Local` 路径调用 | 上游只接受字面 IP |
 | `protocol-tun` | 系统 TUN 入站，复用 WireGuard 的用户态 IP 栈 | 不修改系统路由 |
+| `protocol-zerotier` | ZeroTier 客户端出站：配置、套接字驱动、ARP/NDP 与 IP 栈桥接 | 协议实现只在 `third_party/zerotier-node` |
 | `control` | 只读 HTTP 控制接口 | 读内存账本，不查询 SQLite |
 | `platform` / `policy` | 规划中的宿主适配与策略组 | 按后续阶段逐步拆分建立 |
 

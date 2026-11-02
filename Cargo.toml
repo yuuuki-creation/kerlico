@@ -7,6 +7,7 @@ exclude = [
     "third_party/shaped-rustls/rustls",
     "third_party/xray-transport",
     "third_party/shadowsocks",
+    "third_party/zerotier-node",
     "crates/protocol-ssh/vendor/russh-util",
     "crates/protocol-shadowquic/vendor/quinn-jls",
     "crates/protocol-shadowquic/vendor/quinn-proto-jls",
@@ -61,6 +62,9 @@ kerlico-openconnect = { path = "crates/protocol-openconnect" }
 kerlico-tailscale = { path = "crates/protocol-tailscale" }
 kerlico-easytier = { path = "crates/protocol-easytier" }
 tokio = { version = "1", features = ["io-util", "net", "fs", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+kerlico-zerotier = { path = "crates/protocol-zerotier" }
+zerotier-node = { path = "third_party/zerotier-node" }
+tokio ={ version = "1", features = ["io-util", "net", "fs", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -120,6 +124,12 @@ xray-transport = { path = "third_party/xray-transport" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# 身份工作量证明在未优化构建中单次校验需要数秒。
+[profile.dev.package.zerotier-node]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

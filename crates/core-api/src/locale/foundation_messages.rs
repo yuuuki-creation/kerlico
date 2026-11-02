@@ -69,6 +69,42 @@ pub(super) const DIAGNOSTICS: &[(&str, &str)] = &[
     ),
     ("WireGuard出站运行失败", "The WireGuard outbound failed"),
     ("WireGuard载体运行失败", "The WireGuard carrier failed"),
+    ("ZeroTier出站运行失败", "The ZeroTier outbound failed"),
+    ("ZeroTier载体运行失败", "The ZeroTier carrier failed"),
+    ("ZeroTier出站字段不合法", "Invalid ZeroTier outbound fields"),
+    (
+        "ZeroTier网络ID必须是16位十六进制，且不能是临时网络",
+        "The ZeroTier network ID must be 16 hexadecimal digits and not an ad-hoc network",
+    ),
+    (
+        "ZeroTier身份必须且只能配置identity或identity_file之一",
+        "Configure exactly one of the ZeroTier identity or identity_file",
+    ),
+    ("ZeroTier身份格式不合法", "Invalid ZeroTier identity format"),
+    (
+        "ZeroTier身份缺少私钥",
+        "The ZeroTier identity has no secret key",
+    ),
+    (
+        "ZeroTier身份未通过工作量校验",
+        "A ZeroTier identity failed its proof-of-work check",
+    ),
+    (
+        "ZeroTier身份文件读写失败",
+        "Could not read or write the ZeroTier identity file",
+    ),
+    (
+        "ZeroTier至少需要一个根节点或能直达控制器的对端",
+        "ZeroTier needs at least one root or a direct peer entry for the controller",
+    ),
+    (
+        "ZeroTier种子节点配置不合法",
+        "Invalid ZeroTier root or peer entry",
+    ),
+    (
+        "ZeroTier载体绑定地址不合法",
+        "Invalid ZeroTier carrier bind address",
+    ),
     (
         "统计历史写者异常退出",
         "The statistics history writer exited unexpectedly",

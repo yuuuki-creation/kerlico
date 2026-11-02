@@ -101,6 +101,8 @@ fn registry() -> Result<Registry> {
     registry.register(kerlico_openvpn::OpenVpnFactory)?;
     #[cfg(feature = "protocol-easytier")]
     registry.register(kerlico_easytier::EasyTierFactory)?;
+    #[cfg(feature = "protocol-zerotier")]
+    registry.register(kerlico_zerotier::ZeroTierFactory)?;
     #[cfg(feature = "protocol-tun")]
     registry.register_node(kerlico_tun::TunNodeFactory)?;
     #[cfg(feature = "protocol-vless")]
