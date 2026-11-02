@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """把 nice-wiki 生成的单机编排改成只监听回环地址的独立实例，在部署目录（含 deploy/）里运行。
 与同机其他 nice-wiki 隔离：独立项目名、网段和数据卷；没有 Caddy，入口是 edge 直接发布到 127.0.0.1。
-用法：python3 make_compose.py [--port 18790] [--subnet 10.231.98.0/24] [--project kerlico-wiki]"""
+用法：python3 make_compose.py --version <镜像标签> [--port 18790] [--subnet 10.231.98.0/24] [--project kerlico-wiki]"""
 import argparse
 import json
 import re
@@ -24,6 +24,7 @@ def rewrite(text, project, subnet, base):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--version", required=True)
     parser.add_argument("--port", default="18790")
     parser.add_argument("--subnet", default="10.231.98.0/24")
     parser.add_argument("--project", default="kerlico-wiki")
@@ -39,7 +40,7 @@ def main():
     with open("deploy/config/portal.json", "w", encoding="utf-8") as handle:
         json.dump(portal, handle, indent=2)
     with open("deploy/.env", "w", encoding="utf-8") as handle:
-        handle.write("NW_VERSION=kerlico-7f97f752\nGOMEMLIMIT=256MiB\nSITE_DOMAIN=localhost\n")
+        handle.write(f"NW_VERSION={args.version}\nGOMEMLIMIT=256MiB\nSITE_DOMAIN=localhost\n")
 
 
 if __name__ == "__main__":

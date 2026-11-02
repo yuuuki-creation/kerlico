@@ -13,10 +13,10 @@ kerlico 文档站跑在 nice-wiki 上。这里放外观包 `kerlico` 和把实�
 
 ## 部署
 
-镜像按 nice-wiki main 上的提交自行构建：v0.2.1 发布镜像还没有外观功能。在部署目录放好 nice-wiki 的 `deploy/` 和 `bin/nw-keys` 后：
+镜像按 nice-wiki main 自行构建：v0.2.1 发布镜像没有外观功能，子文档的公开页也会 404（main 已修）。在部署目录放好 nice-wiki 的 `deploy/` 和 `bin/nw-keys` 后：
 
 ```sh
-python3 make_compose.py
+python3 make_compose.py --version <镜像标签>
 sh deploy/init-secrets.sh
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --no-build --pull never
 ```
