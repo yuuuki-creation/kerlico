@@ -4,7 +4,7 @@
 
 ## 版本
 
-最新发布：[v1.3.0](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.3.0)，带 Linux `x86_64` 二进制。完成计划已全部发布。
+最新发布：[v1.3.0](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.3.0)，带 Linux `x86_64` 二进制。完成计划已全部发布。`main` 准备了 `v1.3.1`，修复发布后复查发现的问题。
 
 构建基线：Rust `1.99.1`，Linux `x86_64`。
 
@@ -41,7 +41,10 @@
 ## 已知问题
 
 - **VLESS**：`xhttp-tls-h3-stream-one` 加 Mux 时 UDP 超时，基线同样存在，未定位。出站没有多目标 UDP 关联，不能作为 TUN 或 SOCKS5 UDP 的出站。
-- **SS2022 EIH UDP 测试**：整树门禁中无回包失败过 2 次，单独压测 1000 轮与整树 5 轮都未复现，原因未定位。测试已改为带新包序号重发，单个数据报丢失不再让它失败。
+- **SS2022 EIH UDP 测试**：整树门禁中无回包失败过 2 次，单独压测 1000 轮与整树 5 轮都未复现，原因未定位。测试现在带新包序号重发，并断言节点的 `Dropped` 与 `Failed` 为零，重发次数打印到标准错误。
+- **`kerlico-core`**：`interrupted_node_force_keeps_count_until_actual_socket_join` 全量运行失败过 1 次，单跑 10 次通过，疑似不稳定，未定位。
+- **WireGuard 出站**：定时发送和业务发送失败时隧道服务退出，本地网络短暂不可达会触发。
+- **ZeroTier**：伪造流量持续时，首次主动联系我们的成员学习变慢；本节点发起的查询不受影响。
 - **`Engine::bind`**：用 `connect_timeout_ms` 作为统计库初始化期限，设得很小时可能启动失败（推断，未抓到错误内容）。
 - **TUN**：放开来源后，IPv6 链路本地来源发往组播的 UDP（如 mDNS）可能进入出站（读代码推测，未验证）。
 
