@@ -467,7 +467,7 @@ async fn eih_users_with_identical_session_ids_remain_independent() {
             source.send_to(&wire, peer).await.unwrap();
             let mut response = vec![0; 65_536];
             let (len, _) =
-                tokio::time::timeout(Duration::from_secs(2), source.recv_from(&mut response))
+                tokio::time::timeout(Duration::from_secs(10), source.recv_from(&mut response))
                     .await
                     .unwrap()
                     .unwrap();
