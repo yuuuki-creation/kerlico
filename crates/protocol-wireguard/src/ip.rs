@@ -35,10 +35,11 @@ pub struct StackOptions {
     pub limits: StackLimits,
 }
 impl StackOptions {
-    fn prepare(
-        &self,
-        cancel: CancellationToken,
-    ) -> Result<(Arc<SharedStack>, Vec<Network>, Reassembler)> {
+    /// 不创建协议栈；配置检查阶段用它提前发现运行时才会失败的选项。
+    pub fn validate(&self) -> Result<()> {
+        self.checked().map(|_| ())
+    }
+    fn checked(&self) -> Result<(Addresses, Vec<Network>)> {
         self.limits.validate()?;
         if !(1280..=9000).contains(&self.mtu)
             || self.allowed_ips.is_empty()
@@ -56,8 +57,15 @@ impl StackOptions {
                 return Err(Error::Config("IP数据面允许范围不能重复或重叠".into()));
             }
         }
+        Ok((Addresses::parse(self.addresses.clone())?, allowed))
+    }
+    fn prepare(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<(Arc<SharedStack>, Vec<Network>, Reassembler)> {
+        let (addresses, allowed) = self.checked()?;
         let stack = SharedStack::with_options(
-            Addresses::parse(self.addresses.clone())?,
+            addresses,
             self.limits.clone(),
             self.mtu,
             cancel,

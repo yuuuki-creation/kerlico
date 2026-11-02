@@ -340,6 +340,21 @@ impl LeaseInner {
         self.cancellation_error()
             .map(|error| failure_end(FlowFailure::from_error(&error)))
     }
+    fn error_event(&self, code: &str) {
+        let ledger = &self.ledger;
+        let target = ledger
+            .original
+            .as_ref()
+            .map(|original| original.target().to_string());
+        self.telemetry.push_event(
+            "error",
+            &ledger.source,
+            &ledger.outbound,
+            target,
+            code,
+            Vec::new(),
+        );
+    }
 }
 impl Drop for LeaseInner {
     fn drop(&mut self) {
@@ -407,19 +422,7 @@ impl FlowLease {
     /// 每条流只记录首个非取消失败。
     fn report(&self, failure: FlowFailure, code: &str) {
         if self.observe_failure(failure) && !matches!(failure, FlowFailure::Cancelled) {
-            let ledger = &self.0.ledger;
-            let target = ledger
-                .original
-                .as_ref()
-                .map(|original| original.target().to_string());
-            self.0.telemetry.push_event(
-                "error",
-                &ledger.source,
-                &ledger.outbound,
-                target,
-                code,
-                Vec::new(),
-            );
+            self.0.error_event(code);
         }
     }
     pub(crate) fn observe_failure(&self, failure: FlowFailure) -> bool {
@@ -460,21 +463,24 @@ impl FlowLease {
         }
     }
     pub(crate) fn conclude(&self, outcome: FlowOutcome) {
-        let mut state = self
-            .0
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let CompletionState::Running {
-            first_failure,
-            upload_shutdown,
-            download_eof,
-        } = &*state
-        {
-            let reason = if let Some(failure) = first_failure {
-                failure_end(*failure)
+        let unreported = {
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let CompletionState::Running {
+                first_failure,
+                upload_shutdown,
+                download_eof,
+            } = &*state
+            else {
+                return;
+            };
+            let (reason, unreported) = if let Some(failure) = first_failure {
+                (failure_end(*failure), false)
             } else {
-                match outcome {
+                let reason = match outcome {
                     FlowOutcome::Failed(failure) => failure_end(failure),
                     FlowOutcome::ProtocolEnd
                         if self.0.ledger.stage.load(Ordering::Acquire) == 0 =>
@@ -489,9 +495,20 @@ impl FlowLease {
                         self.0.cancellation_end().unwrap_or(FlowEnd::ClosedByCaller)
                     }
                     FlowOutcome::DuplexEof => FlowEnd::ClosedByCaller,
-                }
+                };
+                (reason, true)
             };
             *state = CompletionState::Closing(reason);
+            unreported.then_some(reason)
+        };
+        match unreported {
+            Some(FlowEnd::Timeout) => self.0.error_event("operation.timeout"),
+            Some(FlowEnd::Failed) => {
+                let service = self.0.service.failure();
+                self.0
+                    .error_event(service.map_or("flow.failed", |failure| failure.error().code()));
+            }
+            _ => {}
         }
     }
     pub(crate) async fn cancelled(&self) {
@@ -749,6 +766,38 @@ impl Telemetry {
             dropped_before,
         });
     }
+    /// 取得账本前的失败没有租约可报告，取消不算失败。
+    pub(crate) fn open_failed(
+        &self,
+        source: &Source,
+        outbound: &OutId,
+        target: Option<&Destination>,
+        error: &Error,
+    ) {
+        if FlowFailure::from_error(error) != FlowFailure::Cancelled {
+            self.push_event(
+                "error",
+                source,
+                outbound,
+                target.map(ToString::to_string),
+                error.code(),
+                Vec::new(),
+            );
+        }
+    }
+    /// 外层超时或取消丢弃了尚未返回的查询。
+    pub(crate) fn dns_aborted(&self, source: &Source, outbound: &OutId, target: &Destination) {
+        if matches!(target.address(), Address::Domain(_)) {
+            self.push_event(
+                "dns",
+                source,
+                outbound,
+                Some(target.host()),
+                "dns.aborted",
+                Vec::new(),
+            );
+        }
+    }
     /// 只记录域名查询；字面 IP 目标不经过解析器。
     pub(crate) fn dns_event(
         &self,
@@ -773,12 +822,39 @@ impl Telemetry {
             addresses,
         );
     }
+    /// 丢弃数本来挂在下一条事件上；没有下一条时单独记一条，否则计数随进程消失。
     pub(crate) fn pending_events(&self) -> Result<Vec<EventRecord>> {
-        let registry = self
+        let mut registry = self
             .0
             .registry
             .lock()
             .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
+        let dropped = std::mem::take(&mut registry.dropped_events);
+        if dropped > 0 {
+            if let Some(last) = registry
+                .events
+                .back_mut()
+                .filter(|last| last.kind == "dropped")
+            {
+                last.dropped_before = last.dropped_before.saturating_add(dropped);
+            } else {
+                let sequence = registry.next_event;
+                registry.next_event = sequence.saturating_add(1);
+                registry.events.push_back(EventRecord {
+                    run: self.0.run.to_string(),
+                    sequence,
+                    kind: "dropped".into(),
+                    ts_ms: timestamp(),
+                    node: String::new(),
+                    user: None,
+                    outbound: String::new(),
+                    target: None,
+                    code: "events.dropped".into(),
+                    addresses: Vec::new(),
+                    dropped_before: dropped,
+                });
+            }
+        }
         Ok(registry.events.iter().cloned().collect())
     }
     pub(crate) fn acknowledge_events(&self, count: usize) -> Result<()> {
@@ -806,7 +882,8 @@ impl Telemetry {
             let key = (
                 flow.source.user(),
                 flow.source.node().clone(),
-                flow.observed_source.map(|address| address.ip()),
+                flow.observed_source
+                    .map(|address| crate::history::masked_source(address.ip())),
             );
             *sources.entry(key).or_insert(0usize) += 1;
         }

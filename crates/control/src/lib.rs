@@ -9,20 +9,26 @@ use hyper_util::rt::TokioIo;
 use kerlico_config::ControlSpec;
 use kerlico_core::{CancellationToken, Error, Result};
 use kerlico_egress::{StoredFlow, Telemetry};
-use kerlico_engine::{Engine, Stats};
+use kerlico_engine::{Engine, FailedNodes, Stats};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
     sync::{Arc, atomic::Ordering},
+    time::Duration,
 };
 use tokio::{net::TcpListener, task::JoinSet};
+
+const MAX_CONNECTIONS: usize = 64;
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 struct Source {
     secret: Option<String>,
     telemetry: Telemetry,
     stats: Arc<Stats>,
     nodes: BTreeMap<String, Arc<Stats>>,
+    failed: FailedNodes,
 }
 
 pub struct ControlServer {
@@ -39,6 +45,7 @@ impl ControlServer {
                 telemetry: engine.telemetry(),
                 stats: engine.stats(),
                 nodes: engine.node_stats(),
+                failed: engine.failed_nodes(),
             }),
         })
     }
@@ -54,19 +61,30 @@ impl ControlServer {
                 biased;
                 _ = cancel.cancelled() => break,
                 accepted = self.listener.accept() => {
-                    let Ok((stream, _)) = accepted else { continue };
+                    let stream = match accepted {
+                        Ok((stream, _)) => stream,
+                        Err(_) => {
+                            tokio::time::sleep(ACCEPT_BACKOFF).await;
+                            continue;
+                        }
+                    };
+                    while connections.try_join_next().is_some() {}
+                    if connections.len() >= MAX_CONNECTIONS {
+                        continue;
+                    }
                     let source = self.source.clone();
                     connections.spawn(async move {
                         let service = service_fn(move |request| {
                             let source = source.clone();
                             async move { Ok::<_, std::convert::Infallible>(respond(&source, &request)) }
                         });
-                        let _ = http1::Builder::new()
-                            .serve_connection(TokioIo::new(stream), service)
-                            .await;
+                        let _ = tokio::time::timeout(
+                            CONNECTION_TIMEOUT,
+                            http1::Builder::new().serve_connection(TokioIo::new(stream), service),
+                        )
+                        .await;
                     });
                 }
-                Some(_) = connections.join_next(), if !connections.is_empty() => {}
             }
         }
         connections.abort_all();
@@ -110,7 +128,14 @@ fn query_number(query: &str, name: &str) -> Option<u64> {
 
 fn route(source: &Source, path: &str, query: &str) -> Result<Option<Value>> {
     Ok(Some(match path {
-        "/v1/health" => json!({"status": "ok", "run": source.telemetry.run_id().to_string()}),
+        "/v1/health" => {
+            let failed = source.failed.tags();
+            json!({
+                "status": if failed.is_empty() { "ok" } else { "degraded" },
+                "run": source.telemetry.run_id().to_string(),
+                "failed_nodes": failed,
+            })
+        }
         "/v1/usage" => {
             let usage = source.telemetry.usage()?;
             json!({

@@ -17,6 +17,9 @@ fn default_name() -> String {
 fn default_mtu() -> u16 {
     1500
 }
+fn default_max_flows() -> usize {
+    1024
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,13 +29,21 @@ struct Options {
     addresses: Vec<String>,
     #[serde(default = "default_mtu")]
     mtu: u16,
+    #[serde(default = "default_max_flows")]
+    max_flows: usize,
 }
 
 fn invalid() -> Error {
     Error::Config("TUN 选项不合法".into())
 }
 
-/// 接口地址，内核发包的来源。用户态栈用它的下一个地址。
+/// 接口已被销毁。tun 驱动对已摘除的 fd 返回 EBADFD。
+fn device_gone(error: &std::io::Error) -> bool {
+    const EBADFD: i32 = 77;
+    error.raw_os_error() == Some(EBADFD)
+}
+
+/// 接口地址。用户态栈用它的下一个地址。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct InterfaceAddress {
     ip: IpAddr,
@@ -73,18 +84,12 @@ impl InterfaceAddress {
         };
         Ok(next)
     }
-
-    fn host_network(&self) -> String {
-        match self.ip {
-            IpAddr::V4(ip) => format!("{ip}/32"),
-            IpAddr::V6(ip) => format!("{ip}/128"),
-        }
-    }
 }
 
 struct TunNode {
     name: String,
     mtu: u16,
+    max_flows: usize,
     addresses: Vec<InterfaceAddress>,
 }
 
@@ -107,13 +112,23 @@ impl TunNode {
                 .iter()
                 .map(InterfaceAddress::gateway)
                 .collect::<Result<_>>()?,
+            // 作为网关时来源是被转发的主机，不限于接口地址。
             allowed_ips: self
                 .addresses
                 .iter()
-                .map(InterfaceAddress::host_network)
+                .map(|address| {
+                    if address.ip.is_ipv4() {
+                        "0.0.0.0/0".to_owned()
+                    } else {
+                        "::/0".to_owned()
+                    }
+                })
                 .collect(),
             mtu: usize::from(self.mtu),
-            limits: StackLimits::default(),
+            limits: StackLimits {
+                max_flows: self.max_flows,
+                ..StackLimits::default()
+            },
         })
     }
 }
@@ -131,6 +146,9 @@ impl InboundProtocol for TunNode {
     fn supports_virtual(&self) -> bool {
         true
     }
+    fn reserved_sessions(&self) -> usize {
+        1
+    }
     fn handle<'a>(
         &'a self,
         _stream: kerlico_core::BoxStream,
@@ -142,9 +160,11 @@ impl InboundProtocol for TunNode {
     fn handle_virtual<'a>(
         &'a self,
         ingress: IngressBinding,
-        context: InboundContext,
+        mut context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Engine 的 max_streams 是单条多路复用连接的上限；TUN 的流由 max_flows 和会话配额约束。
+            context.max_streams = self.max_flows;
             let device = self.create()?;
             let access = ingress.local(&context)?;
             let cancel = context.cancel.clone();
@@ -157,9 +177,12 @@ impl InboundProtocol for TunNode {
                     biased;
                     _ = cancel.cancelled() => return Ok(()),
                     packet = tunnel.next_packet() => match packet {
-                        Ok(packet) => {
-                            device.send(&packet).await?;
-                        }
+                        Ok(packet) => match device.send(&packet).await {
+                            Ok(_) => {}
+                            Err(error) if device_gone(&error) => return Err(error.into()),
+                            // 链路 down 的 EIO、缓冲不足等只影响这一个包。
+                            Err(_) => events.record(NodeEvent::Dropped),
+                        },
                         Err(Error::Cancelled) => return Ok(()),
                         Err(error) => return Err(error),
                     },
@@ -210,11 +233,14 @@ impl NodeFactory for TunNodeFactory {
         if addresses.len() == 2 && addresses[0].ip.is_ipv4() == addresses[1].ip.is_ipv4() {
             return Err(invalid());
         }
-        Ok(Arc::new(TunNode {
+        let node = TunNode {
             name: options.name,
             mtu: options.mtu,
+            max_flows: options.max_flows,
             addresses,
-        }))
+        };
+        node.stack()?.validate().map_err(|_| invalid())?;
+        Ok(Arc::new(node))
     }
 }
 
@@ -229,7 +255,6 @@ mod tests {
             address.gateway().unwrap(),
             "198.18.0.2".parse::<IpAddr>().unwrap()
         );
-        assert_eq!(address.host_network(), "198.18.0.1/32");
         let address = InterfaceAddress::parse("fd00::1/64").unwrap();
         assert_eq!(
             address.gateway().unwrap(),

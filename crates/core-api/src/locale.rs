@@ -529,6 +529,22 @@ const DIAGNOSTICS: &[(&str, &str)] = &[
         "A routing rule references an outbound that does not exist",
     ),
     (
+        "路由规则引用的入站不存在",
+        "A routing rule references an inbound that does not exist",
+    ),
+    (
+        "路由规则引用的管理账户不存在",
+        "A routing rule references a management account that does not exist",
+    ),
+    (
+        "控制接口与入站监听地址重复",
+        "The control interface listener duplicates an inbound listener",
+    ),
+    (
+        "节点会话上限必须大于入口常驻占用的会话数",
+        "The node session limit must exceed the sessions its inbound permanently holds",
+    ),
+    (
         "设备状态目录必须是绝对路径",
         "The device state directory must be an absolute path",
     ),

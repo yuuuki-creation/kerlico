@@ -41,13 +41,19 @@ struct Cidr {
 
 impl Cidr {
     fn parse(text: &str) -> Result<Self> {
-        let (address, prefix) = text.split_once('/').unwrap_or((text, ""));
+        let (address, prefix) = match text.split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix)),
+            None => (text, None),
+        };
         let network: IpAddr = address.parse().map_err(|_| invalid())?;
+        // 匹配前目标已规范化为 IPv4，IPv4-mapped 网段永远不会命中。
+        if network.to_canonical() != network {
+            return Err(invalid());
+        }
         let bits = if network.is_ipv4() { 32 } else { 128 };
-        let prefix = if prefix.is_empty() {
-            bits
-        } else {
-            prefix.parse().map_err(|_| invalid())?
+        let prefix = match prefix {
+            Some(prefix) => prefix.parse().map_err(|_| invalid())?,
+            None => bits,
         };
         if prefix > bits {
             return Err(invalid());
@@ -133,7 +139,13 @@ impl Rule {
             && rule.network.is_none()
             && rule.node.is_empty()
             && rule.user.is_empty();
-        if empty || rule.domain_keyword.iter().any(String::is_empty) {
+        // 目标域名已是 punycode，非 ASCII 关键字永远不会命中。
+        if empty
+            || rule
+                .domain_keyword
+                .iter()
+                .any(|keyword| keyword.is_empty() || !keyword.is_ascii())
+        {
             return Err(invalid());
         }
         Ok(rule)
@@ -212,6 +224,29 @@ impl RouteTable {
 
     pub fn outbounds(&self) -> impl Iterator<Item = &OutId> {
         self.rules.iter().map(|rule| &rule.outbound)
+    }
+
+    /// 可能选中的出站；限定到其他入站或另一网络类型的规则到不了这里。
+    pub fn outbounds_reaching(
+        &self,
+        node: &NodeId,
+        network: Network,
+    ) -> impl Iterator<Item = &OutId> {
+        self.rules
+            .iter()
+            .filter(move |rule| {
+                (rule.node.is_empty() || rule.node.contains(node))
+                    && rule.network.is_none_or(|value| value == network)
+            })
+            .map(|rule| &rule.outbound)
+    }
+
+    pub fn nodes(&self) -> impl Iterator<Item = &NodeId> {
+        self.rules.iter().flat_map(|rule| &rule.node)
+    }
+
+    pub fn users(&self) -> impl Iterator<Item = &UserId> {
+        self.rules.iter().flat_map(|rule| &rule.user)
     }
 }
 
@@ -359,6 +394,9 @@ mod tests {
             json!({"outbound":"a","domain_keyword":[""]}),
             json!({"outbound":"a","ip_cidr":["10.0.0.0/33"]}),
             json!({"outbound":"a","ip_cidr":["example.com/8"]}),
+            json!({"outbound":"a","ip_cidr":["10.0.0.0/"]}),
+            json!({"outbound":"a","ip_cidr":["::ffff:10.0.0.0/104"]}),
+            json!({"outbound":"a","domain_keyword":["例子"]}),
             json!({"outbound":"bad tag","port":[1]}),
         ] {
             let spec: RuleSpec = serde_json::from_value(rule).unwrap();

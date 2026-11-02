@@ -1,13 +1,18 @@
-use kerlico_config::{ControlSpec, Registry, parse};
+use kerlico_config::{ControlSpec, NodeBuildContext, NodeFactory, Registry, parse};
 use kerlico_control::ControlServer;
-use kerlico_core::CancellationToken;
+use kerlico_core::{
+    BoxFuture, BoxStream, CancellationToken, CredentialManifest, Error, InboundContext,
+    InboundProtocol, IngressBinding, Result,
+};
 use kerlico_engine::Engine;
 use kerlico_net::DirectFactory;
 use serde_json::{Value, json};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpListener, TcpSocket, TcpStream},
+    task::JoinHandle,
+    time::timeout,
 };
 
 async fn get(address: SocketAddr, path: &str, secret: Option<&str>) -> (u16, Value) {
@@ -78,4 +83,232 @@ async fn control_requires_the_secret_and_reports_runtime_state() {
 
     stop.cancel();
     serving.await.unwrap();
+}
+
+struct FailingNode;
+impl InboundProtocol for FailingNode {
+    fn credential_manifest(&self) -> CredentialManifest {
+        CredentialManifest::new()
+    }
+    fn supports_tcp(&self) -> bool {
+        false
+    }
+    fn supports_virtual(&self) -> bool {
+        true
+    }
+    fn handle<'a>(
+        &'a self,
+        _: BoxStream,
+        _: IngressBinding,
+        _: InboundContext,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Err(Error::Rejected) })
+    }
+    fn handle_virtual<'a>(
+        &'a self,
+        _: IngressBinding,
+        _: InboundContext,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async {
+            Err(Error::Io(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            )))
+        })
+    }
+}
+struct FailingFactory;
+impl NodeFactory for FailingFactory {
+    fn kind(&self) -> &'static str {
+        "failing"
+    }
+    fn allows_local_inbound(&self) -> bool {
+        true
+    }
+    fn build(&self, _: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        Ok(Arc::new(FailingNode))
+    }
+}
+
+struct Running {
+    control: SocketAddr,
+    forward: SocketAddr,
+    stop: CancellationToken,
+    engine: JoinHandle<Result<()>>,
+    server: JoinHandle<()>,
+}
+impl Running {
+    async fn stop(self) -> Result<()> {
+        self.stop.cancel();
+        self.server.await.unwrap();
+        self.engine.await.unwrap()
+    }
+}
+async fn start(mut config: Value) -> Running {
+    let mut registry = Registry::default();
+    registry.register(DirectFactory).unwrap();
+    registry.register_node(FailingFactory).unwrap();
+    config["version"] = json!(2);
+    config["outbounds"] = json!([{"tag":"exit","type":"direct"}]);
+    config["limits"] = json!({"drain_timeout_ms":1000});
+    let engine = Engine::bind(
+        registry
+            .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let forward = engine.listeners().unwrap()[0].1;
+    let spec = ControlSpec {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        secret: None,
+    };
+    let server = ControlServer::bind(&spec, &engine).await.unwrap();
+    let control = server.local_addr().unwrap();
+    let stop = CancellationToken::new();
+    Running {
+        control,
+        forward,
+        server: tokio::spawn(server.serve(stop.clone())),
+        engine: tokio::spawn(engine.run(stop.clone())),
+        stop,
+    }
+}
+fn forward_to(port: u16) -> Value {
+    json!({"inbounds":[{"tag":"entry","type":"tcp-forward","listen":"127.0.0.1:0",
+        "target":{"host":"127.0.0.1","port":port},"outbound":"exit"}]})
+}
+
+#[tokio::test]
+async fn health_reports_a_failed_node_while_other_inbounds_keep_serving() {
+    let mut config = forward_to(9);
+    config["local_inbounds"] = json!([{"tag":"bad","type":"failing","listen":"127.0.0.1:0",
+        "outbound":"exit","options":{}}]);
+    let running = start(config).await;
+    let health = timeout(Duration::from_secs(5), async {
+        loop {
+            let (_, health) = get(running.control, "/v1/health", None).await;
+            if health["status"] != "ok" {
+                return health;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("节点失败后 health 应转为 degraded");
+    assert_eq!(health["status"], "degraded");
+    assert_eq!(health["failed_nodes"], json!(["bad"]));
+    TcpStream::connect(running.forward)
+        .await
+        .expect("其他入口继续接受连接");
+    assert!(running.stop().await.is_err());
+}
+
+#[tokio::test]
+async fn health_stays_ok_without_failures() {
+    let running = start(forward_to(9)).await;
+    let (_, health) = get(running.control, "/v1/health", None).await;
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["failed_nodes"], json!([]));
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn online_masks_and_merges_sources_like_flows() {
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = target.local_addr().unwrap().port();
+    let holding = tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            held.push(target.accept().await.unwrap());
+        }
+    });
+    let running = start(forward_to(port)).await;
+    let mut clients = Vec::new();
+    for source in ["127.0.0.1:0", "127.0.0.2:0"] {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind(source.parse().unwrap()).unwrap();
+        clients.push(socket.connect(running.forward).await.unwrap());
+    }
+    let online = timeout(Duration::from_secs(5), async {
+        loop {
+            let (_, online) = get(running.control, "/v1/online", None).await;
+            let flows: u64 = online
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["active_flows"].as_u64().unwrap())
+                .sum();
+            if flows == 2 {
+                return online;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("两条流应出现在在线视图");
+    assert_eq!(
+        online,
+        json!([{"user":null,"node":"entry","address":"127.0.0.0/24","active_flows":2}])
+    );
+    drop(clients);
+    holding.abort();
+    running.stop().await.unwrap();
+}
+
+async fn request_on(stream: &mut TcpStream) -> Vec<u8> {
+    let _ = stream
+        .write_all(b"GET /v1/health HTTP/1.1\r\nHost: control\r\n\r\n")
+        .await;
+    let mut bytes = vec![0; 1024];
+    let length = timeout(Duration::from_secs(5), stream.read(&mut bytes))
+        .await
+        .expect("应答或关闭应立即到达")
+        .unwrap_or(0);
+    bytes.truncate(length);
+    bytes
+}
+
+#[tokio::test]
+async fn connections_over_the_limit_are_closed_at_once() {
+    let running = start(forward_to(9)).await;
+    let mut held = Vec::new();
+    for _ in 0..64 {
+        let mut stream = TcpStream::connect(running.control).await.unwrap();
+        assert!(request_on(&mut stream).await.starts_with(b"HTTP/1.1 200"));
+        held.push(stream);
+    }
+    let mut excess = TcpStream::connect(running.control).await.unwrap();
+    assert_eq!(
+        request_on(&mut excess).await,
+        b"",
+        "第 65 条连接应被直接关闭"
+    );
+
+    drop(held.pop());
+    let served = timeout(Duration::from_secs(5), async {
+        loop {
+            let mut stream = TcpStream::connect(running.control).await.unwrap();
+            if !request_on(&mut stream).await.is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(served.is_ok(), "释放名额后应重新服务");
+    running.stop().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn silent_connection_is_closed_by_the_total_timeout() {
+    let running = start(forward_to(9)).await;
+    let started = tokio::time::Instant::now();
+    let mut idle = TcpStream::connect(running.control).await.unwrap();
+    let mut bytes = Vec::new();
+    timeout(Duration::from_secs(60), idle.read_to_end(&mut bytes))
+        .await
+        .expect("无请求的连接应被总时限关闭")
+        .unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(30));
+    running.stop().await.unwrap();
 }

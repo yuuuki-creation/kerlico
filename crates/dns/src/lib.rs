@@ -1,12 +1,16 @@
 //! 为 `Local` 路径解析网站域名：静态 hosts 优先，其余查询配置的上游并使用其缓存。
 use hickory_resolver::{
     TokioResolver,
-    config::{ConnectionConfig, LookupIpStrategy, NameServerConfig, ResolverConfig},
+    config::{ConnectionConfig, LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig},
     net::runtime::TokioRuntimeProvider,
 };
 use kerlico_core::{Address, Destination, Error, Result};
 use serde::Deserialize;
-use std::{collections::BTreeMap, net::IpAddr, net::SocketAddr, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
+    sync::Arc,
+};
 
 /// 上游只接受字面 IP，避免解析上游本身时递归。
 #[derive(Clone, Debug, Deserialize)]
@@ -44,9 +48,14 @@ fn parse_server(text: &str) -> Result<(Transport, SocketAddr)> {
     let address = authority
         .parse::<SocketAddr>()
         .or_else(|_| {
-            authority
-                .parse::<IpAddr>()
-                .map(|ip| SocketAddr::new(ip, default_port))
+            let ip = match authority
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+            {
+                Some(bracketed) => bracketed.parse::<Ipv6Addr>().map(IpAddr::V6),
+                None => authority.parse::<IpAddr>(),
+            };
+            ip.map(|ip| SocketAddr::new(ip, default_port))
         })
         .map_err(|_| invalid())?;
     if address.port() == 0 {
@@ -116,6 +125,7 @@ impl DnsResolver {
                 TokioRuntimeProvider::default(),
             );
             builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
+            builder.options_mut().use_hosts_file = ResolveHosts::Never;
             Some(builder.build().map_err(|_| invalid())?)
         };
         Ok(Self { upstream, hosts })
@@ -183,6 +193,9 @@ mod tests {
             json!({"servers":["udp://1.1.1.1:0"]}),
             json!({"servers":["tls://1.1.1.1"]}),
             json!({"servers":["udp://1.1.1.1#name"]}),
+            json!({"servers":["tcp://[2001:db8::1"]}),
+            json!({"servers":["tcp://2001:db8::1]"]}),
+            json!({"servers":["tcp://[192.0.2.1]"]}),
             json!({"hosts":{"10.0.0.1":["10.0.0.2"]}}),
             json!({"hosts":{"a.example":[]}}),
         ] {
@@ -192,6 +205,44 @@ mod tests {
             spec(json!({"servers":["udp://1.1.1.1","tcp://[2606:4700:4700::1111]:53","tls://1.1.1.1#cloudflare-dns.com"]}))
                 .validate()
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn bracketed_ipv6_without_port_uses_the_default_port() {
+        assert_eq!(
+            parse_server("tcp://[2001:db8::1]").unwrap(),
+            (Transport::Tcp, "[2001:db8::1]:53".parse().unwrap())
+        );
+        assert_eq!(
+            parse_server("tcp://2001:db8::1").unwrap(),
+            (Transport::Tcp, "[2001:db8::1]:53".parse().unwrap())
+        );
+        assert_eq!(
+            parse_server("tls://[2001:db8::1]#dns.example").unwrap(),
+            (
+                Transport::Tls("dns.example".into()),
+                "[2001:db8::1]:853".parse().unwrap()
+            )
+        );
+    }
+
+    /// 需要私有挂载命名空间，把测试名字写进该空间的 `/etc/hosts`：
+    /// `unshare -m sh -c 'echo "203.0.113.9 shadowed.example" > "$H"; mount --bind "$H" /etc/hosts; cargo test -p kerlico-dns --offline -- --ignored'`
+    #[tokio::test]
+    #[ignore = "需要 root，并在私有挂载命名空间内改写 /etc/hosts"]
+    async fn system_hosts_file_does_not_override_configured_upstreams() {
+        let hosts = std::fs::read_to_string("/etc/hosts").unwrap();
+        assert!(
+            hosts.contains("shadowed.example"),
+            "未按说明准备 hosts 文件"
+        );
+        let upstream = fake_upstream().await;
+        let resolver =
+            DnsResolver::new(&spec(json!({"servers":[format!("udp://{upstream}")]}))).unwrap();
+        assert_eq!(
+            resolver.resolve("shadowed.example").await.unwrap(),
+            vec!["192.0.2.7".parse::<IpAddr>().unwrap()]
         );
     }
 

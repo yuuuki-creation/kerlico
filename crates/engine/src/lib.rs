@@ -7,12 +7,13 @@ use kerlico_core::{
     NodeTasks, PeerSession, Result, RuntimeOptions, ServiceRetirement, ShutdownReport,
 };
 use std::{
-    collections::{BTreeMap, HashMap, hash_map::Entry},
+    collections::{BTreeMap, BTreeSet, HashMap, hash_map::Entry},
     net::SocketAddr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 mod history;
 use history::{HistoryCommit, HistoryOwner};
@@ -42,6 +43,41 @@ pub struct Stats {
     pub dropped: AtomicU64,
     /// 已确认完成的强制回收事件，不计作业务失败或包丢弃。
     pub forced_cleanup: AtomicU64,
+}
+
+/// 运行中已停止的入口标签。入口不会自行恢复，记录只增不减。
+#[derive(Clone, Default)]
+pub struct FailedNodes(Arc<Mutex<BTreeSet<String>>>);
+impl FailedNodes {
+    pub fn tags(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+    fn report(&self, tag: &NodeId, error: &Error, language: Language) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(tag.to_string());
+        let (code, error) = (error.code(), error.localized(language));
+        match language {
+            Language::ZhCn => eprintln!("[{code}] 入口 {tag} 已停止：{error}"),
+            Language::En => eprintln!("[{code}] Inbound {tag} stopped: {error}"),
+        }
+    }
+}
+
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// 句柄暂时耗尽或对端在 accept 前放弃，都不代表监听器失效。
+fn accept_retryable(error: &std::io::Error) -> bool {
+    const ENFILE: i32 = 23;
+    const EMFILE: i32 = 24;
+    error.kind() == std::io::ErrorKind::ConnectionAborted
+        || matches!(error.raw_os_error(), Some(ENFILE | EMFILE))
 }
 
 struct Inbound {
@@ -213,6 +249,7 @@ pub struct Engine {
     node_stats: BTreeMap<String, Arc<Stats>>,
     limits: Limits,
     stats: Arc<Stats>,
+    failed: FailedNodes,
 }
 
 impl Engine {
@@ -324,6 +361,7 @@ impl Engine {
                 node_stats,
                 limits,
                 stats: Arc::new(Stats::default()),
+                failed: FailedNodes::default(),
             }),
             Err(primary) => {
                 let deadline = Instant::now() + limits.drain_timeout();
@@ -388,6 +426,11 @@ impl Engine {
     /// 返回按节点标签索引的统计句柄，包含本地协议入口；原子计数仍实时更新。
     pub fn node_stats(&self) -> BTreeMap<String, Arc<Stats>> {
         self.node_stats.clone()
+    }
+
+    /// 返回运行中已停止入口的共享观测句柄；关闭阶段的失败由 `run` 的返回值报告。
+    pub fn failed_nodes(&self) -> FailedNodes {
+        self.failed.clone()
     }
 
     /// 消费本实例并运行入口，直到取消或全部入口退出；调用方应等待返回以完成回收。
@@ -544,18 +587,25 @@ impl Engine {
                                 let expected_cancel = matches!(error, Error::Cancelled)
                                     && (closing.is_some() || owners.get(&id).is_some_and(|owner| owner.tasks.cancel().is_cancelled()));
                                 if !expected_cancel {
+                                    if closing.is_none() && let Some(owner) = owners.get(&id) {
+                                        self.failed.report(owner.tasks.id(), &error, self.language);
+                                    }
                                     failure.get_or_insert(error);
                                     self.stats.failed.fetch_add(1,Ordering::Relaxed);
                                 }
                             }
                             (id, stopped)
                         }
-                        Some(Err(error)) => {
-                            if !error.is_cancelled() || !forced {
-                                failure.get_or_insert(Error::Protocol("入口任务异常退出"));
+                        Some(Err(joined)) => {
+                            if !joined.is_cancelled() || !forced {
+                                let error = Error::Protocol("入口任务异常退出");
+                                if closing.is_none() && let Some(owner) = owners.get(&joined.id()) {
+                                    self.failed.report(owner.tasks.id(), &error, self.language);
+                                }
+                                failure.get_or_insert(error);
                                 self.stats.failed.fetch_add(1,Ordering::Relaxed);
                             }
-                            (error.id(), true)
+                            (joined.id(), true)
                         }
                         None => break,
                     };
@@ -719,7 +769,7 @@ async fn serve_node(
             _=force.cancelled()=>break,
             result=sessions.join_next(),if !sessions.is_empty()=>{if result.is_some_and(|r|r.is_err()){stats.failed.fetch_add(1,Ordering::Relaxed);local_stats.failed.fetch_add(1,Ordering::Relaxed);}},
             accepted=listener.accept()=>{
-                let (stream,peer_addr)=match accepted {Ok(v)=>v,Err(error)=>{failure=Some(Error::Io(error));break;}};
+                let (stream,peer_addr)=match accepted {Ok(v)=>v,Err(error) if accept_retryable(&error)=>{tokio::time::sleep(ACCEPT_BACKOFF).await;continue;},Err(error)=>{failure=Some(Error::Io(error));break;}};
                 let Ok(budget)=kerlico_core::StreamBudget::new(global.clone(),slots.clone()).try_acquire() else {stats.dropped.fetch_add(1,Ordering::Relaxed);local_stats.dropped.fetch_add(1,Ordering::Relaxed);continue;};
                 let _=stream.set_nodelay(true);
                 let protocol=node.protocol.clone();let access=access.clone();let token=force.child_token();let stats=stats.clone();let local_stats=local_stats.clone();
@@ -829,7 +879,7 @@ async fn serve_tcp(
             _=force.cancelled()=>break,
             result=sessions.join_next(),if !sessions.is_empty()=>{ if result.is_some_and(|result|result.is_err()) { stats.failed.fetch_add(1,Ordering::Relaxed); } },
             accepted=listener.accept()=>{
-                let (stream,peer)=match accepted { Ok(value)=>value, Err(error)=>{failure=Some(Error::Io(error));break;} };
+                let (stream,peer)=match accepted { Ok(value)=>value, Err(error) if accept_retryable(&error)=>{ tokio::time::sleep(ACCEPT_BACKOFF).await; continue; }, Err(error)=>{failure=Some(Error::Io(error));break;} };
                 let permit=match slots.clone().try_acquire_owned() { Ok(value)=>value,Err(_)=>{stats.dropped.fetch_add(1,Ordering::Relaxed);continue;} };
                 let target=target.clone();let ingress=ingress.clone();let limits=limits.clone();let token=force.child_token();let stats=stats.clone();
                 stats.accepted.fetch_add(1,Ordering::Relaxed);

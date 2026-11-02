@@ -365,6 +365,9 @@ async fn execute(args: Args, language: Language) -> Result<()> {
         return Err(Error::Config("配置文件超过 1 MiB".into()));
     }
     let prepared = registry.prepare(parse(&std::fs::read(config)?)?)?;
+    if cfg!(not(feature = "warp")) && prepared.device().is_some() {
+        return Err(Error::Config("此构建未启用 warp".into()));
+    }
     if !run {
         println!(
             "{}",
@@ -451,10 +454,7 @@ impl Device {
     }
 
     #[cfg(not(feature = "warp"))]
-    fn start(prepared: &kerlico_config::PreparedConfig) -> Result<Self> {
-        if prepared.device().is_some() {
-            return Err(Error::Config("此构建未启用 warp".into()));
-        }
+    fn start(_: &kerlico_config::PreparedConfig) -> Result<Self> {
         Ok(Self {})
     }
 

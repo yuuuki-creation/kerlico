@@ -446,3 +446,158 @@ async fn dns_and_connect_failures_are_persisted_as_events() {
     assert_eq!(error.outbound, "exit");
     assert_eq!(error.node, "entry");
 }
+
+async fn events_after_closed_connection(
+    config: serde_json::Value,
+    registry: Registry,
+    directory: &Path,
+) -> Vec<kerlico_egress::EventRecord> {
+    let engine = Engine::bind(
+        registry
+            .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let (_, address) = engine.listeners().unwrap().remove(0);
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(engine.run(stop.clone()));
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let mut bytes = Vec::new();
+    let _ = timeout(Duration::from_secs(10), stream.read_to_end(&mut bytes))
+        .await
+        .expect("入口应在期限内结束连接");
+    stop.cancel();
+    running.await.unwrap().unwrap();
+    HistoryReader::open(directory)
+        .unwrap()
+        .events(&HistoryQuery::default())
+        .unwrap()
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect()
+}
+
+#[tokio::test]
+async fn flow_ending_without_a_reported_failure_still_records_one_event() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = silent.local_addr().unwrap().port();
+    let holding = tokio::spawn(async move {
+        let _held = silent.accept().await;
+        std::future::pending::<()>().await;
+    });
+    let mut registry = Registry::default();
+    registry.register(DirectFactory).unwrap();
+    let config = json!({
+        "version": 2,
+        "outbounds": [{"tag":"exit","type":"direct"}],
+        "inbounds": [{"tag":"entry","type":"tcp-forward","listen":"127.0.0.1:0",
+            "target":{"host":"127.0.0.1","port":port},"outbound":"exit"}],
+        "telemetry": {"directory": directory.path(), "sample_interval_ms":60000},
+        "limits": {"idle_timeout_ms":200,"drain_timeout_ms":1000}
+    });
+    let events = events_after_closed_connection(config, registry, directory.path()).await;
+    holding.abort();
+    let errors: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "error")
+        .collect();
+    assert_eq!(errors.len(), 1, "{events:?}");
+    assert_eq!(errors[0].code, "operation.timeout");
+    assert_eq!(errors[0].outbound, "exit");
+}
+
+struct UdpOnly;
+impl kerlico_core::Outbound for UdpOnly {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: false,
+            tcp_eof: false,
+            udp: true,
+        }
+    }
+    fn connect_tcp<'a>(
+        &'a self,
+        _: &'a kerlico_core::Destination,
+        _: &'a kerlico_core::ConnectContext,
+    ) -> kerlico_core::BoxFuture<'a, kerlico_core::Result<kerlico_core::OpenedTcp>> {
+        Box::pin(async { Err(kerlico_core::Error::Rejected) })
+    }
+    fn connect_udp<'a>(
+        &'a self,
+        _: &'a kerlico_core::Destination,
+        _: &'a kerlico_core::ConnectContext,
+    ) -> kerlico_core::BoxFuture<'a, kerlico_core::Result<kerlico_core::DatagramChannel>> {
+        Box::pin(async { Err(kerlico_core::Error::Rejected) })
+    }
+}
+struct UdpOnlyFactory;
+impl kerlico_config::OutboundFactory for UdpOnlyFactory {
+    fn kind(&self) -> &'static str {
+        "udp-only"
+    }
+    fn compile(&self, _: &serde_json::Value) -> kerlico_core::Result<kerlico_config::OutboundPlan> {
+        Ok(kerlico_config::OutboundPlan::new(
+            kerlico_core::Outbound::capabilities(&UdpOnly),
+            false,
+            kerlico_core::TargetPolicy::Remote,
+            |_| {
+                Box::pin(async {
+                    Ok(std::sync::Arc::new(UdpOnly) as std::sync::Arc<dyn kerlico_core::Outbound>)
+                })
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn failure_before_a_flow_exists_records_one_event() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let mut registry = Registry::default();
+    registry.register(DirectFactory).unwrap();
+    registry.register(UdpOnlyFactory).unwrap();
+    let config = json!({
+        "version": 2,
+        "outbounds": [{"tag":"exit","type":"direct"},{"tag":"datagrams","type":"udp-only"}],
+        "inbounds": [{"tag":"entry","type":"tcp-forward","listen":"127.0.0.1:0",
+            "target":{"host":"192.0.2.1","port":9},"outbound":"exit"}],
+        "routes": [{"outbound":"datagrams","port":[9]}],
+        "telemetry": {"directory": directory.path(), "sample_interval_ms":60000},
+        "limits": {"drain_timeout_ms":1000}
+    });
+    let events = events_after_closed_connection(config, registry, directory.path()).await;
+    let errors: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "error")
+        .collect();
+    assert_eq!(errors.len(), 1, "{events:?}");
+    assert_eq!(errors[0].code, "capability.unsupported");
+    assert_eq!(errors[0].outbound, "datagrams");
+    assert_eq!(errors[0].node, "entry");
+    assert_eq!(errors[0].target.as_deref(), Some("192.0.2.1:9"));
+}
+
+#[tokio::test]
+async fn lookup_abandoned_by_the_outer_deadline_records_an_aborted_event() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let upstream = silent.local_addr().unwrap();
+    let mut registry = Registry::default();
+    registry.register(DirectFactory).unwrap();
+    let config = json!({
+        "version": 2,
+        "outbounds": [{"tag":"exit","type":"direct"}],
+        "inbounds": [{"tag":"entry","type":"tcp-forward","listen":"127.0.0.1:0",
+            "target":{"host":"slow.example","port":9},"outbound":"exit"}],
+        "dns": {"servers":[format!("udp://{upstream}")]},
+        "telemetry": {"directory": directory.path(), "sample_interval_ms":60000},
+        "limits": {"connect_timeout_ms":2000,"drain_timeout_ms":1000}
+    });
+    let events = events_after_closed_connection(config, registry, directory.path()).await;
+    drop(silent);
+    let dns: Vec<_> = events.iter().filter(|event| event.kind == "dns").collect();
+    assert_eq!(dns.len(), 1, "{events:?}");
+    assert_eq!(dns[0].code, "dns.aborted");
+    assert_eq!(dns[0].target.as_deref(), Some("slow.example"));
+}

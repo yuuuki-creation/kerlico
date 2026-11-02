@@ -46,14 +46,20 @@ kerlico history --directory state/telemetry --kind bandwidth --since-ms 0 --afte
 
 | 字段 | 含义 |
 | --- | --- |
-| `kind` | `dns` 或 `error` |
+| `kind` | `dns`、`error` 或 `dropped` |
 | `ts_ms` | 墙钟时间 |
-| `node` / `user` / `outbound` | 可信归属与所选出站 |
+| `node` / `user` / `outbound` | 可信归属与所选出站；`dropped` 事件这些字段为空 |
 | `target` | `dns` 为查询的域名，`error` 为业务目标；多目标 UDP 关联的错误没有目标 |
-| `code` | `dns` 成功为 `ok`，其余为稳定错误码，如 `io.failed`、`operation.timeout` |
+| `code` | `dns` 成功为 `ok`，其余为稳定错误码，如 `io.failed`、`operation.timeout`。专用码见下 |
 | `addresses` | `dns` 成功时按选用顺序排列的地址 |
 | `dropped_before` | 待写队列已满时，此事件之前被丢弃的事件数 |
 
-`dns` 只记录本机为 `Local` 路径做的域名解析；`Remote` 出站由远端解析，不产生此事件。`error` 记录每条流首个非取消失败。`dns_records` 与 `error_records` 分别控制两类事件，默认开启。事件不含来源地址和业务载荷，按 `retention_days` 清理，待写队列上限 4096 条。
+`dns` 只记录本机为 `Local` 路径做的域名解析；`Remote` 出站由远端解析，不产生此事件。外层超时或取消丢弃尚未返回的查询时，事件的 `code` 为 `dns.aborted`。
+
+`error` 每条流最多一条，取消不算失败。覆盖建立与转发中的首个失败、没有报告过失败却以失败或超时结束的流（如空闲超时），以及取得账本之前的拒绝（如所选出站没有该能力、账本已满）。结束时没有具体错误可报告时 `code` 为 `flow.failed`。
+
+待写队列已满造成的丢弃数挂在下一条事件的 `dropped_before` 上。提交时还没有下一条事件，就单独写一条 `kind` 为 `dropped`、`code` 为 `events.dropped` 的事件，所以最终计数不会丢失；按 `--node`、`--user`、`--outbound` 筛选时不返回它。
+
+`dns_records` 与 `error_records` 分别控制 `dns` 和 `error` 事件，默认开启。事件不含来源地址和业务载荷，按 `retention_days` 清理，待写队列上限 4096 条。
 
 实现使用锁文件单写者和 SQLite 事务；查询通过只读连接，可与写者并存。[SQLite UPSERT](https://www.sqlite.org/lang_upsert.html)规定冲突键覆盖行为，[rusqlite 0.40.2](https://docs.rs/rusqlite/0.40.2/rusqlite/struct.Connection.html)提供事务与只读打开接口。

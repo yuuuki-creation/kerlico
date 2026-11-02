@@ -47,6 +47,8 @@
 
 路由不查询 DNS，域名目标不会匹配 `ip_cidr`。多目标 UDP 关联建立时没有单一目标，固定走节点绑定的出站；TCP 与固定目标 UDP 按规则选择。规则选中的出站缺少对应能力时，该连接返回不支持错误。
 
+以下规则永远不会按预期命中，`kerlico check` 直接拒绝：`node` 不是任何入站的标签，`user` 不在 `accounts` 内，`ip_cidr` 前缀为空（`10.0.0.0/`）或是 IPv4-mapped 网段（`::ffff:10.0.0.0/104`），`domain_keyword` 含非 ASCII 字符（目标域名已是 punycode）。
+
 ```json
 "routes": [
   {"outbound": "block", "domain_suffix": ["ads.example"]},
@@ -70,7 +72,7 @@
 
 ## 固定目标入口与全局限制（`limits`）
 
-固定转发入口（`inbounds`）包含 `tag`、`type`（`tcp-forward` 或 `udp-forward`）、`listen`（必须为回环地址，端口 `0` 表示系统动态分配）、`target.host`/`port`、`outbound` 及可选 `mode`、`require_remote_eof`（默认 `false`；设为 `true` 时要求所选出站具备 `tcp_eof` 能力）。
+固定转发入口（`inbounds`）包含 `tag`、`type`（`tcp-forward` 或 `udp-forward`）、`listen`（必须为回环地址，端口 `0` 表示系统动态分配）、`target.host`/`port`、`outbound` 及可选 `mode`、`require_remote_eof`（默认 `false`；设为 `true` 时要求所选出站及路由可能把该入口转到的每个出站都具备 `tcp_eof` 能力，限定到其他入站或仅匹配 UDP 的规则不算）。
 
 | `limits` 字段 | 默认值 | 有效范围与说明 |
 | --- | --- | --- |
@@ -92,5 +94,10 @@
 | `kerlico check -c <file>` | 校验配置文件（上限 1 MiB）并编译装配计划，不绑定端口、不拨号或创建状态目录 |
 | `kerlico run -c <file>` | 启动唯一共享出站服务并绑定全部入站入口；收到 `Ctrl-C` 或 Unix `SIGTERM` 时停止准入并有限排空 |
 | `kerlico account-new --prefix <name>` | 从标准输入读取 12–1024 字节管理密码，输出带 `<prefix>_<uuid>` 用户名与 Argon2id 摘要的账户 JSON |
+| `kerlico history --kind <usage\|flows\|bandwidth\|events>` | 只读查询统计历史，输出 JSON，见[统计历史](history.md) |
 
-默认构建注册全部 **23 个协议模块**（其中 `ssh`、`gost-relay`、`tor` 仅注册 `outbound`，其余 20 个协议同时注册 `inbound` 与 `outbound`）。
+默认构建注册全部 **30 个协议模块**，另有基础出站 `direct`、`reject`：
+
+- 同时注册 `inbound` 与 `outbound`（20 个）：`anytls`、`http`、`hysteria1`、`hysteria2`、`mieru`、`naive`、`shadowquic`、`shadowsocks`、`shadowsocksr`、`shadowtls`、`snell`、`socks`、`ss2022`、`sudoku`、`trojan`、`trusttunnel`、`tuic`、`vless`、`vmess`、`wireguard`。
+- 仅注册 `outbound`（9 个）：`easytier`、`gost-relay`、`masque`、`openconnect`、`openvpn`、`ssh`、`tailscale`、`tor`、`zerotier`。
+- 仅注册 `inbound`（1 个）：`tun`。

@@ -528,6 +528,10 @@ pub trait InboundProtocol: Send + Sync {
     fn supports_virtual(&self) -> bool {
         false
     }
+    /// 入口运行期间常驻占用的会话数；节点会话上限须大于它，才有配额留给业务流。
+    fn reserved_sessions(&self) -> usize {
+        0
+    }
     /// 处理一条入口字节流；鉴别后仅通过 `ingress` 签发的PeerSession访问业务目标。
     ///
     /// 实现负责上下文取消、空闲与派生任务回收，不得回退到其他节点凭据。

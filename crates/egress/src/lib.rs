@@ -403,23 +403,56 @@ impl Dispatcher {
             .bindings
             .get(identity.source().node())
             .ok_or(Error::Rejected)?;
-        let outbound = request
-            .and_then(|(target, network)| self.routes.select(target, network, identity.source()))
-            .unwrap_or(&binding.outbound);
+        let outbound = self
+            .selected_outbound(identity, request)
+            .ok_or(Error::Rejected)?;
         let service = self.services.get(outbound).ok_or(Error::Rejected)?;
         service.host.check()?;
         Ok((service, binding.mode))
     }
-    async fn resolve(
+    fn selected_outbound(
         &self,
-        source: &kerlico_core::Source,
-        outbound: &OutId,
-        target: &Destination,
-        mode: FamilyMode,
-    ) -> Result<Vec<Destination>> {
-        let result = candidates(self.resolver.as_ref(), target, mode).await;
-        self.telemetry.dns_event(source, outbound, target, &result);
-        result
+        identity: &SessionIdentity,
+        request: Option<(&Destination, Network)>,
+    ) -> Option<&OutId> {
+        let binding = self.bindings.get(identity.source().node())?;
+        Some(
+            request
+                .and_then(|(target, network)| {
+                    self.routes.select(target, network, identity.source())
+                })
+                .unwrap_or(&binding.outbound),
+        )
+    }
+    /// 取得流账本前的准入；此处失败还没有租约，单独记一条错误事件。
+    fn admit(
+        &self,
+        identity: &SessionIdentity,
+        context: &ConnectContext,
+        request: Option<(&Destination, Network)>,
+        capable: impl FnOnce(&RunningService) -> Result<()>,
+        original: Option<OriginalTarget>,
+        kind: Kind,
+    ) -> Result<(&RunningService, FamilyMode, Arc<telemetry::FlowLedger>)> {
+        if context.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let admitted = self.route(identity, request).and_then(|(service, mode)| {
+            capable(service)?;
+            let ledger = self.telemetry.open(identity, &service.id, original, kind)?;
+            Ok((service, mode, ledger))
+        });
+        if let Err(error) = &admitted
+            && let Some(outbound) = self.selected_outbound(identity, request)
+        {
+            self.telemetry.open_failed(
+                identity.source(),
+                outbound,
+                request.map(|(target, _)| target),
+                error,
+            );
+        }
+        admitted
     }
     fn tcp<'a>(
         &'a self,
@@ -427,13 +460,20 @@ impl Dispatcher {
         original: OriginalTarget,
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, TcpFlow>> {
-        if context.cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        let (service, mode) = self.route(identity, Some((original.target(), Network::Tcp)))?;
-        if !service.capabilities.tcp {
-            return Err(Error::Unsupported("所选命名出站没有 TCP 能力"));
-        }
+        let (service, mode, ledger) = self.admit(
+            identity,
+            context,
+            Some((original.target(), Network::Tcp)),
+            |service| {
+                service
+                    .capabilities
+                    .tcp
+                    .then_some(())
+                    .ok_or(Error::Unsupported("所选命名出站没有 TCP 能力"))
+            },
+            Some(original.clone()),
+            Kind::Tcp,
+        )?;
         let scoped = context.scoped(
             &service.host,
             identity.source(),
@@ -441,9 +481,6 @@ impl Dispatcher {
             identity.cancel(),
             mode,
         );
-        let ledger =
-            self.telemetry
-                .open(identity, &service.id, Some(original.clone()), Kind::Tcp)?;
         let lease = FlowLease::new(&self.telemetry, ledger.clone(), &scoped, identity);
         let completion = lease.clone();
         Ok(FlowOpen::tcp(
@@ -456,14 +493,15 @@ impl Dispatcher {
                     TargetPolicy::Local => {
                         scoped
                             .run(async {
-                                let candidates = self
-                                    .resolve(
-                                        identity.source(),
-                                        &service.id,
-                                        original.target(),
-                                        mode,
-                                    )
-                                    .await?;
+                                let candidates = recorded_candidates(
+                                    self.resolver.as_ref(),
+                                    &self.telemetry,
+                                    identity.source(),
+                                    &service.id,
+                                    original.target(),
+                                    mode,
+                                )
+                                .await?;
                                 let mut last = Error::InvalidAddress;
                                 for (index, target) in candidates.iter().enumerate() {
                                     let remaining = scoped.remaining();
@@ -516,13 +554,20 @@ impl Dispatcher {
         original: OriginalTarget,
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, FixedUdpFlow>> {
-        if context.cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        let (service, mode) = self.route(identity, Some((original.target(), Network::Udp)))?;
-        if !service.capabilities.udp {
-            return Err(Error::Unsupported("所选命名出站没有固定 UDP 能力"));
-        }
+        let (service, mode, ledger) = self.admit(
+            identity,
+            context,
+            Some((original.target(), Network::Udp)),
+            |service| {
+                service
+                    .capabilities
+                    .udp
+                    .then_some(())
+                    .ok_or(Error::Unsupported("所选命名出站没有固定 UDP 能力"))
+            },
+            Some(original.clone()),
+            Kind::FixedUdp,
+        )?;
         let scoped = context.scoped(
             &service.host,
             identity.source(),
@@ -530,12 +575,6 @@ impl Dispatcher {
             identity.cancel(),
             mode,
         );
-        let ledger = self.telemetry.open(
-            identity,
-            &service.id,
-            Some(original.clone()),
-            Kind::FixedUdp,
-        )?;
         let lease = FlowLease::new(&self.telemetry, ledger.clone(), &scoped, identity);
         let completion = lease.clone();
         Ok(FlowOpen::fixed_udp(
@@ -544,10 +583,16 @@ impl Dispatcher {
                     .run(async {
                         let target = match service.policy {
                             TargetPolicy::Remote => original.target().clone(),
-                            TargetPolicy::Local => self
-                                .resolve(identity.source(), &service.id, original.target(), mode)
-                                .await?
-                                .remove(0),
+                            TargetPolicy::Local => recorded_candidates(
+                                self.resolver.as_ref(),
+                                &self.telemetry,
+                                identity.source(),
+                                &service.id,
+                                original.target(),
+                                mode,
+                            )
+                            .await?
+                            .remove(0),
                         };
                         let mut channel = service.backend.connect_udp(&target, &scoped).await?;
                         let observed = if service.policy == TargetPolicy::Local {
@@ -581,13 +626,19 @@ impl Dispatcher {
         identity: &'a SessionIdentity,
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, UdpAssociation>> {
-        if context.cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        let (service, mode) = self.route(identity, None)?;
-        if !service.association {
-            return Err(Error::Unsupported("所选命名出站没有多目标 UDP 关联能力"));
-        }
+        let (service, mode, ledger) = self.admit(
+            identity,
+            context,
+            None,
+            |service| {
+                service
+                    .association
+                    .then_some(())
+                    .ok_or(Error::Unsupported("所选命名出站没有多目标 UDP 关联能力"))
+            },
+            None,
+            Kind::UdpAssociation,
+        )?;
         let scoped = context.scoped(
             &service.host,
             identity.source(),
@@ -595,9 +646,6 @@ impl Dispatcher {
             identity.cancel(),
             mode,
         );
-        let ledger = self
-            .telemetry
-            .open(identity, &service.id, None, Kind::UdpAssociation)?;
         let lease = FlowLease::new(&self.telemetry, ledger.clone(), &scoped, identity);
         let completion = lease.clone();
         Ok(FlowOpen::association(
@@ -660,6 +708,42 @@ impl SessionDispatcher for Dispatcher {
     }
 }
 
+/// 外层超时或取消会直接丢弃查询 future，走不到结果分支，由 Drop 记为中止。
+struct PendingLookup<'a> {
+    telemetry: &'a Telemetry,
+    source: &'a kerlico_core::Source,
+    outbound: &'a OutId,
+    target: &'a Destination,
+    settled: bool,
+}
+impl Drop for PendingLookup<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.telemetry
+                .dns_aborted(self.source, self.outbound, self.target);
+        }
+    }
+}
+async fn recorded_candidates(
+    resolver: &dyn Resolver,
+    telemetry: &Telemetry,
+    source: &kerlico_core::Source,
+    outbound: &OutId,
+    target: &Destination,
+    mode: FamilyMode,
+) -> Result<Vec<Destination>> {
+    let mut pending = PendingLookup {
+        telemetry,
+        source,
+        outbound,
+        target,
+        settled: false,
+    };
+    let result = candidates(resolver, target, mode).await;
+    pending.settled = true;
+    telemetry.dns_event(source, outbound, target, &result);
+    result
+}
 async fn candidates(
     resolver: &dyn Resolver,
     target: &Destination,
@@ -737,12 +821,17 @@ impl DatagramAssociationSender for LocalAssociationSender {
                     return Err(Error::ResourceLimit);
                 }
                 let operation = self.context.new_operation(self.context.timeout);
-                let result = operation
-                    .run(candidates(self.resolver.as_ref(), target, self.mode))
-                    .await;
-                self.telemetry
-                    .dns_event(&self.source, &self.outbound, target, &result);
-                let resolved = result?.remove(0);
+                let resolved = operation
+                    .run(recorded_candidates(
+                        self.resolver.as_ref(),
+                        &self.telemetry,
+                        &self.source,
+                        &self.outbound,
+                        target,
+                        self.mode,
+                    ))
+                    .await?
+                    .remove(0);
                 self.ledger.bind_datagram_target(target, resolved.clone());
                 self.targets.insert(target.clone(), resolved);
             }

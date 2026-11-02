@@ -427,6 +427,9 @@ impl Registry {
         if routes.outbounds().any(|id| !profiles.contains_key(id)) {
             return Err(Error::Config("路由规则引用的出站不存在".into()));
         }
+        if routes.users().any(|id| !accounts.contains_key(id)) {
+            return Err(Error::Config("路由规则引用的管理账户不存在".into()));
+        }
         let mut tags = BTreeSet::new();
         let mut listeners = BTreeSet::new();
         let mut bindings = Vec::new();
@@ -454,7 +457,12 @@ impl Registry {
             ) = profiles
                 .get(&outbound)
                 .ok_or_else(|| Error::Config("引用的出站不存在".into()))?;
-            if spec.require_remote_eof && (!tcp || !tcp_eof) {
+            let routed_without_eof = || {
+                routes
+                    .outbounds_reaching(&node, Network::Tcp)
+                    .any(|id| profiles.get(id).is_none_or(|(routed, _)| !routed.tcp_eof))
+            };
+            if spec.require_remote_eof && (!tcp || !tcp_eof || routed_without_eof()) {
                 return Err(Error::Config("出站不提供所需的远端 EOF 能力".into()));
             }
             if tcp && !supports_tcp || !tcp && !udp {
@@ -525,6 +533,11 @@ impl Registry {
                 local,
             };
             let protocol = factory.build(&input)?;
+            if maximum <= protocol.reserved_sessions() {
+                return Err(Error::Config(
+                    "节点会话上限必须大于入口常驻占用的会话数".into(),
+                ));
+            }
             if protocol.requires_loopback() && !spec.listen.ip().is_loopback() {
                 return Err(Error::Config("当前节点组合仅允许回环监听".into()));
             }
@@ -587,6 +600,14 @@ impl Registry {
                 protocol,
                 max_sessions: maximum,
             });
+        }
+        if routes.nodes().any(|id| !tags.contains(id)) {
+            return Err(Error::Config("路由规则引用的入站不存在".into()));
+        }
+        if let Some(control) = &config.control
+            && listeners.contains(&(control.listen, true))
+        {
+            return Err(Error::Config("控制接口与入站监听地址重复".into()));
         }
         Ok(PreparedConfig {
             history: config.telemetry,

@@ -16,8 +16,24 @@ use std::{
 pub struct OnlineSource {
     pub user: Option<String>,
     pub node: String,
-    pub address: Option<IpAddr>,
+    /// 已遮罩到 `/24` 或 `/48` 的来源网段。
+    pub address: Option<String>,
     pub active_flows: usize,
+}
+
+pub(crate) fn masked_source(address: IpAddr) -> String {
+    match address {
+        IpAddr::V4(ip) => {
+            let mut bytes = ip.octets();
+            bytes[3] = 0;
+            format!("{}/24", std::net::Ipv4Addr::from(bytes))
+        }
+        IpAddr::V6(ip) => {
+            let mut bytes = ip.octets();
+            bytes[6..].fill(0);
+            format!("{}/48", std::net::Ipv6Addr::from(bytes))
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,20 +87,10 @@ pub struct StoredFlow {
 impl StoredFlow {
     pub fn from_record(record: &FlowRecord, mask_source: bool) -> Self {
         let observed_source = record.observed_source.map(|address| {
-            if !mask_source {
-                return address.to_string();
-            }
-            match address.ip() {
-                IpAddr::V4(ip) => {
-                    let mut bytes = ip.octets();
-                    bytes[3] = 0;
-                    format!("{}/24", std::net::Ipv4Addr::from(bytes))
-                }
-                IpAddr::V6(ip) => {
-                    let mut bytes = ip.octets();
-                    bytes[6..].fill(0);
-                    format!("{}/48", std::net::Ipv6Addr::from(bytes))
-                }
+            if mask_source {
+                masked_source(address.ip())
+            } else {
+                address.to_string()
             }
         });
         Self {
@@ -664,6 +670,53 @@ impl HistoryReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dropped_event_count_is_persisted_without_a_later_event() {
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let telemetry = Telemetry::new(4);
+        let mut writer = HistoryWriter::open(
+            directory.path(),
+            telemetry.clone(),
+            true,
+            true,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        writer.record_events(true, true).unwrap();
+        let source = Source::Local {
+            node: NodeId::parse("entry").unwrap(),
+        };
+        let outbound = OutId::parse("exit").unwrap();
+        let target = kerlico_core::Destination::new("a.example", 1).unwrap();
+        let overflow = 7;
+        for _ in 0..4096 + overflow {
+            telemetry.dns_event(&source, &outbound, &target, &Ok(Vec::new()));
+        }
+        writer.checkpoint().unwrap();
+        writer.checkpoint().unwrap();
+
+        let reader = HistoryReader::open(directory.path()).unwrap();
+        let (mut after, mut dropped, mut rows) = (0, 0, 0);
+        loop {
+            let page = reader
+                .events(&HistoryQuery {
+                    after,
+                    limit: 4096,
+                    ..Default::default()
+                })
+                .unwrap();
+            let Some((last, _)) = page.last() else { break };
+            after = *last;
+            rows += page.iter().filter(|(_, event)| event.kind == "dns").count();
+            dropped += page
+                .iter()
+                .map(|(_, event)| event.dropped_before)
+                .sum::<u64>();
+        }
+        assert_eq!(rows, 4096);
+        assert_eq!(dropped, overflow as u64);
+    }
+
     #[test]
     fn initialization_crash_child() {
         if let Some(directory) = std::env::var_os("KERLICO_HISTORY_CRASH_DIRECTORY") {
