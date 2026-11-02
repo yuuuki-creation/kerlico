@@ -3272,6 +3272,7 @@ dependencies = [
  "kerlico-vless",
  "kerlico-vmess",
  "kerlico-wireguard",
+ "kerlico-zerotier",
  "serde_json",
  "tempfile",
  "tokio",
@@ -4045,6 +4046,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kerlico-zerotier"
+version = "1.2.0"
+dependencies = [
+ "kerlico-config",
+ "kerlico-core",
+ "kerlico-wireguard",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zerotier-node",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4173,6 +4187,12 @@ name = "lru_time_cache"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9106e1d747ffd48e6be5bb2d97fa706ed25b144fbee4d5c02eae110cd8d6badd"
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 
 [[package]]
 name = "managed"
@@ -9586,6 +9606,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "zerotier-node"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek 2.2.0",
+ "lz4_flex",
+ "poly1305 0.8.0",
+ "rand 0.8.8",
+ "salsa20",
+ "sha2 0.10.9",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

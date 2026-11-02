@@ -31,6 +31,7 @@ default = [
     "protocol-sudoku",
     "protocol-tor",
     "protocol-wireguard",
+    "protocol-zerotier",
     "protocol-tun",
     "warp",
 ]
@@ -59,6 +60,7 @@ protocol-naive = ["dep:kerlico-naive"]
 protocol-sudoku = ["dep:kerlico-sudoku"]
 protocol-tor = ["dep:kerlico-tor"]
 protocol-wireguard = ["dep:kerlico-wireguard"]
+protocol-zerotier = ["dep:kerlico-zerotier"]
 anytls = ["protocol-anytls"]
 ss2022 = ["protocol-ss2022"]
 
@@ -94,6 +96,7 @@ kerlico-naive = { workspace = true, optional = true }
 kerlico-sudoku = { workspace = true, optional = true }
 kerlico-tor = { workspace = true, optional = true }
 kerlico-wireguard = { workspace = true, optional = true }
+kerlico-zerotier = { workspace = true, optional = true }
 tokio.workspace = true
 clap.workspace = true
 serde_json.workspace = true
