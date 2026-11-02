@@ -12,6 +12,7 @@ run() { ssh -F "${KERLICO_SSH_CONFIG:-.private/machines/ssh_config}" -o BatchMod
 
 git -c core.autocrlf=false archive "$rev" | gzip | run "rm -rf '$root/src' && mkdir -p '$root/src' && tar -xz -C '$root/src' && cd '$root/src' \
   && export PATH=\"\$HOME/.cargo/bin:\$PATH\" CARGO_TARGET_DIR='$root/target' CARGO_INCREMENTAL=0 \
+  && export PROTOC=\"\$(bash tools/fetch_protoc.sh '${root%/*}')\" \
   && nice -n 10 cargo build --release --locked -p kerlico \
   && python3 tools/gen_third_party_notices.py > '$root/target/release/THIRD_PARTY_NOTICES.txt' \
   && '$root/target/release/kerlico' --lang en check -c examples/config-v2-minimal.json"

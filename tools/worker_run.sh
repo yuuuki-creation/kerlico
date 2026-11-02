@@ -26,7 +26,7 @@ status=0
 run "cd '$root/src' && export CARGO_TARGET_DIR='$root/target' CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 \
   CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUST_TEST_THREADS=1 \
   KERLICO_TEST_ASSETS_DIR='${root%/gate}/resume-test-assets' KERLICO_WORKER_ALIAS='$alias' \
-  PATH=\"\$HOME/.cargo/bin:\$PATH\"; $*" || status=$?
+  PATH=\"\$HOME/.cargo/bin:\$PATH\" PROTOC=\"\$(bash tools/fetch_protoc.sh '${root%/gate}')\"; $*" || status=$?
 
 if [ "$pull" = 1 ]; then
   run "cd '$root/src' && find . -type f -newer '$root/marker' -print0 | tar --null -T - -cz" | tar -xz

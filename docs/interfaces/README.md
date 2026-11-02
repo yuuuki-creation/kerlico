@@ -46,6 +46,7 @@
 | [Sudoku](sudoku.md) | 记录/表/流/UoT/多路复用与六类载体双端 |
 | [Tor](tor.md) | 基于 `arti-client` 的原生客户端 TCP 出站、目录权限校验与电路隔离 |
 | [WireGuard](wireguard.md) | 基于 Boringtun + smoltcp 的原生双端 TCP/UDP 隧道与多用户 peer 隔离 |
+| [EasyTier](easytier.md) | 以 peer 身份加入 EasyTier 网络，经用户态栈访问虚拟 IP 与子网代理的客户端出站 |
 
 ## 集成与专项验证记录
 

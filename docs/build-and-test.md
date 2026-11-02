@@ -19,6 +19,8 @@
 | `perf-02` | 4 核 / 8 GB 内存 | Debian 12 (`x86_64`, Rust `1.99.1`, Docker) | Release 构建、系统兼容性验证、固定上游对端互通测试分片 |
 | `perf-03` | 8 核 / 8 GB 内存 | Debian 13 (`x86_64`, Rust `1.99.1`, Docker) | 整树全目标测试、大流量/高并发回归与隔离性能采样 |
 
+默认构建依赖 `protoc`（上游 EasyTier 的 `build.rs` 需要）。`tools/worker_run.sh`、`worker_gate.sh`、`worker_release.sh` 通过 `tools/fetch_protoc.sh` 把固定版本下载到工作区并设置 `PROTOC`。
+
 启动测试或构建作业前先检查当前机器负载与可用内存，合理控制并发度；性能采样期间避开其他高负载作业并记录环境参数。
 
 ## 本地私有凭证隔离（`.private/machines/`）

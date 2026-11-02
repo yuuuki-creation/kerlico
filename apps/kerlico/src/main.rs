@@ -91,6 +91,8 @@ fn registry() -> Result<Registry> {
         registry.register(kerlico_wireguard::WireGuardFactory)?;
         registry.register_node(kerlico_wireguard::WireGuardNodeFactory)?;
     }
+    #[cfg(feature = "protocol-easytier")]
+    registry.register(kerlico_easytier::EasyTierFactory)?;
     #[cfg(feature = "protocol-tun")]
     registry.register_node(kerlico_tun::TunNodeFactory)?;
     #[cfg(feature = "protocol-vless")]
