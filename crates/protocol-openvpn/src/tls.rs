@@ -21,6 +21,14 @@ struct Verifier {
     algorithms: WebPkiSupportedAlgorithms,
     common_name: Option<String>,
 }
+/// webpki 只在证书带 EKU 扩展时才检查 serverAuth；`remote-cert-tls server` 要求扩展存在，
+/// 否则同一 CA 签发的无 EKU 证书也能冒充服务端并拿到用户名密码。
+fn has_server_auth(certificate: &[u8]) -> bool {
+    let Ok((_, parsed)) = x509_parser::certificate::X509Certificate::from_der(certificate) else {
+        return false;
+    };
+    matches!(parsed.extended_key_usage(), Ok(Some(usage)) if usage.value.server_auth)
+}
 fn subject_matches(certificate: &[u8], expected: &str) -> bool {
     let Ok((_, parsed)) = x509_parser::certificate::X509Certificate::from_der(certificate) else {
         return false;
@@ -49,6 +57,11 @@ impl ServerCertVerifier for Verifier {
             now,
             self.algorithms.all,
         )?;
+        if !has_server_auth(end_entity.as_ref()) {
+            return Err(rustls::Error::InvalidCertificate(
+                CertificateError::InvalidPurpose,
+            ));
+        }
         if let Some(expected) = &self.common_name
             && !subject_matches(end_entity.as_ref(), expected)
         {
@@ -125,4 +138,47 @@ pub(crate) fn client_config(
     config.resumption = rustls::client::Resumption::disabled();
     config.enable_sni = false;
     Ok(Arc::new(config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcgen::{
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    };
+
+    fn accepts(usages: Vec<ExtendedKeyUsagePurpose>) -> bool {
+        let mut authority = CertificateParams::new(Vec::<String>::new()).unwrap();
+        authority.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let authority_key = KeyPair::generate().unwrap();
+        let root = authority.self_signed(&authority_key).unwrap();
+        let mut leaf = CertificateParams::new(vec!["server.invalid".to_owned()]).unwrap();
+        leaf.extended_key_usages = usages;
+        let leaf_key = KeyPair::generate().unwrap();
+        let certificate = leaf
+            .signed_by(&leaf_key, &Issuer::from_params(&authority, &authority_key))
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(root.der().clone()).unwrap();
+        Verifier {
+            roots,
+            algorithms: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            common_name: None,
+        }
+        .verify_server_cert(
+            certificate.der(),
+            &[],
+            &ServerName::try_from("openvpn.invalid").unwrap(),
+            &[],
+            UnixTime::now(),
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn server_certificate_must_carry_the_server_auth_extended_key_usage() {
+        assert!(accepts(vec![ExtendedKeyUsagePurpose::ServerAuth]));
+        assert!(!accepts(vec![ExtendedKeyUsagePurpose::ClientAuth]));
+        assert!(!accepts(Vec::new()));
+    }
 }

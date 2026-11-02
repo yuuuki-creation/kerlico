@@ -13,7 +13,7 @@ use crate::{
     udp,
 };
 use boringtun::{
-    noise::{Packet, Tunn, handshake::parse_handshake_anon},
+    noise::{Packet, TunnResult, handshake::parse_handshake_anon, rate_limiter::RateLimiter},
     x25519::{PublicKey, StaticSecret},
 };
 use kerlico_core::{
@@ -196,24 +196,59 @@ impl PeerCrypto {
         self.0.tick()
     }
 }
-pub enum PacketOwner {
+pub enum PacketRoute {
     /// 握手发起方的静态公钥，已由本端私钥解密认证。
     Initiator([u8; 32]),
     /// 接收方序号，等于 [`PeerCrypto::new`] 的 `index`。
     Index(u32),
+    /// 握手超过限速且未带有效 MAC2：把 cookie 回复原路发回，对端证明地址后重试。
+    CookieReply(Vec<u8>),
 }
-/// 判断无来源身份的 UDP 密文属于哪个对端。
-pub fn packet_owner(private: &[u8; 32], packet: &[u8]) -> Option<PacketOwner> {
-    match Tunn::parse_incoming_packet(packet).ok()? {
-        Packet::HandshakeInit(packet) => {
-            let secret = StaticSecret::from(*private);
-            let public = PublicKey::from(&secret);
-            let half = parse_handshake_anon(&secret, &public, &packet).ok()?;
-            Some(PacketOwner::Initiator(half.peer_static_public))
+/// 与 WireGuard 服务端入站相同的每秒握手上限。
+const HANDSHAKE_LIMIT: u64 = 100;
+/// 判断无来源身份的 UDP 密文属于哪个对端。握手在 DH 之前先校验 MAC1 并限速。
+pub struct PacketClassifier {
+    secret: StaticSecret,
+    public: PublicKey,
+    limiter: RateLimiter,
+}
+impl PacketClassifier {
+    pub fn new(private: [u8; 32]) -> Self {
+        let secret = StaticSecret::from(private);
+        let public = PublicKey::from(&secret);
+        let limiter = RateLimiter::new(&public, HANDSHAKE_LIMIT);
+        Self {
+            secret,
+            public,
+            limiter,
         }
-        Packet::HandshakeResponse(packet) => Some(PacketOwner::Index(packet.receiver_idx >> 8)),
-        Packet::PacketCookieReply(packet) => Some(PacketOwner::Index(packet.receiver_idx >> 8)),
-        Packet::PacketData(packet) => Some(PacketOwner::Index(packet.receiver_idx >> 8)),
+    }
+    /// `source` 是外层来源地址，用于 cookie。
+    pub fn classify(&self, source: IpAddr, packet: &[u8]) -> Option<PacketRoute> {
+        let mut cookie = [0; 64];
+        let parsed = match self
+            .limiter
+            .verify_packet(Some(source), packet, &mut cookie)
+        {
+            Ok(parsed) => parsed,
+            Err(TunnResult::WriteToNetwork(reply)) => {
+                return Some(PacketRoute::CookieReply(reply.to_vec()));
+            }
+            Err(_) => return None,
+        };
+        match parsed {
+            Packet::HandshakeInit(packet) => {
+                let half = parse_handshake_anon(&self.secret, &self.public, &packet).ok()?;
+                Some(PacketRoute::Initiator(half.peer_static_public))
+            }
+            Packet::HandshakeResponse(packet) => Some(PacketRoute::Index(packet.receiver_idx >> 8)),
+            Packet::PacketCookieReply(packet) => Some(PacketRoute::Index(packet.receiver_idx >> 8)),
+            Packet::PacketData(packet) => Some(PacketRoute::Index(packet.receiver_idx >> 8)),
+        }
+    }
+    /// 每秒归零限速计数；调用方的定时器可以更频繁地调用。
+    pub fn reset_count(&self) {
+        self.limiter.reset_count();
     }
 }
 
@@ -280,5 +315,53 @@ async fn next_packet(stack: &SharedStack) -> Result<Vec<u8>> {
             _ = stack.notify.notified() => {},
             _ = timer.tick() => {},
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SOURCE: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
+
+    /// 返回响应方私钥、发起方公钥和一个发给响应方的握手发起包。
+    fn handshake_init() -> ([u8; 32], [u8; 32], Vec<u8>) {
+        let responder = [1; 32];
+        let responder_public = *PublicKey::from(&StaticSecret::from(responder)).as_bytes();
+        let initiator = [2; 32];
+        let initiator_public = *PublicKey::from(&StaticSecret::from(initiator)).as_bytes();
+        let mut peer = PeerCrypto::new(initiator, responder_public, 1);
+        let init = peer.encrypt(&[0x45; 20]).unwrap().unwrap();
+        (responder, initiator_public, init)
+    }
+
+    #[test]
+    fn handshake_with_a_bad_mac1_is_dropped_before_any_diffie_hellman() {
+        let (responder, initiator_public, init) = handshake_init();
+        let classifier = PacketClassifier::new(responder);
+        assert!(matches!(
+            classifier.classify(SOURCE, &init),
+            Some(PacketRoute::Initiator(public)) if public == initiator_public
+        ));
+        let mut forged = init.clone();
+        let mac1 = forged.len() - 32;
+        forged[mac1] ^= 1;
+        assert!(classifier.classify(SOURCE, &forged).is_none());
+    }
+
+    #[test]
+    fn handshake_flood_gets_cookie_replies_instead_of_diffie_hellman() {
+        let (responder, _, init) = handshake_init();
+        let classifier = PacketClassifier::new(responder);
+        for _ in 0..HANDSHAKE_LIMIT {
+            assert!(matches!(
+                classifier.classify(SOURCE, &init),
+                Some(PacketRoute::Initiator(_))
+            ));
+        }
+        assert!(matches!(
+            classifier.classify(SOURCE, &init),
+            Some(PacketRoute::CookieReply(reply)) if reply[0] == 3
+        ));
     }
 }

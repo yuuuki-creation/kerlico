@@ -47,28 +47,34 @@ pub(crate) struct KeyMessage<'a> {
     pub peer_info: &'a str,
 }
 
-pub(crate) fn write_key_method(source: &ClientKeySource, message: &KeyMessage) -> Vec<u8> {
+pub(crate) fn write_key_method(source: &ClientKeySource, message: &KeyMessage) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(256 + message.options.len() + message.peer_info.len());
     out.extend_from_slice(&[0; 4]);
     out.push(KEY_METHOD_2);
     out.extend_from_slice(&source.pre_master);
     out.extend_from_slice(&source.random1);
     out.extend_from_slice(&source.random2);
-    write_string(&mut out, Some(message.options));
-    write_string(&mut out, message.username);
-    write_string(&mut out, message.password);
-    write_string(&mut out, Some(message.peer_info));
-    out
+    write_string(&mut out, Some(message.options))?;
+    write_string(&mut out, message.username)?;
+    write_string(&mut out, message.password)?;
+    write_string(&mut out, Some(message.peer_info))?;
+    Ok(out)
 }
+/// 线上长度字段是 16 位且计入结尾 NUL，这是 key-method 2 字符串的最大字节数。
+pub(crate) const MAX_STRING: usize = u16::MAX as usize - 1;
 /// 上游 `write_string` 把结尾 NUL 计入长度；缺省字段写零长度。
-fn write_string(out: &mut Vec<u8>, value: Option<&str>) {
+fn write_string(out: &mut Vec<u8>, value: Option<&str>) -> Result<()> {
     let Some(value) = value else {
         out.extend_from_slice(&[0, 0]);
-        return;
+        return Ok(());
     };
+    if value.len() > MAX_STRING {
+        return Err(Error::Protocol("OpenVPN 密钥交换消息不合法"));
+    }
     out.extend_from_slice(&(value.len() as u16 + 1).to_be_bytes());
     out.extend_from_slice(value.as_bytes());
     out.push(0);
+    Ok(())
 }
 
 /// 消息不完整时返回 `None`。选项串之后的字段对客户端没有用途，不解析。
@@ -201,7 +207,8 @@ mod tests {
                 password: None,
                 peer_info: "IV_PROTO=10\n",
             },
-        );
+        )
+        .unwrap();
         assert_eq!(wire[..5], [0, 0, 0, 0, 2]);
         assert_eq!(wire[5..53], [1; 48]);
         assert_eq!(wire[53..85], [2; 32]);
@@ -210,6 +217,15 @@ mod tests {
             wire[117..],
             *b"\0\x03V4\0\0\x02u\0\0\0\0\x0dIV_PROTO=10\n\0"
         );
+    }
+
+    #[test]
+    fn key_method_strings_must_fit_the_length_field_with_their_nul() {
+        let mut out = Vec::new();
+        write_string(&mut out, Some(&"a".repeat(MAX_STRING))).unwrap();
+        assert_eq!(out[..2], [0xff, 0xff]);
+        assert_eq!(out.len(), 2 + MAX_STRING + 1);
+        assert!(write_string(&mut Vec::new(), Some(&"a".repeat(MAX_STRING + 1))).is_err());
     }
 
     #[test]

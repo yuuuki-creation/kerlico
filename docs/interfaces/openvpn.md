@@ -37,7 +37,7 @@
 | `bind` | 无 | 外层 socket 本地地址。 |
 | `ca_pem` | 必填 | 校验服务端证书的 CA，PEM 文本，对应 `.ovpn` 的 `<ca>`。 |
 | `cert_pem`、`key_pem` | 无 | 客户端证书与私钥，必须成对。私钥不能加密。 |
-| `username`、`password` | 无 | 必须成对。证书和用户名密码至少提供一种。 |
+| `username`、`password` | 无 | 必须成对，各不超过 65534 字节。证书和用户名密码至少提供一种。 |
 | `tls_auth` | 无 | `{"key": "<静态密钥文本>", "direction": 1, "digest": "SHA1"}`。`direction` 省略表示双向共用，`digest` 默认 `SHA1`，对应 `--auth`。与 `tls_crypt_key` 互斥。 |
 | `tls_crypt_key` | 无 | `tls-crypt` 静态密钥文本。 |
 | `ciphers` | 全部三种 | 允许的数据通道算法，首项在服务端不推送 `cipher` 时使用。 |
@@ -47,18 +47,20 @@
 | `ping_secs` | `10` | 保活间隔，服务端推送 `ping` 时覆盖，`0` 关闭。 |
 | `ping_restart_secs` | `0` | 重连判定时长，服务端推送 `ping-restart` 时覆盖，`0` 关闭。 |
 | `reneg_secs` | `3600` | 本端发起换钥的间隔，`0` 关闭。序号接近 32 位上限时总会换钥。 |
-| `handshake_timeout_secs` | `60` | 单次握手或换钥的时限，对应 `hand-window`。 |
+| `handshake_timeout_secs` | `60` | 单次握手或换钥的时限，对应 `hand-window`，范围 `1`–`3600`。 |
 
 ## 安全性质
 
-- 服务端证书校验信任链、有效期与 serverAuth 扩展用途（等同 `remote-cert-tls server`）。OpenVPN 证书通常不含主机名，因此不校验 `remote` 与证书的主机名匹配。未设置 `verify_x509_name` 时，同一 CA 签发的任何 serverAuth 证书都能通过。
+- 服务端证书校验信任链、有效期，并要求叶证书带 serverAuth 扩展用途（EKU）。不带 EKU 扩展的证书被拒绝，只有旧式 `nsCertType=server` 的证书同样被拒绝。这对应 `remote-cert-tls server` 的 EKU 部分，不检查上游同时比较的 keyUsage。OpenVPN 证书通常不含主机名，因此不校验 `remote` 与证书的主机名匹配。未设置 `verify_x509_name` 时，同一 CA 签发的任何 serverAuth 证书都能通过。
 - 控制通道包装的认证和数据通道的 AEAD 都带防重放窗口（128 个序号）。认证失败的包直接丢弃，不影响会话。
+- `tls-auth` 与 `tls-crypt` 的静态密钥长期不变，旧会话的包重放后仍能通过认证。因此只有回显本次随机会话 ID 的包才能绑定对端会话，之后只接受该会话的包；只有确认属于本会话的包才推进防重放窗口。窗口同时比较对端时间戳，早于已接受时间戳的包被丢弃。时间戳只与对端自身比较，不与本机时钟比较，两端时钟不需要同步。无包装时控制包没有认证和时间戳，上述防重放不适用，服务端身份只靠 TLS 证书保证。
 
 ## 目标策略与连接状态
 
 - 出站声明 `TargetPolicy::Local`：隧道只承载字面 IP，域名由共享 `Dispatcher` 在本地解析。服务端推送的 `dhcp-option DNS` 不生效。
 - 启动不等待握手。后台会话连接服务端，业务连接在隧道就绪前等待，直到本次连接超时；超时时返回上次会话的失败原因。
 - 会话失败后按 1 秒到 60 秒指数退避重连。每次重连建立新 IP 栈，旧连接上的隧道内流随之结束。
+- TCP 载体被对端背压时，读取、定时器和换钥继续运行，隧道暂停取新包。发送队列连续 60 秒写不完时判定对端失效并重连，不依赖服务端是否推送 `ping-restart`。
 - 收到 `AUTH_FAILED` 或 `HALT` 时不再重试，命名出站进入失败状态，避免反复认证导致账户被锁。收到 `RESTART` 时按普通失败重连。
 
 ## 未实现
@@ -67,7 +69,7 @@
 
 ## 互通验证
 
-`tools/interop_openvpn.py` 在 worker 的容器内运行 Alpine 打包的官方 OpenVPN 2.6.20 与 2.4.12 服务端，通过 `kerlico run` 的 SOCKS5 本地入站发送真实 TCP 与 UDP，并检查回显字节。用例覆盖两种载体、三种包装、三种算法、三种身份组合、内层 IPv6、双向换钥、服务端重启后的重连，以及错误密码、不受信 CA 和错误 CN 被拒绝。
+`tools/interop_openvpn.py` 在 worker 的容器内运行 Alpine 打包的官方 OpenVPN 2.6.20 与 2.4.12 服务端，通过 `kerlico run` 的 SOCKS5 本地入站发送真实 TCP 与 UDP，并检查回显字节。用例覆盖两种载体、三种包装、三种算法、三种身份组合、内层 IPv6、双向换钥、服务端重启后的重连，以及错误密码、不受信 CA、错误 CN 和同 CA 签发的无 EKU 证书被拒绝。
 
 ```sh
 cargo build -p kerlico --no-default-features --features protocol-socks,protocol-openvpn

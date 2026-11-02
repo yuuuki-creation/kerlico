@@ -60,6 +60,8 @@ CASES = [
     {"name": "wrong-password-is-rejected", "proto": "udp", "wrap": None, "cipher": "AES-256-GCM", "auth": "password", "client": {"password": "wrong"}, "refused": True},
     {"name": "untrusted-server-certificate-is-rejected", "proto": "udp", "wrap": None, "cipher": "AES-256-GCM", "auth": "certificate", "untrusted": True, "refused": True},
     {"name": "wrong-x509-name-is-rejected", "proto": "udp", "wrap": None, "cipher": "AES-256-GCM", "auth": "certificate", "client": {"verify_x509_name": "other"}, "refused": True},
+    {"name": "server-auth-certificate-without-name-check", "proto": "udp", "wrap": None, "cipher": "AES-256-GCM", "auth": "certificate", "client": {"verify_x509_name": None}},
+    {"name": "certificate-without-eku-is-rejected", "proto": "udp", "wrap": None, "cipher": "AES-256-GCM", "auth": "certificate", "client": {"verify_x509_name": None}, "server_cert": "server-no-eku", "refused": True},
 ]
 
 
@@ -78,6 +80,7 @@ def create_pki(root):
     for authority in ["ca", "other-ca"]:
         run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", root / f"{authority}.key", "-out", root / f"{authority}.crt", "-subj", f"/CN={authority}", "-days", "30"], root / "pki.log")
     certificate("server", "ca", "extendedKeyUsage=serverAuth")
+    certificate("server-no-eku", "ca", "basicConstraints=CA:FALSE")
     certificate("client", "ca", "extendedKeyUsage=clientAuth")
     lines = [os.urandom(16).hex() for _ in range(16)]
     (root / "static.key").write_text("-----BEGIN OpenVPN Static key V1-----\n" + "\n".join(lines) + "\n-----END OpenVPN Static key V1-----\n")
@@ -96,10 +99,11 @@ def build_image(root, label):
 
 
 def server_config(case, label):
+    certificate = case.get("server_cert", "server")
     lines = [
         "dev tun", "topology subnet", "server 10.8.0.0 255.255.255.0", "port 1194",
         "proto tcp-server" if case["proto"] == "tcp" else "proto udp",
-        "ca /keys/ca.crt", "cert /keys/server.crt", "key /keys/server.key", "dh none", "verb 4",
+        "ca /keys/ca.crt", f"cert /keys/{certificate}.crt", f"key /keys/{certificate}.key", "dh none", "verb 4",
     ]
     if label == "legacy":
         lines += [f"ncp-ciphers {case['cipher']}", f"cipher {case['cipher']}"]

@@ -243,18 +243,23 @@ impl Session {
         let Ok(body) = decode_body(opcode, &unwrapped.body) else {
             return Ok(());
         };
-        match self.remote {
-            Some(remote) if remote != unwrapped.session => return Ok(()),
-            None if opcode != Opcode::HardResetServer => return Ok(()),
-            None => self.remote = Some(unwrapped.session),
-            Some(_) => {}
-        }
         if body
             .ack_session
             .is_some_and(|session| session != self.local)
         {
             return Ok(());
         }
+        // 只有回显本端随机会话 ID 的包才能绑定对端：静态密钥下旧会话的包可被重放，但它们回显的是旧 ID。
+        // 上游 2.4 重传 reset 时不带 ACK，确认由单独的 P_ACK 送达，所以不限定操作码。
+        match self.remote {
+            Some(remote) if remote != unwrapped.session => return Ok(()),
+            None if body.ack_session.is_none() => return Ok(()),
+            _ => {}
+        }
+        if !self.wrap.commit(unwrapped.replay) {
+            return Ok(());
+        }
+        self.remote = Some(unwrapped.session);
         if opcode == Opcode::SoftReset
             && key_id != self.negotiation.key_id
             && key_id == self.next_key_id
@@ -384,7 +389,7 @@ impl Session {
                 .or(credentials.map(|value| value.password.as_str())),
             peer_info: &self.settings.peer_info,
         };
-        let bytes = Zeroizing::new(write_key_method(&self.negotiation.source, &message));
+        let bytes = Zeroizing::new(write_key_method(&self.negotiation.source, &message)?);
         self.negotiation.write_plaintext(&bytes)
     }
 
@@ -526,5 +531,134 @@ impl Session {
             let body = encode_body(&acks, remote.as_ref(), None, &[]);
             outbox.push(wrap.wrap(Opcode::Ack.byte(key_id), local, &body, time));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        tls::client_config,
+        wrap::{AuthDigest, StaticKey},
+    };
+
+    const TIME: u32 = 1_000_000;
+    const REMOTE: SessionId = [1; 8];
+    const STALE: SessionId = [9; 8];
+
+    fn key() -> StaticKey {
+        let body: String = (0..256)
+            .map(|index| format!("{:02x}", index % 251))
+            .collect();
+        StaticKey::parse(&format!(
+            "-----BEGIN OpenVPN Static key V1-----\n{body}\n-----END OpenVPN Static key V1-----\n"
+        ))
+        .unwrap()
+    }
+    fn server_wrap() -> ControlWrap {
+        ControlWrap::new(WrapKeys::auth(&key(), AuthDigest::Sha256, Some(0)))
+    }
+    fn client_session() -> Session {
+        let authority = rcgen::generate_simple_self_signed(vec!["ca.invalid".to_owned()])
+            .unwrap()
+            .cert
+            .pem();
+        let settings = Settings {
+            tls: client_config(&authority, None, None).unwrap(),
+            wrap: WrapKeys::auth(&key(), AuthDigest::Sha256, Some(1)),
+            credentials: None,
+            ciphers: vec![DataCipher::ALL[0]],
+            options: String::new(),
+            peer_info: String::new(),
+            ping: None,
+            ping_restart: None,
+            reneg: None,
+            handshake: Duration::from_secs(60),
+        };
+        Session::new(Arc::new(settings), Instant::now()).unwrap()
+    }
+    fn reset(
+        wrap: &mut ControlWrap,
+        session: &SessionId,
+        ack: Option<&SessionId>,
+        time: u32,
+    ) -> Vec<u8> {
+        let acks: &[u32] = if ack.is_some() { &[0] } else { &[] };
+        let body = encode_body(acks, ack, Some(0), &[]);
+        wrap.wrap(Opcode::HardResetServer.byte(0), session, &body, time)
+    }
+    fn control(wrap: &mut ControlWrap, session: &SessionId, packet_id: u32, time: u32) -> Vec<u8> {
+        let body = encode_body(&[], None, Some(packet_id), &[]);
+        wrap.wrap(Opcode::Control.byte(0), session, &body, time)
+    }
+    /// 返回会话是否对该包产生了 ACK，即可靠层是否接受了它。
+    fn acked(session: &mut Session, wire: &[u8]) -> bool {
+        session.take_outbox();
+        session.receive(Instant::now(), wire).unwrap();
+        !session.take_outbox().is_empty()
+    }
+
+    #[test]
+    fn hard_reset_binds_only_when_it_acknowledges_this_session() {
+        let mut session = client_session();
+        let local = session.local;
+        let mut server = server_wrap();
+        let replayed = reset(&mut server, &STALE, Some(&[0xee; 8]), TIME);
+        session.receive(Instant::now(), &replayed).unwrap();
+        assert_eq!(session.remote, None, "replayed reset for an old client");
+        let unacknowledged = reset(&mut server, &STALE, None, TIME);
+        session.receive(Instant::now(), &unacknowledged).unwrap();
+        assert_eq!(session.remote, None, "reset without an ACK");
+        let genuine = reset(&mut server, &REMOTE, Some(&local), TIME);
+        session.receive(Instant::now(), &genuine).unwrap();
+        assert_eq!(session.remote, Some(REMOTE));
+    }
+
+    #[test]
+    fn separate_ack_binds_so_a_retransmitted_reset_without_ack_still_counts() {
+        let mut session = client_session();
+        let local = session.local;
+        let mut server = server_wrap();
+        let body = encode_body(&[0], Some(&local), None, &[]);
+        let ack = server.wrap(Opcode::Ack.byte(0), &REMOTE, &body, TIME);
+        session.receive(Instant::now(), &ack).unwrap();
+        assert_eq!(session.remote, Some(REMOTE));
+        let retransmitted = reset(&mut server, &REMOTE, None, TIME);
+        assert!(acked(&mut session, &retransmitted));
+        assert!(session.negotiation.peer_reset);
+    }
+
+    #[test]
+    fn packet_from_another_session_cannot_advance_the_replay_window() {
+        let mut session = client_session();
+        let local = session.local;
+        let mut server = server_wrap();
+        let genuine = reset(&mut server, &REMOTE, Some(&local), TIME);
+        assert!(acked(&mut session, &genuine));
+        let mut old = server_wrap();
+        for _ in 0..1000 {
+            control(&mut old, &STALE, 0, TIME - 3600);
+        }
+        let high = control(&mut old, &STALE, 0, TIME - 3600);
+        assert!(!acked(&mut session, &high));
+        let next = control(&mut server, &REMOTE, 1, TIME);
+        assert!(
+            acked(&mut session, &next),
+            "genuine packet after the replay"
+        );
+        assert!(!acked(&mut session, &next), "duplicate of a genuine packet");
+    }
+
+    #[test]
+    fn packet_older_than_the_session_start_is_rejected() {
+        let mut session = client_session();
+        let local = session.local;
+        let mut server = server_wrap();
+        let genuine = reset(&mut server, &REMOTE, Some(&local), TIME);
+        assert!(acked(&mut session, &genuine));
+        let older = control(&mut server, &REMOTE, 1, TIME - 1);
+        assert!(!acked(&mut session, &older));
+        let newer = control(&mut server, &REMOTE, 1, TIME + 1);
+        assert!(acked(&mut session, &newer));
     }
 }

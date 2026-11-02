@@ -35,11 +35,12 @@
 
 ## 实现范围
 
-- **控制面**：`GET /key` 取服务端公钥，`POST /ts2021` 升级为 Noise IK，其上跑 HTTP/2；`/machine/register` 注册，`/machine/map` 流式接收 netmap 并合并 `Peers`、`PeersChanged`、`PeersRemoved`、`PeersChangedPatch`。断线按退避重连，已注册节点被控制面遗忘（map 返回 4xx）时重新注册。
+- **控制面**：`GET /key` 取服务端公钥，`POST /ts2021` 升级为 Noise IK，其上跑 HTTP/2；`/machine/register` 注册，`/machine/map` 流式接收 netmap 并合并 `Peers`、`PeersChanged`、`PeersRemoved`、`PeersChangedPatch`。断线按退避重连，已注册节点被控制面遗忘（map 返回 4xx）时重新注册。注册与首个 map 响应合计 30 秒未完成时断开并走同一退避。
 - **数据面**：每个对端一个 `boringtun` 会话，节点身份即 node key，明文 IP 包交给共享的 `kerlico_wireguard::ip::ClientTunnel`。MTU 固定 1280。支持 TCP、TCP 半关闭、固定目标 UDP 与多目标 UDP 关联。
 - **路径**：默认走对端首选 DERP 区域；对端活跃时每 5 秒向其端点发 disco Ping，收到 Pong 后切到延迟最低的直连路径，6.5 秒未再确认则退回 DERP。经 DERP 发送 CallMeMaybe 触发对端反向打洞。
 - **路由**：目标 IP 按对端 AllowedIPs 最长前缀匹配。对端自身地址总是可达；默认路由仅属于 `exit_node` 选中的对端；其他子网需要 `accept_routes`。无匹配的目标直接拒绝，不回退直连。入站明文的源 IP 必须路由回发送它的对端。
 - **目标策略**：`TargetPolicy::Local`。域名由共享调度器在本机解析后再进入 tailnet。
+- **数据面抗滥用**：数据面是单任务，所以公开 UDP 端口上的包在做 DH 之前先过滤。disco 包的发送方必须在 netmap 中。WireGuard 握手必须带有效 MAC1，每秒超过 100 个时要求 cookie（MAC2）。MAC1 的密钥来自本节点公钥，知道该公钥并能证明源地址的来源仍可触发 DH。STUN 回应只在请求在途时、且只从被询问的服务器接受。
 
 ## 限制
 

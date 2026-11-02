@@ -14,6 +14,8 @@ mod access;
 pub use access::*;
 mod lifecycle;
 pub use lifecycle::*;
+mod login_backoff;
+pub use login_backoff::LoginBackoff;
 mod node_tasks;
 pub use node_tasks::*;
 mod peer_lease;

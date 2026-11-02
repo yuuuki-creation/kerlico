@@ -127,19 +127,21 @@ pub(crate) struct Unwrapped {
     pub header: u8,
     pub session: SessionId,
     pub body: Vec<u8>,
+    /// 无包装时为空。
+    pub replay: Option<ReplayStamp>,
 }
 
 pub(crate) struct ControlWrap {
     keys: WrapKeys,
     next_id: u32,
-    replay: ReplayWindow,
+    replay: ControlReplay,
 }
 impl ControlWrap {
     pub fn new(keys: WrapKeys) -> Self {
         Self {
             keys,
             next_id: 1,
-            replay: ReplayWindow::default(),
+            replay: ControlReplay::default(),
         }
     }
     pub fn wrap(&mut self, header: u8, session: &SessionId, body: &[u8], time: u32) -> Vec<u8> {
@@ -176,11 +178,12 @@ impl ControlWrap {
         self.next_id = self.next_id.wrapping_add(1);
         wire
     }
-    pub fn unwrap(&mut self, wire: &[u8]) -> Result<Unwrapped> {
+    /// 只校验认证。静态密钥下旧会话的包同样能通过，调用方确认包属于本会话后才用 [`Self::commit`] 推进窗口。
+    pub fn unwrap(&self, wire: &[u8]) -> Result<Unwrapped> {
         let forged = || Error::Protocol("OpenVPN 控制包认证失败");
         let (&header, rest) = wire.split_first().ok_or_else(forged)?;
         let (session, rest) = rest.split_first_chunk::<8>().ok_or_else(forged)?;
-        let (id, body) = match &self.keys {
+        let (replay, body) = match &self.keys {
             WrapKeys::Plain => (None, rest.to_vec()),
             WrapKeys::Auth { size, receive, .. } => {
                 if rest.len() < size + 8 {
@@ -192,7 +195,7 @@ impl ControlWrap {
                 if !bool::from(expected.as_ref().ct_eq(tag)) {
                     return Err(forged());
                 }
-                (Some(id_of(replay)), body.to_vec())
+                (Some(ReplayStamp::parse(replay)), body.to_vec())
             }
             WrapKeys::Crypt {
                 receive_hmac,
@@ -210,23 +213,20 @@ impl ControlWrap {
                 if !bool::from(expected.as_ref().ct_eq(tag)) {
                     return Err(forged());
                 }
-                (Some(id_of(replay)), body)
+                (Some(ReplayStamp::parse(replay)), body)
             }
         };
-        if let Some(id) = id
-            && !self.replay.accept(id)
-        {
-            return Err(forged());
-        }
         Ok(Unwrapped {
             header,
             session: *session,
             body,
+            replay,
         })
     }
-}
-fn id_of(replay: &[u8]) -> u32 {
-    u32::from_be_bytes([replay[0], replay[1], replay[2], replay[3]])
+    /// 返回 `false` 表示重放或早于会话起始，应丢弃该包。
+    pub fn commit(&mut self, replay: Option<ReplayStamp>) -> bool {
+        replay.is_none_or(|stamp| self.replay.accept(stamp))
+    }
 }
 fn auth_tag(
     key: &hmac::Key,
@@ -259,6 +259,41 @@ fn crypt_tag(
 fn apply_ctr(key: &[u8; 32], tag: &[u8], data: &mut [u8]) {
     let mut cipher = ctr::Ctr128BE::<Aes256>::new(key.into(), tag[..16].into());
     cipher.apply_keystream(data);
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ReplayStamp {
+    id: u32,
+    time: u32,
+}
+impl ReplayStamp {
+    fn parse(replay: &[u8]) -> Self {
+        Self {
+            id: u32::from_be_bytes([replay[0], replay[1], replay[2], replay[3]]),
+            time: u32::from_be_bytes([replay[4], replay[5], replay[6], replay[7]]),
+        }
+    }
+}
+
+/// 时间戳来自对端时钟，与上游 `packet_id_test` 一样只比较先后，不与本机时钟比较：更早的被拒绝，更新的开始新窗口。
+#[derive(Default)]
+struct ControlReplay {
+    time: u32,
+    window: ReplayWindow,
+}
+impl ControlReplay {
+    fn accept(&mut self, stamp: ReplayStamp) -> bool {
+        if stamp.time < self.time {
+            return false;
+        }
+        if stamp.time > self.time {
+            *self = Self {
+                time: stamp.time,
+                window: ReplayWindow::default(),
+            };
+        }
+        self.window.accept(stamp.id)
+    }
 }
 
 /// 收到的最高序号及其之前 128 个序号的位图；序号 0 在 OpenVPN 中保留不用。
@@ -354,7 +389,8 @@ mod tests {
                 (opened.header, opened.session, opened.body.as_slice()),
                 (0x40, [7; 8], b"body".as_slice())
             );
-            assert!(receiver.unwrap(&wire).is_err());
+            assert!(receiver.commit(opened.replay));
+            assert!(!receiver.commit(receiver.unwrap(&wire).unwrap().replay));
             let mut tampered = sender.wrap(0x40, &[7; 8], b"body", 1);
             *tampered.last_mut().unwrap() ^= 1;
             assert!(receiver.unwrap(&tampered).is_err());
@@ -371,6 +407,15 @@ mod tests {
         assert!(window.accept(1000));
         assert!(!window.accept(872));
         assert!(window.accept(873));
+    }
+    #[test]
+    fn control_replay_orders_by_timestamp_before_id() {
+        let mut window = ControlReplay::default();
+        assert!(window.accept(ReplayStamp { id: 500, time: 7 }));
+        assert!(!window.accept(ReplayStamp { id: 501, time: 6 }));
+        assert!(window.accept(ReplayStamp { id: 1, time: 8 }));
+        assert!(!window.accept(ReplayStamp { id: 1, time: 8 }));
+        assert!(!window.accept(ReplayStamp { id: 502, time: 7 }));
     }
 
     const TLS_AUTH_CLIENT: &str =

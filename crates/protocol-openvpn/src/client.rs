@@ -5,6 +5,7 @@ use crate::{
     push::PushedConfig,
     session::{Event, Session},
 };
+use bytes::Bytes;
 use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     Address, BoxFuture, CancellationToken, Capabilities, ConnectContext, DatagramAssociation,
@@ -14,13 +15,14 @@ use kerlico_core::{
 use kerlico_wireguard::ip::{ClientTunnel, StackLimits, StackOptions};
 use serde_json::Value;
 use std::{
+    collections::VecDeque,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpStream, UdpSocket},
+    net::{TcpStream, UdpSocket, tcp::WriteHalf},
     sync::watch,
     time::MissedTickBehavior,
 };
@@ -33,6 +35,8 @@ const CAPABILITIES: Capabilities = Capabilities {
 const TICK: Duration = Duration::from_millis(250);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// 发送队列连续这么久没有清空，说明对端不再读取 TCP；服务端未推送 `ping-restart` 时这是唯一的恢复途径。
+const SEND_STALL: Duration = Duration::from_secs(60);
 
 pub struct OpenVpnFactory;
 impl OutboundFactory for OpenVpnFactory {
@@ -215,10 +219,7 @@ async fn run_session(
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         for wire in session.take_outbox() {
-            tokio::select! { biased;
-                _ = cancel.cancelled() => return Ok(()),
-                sent = link.send(&wire) => sent?,
-            }
+            link.queue(wire)?;
         }
         for event in session.take_events() {
             match event {
@@ -239,9 +240,21 @@ async fn run_session(
         }
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            wire = link.recv() => session.receive(Instant::now(), &wire?)?,
-            packet = next_packet(tunnel.as_ref()) => session.send_packet(Instant::now(), &packet?)?,
-            _ = timer.tick() => session.tick(Instant::now())?,
+            event = link.next() => {
+                if let LinkEvent::Received(wire) = event? {
+                    session.receive(Instant::now(), &wire)?;
+                }
+            }
+            packet = next_packet(tunnel.as_ref()), if link.idle() => {
+                session.send_packet(Instant::now(), &packet?)?;
+            }
+            _ = timer.tick() => {
+                let now = Instant::now();
+                if link.stalled(now) {
+                    return Err(Error::Timeout);
+                }
+                session.tick(now)?;
+            }
         }
     }
 }
@@ -277,19 +290,30 @@ fn open_tunnel(
     )
 }
 
-enum Link {
-    Udp {
-        socket: UdpSocket,
-        buffer: Vec<u8>,
-        host: ServiceContext,
-    },
-    Tcp {
-        stream: TcpStream,
-        buffer: Vec<u8>,
-        host: ServiceContext,
-    },
+enum Carrier {
+    Udp { socket: UdpSocket, buffer: Vec<u8> },
+    Tcp { stream: TcpStream, buffer: Vec<u8> },
+}
+enum LinkEvent {
+    Received(Vec<u8>),
+    Drained,
+}
+/// 单任务同时推进收发：TCP 背压时仍继续读取和走定时器，发送队列留到下次调用继续。
+struct Link {
+    carrier: Carrier,
+    pending: VecDeque<Bytes>,
+    pending_since: Option<Instant>,
+    host: ServiceContext,
 }
 impl Link {
+    fn new(carrier: Carrier, host: ServiceContext) -> Self {
+        Self {
+            carrier,
+            pending: VecDeque::new(),
+            pending_since: None,
+            host,
+        }
+    }
     async fn connect(prepared: &Prepared, host: ServiceContext) -> Result<Self> {
         let endpoint = resolve(&prepared.remote, prepared.bind).await?;
         let bind = prepared.bind.unwrap_or_else(|| {
@@ -304,11 +328,8 @@ impl Link {
             Proto::Udp => {
                 let socket = UdpSocket::bind(bind).await?;
                 socket.connect(endpoint).await?;
-                Ok(Self::Udp {
-                    socket,
-                    buffer: vec![0; 65536],
-                    host,
-                })
+                let buffer = vec![0; 65536];
+                Ok(Self::new(Carrier::Udp { socket, buffer }, host))
             }
             Proto::Tcp => {
                 let socket = if endpoint.is_ipv4() {
@@ -321,65 +342,102 @@ impl Link {
                 }
                 let stream = socket.connect(endpoint).await?;
                 stream.set_nodelay(true)?;
-                Ok(Self::Tcp {
-                    stream,
-                    buffer: Vec::with_capacity(65538),
-                    host,
-                })
+                let buffer = Vec::with_capacity(65538);
+                Ok(Self::new(Carrier::Tcp { stream, buffer }, host))
             }
         }
     }
-    /// 可被 `select!` 取消：TCP 已读字节留在 `buffer`，下一次调用继续拼帧。
-    async fn recv(&mut self) -> Result<Vec<u8>> {
-        match self {
-            Self::Udp {
-                socket,
-                buffer,
-                host,
-            } => {
-                let count = socket.recv(buffer).await?;
-                host.record_carrier(0, count as u64);
-                Ok(buffer[..count].to_vec())
+    fn idle(&self) -> bool {
+        self.pending.is_empty()
+    }
+    fn stalled(&self, now: Instant) -> bool {
+        self.pending_since
+            .is_some_and(|since| now.duration_since(since) >= SEND_STALL)
+    }
+    fn queue(&mut self, packet: Vec<u8>) -> Result<()> {
+        let frame = match self.carrier {
+            Carrier::Udp { .. } => packet,
+            Carrier::Tcp { .. } => {
+                let length =
+                    u16::try_from(packet.len()).map_err(|_| Error::Protocol("OpenVPN 包过大"))?;
+                let mut frame = Vec::with_capacity(2 + packet.len());
+                frame.extend_from_slice(&length.to_be_bytes());
+                frame.extend_from_slice(&packet);
+                frame
             }
-            Self::Tcp {
-                stream,
-                buffer,
-                host,
-            } => loop {
+        };
+        self.host.record_carrier(frame.len() as u64, 0);
+        self.pending.push_back(frame.into());
+        self.pending_since.get_or_insert_with(Instant::now);
+        Ok(())
+    }
+    /// 可被 `select!` 取消：TCP 已读字节留在 `buffer`，未写完的帧留在 `pending` 的队首。
+    async fn next(&mut self) -> Result<LinkEvent> {
+        let Self {
+            carrier,
+            pending,
+            pending_since,
+            host,
+        } = self;
+        match carrier {
+            Carrier::Udp { socket, buffer } => {
+                tokio::select! {
+                    sent = drain_udp(socket, pending), if !pending.is_empty() => {
+                        sent?;
+                        *pending_since = None;
+                        Ok(LinkEvent::Drained)
+                    }
+                    count = socket.recv(buffer) => {
+                        let count = count?;
+                        host.record_carrier(0, count as u64);
+                        Ok(LinkEvent::Received(buffer[..count].to_vec()))
+                    }
+                }
+            }
+            Carrier::Tcp { stream, buffer } => loop {
                 if let Some((length, rest)) = buffer.split_first_chunk::<2>() {
                     let length = usize::from(u16::from_be_bytes(*length));
                     if rest.len() >= length {
                         let packet = rest[..length].to_vec();
                         buffer.drain(..2 + length);
-                        return Ok(packet);
+                        return Ok(LinkEvent::Received(packet));
                     }
                 }
-                let count = stream.read_buf(buffer).await?;
-                if count == 0 {
-                    return Err(Error::Protocol("OpenVPN 服务端关闭了 TCP 连接"));
+                let (mut reader, mut writer) = stream.split();
+                tokio::select! {
+                    sent = drain_tcp(&mut writer, pending), if !pending.is_empty() => {
+                        sent?;
+                        *pending_since = None;
+                        return Ok(LinkEvent::Drained);
+                    }
+                    count = reader.read_buf(buffer) => {
+                        let count = count?;
+                        if count == 0 {
+                            return Err(Error::Protocol("OpenVPN 服务端关闭了 TCP 连接"));
+                        }
+                        host.record_carrier(0, count as u64);
+                    }
                 }
-                host.record_carrier(0, count as u64);
             },
         }
     }
-    async fn send(&mut self, packet: &[u8]) -> Result<()> {
-        match self {
-            Self::Udp { socket, host, .. } => {
-                let count = socket.send(packet).await?;
-                host.record_carrier(count as u64, 0);
-            }
-            Self::Tcp { stream, host, .. } => {
-                let length =
-                    u16::try_from(packet.len()).map_err(|_| Error::Protocol("OpenVPN 包过大"))?;
-                let mut frame = Vec::with_capacity(2 + packet.len());
-                frame.extend_from_slice(&length.to_be_bytes());
-                frame.extend_from_slice(packet);
-                stream.write_all(&frame).await?;
-                host.record_carrier(frame.len() as u64, 0);
-            }
-        }
-        Ok(())
+}
+async fn drain_udp(socket: &UdpSocket, pending: &mut VecDeque<Bytes>) -> std::io::Result<()> {
+    while let Some(packet) = pending.front() {
+        socket.send(packet).await?;
+        pending.pop_front();
     }
+    Ok(())
+}
+async fn drain_tcp(
+    writer: &mut WriteHalf<'_>,
+    pending: &mut VecDeque<Bytes>,
+) -> std::io::Result<()> {
+    while let Some(frame) = pending.front_mut() {
+        writer.write_all_buf(frame).await?;
+        pending.pop_front();
+    }
+    Ok(())
 }
 async fn resolve(remote: &Destination, bind: Option<SocketAddr>) -> Result<SocketAddr> {
     let mut addresses: Vec<SocketAddr> = match remote.address() {
@@ -395,4 +453,54 @@ async fn resolve(remote: &Destination, bind: Option<SocketAddr>) -> Result<Socke
     });
     addresses.sort_by_key(SocketAddr::is_ipv6);
     addresses.into_iter().next().ok_or(Error::InvalidAddress)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::{net::TcpListener, time::timeout};
+
+    /// 对端完全不读时，发送队列写不完，读取仍要继续，并在时限后判定停滞。
+    #[tokio::test]
+    async fn tcp_backpressure_does_not_stop_reads_and_is_detected_as_a_stall() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let buffer = Vec::with_capacity(65538);
+        let mut link = Link::new(Carrier::Tcp { stream, buffer }, ServiceContext::for_test());
+        for _ in 0..2048 {
+            link.queue(vec![0; 60000]).unwrap();
+        }
+        let blocked = timeout(Duration::from_millis(200), link.next()).await;
+        assert!(blocked.is_err(), "send buffers should be full by now");
+        assert!(!link.idle());
+
+        peer.write_all(&[0, 3, b'a', b'b', b'c']).await.unwrap();
+        let event = timeout(Duration::from_secs(5), link.next()).await.unwrap();
+        assert!(matches!(event, Ok(LinkEvent::Received(wire)) if wire == b"abc"));
+
+        assert!(!link.stalled(Instant::now()));
+        assert!(link.stalled(Instant::now() + SEND_STALL));
+    }
+
+    #[tokio::test]
+    async fn drained_queue_clears_the_stall_clock() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let buffer = Vec::with_capacity(65538);
+        let mut link = Link::new(Carrier::Tcp { stream, buffer }, ServiceContext::for_test());
+        link.queue(b"abc".to_vec()).unwrap();
+        let event = timeout(Duration::from_secs(5), link.next()).await.unwrap();
+        assert!(matches!(event, Ok(LinkEvent::Drained)));
+        assert!(link.idle());
+        assert!(!link.stalled(Instant::now() + SEND_STALL));
+        let mut frame = [0; 5];
+        peer.read_exact(&mut frame).await.unwrap();
+        assert_eq!(frame, [0, 3, b'a', b'b', b'c']);
+    }
 }

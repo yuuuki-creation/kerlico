@@ -21,6 +21,8 @@ use tokio::{
 /// 与所读上游 1.92 系列的 `CurrentCapabilityVersion` 对齐。
 pub const CAPABILITY_VERSION: u16 = 131;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// 注册与首个 map 响应的总时限；服务端可能在写出第一帧 netmap 时才返回响应头。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAP_WATCHDOG: Duration = Duration::from_secs(120);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const HEALTHY_SESSION: Duration = Duration::from_secs(60);
@@ -122,11 +124,7 @@ impl Control {
         )
         .await
         .map_err(|_| Failure::Retry)??;
-        if !*registered {
-            self.register(&send).await?;
-            *registered = true;
-        }
-        let mut stream = self.map_request(&send, true).await?;
+        let mut stream = self.open_map(&send, registered, REQUEST_TIMEOUT).await?;
         let mut frames = MapFrames::default();
         let mut netmap = NetMap::default();
         loop {
@@ -160,6 +158,23 @@ impl Control {
                 }
             }
         }
+    }
+
+    async fn open_map(
+        &self,
+        send: &SendRequest<Bytes>,
+        registered: &mut bool,
+        limit: Duration,
+    ) -> std::result::Result<RecvStream, Failure> {
+        timeout(limit, async {
+            if !*registered {
+                self.register(send).await?;
+                *registered = true;
+            }
+            self.map_request(send, true).await
+        })
+        .await
+        .map_err(|_| Failure::Retry)?
     }
 
     fn hostinfo(&self, local: &LocalState) -> Value {
@@ -358,8 +373,10 @@ fn dechunk(mut body: &[u8]) -> Option<Vec<u8>> {
         if size == 0 {
             return Some(output);
         }
-        output.extend_from_slice(body.get(end + 2..end + 2 + size)?);
-        body = body.get(end + 2 + size + 2..)?;
+        let start = end + 2;
+        let stop = start.checked_add(size)?;
+        output.extend_from_slice(body.get(start..stop)?);
+        body = body.get(stop.checked_add(2)?..)?;
     }
 }
 
@@ -423,6 +440,46 @@ mod tests {
             Some(&b"abcde"[..])
         );
         assert_eq!(dechunk(b"9\r\nabc"), None);
+        assert_eq!(dechunk(b"ffffffffffffffff\r\nabc"), None);
+    }
+
+    #[tokio::test]
+    async fn silent_control_plane_is_retried_instead_of_hanging() {
+        let (client, server) = tokio::io::duplex(65536);
+        tokio::spawn(async move {
+            let mut connection = h2::server::handshake(server).await.unwrap();
+            let mut unanswered = Vec::new();
+            while let Some(Ok(request)) = connection.accept().await {
+                unanswered.push(request);
+            }
+        });
+        let (send, connection) = h2::client::handshake(client).await.unwrap();
+        tokio::spawn(connection);
+        let options: crate::config::Options = serde_json::from_value(json!({
+            "control_url": "http://control.invalid",
+            "auth_key": "k",
+        }))
+        .unwrap();
+        let (netmap, _) = watch::channel(None);
+        let (_keep_local, local) = watch::channel(LocalState::default());
+        let control = Control {
+            prepared: options.prepare().map_err(|_| "prepare").unwrap(),
+            identity: Identity::load(None).map_err(|_| "identity").unwrap(),
+            disco: DiscoKey([1; 32]),
+            netmap,
+            local,
+            host: ServiceContext::for_test(),
+        };
+        let limit = Duration::from_millis(100);
+        for mut registered in [false, true] {
+            let opened = timeout(
+                Duration::from_secs(5),
+                control.open_map(&send, &mut registered, limit),
+            )
+            .await
+            .expect("open_map must apply its own limit");
+            assert!(matches!(opened, Err(Failure::Retry)));
+        }
     }
 
     #[test]

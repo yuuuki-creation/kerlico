@@ -6,11 +6,11 @@ use crate::{
 use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     BoxFuture, Capabilities, ConnectContext, DatagramAssociation, DatagramAssociationSender,
-    DatagramChannel, Destination, Error, OpenedTcp, Outbound, ResourceKey, Result, ServiceContext,
-    TargetPolicy,
+    DatagramChannel, Destination, Error, LoginBackoff, OpenedTcp, Outbound, ResourceKey, Result,
+    ServiceContext, TargetPolicy,
 };
 use serde_json::Value;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 
 const CAPABILITIES: Capabilities = Capabilities {
@@ -41,6 +41,7 @@ impl OutboundFactory for MasqueFactory {
                         prepared,
                         host,
                         tunnels: Mutex::new(HashMap::new()),
+                        login: Mutex::default(),
                     }) as Arc<dyn Outbound>)
                 })
             },
@@ -54,6 +55,8 @@ struct MasqueOutbound {
     prepared: Prepared,
     host: ServiceContext,
     tunnels: Mutex<HashMap<ResourceKey, Slot>>,
+    /// 凭据属于整个出站：不同来源共用退避并串行建立，一次配错不会变成对代理的持续重试。
+    login: Mutex<LoginBackoff>,
 }
 impl MasqueOutbound {
     fn slot(&self, tunnels: &mut HashMap<ResourceKey, Slot>, key: &ResourceKey) -> Result<Slot> {
@@ -79,7 +82,11 @@ impl MasqueOutbound {
                 if let Some(tunnel) = current.as_ref().filter(|tunnel| tunnel.alive()) {
                     return Ok(tunnel.clone());
                 }
-                let tunnel = tunnel::establish(&self.prepared, &self.host).await?;
+                let mut login = self.login.lock().await;
+                login.check(Instant::now())?;
+                let established = tunnel::establish(&self.prepared, &self.host).await;
+                login.record(Instant::now(), &established);
+                let tunnel = established?;
                 *current = Some(tunnel.clone());
                 Ok(tunnel)
             })
