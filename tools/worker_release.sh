@@ -8,7 +8,7 @@ rev="$(git rev-parse "$2")"
 out="$3"
 alias="${4:-perf-02}"
 root="${KERLICO_WORKER_ROOT:-/srv/build/kerlico}/release-$version"
-run() { ssh -F .private/machines/ssh_config -o BatchMode=yes -o ServerAliveInterval=30 "$alias" "$@"; }
+run() { ssh -F "${KERLICO_SSH_CONFIG:-.private/machines/ssh_config}" -o BatchMode=yes -o ServerAliveInterval=30 "$alias" "$@"; }
 
 git -c core.autocrlf=false archive "$rev" | gzip | run "rm -rf '$root/src' && mkdir -p '$root/src' && tar -xz -C '$root/src' && cd '$root/src' \
   && export PATH=\"\$HOME/.cargo/bin:\$PATH\" CARGO_TARGET_DIR='$root/target' CARGO_INCREMENTAL=0 \

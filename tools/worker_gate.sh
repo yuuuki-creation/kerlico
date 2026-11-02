@@ -6,7 +6,7 @@ set -euo pipefail
 alias="${1:-perf-01}"
 rev="$(git rev-parse "${2:-HEAD}")"
 root="${KERLICO_WORKER_ROOT:-/srv/build/kerlico}/gate"
-run() { ssh -F .private/machines/ssh_config -o BatchMode=yes -o ServerAliveInterval=30 "$alias" "$@"; }
+run() { ssh -F "${KERLICO_SSH_CONFIG:-.private/machines/ssh_config}" -o BatchMode=yes -o ServerAliveInterval=30 "$alias" "$@"; }
 
 git -c core.autocrlf=false archive "$rev" | gzip | run "mkdir -p '$root' && rm -rf '$root/new' && mkdir '$root/new' \
   && tar -xz -C '$root/new' && mkdir -p '$root/src' && rsync -rc --delete '$root/new/' '$root/src/'"

@@ -11,7 +11,7 @@ fi
 alias="$1"
 shift
 root="${KERLICO_WORKER_ROOT:-/srv/build/kerlico}/gate"
-run() { ssh -F .private/machines/ssh_config -o BatchMode=yes -o ServerAliveInterval=30 "$alias" "$@"; }
+run() { ssh -F "${KERLICO_SSH_CONFIG:-.private/machines/ssh_config}" -o BatchMode=yes -o ServerAliveInterval=30 "$alias" "$@"; }
 
 index="$(mktemp)"
 trap 'rm -f "$index"' EXIT
