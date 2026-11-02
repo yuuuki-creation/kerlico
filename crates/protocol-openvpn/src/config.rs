@@ -2,6 +2,7 @@
 
 use crate::{
     data::DataCipher,
+    keys::MAX_STRING,
     session::{Credentials, Settings},
     tls::client_config,
     wrap::{AuthDigest, StaticKey, WrapKeys},
@@ -81,6 +82,7 @@ fn default_reneg() -> u64 {
 fn default_handshake() -> u64 {
     60
 }
+const MAX_HANDSHAKE_SECS: u64 = 3600;
 
 pub(crate) struct Prepared {
     pub remote: Destination,
@@ -103,7 +105,7 @@ impl ClientOptions {
         let remote = Destination::new(&self.remote.host, self.remote.port)?;
         if self.remote.port == 0
             || self.bind.is_some_and(|bind| bind.ip().is_multicast())
-            || self.handshake_timeout_secs == 0
+            || !(1..=MAX_HANDSHAKE_SECS).contains(&self.handshake_timeout_secs)
         {
             return Err(invalid());
         }
@@ -114,7 +116,11 @@ impl ClientOptions {
         };
         let credentials = match (self.username, self.password) {
             (Some(username), Some(password))
-                if !username.is_empty() && !username.contains('\0') && !password.contains('\0') =>
+                if !username.is_empty()
+                    && username.len() <= MAX_STRING
+                    && password.len() <= MAX_STRING
+                    && !username.contains('\0')
+                    && !password.contains('\0') =>
             {
                 Some(Credentials { username, password })
             }
@@ -288,5 +294,8 @@ mod tests {
         assert!(parse(with("cert_pem", json!("no key"))).is_err());
         assert!(parse(with("ca_pem", json!("no certificate"))).is_err());
         assert!(parse(with("unknown", json!(1))).is_err());
+        assert!(parse(with("handshake_timeout_secs", json!(u64::MAX))).is_err());
+        assert!(parse(with("username", json!("u".repeat(65535)))).is_err());
+        assert!(parse(with("password", json!("p".repeat(65535)))).is_err());
     }
 }
