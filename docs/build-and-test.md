@@ -51,3 +51,19 @@ tools/worker_gate.sh perf-01 HEAD
 日常修改用 `tools/worker_run.sh perf-01 '<命令>'` 在 worker 上运行未提交的工作树，`--pull` 把 fmt、lockfile 等改动拉回本机。
 
 发行二进制用 `tools/worker_release.sh <版本> <提交> <输出目录>` 在 glibc 较低的 `perf-02` 上构建。
+
+## 跨机矩阵
+
+`tools/interop_cross_host.py` 在本机编排，把自身传到三台 worker 常驻，ssh 断开时回收它启动的进程。客户端 A 经本机 SOCKS 入口，节点或真实对端 B，回显目标 C，三种排列轮换。被测二进制放在三台的 xhost 工作目录，用 `perf-02` 构建，`perf-01` 的 glibc 版本更高，它构建的二进制在 `perf-02` 上跑不起来。
+
+```sh
+tools/interop_cross_host.py probe --network mesh --out probe.json      # 直连基线
+tools/interop_cross_host.py check                                      # 只校验全部配置
+tools/interop_cross_host.py run --jobs 2 --out dual.json               # 双端协议
+tools/interop_cross_host.py run --only mieru,tuic/v5 --resume --retry-failed --out dual.json
+tools/interop_cross_host.py prepare-outbound                           # 准备对端镜像和二进制
+tools/interop_cross_host.py run-outbound --only ssh,tun --out out.json # 仅出站协议与 TUN
+tools/interop_cross_host.py cleanup-outbound
+```
+
+公网入站被机器防火墙拦截，默认 `--network mesh` 走 Mesh 接口地址；`--network public` 走公网地址。`run-outbound` 不要并发多个实例。Windows 的 Git Bash 下运行要设 `MSYS_NO_PATHCONV=1`。结果 JSON 里的地址和路径已替换为别名。结果见 [2026-11-03 跨机矩阵](testing/cross-host-2026-11-03.md)。
