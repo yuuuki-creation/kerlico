@@ -12,7 +12,7 @@ use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     Address, BoxFuture, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
     Destination, Error, OpenedTcp, Outbound, Result, ServiceContext, ServiceFailure, ServiceStatus,
-    TargetPolicy, TcpConnectInfo,
+    TargetPolicy, TcpConnectInfo, is_peer_path_error,
 };
 use serde_json::Value;
 use std::{
@@ -276,13 +276,18 @@ pub(crate) async fn run(
                 { send(&socket, endpoint, &packet, &stack.cancel, &carrier).await?; }
             }
             result = socket.recv_from(&mut receive) => {
-                let (count, source) = result?;
+                let (count, source) = match result {
+                    Ok(value) => value,
+                    Err(error) if is_peer_path_error(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
                 carrier.record(0, count);
+                // 来源地址未经认证；回复发不出去只损失这一个数据报。
                 match index.identify(source, &receive[..count]) {
-                    Ok(Identified::Cookie(packet)) => send(&socket, source, &packet, &stack.cancel, &carrier).await?,
+                    Ok(Identified::Cookie(packet)) => { let _ = send(&socket, source, &packet, &stack.cancel, &carrier).await; }
                     Ok(Identified::Peer(_)) => {
                         if let Ok(received) = crypto.receive(source, &receive[..count]) {
-                            for packet in received.network { send(&socket, source, &packet, &stack.cancel, &carrier).await?; }
+                            for packet in received.network { let _ = send(&socket, source, &packet, &stack.cancel, &carrier).await; }
                             if let Some(packet) = received.plain { let _ = input(&stack, &peer, &mut fragments, &packet); }
                         }
                     }

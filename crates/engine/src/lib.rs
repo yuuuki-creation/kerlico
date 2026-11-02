@@ -971,7 +971,11 @@ async fn serve_udp(
                 if let Some((peer,id))=finished && senders.get(&peer).is_some_and(|(current,_)|*current==id) { senders.remove(&peer); }
             },
             packet=socket.recv_from(&mut buffer)=>{
-                let (count,peer)=match packet {Ok(value)=>value,Err(error)=>{failure=Some(Error::Io(error));break;}};
+                let (count,peer)=match packet {
+                    Ok(value)=>value,
+                    Err(error) if kerlico_core::is_peer_path_error(&error)=>{stats.dropped.fetch_add(1,Ordering::Relaxed);continue;}
+                    Err(error)=>{failure=Some(Error::Io(error));break;}
+                };
                 if count>limits.max_datagram_size {stats.dropped.fetch_add(1,Ordering::Relaxed);continue;}
                 if senders.get(&peer).is_some_and(|(_,sender)|sender.is_closed()) {senders.remove(&peer);}
                 if let Entry::Vacant(entry)=senders.entry(peer) {

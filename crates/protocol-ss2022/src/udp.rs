@@ -6,7 +6,7 @@ use bytes::BytesMut;
 use kerlico_core::{
     BoxFuture, CancellationToken, ConnectContext, DatagramChannel, DatagramReceiver,
     DatagramSender, Destination, Error, InboundContext, IngressBinding, NodeEvent, NodeObserver,
-    PeerSession, Result, StreamLease,
+    PeerSession, Result, StreamLease, is_peer_path_error,
 };
 use shadowsocks::{
     ServerConfig,
@@ -218,7 +218,11 @@ impl Ss2022Node {
                 },
                 _ = tasks.join_next(), if !tasks.is_empty() => {},
                 received = socket.recv_from(&mut wire) => {
-                    let (len, peer) = received?;
+                    let (len, peer) = match received {
+                        Ok(value) => value,
+                        Err(error) if is_peer_path_error(&error) => { context.events.record(NodeEvent::Dropped); continue; }
+                        Err(error) => return Err(error.into()),
+                    };
                     let mut decoded = None;
                     for (_, row) in self.credentials.rows() {
                         let config = row.config.clone(); let mut packet = wire[..len].to_vec();
@@ -227,14 +231,16 @@ impl Ss2022Node {
                         let Ok(target) = destination(&target) else { continue; };
                         let user_key = control.user.as_ref().map_or(config.key(), |user| user.key()).to_vec();
                         let Some((slot, _)) = self.credentials.rows().find(|(_, row)| row.key == user_key) else { continue; };
-                        let access = ingress.authenticated(self.credentials.verified(&slot, ())?, &{ let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer); peer_context })?.0;
+                        // 停用成员的密钥仍能解密；拒绝只丢这一个数据报，取消由循环顶部处理。
+                        let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer);
+                        let Ok((access, ())) = self.credentials.verified(&slot, ()).and_then(|verified| ingress.authenticated(verified, &peer_context)) else { break; };
                         packet.truncate(count); decoded = Some((config, packet, target, control, user_key, access)); break;
                     }
-                    let Some((config, packet, target, control, user_key, access)) = decoded else { continue; };
+                    let Some((config, packet, target, control, user_key, access)) = decoded else { context.events.record(NodeEvent::Dropped); continue; };
                     let key = SessionKey { user: fingerprint(&user_key), client: control.client_session_id };
                     let now = Instant::now();
                     if !sessions.contains_key(&key) {
-                        if sessions.len() >= context.max_streams { continue; }
+                        if sessions.len() >= context.max_streams { context.events.record(NodeEvent::Dropped); continue; }
                         let Ok(lease) = context.stream_budget.try_acquire() else { context.events.record(NodeEvent::Dropped); continue };
                         context.events.record(NodeEvent::Accepted);
                         sessions.insert(key, Session {
@@ -244,16 +250,16 @@ impl Ss2022Node {
                         });
                     }
                     let session = sessions.get_mut(&key).expect("会话已插入");
-                    if !session.replay.accept(control.packet_id) { continue; }
+                    if !session.replay.accept(control.packet_id) { context.events.record(NodeEvent::Dropped); continue; }
                     session.last_seen = now;
                     *session.response.peer.lock().map_err(|_| protocol_error())? = peer;
                     // 回放状态独立保留；新鲜数据报可重建已经关闭的目标关联。
                     session.targets.retain(|_, sender| !sender.is_closed());
                     if let Some(sender) = session.targets.get(&target) {
-                        let _ = sender.try_send(packet.clone());
+                        if sender.try_send(packet.clone()).is_err() { context.events.record(NodeEvent::Dropped); }
                         continue;
                     }
-                    if session.targets.len() >= context.max_streams { continue; }
+                    if session.targets.len() >= context.max_streams { context.events.record(NodeEvent::Dropped); continue; }
                     let Ok(lease) = context.stream_budget.try_acquire() else { context.events.record(NodeEvent::Dropped); continue };
                     let (sender, receiver) = mpsc::channel(32);
                     let _ = sender.try_send(packet.clone());

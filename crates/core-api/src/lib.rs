@@ -454,6 +454,17 @@ pub enum NodeEvent {
     /// 局部强制回收事实；Engine 在外层及全部真实节点任务 join 后才累计。
     ForcedCleanup,
 }
+/// UDP 接收错误是否来自对端路径（ICMP 不可达等），而不是本地 socket 失效。
+/// 这类错误只损失这一次接收，节点循环记 [`NodeEvent::Dropped`] 后继续。
+pub fn is_peer_path_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkUnreachable
+    )
+}
 /// 注入节点的事件观察者，负责归入相应节点与全局统计。
 pub trait NodeObserver: Send + Sync {
     /// 记录一个累计事件；不承载身份秘密或包内容。

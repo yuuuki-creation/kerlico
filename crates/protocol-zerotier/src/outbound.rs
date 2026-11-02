@@ -6,13 +6,12 @@ use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     BoxFuture, CancellationToken, Capabilities, ConnectContext, DatagramAssociation,
     DatagramChannel, Destination, Error, OpenedTcp, Outbound, Result, ServiceContext,
-    ServiceFailure, ServiceStatus, TargetPolicy,
+    ServiceFailure, ServiceStatus, TargetPolicy, is_peer_path_error,
 };
 use kerlico_wireguard::ip::ClientTunnel;
 use serde_json::Value;
 use std::{
     future::pending,
-    io::ErrorKind,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -351,15 +350,7 @@ impl Driver {
                     .on_datagram(self.clock.now(), from, &buffer[..count]);
                 Ok(())
             }
-            // ICMP 不可达在部分平台表现为接收错误，不代表本地套接字失效。
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::ConnectionReset | ErrorKind::ConnectionRefused
-                ) =>
-            {
-                Ok(())
-            }
+            Err(error) if is_peer_path_error(&error) => Ok(()),
             Err(error) => Err(error.into()),
         }
     }

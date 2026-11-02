@@ -7,7 +7,7 @@ use kerlico_core::{
     AddressedDatagram, BoxFuture, CancellationToken, ConnectContext, DatagramAssociation,
     DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel, DatagramReceiver,
     DatagramSender, Destination, Error, InboundContext, IngressBinding, NodeEvent, NodeObserver,
-    PeerSession, Result,
+    PeerSession, Result, is_peer_path_error,
 };
 use shadowsocks::relay::socks5::Address;
 use std::{collections::HashMap, io::Cursor, net::SocketAddr, sync::Arc, time::Duration};
@@ -286,21 +286,28 @@ impl ShadowsocksRNode {
                 _ = tasks.join_next(),if !tasks.is_empty()=>{entries.retain(|_,entry|!entry.sender.is_closed());},
                 _ = maintenance.tick()=>{entries.retain(|_,entry|!entry.sender.is_closed());},
                 received=socket.recv_from(&mut buffer)=>{
-                    let (count,peer)=received?;
+                    let (count,peer)=match received {
+                        Ok(value)=>value,
+                        Err(error) if is_peer_path_error(&error)=>{context.events.record(NodeEvent::Dropped);continue;}
+                        Err(error)=>return Err(error.into()),
+                    };
                     let mut selected = None;
                     for (group, codec) in codecs.iter().enumerate() {
                         let Ok((iv, plain)) = decode(&codec.cfg, &buffer[..count]) else { continue; };
                         let Ok(decoded) = codec.decode_client(&plain) else { continue; };
                         let Ok((target, payload)) = unpack(&decoded.data) else { continue; };
                         if payload.len() > context.max_datagram_size.min(MAX_PACKET) { continue; }
-                        let access = if self.credentials.is_empty() { ingress.local(&{ let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer); peer_context })? } else {
+                        let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer);
+                        let access = if self.credentials.is_empty() { ingress.local(&peer_context) } else {
                             let Some((slot, _)) = self.credentials.rows().find(|(_, row)| row.group == group && row.user == decoded.user) else { continue; };
-                            ingress.authenticated(self.credentials.verified(&slot, ())?, &{ let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer); peer_context })?.0
+                            self.credentials.verified(&slot, ()).and_then(|verified| ingress.authenticated(verified, &peer_context)).map(|(access, ())| access)
                         };
+                        // 停用成员的密钥仍能解密；拒绝只丢这一个数据报，取消由循环顶部处理。
+                        let Ok(access) = access else { selected = None; break; };
                         if selected.is_some() { selected = None; break; }
                         selected = Some((group, codec.clone(), iv, plain, decoded, target, payload, access));
                     }
-                    let Some((group, codec, iv, plain, decoded, target, payload, access)) = selected else { continue; };
+                    let Some((group, codec, iv, plain, decoded, target, payload, access)) = selected else { context.events.record(NodeEvent::Dropped); continue; };
                     if codec.cfg.replay.nonce(&iv).is_err(){context.events.record(NodeEvent::Dropped);continue;}
                     if iv.is_empty()&&decoded.replay&&codec.cfg.replay.insert(b"udp-chain-request",&plain,Duration::from_secs(120)).is_err(){context.events.record(NodeEvent::Dropped);continue;}
                     entries.retain(|_,entry|!entry.sender.is_closed());let key=Key{peer,user:decoded.user,group};

@@ -14,6 +14,7 @@ use kerlico_config::{NodeBuildContext, NodeFactory};
 use kerlico_core::{
     BoxFuture, BoxStream, CredentialManifest, CredentialSet, CredentialSlot, Error, InboundContext,
     InboundProtocol, IngressBinding, NodeEvent, PeerSession, Result, StreamLease,
+    is_peer_path_error,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -250,14 +251,18 @@ impl WireGuardNode {
                         peer.fragments.expire(Instant::now());
                         if let Some(packet) = peer.crypto.tick()
                             && let Some(endpoint) = peer.crypto.endpoint
-                        { send(&socket, endpoint, &packet, &context.cancel, &carrier).await?; }
+                        { send_or_drop(&socket, endpoint, &packet, &context, &carrier).await; }
                     }
                 }
                 result = socket.recv_from(&mut input) => {
-                    let (count, source) = result?;
+                    let (count, source) = match result {
+                        Ok(value) => value,
+                        Err(error) if is_peer_path_error(&error) => { context.events.record(NodeEvent::Dropped); continue; }
+                        Err(error) => return Err(error.into()),
+                    };
                     carrier.record(0, count);
                     let selected = match index.identify(source, &input[..count]) {
-                        Ok(Identified::Cookie(packet)) => { send(&socket, source, &packet, &context.cancel, &carrier).await?; continue; }
+                        Ok(Identified::Cookie(packet)) => { send_or_drop(&socket, source, &packet, &context, &carrier).await; continue; }
                         Ok(Identified::Peer(index)) => index,
                         Err(_) => { context.events.record(NodeEvent::Dropped); continue; }
                     };
@@ -265,7 +270,7 @@ impl WireGuardNode {
                     let Ok(received) = peer.crypto.receive(source, &input[..count]) else {
                         context.events.record(NodeEvent::Dropped); continue;
                     };
-                    for packet in received.network { send(&socket, source, &packet, &context.cancel, &carrier).await?; }
+                    for packet in received.network { send_or_drop(&socket, source, &packet, &context, &carrier).await; }
                     if received.authenticated {
                         if peer.runtime.is_none() {
                             let runtime = self.admit_peer(peer, source, &ingress, &context, notify.clone(), budget.clone());
@@ -300,7 +305,7 @@ impl WireGuardNode {
                     && let Some(packet) = peer.crypto.initiate()
                     && let Some(endpoint) = peer.crypto.endpoint
                 {
-                    send(&socket, endpoint, &packet, &context.cancel, &carrier).await?;
+                    send_or_drop(&socket, endpoint, &packet, &context, &carrier).await;
                 }
                 if peer.crypto.ready() {
                     for packet in runtime.stack.drain(32)? {
@@ -310,7 +315,7 @@ impl WireGuardNode {
                         if let Some(packet) = peer.crypto.encrypt(&packet)?
                             && let Some(endpoint) = peer.crypto.endpoint
                         {
-                            send(&socket, endpoint, &packet, &context.cancel, &carrier).await?;
+                            send_or_drop(&socket, endpoint, &packet, &context, &carrier).await;
                         }
                     }
                     if runtime.stack.has_output() {
@@ -357,6 +362,22 @@ impl WireGuardNode {
             last_seen: Instant::now(),
             _lease: lease,
         })
+    }
+}
+
+/// 目的地址来自远端（来源端口可为 0，路径可不可达），发送失败只损失这一个数据报。
+async fn send_or_drop(
+    socket: &UdpSocket,
+    endpoint: SocketAddr,
+    packet: &[u8],
+    context: &InboundContext,
+    carrier: &Carrier,
+) {
+    if send(socket, endpoint, packet, &context.cancel, carrier)
+        .await
+        .is_err()
+    {
+        context.events.record(NodeEvent::Dropped);
     }
 }
 

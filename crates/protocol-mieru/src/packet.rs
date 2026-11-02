@@ -6,7 +6,7 @@ use crate::{
     session::{Command, Entry, Life, Link, Receipt, Scope, TcpSettings},
 };
 use bytes::Bytes;
-use kerlico_core::{Error, Result};
+use kerlico_core::{Error, NodeEvent, Result};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     net::SocketAddr,
@@ -74,6 +74,12 @@ pub(crate) fn start(
                     }
                 }
                 Ok(_) => {}
+                // 客户端的载体只有这一个对端，对端不可达应结束链路；服务端不能因此停掉整个节点。
+                Err(error) if !client && kerlico_core::is_peer_path_error(&error) => {
+                    if let Some(server) = &source.server {
+                        server.context.events.record(NodeEvent::Dropped);
+                    }
+                }
                 Err(_) => break,
             }
         }

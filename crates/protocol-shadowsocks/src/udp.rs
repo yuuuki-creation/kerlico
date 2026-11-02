@@ -6,7 +6,7 @@ use bytes::BytesMut;
 use kerlico_core::{
     BoxFuture, CancellationToken, ConnectContext, DatagramChannel, DatagramReceiver,
     DatagramSender, Destination, Error, InboundContext, IngressBinding, NodeEvent, NodeObserver,
-    PeerSession, Result,
+    PeerSession, Result, is_peer_path_error,
 };
 use shadowsocks::{
     ServerConfig,
@@ -173,7 +173,11 @@ impl ShadowsocksNode {
                 _ = tasks.join_next(), if !tasks.is_empty() => { sessions.retain(|_, sender| !sender.is_closed()); },
                 _ = maintenance.tick() => { sessions.retain(|_, sender| !sender.is_closed()); },
                 received = socket.recv_from(&mut wire) => {
-                    let (len, peer) = match received { Ok(value) => value, Err(error) => break Err(error.into()) };
+                    let (len, peer) = match received {
+                        Ok(value) => value,
+                        Err(error) if is_peer_path_error(&error) => { context.events.record(NodeEvent::Dropped); continue; }
+                        Err(error) => break Err(error.into()),
+                    };
                     let configurations: Vec<_> = if self.credentials.is_empty() { vec![(None, self.config.clone())] } else { self.credentials.rows().map(|(slot, row)| (Some(slot), row.config.clone())).collect() };
                     let mut decoded = None;
                     for (slot, config) in configurations {
@@ -182,11 +186,17 @@ impl ShadowsocksNode {
                         if let Ok((count, target, None)) = crypto_io::decrypt_client_payload(&self.crypto, config.method(), config.key(), &mut bytes, None) {
                             if count > context.max_datagram_size.min(MAX_PACKET) { continue; }
                             let Ok(target) = destination(&target) else { continue; };
-                            let access = match slot { Some(slot) => ingress.authenticated(self.credentials.verified(&slot, ())?, &{ let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer); peer_context })?.0, None => ingress.local(&{ let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer); peer_context })? };
+                            // 停用成员的密钥仍能解密；拒绝只丢这一个数据报，取消由循环顶部处理。
+                            let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer);
+                            let access = match slot {
+                                Some(slot) => self.credentials.verified(&slot, ()).and_then(|verified| ingress.authenticated(verified, &peer_context)).map(|(access, ())| access),
+                                None => ingress.local(&peer_context),
+                            };
+                            let Ok(access) = access else { break; };
                             bytes.truncate(count); decoded = Some((config, nonce, target, bytes, access)); break;
                         }
                     }
-                    let Some((config, nonce, target, packet, access)) = decoded else { continue; };
+                    let Some((config, nonce, target, packet, access)) = decoded else { context.events.record(NodeEvent::Dropped); continue; };
                     let scoped_nonce = if nonce.is_empty() { nonce } else { let mut scoped = config.key().to_vec(); scoped.extend_from_slice(&nonce); scoped };
                     if !replay.accept(&scoped_nonce) { context.events.record(NodeEvent::Dropped); continue; }
                     let key = Association { peer, target: target.clone(), credential: config.key().to_vec() };
