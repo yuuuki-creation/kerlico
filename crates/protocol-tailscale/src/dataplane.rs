@@ -10,7 +10,7 @@ use crate::{
     stun,
 };
 use kerlico_core::{Error, Result, ServiceContext};
-use kerlico_wireguard::ip::{ClientTunnel, PacketOwner, PeerCrypto, packet_owner};
+use kerlico_wireguard::ip::{ClientTunnel, PacketClassifier, PacketRoute, PeerCrypto};
 use rand::{RngCore, rngs::OsRng};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -127,8 +127,29 @@ struct State {
     home_sender: mpsc::Sender<Option<HomeChoice>>,
     derp_sender: mpsc::Sender<Received>,
     stun_target: Option<SocketAddr>,
-    stun_tx: [u8; 12],
+    stun_probe: StunProbe,
     last_stun: Option<Instant>,
+    classifier: PacketClassifier,
+}
+
+/// 唯一在途的 STUN 请求。回应决定上报给控制面的端点，所以只接受被询问的服务器对这次请求的回应。
+#[derive(Default)]
+struct StunProbe(Option<(SocketAddr, [u8; 12])>);
+impl StunProbe {
+    fn start(&mut self, target: SocketAddr) -> [u8; 12] {
+        let mut tx = [0; 12];
+        OsRng.fill_bytes(&mut tx);
+        self.0 = Some((target, tx));
+        tx
+    }
+    fn accept(&mut self, source: SocketAddr, packet: &[u8]) -> Option<SocketAddr> {
+        let (tx, mapped) = stun::parse_response(packet)?;
+        if self.0 != Some((source, tx)) {
+            return None;
+        }
+        self.0 = None;
+        Some(mapped)
+    }
 }
 
 impl Dataplane {
@@ -150,8 +171,9 @@ impl Dataplane {
             home_sender,
             derp_sender,
             stun_target: None,
-            stun_tx: [0; 12],
+            stun_probe: StunProbe::default(),
             last_stun: None,
+            classifier: PacketClassifier::new(self.node.bytes()),
         };
         self.reconcile(&mut state).await?;
         let mut timer = interval(Duration::from_millis(250));
@@ -227,12 +249,15 @@ impl Dataplane {
             self.on_disco(state, Origin::Udp(canonical(source)), packet)
                 .await;
         } else if stun::is_stun(packet) {
-            self.on_stun(state, packet);
+            self.on_stun(state, canonical(source), packet);
         } else {
-            let owner = packet_owner(&self.node.bytes(), packet);
-            let key = match owner {
-                Some(PacketOwner::Initiator(public)) => Some(NodeKey(public)),
-                Some(PacketOwner::Index(index)) => state.by_index.get(&index).copied(),
+            let key = match state.classifier.classify(source.ip(), packet) {
+                Some(PacketRoute::Initiator(public)) => Some(NodeKey(public)),
+                Some(PacketRoute::Index(index)) => state.by_index.get(&index).copied(),
+                Some(PacketRoute::CookieReply(cookie)) => {
+                    self.send_udp(source, &cookie).await;
+                    None
+                }
                 None => None,
             };
             if let Some(key) = key {
@@ -267,10 +292,12 @@ impl Dataplane {
     }
 
     async fn on_disco(&self, state: &mut State, origin: Origin, packet: &[u8]) {
-        let Some((sender, message)) = disco::open(&self.disco, packet) else {
+        // 解封要做一次 DH；发送方公钥是明文，先按 netmap 过滤，陌生来源不消耗数据面。
+        let Some(&key) = disco::sender(packet).and_then(|sender| state.by_disco.get(&sender))
+        else {
             return;
         };
-        let Some(&key) = state.by_disco.get(&sender) else {
+        let Some((sender, message)) = disco::open(&self.disco, packet) else {
             return;
         };
         match (message, origin) {
@@ -325,18 +352,16 @@ impl Dataplane {
         }
     }
 
-    fn on_stun(&self, state: &mut State, packet: &[u8]) {
-        let Some((tx, mapped)) = stun::parse_response(packet) else {
+    fn on_stun(&self, state: &mut State, source: SocketAddr, packet: &[u8]) {
+        let Some(mapped) = state.stun_probe.accept(source, packet) else {
             return;
         };
-        if tx == state.stun_tx {
-            self.local.send_if_modified(|local| {
-                let stun = vec![mapped];
-                let changed = local.stun != stun;
-                local.stun = stun;
-                changed
-            });
-        }
+        self.local.send_if_modified(|local| {
+            let stun = vec![mapped];
+            let changed = local.stun != stun;
+            local.stun = stun;
+            changed
+        });
     }
 
     /// 有业务活动时周期探测直连端点，并经 DERP 请对端反向探测以打洞。
@@ -439,6 +464,7 @@ impl Dataplane {
 
     async fn tick(&self, state: &mut State) {
         let now = Instant::now();
+        state.classifier.reset_count();
         let mut outgoing = Vec::new();
         let mut active = Vec::new();
         for (key, peer) in &mut state.peers {
@@ -473,8 +499,8 @@ impl Dataplane {
                 .is_none_or(|last| now - last >= STUN_INTERVAL)
         {
             state.last_stun = Some(now);
-            OsRng.fill_bytes(&mut state.stun_tx);
-            let _ = socket.send_to(&stun::request(&state.stun_tx), target).await;
+            let tx = state.stun_probe.start(target);
+            let _ = socket.send_to(&stun::request(&tx), target).await;
         }
     }
 
@@ -704,5 +730,27 @@ mod tests {
         assert_eq!(ip_source(&v6), Some("fd7a::1".parse().unwrap()));
         assert_eq!(ip_destination(&v6), Some("fd7a::2".parse().unwrap()));
         assert_eq!(ip_destination(&[0x45; 8]), None);
+    }
+
+    fn stun_response(tx: &[u8; 12]) -> Vec<u8> {
+        let mut packet = vec![1, 1, 0, 12, 0x21, 0x12, 0xa4, 0x42];
+        packet.extend_from_slice(tx);
+        packet.extend_from_slice(&[0, 0x20, 0, 8, 0, 1, 0xc7, 0x86, 0x69, 0x57, 0x85, 0x6f]);
+        packet
+    }
+
+    #[test]
+    fn stun_response_counts_only_for_the_outstanding_request_from_its_server() {
+        let server: SocketAddr = "192.0.2.1:3478".parse().unwrap();
+        let other: SocketAddr = "192.0.2.2:3478".parse().unwrap();
+        let mut probe = StunProbe::default();
+        assert_eq!(probe.accept(server, &stun_response(&[0; 12])), None);
+        let tx = probe.start(server);
+        assert_ne!(tx, [0; 12]);
+        assert_eq!(probe.accept(server, &stun_response(&[0; 12])), None);
+        assert_eq!(probe.accept(other, &stun_response(&tx)), None);
+        let mapped = "72.69.33.45:59028".parse().unwrap();
+        assert_eq!(probe.accept(server, &stun_response(&tx)), Some(mapped));
+        assert_eq!(probe.accept(server, &stun_response(&tx)), None);
     }
 }
