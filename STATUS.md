@@ -43,6 +43,7 @@
 - **VLESS**：`xhttp-tls-h3-stream-one` 加 Mux 时 UDP 超时，基线同样存在，未定位。出站没有多目标 UDP 关联，不能作为 TUN 或 SOCKS5 UDP 的出站。
 - **SS2022 EIH UDP 测试**：整树门禁中无回包失败过 2 次，单独压测 1000 轮与整树 5 轮都未复现，原因未定位。测试现在带新包序号重发，并断言节点的 `Dropped` 与 `Failed` 为零，重发次数打印到标准错误。
 - **Shadowsocks 与 SS2022 TCP 截断（已修复，待发布）**：`v1.3.1` 及之前的节点和出站在写 Pending 后可能丢弃数据末尾，连接随后停滞。根因与补丁见 `third_party/shadowsocks/PATCHES.md`。
+- **Snell 出站（已修复，待发布）**：`v1.3.1` 及之前接官方 snell-server 时 IPv4 目标的 UDP 无回包，官方双栈套接字的来源是 IPv4 映射地址。
 - **`kerlico-core`**：`interrupted_node_force_keeps_count_until_actual_socket_join` 全量运行失败过 1 次，单跑 10 次通过，疑似不稳定，未定位。
 - **WireGuard 出站**：定时发送和业务发送失败时隧道服务退出，本地网络短暂不可达会触发。
 - **ZeroTier**：伪造流量持续时，首次主动联系我们的成员学习变慢；本节点发起的查询不受影响。
@@ -55,6 +56,7 @@
 - **ShadowsocksR**：固定版本 Mihomo 同参数下会向 Rust 与 Python 两种服务端发出坏 MAC 流；Rust→Python 100/100。
 - **Sudoku**：494 配置矩阵 18 项失败后已修订，修订后的 20 配置 740 项与 12 条 33MiB 大流通过，全矩阵未重跑。六类生命周期用例的参考客户端在双端同样停滞。
 - **Tor**：公网字面 IPv6 未测。
+- **sing-box 1.14.4**：Snell 与 Hysteria1 入站丢弃域名目标的 UDP，HTTPUpgrade 入站拒绝带 `Sec-WebSocket-Key` 的请求，gRPC 没有 multi 模式。对照见 [互通记录](docs/testing/peer-interop-2026-11-03.md)。
 
 ## 资料导航
 
