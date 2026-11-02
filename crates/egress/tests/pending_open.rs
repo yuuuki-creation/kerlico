@@ -46,12 +46,20 @@ struct GatedStream {
     gate: Arc<WriteGate>,
 }
 impl AsyncRead for GatedStream {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buffer: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.get_mut().stream).poll_read(cx, buffer)
     }
 }
 impl AsyncWrite for GatedStream {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
         if this.gate.held.load(Ordering::Acquire) {
             this.gate.attempts.fetch_add(1, Ordering::AcqRel);
@@ -102,7 +110,10 @@ impl DeviceNetwork for PendingDevice {
             let local = stream.local_addr()?;
             self.hold(
                 OpenedTcp {
-                    stream: Box::new(GatedStream { stream, gate: self.write_gate.clone() }),
+                    stream: Box::new(GatedStream {
+                        stream,
+                        gate: self.write_gate.clone(),
+                    }),
                     info: TcpConnectInfo::local_bound(local),
                 },
                 local,
@@ -598,7 +609,9 @@ async fn ready_three_kinds_keep_protocol_end_when_service_fails_before_or_after_
 fn assert_service_failure(error: &Error, failure: ServiceFailure) {
     match failure {
         ServiceFailure::Timeout => assert!(matches!(error, Error::Timeout)),
-        ServiceFailure::Protocol(expected) => assert!(matches!(error, Error::Protocol(actual) if *actual == expected)),
+        ServiceFailure::Protocol(expected) => {
+            assert!(matches!(error, Error::Protocol(actual) if *actual == expected))
+        }
         _ => panic!("本回归只使用超时和协议失败"),
     }
 }
@@ -606,7 +619,10 @@ fn assert_service_failure(error: &Error, failure: ServiceFailure) {
 #[tokio::test]
 async fn dispatcher_preserves_first_service_failure_for_pending_and_new_requests() {
     for kind in [Kind::Tcp, Kind::Fixed, Kind::Association] {
-        for failure in [ServiceFailure::Timeout, ServiceFailure::Protocol("协议版本已不满足网络要求")] {
+        for failure in [
+            ServiceFailure::Timeout,
+            ServiceFailure::Protocol("协议版本已不满足网络要求"),
+        ] {
             let mut fixture = Fixture::new(kind).await;
             let pending = fixture.entered.take().unwrap();
             let mut opening = fixture.open(kind);
@@ -628,7 +644,11 @@ async fn dispatcher_preserves_first_service_failure_for_pending_and_new_requests
             assert!(!fixture.request.cancel.is_cancelled());
             assert!(!fixture.peer.cancel().is_cancelled());
             assert!(!fixture.binding.node_cancel().is_cancelled());
-            let expected = if failure == ServiceFailure::Timeout { FlowEnd::Timeout } else { FlowEnd::Failed };
+            let expected = if failure == ServiceFailure::Timeout {
+                FlowEnd::Timeout
+            } else {
+                FlowEnd::Failed
+            };
             assert_finished(&fixture, address, website, expected).await;
         }
     }
@@ -672,7 +692,13 @@ async fn dispatcher_normal_request_peer_and_node_cancel_precede_service_failure(
             assert_eq!(fixture.telemetry.usage().unwrap().active_flows, 0);
             assert_eq!(fixture.device.released.load(Ordering::Acquire), 1);
             if let Some(website) = &mut website {
-                assert_eq!(timeout(Duration::from_secs(1), website.read(&mut [0; 1])).await.unwrap().unwrap(), 0);
+                assert_eq!(
+                    timeout(Duration::from_secs(1), website.read(&mut [0; 1]))
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
             } else {
                 let _rebound = UdpSocket::bind(address).await.unwrap();
             }
@@ -684,16 +710,26 @@ async fn dispatcher_normal_request_peer_and_node_cancel_precede_service_failure(
 async fn ready_io_keeps_service_failure_and_already_accounted_bytes() {
     let healthy = ServiceContext::for_test();
     for kind in [Kind::Tcp, Kind::Fixed, Kind::Association] {
-        for failure in [ServiceFailure::Timeout, ServiceFailure::Protocol("协议版本已不满足网络要求")] {
+        for failure in [
+            ServiceFailure::Timeout,
+            ServiceFailure::Protocol("协议版本已不满足网络要求"),
+        ] {
             let mut fixture = Fixture::new(kind).await;
             let pending = fixture.entered.take().unwrap();
             let release = fixture.release.take().unwrap();
             let mut opening = fixture.open(kind);
             let (address, mut website) = held(&mut opening, pending, &fixture, kind).await;
             release.send(Ok(())).unwrap();
-            let flow = timeout(Duration::from_secs(1), &mut opening).await.unwrap().unwrap();
+            let flow = timeout(Duration::from_secs(1), &mut opening)
+                .await
+                .unwrap()
+                .unwrap();
             drop(opening);
-            let expected_failure = if failure == ServiceFailure::Timeout { FlowFailure::Timeout } else { FlowFailure::Failed };
+            let expected_failure = if failure == ServiceFailure::Timeout {
+                FlowFailure::Timeout
+            } else {
+                FlowFailure::Failed
+            };
             timeout(Duration::from_secs(2), async {
                 match flow {
                     Ready::Tcp(mut flow) => {
@@ -708,18 +744,35 @@ async fn ready_io_keeps_service_failure_and_already_accounted_bytes() {
                         assert_eq!(&down, b"down");
                         let (io, completion) = flow.into_parts();
                         let (mut reader, mut writer) = tokio::io::split(io);
-                        fixture.device.write_gate.held.store(true, Ordering::Release);
+                        fixture
+                            .device
+                            .write_gate
+                            .held
+                            .store(true, Ordering::Release);
                         let mut byte = [0; 1];
                         let mut read = Box::pin(reader.read(&mut byte));
                         let mut write = Box::pin(writer.write_all(b"not-counted"));
-                        assert!(poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx).is_pending())).await);
-                        assert!(poll_fn(|cx| Poll::Ready(write.as_mut().poll(cx).is_pending())).await);
+                        assert!(
+                            poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx).is_pending())).await
+                        );
+                        assert!(
+                            poll_fn(|cx| Poll::Ready(write.as_mut().poll(cx).is_pending())).await
+                        );
                         let polls = fixture.device.write_gate.attempts.load(Ordering::Acquire);
                         fixture.service.fail(failure);
                         let (read, write) = tokio::join!(read, write);
-                        assert_eq!(FlowFailure::from_io_error(&read.unwrap_err()), expected_failure);
-                        assert_eq!(FlowFailure::from_io_error(&write.unwrap_err()), expected_failure);
-                        assert_eq!(fixture.device.write_gate.attempts.load(Ordering::Acquire), polls);
+                        assert_eq!(
+                            FlowFailure::from_io_error(&read.unwrap_err()),
+                            expected_failure
+                        );
+                        assert_eq!(
+                            FlowFailure::from_io_error(&write.unwrap_err()),
+                            expected_failure
+                        );
+                        assert_eq!(
+                            fixture.device.write_gate.attempts.load(Ordering::Acquire),
+                            polls
+                        );
                         completion.finish(FlowOutcome::ProtocolEnd);
                         drop((reader, writer));
                     }
@@ -732,10 +785,15 @@ async fn ready_io_keeps_service_failure_and_already_accounted_bytes() {
                         fixture._udp.send_to(b"down", client).await.unwrap();
                         assert_eq!(receiver.recv().await.unwrap().unwrap(), b"down");
                         let mut receive = receiver.recv();
-                        assert!(poll_fn(|cx| Poll::Ready(receive.as_mut().poll(cx).is_pending())).await);
+                        assert!(
+                            poll_fn(|cx| Poll::Ready(receive.as_mut().poll(cx).is_pending())).await
+                        );
                         fixture.service.fail(failure);
                         assert_service_failure(&receive.await.unwrap_err(), failure);
-                        assert_service_failure(&sender.send(b"not-counted").await.unwrap_err(), failure);
+                        assert_service_failure(
+                            &sender.send(b"not-counted").await.unwrap_err(),
+                            failure,
+                        );
                         completion.finish(FlowOutcome::ProtocolEnd);
                         drop((sender, receiver));
                     }
@@ -750,33 +808,66 @@ async fn ready_io_keeps_service_failure_and_already_accounted_bytes() {
                         assert_eq!(source, fixture.target);
                         assert_eq!(bytes, b"down");
                         let mut receive = receiver.recv_from();
-                        assert!(poll_fn(|cx| Poll::Ready(receive.as_mut().poll(cx).is_pending())).await);
+                        assert!(
+                            poll_fn(|cx| Poll::Ready(receive.as_mut().poll(cx).is_pending())).await
+                        );
                         fixture.service.fail(failure);
                         assert_service_failure(&receive.await.unwrap_err(), failure);
-                        assert_service_failure(&sender.send_to(b"not-counted", &fixture.target).await.unwrap_err(), failure);
+                        assert_service_failure(
+                            &sender
+                                .send_to(b"not-counted", &fixture.target)
+                                .await
+                                .unwrap_err(),
+                            failure,
+                        );
                         completion.finish(FlowOutcome::ProtocolEnd);
                         drop((sender, receiver));
                     }
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             let records = fixture.telemetry.records(0, 2).unwrap();
             assert_eq!(records.len(), 1);
-            let expected = if failure == ServiceFailure::Timeout { FlowEnd::Timeout } else { FlowEnd::Failed };
+            let expected = if failure == ServiceFailure::Timeout {
+                FlowEnd::Timeout
+            } else {
+                FlowEnd::Failed
+            };
             assert_eq!(records[0].end, Some(expected));
             let packets = usize::from(!matches!(kind, Kind::Tcp)) as u64;
-            let usage = Usage { upload_bytes: 3, download_bytes: 4, upload_packets: packets, download_packets: packets };
+            let usage = Usage {
+                upload_bytes: 3,
+                download_bytes: 4,
+                upload_packets: packets,
+                download_packets: packets,
+            };
             assert_eq!(records[0].usage, usage);
             assert_eq!(fixture.telemetry.usage().unwrap().engine, usage);
             assert_eq!(fixture.telemetry.usage().unwrap().active_flows, 0);
             assert!(!fixture.peer.cancel().is_cancelled());
             assert!(!fixture.binding.node_cancel().is_cancelled());
-            assert_eq!(healthy.spawn_tracked(async { 31 }).unwrap().await.unwrap(), 31);
+            assert_eq!(
+                healthy.spawn_tracked(async { 31 }).unwrap().await.unwrap(),
+                31
+            );
             if let Some(mut website) = website {
-                assert_eq!(timeout(Duration::from_secs(1), website.read(&mut [0; 1])).await.unwrap().unwrap(), 0);
+                assert_eq!(
+                    timeout(Duration::from_secs(1), website.read(&mut [0; 1]))
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
             } else {
                 let _rebound = UdpSocket::bind(address).await.unwrap();
             }
         }
     }
-    assert!(healthy.shutdown(Instant::now() + Duration::from_secs(1)).await.is_clean());
+    assert!(
+        healthy
+            .shutdown(Instant::now() + Duration::from_secs(1))
+            .await
+            .is_clean()
+    );
 }

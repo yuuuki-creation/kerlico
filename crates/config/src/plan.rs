@@ -1,4 +1,4 @@
-use crate::{ForwardSpec, Limits};
+use crate::{ForwardSpec, HistorySpec, Limits};
 use kerlico_core::{
     BoxFuture, Capabilities, CredentialIssuer, FamilyMode, InboundProtocol, NodeId, OutId,
     Outbound, Result, ServiceContext, TargetPolicy,
@@ -13,6 +13,7 @@ pub struct OutboundPlan {
     capabilities: Capabilities,
     association: bool,
     policy: TargetPolicy,
+    native_targets: bool,
     start: ServiceStarter,
 }
 impl OutboundPlan {
@@ -28,8 +29,16 @@ impl OutboundPlan {
             capabilities,
             association,
             policy,
+            native_targets: false,
             start: Box::new(start),
         }
+    }
+    pub fn with_native_targets(mut self) -> Self {
+        self.native_targets = true;
+        self
+    }
+    pub fn needs_native_targets(&self) -> bool {
+        self.native_targets
     }
     pub fn capabilities(&self) -> Capabilities {
         self.capabilities
@@ -79,12 +88,14 @@ impl EgressPlan {
 }
 
 pub struct PreparedConfig {
+    pub(crate) history: Option<HistorySpec>,
     pub(crate) egress: EgressPlan,
     pub(crate) inbounds: Vec<ForwardSpec>,
     pub(crate) limits: Limits,
     pub(crate) nodes: Vec<PreparedNode>,
 }
 pub struct EnginePlanParts {
+    pub history: Option<HistorySpec>,
     pub egress: EgressPlan,
     pub inbounds: Vec<ForwardSpec>,
     pub limits: Limits,
@@ -95,10 +106,12 @@ pub struct EnginePlanParts {
 pub struct DeviceRequirements {
     pub local_ipv4: bool,
     pub local_ipv6: bool,
+    pub auto_warp: bool,
 }
 impl PreparedConfig {
     pub fn into_parts(self) -> EnginePlanParts {
         EnginePlanParts {
+            history: self.history,
             egress: self.egress,
             inbounds: self.inbounds,
             limits: self.limits,
@@ -122,10 +135,10 @@ impl PreparedConfig {
         let mut requirements = DeviceRequirements::default();
         for binding in &self.egress.bindings {
             let local = self.egress.services.iter().any(|service| {
-                service.id == binding.outbound
-                    && service.plan.target_policy() == TargetPolicy::Local
+                service.id == binding.outbound && service.plan.needs_native_targets()
             });
             if local {
+                requirements.auto_warp |= binding.mode == FamilyMode::DualV4Preferred;
                 requirements.local_ipv4 |= binding.mode != FamilyMode::V6Only;
                 requirements.local_ipv6 |= binding.mode != FamilyMode::V4Only;
             }

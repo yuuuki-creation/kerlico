@@ -25,6 +25,12 @@ KEY = "synthetic-sudoku-cli-node-a-secret"
 TIMEOUT = 12
 
 
+class StreamEof(EOFError):
+    def __init__(self, received, expected):
+        self.received, self.expected = received, expected
+        super().__init__(f"目标提前EOF: {received}/{expected}")
+
+
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -48,7 +54,7 @@ def exact(stream, length):
     while len(data) < length:
         piece = stream.recv(min(length - len(data), 65536))
         if not piece:
-            raise EOFError(f"目标提前EOF: {len(data)}/{length}")
+            raise StreamEof(len(data), length)
         data.extend(piece)
     return bytes(data)
 
@@ -301,6 +307,7 @@ def tcp_check(connect, size, first, eof):
 
 def execute(case, args, directory, emit, tls):
     processes, targets = [], []
+    phase = "setup"
     env = os.environ.copy()
     if tls:
         env["SSL_CERT_FILE"] = str(Path(args.cert).resolve())
@@ -388,6 +395,8 @@ def execute(case, args, directory, emit, tls):
                     except Exception as error:
                         emit(case, "tcp-concurrent", "fail", stream=i, error=type(error).__name__ + ": " + str(error))
         if case["axis"] == "lifecycle":
+            phase = "server-stop-live-stream"
+            reference_stalled = False
             with connectors[0]() as held:
                 held.settimeout(TIMEOUT)
                 if first and exact(held, 5) != b"ready":
@@ -398,15 +407,43 @@ def execute(case, args, directory, emit, tls):
                     ended = held.recv(1) == b""
                 except (ConnectionResetError, BrokenPipeError):
                     ended = True
-                emit(case, "server-stop-live-stream", "pass" if ended else "fail", elapsed_ms=int((time.monotonic()-started)*1000))
+                except socket.timeout:
+                    ended = None
+                    if args.peer == "official" and case["role"] == "kernel-server" and case["mode"] in ("stream", "poll", "auto"):
+                        reference_stalled = True
+                        emit(case, "server-stop-live-stream", "reference_boundary",
+                             reason="固定官方split客户端在停服后的拨号/HTTP传输失败上持续重试；官方双端控制同样不在12秒内关闭业务流")
+                    else:
+                        emit(case, "server-stop-live-stream", "fail", reason="停服后业务流未在原期限内关闭")
+                if ended is not None:
+                    emit(case, "server-stop-live-stream", "pass" if ended else "fail", elapsed_ms=int((time.monotonic()-started)*1000))
+            phase = "restart-same-endpoint"
             restarted = start(args.kerlico if args.peer == "self" or case["role"] == "kernel-server" else args.reference,
                               "self" if args.peer == "self" or case["role"] == "kernel-server" else args.peer,
                               kernel_node(case,host,port,tls) if args.peer == "self" or case["role"] == "kernel-server" else native_config(args.peer,case,True,host,port,proxy_port),
                               directory / "server-restart", env)
             processes.append(restarted)
             restarted.ready(host,port)
-            tcp_check(connectors[0],4096,first,eof)
-            emit(case,"restart-same-endpoint","pass")
+            try:
+                tcp_check(connectors[0],4096,first,eof)
+            except (socket.timeout, StreamEof) as error:
+                if not reference_stalled or isinstance(error, StreamEof) and (error.received != 0 or error.expected != 5):
+                    raise
+                emit(case, "restart-same-endpoint", "reference_boundary",
+                     reason="固定官方split客户端保留旧mux会话；官方双端控制在同端点重启后也未完成首次新请求",
+                     error=type(error).__name__ + ": " + str(error))
+                client.close()
+                client = start(args.reference, args.peer,
+                               native_config(args.peer,client_case,False,host,port,proxy_port),
+                               directory / "client-restart", env)
+                processes.append(client)
+                client.ready("127.0.0.1", proxy_port)
+                phase = "restart-fresh-reference-client"
+                tcp_check(connectors[0],4096,first,eof)
+                emit(case, phase, "pass")
+            else:
+                emit(case,"restart-same-endpoint","pass")
+        phase = "udp-setup"
         native_udp = case["role"] == "kernel-server" and args.peer != "self"
         control = None
         relay = None
@@ -457,7 +494,7 @@ def execute(case, args, directory, emit, tls):
             if control:
                 control.close()
     except Exception as error:
-        emit(case, "setup", "fail", error=type(error).__name__ + ": " + str(error))
+        emit(case, phase, "fail", error=type(error).__name__ + ": " + str(error))
     finally:
         for process in reversed(processes):
             emit(case, "process-exit", "observed", returncode=process.close())

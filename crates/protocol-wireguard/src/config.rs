@@ -2,12 +2,15 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use kerlico_core::{Address, Destination, Error, Result};
 use serde::Deserialize;
-use std::{net::{IpAddr, SocketAddr}, time::Duration};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 use zeroize::Zeroizing;
 
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct Limits {
+pub struct Limits {
     pub max_flows: usize,
     pub tcp_buffer_bytes: usize,
     pub queue_packets: usize,
@@ -58,23 +61,33 @@ impl Network {
         let (address, prefix) = value.split_once('/').ok_or_else(invalid)?;
         let address: IpAddr = address.parse().map_err(|_| invalid())?;
         let prefix: u8 = prefix.parse().map_err(|_| invalid())?;
-        if prefix > if address.is_ipv4() { 32 } else { 128 }
-            || address.to_canonical() != address
-        {
+        if prefix > if address.is_ipv4() { 32 } else { 128 } || address.to_canonical() != address {
             return Err(invalid());
         }
         let result = Self { address, prefix };
         if result.mask(address) != address {
-            return Err(Error::Config("WireGuard AllowedIPs必须使用规范网络地址".into()));
+            return Err(Error::Config(
+                "WireGuard AllowedIPs必须使用规范网络地址".into(),
+            ));
         }
         Ok(result)
     }
     fn mask(&self, address: IpAddr) -> IpAddr {
         match address {
-            IpAddr::V4(address) => IpAddr::V4((u32::from(address)
-                & u32::MAX.checked_shl(u32::from(32 - self.prefix)).unwrap_or(0)).into()),
-            IpAddr::V6(address) => IpAddr::V6((u128::from(address)
-                & u128::MAX.checked_shl(u32::from(128 - self.prefix)).unwrap_or(0)).into()),
+            IpAddr::V4(address) => IpAddr::V4(
+                (u32::from(address)
+                    & u32::MAX
+                        .checked_shl(u32::from(32 - self.prefix))
+                        .unwrap_or(0))
+                .into(),
+            ),
+            IpAddr::V6(address) => IpAddr::V6(
+                (u128::from(address)
+                    & u128::MAX
+                        .checked_shl(u32::from(128 - self.prefix))
+                        .unwrap_or(0))
+                .into(),
+            ),
         }
     }
     pub fn contains(&self, address: IpAddr) -> bool {
@@ -91,7 +104,7 @@ pub(crate) struct Addresses {
     pub v6: Option<IpAddr>,
 }
 impl Addresses {
-    fn parse(values: Vec<IpAddr>) -> Result<Self> {
+    pub(crate) fn parse(values: Vec<IpAddr>) -> Result<Self> {
         if values.is_empty() || values.len() > 2 {
             return Err(invalid());
         }
@@ -100,9 +113,15 @@ impl Addresses {
             if !unicast(address) {
                 return Err(invalid());
             }
-            let slot = if address.is_ipv4() { &mut result.v4 } else { &mut result.v6 };
+            let slot = if address.is_ipv4() {
+                &mut result.v4
+            } else {
+                &mut result.v6
+            };
             if slot.replace(address).is_some() {
-                return Err(Error::Config("WireGuard每个内部地址族只能配置一个接口地址".into()));
+                return Err(Error::Config(
+                    "WireGuard每个内部地址族只能配置一个接口地址".into(),
+                ));
             }
         }
         Ok(result)
@@ -120,7 +139,8 @@ impl Addresses {
 }
 
 pub(crate) fn unicast(address: IpAddr) -> bool {
-    !address.is_unspecified() && !address.is_multicast()
+    !address.is_unspecified()
+        && !address.is_multicast()
         && address.to_canonical() == address
         && !matches!(address, IpAddr::V4(ip) if ip.is_broadcast())
 }
@@ -136,10 +156,13 @@ pub(crate) fn destination(value: SocketAddr) -> Result<Destination> {
 }
 pub(crate) fn key(value: &str) -> Result<[u8; 32]> {
     let mut output = [0; 32];
-    if value.len() != 44 || STANDARD.decode_slice(value, &mut output).ok() != Some(32)
+    if value.len() != 44
+        || STANDARD.decode_slice(value, &mut output).ok() != Some(32)
         || output == [0; 32]
     {
-        return Err(Error::Config("WireGuard密钥必须为非零32字节的标准Base64".into()));
+        return Err(Error::Config(
+            "WireGuard密钥必须为非零32字节的标准Base64".into(),
+        ));
     }
     Ok(output)
 }
@@ -165,16 +188,26 @@ impl PeerOptions {
         if self.allowed_ips.is_empty() || self.allowed_ips.len() > 256 {
             return Err(invalid());
         }
-        let allowed = self.allowed_ips.iter().map(|s| Network::parse(s))
+        let allowed = self
+            .allowed_ips
+            .iter()
+            .map(|s| Network::parse(s))
             .collect::<Result<Vec<_>>>()?;
         for (index, network) in allowed.iter().enumerate() {
             if allowed[..index].iter().any(|other| network.overlaps(other)) {
-                return Err(Error::Config("WireGuard单peer的AllowedIPs不能重复或重叠".into()));
+                return Err(Error::Config(
+                    "WireGuard单peer的AllowedIPs不能重复或重叠".into(),
+                ));
             }
         }
         Ok(PeerConfig {
             public_key: key(&self.public_key)?,
-            preshared_key: self.preshared_key.as_deref().map(key).transpose()?.map(Zeroizing::new),
+            preshared_key: self
+                .preshared_key
+                .as_deref()
+                .map(key)
+                .transpose()?
+                .map(Zeroizing::new),
             allowed,
             keepalive: (self.persistent_keepalive != 0).then_some(self.persistent_keepalive),
         })
@@ -196,7 +229,9 @@ pub(crate) struct CommonOptions {
     #[serde(default)]
     pub limits: Limits,
 }
-fn default_mtu() -> usize { 1420 }
+fn default_mtu() -> usize {
+    1420
+}
 #[derive(Clone)]
 pub(crate) struct Prepared {
     pub private_key: StaticSecret,
@@ -208,9 +243,15 @@ pub(crate) struct Prepared {
 impl Prepared {
     pub fn validate_peer(&self, peer: &PeerConfig) -> Result<()> {
         if peer.public_key == *self.public_key.as_bytes()
-            || self.private_key.diffie_hellman(&PublicKey::from(peer.public_key)).to_bytes() == [0; 32]
+            || self
+                .private_key
+                .diffie_hellman(&PublicKey::from(peer.public_key))
+                .to_bytes()
+                == [0; 32]
         {
-            return Err(Error::Config("WireGuard对端公钥不能等于本机公钥或使用低阶点".into()));
+            return Err(Error::Config(
+                "WireGuard对端公钥不能等于本机公钥或使用低阶点".into(),
+            ));
         }
         Ok(())
     }

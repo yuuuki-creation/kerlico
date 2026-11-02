@@ -1,5 +1,11 @@
 # Naive 验证记录
 
+## 2026-11-02 并发成员夹具修订
+
+`perf-01` 的 `fixtures-resume-baseline-naive-r2` 复现 `stalled_member_dial_and_cancellation_do_not_block_other_member` 的 `BrokenPipe`。测试把唯一共享调度器绑定交给两个 HTTP 请求处理器，未像 Engine 保留运行期所有者。请求处理器退出时可导致调度器析构并退休共享命名出站，破坏仍应存活的成员业务。仅由夹具根作用域继续持有该绑定后，`fixtures-resume-owner-naive-r4` 的相同用例通过，没有修改生产逻辑。
+
+`fixtures-resume-complete-r5` 的 Mieru/Naive `all-targets` 联合测试退出 0，15 个程序、70 项全部通过，其中 Naive 为 33 项。977 文件输入归档 SHA-256 为 `08656693b10956a70d94ff71b0bc0e514b25ccfbeb4f885c0ceb01e27ba0e55e`。`fixtures-resume-repeat-naive-r6` 对上述并发成员用例连续执行 20 轮，全部通过；每轮仍要求成员 A 拨号挂起时成员 B 完成真实 H2/TLS 业务，并在取消 A 后继续核对 B 的完整回显。此结果不代替整树或独立对端矩阵的新验收。
+
 日期：2026-10-31。状态：**P-21 本文限定范围已在 perf-03 验收。** `native-r12` 的 26 项 Rust、严格 Clippy、格式检查、Naive-only 实际 CLI 与公开 API 探针构建通过；`interop-full-r1` 156/156 配置、900 条常规检查通过；同进程双端 28 条检查通过。14 条原对端包长/空包限制及 36 条原客户端 EOF 限制分别保留，不能把“156 配置完成”解释为这些负例通过。没有在本地构建、格式检查或测试，也没有验收当前全部工作区。
 
 **1.0.0测试资产迁移增量已在perf-03新冻结复验通过。** `native-assets-r1` 完整26项、严格Clippy、fmt及限定CLI/探针构建终态0。公开CA证书未取得明确再分发许可，原DER已从源码移出，r12原始资产和通过快照仅在私有证据中保留。本次只调整准备工具及 `cfg(test)` 读取路径，生产拒绝集及TLS代码在 `cfg(test)` 之前的字节与r12一致；历史156配置互通仍明确属于r12，不冒充新资产准备步骤的验证。

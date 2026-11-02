@@ -1,6 +1,9 @@
 use kerlico_core::{Error, Result};
 use serde::Deserialize;
-use std::{path::{Component, Path, PathBuf}, time::Duration};
+use std::{
+    path::{Component, Path, PathBuf},
+    time::Duration,
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -14,9 +17,15 @@ pub(crate) struct Options {
     shutdown_timeout_ms: u64,
 }
 
-fn bootstrap_timeout() -> u64 { 120_000 }
-fn carrier_timeout() -> u64 { 30_000 }
-fn shutdown_timeout() -> u64 { 5_000 }
+fn bootstrap_timeout() -> u64 {
+    120_000
+}
+fn carrier_timeout() -> u64 {
+    30_000
+}
+fn shutdown_timeout() -> u64 {
+    5_000
+}
 
 pub(crate) struct Prepared {
     pub data_directory: PathBuf,
@@ -30,10 +39,15 @@ fn valid_directory(path: &Path) -> bool {
     for part in path.components() {
         match part {
             Component::Normal(value) => {
-                let Some(value) = value.to_str() else { return false; };
-                if value.is_empty() || value.len() > 128 || value.chars().any(|c| {
-                    c.is_control() || "<>:\"|?*".contains(c)
-                }) {
+                let Some(value) = value.to_str() else {
+                    return false;
+                };
+                if value.is_empty()
+                    || value.len() > 128
+                    || value
+                        .chars()
+                        .any(|c| c.is_control() || "<>:\"|?*".contains(c))
+                {
                     return false;
                 }
                 normal = true;
@@ -52,7 +66,9 @@ impl Options {
             || !(100..=120_000).contains(&self.carrier_timeout_ms)
             || !(100..=60_000).contains(&self.shutdown_timeout_ms)
         {
-            return Err(Error::Config("Tor状态目录须是项目相对路径，时间预算须在允许范围内".into()));
+            return Err(Error::Config(
+                "Tor状态目录须是项目相对路径，时间预算须在允许范围内".into(),
+            ));
         }
         Ok(Prepared {
             data_directory: self.data_directory,
@@ -90,13 +106,15 @@ mod tests {
             "bootstrap_timeout_ms":120_000,
             "carrier_timeout_ms":30_000,
             "shutdown_timeout_ms":5_000
-        })).unwrap();
+        }))
+        .unwrap();
         let prepared = options.prepare().unwrap();
         assert_eq!(prepared.data_directory, PathBuf::from("state/tor"));
         assert_eq!(prepared.bootstrap_timeout, Duration::from_secs(120));
         let options: Options = serde_json::from_value(json!({
             "data_directory":"state", "bootstrap_timeout_ms":0
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(options.prepare().is_err());
     }
 }

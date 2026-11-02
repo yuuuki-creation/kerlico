@@ -25,11 +25,26 @@ impl PacketBudget {
     }
     pub fn reserve(&self, bytes: usize) -> Result<PacketLease> {
         let bytes = u32::try_from(bytes).map_err(|_| Error::ResourceLimit)?;
-        let packet = self.packets.clone().try_acquire_owned().map_err(|_| Error::ResourceLimit)?;
-        let bytes = self.bytes.clone().try_acquire_many_owned(bytes).map_err(|_| Error::ResourceLimit)?;
-        Ok(PacketLease { _packet: packet, _bytes: bytes })
+        let packet = self
+            .packets
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::ResourceLimit)?;
+        let bytes = self
+            .bytes
+            .clone()
+            .try_acquire_many_owned(bytes)
+            .map_err(|_| Error::ResourceLimit)?;
+        Ok(PacketLease {
+            _packet: packet,
+            _bytes: bytes,
+        })
     }
     pub fn packet(&self, bytes: Vec<u8>, from_stack: bool) -> Result<QueuedPacket> {
-        Ok(QueuedPacket { _lease: self.reserve(bytes.len())?, bytes, from_stack })
+        Ok(QueuedPacket {
+            _lease: self.reserve(bytes.len())?,
+            bytes,
+            from_stack,
+        })
     }
 }

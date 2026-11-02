@@ -2,7 +2,7 @@ use kerlico_core::ServiceContext;
 use quinn::{AsyncTimer, AsyncUdpSocket, Runtime};
 use std::{future::Future, io, pin::Pin, sync::Arc, time::Instant};
 
-pub(crate) struct ServiceRuntime(ServiceContext);
+pub struct ServiceRuntime(ServiceContext);
 impl ServiceRuntime {
     pub fn new(host: ServiceContext) -> Arc<Self> {
         Arc::new(Self(host))
@@ -10,12 +10,12 @@ impl ServiceRuntime {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NodeDrain {
+pub enum NodeDrain {
     Graceful,
     Forced,
 }
 
-pub(crate) struct NodeRuntime {
+pub struct NodeRuntime {
     owner: kerlico_core::NodeTasks,
     cancel: kerlico_core::CancellationToken,
     tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
@@ -188,7 +188,7 @@ impl Runtime for NodeRuntime {
         quinn::TokioRuntime.wrap_udp_socket(socket)
     }
 }
-pub(crate) struct NodeGuard(Arc<NodeRuntime>);
+pub struct NodeGuard(Arc<NodeRuntime>);
 impl Drop for NodeGuard {
     fn drop(&mut self) {
         self.0.stop();
@@ -213,7 +213,7 @@ impl Runtime for ServiceRuntime {
     }
 }
 
-pub(crate) fn spawn_owned<F, T>(
+pub fn spawn_owned<F, T>(
     owner: kerlico_core::NodeTasks,
     events: Arc<dyn kerlico_core::NodeObserver>,
     tasks: &mut tokio::task::JoinSet<T>,

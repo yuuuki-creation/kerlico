@@ -21,7 +21,7 @@ struct Socket {
 }
 impl std::fmt::Debug for Socket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TrustTunnelUdpSocket")
+        f.write_str("HttpCarrierUdpSocket")
     }
 }
 impl Socket {
@@ -52,7 +52,7 @@ impl Socket {
         }
     }
 }
-pub(crate) struct Close(Arc<Socket>);
+pub struct Close(Arc<Socket>);
 impl Close {
     pub fn close(&self) {
         self.0.close();
@@ -66,7 +66,7 @@ impl Drop for Close {
 struct Poller(Arc<Mutex<PollState>>);
 impl std::fmt::Debug for Poller {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TrustTunnelUdpPoller")
+        f.write_str("HttpCarrierUdpPoller")
     }
 }
 impl UdpPoller for Poller {
@@ -74,7 +74,7 @@ impl UdpPoller for Poller {
         let mut state = self
             .0
             .lock()
-            .map_err(|_| io::Error::other("TrustTunnel UDP 状态不可用"))?;
+            .map_err(|_| io::Error::other("HTTP QUIC UDP状态不可用"))?;
         state.wake = Some(cx.waker().clone());
         match state.inner.as_mut() {
             Some(inner) => inner.as_mut().poll_writable(cx),
@@ -99,7 +99,7 @@ impl AsyncUdpSocket for Socket {
         let guard = self
             .inner
             .lock()
-            .map_err(|_| io::Error::other("TrustTunnel UDP 状态不可用"))?;
+            .map_err(|_| io::Error::other("HTTP QUIC UDP状态不可用"))?;
         guard
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?
@@ -117,7 +117,7 @@ impl AsyncUdpSocket for Socket {
         let guard = self
             .inner
             .lock()
-            .map_err(|_| io::Error::other("TrustTunnel UDP 状态不可用"))?;
+            .map_err(|_| io::Error::other("HTTP QUIC UDP状态不可用"))?;
         match guard.as_ref() {
             Some(inner) => inner.poll_recv(cx, buffers, metadata),
             None => Poll::Ready(Err(io::ErrorKind::NotConnected.into())),
@@ -136,7 +136,7 @@ impl AsyncUdpSocket for Socket {
         self.fragment
     }
 }
-pub(crate) fn wrap(socket: UdpSocket) -> io::Result<(Arc<dyn AsyncUdpSocket>, Close)> {
+pub fn wrap(socket: UdpSocket) -> io::Result<(Arc<dyn AsyncUdpSocket>, Close)> {
     let inner = quinn::TokioRuntime.wrap_udp_socket(socket)?;
     let socket = Arc::new(Socket {
         address: inner.local_addr()?,

@@ -448,7 +448,7 @@ pub async fn exchange_scoped(
     target: &Destination,
     bytes: Vec<u8>,
 ) {
-    let mut stream = outbound.connect_tcp(target, &context).await.unwrap().stream;
+    let mut stream = outbound.connect_tcp(target, context).await.unwrap().stream;
     banner(&mut stream).await;
     let eof = outbound.capabilities().tcp_eof;
     let (mut read, mut write) = tokio::io::split(stream);

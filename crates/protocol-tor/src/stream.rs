@@ -1,6 +1,15 @@
-use crate::{error::{cancelled, sanitized_io}, runtime::TaskOwner, storage::StateLease};
+use crate::{
+    error::{cancelled, sanitized_io},
+    runtime::TaskOwner,
+    storage::StateLease,
+};
 use kerlico_core::{BoxFuture, ConnectContext, Error};
-use std::{io, pin::Pin, sync::Arc, task::{Context, Poll}};
+use std::{
+    io,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 struct Cancellation {
@@ -29,7 +38,9 @@ impl Cancellation {
         }
     }
     fn poll(&mut self, owner: &TaskOwner, cx: &mut Context<'_>) -> io::Result<()> {
-        owner.check().map_err(|error| io::Error::new(io::ErrorKind::ConnectionAborted, error))?;
+        owner
+            .check()
+            .map_err(|error| io::Error::new(io::ErrorKind::ConnectionAborted, error))?;
         if self.stopped || self.waiting.as_mut().poll(cx).is_ready() {
             self.stopped = true;
             match owner.check() {
@@ -50,7 +61,12 @@ pub(crate) struct TorStream<S> {
     write_cancel: Cancellation,
 }
 impl<S> TorStream<S> {
-    pub fn new(stream: S, owner: TaskOwner, storage: Arc<StateLease>, context: &ConnectContext) -> Self {
+    pub fn new(
+        stream: S,
+        owner: TaskOwner,
+        storage: Arc<StateLease>,
+        context: &ConnectContext,
+    ) -> Self {
         Self {
             stream,
             read_cancel: Cancellation::new(&owner, context),
@@ -61,26 +77,42 @@ impl<S> TorStream<S> {
     }
 }
 impl<S: AsyncRead + Unpin> AsyncRead for TorStream<S> {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.read_cancel.poll(&this.owner, cx)?;
-        Pin::new(&mut this.stream).poll_read(cx, bytes).map_err(sanitized_io)
+        Pin::new(&mut this.stream)
+            .poll_read(cx, bytes)
+            .map_err(sanitized_io)
     }
 }
 impl<S: AsyncWrite + Unpin> AsyncWrite for TorStream<S> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.write_cancel.poll(&this.owner, cx)?;
-        Pin::new(&mut this.stream).poll_write(cx, bytes).map_err(sanitized_io)
+        Pin::new(&mut this.stream)
+            .poll_write(cx, bytes)
+            .map_err(sanitized_io)
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.write_cancel.poll(&this.owner, cx)?;
-        Pin::new(&mut this.stream).poll_flush(cx).map_err(sanitized_io)
+        Pin::new(&mut this.stream)
+            .poll_flush(cx)
+            .map_err(sanitized_io)
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.write_cancel.poll(&this.owner, cx)?;
-        Pin::new(&mut this.stream).poll_shutdown(cx).map_err(sanitized_io)
+        Pin::new(&mut this.stream)
+            .poll_shutdown(cx)
+            .map_err(sanitized_io)
     }
 }

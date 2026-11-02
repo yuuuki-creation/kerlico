@@ -1,45 +1,52 @@
-# 实现接口
+# 实现接口目录
 
-本轮源码同步（2026-11-02）。共享运行迁移首轮已写齐并冻结，尚未整树验证。实际新契约见[核心接口](core.md)及[配置v2](config.md)。本文的未来架构范围仍包含尚未实现的WARP、IP端点、持久统计及带宽历史，不能据此登记已支持。
+更新日期：2026-11-02（Asia/Shanghai）
 
-2026-11-02目标补充：单节点多用户、管理用户归属、流量、带宽、在线及访问历史见[0011](../decisions/0011-users-statistics-and-access-records.md)和[统计设计](../statistics-and-users.md)。可信用户与运行计量正在本轮迁移；持久历史、带宽和完整在线服务仍待实现。Stats的原有四类累计事件与新增ForcedCleanup继续单列。以下新接口均待整树验证。
+本目录维护当前源码已实现的 Rust 公共接口、JSON v2 配置契约与 23 个协议模块的实现边界。各模块的实时测试进度见根 [STATUS.md](../../STATUS.md)，跨进程设备共享、独立路由/DNS/TUN 等后续目标见 [架构设计导航](../README.md)。
 
-更新日期：2026-10-31。核心基础接口沿用 0.1，协议扩展各自标明版本与验证状态；这里描述已经写入代码的契约，完整目标架构仍在其他设计文档中维护。
+## 核心与公共接口
 
-2026-11-01文档同步：全局共享调度器及多远端目标见[0009](../decisions/0009-global-egress-dispatcher.md)，节点模式、设备WARP和远端透传见[0010](../decisions/0010-node-egress-modes-and-warp.md)。本轮源码已替换逐节点出站，配置v2表达节点模式并保留Remote原目标；尚未整树验证，WARP仍无数据路径。
-
-| 文档 | 范围 |
+| 文档 | 内容范围 |
 | --- | --- |
-| [核心接口](core.md) | 地址、I/O、出站能力、建立预算、注册与运行退出 |
-| [配置与命令行](config.md) | JSON 外层、固定目标入口、限制、功能裁剪和退出行为 |
-| [节点与统一出口](node-egress.md) | 独立节点凭据、双角色、访问服务、IPv4 优先与资源预算 |
-| [VLESS 接口](vless.md) | 双端、传输/安全、Encryption、Mux 与存储承载；扩展验证中 |
-| [AnyTLS 接口](anytls.md) | TLS 双端、会话复用与 UoT v2 |
-| [SS2022 接口](ss2022.md) | 三种算法、TCP/UDP 双端与 AES EIH |
-| [SOCKS 接口](socks.md) | 4/4a/5 双端及 SOCKS5 UDP；限定范围已验 |
-| [Shadowsocks 接口](shadowsocks.md) | AEAD/legacy/none 双端；限定范围已验 |
-| [HTTP 代理接口](http-proxy.md) | CONNECT 双端、普通转发、Basic/TLS；限定范围已验 |
-| [Trojan 接口](trojan.md) | 双端传输与 TCP/UDP；限定范围已验 |
-| [VMess 接口](vmess.md) | AEAD 双端、记录与重放边界；限定范围已验 |
-| [Snell 接口](snell.md) | v4 出站/v5 节点与 v6 双端；限定范围已验 |
-| [TUIC 接口](tuic.md) | v4/v5 双端与同 socket 多目标关联；限定范围已验 |
-| [Hysteria2 接口](hysteria2.md) | 原生 QUIC/H3 双端、UDP 关联与混淆；限定范围已验 |
-| [SSH 接口](ssh.md) | 原生 direct-tcpip 出站、固定主机与显式认证；限定范围已验 |
-| [ShadowQUIC 接口](shadowquic.md) | 原生 JLS/QUIC 与有界回退；原 Mihomo v1 与受控 v2 分别已验 |
-| [Hysteria v1 接口](hysteria1.md) | 独立握手、QUIC 载体与多目标 UDP；限定范围已验 |
-| [SSR 接口](shadowsocksr.md) | 独立 protocol/obfs/cipher 与真实鉴权边界；首轮已写待验证 |
-| [ShadowTLS 接口](shadowtls.md) | 真实内层 AEAD 流包装与分域凭据；首轮已写待验证 |
-| [Gost Relay 接口](gost-relay.md) | 原生 CONNECT 出站、TCP/固定 UDP、TLS/SMUX v1；限定范围已验 |
-| [Mieru 接口](mieru.md) | TCP双端、真实复用与Full Cone；原UDP仅显式本机不安全兼容，限定范围已验 |
-| [TrustTunnel 接口](trusttunnel.md) | TLS H1/H2/H3双端和固定UDP；已停止原验证，H2增量未编译，完整对端未验收 |
-| [Naive 接口](naive.md) | H1/H2/H3、padding和UoT双端；限定快照已验，对端EOF/包长限制单列，不外推当前整树 |
-| [Sudoku 首轮接口](sudoku.md) | 记录/表/流/UoT/真实复用和六载体双端；完整首轮写齐并接线，冻结验证中 |
-| [扩展验证快照](../testing/vless-combinations.md) | 当前各快照通过范围、失败修正及最新未复验增量 |
-| [首批协议集成](../testing/protocol-batch-1.md) | 八模块冻结快照、公共契约、功能裁剪与 81 项联合运行 |
-| [十一模块集成](../testing/protocol-batch-2.md) | 139 项整树测试、功能裁剪与 111 项联合运行 |
-| [凭据隔离契约验证](../testing/credential-isolation-contract.md) | 六包冻结快照的7项限定测试、格式与严格Clippy |
-| [0.1 历史记录](../testing/vless-ordinary-flow.md) | 已发布旧版环境与边界 |
+| [核心接口 (core.md)](core.md) | 装配流程、身份鉴别、业务流完成权（`FlowOpen`）、唯一业务计量与服务回收契约 |
+| [配置与命令行 (config.md)](config.md) | JSON v2 根结构、管理账户、节点成员、资源限制与 CLI 子命令 |
+| [节点与共享目标访问 (node-egress.md)](node-egress.md) | 凭据隔离清单、`Local`/`Remote` 目标路径、载体计量与服务退休收据（`ServiceRetirement`） |
+| [统计历史 (history.md)](history.md) | SQLite 用量、访问与带宽记录，关闭收据和只读 CLI 查询 |
+| [设备所有者 (device-runtime.md)](device-runtime.md) | 同进程共享 WARP、原生载体与业务路径、私有状态和生命周期 |
+| [语言与诊断 (localization.md)](localization.md) | 显式语种、双语 CLI、稳定诊断码及目录覆盖边界 |
+| [IP 隧道 (ip-tunnel.md)](ip-tunnel.md) · [HTTP 载体 (http-carrier.md)](http-carrier.md) | WireGuard 共用 IP 数据面与受管 HTTP DATA/QUIC 载体 |
 
-修改公共签名、配置字段、能力、错误或关闭行为时，同步对应接口文档与有意义的验证；不要只更新总表状态。接口状态、上游支持情况和未来候选组合分别记录。源码与文档不一致时先修正，不把文档愿景当作实现。
+## 协议模块接口（23 个）
 
-用户已确认的完整目标边界见[节点设计](../node-egress.md)。本轮已删除旧AccessService并编写共享所有权、节点模式和远端透传，设备WARP仍未实现；具体协议的角色与组合仍以各自接口及测试记录为准。
+| 文档 | 角色与能力范围 |
+| --- | --- |
+| [VLESS](vless.md) | 双端 TCP/UDP，支持 RAW/WS/HTTPUpgrade/gRPC/XHTTP、TLS/REALITY、Vision、Encryption、ML-KEM、Mux、XDRIVE、packetaddr |
+| [AnyTLS](anytls.md) | 原生 Rust TLS 双端、会话复用、padding 与 TCP/UoT v2 |
+| [SS2022](ss2022.md) | 三算法双端 TCP/UDP、AES EIH 多用户与客户端身份链 |
+| [SOCKS](socks.md) | SOCKS 4/4a/5 双端与 SOCKS5 UDP 关联 |
+| [HTTP 代理](http-proxy.md) | HTTP CONNECT 双端、普通 HTTP 转发、Basic 认证与 TLS |
+| [Shadowsocks](shadowsocks.md) | AEAD / legacy / none 双端 TCP/UDP |
+| [Trojan](trojan.md) | 双端传输与 TCP/UDP |
+| [VMess](vmess.md) | AEAD 双端 TCP/UDP 与防重放边界 |
+| [Snell](snell.md) | v4 出站、v5 节点与 v6 双端 |
+| [TUIC](tuic.md) | v4/v5 双端与同 Socket 多目标 UDP 关联 |
+| [Hysteria v1](hysteria1.md) | 独立握手、QUIC 载体与双端多目标 UDP |
+| [Hysteria2](hysteria2.md) | 原生 QUIC/H3 双端、UDP 关联与 Salamander 混淆 |
+| [ShadowQUIC](shadowquic.md) | 原生 JLS/QUIC 双端（v1/v2）与有界回退 |
+| [SSH](ssh.md) | 原生 `direct-tcpip` 客户端出站、固定主机公钥校验与显式认证 |
+| [Gost Relay](gost-relay.md) | 原生 CONNECT 客户端出站、TCP/固定 UDP、TLS 与 SMUX v1 |
+| [Mieru](mieru.md) | TCP 双端、流复用与 Full Cone UDP 隧道 |
+| [ShadowsocksR (SSR)](shadowsocksr.md) | 独立 protocol / obfs / cipher 双端与真实鉴权边界 |
+| [ShadowTLS](shadowtls.md) | 内层 AEAD 流包装双端与认证/保护分域凭据 |
+| [TrustTunnel](trusttunnel.md) | TLS H1/H2/H3 双端与固定目标 UDP |
+| [Naive](naive.md) | H1/H2/H3、padding 与 UoT 双端 |
+| [Sudoku](sudoku.md) | 记录/表/流/UoT/多路复用与六类载体双端 |
+| [Tor](tor.md) | 基于 `arti-client` 的原生客户端 TCP 出站、目录权限校验与电路隔离 |
+| [WireGuard](wireguard.md) | 基于 Boringtun + smoltcp 的原生双端 TCP/UDP 隧道与多用户 peer 隔离 |
+
+## 集成与专项验证记录
+
+- [2026-11-02 协议恢复与矩阵验证](../testing/protocol-restoration-20261102.md)
+- [VLESS 扩展组合验证](../testing/vless-combinations.md)
+- [首批八模块联合集成](../testing/protocol-batch-1.md) · [第二批十一模块联合集成](../testing/protocol-batch-2.md)
+- [凭据隔离契约验证](../testing/credential-isolation-contract.md)

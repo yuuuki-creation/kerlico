@@ -1,11 +1,26 @@
 # 项目许可与第三方材料
 
-自2026-11-02起，kerlico自有代码采用GNU General Public License第3版，SPDX标识为`GPL-3.0-only`。这表示仅第3版，不额外授予后续版本选择。完整许可见根目录[LICENSE](../LICENSE)；Cargo工作区和自有包采用同一声明。
+更新日期：2026-11-02（Asia/Shanghai）
 
-该选择依据用户明确指令。它不更改第三方代码、补丁基础、证书、参考资料或依赖的原许可。`third_party/`、协议内vendor目录和带有独立声明的材料保留原许可、来源及必要通知；不能用根许可替代这些声明，也不能为匿名提交删除上游要求保留的署名。
+## 自有代码许可证
 
-正式二进制发行将同时提供对应版本的可修改源码、锁文件、构建及安装说明、必要补丁和依赖来源，并随产物提供适用的许可与通知。以最终启用的依赖图核对源码提供及通知要求，不能仅凭Cargo的`license`字段判定审查完成。
+`kerlico` 自有代码采用 **GNU General Public License v3.0 only**（SPDX 标识：`GPL-3.0-only`，仅限第 3 版，不附带“或更高版本”条款）。
 
-当前项目许可已确定，依赖通知、完整源码归档及实际发行产物仍在准备。历史[发行只读审计](releases/1.0.0-readonly-audit.md)保留原时点的缺口；本次决定只解决其中“项目许可未定”一项，不代表其他门槛通过。未明确再分发许可的外部证书资产仍不得加入发行包。
+- 完整许可证原文位于仓库根目录 [LICENSE](../LICENSE)（取自 [SPDX GPL-3.0-only 官方文本](https://github.com/spdx/license-list-data/blob/main/text/GPL-3.0-only.txt)）。
+- 根 `Cargo.toml` 的 `[workspace.package]` 及所有自有 crate 均声明 `license = "GPL-3.0-only"`。
 
-许可原文来源为[SPDX的GPL-3.0-only文本](https://github.com/spdx/license-list-data/blob/main/text/GPL-3.0-only.txt)，原文完整保留，不将中文说明作为修改后的许可文本。
+## 第三方代码与内置补丁
+
+本项目的 `GPL-3.0-only` 声明不改变第三方依赖、内置补丁、测试夹具或参考资料的原始许可证：
+
+- `third_party/`（如 `h3`、`xray-transport`、`ml-kem-legacy`）与各协议 crate 下的 `vendor/` 目录（如 `russh-util`、`quinn-jls`、`quinn-proto-jls`、`arti-client`）均保留其上游许可证文本、版权声明及修改记录（`PATCHES.md` / `MODIFICATIONS.md`）。
+- 项目的匿名提交规则仅针对本项目提交者身份，不删除上游开源项目要求保留的作者署名与许可证通知。
+- `third_party/shaped-rustls` 保留固定上游版本的 Apache-2.0 / ISC / MIT 许可证与源码；TLS 1.2 显式扩展省略的补丁和独立清单调整见该目录 `PATCHES.md`。
+
+## 二进制发行合规要求
+
+在发布正式二进制产物时，须随附或同步提供：
+
+1. 与二进制标签完全对应的完整源码、锁文件（`Cargo.lock`）、本地补丁与构建说明；
+2. 实际参与链接的第三方依赖许可证汇总与必要署名通知（前期排查记录见 [1.0.0 只读审计](releases/1.0.0-readonly-audit.md)）；
+3. 不将缺少明确再分发许可的外部专有证书或测试资产打包进公开发行物（见 [公共证书审查](releases/public-certificate-review.md)）。

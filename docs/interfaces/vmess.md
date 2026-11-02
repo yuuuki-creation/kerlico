@@ -1,17 +1,6 @@
 # VMess AEAD 双端接口
 
-当前源码更新于2026-11-02，已编写共享运行与配置 v2 迁移，尚未执行本轮编译、格式、测试或互通。下文既有通过结果只属于各自历史输入，不能作为本轮验收。
-
-节点通过 `NodeFactory::build(&NodeBuildContext)` 编译。每个 `members[]` 绑定管理 user_id、credential_epoch 和 native_credential；协议凭据与管理用户名、密码分开。原生凭据格式为 `{"uuid":"协议 UUID"}`。
-
-认证前只持 `IngressBinding`。真实协议校验成功后交接 `CredentialSet` 的槽与同次解码状态，经 `authenticated` 得到 `PeerSession`。每次 TCP 或 UDP 建立均由共享 Dispatcher 创建独立流归属；复用载体不会把成员或流标识混合。旧指纹接口已替换为 `CredentialManifest`，分别登记 Authentication 与 Protection。
-
-出站使用 `OutboundFactory::compile(&Value) -> OutboundPlan`。编译完成字段、凭据与资产校验；Engine 只消费一次 `start(ServiceContext)`，构造唯一命名运行实例。此模块使用 Remote 策略，保留网站原域名/IP、端口和负载，只解析代理载体端点。远端失败不在本机更换代理、换族或回退直连。
-
-`ConnectContext` 必须通过构造方法建立，嵌套阶段使用 `with_timeout` 收紧原期限。共享连接与票据按 `resource_key()` 的运行实例、成员与凭据代次分区。持久任务归命名服务，单个入站或请求取消不会关闭共享服务。显式 `shutdown` 停止并等待本实例任务；历史包级验证尚未覆盖新关闭路径。
-
-
-日期：2026-10-31。状态：限定双端已通过远端包级检查及真实对端矩阵，精确范围见[验证记录](../testing/vmess.md)。工厂类型均为 `vmess`，客户端与服务端分别注册。
+`VmessFactory`、`VmessNodeFactory` 均注册为 `vmess`（研究见 [vmess.md](../../reference/research_notes/vmess.md)，验证记录见 [vmess.md](../testing/vmess.md)）。节点成员凭据 `native_credential` 格式为 `{"uuid": "协议 UUID"}`。
 
 ## 客户端
 
@@ -56,10 +45,6 @@ TCP 默认支持写端终止记录和继续读取反向数据；开启 `no_termi
 
 ## 完成权与节点任务契约
 
-2026-11-02 本轮首轮编码，尚未构建、格式检查或运行验证。
-
-业务入口返回 `TcpFlow`、`FixedUdpFlow` 或 `UdpAssociation`，拆分后唯一 `FlowCompletion` 留在实际会话 owner。字节与数据报仍只由 Dispatcher 计量，完成权只报告原因；最后 I/O、半部及完成权租约释放后才提交终态。底层出站 TCP 返回 `OpenedTcp`，本模块没有绑定证据时明确返回 `Unknown`，不以代理载体地址代填。
-
-TCP 直接传递 `TcpFlow`；command2 UDP 拆分 typed 半部，保留同时收发和非空数据报限制，完整会话结束、外层读写错误、空闲与取消分别报告。HTTP 派生任务登记到 `NodeTasks`，NodeTasks 不替代原物理 peer 的取消和额度。
-
-HTTP/2 executor 将 Hyper 的真实 future 登记到同一节点所有者；节点停止接纳后释放该 future，不创建未登记的备用任务。原物理连接的取消与租约仍由各请求上下文保留。
+- TCP 直接传递 `TcpFlow`；底层出站 `OpenedTcp` 返回 `TcpConnectInfo::unknown()`。
+- command 2 UDP 拆分 typed 半部，保留同时收发和非空数据报限制，完整会话结束、外层读写错误、空闲与取消分别报告。
+- HTTP 派生任务与 Hyper HTTP/2 executor 的真实 future 登记到 `NodeTasks`；节点停止接纳后释放该 future，不创建未登记的备用任务。原物理连接的取消与租约仍由各请求上下文保留。

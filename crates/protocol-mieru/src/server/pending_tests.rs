@@ -201,7 +201,7 @@ enum End {
     Idle,
     ConnectDeadline,
     ProtocolClose,
-    ServiceCancelBeforeProtocolClose(u8),
+    ServiceFailureBeforeProtocolClose(u8),
     EntryDrop,
     BackendFailure,
     BackendTimeout,
@@ -211,15 +211,15 @@ enum End {
 impl End {
     fn expected(self) -> FlowEnd {
         match self {
-            Self::PeerCancel | Self::NodeCancel | Self::ServiceCancelBeforeProtocolClose(_) => {
-                FlowEnd::Cancelled
-            }
+            Self::PeerCancel | Self::NodeCancel => FlowEnd::Cancelled,
             Self::Idle | Self::ConnectDeadline | Self::BackendTimeout => FlowEnd::Timeout,
             Self::ProtocolClose => FlowEnd::Completed,
             Self::EntryDrop => FlowEnd::ClosedByCaller,
-            Self::InternalAbort | Self::BackendFailure | Self::OsAborted | Self::OsTimedOut => {
-                FlowEnd::Failed
-            }
+            Self::InternalAbort
+            | Self::BackendFailure
+            | Self::OsAborted
+            | Self::OsTimedOut
+            | Self::ServiceFailureBeforeProtocolClose(_) => FlowEnd::Failed,
         }
     }
 }
@@ -260,6 +260,7 @@ async fn pending_case(end: End, udp: bool) {
         service.clone(),
     )
     .unwrap();
+    let runtime_owner = binding.clone();
     let node_cancel = binding.node_cancel();
     let peer_cancel = node_cancel.child_token();
     let tasks = NodeTasks::new(NodeId::parse("test-node").unwrap(), node_cancel.clone());
@@ -315,7 +316,7 @@ async fn pending_case(end: End, udp: bool) {
         session::ServerAccess::Authenticated(peer) => peer.source().clone(),
         session::ServerAccess::Local(_) => panic!("TCP回归必须经过真实鉴权"),
     };
-    let poll_gate = matches!(end, End::ServiceCancelBeforeProtocolClose(_))
+    let poll_gate = matches!(end, End::ServiceFailureBeforeProtocolClose(_))
         .then(|| Arc::new(OpeningPollGate::new(1)));
     if let Some(gate) = &poll_gate {
         *link.opening_poll_gate.lock().unwrap() = Some(gate.clone());
@@ -397,10 +398,10 @@ async fn pending_case(end: End, udp: bool) {
         End::PeerCancel => peer_cancel.cancel(),
         End::NodeCancel => node_cancel.cancel(),
         End::Idle | End::ConnectDeadline => {}
-        End::ProtocolClose | End::ServiceCancelBeforeProtocolClose(_) | End::EntryDrop => {
+        End::ProtocolClose | End::ServiceFailureBeforeProtocolClose(_) | End::EntryDrop => {
             let (kind, sequence) = match end {
                 End::ProtocolClose => (4, 1),
-                End::ServiceCancelBeforeProtocolClose(kind) => (kind, 1),
+                End::ServiceFailureBeforeProtocolClose(kind) => (kind, 1),
                 End::EntryDrop => (3, 0),
                 _ => unreachable!(),
             };
@@ -475,7 +476,7 @@ async fn pending_case(end: End, udp: bool) {
     timeout(Duration::from_secs(1), request.cancel.cancelled())
         .await
         .unwrap();
-    let service_failed = matches!(end, End::ServiceCancelBeforeProtocolClose(_));
+    let service_failed = matches!(end, End::ServiceFailureBeforeProtocolClose(_));
     assert_eq!(request.service_cancel().is_cancelled(), service_failed);
     if !matches!(end, End::PeerCancel | End::NodeCancel) {
         assert!(!peer_cancel.is_cancelled());
@@ -503,6 +504,7 @@ async fn pending_case(end: End, udp: bool) {
     assert!(!service_report.timed_out);
     assert_eq!(service_report.failed_tasks, usize::from(service_failed));
     assert_eq!(service_report.forced_tasks, 0);
+    drop(runtime_owner);
 }
 
 #[tokio::test]
@@ -555,7 +557,7 @@ async fn authenticated_pending_tcp_and_udp_keep_prior_backend_failure_and_timeou
 async fn authenticated_pending_tcp_and_udp_keep_service_failure_before_frame4_and_frame5() {
     for udp in [false, true] {
         for frame in [4, 5] {
-            pending_case(End::ServiceCancelBeforeProtocolClose(frame), udp).await;
+            pending_case(End::ServiceFailureBeforeProtocolClose(frame), udp).await;
         }
     }
 }

@@ -1,13 +1,29 @@
-use crate::{config::{destination, target}, packet::udp_packet, queue::QueuedPacket, stack::SharedStack, tcp::TcpStream};
+use crate::{
+    config::{destination, target},
+    packet::udp_packet,
+    queue::QueuedPacket,
+    stack::SharedStack,
+    tcp::TcpStream,
+};
 use kerlico_core::{
     CancellationToken, ConnectContext, DatagramAssociationReceiver, DatagramAssociationSender,
-    Destination, Error, FlowFailure, FlowOutcome, InboundContext, NodeEvent, PeerSession, Result, StreamLease,
+    Destination, Error, FlowFailure, FlowOutcome, InboundContext, NodeEvent, PeerSession, Result,
+    StreamLease,
 };
 use std::{net::SocketAddr, sync::Arc};
-use tokio::{sync::mpsc, time::{Instant, timeout}};
+use tokio::{
+    sync::mpsc,
+    time::{Instant, timeout},
+};
 
-pub(super) struct PendingDatagram { pub target: SocketAddr, pub packet: QueuedPacket }
-struct TaskScope { context: InboundContext, _lease: StreamLease }
+pub(super) struct PendingDatagram {
+    pub target: SocketAddr,
+    pub packet: QueuedPacket,
+}
+struct TaskScope {
+    context: InboundContext,
+    _lease: StreamLease,
+}
 impl Drop for TaskScope {
     fn drop(&mut self) {
         self.context.cancel.cancel();
@@ -16,7 +32,10 @@ impl Drop for TaskScope {
 }
 fn task_scope(mut context: InboundContext, lease: StreamLease) -> TaskScope {
     context.cancel = context.cancel.child_token();
-    TaskScope { context, _lease: lease }
+    TaskScope {
+        context,
+        _lease: lease,
+    }
 }
 fn outcome(result: &Result<()>) -> FlowOutcome {
     match result {
@@ -24,30 +43,60 @@ fn outcome(result: &Result<()>) -> FlowOutcome {
         Err(error) => FlowOutcome::Failed(FlowFailure::from_error(error)),
     }
 }
-pub(super) async fn tcp(stream: TcpStream, access: PeerSession, target: Destination, context: InboundContext, lease: StreamLease) {
+pub(super) async fn tcp(
+    stream: TcpStream,
+    access: PeerSession,
+    target: Destination,
+    context: InboundContext,
+    lease: StreamLease,
+) {
     let scope = task_scope(context, lease);
-    let budget = ConnectContext::new(scope.context.connect_timeout).with_cancel(stream.pending_cancel());
+    let budget =
+        ConnectContext::new(scope.context.connect_timeout).with_cancel(stream.pending_cancel());
     let result = async {
         let remote = access.connect_tcp(&target, &budget).await?;
-        let accepted = async { stream.resume_accept()?; stream.established().await };
+        let accepted = async {
+            stream.resume_accept()?;
+            stream.established().await
+        };
         if let Err(error) = budget.run(accepted).await {
             remote.finish(FlowOutcome::Failed(FlowFailure::from_error(&error)));
             return Err(error);
         }
-        kerlico_core::relay_tcp(Box::new(stream), remote, scope.context.idle_timeout, scope.context.cancel.clone()).await
-    }.await;
-    if result.is_err() { scope.context.events.record(NodeEvent::Failed); }
+        kerlico_core::relay_tcp(
+            Box::new(stream),
+            remote,
+            scope.context.idle_timeout,
+            scope.context.cancel.clone(),
+        )
+        .await
+    }
+    .await;
+    if result.is_err() {
+        scope.context.events.record(NodeEvent::Failed);
+    }
 }
-pub(super) async fn udp(stack: Arc<SharedStack>, source: SocketAddr, mut packets: mpsc::Receiver<PendingDatagram>, access: PeerSession, context: InboundContext, lease: StreamLease) {
+pub(super) async fn udp(
+    stack: Arc<SharedStack>,
+    source: SocketAddr,
+    mut packets: mpsc::Receiver<PendingDatagram>,
+    access: PeerSession,
+    context: InboundContext,
+    lease: StreamLease,
+) {
     let scope = task_scope(context, lease);
-    let budget = ConnectContext::new(scope.context.connect_timeout).with_cancel(scope.context.cancel.clone());
+    let budget = ConnectContext::new(scope.context.connect_timeout)
+        .with_cancel(scope.context.cancel.clone());
     let flow = match access.associate_udp(&budget).await {
         Ok(flow) => flow,
-        Err(_) => { scope.context.events.record(NodeEvent::Failed); return; }
+        Err(_) => {
+            scope.context.events.record(NodeEvent::Failed);
+            return;
+        }
     };
-        let (mut sender, mut receiver, completion) = flow.into_parts();
-        let idle = stack.limits.udp_idle().min(scope.context.idle_timeout);
-        let result = async {
+    let (mut sender, mut receiver, completion) = flow.into_parts();
+    let idle = stack.limits.udp_idle().min(scope.context.idle_timeout);
+    let result = async {
             let timer = tokio::time::sleep(idle);
             tokio::pin!(timer);
             loop {
@@ -82,10 +131,16 @@ pub(super) async fn udp(stack: Arc<SharedStack>, source: SocketAddr, mut packets
                 }
             }
         }.await;
-        completion.finish(outcome(&result));
-    if result.is_err() { scope.context.events.record(NodeEvent::Failed); }
+    completion.finish(outcome(&result));
+    if result.is_err() {
+        scope.context.events.record(NodeEvent::Failed);
+    }
 }
-async fn operation<T>(future: impl std::future::Future<Output = Result<T>>, cancel: &CancellationToken, duration: std::time::Duration) -> Result<T> {
+async fn operation<T>(
+    future: impl std::future::Future<Output = Result<T>>,
+    cancel: &CancellationToken,
+    duration: std::time::Duration,
+) -> Result<T> {
     tokio::select! { biased;
         _ = cancel.cancelled() => Err(Error::Cancelled),
         result = timeout(duration, future) => result.map_err(|_| Error::Timeout)?,

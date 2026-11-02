@@ -1,6 +1,34 @@
 # Sudoku 首轮测试记录
 
-更新日期：2026-11-02。按新增授权恢复后，旧SDK1独立集成快照的90项包级测试通过；官方494配置完整互通仍有18项失败，未完成交付。共享出站的新SDK2适配另行验证，不能继承这些旧输入结果。
+更新日期：2026-11-02。本轮修复HTTP FIN确认丢失，20个官方并发配置复验通过；完整494配置矩阵尚未全量复跑。原矩阵18项失败与旧SDK1包级结果保留在后文，SDK2修订按本轮输入单独记录。
+
+## 本轮FIN确认修复
+
+原18项失败对应12个配置。poll与auto两项客户端并发尾部EOF在SDK2冻结CLI上重放20个配置，得到737通过、3失败；当前源码加诊断后仍有1次尾部EOF。失败流的FIN请求返回HTTP传输错误，上传任务随后停止下行任务，尚未读完的目标尾部随之丢失。
+
+`lost_fin_response_is_reconfirmed_without_repeating_payload`使用真实回环HTTP服务，先接收业务数据，再在FIN已提交时丢弃HTTP响应。修改前回归失败，上传返回`Sudoku HTTP上传EOF未确认`，确认通道返回`ConnectionAborted`。修改后通过。客户端现在仅对同一token的空FIN控制做一次有界重确认，不重复发送业务数据。两次均失败或明确拒绝时仍报告失败。
+
+perf-01的`mux-candidate-r2`使用固定官方v0.5.2.0，在原poll与auto参数上各重复10次。20配置产生780条记录，740通过、40进程观察、0失败。候选CLI的SHA256为`173db930b909ed3345d203e371317d46b5f9d2bf8891064f3e0f03d462315274`，源码归档SHA256为`f9c2a887abb62833cfe6821893ce9b56c74dfae84873372d6c252c83c0973b06`。该限定CLI不是正式发行产物。
+
+`sudoku-resume-fin-exact-r5`的两项HTTP client回归通过，包括已有的FIN拒绝永久锁存测试。`sudoku-resume-fin-tests-r3`已完成库73项、预算1项、HTTP控制6项、成员匹配1项与Mux 6项，均通过；主任务为释放worker构建租约主动中止其余大矩阵，作业终态101并保存停止请求，不能登记为整包通过。
+
+新测试的参考HTTP任务join补齐2秒期限后，`sudoku-resume-fin-exact-r11`两项再次通过。最终Rust源码的`sudoku-resume-final-fmt-r12`格式检查与`sudoku-resume-final-clippy-r13`本包all-targets no-deps严格Clippy均通过。候选CLI保留原冻结输入，测试期限补充没有改变生产FIN逻辑。
+
+严格Clippy首次停于公共`core-api`的`fetch_update`弃用。限定`--no-deps`检查另发现Sudoku测试辅助函数多余借用，修正后`clippy -p kerlico-sudoku --all-targets --no-deps --locked -- -D warnings`通过。公共依赖与整树严格Clippy仍由集成输入复验。
+
+## 原33MiB失败配置复验
+
+`failures-r1`按旧18项失败提取12个独立配置，在SDK2冻结CLI上保留原负载与期限重放。总计240条记录，198通过、12入口限制、24进程观察、6个停服观察失败。六失败均对应下节的固定官方split客户端行为，未改写原失败记录。
+
+其中raw与ws、两种AEAD的四个rekey配置得到88通过、12入口限制、8进程观察、0失败。IPv4、IPv6与域名目标的12条33MiB检查均完整通过，包含原十项提前EOF失败。CLI为原`shared-native-first-r55`冻结产物，SHA256为`6ed1c1f4e5f111f4172f15dd9527cf4f35e9da1fa91744348294c09794626f96`，源码归档SHA256为`3a12ae64c32b21cae78b7f7a5f168849c9b051a38aa3adca4966863d13d822d7`。该结果验证此前已合入的读取让出修订，不代表新发行输入整树验收完成。
+
+## 官方split客户端的生命周期边界
+
+perf-01的官方双端控制在stream、poll、auto与两种节点地址族上均完成正常TCP后复现停服超时。完整六配置控制得到36条正常TCP通过记录、6次停服后12秒读超时。保留同一客户端继续重启服务端，六配置又都在首次新请求超时。
+
+固定官方源码`pkg/obfs/httpmask/split_conn.go`的`pullOnce`将拨号与可重试HTTP传输错误交回持续重试循环。原测试的通用`setup`标签因此不能区分监听失败、停服观察和重启请求。工具现在保留具体生命周期阶段，将上述已由官方双端控制复现的行为记录为`reference_boundary`，继续用新建的参考客户端验证同端点服务恢复。旧客户端的关闭与自动恢复不计通过，`all_requested_scope_accepted`保持false。部分业务数据或尾部丢失仍计失败。
+
+`reference-controls-fresh-r4`的官方双端与`lifecycle-candidate-r3`的候选节点各运行六配置，均产生174条记录，120通过、12参考边界、18入口限制、24进程观察、0失败。候选节点在原参考客户端上也会把重启后的旧token拒绝为首次banner之前的零字节EOF；该情形单独记边界。每个配置随后重建原生参考客户端，重新完成4096字节TCP内容、FIN尾部和UDP检查。没有把重建客户端后的成功登记为旧会话自动恢复。
 
 ## 恢复后的实际验证
 

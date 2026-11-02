@@ -272,7 +272,9 @@ mod tests {
     fn non_certificate_custom_ca_is_rejected_during_compile() {
         assert_invalid_ca("unrelated material");
         let label = "PRIVATE KEY";
-        assert_invalid_ca(&format!("-----BEGIN {label}-----\nAQID\n-----END {label}-----\n"));
+        assert_invalid_ca(&format!(
+            "-----BEGIN {label}-----\nAQID\n-----END {label}-----\n"
+        ));
     }
 
     #[test]

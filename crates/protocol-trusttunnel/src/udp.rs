@@ -312,10 +312,9 @@ fn finish_target(
     if flows
         .get(&key)
         .is_some_and(|flow| flow.generation == generation)
+        && let Some(flow) = flows.remove(&key)
     {
-        if let Some(flow) = flows.remove(&key) {
-            flow.completion.finish(flow_outcome(result));
-        }
+        flow.completion.finish(flow_outcome(result));
     }
 }
 fn flow_outcome(result: &Result<()>) -> kerlico_core::FlowOutcome {

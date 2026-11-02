@@ -164,7 +164,7 @@ async fn tcp_scoped(
     target: &Destination,
     size: usize,
 ) {
-    let mut io = outbound.connect_tcp(target, &context).await.unwrap().stream;
+    let mut io = outbound.connect_tcp(target, context).await.unwrap().stream;
     let mut hi = [0; 2];
     io.read_exact(&mut hi).await.unwrap();
     assert_eq!(&hi, b"hi");

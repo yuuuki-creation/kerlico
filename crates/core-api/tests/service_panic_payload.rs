@@ -101,41 +101,73 @@ async fn payload_drop_panic_keeps_reaper_receipt_and_native_task_alive() {
     let native_gate = BlockingGate::new();
     let gate = native_gate.0.clone();
     let (entered, ready) = oneshot::channel();
-    let native = host.spawn_blocking_tracked(move || {
-        let _socket = socket;
-        entered.send(()).unwrap();
-        let mut released = gate.0.lock().unwrap();
-        while !*released {
-            released = gate.1.wait(released).unwrap();
-        }
-        73u8
-    }).unwrap();
-    timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
+    let native = host
+        .spawn_blocking_tracked(move || {
+            let _socket = socket;
+            entered.send(()).unwrap();
+            let mut released = gate.0.lock().unwrap();
+            while !*released {
+                released = gate.1.wait(released).unwrap();
+            }
+            73u8
+        })
+        .unwrap();
+    timeout(Duration::from_secs(1), ready)
+        .await
+        .unwrap()
+        .unwrap();
     let (release, gate) = oneshot::channel();
     let (destroyed, finished) = oneshot::channel();
     let payload = PanickingPayload {
         host: Some(host.clone()),
         destroyed: Some(destroyed),
     };
-    let task = host.spawn_tracked(async move {
-        gate.await.unwrap();
-        std::panic::panic_any(payload);
-    }).unwrap();
+    let task = host
+        .spawn_tracked(async move {
+            gate.await.unwrap();
+            std::panic::panic_any(payload);
+        })
+        .unwrap();
     host.fail(ServiceFailure::Timeout);
     drop(host);
     release.send(()).unwrap();
-    assert!(timeout(Duration::from_secs(2), task).await.unwrap().is_err());
-    timeout(Duration::from_secs(1), finished).await.unwrap().unwrap();
+    assert!(
+        timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .is_err()
+    );
+    timeout(Duration::from_secs(1), finished)
+        .await
+        .unwrap()
+        .unwrap();
     let mut waiting = Box::pin(receipt.wait());
-    assert!(poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await.is_pending());
+    assert!(
+        poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
     assert!(!receipt.is_finished());
     assert!(!native.is_finished());
     assert!(TcpListener::bind(address).is_err());
-    assert_eq!(healthy.spawn_tracked(async { 23u8 }).unwrap().await.unwrap(), 23);
+    assert_eq!(
+        healthy
+            .spawn_tracked(async { 23u8 })
+            .unwrap()
+            .await
+            .unwrap(),
+        23
+    );
     assert!(!healthy.cancel().is_cancelled());
 
     native_gate.release();
-    assert_eq!(timeout(Duration::from_secs(1), native).await.unwrap().unwrap(), 73);
+    assert_eq!(
+        timeout(Duration::from_secs(1), native)
+            .await
+            .unwrap()
+            .unwrap(),
+        73
+    );
     let report = timeout(Duration::from_secs(2), waiting).await.unwrap();
     assert!(report.timed_out);
     assert!(!report.is_clean());
@@ -144,7 +176,12 @@ async fn payload_drop_panic_keeps_reaper_receipt_and_native_task_alive() {
     assert_eq!(status.failure(), Some(ServiceFailure::Timeout));
     assert!(receipt.is_finished());
     let _rebound = TcpListener::bind(address).unwrap();
-    assert!(healthy.shutdown(Instant::now() + Duration::from_secs(1)).await.is_clean());
+    assert!(
+        healthy
+            .shutdown(Instant::now() + Duration::from_secs(1))
+            .await
+            .is_clean()
+    );
 }
 
 struct WakeObserved {
@@ -207,29 +244,49 @@ async fn payload_cancellation_wake_reenters_registry_and_cannot_finish_its_own_b
         receipt: receipt.clone(),
         completed: Mutex::new(Some(completed)),
     }));
-    assert!(cancelled.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+    assert!(
+        cancelled
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
     let (destroyed, finished) = oneshot::channel();
     let payload = CancellingPayload {
         trigger: trigger.clone(),
         destroyed: Some(destroyed),
     };
     let (release, gate) = oneshot::channel();
-    let task = host.spawn_tracked(async move {
-        gate.await.unwrap();
-        std::panic::panic_any(payload);
-    }).unwrap();
+    let task = host
+        .spawn_tracked(async move {
+            gate.await.unwrap();
+            std::panic::panic_any(payload);
+        })
+        .unwrap();
     host.fail(ServiceFailure::Timeout);
     release.send(()).unwrap();
-    assert!(timeout(Duration::from_secs(2), task).await.unwrap().is_err());
-    let observed = timeout(Duration::from_secs(1), observed).await.unwrap().unwrap();
+    assert!(
+        timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .is_err()
+    );
+    let observed = timeout(Duration::from_secs(1), observed)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(observed.task_rejected);
     assert!(observed.retirement_pending);
     assert!(observed.first_failure_preserved);
-    timeout(Duration::from_secs(1), finished).await.unwrap().unwrap();
+    timeout(Duration::from_secs(1), finished)
+        .await
+        .unwrap()
+        .unwrap();
     drop(cancelled);
     drop(waker);
 
-    let report = timeout(Duration::from_secs(2), receipt.wait()).await.unwrap();
+    let report = timeout(Duration::from_secs(2), receipt.wait())
+        .await
+        .unwrap();
     assert!(!report.timed_out);
     assert_eq!(report.failed_tasks, 1);
     assert!(!report.is_clean());
@@ -267,15 +324,20 @@ async fn retirement_notification_query_reentry_preserves_normal_waiter_completio
     let native_gate = BlockingGate::new();
     let gate = native_gate.0.clone();
     let (entered, ready) = oneshot::channel();
-    let native = host.spawn_blocking_tracked(move || {
-        entered.send(()).unwrap();
-        let mut released = gate.0.lock().unwrap();
-        while !*released {
-            released = gate.1.wait(released).unwrap();
-        }
-        19u8
-    }).unwrap();
-    timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
+    let native = host
+        .spawn_blocking_tracked(move || {
+            entered.send(()).unwrap();
+            let mut released = gate.0.lock().unwrap();
+            while !*released {
+                released = gate.1.wait(released).unwrap();
+            }
+            19u8
+        })
+        .unwrap();
+    timeout(Duration::from_secs(1), ready)
+        .await
+        .unwrap()
+        .unwrap();
     host.retire(Instant::now());
     let (registered, pending) = oneshot::channel();
     let normal_receipt = receipt.clone();
@@ -283,21 +345,39 @@ async fn retirement_notification_query_reentry_preserves_normal_waiter_completio
         registered.send(()).unwrap();
         normal_receipt.wait().await
     });
-    timeout(Duration::from_secs(1), pending).await.unwrap().unwrap();
+    timeout(Duration::from_secs(1), pending)
+        .await
+        .unwrap()
+        .unwrap();
     let (completed, observed) = std::sync::mpsc::channel();
     let waker = Waker::from(Arc::new(QueryRetirementOnWake {
         receipt: receipt.clone(),
         completed: Mutex::new(Some(completed)),
     }));
     let mut notified = Box::pin(receipt.wait());
-    assert!(notified.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+    assert!(
+        notified
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
 
     native_gate.release();
-    let observed = observed.recv_timeout(Duration::from_secs(1))
+    let observed = observed
+        .recv_timeout(Duration::from_secs(1))
         .expect("当前runtime暂停poll时，独立回收线程的通知仍须完成同步收据查询");
     assert!(!observed, "回收线程的通知回调不能把自身join登记为完成");
-    assert_eq!(timeout(Duration::from_secs(1), native).await.unwrap().unwrap(), 19);
-    let report = timeout(Duration::from_secs(2), normal).await.unwrap().unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(1), native)
+            .await
+            .unwrap()
+            .unwrap(),
+        19
+    );
+    let report = timeout(Duration::from_secs(2), normal)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(report.timed_out);
     assert_eq!(report.failed_tasks, 0);
     assert_eq!(report.forced_tasks, 1);

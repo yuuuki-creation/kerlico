@@ -1,5 +1,13 @@
 # Mieru 验证记录
 
+## 2026-11-02 发布后回归修订
+
+`perf-01` 的 `fixtures-resume-baseline-mieru-r1` 在原始输入重现 7 项 `server::pending_tests` 失败。6 项发生在 `drop(link)` 后，测试夹具释放了唯一的共享调度器并触发命名服务退休；真实 Engine 会继续持有全局出站所有者。夹具增加一份运行期绑定持有后，`fixtures-resume-owner-mieru-r3` 变为 6 通过、1 失败。
+
+剩余一项在命名服务的真实受控后台 panic 后得到 `Some(Failed)`，旧断言仍要求 `Some(Cancelled)`。按当前 `ServiceFailure` 首因契约，修正测试终因并将枚举改名为 `ServiceFailureBeforeProtocolClose`，继续要求 frame 4/5 和清理均不能覆盖首因。没有修改生产协议或共享账本。
+
+`cargo test -p kerlico-mieru -p kerlico-naive --all-targets --locked --no-fail-fast -- --nocapture` 在 `fixtures-resume-complete-r5` 退出 0，15 个程序、70 项测试全部通过，其中 Mieru 为 37 项。该 977 文件归档 SHA-256 为 `08656693b10956a70d94ff71b0bc0e514b25ccfbeb4f885c0ceb01e27ba0e55e`。Mieru 的 pending 服务失败用例在 `fixtures-resume-repeat-mieru-r7` 连续运行 10 轮通过，覆盖 TCP/UDP 与 frame 4/5。`fixtures-resume-format-r8` 的两包远端格式化退出 0，仅调整本轮 Mieru 测试文件格式。结果只覆盖此次输入和上述包级范围，不代替整树或真实独立对端的新验收。
+
 日期：2026-10-31。限定交付：**默认 TCP 双端、真实复用及 TCP/Full Cone UDP 包隧道已验；原 UDP 线格式只在显式本机不安全兼容类验收，公网 UDP 未支持。** 原 UDP 的 nonce 复用风险不因任何通过结果消失。
 
 ## 环境与快照范围

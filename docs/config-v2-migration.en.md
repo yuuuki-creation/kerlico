@@ -1,21 +1,23 @@
-# Configuration v2 migration
+# Configuration v2 Migration Guide
 
-The migration source accepts v2 only. This implementation wave has not been built or tested as a complete tree. Existing v1 files remain historical evidence, not runnable configurations for this tree.
+Updated: 2026-11-02 (Asia/Shanghai)
 
-The [minimal v2 configuration](../examples/config-v2-minimal.json) uses a local TCP forward without management accounts. The operating system assigns its listening port. Its target is a separately started loopback service on port 18080. The example has not yet been checked or run with this migration tree.
+The current codebase requires **Configuration Schema v2 (JSON v2)**. Legacy v1 files must be migrated before use. Refer to [examples/config-v2-minimal.json](../examples/config-v2-minimal.json) for a minimal template and [docs/interfaces/config.md](interfaces/config.md) for the full specification.
 
-1. Set version to 2. Keep named outbounds. Multiple nodes referring to the same tag share one runtime instance.
-2. Read a management password from standard input with account-new and save its JSON output under accounts. Keep user_id stable. The default username includes its UUID suffix.
-3. Move native inbound authentication material from options to members[].native_credential. Bind each member to an explicit management user_id. Transport, certificates, protection secrets and resource limits remain protocol options.
-4. Configure IPv4 and IPv6 listeners independently. Reusing a management account requires explicit membership at each node, and native credentials remain separate.
-5. Set mode to ipv4-only, ipv6-only or dual-stack for locally governed target paths. Remote proxy paths retain the original target and never resolve website names locally.
-6. Run check for pure validation, then validate the complete role and combination matrix in a dedicated worker workspace. Check does not deploy WARP or modify the host network.
+## Migration Steps
 
-Management passwords use Argon2id PHC verifiers and do not become protocol credentials. Native wire formats remain unchanged. See the native credential mapping in the [Chinese migration guide](config-v2-migration.md).
+1. **Update Schema Version & Shared Outbounds**: Set root `"version"` to `2`. Retain named `outbounds`; multiple inbound nodes referencing the same outbound `tag` share a single runtime instance.
+2. **Create Management Accounts**: Run `kerlico account-new --prefix <name>` (reading the management password from `stdin`) and place the generated account object (`user_id`, `username`, and Argon2id PHC `password_hash`) under the root `accounts` array.
+3. **Separate Node Members & Protocol-Native Credentials**:
+   - Move per-user inbound authentication secrets from protocol `options` into `members[].native_credential`, binding each entry to a management `user_id`.
+   - Keep transport settings, TLS certificates, outer protection secrets (such as ShadowTLS handshake passwords or SS2022 AES EIH `identity_key`), and resource limits under protocol `options`.
+4. **Configure IPv4 and IPv6 Nodes Independently**: Declare `members` and protocol secrets separately for IPv4 and IPv6 listeners. A management `user_id` must be explicitly listed in each node's `members` to access that node, using distinct protocol secrets per node.
+5. **Set Node Target Family Mode (`mode`)**: Configure `ipv4-only`, `ipv6-only`, or `dual-stack` (default) for locally governed target paths (`TargetPolicy::Local`). Remote proxy paths (`TargetPolicy::Remote`) pass the original target through without local website DNS resolution.
+6. **Validate Configuration**: Run `kerlico check -c <config.json>` for pure compile-time validation without binding sockets or modifying host networking.
 
-Unauthenticated legacy modes remain explicitly local and never acquire a fabricated management user. SSH and Gost Relay currently provide outbound roles only; their remote credentials stay in the named outbound configuration.
+## Notes on Special Roles & Behavior Changes
 
-The current telemetry API reports unique payload accounting and bounded in-memory records. Persistent history, bandwidth history, retention settings and automatic WARP family completion are still incomplete. Configuration v2 does not imply that release requirements have passed.
-
-
-XDRIVE storage no longer reads HTTP_PROXY, HTTPS_PROXY or NO_PROXY implicitly. It connects only to the explicitly configured storage URL and does not add an implicit proxy chain. This is an accepted configuration behavior change. The previous pinned reqwest graph did not include HTTP/2. The owned HTTP/1 client preserves the previously used path, with URL/query handling, template headers, JSON/XML, OAuth and request deadlines requiring current-tree validation.
+- **Per-Protocol `native_credential` Shapes**: See the table in the [Chinese migration guide](config-v2-migration.md) for exact JSON shapes across all supported inbound protocols.
+- **Outbound-Only Protocols (SSH / Gost Relay / Tor)**: Remote credentials and state directories remain inside each named `outbound.options`.
+- **Unauthenticated Local Inbounds (`local_inbounds`)**: Loopback-only unauthenticated modes are configured under `local_inbounds` (`Source::Local`) without fabricating management users.
+- **XDRIVE Storage Transport**: XDRIVE connects directly to the explicitly configured storage URL and no longer reads `HTTP_PROXY`, `HTTPS_PROXY`, or `NO_PROXY` environment variables implicitly.

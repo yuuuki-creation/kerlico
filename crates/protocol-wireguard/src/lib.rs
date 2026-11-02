@@ -4,6 +4,7 @@ mod carrier;
 mod client;
 mod config;
 mod crypto;
+pub mod ip;
 mod packet;
 mod queue;
 mod server;

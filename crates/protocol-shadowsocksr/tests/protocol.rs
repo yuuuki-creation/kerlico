@@ -390,28 +390,28 @@ fn missing_authentication_is_local_only_and_unknown_settings_are_rejected() {
                     && (!udp || users(protocol));
                 assert_eq!(!node.manifest().is_empty(), authenticated);
                 let spec = json!({"tag":"ssr","type":"shadowsocksr","listen":"127.0.0.1:0","outbound":"direct","options":options});
-                let config = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[spec]});
-                let mut public = support::configuration(config.clone());
+                let config = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[spec.clone()]});
+                let mut public = support::configuration(config);
                 if !authenticated {
                     public["nodes"] = public["local_inbounds"].take();
                     public["local_inbounds"] = json!([]);
                 }
                 let parsed = parse(&serde_json::to_vec(&public).unwrap()).unwrap();
+                let prepared = registry.prepare(parsed);
                 assert_eq!(
-                    registry.prepare(parsed).is_ok(),
+                    prepared.is_ok(),
                     authenticated,
-                    "{protocol} {obfs} udp={udp}"
+                    "{protocol} {obfs} udp={udp}: {:?}",
+                    prepared.err()
                 );
-                let mut local = support::configuration(config);
-                if authenticated {
-                    local["local_inbounds"] = local["nodes"].take();
-                    local["nodes"] = json!([]);
-                }
-                assert!(
-                    registry
-                        .prepare(parse(&serde_json::to_vec(&local).unwrap()).unwrap())
-                        .is_ok(),
-                    "{protocol} {obfs} udp={udp}"
+                let local = json!({"version":2,"outbounds":[{"tag":"direct","type":"direct"}],"local_inbounds":[spec]});
+                let prepared =
+                    registry.prepare(parse(&serde_json::to_vec(&local).unwrap()).unwrap());
+                assert_eq!(
+                    prepared.is_ok(),
+                    !authenticated,
+                    "{protocol} {obfs} udp={udp}: {:?}",
+                    prepared.err()
                 );
             }
         }

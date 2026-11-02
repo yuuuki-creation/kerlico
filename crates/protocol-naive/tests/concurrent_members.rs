@@ -131,6 +131,7 @@ async fn stalled_member_dial_and_cancellation_do_not_block_other_member() {
     let node = kerlico_http::HttpNodeFactory.build(&input).unwrap();
     let ingress =
         kerlico_egress::testing::ingress(&input, outbound.clone(), TargetPolicy::Remote).unwrap();
+    let runtime_owner = ingress.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let target = Destination::new("127.0.0.1", listener.local_addr().unwrap().port()).unwrap();
     let echo = tokio::spawn(async move {
@@ -189,6 +190,7 @@ async fn stalled_member_dial_and_cancellation_do_not_block_other_member() {
         .unwrap()
         .unwrap();
     outbound.shutdown().await.unwrap();
+    drop(runtime_owner);
     remote.stop().await;
     tokio::time::timeout(Duration::from_secs(2), echo)
         .await

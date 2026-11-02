@@ -1,15 +1,34 @@
 use super::*;
-use crate::{config::{CommonOptions, PeerOptions}, crypto::{CryptoPeer, PeerIndex}, packet::udp_packet};
+use crate::{
+    config::{CommonOptions, PeerOptions},
+    crypto::{CryptoPeer, PeerIndex},
+    packet::udp_packet,
+};
 use std::net::SocketAddr;
 
 fn pair(psk: Option<u8>) -> (CryptoPeer, CryptoPeer) {
-    let a = serde_json::from_value::<CommonOptions>(tunnel(1, 2)).unwrap().prepare().unwrap();
-    let b = serde_json::from_value::<CommonOptions>(tunnel(2, 1)).unwrap().prepare().unwrap();
-    let a_peer = serde_json::from_value::<PeerOptions>(peer(2, None, psk)).unwrap().prepare().unwrap();
-    let b_peer = serde_json::from_value::<PeerOptions>(peer(1, Some(2), psk)).unwrap().prepare().unwrap();
+    let a = serde_json::from_value::<CommonOptions>(tunnel(1, 2))
+        .unwrap()
+        .prepare()
+        .unwrap();
+    let b = serde_json::from_value::<CommonOptions>(tunnel(2, 1))
+        .unwrap()
+        .prepare()
+        .unwrap();
+    let a_peer = serde_json::from_value::<PeerOptions>(peer(2, None, psk))
+        .unwrap()
+        .prepare()
+        .unwrap();
+    let b_peer = serde_json::from_value::<PeerOptions>(peer(1, Some(2), psk))
+        .unwrap()
+        .prepare()
+        .unwrap();
     let a_index = PeerIndex::new(&a, std::slice::from_ref(&a_peer));
     let b_index = PeerIndex::new(&b, std::slice::from_ref(&b_peer));
-    (CryptoPeer::new(&a, &a_peer, 1, None, a_index.limiter), CryptoPeer::new(&b, &b_peer, 1, None, b_index.limiter))
+    (
+        CryptoPeer::new(&a, &a_peer, 1, None, a_index.limiter),
+        CryptoPeer::new(&b, &b_peer, 1, None, b_index.limiter),
+    )
 }
 fn handshake(a: &mut CryptoPeer, b: &mut CryptoPeer, source: SocketAddr, target: SocketAddr) {
     let init = a.initiate().unwrap();
@@ -28,7 +47,12 @@ fn encrypted_transport_replay_and_roaming_require_real_authentication() {
         let source: SocketAddr = "127.0.0.1:1200".parse().unwrap();
         let target = "127.0.0.1:1300".parse().unwrap();
         handshake(&mut a, &mut b, source, target);
-        let ip = udp_packet("10.77.0.2:1400".parse().unwrap(), "192.0.2.5:1500".parse().unwrap(), b"authenticated").unwrap();
+        let ip = udp_packet(
+            "10.77.0.2:1400".parse().unwrap(),
+            "192.0.2.5:1500".parse().unwrap(),
+            b"authenticated",
+        )
+        .unwrap();
         let packet = a.encrypt(&ip).unwrap().unwrap();
         let moved = "127.0.0.1:1201".parse().unwrap();
         let received = b.receive(moved, &packet).unwrap();
@@ -53,7 +77,10 @@ fn mismatched_psk_never_confirms_peer() {
     let init = a.initiate().unwrap();
     let response = b.receive("127.0.0.1:1200".parse().unwrap(), &init).unwrap();
     assert!(!response.authenticated);
-    assert!(a.receive("127.0.0.1:1300".parse().unwrap(), &response.network[0]).is_err());
+    assert!(
+        a.receive("127.0.0.1:1300".parse().unwrap(), &response.network[0])
+            .is_err()
+    );
     assert!(!a.ready() && !b.ready());
     assert!(b.endpoint.is_none());
 }

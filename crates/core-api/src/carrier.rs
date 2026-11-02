@@ -1,4 +1,7 @@
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 /// 当前所有者确认交接的载体字节，独立于用户业务量和设备网卡总量。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -25,7 +28,7 @@ impl CarrierCounter {
     }
 
     fn add(&self, counter: &AtomicU64, bytes: u64) {
-        let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        let _ = counter.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             Some(current.checked_add(bytes).unwrap_or_else(|| {
                 self.0.saturated.store(true, Ordering::Release);
                 u64::MAX

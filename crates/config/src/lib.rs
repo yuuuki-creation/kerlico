@@ -34,6 +34,52 @@ pub struct Config {
     pub local_inbounds: Vec<NodeSpec>,
     #[serde(default)]
     pub limits: Limits,
+    #[serde(default)]
+    pub telemetry: Option<HistorySpec>,
+}
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistorySpec {
+    pub failure_policy: HistoryFailurePolicy,
+    pub directory: std::path::PathBuf,
+    pub sample_interval_ms: u64,
+    pub retention_days: u32,
+    pub mask_source: bool,
+    pub access_records: bool,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HistoryFailurePolicy {
+    #[default]
+    Degrade,
+    StopEngine,
+}
+impl Default for HistorySpec {
+    fn default() -> Self {
+        Self {
+            failure_policy: HistoryFailurePolicy::Degrade,
+            directory: "state/telemetry".into(),
+            sample_interval_ms: 1000,
+            retention_days: 30,
+            mask_source: true,
+            access_records: true,
+        }
+    }
+}
+impl HistorySpec {
+    fn validate(&self) -> Result<()> {
+        if self.directory.as_os_str().is_empty()
+            || self
+                .directory
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || !(100..=60_000).contains(&self.sample_interval_ms)
+            || !(1..=3650).contains(&self.retention_days)
+        {
+            return Err(Error::Config("统计目录、采样间隔或保留天数不合法".into()));
+        }
+        Ok(())
+    }
 }
 fn one() -> u64 {
     1
@@ -296,6 +342,9 @@ impl Registry {
             return Err(Error::Config("配置代次必须大于零".into()));
         }
         config.limits.validate()?;
+        if let Some(history) = &config.telemetry {
+            history.validate()?;
+        }
         let mut accounts = BTreeMap::new();
         let mut usernames = BTreeSet::new();
         for account in config.accounts {
@@ -485,6 +534,7 @@ impl Registry {
             });
         }
         Ok(PreparedConfig {
+            history: config.telemetry,
             egress: EgressPlan {
                 services,
                 bindings,

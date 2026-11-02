@@ -3,9 +3,8 @@
 use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     Address, BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation,
-    DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel, DatagramReceiver,
-    DatagramSender, Destination, Error, OpenedTcp, Outbound, Result, StreamConnector, TargetPolicy,
-    TcpConnectInfo,
+    DatagramChannel, Destination, Error, OpenedTcp, Outbound, Result, StreamConnector,
+    TargetPolicy, TcpConnectInfo,
 };
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use serde::Deserialize;
@@ -149,79 +148,6 @@ impl kerlico_core::DeviceNetwork for NativeDevice {
         })
     }
 }
-struct DirectDatagram(Arc<UdpSocket>);
-
-struct DirectAssociation {
-    socket: Arc<UdpSocket>,
-    cancel: kerlico_core::CancellationToken,
-    ipv6: bool,
-}
-impl DatagramAssociationSender for DirectAssociation {
-    fn send_to<'a>(
-        &'a mut self,
-        packet: &'a [u8],
-        target: &'a Destination,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            if packet.len() > 65_507 {
-                return Err(Error::ResourceLimit);
-            }
-            let Address::Ip(ip) = target.address() else {
-                return Err(Error::Unsupported("多目标直连需要统一出口提供字面 IP"));
-            };
-            let ip = match ip {
-                std::net::IpAddr::V4(ip) if self.ipv6 => std::net::IpAddr::V6(ip.to_ipv6_mapped()),
-                ip => *ip,
-            };
-            let count = tokio::select! { biased; _ = self.cancel.cancelled() => return Err(Error::Cancelled), result = self.socket.send_to(packet, std::net::SocketAddr::new(ip, target.port())) => result? };
-            if count != packet.len() {
-                return Err(Error::Protocol("UDP 关联未发送完整数据报"));
-            }
-            Ok(())
-        })
-    }
-}
-impl DatagramAssociationReceiver for DirectAssociation {
-    fn recv_from(&mut self) -> BoxFuture<'_, Result<Option<kerlico_core::AddressedDatagram>>> {
-        Box::pin(async move {
-            let mut bytes = vec![0; 65_535];
-            let (count, source) = tokio::select! { biased; _ = self.cancel.cancelled() => return Err(Error::Cancelled), result = self.socket.recv_from(&mut bytes) => result? };
-            bytes.truncate(count);
-            Ok(Some((
-                Destination::new(&source.ip().to_canonical().to_string(), source.port())?,
-                bytes,
-            )))
-        })
-    }
-}
-
-impl DatagramSender for DirectDatagram {
-    fn send<'a>(&'a mut self, packet: &'a [u8]) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            let count = self.0.send(packet).await?;
-            if count != packet.len() {
-                return Err(Error::Protocol("UDP通道未发送完整数据报"));
-            }
-            Ok(())
-        })
-    }
-}
-
-impl DatagramReceiver for DirectDatagram {
-    fn peer_addr(&self) -> Option<Destination> {
-        let peer = self.0.peer_addr().ok()?;
-        Destination::new(&peer.ip().to_string(), peer.port()).ok()
-    }
-    fn recv(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>>> {
-        Box::pin(async move {
-            let mut bytes = vec![0; 65_535];
-            let count = self.0.recv(&mut bytes).await?;
-            bytes.truncate(count);
-            Ok(Some(bytes))
-        })
-    }
-}
-
 impl Outbound for Direct {
     fn supports_udp_association(&self) -> bool {
         true
@@ -230,26 +156,7 @@ impl Outbound for Direct {
         &'a self,
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramAssociation>> {
-        Box::pin(async move {
-            context
-                .run(async {
-                    let socket = self.device.udp_association(context.target_mode()).await?;
-                    let ipv6 = socket.local_addr()?.is_ipv6();
-                    Ok(DatagramAssociation {
-                        sender: Box::new(DirectAssociation {
-                            socket: socket.clone(),
-                            cancel: context.cancel.clone(),
-                            ipv6,
-                        }),
-                        receiver: Box::new(DirectAssociation {
-                            socket,
-                            cancel: context.cancel.clone(),
-                            ipv6,
-                        }),
-                    })
-                })
-                .await
-        })
+        self.device.target_association(context)
     }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -270,7 +177,7 @@ impl Outbound for Direct {
             context
                 .run(
                     self.device
-                        .connect_tcp(std::net::SocketAddr::new(*ip, target.port())),
+                        .connect_target_tcp(std::net::SocketAddr::new(*ip, target.port()), context),
                 )
                 .await
         })
@@ -281,23 +188,15 @@ impl Outbound for Direct {
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramChannel>> {
         Box::pin(async move {
-            context
-                .run(async {
-                    let Address::Ip(ip) = target.address() else {
-                        return Err(Error::Unsupported("直连后端只接受调度器已选定的字面目标"));
-                    };
-                    let peer = std::net::SocketAddr::new(*ip, target.port());
-                    let socket = self.device.connect_udp(peer).await?;
-                    Ok(DatagramChannel {
-                        sender: Box::new(DirectDatagram(socket.clone())),
-                        receiver: Box::new(DirectDatagram(socket)),
-                    })
-                })
+            let Address::Ip(ip) = target.address() else {
+                return Err(Error::Unsupported("直连后端只接受调度器已选定的字面目标"));
+            };
+            self.device
+                .connect_target_udp(std::net::SocketAddr::new(*ip, target.port()), context)
                 .await
         })
     }
 }
-
 struct Reject;
 impl Outbound for Reject {
     fn capabilities(&self) -> Capabilities {
@@ -359,7 +258,8 @@ impl OutboundFactory for DirectFactory {
                     }) as Arc<dyn Outbound>)
                 })
             },
-        ))
+        )
+        .with_native_targets())
     }
 }
 impl OutboundFactory for RejectFactory {

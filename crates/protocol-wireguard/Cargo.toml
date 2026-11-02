@@ -21,7 +21,7 @@ zeroize = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-std"] }
-kerlico-egress.workspace = true
+kerlico-egress = { workspace = true, features = ["test-support"] }
 kerlico-net.workspace = true
 kerlico-engine.workspace = true
 

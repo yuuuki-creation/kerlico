@@ -3118,6 +3118,7 @@ dependencies = [
  "kerlico-anytls",
  "kerlico-config",
  "kerlico-core",
+ "kerlico-egress",
  "kerlico-engine",
  "kerlico-gost-relay",
  "kerlico-http",
@@ -3192,6 +3193,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "kerlico-device"
+version = "1.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "kerlico-config",
+ "kerlico-core",
+ "kerlico-egress",
+ "kerlico-engine",
+ "kerlico-net",
+ "kerlico-wireguard",
+ "rand 0.8.8",
+ "rustix",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "kerlico-egress"
 version = "1.0.0"
 dependencies = [
@@ -3202,7 +3228,11 @@ dependencies = [
  "kerlico-net",
  "kerlico-shadowsocks",
  "kerlico-ss2022",
+ "rusqlite",
+ "rustix",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -3214,8 +3244,10 @@ dependencies = [
  "kerlico-core",
  "kerlico-egress",
  "kerlico-net",
+ "rusqlite",
  "serde_json",
  "socket2",
+ "tempfile",
  "tokio",
 ]
 
@@ -3258,6 +3290,19 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tokio-rustls",
+]
+
+[[package]]
+name = "kerlico-http-carrier"
+version = "1.0.0"
+dependencies = [
+ "bytes",
+ "h2",
+ "h3",
+ "h3-quinn",
+ "kerlico-core",
+ "quinn",
+ "tokio",
 ]
 
 [[package]]
@@ -3661,6 +3706,7 @@ dependencies = [
  "kerlico-egress",
  "kerlico-engine",
  "kerlico-http",
+ "kerlico-http-carrier",
  "kerlico-net",
  "quinn",
  "rand 0.8.8",
@@ -5618,7 +5664,6 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.40"
-source = "git+https://github.com/aimalygin/shaped-rustls?rev=3a131beaef0183b0cb61e5a9070a703b6be39ed3#3a131beaef0183b0cb61e5a9070a703b6be39ed3"
 dependencies = [
  "aws-lc-rs",
  "brotli",

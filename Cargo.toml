@@ -4,6 +4,7 @@ default-members = ["apps/kerlico"]
 exclude = [
     "third_party/ml-kem-legacy",
     "third_party/h3",
+    "third_party/shaped-rustls/rustls",
     "third_party/xray-transport",
     "crates/protocol-ssh/vendor/russh-util",
     "crates/protocol-shadowquic/vendor/quinn-jls",
@@ -24,6 +25,7 @@ kerlico-core = { path = "crates/core-api" }
 kerlico-config = { path = "crates/config" }
 kerlico-net = { path = "crates/net" }
 kerlico-engine = { path = "crates/engine" }
+kerlico-device = { path = "crates/device" }
 kerlico-vless = { path = "crates/protocol-vless" }
 kerlico-egress = { path = "crates/egress" }
 kerlico-anytls = { path = "crates/protocol-anytls" }
@@ -96,7 +98,7 @@ argon2 = "0.5.3"
 russh-util = { path = "crates/protocol-ssh/vendor/russh-util" }
 ml-kem = { path = "third_party/ml-kem-legacy" }
 h3 = { path = "third_party/h3" }
-rustls = { git = "https://github.com/aimalygin/shaped-rustls", rev = "3a131beaef0183b0cb61e5a9070a703b6be39ed3" }
+rustls = { path = "third_party/shaped-rustls/rustls" }
 quinn = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d37466492242a1827f9a16aa91ca4c1b00be" }
 quinn-proto = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d37466492242a1827f9a16aa91ca4c1b00be" }
 h3-quinn = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d37466492242a1827f9a16aa91ca4c1b00be" }

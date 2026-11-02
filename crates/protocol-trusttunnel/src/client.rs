@@ -1,7 +1,7 @@
 //! 每个出站独享有界物理池；故障不重放业务、不回退节点或直连。
 use crate::{
     config::{self, ClientOptions, Limits, Transport},
-    io::{BodyIo, HeldIo, Reader, Writer},
+    held::HeldIo,
     protocol,
 };
 use bytes::Bytes;
@@ -10,6 +10,7 @@ use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel, Destination, Error,
     Outbound, ResourceKey, Result, ServiceContext, ServiceTask, TargetPolicy,
 };
+use kerlico_http_carrier::{BodyIo, Reader, Writer};
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -38,7 +39,7 @@ pub(crate) struct Carrier {
     driver: Mutex<Option<ServiceTask<()>>>,
     maintenance: Mutex<Option<ServiceTask<()>>>,
     quic: Option<(quinn::Endpoint, quinn::Connection)>,
-    socket: Option<crate::socket::Close>,
+    socket: Option<kerlico_http_carrier::socket::Close>,
 }
 impl Carrier {
     pub fn touch(&self) {
@@ -255,13 +256,13 @@ impl Client {
             .map_err(|_| crate::invalid())?;
             let socket = std::net::UdpSocket::bind(bind)?;
             socket.set_nonblocking(true)?;
-            let (socket, close) = crate::socket::wrap(socket)?;
+            let (socket, close) = kerlico_http_carrier::socket::wrap(socket)?;
             socket_close = Some(close);
             let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
                 quinn::EndpointConfig::default(),
                 None,
                 socket,
-                crate::runtime::ServiceRuntime::new(self.host.clone()),
+                kerlico_http_carrier::runtime::ServiceRuntime::new(self.host.clone()),
             )?;
             let crypto = quinn::crypto::rustls::QuicClientConfig::try_from((*self.tls).clone())
                 .map_err(|_| crate::invalid())?;

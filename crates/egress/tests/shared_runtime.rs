@@ -196,7 +196,8 @@ mod failure_during_poll {
             Operation::Shutdown,
         ] {
             for failure in [Failure::Cancelled, Failure::Aborted, Failure::Timeout] {
-                let (mut flow, request, telemetry, fault, _binding) = fixture(operation, failure).await;
+                let (mut flow, request, telemetry, fault, _binding) =
+                    fixture(operation, failure).await;
                 let error = tokio::time::timeout(Duration::from_secs(1), async {
                     match operation {
                         Operation::Read => flow.read_exact(&mut [0; 1]).await.map(|_| ()),
@@ -221,7 +222,8 @@ mod failure_during_poll {
     #[tokio::test]
     async fn relay_and_real_record_agree_when_backend_cancels_inside_poll() {
         for failure in [Failure::Cancelled, Failure::Aborted, Failure::Timeout] {
-            let (flow, _request, telemetry, fault, _binding) = fixture(Operation::Write, failure).await;
+            let (flow, _request, telemetry, fault, _binding) =
+                fixture(Operation::Write, failure).await;
             let (front, mut peer) = tokio::io::duplex(32);
             peer.write_all(b"failed-write").await.unwrap();
             let result = tokio::time::timeout(

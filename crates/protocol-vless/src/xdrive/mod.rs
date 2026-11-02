@@ -4,7 +4,8 @@ mod storage;
 #[cfg(test)]
 mod tests;
 use kerlico_core::{
-    BoxFuture, CancellationToken, Error, InboundContext, IngressBinding, NodeEvent, Result,
+    BoxFuture, CancellationToken, Diagnostic, DiagnosticSink, Error, InboundContext,
+    IngressBinding, NodeEvent, Result,
 };
 use serde::Deserialize;
 use std::{
@@ -126,7 +127,8 @@ impl Transport {
         self.store
             .put(&format!("sessions/{nanos}-{id}"), &[])
             .await?;
-        let Connection { mut io, driving } = self.connection(&id, false, None);
+        let Connection { mut io, driving } =
+            self.connection(&id, false, None, DiagnosticSink::stderr(host.language()));
         io.task = Some(host.spawn_tracked(driving)?);
         Ok(Box::new(crate::server_io::Plain(Box::new(io))))
     }
@@ -135,6 +137,7 @@ impl Transport {
         id: &str,
         server: bool,
         ring: Option<slots::Ring>,
+        diagnostics: DiagnosticSink,
     ) -> Connection {
         let (local, remote) = tokio::io::duplex(64 * 1024);
         let (reader, writer) = tokio::io::split(remote);
@@ -148,10 +151,14 @@ impl Transport {
         let writing_ring = ring
             .as_ref()
             .map(|r| if server { r.down.clone() } else { r.up.clone() });
+        let write_diagnostics = diagnostics.clone();
         let writing = async move {
             let result = tokio::select! {_=stop.cancelled()=>Ok(()),r=async {if let Some(table)=writing_ring {slots::write(this.store.clone(),reader,table,&this.settings,status.clone()).await}else{write_segments(this.store.clone(),reader,&write_prefix,&this.settings,status.clone()).await}}=>r};
             if let Err(error) = result {
-                eprintln!("XDRIVE 后台任务失败：{error}");
+                write_diagnostics.emit(Diagnostic {
+                    code: "vless.xdrive.background_failed",
+                    error: &error,
+                });
                 status.fail();
             } else {
                 status.finished.store(true, Ordering::Release);
@@ -165,7 +172,10 @@ impl Transport {
         let reading = async move {
             let result = tokio::select! {_=stop.cancelled()=>Ok(()),r=async {if let Some(table)=reading_ring {slots::read(this.store.clone(),writer,table,&this.settings).await}else{read_segments(this.store.clone(),writer,&read_prefix,&this.settings).await}}=>r};
             if let Err(error) = result {
-                eprintln!("XDRIVE 后台任务失败：{error}");
+                diagnostics.emit(Diagnostic {
+                    code: "vless.xdrive.background_failed",
+                    error: &error,
+                });
                 status.fail();
             }
         };
@@ -234,7 +244,9 @@ impl Transport {
                                 None => self.store.get(&announce).await?.unwrap_or_default(),
                             };
                             let ring = if data.is_empty() { None } else { Some(slots::Ring::parse(&data)?) };
-                            let connection = self.connection(id, true, ring);
+                            let diagnostic_events = context.events.clone();
+                            let diagnostics = DiagnosticSink::new(move |event| diagnostic_events.diagnostic(event));
+                            let connection = self.connection(id, true, ring, diagnostics);
                             handled.insert(id.to_owned(), Instant::now());
                             let payload = payload.clone();
                             let access = access.clone();
@@ -248,7 +260,7 @@ impl Transport {
                                     payload.serve(Box::new(crate::server_io::Plain(Box::new(io))), access, session).await
                                 }).await;
                                 if let Err(error) = &result {
-                                    eprintln!("VLESS 存储会话失败：{error}");
+                                    events.diagnostic(Diagnostic { code: "vless.xdrive.session_failed", error });
                                 }
                                 events.record(if result.is_ok() { NodeEvent::Completed } else { NodeEvent::Failed });
                             })?;

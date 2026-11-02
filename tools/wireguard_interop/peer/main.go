@@ -184,7 +184,7 @@ func run(path string) error {
 		var req request; if err := json.Unmarshal(scanner.Bytes(), &req); err != nil { emit(map[string]any{"ok":false,"error":"验证请求不合法"}); continue }
 		if req.Op == "stop" { emit(map[string]any{"stopped":true,"clean":true}); return nil }
 		if req.Op == "snapshot" { emit(snapshot(dev)); continue }
-		result, err := business(tnet, addresses, req); if err != nil { emit(map[string]any{"ok":false,"error":"官方peer业务失败"}) } else { emit(result) }
+		result, err := business(tnet, addresses, req); if err != nil { fmt.Fprintln(os.Stderr, err); emit(map[string]any{"ok":false,"error":"官方peer业务失败"}) } else { emit(result) }
 	}
 	return scanner.Err()
 }

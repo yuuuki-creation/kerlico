@@ -22,6 +22,10 @@ mod device;
 pub use device::*;
 mod carrier;
 pub use carrier::CarrierUsage;
+mod locale;
+pub use locale::{Language, LocalizedError, diagnostic_translation};
+mod diagnostic;
+pub use diagnostic::{Diagnostic, DiagnosticSink, LocalizedDiagnostic};
 
 /// 可在线程间移动的装箱异步操作；丢弃操作不会撤回已经发送的数据。
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -204,6 +208,9 @@ pub trait StreamConnector: Send + Sync {
 }
 
 impl ConnectContext {
+    pub fn language(&self) -> Language {
+        self.service.language()
+    }
     /// 创建独立请求取消域和建立链的绝对截止时间。
     pub fn new(timeout: Duration) -> Self {
         Self {
@@ -437,6 +444,10 @@ pub enum NodeEvent {
 pub trait NodeObserver: Send + Sync {
     /// 记录一个累计事件；不承载身份秘密或包内容。
     fn record(&self, event: NodeEvent);
+    /// 结构化诊断与累计计数分离，调用方可选择语言或持久化类别。
+    fn diagnostic(&self, event: Diagnostic<'_>) {
+        eprintln!("{}", event.localized(Language::default()));
+    }
 }
 
 /// 全局与节点两层信号量组成的逻辑流配额。

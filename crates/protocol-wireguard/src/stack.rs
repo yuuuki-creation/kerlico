@@ -1,7 +1,24 @@
-use crate::{config::{Addresses, Limits, Network, Prepared}, packet::{FlowTuple, IpPacket, rewrite_tcp}, queue::{PacketBudget, PacketLease, QueuedPacket}};
+use crate::{
+    config::{Addresses, Limits, Network, Prepared},
+    packet::{FlowTuple, IpPacket, rewrite_tcp},
+    queue::{PacketBudget, PacketLease, QueuedPacket},
+};
 use kerlico_core::{CancellationToken, ConnectContext, Error, Result};
-use smoltcp::{iface::{Config, Interface, SocketHandle, SocketSet}, phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken}, socket::tcp, time::Instant as StackInstant, wire::{HardwareAddress, IpCidr, IpEndpoint}};
-use std::{collections::{HashMap, VecDeque}, io, net::SocketAddr, sync::{Arc, Mutex, MutexGuard}, task::{Context, Poll, Waker}, time::{Duration, Instant}};
+use smoltcp::{
+    iface::{Config, Interface, SocketHandle, SocketSet},
+    phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken},
+    socket::tcp,
+    time::Instant as StackInstant,
+    wire::{HardwareAddress, IpCidr, IpEndpoint},
+};
+use std::{
+    collections::{HashMap, VecDeque},
+    io,
+    net::SocketAddr,
+    sync::{Arc, Mutex, MutexGuard},
+    task::{Context, Poll, Waker},
+    time::{Duration, Instant},
+};
 use tokio::sync::{Notify, mpsc};
 
 #[derive(Clone)]
@@ -13,14 +30,26 @@ pub(crate) struct FlowScope {
 }
 impl FlowScope {
     pub fn from_context(context: &ConnectContext) -> Self {
-        Self { request: context.cancel.clone(), node: context.node_cancel(),
-            peer: context.peer_cancel(), service: context.service_cancel() }
+        Self {
+            request: context.cancel.clone(),
+            node: context.node_cancel(),
+            peer: context.peer_cancel(),
+            service: context.service_cancel(),
+        }
     }
     pub fn inbound(cancel: CancellationToken) -> Self {
-        Self { request: cancel, node: CancellationToken::new(), peer: CancellationToken::new(), service: CancellationToken::new() }
+        Self {
+            request: cancel,
+            node: CancellationToken::new(),
+            peer: CancellationToken::new(),
+            service: CancellationToken::new(),
+        }
     }
     pub fn is_cancelled(&self) -> bool {
-        self.request.is_cancelled() || self.node.is_cancelled() || self.peer.is_cancelled() || self.service.is_cancelled()
+        self.request.is_cancelled()
+            || self.node.is_cancelled()
+            || self.peer.is_cancelled()
+            || self.service.is_cancelled()
     }
     pub async fn cancelled(&self) {
         tokio::select! { biased;
@@ -51,8 +80,12 @@ pub(crate) enum TcpOwner {
 }
 impl TcpEntry {
     fn wake(&mut self) {
-        if let Some(waker) = self.reader.take() { waker.wake(); }
-        if let Some(waker) = self.writer.take() { waker.wake(); }
+        if let Some(waker) = self.reader.take() {
+            waker.wake();
+        }
+        if let Some(waker) = self.writer.take() {
+            waker.wake();
+        }
     }
 }
 pub(crate) struct UdpEntry {
@@ -90,34 +123,93 @@ pub(crate) struct SharedStack {
     started: Instant,
 }
 impl SharedStack {
-    pub fn new(prepared: &Prepared, cancel: CancellationToken, notify: Arc<Notify>, allowed: Vec<Network>, budget: PacketBudget) -> Result<Arc<Self>> {
-        let addresses = prepared.addresses.clone();
-        let limits = prepared.limits.clone();
-        let mtu = prepared.mtu;
-        let mut device = PacketDevice { incoming: VecDeque::new(), outgoing: VecDeque::new(),
-            mtu, budget: budget.clone() };
+    pub fn new(
+        prepared: &Prepared,
+        cancel: CancellationToken,
+        notify: Arc<Notify>,
+        allowed: Vec<Network>,
+        budget: PacketBudget,
+    ) -> Result<Arc<Self>> {
+        Self::with_options(
+            prepared.addresses.clone(),
+            prepared.limits.clone(),
+            prepared.mtu,
+            cancel,
+            notify,
+            allowed,
+            budget,
+        )
+    }
+    pub(crate) fn with_options(
+        addresses: Addresses,
+        limits: Limits,
+        mtu: usize,
+        cancel: CancellationToken,
+        notify: Arc<Notify>,
+        allowed: Vec<Network>,
+        budget: PacketBudget,
+    ) -> Result<Arc<Self>> {
+        let mut device = PacketDevice {
+            incoming: VecDeque::new(),
+            outgoing: VecDeque::new(),
+            mtu,
+            budget: budget.clone(),
+        };
         let mut config = Config::new(HardwareAddress::Ip);
         config.random_seed = rand::random();
         let mut interface = Interface::new(config, &mut device, StackInstant::from_millis(0));
         interface.update_ip_addrs(|list| {
             for address in addresses.iter() {
-                let _ = list.push(IpCidr::new(address.into(), if address.is_ipv4() { 32 } else { 128 }));
+                let _ = list.push(IpCidr::new(
+                    address.into(),
+                    if address.is_ipv4() { 32 } else { 128 },
+                ));
             }
         });
         if let Some(std::net::IpAddr::V4(address)) = addresses.v4 {
-            interface.routes_mut().add_default_ipv4_route(address).map_err(|_| Error::ResourceLimit)?;
+            interface
+                .routes_mut()
+                .add_default_ipv4_route(address)
+                .map_err(|_| Error::ResourceLimit)?;
         }
         if let Some(std::net::IpAddr::V6(address)) = addresses.v6 {
-            interface.routes_mut().add_default_ipv6_route(address).map_err(|_| Error::ResourceLimit)?;
+            interface
+                .routes_mut()
+                .add_default_ipv6_route(address)
+                .map_err(|_| Error::ResourceLimit)?;
         }
-        Ok(Arc::new(Self { state: Mutex::new(State { interface, sockets: SocketSet::new(Vec::new()),
-            tcp: HashMap::new(), tuples: HashMap::new(), inbound_tcp: HashMap::new(), udp: HashMap::new(), device, closed: false,
-            next_id: 1, next_port: 49152 + rand::random::<u16>() % 16384, next_fragment: rand::random() }),
-            notify, cancel, addresses, limits, mtu, budget, allowed, started: Instant::now() }))
+        Ok(Arc::new(Self {
+            state: Mutex::new(State {
+                interface,
+                sockets: SocketSet::new(Vec::new()),
+                tcp: HashMap::new(),
+                tuples: HashMap::new(),
+                inbound_tcp: HashMap::new(),
+                udp: HashMap::new(),
+                device,
+                closed: false,
+                next_id: 1,
+                next_port: 49152 + rand::random::<u16>() % 16384,
+                next_fragment: rand::random(),
+            }),
+            notify,
+            cancel,
+            addresses,
+            limits,
+            mtu,
+            budget,
+            allowed,
+            started: Instant::now(),
+        }))
     }
     pub fn lock(&self) -> Result<MutexGuard<'_, State>> {
-        let state = self.state.lock().map_err(|_| Error::Protocol("WireGuard用户态栈状态已损坏"))?;
-        if state.closed || self.cancel.is_cancelled() { return Err(Error::Cancelled); }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| Error::Protocol("WireGuard用户态栈状态已损坏"))?;
+        if state.closed || self.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         Ok(state)
     }
     pub fn time(&self) -> StackInstant {
@@ -129,19 +221,28 @@ impl SharedStack {
         let packet = if let Some(id) = state.inbound_tcp.get(&tuple) {
             let entry = state.tcp.get(id).ok_or(Error::Rejected)?;
             rewrite_tcp(&packet, entry.tuple.target, entry.tuple.source)?
-        } else { packet };
-        state.device.incoming.push_back(self.budget.packet(packet, false)?);
+        } else {
+            packet
+        };
+        state
+            .device
+            .incoming
+            .push_back(self.budget.packet(packet, false)?);
         Ok(())
     }
     pub fn contains_tcp(&self, tuple: &FlowTuple) -> bool {
-        self.lock().is_ok_and(|state| state.inbound_tcp.contains_key(tuple))
+        self.lock()
+            .is_ok_and(|state| state.inbound_tcp.contains_key(tuple))
     }
     pub fn flow_count(&self) -> usize {
-        self.lock().map_or(0, |state| state.tcp.len() + state.udp.len())
+        self.lock()
+            .map_or(0, |state| state.tcp.len() + state.udp.len())
     }
     pub fn queue(&self, packets: Vec<Vec<u8>>) -> Result<()> {
         let mut state = self.lock()?;
-        let packets = packets.into_iter().map(|packet| self.budget.packet(packet, false))
+        let packets = packets
+            .into_iter()
+            .map(|packet| self.budget.packet(packet, false))
             .collect::<Result<Vec<_>>>()?;
         state.device.outgoing.extend(packets);
         drop(state);
@@ -149,7 +250,9 @@ impl SharedStack {
         Ok(())
     }
     pub fn queue_packet(&self, packet: Vec<u8>) -> Result<()> {
-        if !self.allows(IpPacket::parse(&packet)?.target) { return Err(Error::Rejected); }
+        if !self.allows(IpPacket::parse(&packet)?.target) {
+            return Err(Error::Rejected);
+        }
         let id = {
             let mut state = self.lock()?;
             let id = state.next_fragment;
@@ -174,19 +277,36 @@ impl SharedStack {
                     entry.owner = TcpOwner::Aborting(now + Duration::from_secs(1));
                     entry.wake();
                 }
-                if matches!(entry.owner, TcpOwner::Aborting(_)) { socket.abort(); }
+                if matches!(entry.owner, TcpOwner::Aborting(_)) {
+                    socket.abort();
+                }
             }
         }
         {
-            let State { interface, sockets, device, .. } = &mut *state;
+            let State {
+                interface,
+                sockets,
+                device,
+                ..
+            } = &mut *state;
             interface.poll(self.time(), device, sockets);
         }
         {
-            let State { sockets, tcp, tuples, device, .. } = &mut *state;
+            let State {
+                sockets,
+                tcp,
+                tuples,
+                device,
+                ..
+            } = &mut *state;
             for queued in &mut device.outgoing {
-                if !queued.from_stack { continue; }
+                if !queued.from_stack {
+                    continue;
+                }
                 let packet = IpPacket::parse(&queued.bytes)?;
-                if packet.protocol != 6 { return Err(Error::Protocol("WireGuard TCP栈产生了意外控制包")); }
+                if packet.protocol != 6 {
+                    return Err(Error::Protocol("WireGuard TCP栈产生了意外控制包"));
+                }
                 let tuple = packet.tcp_tuple()?;
                 if let Some(entry) = tuples.get(&tuple).and_then(|id| tcp.get(id))
                     && let Some(wire) = entry.wire
@@ -197,70 +317,147 @@ impl SharedStack {
             }
             for entry in tcp.values_mut() {
                 let socket = sockets.get_mut::<tcp::Socket>(entry.handle);
-                if matches!(socket.state(), tcp::State::Established | tcp::State::CloseWait) { entry.established = true; }
-                if matches!(socket.state(), tcp::State::CloseWait | tcp::State::Closing | tcp::State::LastAck | tcp::State::TimeWait) { entry.saw_fin = true; }
-                if !entry.established && (socket.state() == tcp::State::Closed
-                    || entry.wire.is_some() && socket.state() == tcp::State::Listen)
-                { entry.pending.cancel(); }
+                if matches!(
+                    socket.state(),
+                    tcp::State::Established | tcp::State::CloseWait
+                ) {
+                    entry.established = true;
+                }
+                if matches!(
+                    socket.state(),
+                    tcp::State::CloseWait
+                        | tcp::State::Closing
+                        | tcp::State::LastAck
+                        | tcp::State::TimeWait
+                ) {
+                    entry.saw_fin = true;
+                }
+                if !entry.established
+                    && (socket.state() == tcp::State::Closed
+                        || entry.wire.is_some() && socket.state() == tcp::State::Listen)
+                {
+                    entry.pending.cancel();
+                }
             }
         }
-        let expired = state.tcp.iter().filter_map(|(id, entry)| {
-            let socket = state.sockets.get::<tcp::Socket>(entry.handle);
-            match entry.owner {
-                TcpOwner::Attached => None,
-                TcpOwner::Draining(_) if socket.remote_endpoint().is_none() => Some(*id),
-                TcpOwner::Aborting(deadline) if socket.remote_endpoint().is_none() || now >= deadline => Some(*id),
-                _ => None,
-            }
-        }).collect::<Vec<_>>();
+        let expired = state
+            .tcp
+            .iter()
+            .filter_map(|(id, entry)| {
+                let socket = state.sockets.get::<tcp::Socket>(entry.handle);
+                match entry.owner {
+                    TcpOwner::Attached => None,
+                    TcpOwner::Draining(_) if socket.remote_endpoint().is_none() => Some(*id),
+                    TcpOwner::Aborting(deadline)
+                        if socket.remote_endpoint().is_none() || now >= deadline =>
+                    {
+                        Some(*id)
+                    }
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
         for id in expired {
             if let Some(mut entry) = state.tcp.remove(&id) {
                 entry.wake();
                 state.tuples.remove(&entry.tuple);
-                if let Some(wire) = entry.wire { state.inbound_tcp.remove(&wire); }
+                if let Some(wire) = entry.wire {
+                    state.inbound_tcp.remove(&wire);
+                }
                 state.sockets.remove(entry.handle);
             }
         }
-        state.udp.retain(|_, entry| !entry.scope.is_cancelled() && !entry.receive.is_closed());
+        state
+            .udp
+            .retain(|_, entry| !entry.scope.is_cancelled() && !entry.receive.is_closed());
         Ok(())
     }
     pub fn drain(&self, maximum: usize) -> Result<Vec<Vec<u8>>> {
         let mut state = self.lock()?;
         let count = maximum.min(state.device.outgoing.len());
-        let packets = state.device.outgoing.drain(..count).map(|packet| packet.bytes).collect::<Vec<_>>();
+        let packets = state
+            .device
+            .outgoing
+            .drain(..count)
+            .map(|packet| packet.bytes)
+            .collect::<Vec<_>>();
         Ok(packets)
     }
     pub fn has_output(&self) -> bool {
-        self.lock().is_ok_and(|state| !state.device.outgoing.is_empty())
+        self.lock()
+            .is_ok_and(|state| !state.device.outgoing.is_empty())
     }
     pub fn receive_udp(&self, packet: &IpPacket<'_>) -> Result<()> {
         let (tuple, payload) = packet.udp()?;
-        if !self.addresses.contains(tuple.target.ip()) { return Err(Error::Rejected); }
+        if !self.addresses.contains(tuple.target.ip()) {
+            return Err(Error::Rejected);
+        }
         let state = self.lock()?;
         let entry = state.udp.get(&tuple.target.port()).ok_or(Error::Rejected)?;
         if entry.scope.is_cancelled() || entry.fixed.is_some_and(|fixed| fixed != tuple.source) {
             return Err(Error::Rejected);
         }
-        entry.receive.try_send(ReceivedDatagram { source: tuple.source, payload: payload.to_vec(),
-            _lease: self.budget.reserve(payload.len())? }).map_err(|_| Error::ResourceLimit)
+        entry
+            .receive
+            .try_send(ReceivedDatagram {
+                source: tuple.source,
+                payload: payload.to_vec(),
+                _lease: self.budget.reserve(payload.len())?,
+            })
+            .map_err(|_| Error::ResourceLimit)
     }
-    pub fn tcp_poll<T>(&self, id: u64, cx: &mut Context<'_>, operation: impl FnOnce(&mut tcp::Socket<'static>, &mut TcpEntry, &mut Context<'_>) -> Poll<io::Result<T>>) -> Poll<io::Result<T>> {
-        let mut state = match self.lock() { Ok(state) => state, Err(_) => return Poll::Ready(Err(cancelled())) };
+    pub fn tcp_poll<T>(
+        &self,
+        id: u64,
+        cx: &mut Context<'_>,
+        operation: impl FnOnce(
+            &mut tcp::Socket<'static>,
+            &mut TcpEntry,
+            &mut Context<'_>,
+        ) -> Poll<io::Result<T>>,
+    ) -> Poll<io::Result<T>> {
+        let mut state = match self.lock() {
+            Ok(state) => state,
+            Err(_) => return Poll::Ready(Err(cancelled())),
+        };
         let State { sockets, tcp, .. } = &mut *state;
-        let Some(entry) = tcp.get_mut(&id) else { return Poll::Ready(Err(cancelled())); };
-        if entry.scope.is_cancelled() { return Poll::Ready(Err(cancelled())); }
+        let Some(entry) = tcp.get_mut(&id) else {
+            return Poll::Ready(Err(cancelled()));
+        };
+        if entry.scope.is_cancelled() {
+            return Poll::Ready(Err(cancelled()));
+        }
         let socket = sockets.get_mut::<tcp::Socket>(entry.handle);
-        if matches!(socket.state(), tcp::State::Established | tcp::State::CloseWait) { entry.established = true; }
-        if matches!(socket.state(), tcp::State::CloseWait | tcp::State::Closing | tcp::State::LastAck | tcp::State::TimeWait) { entry.saw_fin = true; }
+        if matches!(
+            socket.state(),
+            tcp::State::Established | tcp::State::CloseWait
+        ) {
+            entry.established = true;
+        }
+        if matches!(
+            socket.state(),
+            tcp::State::CloseWait
+                | tcp::State::Closing
+                | tcp::State::LastAck
+                | tcp::State::TimeWait
+        ) {
+            entry.saw_fin = true;
+        }
         let result = operation(socket, entry, cx);
         drop(state);
         self.notify.notify_one();
         result
     }
     pub fn close(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         state.closed = true;
-        for entry in state.tcp.values_mut() { entry.pending.cancel(); entry.wake(); }
+        for entry in state.tcp.values_mut() {
+            entry.pending.cancel();
+            entry.wake();
+        }
         state.tcp.clear();
         state.tuples.clear();
         state.inbound_tcp.clear();
@@ -271,8 +468,12 @@ impl SharedStack {
         self.notify.notify_waiters();
     }
 }
-pub(crate) fn cancelled() -> io::Error { io::Error::other(Error::Cancelled) }
-pub(crate) fn endpoint(address: SocketAddr) -> IpEndpoint { IpEndpoint::new(address.ip().into(), address.port()) }
+pub(crate) fn cancelled() -> io::Error {
+    io::Error::other(Error::Cancelled)
+}
+pub(crate) fn endpoint(address: SocketAddr) -> IpEndpoint {
+    IpEndpoint::new(address.ip().into(), address.port())
+}
 
 struct PacketDevice {
     incoming: VecDeque<QueuedPacket>,
@@ -281,15 +482,30 @@ struct PacketDevice {
     budget: PacketBudget,
 }
 struct Receive(Vec<u8>);
-struct Transmit<'a> { outgoing: &'a mut VecDeque<QueuedPacket>, lease: PacketLease }
+struct Transmit<'a> {
+    outgoing: &'a mut VecDeque<QueuedPacket>,
+    lease: PacketLease,
+}
 impl RxToken for Receive {
-    fn consume<R, F>(self, f: F) -> R where F: FnOnce(&[u8]) -> R { f(&self.0) }
+    fn consume<R, F>(self, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        f(&self.0)
+    }
 }
 impl TxToken for Transmit<'_> {
-    fn consume<R, F>(self, len: usize, f: F) -> R where F: FnOnce(&mut [u8]) -> R {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
         let mut packet = vec![0; len];
         let result = f(&mut packet);
-        self.outgoing.push_back(QueuedPacket { bytes: packet, from_stack: true, _lease: self.lease });
+        self.outgoing.push_back(QueuedPacket {
+            bytes: packet,
+            from_stack: true,
+            _lease: self.lease,
+        });
         result
     }
 }
@@ -301,11 +517,20 @@ impl Device for PacketDevice {
         let bytes = packet.bytes;
         drop(packet._lease);
         let lease = self.budget.reserve(self.mtu).ok()?;
-        Some((Receive(bytes), Transmit { outgoing: &mut self.outgoing, lease }))
+        Some((
+            Receive(bytes),
+            Transmit {
+                outgoing: &mut self.outgoing,
+                lease,
+            },
+        ))
     }
     fn transmit(&mut self, _: StackInstant) -> Option<Self::TxToken<'_>> {
         let lease = self.budget.reserve(self.mtu).ok()?;
-        Some(Transmit { outgoing: &mut self.outgoing, lease })
+        Some(Transmit {
+            outgoing: &mut self.outgoing,
+            lease,
+        })
     }
     fn capabilities(&self) -> DeviceCapabilities {
         let mut capabilities = DeviceCapabilities::default();

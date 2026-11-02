@@ -11,6 +11,12 @@ kerlico-core.workspace = true
 kerlico-config.workspace = true
 kerlico-net.workspace = true
 tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.6", features = ["process"] }
 
 [features]
 test-support = []
@@ -20,7 +26,7 @@ kerlico-egress = { path = ".", features = ["test-support"] }
 kerlico-shadowsocks.workspace = true
 kerlico-ss2022.workspace = true
 base64.workspace = true
-serde_json.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true

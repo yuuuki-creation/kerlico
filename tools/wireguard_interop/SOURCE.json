@@ -17,5 +17,10 @@
     "commit": "cbfe05f835cfc75bf781addc1c0eb2e1a0df1ea3",
     "license": "0BSD"
   },
+  "netstack_test_adapter": {
+    "file": "tun/netstack/tun.go",
+    "change": "ipv4/ipv6 NewProtocolWithOptions AllowExternalLoopbackTraffic=true",
+    "scope": "仅让独立参考peer接收回环业务响应；保留原始归档与逐文件校验，WireGuard协议及密码实现不变。"
+  },
   "scope": "官方wireguard-go及其固定gVisor依赖只用于隔离参考peer，不进入产品运行。所有构建和执行均由海外worker完成。"
 }

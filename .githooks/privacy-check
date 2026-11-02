@@ -2,6 +2,7 @@
 """仓库匿名检查；不得回显检测到的身份信息。"""
 
 import getpass
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -47,6 +48,12 @@ def local_identifiers():
 
 LOCAL_IDENTIFIERS = local_identifiers()
 CHECKED_BLOBS = set()
+# 固定上游原文中的法定署名；只有逐字匹配的已审文件可保留原作者邮箱。
+UPSTREAM_NOTICES = {
+    b"third_party/shaped-rustls/LICENSE-ISC": "7cfafc877eccc46c0e346ccbaa5c51bb6b894d2b818e617d970211e232785ad4",
+    b"third_party/shaped-rustls/LICENSE-MIT": "709e3175b4212f7b13aa93971c9f62ff8c69ec45ad8c6532a7e0c41d7a7d6f8c",
+    b"third_party/shaped-rustls/README.md": "41143f33a439ac0b138b33eb6e8681cc7f56c1ecca95578a68323f4f95f20279",
+}
 
 
 def scan_text(data):
@@ -94,9 +101,14 @@ def check_entry(mode, oid, name):
         raise Rejected("sensitive-file")
     if mode == b"160000":
         raise Rejected("unreviewed-submodule")
-    if oid not in CHECKED_BLOBS:
-        scan_text(git("cat-file", "blob", oid.decode("ascii")))
-        CHECKED_BLOBS.add(oid)
+    if oid not in CHECKED_BLOBS or name in UPSTREAM_NOTICES:
+        contents = git("cat-file", "blob", oid.decode("ascii"))
+        if name in UPSTREAM_NOTICES:
+            if hashlib.sha256(contents).hexdigest() != UPSTREAM_NOTICES[name]:
+                raise Rejected("upstream-notice-changed-needs-review")
+        else:
+            scan_text(contents)
+            CHECKED_BLOBS.add(oid)
 
 
 def check_index():

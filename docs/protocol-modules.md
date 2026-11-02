@@ -1,107 +1,61 @@
 # 协议模块与插拔规划
 
-状态：目标规划，更新日期2026-11-02，Asia/Shanghai。出站边界按[0009](decisions/0009-global-egress-dispatcher.md)、[0010](decisions/0010-node-egress-modes-and-warp.md)，多用户与统计适配按[0011](decisions/0011-users-statistics-and-access-records.md)同步；新架构尚未迁移。配合[总体结构](architecture.md)阅读，实际签名、配置和验证范围以接口及根STATUS为准。
+更新日期：2026-11-02（Asia/Shanghai）
 
-本轮公共契约见[核心契约](core-contracts.md)，接入/转发细节见[数据路径](data-paths.md)，代次与资源退出见[运行生命周期](runtime-lifecycle.md)。这些约定共同约束协议插拔，不能只靠目录隔离判断模块独立。
+本文说明协议模块的独立 package 组织、工厂注册、Cargo features 编译裁剪以及新增/移除协议的工程边界。
 
-协议范围、方向与组合统一见[三核心协议与组合总表](../reference/reports/三核心%20协议%20组合支持.md)，阶段见[协议路线](protocol-roadmap.md)。按[当前流程](decisions/0007-protocol-development-cycle.md)，调研明确本轮完整交付后，首次集中写完协议代码和接口文档，再统一远端测试、修改和复验；不预建空协议目录。
+- 协议范围与组合清单：[三核心协议与组合总表](../reference/reports/三核心%20协议%20组合支持.md)
+- 开发流程约定：[协议开发阶段与工作流](protocol-roadmap.md) 及 [0007](decisions/0007-protocol-development-cycle.md)
+- 当前已实现的 23 个协议契约：[实现接口目录](interfaces/README.md)
 
-## 一个协议一个维护边界
+## 一个协议一个独立 Crate
 
-建议每个协议使用一个独立库 package，协议自身的入站、出站、配置与测试放在同一目录。只实现出站的协议不需要建立空入站；模块较小时也不必预先拆出所有子文件。
-
-客户端与服务端一体方向已确认，见 [0006](decisions/0006-unified-client-server-core.md)。同一协议 crate 的入站、出站共享编解码，分别注册能力与构造入口。入站在鉴权解码后提交统一目标访问服务，出站由该服务选择后调用；服务端节点的 IPv4/IPv6 接入和凭据独立。逐角色实现与验证，不因同一程序包含协议出站就登记入站已支持。
+每个协议在 `crates/protocol-<name>` 下作为独立库 package 维护，内部包含该协议的配置解码、握手鉴权、报文编解码、客户端出站（`OutboundFactory`）与服务端入站（`NodeFactory`）：
 
 ```text
-crates/protocol-<name>/            # 以下均为未来结构示意
+crates/protocol-<name>/
 ├── Cargo.toml
-├── README.md                     # 能力、支持方向、已验证的互通范围
 ├── src/
-│   ├── lib.rs                    # 小范围公共入口，不重新导出私有实现
-│   ├── module.rs                 # 工厂、能力描述、配置解码与注册描述
-│   ├── config.rs                 # 协议专属字段和校验
-│   ├── inbound.rs                # 按需：接受连接并交给核心
-│   ├── outbound.rs               # 按需：建立协议连接
-│   ├── codec/                    # 按需：报文、帧和地址编码
-│   ├── handshake.rs              # 按需：握手与鉴权
-│   └── error.rs                  # 协议错误与公共错误的转换
-└── tests/                        # 实现阶段建立的互通与异常场景
+│   ├── lib.rs          # 导出 Factory 与必要的公共类型，隐藏内部实现细节
+│   ├── config.rs       # 协议专属 options 与 native_credential 解码校验
+│   ├── inbound.rs      # (按需) 服务端节点监听/鉴别，通过 PeerSession 访问 Dispatcher
+│   ├── outbound.rs     # (按需) 客户端出站连接，实现 Outbound trait
+│   └── codec.rs        # (按需) 协议帧、地址编码与加密封装
+└── tests/              # 协议包级单元/集成与回归测试
 ```
 
-重用的连接器、传输或 TLS 能力归 `net`；OS 资源获取归 `platform` 或宿主注入。协议独有的握手、安全构造和复用机制留在协议内部。QUIC 等具有组合约束的协议不能被机械拆成任意可互换层；只有已确认可独立复用的部分才提取。
+- **角色按需实现**：支持双端的协议同时导出 `OutboundFactory` 与 `NodeFactory`；仅支持出站的协议（如 `protocol-ssh`、`protocol-gost-relay`、`protocol-tor`）只导出 `OutboundFactory`。
+- **公共能力复用**：通用 Socket 拨号与基础 TLS 辅助由 `kerlico-net` 提供；协议特有的握手、混淆、QUIC/H3 封装或用户态栈留在协议 crate 内部。
 
-SOCKS、Trojan、VLESS 等代理协议，TLS/传输、DNS transport 和原始 IP endpoint 属于不同类别。它们可以共享注册和生命周期约定，但不必实现同一个万能数据接口。路由匹配器也不应作为代理协议放进 `protocol-*`。
+## 协议与核心的交互契约
 
-## 公共接口先描述语义
+| 接口 | 协议模块职责 | 核心保障 |
+| --- | --- | --- |
+| `OutboundFactory::compile` | 校验协议 `options`，声明 `Capabilities` 与 `TargetPolicy`（应用层代理为 `Remote`，IP 隧道为 `Local`），返回一次性启动闭包 `OutboundPlan` | 每个命名出站在 `Engine::bind` 时仅启动一次，由 `Dispatcher` 全局持有 |
+| `NodeFactory::build` | 校验节点 `options` 与各成员 `native_credential`，声明 `CredentialManifest`（分离认证秘密与外层保护秘密） | 编译期拦截跨节点秘密复用，为节点分配独立 `CredentialIssuer` |
+| 入站鉴别与请求提交 | 完成真实协议线格式验证后调用 `IngressBinding::authenticated` 获取 `PeerSession`，再调用 `connect_tcp` / `connect_udp` / `associate_udp` | 鉴权前禁止拨号；所有业务流统一经过 `Dispatcher` 进行选路与唯一业务计量 |
+| 后台任务管理 | 出站后台任务登记至 `ServiceContext`，入站节点派生任务登记至 `InboundContext.tasks`（`NodeTasks`） | 关闭时按固定截止时间执行协作排空、强制中止与确定性 `join` |
 
-`core-api` 建议承载以下契约，具体命名、异步表达和分配策略在实现前另议：
+## 显式注册与 Cargo Features 裁剪
 
-| 契约 | 必须明确的内容 |
+`apps/kerlico` 通过 Cargo features（如 `protocol-vless`、`protocol-trojan`、`protocol-wireguard` 等，详见 [apps/kerlico/Cargo.toml](../apps/kerlico/Cargo.toml)）控制参与编译的协议 crate，并在 [`apps/kerlico/src/main.rs`](../apps/kerlico/src/main.rs) 的 `registry()` 中显式注册：
+
+| 构建与配置状态 | 运行时行为 |
 | --- | --- |
-| 会话上下文 | 接纳时固定代次；来源、原始目的地址、恢复域名、嗅探域名、路由目标、实际拨号目标分别保存；谁能在哪个阶段更新 |
-| TCP 流 | 读写、半关闭、关闭、取消与错误传播；不暴露具体协议连接类型 |
-| UDP 数据报会话 | 单包边界、逐包目的地址、回写来源、会话超时与映射 key；数据交接后的所有权 |
-| 入站处理器 | 完成鉴权和解码后调用同一个出站调度器；本地应用节点模式，远端保留原业务目标，不在协议内复制选择规则 |
-| 出站处理器 | 根据请求和服务上下文建立流或数据报通道；明确是否支持对应方向和传输能力 |
-| 模块工厂与描述 | 模块类别、稳定类型标识、配置解码/校验、支持能力与构造入口；不携带全局单例 |
-| 构造服务 | 注入解析器、连接器、平台保护、任务取消与观测能力；通过窄接口提供，不交出整个 engine |
-| 生命周期 | 初始化、启动、停止接入、会话排空、超时取消与最终释放；部分启动失败也要可清理 |
+| Feature 未启用（未编入二进制） | `kerlico modules` 不列出该类型；配置文件引用该类型时明确报错拒绝 |
+| Feature 已启用，但配置未引用 | 工厂已注册，但不构造运行实例、不分配监听或后台线程 |
+| Feature 已启用，且配置校验通过 | 编译计划并构造对应命名出站或入站节点实例 |
 
-模块可在进程内多实例运行，例如相同协议建立多个不同标签的出站；类型标识与实例标签不能混用。注册表按模块类别和类型定位工厂，实例表按标签查找已构造实例。首次可以只实现实际需要的能力契约，避免把全部未来能力塞进公共接口。
+## 新增与移除协议的改动范围
 
-目标装配中，每条命名出站只构造一次，由egress唯一持有；不同入站引用同一配置时共享该实例，不逐节点重建。访问句柄只绑定来源及共享服务，不能藏出站或池。不同代理及必要来源作用域的池和票据分别管理，请求或节点取消不关闭其他节点的后台资源。
+- **新增协议**：
+  1. 新建 `crates/protocol-<name>`，实现协议编解码、工厂与包级测试；
+  2. 在根 `Cargo.toml` 与 `apps/kerlico/Cargo.toml` 添加依赖与 `protocol-<name>` feature；
+  3. 在 `apps/kerlico/src/main.rs` 注册工厂，并同步编写 `docs/interfaces/<name>.md` 与 `docs/testing/<name>.md`。
+  - 核心 `kerlico-engine` 与 `kerlico-egress` 无需按新协议名称增加分支。
+- **裁剪或移除协议**：关闭对应 Cargo feature 或从 `apps/kerlico` 移除注册与可选依赖；若有配置引用被移除的协议，在 `Registry::prepare` 阶段即被拦截。
 
-设备WARP由设备级所有者统一准备，Warp4/Warp6复用同一环境。模块配置解码及工厂不执行安装或系统网络变更；远端分流保留目标、端口和业务负载并按代理协议编码，失败不触发本机换族、换代理、直连或WARP补救。
+## 关联文档与借鉴依据
 
-接口隔离用于维护依赖和行为边界，不提供进程级崩溃隔离或安全沙箱。trait 对象、泛型与缓冲池的选择需结合具体异步调用及测量结果确定，不能由“插件化”直接推出某一种实现。
-
-## 注册、配置与构造
-
-多用户与统计按[0011](decisions/0011-users-statistics-and-access-records.md)和[统计设计](statistics-and-users.md)适配。协议将真实鉴权结果映射为可信管理用户，不强行改变认证线格式；逻辑流继承正确用户，业务量在统一边界计一次。节点、具体出站和统计后台仍共享既定运行所有权，协议工厂不各自创建账本。现有多UUID/多口令配置不等于统一用户、流量及带宽历史已实现。
-
-建议由 `apps/kerlico/src/assembly.rs` 显式注册本次构建启用的工厂，核心只看工厂接口。协议实现不依靠导入副作用或全局注册表，避免实例之间共享不可控状态。
-
-外层配置规定类型、实例标签、引用及模块选项边界。当前代码使用JSON v1和真实工厂构造，进一步的不透明计划类型仍是建议。配置层请求协议专属解码与校验，不为新增协议维护中央枚举，也不向下转换私有配置。新节点模式和WARP字段尚未成为当前可运行配置。
-
-推荐的启动流程如下：
-
-1. 建立当前构建的注册表，检测重复模块标识并生成能力清单。
-2. 解析外层文档，按模块类别和类型调用工厂解码专属配置，保留字段路径以报告错误。
-3. 校验实例标签、引用、方向和 TCP/UDP 能力；检查出站链、DNS 引导和连接器引用造成的依赖环。
-4. 生成装配计划，命名出站构造一次并移交唯一调度器，向各入口注入绑定身份的访问接口。配置校验不启动监听或修改系统网络；设备WARP准备由部署资源层单独追踪。
-5. 依赖就绪后再打开接入，失败时清理已取得资源；退出时先停止新接入，再按截止时间排空会话并回收资源。
-
-模块构造所需服务通过 `core-api` 接口传递。engine 无需导入具体 DNS、路由或协议 crate，配置层也无需导入所有协议配置类型。这保证新增协议的主要改动集中在自身 package 和 app 装配处。
-
-未知类型、不支持的方向和配置引用错误要明确报错，不能悄悄回退为直连。能力清单应从同一份已注册描述生成，避免程序宣称支持某协议但注册路径缺失。仅凭“未注册”不能区分拼写错误与未编译模块；只有 app 提供已知 feature 清单时才给出具体的缺失构建开关提示。
-
-## 构建裁剪与配置选用
-
-建议在 app 层用 `proto-<name>` 等 feature 表达可选协议依赖，`tun`、控制接口等功能使用独立能力开关；名称只是规划示例。库 package 自身的内部 feature 与产品发行功能区分维护。Cargo 的条件编译与可选依赖规则见[官方 features 文档](https://doc.rust-lang.org/cargo/reference/features.html)。
-
-| 状态 | 预期行为 |
-| --- | --- |
-| 源码存在，但本次构建未包含 | 当前程序没有注册该类型；给出现有能力，若有已知 feature 信息则进一步提示构建开关 |
-| 本次构建已包含，但配置未选用 | 不创建该协议实例；代码仍可能存在于程序内 |
-| 已构建、配置有效且引用完整 | 创建实例并接入相应的数据路径 |
-| 配置要求移除正在使用的实例 | 先处理依赖和已有会话，不能直接删除仍被引用的对象；在线处理方式待定 |
-
-features 应增加能力。多个依赖边可能重新启用默认 feature，不能仅凭一个开关名称断言协议和共享库已完全裁掉。未来需要检查选定产品 package 的依赖图和构建产物；验证整个 workspace 的编译与验证单个发行程序的裁剪是两件事。
-
-新增协议需要重建程序。运行时配置可以在已编入的协议中选择，是否支持不重启修改实例需另行实现；这不等于向已发布程序注入新 Rust 代码。若未来采用动态库插件，还需独立设计版本、资源和 ABI 边界，不能直接把 Rust trait 当成稳定跨版本 ABI。依据：[Rust 原生 ABI 的边界](https://doc.rust-lang.org/reference/items/external-blocks.html#abi)。
-
-## 新增与移除的改动范围
-
-新增协议时，先判断它属于代理协议、DNS transport、传输/安全能力还是 IP endpoint。对于代理协议，建议只新增自身 package、对应的配置与能力说明，以及 app 的可选依赖、feature 和一处注册；共享接口满足语义时，不改核心调度和路由的协议分支。若现有契约无法表达新能力，应讨论并有意演进接口，而不是隐藏为特殊标志。
-
-移除协议时，取消 app 的注册及可选依赖，处理引用它的实例和发行能力说明；若仅裁剪某个发行版本，可保留源码和其他产品的构建能力。共享 TLS、QUIC 等依赖可能仍被别的模块使用，移除协议不等于它们全部消失。实例依赖缺失应在启动前报错。
-
-各实现建立有意义的验证：编解码、异常报文、声明的流/包互通、取消/超时/回收、退出和构建裁剪。当前普通 VLESS 已有[实际接口](interfaces/vless.md)和[验证记录](testing/vless-ordinary-flow.md)；配置替换、其他协议和组合不继承这些结果。
-
-## 尚未作出的选择
-
-普通VLESS的首次实现见[0003](decisions/0003-vless-first-implementation.md)，当前21模块的方向、传输及限定验证见接口与根STATUS，不再将其他协议或QUIC一概视为未开始。共享调度器、节点模式、设备WARP及远端透传仍待迁移；动态配置和在线更新也仍是目标。编译选模块不等于运行时无中断卸载。
-
-## 借鉴依据
-
-关联[借鉴映射](../reference/design-map.md)的REF-003和REF-005。独立package与app显式注册已有多模块实现，不能据此推定完整不透明计划、新共享所有权及全部生命周期契约已验收；各自以当前实现和冻结验证范围为准。
+- **细化文档**：[总体结构](architecture.md) · [核心契约](core-contracts.md) · [配置与命令行接口](interfaces/config.md)
+- **上游借鉴**：关联 [借鉴映射](../reference/design-map.md) 的 `REF-003`（显式装配与注册）与 `REF-005`（协议与传输能力分层）。

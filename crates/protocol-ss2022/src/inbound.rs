@@ -183,13 +183,7 @@ impl InboundProtocol for Ss2022Node {
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}
             let (key, stream, target) = selected?;
-            let nonce = candidates.prefix(
-                if self.config.method().is_aead() || self.config.method().is_aead_2022() {
-                    self.config.method().salt_len()
-                } else {
-                    self.config.method().iv_len()
-                },
-            )?;
+            let nonce = candidates.prefix(self.config.method().salt_len())?;
             self.crypto
                 .check_nonce_replay(self.config.method(), &nonce)?;
             candidates.accept();

@@ -62,6 +62,7 @@ ss2022 = ["protocol-ss2022"]
 kerlico-core.workspace = true
 kerlico-config.workspace = true
 kerlico-engine.workspace = true
+kerlico-egress.workspace = true
 kerlico-net.workspace = true
 kerlico-vless = { workspace = true, optional = true }
 kerlico-anytls = { workspace = true, optional = true }

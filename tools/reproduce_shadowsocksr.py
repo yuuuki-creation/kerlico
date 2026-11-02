@@ -91,6 +91,8 @@ async def main(args):
         raise RuntimeError("对照角色或次数不合法")
     if args.payload_bytes is not None and not 1 <= args.payload_bytes <= 2 * 1024 * 1024:
         raise RuntimeError("合成负载须在1字节至2 MiB之间")
+    t.require_loopback(args.node_host)
+    t.require_loopback(args.target_host)
     root = Path(args.work)
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
     method = ("none" if args.protocol.startswith("auth_chain") else "aes-128-cfb") if args.method == "auto" else args.method
@@ -103,9 +105,9 @@ async def main(args):
             work.mkdir(mode=0o700)
             server_kind, client_kind = PAIRS[pair]
             target_seen = [False, 0]
-            target, node, local = t.h.port(), t.h.port(), t.h.port()
+            target, node, local = t.h.port(args.target_host), t.h.port(args.node_host), t.h.port()
             active, trace, listener = [], None, None
-            row = {"pair": pair, "iteration": index, "protocol": args.protocol, "obfs": args.obfs, "method": method, "traffic_pattern": "target-first" if args.target_greeting else "client-first", "payload_bytes": args.payload_bytes or (77824 if args.target_greeting else 59392), "node_port": node, "pass": False}
+            row = {"pair": pair, "iteration": index, "protocol": args.protocol, "obfs": args.obfs, "method": method, "node_family": 6 if ":" in args.node_host else 4, "target_family": 6 if ":" in args.target_host else 4, "traffic_pattern": "target-first" if args.target_greeting else "client-first", "payload_bytes": args.payload_bytes or (77824 if args.target_greeting else 59392), "node_port": node, "pass": False}
             async def echo(reader, writer):
                 target_seen[0] = True
                 try:
@@ -123,10 +125,10 @@ async def main(args):
             try:
                 if args.capture:
                     trace = await capture(work, node)
-                listener = await asyncio.start_server(echo, "127.0.0.1", target)
-                config = t.server_config("127.0.0.1", node, method, args.protocol, args.obfs, False) if server_kind == "own" else t.reference_config("server", "127.0.0.1", node, local, "127.0.0.1", target, method, args.protocol, args.obfs, False, "python")
-                active.append(await t.start(args, server_kind, "server", t.h.save(work, "server.json", config), work / "server.log", "127.0.0.1", node, work))
-                config = t.client_config(local, "127.0.0.1", node, "127.0.0.1", target, method, args.protocol, args.obfs, False) if client_kind == "own" else t.reference_config("client", "127.0.0.1", node, local, "127.0.0.1", target, method, args.protocol, args.obfs, False, "mihomo")
+                listener = await asyncio.start_server(echo, args.target_host, target)
+                config = t.server_config(args.node_host, node, method, args.protocol, args.obfs, False) if server_kind == "own" else t.reference_config("server", args.node_host, node, local, args.target_host, target, method, args.protocol, args.obfs, False, "python")
+                active.append(await t.start(args, server_kind, "server", t.h.save(work, "server.json", config), work / "server.log", args.node_host, node, work))
+                config = t.client_config(local, args.node_host, node, args.target_host, target, method, args.protocol, args.obfs, False) if client_kind == "own" else t.reference_config("client", args.node_host, node, local, args.target_host, target, method, args.protocol, args.obfs, False, "mihomo")
                 path = t.h.save(work, "client.json", config)
                 if client_kind == "own":
                     active.append(await native_client(args, path, work / "client.log", local))
@@ -174,6 +176,8 @@ if __name__ == "__main__":
     parser.add_argument("--protocol", choices=t.PROTOCOLS, required=True)
     parser.add_argument("--obfs", choices=t.OBFS, required=True)
     parser.add_argument("--method", default="auto")
+    parser.add_argument("--node-host", default="127.0.0.1")
+    parser.add_argument("--target-host", default="127.0.0.1")
     parser.add_argument("--pairs", default=",".join(PAIRS))
     parser.add_argument("--iterations", type=int, default=10)
     parser.add_argument("--target-greeting", action="store_true")

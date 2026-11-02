@@ -359,7 +359,10 @@ async fn fixture_options(
             let server = tokio::spawn(async move { owned.await? });
             (address, server)
         } else {
-            let runtime = crate::runtime::NodeRuntime::new(&context.cancel, context.tasks.clone());
+            let runtime = kerlico_http_carrier::runtime::NodeRuntime::new(
+                &context.cancel,
+                context.tasks.clone(),
+            );
             context.cancel = runtime.cancel();
             let crypto =
                 quinn::crypto::rustls::QuicServerConfig::try_from((*node.tls).clone()).unwrap();

@@ -1,39 +1,41 @@
-# 配置v2迁移
+# 配置 v2 迁移指南
 
-本轮源码只接受v2。迁移代码尚未完成整树验证，不能把下面示例当成已通过的发行配置。历史v1文件可作为证据保留，运行前须显式转换。
+更新日期：2026-11-02（Asia/Shanghai）
 
-最小配置见[config-v2-minimal.json](../examples/config-v2-minimal.json)。它使用Local固定转发，不需要管理账户；监听端口由系统分配，目标是独立启动的回环18080服务。该示例只展示配置结构，尚未执行迁移树check或运行验证。
+当前源码使用 **配置版本 2（JSON v2）**，旧版 v1 配置需按以下规则迁移后运行。最小可用结构参考 [examples/config-v2-minimal.json](../examples/config-v2-minimal.json)，完整字段约束见 [配置与命令行接口](interfaces/config.md)。
 
-1. 将version改为2。保留命名outbounds；多个节点引用同一tag会使用同一个运行实例。
-2. 使用account-new从标准输入建立一次管理账户，将输出存入accounts。保持user_id稳定，用户名默认带同一个UUID后缀。
-3. 将入站协议的用户秘密从options移入members[].native_credential，并填写对应管理user_id。协议载体、证书、混淆保护和限制继续留在options。
-4. IPv4和IPv6监听节点分别声明成员及独立协议秘密；相同管理账户只有被各节点明确列入members才取得对应授权。
-5. 按本节点负责的目标路径设置mode。可选ipv4-only、ipv6-only、dual-stack。远端代理路径不据此本地解析网站。
-6. 用check纯校验，再在项目独立worker目录完成各角色和组合的运行验证。check不部署WARP或改变系统网络。
+## 迁移步骤
 
-| 入站 | native_credential形状 |
+1. **升级版本号与共享出站**：将根字段 `"version"` 设为 `2`。保留命名 `outbounds` 数组；多个入站节点引用同一出站 `tag` 时将共享同一个运行实例。
+2. **创建管理账户**：使用 `kerlico account-new --prefix <name>` 从标准输入读取管理密码，生成带持久 `user_id`（UUID）与 Argon2id PHC 密码摘要（`password_hash`）的账户项，填入根配置 `accounts` 数组。
+3. **分离节点成员与协议原生凭据**：
+   - 将服务端入站节点的用户认证秘密从协议 `options` 移至节点 `members[].native_credential`，并关联对应的管理 `user_id`。
+   - 协议传输载体、TLS 证书、外层混淆/保护密钥（如 ShadowTLS 握手密码、SS2022 AES EIH 外层 `identity_key`）与资源限制仍留在节点 `options` 中。
+4. **独立声明 IPv4 / IPv6 节点成员**：IPv4 与 IPv6 监听节点分别配置独立的 `members` 与协议秘密；同一管理 `user_id` 需在各节点显式列入 `members` 方可访问对应节点。
+5. **配置节点目标地址族模式（`mode`）**：按本节点负责的本地出网策略设置为 `ipv4-only`、`ipv6-only` 或 `dual-stack`（默认）。远端代理分流路径保留原始目标透传，不受本地节点 `mode` 改写。
+6. **执行配置校验**：运行 `kerlico check -c <config.json>` 进行纯编译校验（不绑定端口或修改宿主网络）。
+
+## 各入站协议 `native_credential` 格式
+
+| 入站协议 | `native_credential` JSON 结构 |
 | --- | --- |
-| VLESS | {"uuid":"协议UUID","flow":"可选原生flow"} |
-| VMess | {"uuid":"协议UUID"} |
-| Trojan、AnyTLS | {"password":"协议密码"} |
-| SOCKS、HTTP、ShadowQUIC、Mieru、Naive、TrustTunnel | {"username":"原生用户名","password":"协议密码"} |
-| Shadowsocks AEAD | {"password":"协议密码"}，method留在options |
-| SS2022 | {"key":"终端key"}，AES EIH的外层身份写options.identity_key |
-| Snell | {"psk":"原生PSK","userkey":"可选v6用户key"} |
-| TUIC | v4为{"token":"原生token"}，v5为{"uuid":"协议UUID","password":"协议密码"} |
-| Hysteria1 | {"auth_str":"文本"}或{"auth":"原生编码材料"}，两者互斥 |
-| Hysteria2 | {"auth":"原生认证材料"} |
-| SSR | {"password":"基础密码","user":{"id":1,"password":"可选UID密码"}} |
-| Sudoku | {"key":"原生key"} |
-| ShadowTLS | 使用所选inner协议的形状；外层password/users只属于Protection |
+| VLESS | `{"uuid": "<协议UUID>", "flow": "<可选flow>"}` |
+| VMess | `{"uuid": "<协议UUID>"}` |
+| Trojan、AnyTLS | `{"password": "<协议密码>"}` |
+| SOCKS、HTTP、ShadowQUIC、Mieru、Naive、TrustTunnel | `{"username": "<原生用户名>", "password": "<协议密码>"}` |
+| Shadowsocks (AEAD) | `{"password": "<协议密码>"}`（加密方法 `method` 留在节点 `options`） |
+| SS2022 | `{"key": "<终端用户Key>"}`（AES EIH 外层身份留在 `options.identity_key`） |
+| Snell | `{"psk": "<原生PSK>", "userkey": "<可选v6用户Key>"}` |
+| TUIC | v4：`{"token": "<原生Token>"}`；v5：`{"uuid": "<协议UUID>", "password": "<协议密码>"}` |
+| Hysteria v1 | `{"auth_str": "<文本>"}` 或 `{"auth": "<原生编码材料>"}`（二选一） |
+| Hysteria2 | `{"auth": "<原生认证材料>"}` |
+| SSR | `{"password": "<基础密码>", "user": {"id": 1, "password": "<可选UID密码>"}}` |
+| Sudoku | `{"key": "<原生Key>"}` |
+| ShadowTLS | 采用所选 `inner` 协议的凭据结构（外层握手密码属于 `Protection` 域，留在 `options`） |
+| WireGuard | `{"public_key": "<Base64公钥>", "preshared_key": "<可选Base64 PSK>", "allowed_ips": ["..."], "persistent_keepalive": 25}` |
 
-SSH及Gost Relay当前仅出站，它们的远端用户名、密码或key继续归各命名outbound.options，不从入站账户取值。
+## 特殊角色与行为说明
 
-无真实鉴别的旧stream/none及明确不安全的Local组合不生成管理用户。它们只能在工厂允许的local_inbounds保留必要编码材料。不得为通过v2而给无鉴别组合添加一个占位member。
-
-管理password_hash为Argon2id PHC摘要，不能填写明文或直接复制协议密码。配置中的真实协议秘密应按私有部署资料管理，不进入可提交示例。代码里的测试账户只用于合成夹具。
-
-本轮运行统计有唯一业务计量和有限内存记录。SQLite保存、带宽历史、保留策略和持久查询仍未实现；WARP自动补族也未交付。v2迁移不代表这些发行条件已经满足。
-
-
-XDRIVE存储载体不再隐式读取HTTP_PROXY、HTTPS_PROXY或NO_PROXY。它只连接明确配置的存储URL，不自动经过环境代理，也不新增代理链。此项是本轮明确接受的配置行为变化。旧固定reqwest依赖图没有HTTP/2，受控HTTP/1实现保留原实际路径；URL/query、模板头、JSON/XML、OAuth与请求期限仍分别验证，不能据代码编写宣称完全兼容。
+- **仅出站协议（SSH / Gost Relay / Tor）**：远端认证材料或状态目录直接配置在对应命名 `outbound.options` 中，不使用入站管理账户。
+- **显式本地无认证入口（`local_inbounds`）**：无真实用户鉴别的本地回环入口通过 `local_inbounds` 声明，运行时绑定 `Source::Local`，无需配置占位 `members`。
+- **XDRIVE 存储载体连接行为**：XDRIVE 仅直连显式配置的存储服务 URL，不再隐式读取环境变量 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。

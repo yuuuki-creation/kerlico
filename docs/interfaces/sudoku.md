@@ -69,6 +69,8 @@ HTTP传输池使用显式Tokio计时器和pool_idle_ms回收空闲连接；Hyper
 
 每token最多一个活动下载；尚未交给HTTP正文的原始块保留供下一pull，交付已不确定时关闭token。下载客户端只在正常完整HTTP响应结束后续拉，不重试断裂的部分响应。EOF由x-sudoku-stream-eof trailer单独表示，结束下载后仍可继续上传。fin幂等结束上传，close取消整个token；会话到期、节点退出和预算拒绝另行处理。
 
+客户端发送fin后遇到HTTP传输错误、超时或5xx时，最多向同一token重确认一次，不重复上传业务数据；其他状态直接失败。只有收到200才确认上传EOF，重复失败仍锁存为失败，不把下行EOF当作上传确认。
+
 下载请求显式发送TE: trailers；Hyper的HTTP/1服务端会丢弃未获允许的trailer，不能仅设置响应Trailer头就推定EOF能送达，见[实现](https://github.com/hyperium/hyper/blob/v1.11.1/src/proto/h1/conn.rs#L690)。H1/H2真实EOF路径均待本轮统一验证。
 
 固定原生Go客户端不声明TE但读取该EOF trailer；H1 split服务端在Hyper前使用有界输入适配器，仅对本节点精确下载路径的HTTP/1.1 GET、唯一stream/poll模式且缺少TE时增加内部能力标记。原有TE不改，Content-Length/chunked正文及pipeline原样透传；拒绝歧义分帧，H2跳过适配器。Auto模式中的WS仅在真实OnUpgrade成功后切换原始透传，被拒升级仍按后续HTTP边界处理。没有修改原生对端或伪造业务EOF；适配器7项纯状态/实际Hyper回归待执行。

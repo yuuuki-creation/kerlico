@@ -1,32 +1,28 @@
-# 1.0.0发行范围与验收
+# 1.0.0 发行范围与质量门槛
 
-2026-11-02最新顺序已由用户改为先发布、再测试。当前源码发行和未验边界见[1.0.0发行说明](releases/1.0.0.md)。下文保留原计划的历史时点，作为发布后继续完成的质量目标，不再作为本次建立标签的前置条件。匿名、私有资料隔离和第三方许可要求仍然生效。
+更新日期：2026-11-02（Asia/Shanghai）
 
-日期：2026-10-31。状态：1.0.0原定目标保留；用户随后要求停止修复、更新文档并push开发快照。本计划暂停，尚未发布，不创建正式标签。再次获得明确继续指令后才恢复门槛工作。
+按“先发布源码、再执行海外整树构建与验证”的推进顺序，`v1.0.0` 源码版已先行发布（见 [1.0.0 发行说明](releases/1.0.0.md)）。本文记录 `1.0.0` 系列完整交付的质量验收门槛，作为发布后持续验证与补丁版本（`1.0.x`）收尾的标准。
 
-## 冻结范围
+## 协议与架构范围
 
-现有21模块：VLESS、AnyTLS、SS2022、SOCKS、HTTP、Shadowsocks AEAD/legacy、Trojan、VMess、Snell、Hysteria v1、Hysteria2、TUIC、ShadowQUIC、SSH、Gost Relay、Mieru、Naive、ShadowsocksR、ShadowTLS、TrustTunnel、Sudoku。各自角色、版本、传输和数据边界以[协议总表](../reference/reports/三核心%20协议%20组合支持.md)与模块接口/测试记录为准，不将模块数量当作所有上游组合均支持。
+1. **协议模块（23 个）**：
+   - 双端协议（20 个）：VLESS、AnyTLS、SS2022、SOCKS、HTTP、Shadowsocks (AEAD/legacy)、Trojan、VMess、Snell、TUIC、Hysteria v1、Hysteria2、ShadowQUIC、Mieru、Naive、ShadowsocksR、ShadowTLS、TrustTunnel、Sudoku、WireGuard。
+   - 仅出站协议（3 个）：SSH、Gost Relay、Tor。
+   - 各协议具体支持的版本、传输组合与数据边界以 [协议总表](../reference/reports/三核心%20协议%20组合支持.md) 及 `docs/interfaces/` 为准。
+2. **核心架构能力**：
+   - 全局唯一共享出站调度器（`EgressRuntime` / `Dispatcher`），支持多命名远端出站；
+   - 节点地址族模式（`ipv4-only` / `ipv6-only` / `dual-stack` 默认 IPv4 优先）、双栈缺族设备共享 CF WARP 自动补齐，以及远端代理原目标透传（[0009](decisions/0009-global-egress-dispatcher.md)、[0010](decisions/0010-node-egress-modes-and-warp.md)）；
+   - 单节点多用户管理账户、唯一业务流量计量、采样带宽历史与访问记录持久化（[0011](decisions/0011-users-statistics-and-access-records.md)）。
 
-Tor及其他尚未编写协议保留研究或队列，不加入本次发行。双端与独立节点原则保留，最新出站目标以[0009](decisions/0009-global-egress-dispatcher.md)、[0010](decisions/0010-node-egress-modes-and-warp.md)为准：唯一调度器、本地节点模式及设备WARP、远端原目标透传。新架构尚未迁移，其发行适用范围需在后续任务中明确，不能用旧快照登记通过；SSH/Gost Relay等仅出站角色不推定存在服务端。
+## 完整交付验收门槛
 
-## 必须通过的门槛
-
-[0011多用户及统计](decisions/0011-users-statistics-and-access-records.md)是最新确认的目标范围，尚未实现。是否纳入本次首发及对应迁移顺序需在恢复任务中明确，不能用已有协议快照替代用户归属、流量、带宽与访问历史验收；本文不因此扩大旧通过结论。
-
-| 门槛 | 证明材料与要求 |
+| 验收维度 | 要求与标准 |
 | --- | --- |
-| 已写协议收尾 | 逐模块保留实际修复、单元/集成、真实对端、负例、包长/EOF及资源清理结果；未支持与参考端限制分开，不忽略失败或停用模块替代 |
-| 公共API | Rust导出接口及生成文档、Factory注册与能力、流/包/EOF、错误/取消/预算和生命周期契约与实现一致 |
-| 配置与CLI | 未知/无效配置拒绝、功能裁剪行为、modules/check/run/版本与帮助、可运行合成示例有对应验证；不写不存在的远控API |
-| 当前整树 | 同一源码/锁的全工作区测试、严格Clippy、fmt、Rustdoc、合理功能裁剪、并发多节点联合运行通过；只在专用worker执行 |
-| 正式构建 | 先固定实际支持平台；当前已用环境仅Linux x86_64/Rust1.99.1，不外推其他平台。正式单可执行文件、目标/工具链/依赖与源摘要固定，运行冒烟与退出/重绑通过 |
-| 许可与来源 | 项目许可状态、依赖/第三方许可及必要通知、补丁来源和可追溯源码均审查；未知项不得当作已清理 |
-| 匿名发布 | Git实际author/committer、历史与标签、提交说明、文档、示例、源码及产物检查；私有目录/真实凭证/机器路径不发布，不绕过钩子 |
-| 发布实物 | 版本号1.0.0、对应提交与标签、简体中文发布说明、已验证支持表、限制、下载产物及校验摘要；远端状态核对成功后才登记已发布 |
-
-原工具内容风险检查没有给出确切触发动作；相关步骤不重试。恢复发行工作后再执行独立审查和允许范围内的验证，当前仍暂停；真实阻塞如实保留，不能以发行日期或版本目标替代验收。
-
-## 当前状态入口
-
-进度只在[STATUS](../STATUS.md)汇总，详细结果归模块测试记录，本文维护发行范围与门槛。当前尚有模块失败、未验增量、整树与产物检查，不能将历史快照或本计划作为正式版通过证明。
+| 协议模块验证 | 每个模块完成包级测试、真实参考对端互通、异常报文/鉴权失败负例、包长/EOF 边界与资源回收测试；明确区分参考对端自身限制与本实现缺陷 |
+| 公共 API 与文档一致 | `core-api`、`config`、`egress`、`engine` 的公开签名、Rustdoc、错误/取消契约与 `docs/interfaces/` 完全一致 |
+| 配置与 CLI | JSON v2 校验、未知/非法配置拒绝、Cargo feature 裁剪行为、`modules`/`check`/`run`/`account-new` 命令与中英双语提示验证通过 |
+| 整树构建与检查 | 同一源码快照在专用海外 worker（Linux `x86_64` / Rust `1.99.1`）通过全工作区测试、严格 Clippy、`cargo fmt --check`、Rustdoc、功能裁剪构建与多节点并发联合运行 |
+| 许可证与源码合规 | 完成 `GPL-3.0-only` 声明及全部实际链接依赖的第三方许可证/署名通知核对（见 [许可说明](licensing.md)） |
+| 匿名与隐私检查 | 通过 `.githooks/privacy-check` 完整历史与产物检查，确保无个人身份信息、主机路径或 `.private/` 凭证泄露 |
+| 正式构建产物 | 上传与对应 Git 标签源码严格匹配的 Release 二进制及 SHA-256 校验摘要，完成启动冒烟与优雅退出验证 |

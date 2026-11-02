@@ -1,4 +1,4 @@
-//! 运行期唯一业务账本。当前不提供持久历史或带宽历史查询。
+//! 运行期唯一业务账本与持久快照边界。
 
 use kerlico_core::{
     Destination, Error, FlowFailure, FlowOutcome, NodeId, OriginalTarget, OutId, Result, RunId,
@@ -20,7 +20,7 @@ pub struct FlowId {
     pub sequence: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Usage {
     pub upload_bytes: u64,
     pub download_bytes: u64,
@@ -28,7 +28,7 @@ pub struct Usage {
     pub download_packets: u64,
 }
 impl Usage {
-    fn add(&mut self, other: Self) {
+    pub(crate) fn add(&mut self, other: Self) {
         self.upload_bytes = self.upload_bytes.saturating_add(other.upload_bytes);
         self.download_bytes = self.download_bytes.saturating_add(other.download_bytes);
         self.upload_packets = self.upload_packets.saturating_add(other.upload_packets);
@@ -171,7 +171,7 @@ impl FlowLedger {
         }
     }
     fn increment(&self, counter: &AtomicU64, value: u64) {
-        let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        let _ = counter.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             Some(match current.checked_add(value) {
                 Some(next) => next,
                 None => {
@@ -317,7 +317,8 @@ impl LeaseInner {
         }
     }
     fn cancellation_end(&self) -> Option<FlowEnd> {
-        self.cancellation_error().map(|error| failure_end(FlowFailure::from_error(&error)))
+        self.cancellation_error()
+            .map(|error| failure_end(FlowFailure::from_error(&error)))
     }
 }
 impl Drop for LeaseInner {
@@ -435,7 +436,9 @@ impl FlowLease {
                     FlowOutcome::DuplexEof if *upload_shutdown && *download_eof => {
                         FlowEnd::Completed
                     }
-                    FlowOutcome::ClosedByCaller => self.0.cancellation_end().unwrap_or(FlowEnd::ClosedByCaller),
+                    FlowOutcome::ClosedByCaller => {
+                        self.0.cancellation_end().unwrap_or(FlowEnd::ClosedByCaller)
+                    }
                     FlowOutcome::DuplexEof => FlowEnd::ClosedByCaller,
                 }
             };
@@ -478,6 +481,8 @@ struct Registry {
     records: BTreeMap<u64, Arc<FlowLedger>>,
     order: VecDeque<u64>,
     archived: UsageSnapshot,
+    pending: BTreeMap<u64, FlowRecord>,
+    persistent: bool,
 }
 struct TelemetryInner {
     run: RunId,
@@ -498,6 +503,8 @@ impl Telemetry {
                 records: BTreeMap::new(),
                 order: VecDeque::new(),
                 archived: UsageSnapshot::default(),
+                pending: BTreeMap::new(),
+                persistent: false,
             }),
         }))
     }
@@ -521,9 +528,16 @@ impl Telemetry {
                     .is_some_and(|flow| matches!(flow.end.load(Ordering::Acquire), 1..=5))
             });
             if let Some(index) = remove {
+                if registry.persistent && registry.pending.len() >= self.0.capacity {
+                    return Err(Error::ResourceLimit);
+                }
                 let id = registry.order.remove(index).expect("已找到记录序号");
                 if let Some(flow) = registry.records.remove(&id) {
-                    registry.archived.account(&flow.record());
+                    let record = flow.record();
+                    registry.archived.account(&record);
+                    if registry.persistent {
+                        registry.pending.insert(id, record);
+                    }
                     registry.archived.evicted_records += 1;
                 }
             } else {
@@ -533,7 +547,7 @@ impl Telemetry {
         let sequence = self
             .0
             .next
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |next| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |next| {
                 next.checked_add(1)
             })
             .map_err(|_| Error::ResourceLimit)?;
@@ -579,6 +593,83 @@ impl Telemetry {
             snapshot.account(&record);
         }
         Ok(snapshot)
+    }
+    pub fn run_id(&self) -> RunId {
+        self.0.run
+    }
+    pub(crate) fn enable_history(&self) -> Result<()> {
+        let mut registry = self
+            .0
+            .registry
+            .lock()
+            .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
+        if !registry.records.is_empty()
+            || registry.archived.evicted_records != 0
+            || registry.persistent
+        {
+            return Err(Error::Config("历史记录必须在流量开始前且仅启用一次".into()));
+        }
+        registry.persistent = true;
+        Ok(())
+    }
+    pub(crate) fn history_snapshot(&self) -> Result<(UsageSnapshot, Vec<FlowRecord>, Vec<u64>)> {
+        let registry = self
+            .0
+            .registry
+            .lock()
+            .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
+        let mut usage = registry.archived.clone();
+        usage.retained_records = registry.records.len();
+        let mut records: Vec<_> = registry.pending.values().cloned().collect();
+        for flow in registry.records.values() {
+            let record = flow.record();
+            usage.active_flows += usize::from(record.end.is_none());
+            usage.account(&record);
+            records.push(record);
+        }
+        Ok((usage, records, registry.pending.keys().copied().collect()))
+    }
+    pub(crate) fn acknowledge_history(&self, saved: &[u64]) -> Result<()> {
+        let mut registry = self
+            .0
+            .registry
+            .lock()
+            .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
+        for id in saved {
+            registry.pending.remove(id);
+        }
+        Ok(())
+    }
+    /// 仅统计仍持有业务流的可信归属；同一来源按活跃逻辑流计数。
+    pub fn online(&self) -> Result<Vec<crate::OnlineSource>> {
+        let registry = self
+            .0
+            .registry
+            .lock()
+            .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
+        let mut sources = BTreeMap::new();
+        for flow in registry.records.values() {
+            if flow.end.load(Ordering::Acquire) != 0 {
+                continue;
+            }
+            let key = (
+                flow.source.user(),
+                flow.source.node().clone(),
+                flow.observed_source.map(|address| address.ip()),
+            );
+            *sources.entry(key).or_insert(0usize) += 1;
+        }
+        Ok(sources
+            .into_iter()
+            .map(
+                |((user, node, address), active_flows)| crate::OnlineSource {
+                    user: user.map(|value| value.to_string()),
+                    node: node.to_string(),
+                    address,
+                    active_flows,
+                },
+            )
+            .collect())
     }
     /// 只查询本次进程保留的记录；没有磁盘持久性保证。
     pub fn records(&self, after: u64, limit: usize) -> Result<Vec<FlowRecord>> {

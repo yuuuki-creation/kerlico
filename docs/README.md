@@ -1,41 +1,31 @@
 # 架构设计导航
 
-更新日期：2026-11-02，Asia/Shanghai。代码修复、构建测试与发行仍处于停止快照，本轮同步共享出站、多用户、统计和访问记录的确认范围与设计。目标设计与实际接口分开维护，当前实现及验证范围见接口、测试记录和根STATUS。
+更新日期：2026-11-02（Asia/Shanghai）
+
+本目录维护 `kerlico` 的目标架构、模块契约、数据路径与设计决策。当前源码的实际公开接口与配置契约见 [实现接口](interfaces/README.md)，实时开发与测试进度见根 [STATUS.md](../STATUS.md)。
 
 ## 阅读顺序
 
-| 文档 | 回答的问题 |
+| 文档 | 内容范围 |
 | --- | --- |
-| [实现接口](interfaces/README.md) | 当前核心、JSON 配置、各协议与命令行的实际契约 |
-| [VLESS早期验证](testing/vless-ordinary-flow.md) | 历史源码、环境、对端、结果与未覆盖范围，不外推当前代码 |
-| [文档与资料约定](repository-workflow.md) | docs、STATUS、决策与上游源码分别怎样存和维护 |
-| [强制匿名规则](anonymity.md) | 作者、提交者、内容、签名与发布历史怎样满足匿名要求 |
-| [总体结构](architecture.md) | 单文件如何交付，各 package 怎样组织，编译依赖指向哪里 |
-| [双端与统一目标访问](node-egress.md) | 唯一共享调度器、多远端、节点模式、设备共享WARP与远端透传；尚未迁移 |
-| [全局共享出站决策](decisions/0009-global-egress-dispatcher.md) | 共享运行服务和命名出站的所有权 |
-| [节点模式与WARP决策](decisions/0010-node-egress-modes-and-warp.md) | 本地目标策略、双栈缺族补齐和远端原请求透传的责任边界 |
-| [多用户、流量与带宽](statistics-and-users.md) | 管理用户与协议凭据、唯一业务计量、带宽采样、在线信息、访问记录及持久历史 |
-| [统计适配决策](decisions/0011-users-statistics-and-access-records.md) | 将Xray相关日志、统计和查询能力适配共享出站，明确需求与未实现边界 |
-| [协议与组合总表](../reference/reports/三核心%20协议%20组合支持.md) | 唯一协议/组合清单：三个核心的角色、限制、证据和建议任务编号 |
-| [协议阶段与路线](protocol-roadmap.md) | 框架范围、逐项开发阶段和开工前研究/验证流程 |
-| [编译与测试安排](build-and-test.md) | 三台 worker 的建议分工、本地凭证隔离、连接准备状态与验证边界 |
-| [核心契约](core-contracts.md) | 模块之间交换哪些信息，谁拥有和修改这些信息，公共接口怎样保持小而稳定 |
-| [数据路径](data-paths.md) | TCP、UDP、TUN、DNS 怎样协作，首包、嗅探和回写怎样处理 |
-| [运行与配置生命周期](runtime-lifecycle.md) | 怎样启动、更新、排空和停止，独占系统资源怎样管理 |
-| [协议模块](protocol-modules.md) | 协议内部怎样组织，怎样注册、增加和移除 |
-| [决策目录](decisions/README.md) | 重要选择的原因、确认状态和取代关系怎样记录 |
-| [上游调研](../reference/README.md) | mihomo、sing-box、Xray-core 的固定源码证据与分析 |
-
-此前并行协议任务已保存停点，不能据旧安排自动继续。恢复实现时仍遵循完整首轮编写后集中worker验证的流程；本轮设计确认不代表开始源码迁移或设备部署。
-
-## 项目状态与设计依据
-
-已明确要求、推荐方案、待决项和实际进度统一维护在根 [STATUS.md](../STATUS.md)，此处不另建进度表。各设计文档保留自己的草案或确认状态，重要选择的理由与确认过程归[决策目录](decisions/README.md)。
-
-上游资料到本项目设计的对应关系见[借鉴映射](../reference/design-map.md)。从“上游存在”到“本项目采纳”，再到“实现与验证完成”，分别记录，不互相代替。
+| [实现接口](interfaces/README.md) | 当前核心 API、JSON v2 配置、各协议模块与 CLI 的实际契约 |
+| [总体结构](architecture.md) | 单可执行文件交付、Cargo workspace 划分与编译依赖关系 |
+| [双端与统一目标访问](node-egress.md) | 全局共享调度器、多远端出站、节点地址族模式、设备共享 WARP 与远端透传 |
+| [多用户、流量与带宽](statistics-and-users.md) | 管理账户与协议凭据分离、唯一业务计量、带宽采样、在线状态与访问记录持久化设计 |
+| [核心契约](core-contracts.md) | 跨模块标识、分阶段会话元数据、工厂注册与能力约束 |
+| [数据路径](data-paths.md) | TCP、UDP、TUN 与 DNS 的阶段协作、首包嗅探与半关闭语义 |
+| [运行与配置生命周期](runtime-lifecycle.md) | 启动阶段、配置代次、资源租约（lease）、在线更新分级与排空退出 |
+| [协议模块与插拔](protocol-modules.md) | 协议 crate 内部结构、显式注册、Cargo feature 裁剪与扩展示范 |
+| [协议阶段与路线](protocol-roadmap.md) | 框架范围与“调研 → 编写 → 测试 → 修改”开发工作流 |
+| [协议与组合总表](../reference/reports/三核心%20协议%20组合支持.md) | mihomo、sing-box、Xray-core 协议与组合支持对照及任务编号 |
+| [编译与测试安排](build-and-test.md) | 三台专用海外 worker 分工、本地私有凭证隔离与测试约束 |
+| [强制匿名规则](anonymity.md) | Git 匿名作者身份、内容脱敏要求与提交/推送校验钩子 |
+| [项目许可说明](licensing.md) | `GPL-3.0-only` 许可范围与第三方材料合规要求 |
+| [文档与资料约定](repository-workflow.md) | `docs/`、`STATUS.md`、`decisions/` 与 `reference/` 的维护边界 |
+| [决策目录](decisions/README.md) | 重要架构与流程决策的背景、取舍与确认状态 |
+| [上游调研](../reference/README.md) | 三个参考核心的固定源码基线、研究笔记与[借鉴映射](../reference/design-map.md) |
 
 ## 阅读约定
 
-“契约”表示建议实现必须满足的行为；英文名称用于讨论概念，不是已经存在的 Rust 类型或最终公开 API。目录树与文件路径标为未来规划时，不表示文件已创建。参数需要有明确的限制，但本轮不随意指定容量、超时或性能数字。
-
-目标设计与当前接口分开维护。用户逐项确认和任务内授权自主采用分别记录，不混用状态；实际 crate 版本以 Cargo.lock 为准，不从 Go 项目的依赖表推定。
+- **目标设计与当前实现区分**：`docs/*.md` 描述完整目标架构；已落地的 Rust 类型、配置字段与已验证边界以 [interfaces/](interfaces/README.md) 和 [STATUS.md](../STATUS.md) 为准。
+- **契约术语**：文中的英文类型或服务名用于表达架构职责边界，具体代码签名见 `crates/core-api`、`crates/config`、`crates/egress` 与 `crates/engine`。

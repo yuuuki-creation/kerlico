@@ -1323,7 +1323,9 @@ impl<R: Runtime> RunningInner<R> {
             // TODO #1932: It would be nice to have a cleaner shutdown mechanism here,
             // but that will take some work.
             |fatal| async move {
-                let Err(fatal) = dispatch_embedded_protocol_failure(protocol_shutdown_handler, fatal) else {
+                let Err(fatal) =
+                    dispatch_embedded_protocol_failure(protocol_shutdown_handler, fatal)
+                else {
                     return;
                 };
                 use tor_error::ErrorReport as _;
@@ -2678,8 +2680,11 @@ mod test {
         ).unwrap();
         let timestamp = humantime::parse_rfc3339("2026-11-02T00:00:00Z").unwrap();
         let fatal = crate::protostatus::evaluate_protocol_status(
-            timestamp, &recommendation, &"Relay=1".parse().unwrap(),
-        ).unwrap_err();
+            timestamp,
+            &recommendation,
+            &"Relay=1".parse().unwrap(),
+        )
+        .unwrap_err();
         let stopped = Arc::new(AtomicBool::new(false));
         let observed = stopped.clone();
         let handler: crate::builder::ProtocolShutdownHandler = Arc::new(move |error| {
@@ -2688,9 +2693,14 @@ mod test {
         });
         assert!(dispatch_embedded_protocol_failure(Some(handler), fatal).is_ok());
         assert!(stopped.load(Ordering::Acquire));
-        assert!(crate::protostatus::evaluate_protocol_status(
-            timestamp, &recommendation, &"Relay=1-4".parse().unwrap(),
-        ).is_ok());
+        assert!(
+            crate::protostatus::evaluate_protocol_status(
+                timestamp,
+                &recommendation,
+                &"Relay=1-4".parse().unwrap(),
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2699,7 +2709,12 @@ mod test {
         let fatal = ErrorDetail::MissingProtocol(ProtocolSupportError::MissingRequired(
             "Relay=3".parse().unwrap(),
         ));
-        assert_eq!(dispatch_embedded_protocol_failure(None, fatal).unwrap_err().kind(), ErrorKind::SoftwareDeprecated);
+        assert_eq!(
+            dispatch_embedded_protocol_failure(None, fatal)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::SoftwareDeprecated
+        );
     }
 
     #[test]

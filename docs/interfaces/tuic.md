@@ -1,25 +1,10 @@
 # TUIC v4/v5 双端接口
 
-2026-11-02共享运行迁移已编写，尚未编译、格式检查或测试。本文保留的历史通过记录只对应原输入，不代表当前整树已验收。
+`TuicFactory`、`TuicNodeFactory` 均注册为 `tuic`（研究见 [tuic.md](../../reference/research_notes/tuic.md)，验证记录见 [tuic.md](../testing/tuic.md)）。
 
-配置模式为`version:2`。节点的`members`引用管理账户`user_id`，分别保存`credential_epoch`与`native_credential`。管理用户名、管理密码摘要和协议凭据互不代用。节点工厂接收`NodeBuildContext`，鉴权前只持`IngressBinding`，鉴权后使用`PeerSession`访问共享Dispatcher。
-
-v4每条成员凭据为`{"token":"synthetic-token"}`，v5为`{"uuid":"00000000-0000-4000-8000-000000000001","password":"synthetic-password"}`。节点options不再接受token/tokens/uuid/password/users。真实v4认证摘要或v5 TLS exporter命中成员，连接内TCP流与UDP关联沿用该可信用户。
-
-出站工厂通过`compile`校验配置与资产，返回一次性`OutboundPlan`；`start(ServiceContext)`才创建命名运行实例。一个Engine内每条命名出站只有一个实例，池按`ConnectContext.resource_key()`的服务、成员和凭据代次分区。持久任务登记到ServiceContext，shutdown停止并等待自身资源；单个请求或节点不关闭共享出站。使用TLS的共享出站不跨成员复用恢复票据。
-
-成员池的外层表只在查找或取得 bucket 时短暂加锁。DNS、载体拨号和协议协商只持对应成员 bucket 的锁；其他成员可同时建立载体。关闭时先从表和 bucket 移出资源，再等待清理，不跨 await 持有全局池锁。bucket 只保存池状态，不创建第二个完整出站实例。
-
-QUIC 的 NEW_TOKEN 缓存与 TLS 恢复票据分开处理。每次建立新 QUIC 连接都在克隆的 ClientConfig 上设置独立 TokenMemoryCache，避免缓存随配置 Arc 跨成员共享；当前也不跨重连复用 NEW_TOKEN，不修改上游 token 算法。
-
-QUIC 入站的节点任务所有者登记原生驱动，使用独立子取消域。节点停止接入后先回收自己的连接，再关闭端点并在原 drain_timeout 总预算内排空；末段预算留给强制取消和实际 join。自然排空到期后，若全部登记任务已完成强制回收，记录 NodeEvent::ForcedCleanup 并返回成功；它不计为 Failed 或数据包 Dropped。强制后仍未完成或任务异常退出才返回错误。节点通知取消不会提前丢弃 QUIC 驱动，也不会取消共享出站服务。
-
-QUIC 鉴权使用已接受连接的 remote_address 记录实际可观察来源；该字段不参与 ResourceKey，也不取客户端请求自报地址。TCP 来源继续沿用接入层的 socket 地址。
-
-本模块代理出站声明`TargetPolicy::Remote`，保留网站原目标、端口和负载。本机只解析代理接入端点，网站解析由远端负责；协议无法表达的目标明确拒绝。TCP连接与UDP关联建立后固定所选出站，不在失败后跨代理或直连重放。
-
-
-日期：2026-10-31。状态：本轮限定双端已通过远端包级检查、真实互通与生命周期矩阵，精确范围见[验证记录](../testing/tuic.md)。客户端和节点工厂均注册为 `tuic`，按角色分别验收。
+- **节点成员凭据**：v4 每条 `members[].native_credential` 为 `{"token": "synthetic-token"}`，v5 为 `{"uuid": "00000000-0000-4000-8000-000000000001", "password": "synthetic-password"}`。真实 v4 认证摘要或 v5 TLS exporter 命中成员后，连接内 TCP 流与 UDP 关联沿用该可信用户；鉴权使用已接受 QUIC 连接的 `remote_address` 记录可观察来源。
+- **成员池与 QUIC 缓存**：成员池外层表只在查找或取得 bucket 时短暂加锁，DNS、载体拨号和协议协商只持对应成员 bucket 锁；每次建立新 QUIC 连接都在克隆的 `ClientConfig` 上设置独立 `TokenMemoryCache`，避免 `NEW_TOKEN` 缓存跨成员共享。
+- **QUIC 节点排空**：QUIC 入站原生驱动登记到 `NodeTasks` 并使用独立子取消域。停止接入后先回收连接，再关闭端点并在 `drain_timeout` 内排空（末段留给强制取消和 join；全部强制回收完成记录 `NodeEvent::ForcedCleanup`）。
 
 ## 客户端
 

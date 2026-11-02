@@ -1,6 +1,9 @@
 use arti_client::{TorClientConfig, config::TorClientConfigBuilder};
 use kerlico_core::{Error, OutId, Result};
-use std::{fs::File, path::{Path, PathBuf}};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+};
 
 pub(crate) struct StateLease {
     _lock: File,
@@ -15,7 +18,11 @@ fn storage_error() -> Error {
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use rustix::{fs::{Mode, OFlags, mkdirat, open, openat}, io::Errno, process::geteuid};
+    use rustix::{
+        fs::{Mode, OFlags, mkdirat, open, openat},
+        io::Errno,
+        process::geteuid,
+    };
     use std::{ffi::OsStr, os::unix::fs::MetadataExt, path::Component};
 
     struct TrustedDirectory {
@@ -40,9 +47,18 @@ mod unix {
                 return Err(storage_error());
             }
             let own_uid = geteuid().as_raw();
-            let file = open("/", OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
-                .map(File::from).map_err(|_| storage_error())?;
-            let mut directory = Self { file, path: PathBuf::from("/"), own_uid };
+            let file = open(
+                "/",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map(File::from)
+            .map_err(|_| storage_error())?;
+            let mut directory = Self {
+                file,
+                path: PathBuf::from("/"),
+                own_uid,
+            };
             directory.check(false)?;
             for component in path.components() {
                 match component {
@@ -61,9 +77,19 @@ mod unix {
                     Err(_) => return Err(storage_error()),
                 }
             }
-            let file = openat(&self.file, name, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
-                .map(File::from).map_err(|_| storage_error())?;
-            let child = Self { file, path: self.path.join(name), own_uid: self.own_uid };
+            let file = openat(
+                &self.file,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map(File::from)
+            .map_err(|_| storage_error())?;
+            let child = Self {
+                file,
+                path: self.path.join(name),
+                own_uid: self.own_uid,
+            };
             child.check(private)?;
             Ok(child)
         }
@@ -86,18 +112,30 @@ mod unix {
             directory = directory.child(name, true)?;
         }
         directory = directory.child(OsStr::new(id.as_str()), true)?;
-        let lock = openat(&directory.file, "instance.lock", OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::from_raw_mode(0o600))
-            .map(File::from).map_err(|_| storage_error())?;
+        let lock = openat(
+            &directory.file,
+            "instance.lock",
+            OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map(File::from)
+        .map_err(|_| storage_error())?;
         let metadata = lock.metadata().map_err(|_| storage_error())?;
-        if !metadata.is_file() || metadata.uid() != directory.own_uid
-            || metadata.mode() & 0o777 != 0o600 || metadata.nlink() != 1
+        if !metadata.is_file()
+            || metadata.uid() != directory.own_uid
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.nlink() != 1
         {
             return Err(storage_error());
         }
         lock.try_lock().map_err(|_| storage_error())?;
         let state = directory.child(OsStr::new("state"), true)?.path;
         let cache = directory.child(OsStr::new("cache"), true)?.path;
-        Ok(StateLease { _lock: lock, state, cache })
+        Ok(StateLease {
+            _lock: lock,
+            state,
+            cache,
+        })
     }
 }
 
@@ -114,20 +152,27 @@ impl StateLease {
 
     #[cfg(not(unix))]
     pub(crate) fn open_at(_: &Path, _: &Path, _: &OutId) -> Result<Self> {
-        Err(Error::Unsupported("Tor状态目录的完整祖先信任检查尚未实现该平台"))
+        Err(Error::Unsupported(
+            "Tor状态目录的完整祖先信任检查尚未实现该平台",
+        ))
     }
 
     pub fn config(&self) -> Result<TorClientConfig> {
         let mut builder = TorClientConfigBuilder::from_directories(&self.state, &self.cache);
         builder.storage().permissions().ignore_environment();
-        builder.build().map_err(|_| Error::Config("Tor内部配置不合法".into()))
+        builder
+            .build()
+            .map_err(|_| Error::Config("Tor内部配置不合法".into()))
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::{PermissionsExt, symlink}};
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+    };
 
     fn directory() -> tempfile::TempDir {
         tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap()

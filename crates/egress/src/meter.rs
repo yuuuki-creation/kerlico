@@ -2,7 +2,7 @@ use crate::telemetry::FlowLease;
 use kerlico_core::{
     AddressedDatagram, BoxFuture, BoxStream, DatagramAssociation, DatagramAssociationReceiver,
     DatagramAssociationSender, DatagramChannel, DatagramReceiver, DatagramSender, Destination,
-    Error, Result,
+    Result,
 };
 use std::{
     future::Future,
@@ -43,10 +43,7 @@ impl MeteredStream {
         if cancel.is_none() {
             let error = lease.cancellation_error();
             lease.failed(&error);
-            Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                error,
-            ))
+            Err(io::Error::new(io::ErrorKind::ConnectionAborted, error))
         } else {
             Ok(())
         }

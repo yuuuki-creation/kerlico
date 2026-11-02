@@ -1,17 +1,6 @@
-# VLESS 接口 0.2（开发中）
+# VLESS 双端接口
 
-当前源码更新于2026-11-02，已编写共享运行与配置 v2 迁移，尚未执行本轮编译、格式、测试或互通。下文既有通过结果只属于各自历史输入，不能作为本轮验收。
-
-节点通过 `NodeFactory::build(&NodeBuildContext)` 编译。每个 `members[]` 绑定管理 user_id、credential_epoch 和 native_credential；协议凭据与管理用户名、密码分开。原生凭据格式为 `{"uuid":"协议 UUID","flow":""}`。flow 可为空或 `xtls-rprx-vision`。
-
-认证前只持 `IngressBinding`。真实协议校验成功后交接 `CredentialSet` 的槽与同次解码状态，经 `authenticated` 得到 `PeerSession`。每次 TCP 或 UDP 建立均由共享 Dispatcher 创建独立流归属；复用载体不会把成员或流标识混合。旧指纹接口已替换为 `CredentialManifest`，分别登记 Authentication 与 Protection。
-
-出站使用 `OutboundFactory::compile(&Value) -> OutboundPlan`。编译完成字段、凭据与资产校验；Engine 只消费一次 `start(ServiceContext)`，构造唯一命名运行实例。此模块使用 Remote 策略，保留网站原域名/IP、端口和负载，只解析代理载体端点。远端失败不在本机更换代理、换族或回退直连。
-
-`ConnectContext` 必须通过构造方法建立，嵌套阶段使用 `with_timeout` 收紧原期限。共享连接与票据按 `resource_key()` 的运行实例、成员与凭据代次分区。持久任务归命名服务，单个入站或请求取消不会关闭共享服务。显式 `shutdown` 停止并等待本实例任务；历史包级验证尚未覆盖新关闭路径。
-
-
-更新日期：2026-10-30。本轮双向完整矩阵等快照已通过，最新共享生命周期增量尚未复验，见[快照记录](../testing/vless-combinations.md)。0.1 已发布范围及历史证据保留在[普通流记录](../testing/vless-ordinary-flow.md)；这些结果不外推本轮全部代码。
+更新日期：2026-11-02（Asia/Shanghai）。本模块采用配置 v2 与全局共享 `Dispatcher`（`TargetPolicy::Remote`），服务端节点成员凭据 `members[].native_credential` 格式为 `{"uuid": "<协议UUID>", "flow": ""}`（`flow` 可为空或 `"xtls-rprx-vision"`）。验证进展见 [VLESS 扩展验证记录](../testing/vless-combinations.md)。
 
 ## 角色与分层
 
@@ -111,18 +100,10 @@ ML-DSA 验签、混合 NFS 链及真实云账户尚未互通验收；服务端�
 | OAuth刷新、JSON/XML、状态重试 | 令牌字段、过期窗口、401清缓存、429/5xx重试、JSON/XML解析保留原代码；令牌HTTP请求使用同一个受控客户端 |
 | 超时和取消 | 60秒覆盖拨号、TLS、请求、完整响应和驱动结束；取消丢弃同一操作Future中的真实HTTP驱动 |
 | 连接复用 | 改为每操作独占连接，不保留隐式HTTP连接池；协议Mux与命名出站实例的复用契约不变 |
-| 环境代理 | 旧reqwest的ClientBuilder默认auto_sys_proxy为true并安装系统matcher；新客户端只连接显式URL，不读取HTTP(S)_PROXY或NO_PROXY。父任务已接受此差异，按显式载体与命名实例配置确定路径，不补隐式代理链，不称全部行为相同 |
-
-对应代码测试仅已编写。尚未运行固定对端、真实云账户、异常HTTP状态或长时间回收验收。
+| 环境代理 | 新客户端仅连接显式配置的存储 URL，不读取 `HTTP(S)_PROXY` 或 `NO_PROXY` |
 
 ## 完成权与节点任务契约
 
-2026-11-02 本轮首轮编码，尚未构建、格式检查或运行验证。
-
-业务入口返回 `TcpFlow`、`FixedUdpFlow` 或 `UdpAssociation`，拆分后唯一 `FlowCompletion` 留在实际会话 owner。字节与数据报仍只由 Dispatcher 计量，完成权只报告原因；最后 I/O、半部及完成权租约释放后才提交终态。底层出站 TCP 返回 `OpenedTcp`，本模块没有绑定证据时明确返回 `Unknown`，不以代理载体地址代填。
-
-普通 TCP 使用 typed relay，建立后的响应首部写失败归到同一流；固定 UDP 的结束、超时与取消显式报告。Mux 的父级有界完成权表按逻辑会话及代次管理，关闭后的登记退回完成权和已固定原因，旧结果不能关闭新代次。Mux 没有方向 EOF，继续声明 `tcp_eof=false`；目标 EOF 触发本端收尾，尾部数据和整流 END 经真实 writer 确认写出后才 `ProtocolEnd`。错误 END 或 END 写失败为失败。packetaddr 与 XUDP 仍按各目标计量，父终因在清理取消前固定。XDRIVE 会话和 HTTP/3 原生驱动登记到节点任务所有者。跨物理请求的 XHTTP 表使用独立节点上下文，不捕获首个 peer 的取消、地址或租约。
-
-Hyper HTTP/2 的 executor 同样使用 `NodeTasks` 登记真实 future；节点停止接纳后直接释放被拒绝的 future，不创建备用任务。XDRIVE 的存储会话 future 由该节点所有者持有，外层轮询 handler 中止后仍可等待真实存储读写析构。
-
-Mux 物理载体正常 EOF 不代替逻辑 END：尚未收到 END、也未通过目标 EOF 与实际 END 写确认结束的活跃流报告 `ClosedByCaller`。已独立完成的逻辑流保持原结果；此规则不改变以控制 EOF 定义完整 UDP 关联结束的 UoT 或 SOCKS。
+- 普通 TCP 使用 typed relay，建立后的响应首部写失败归属同一流；固定 UDP 的结束、超时与取消显式报告。
+- Mux 父级有界完成权表按逻辑会话及代次管理，关闭后的登记退回完成权与已固定原因，旧结果不关闭新代次。Mux 声明 `tcp_eof=false`；目标 EOF 触发本端收尾，尾部数据与整流 `END` 经真实 writer 确认写出后报告 `ProtocolEnd`，错误 `END` 或写失败记为失败。Mux 物理载体正常 EOF 不代替逻辑 `END`，尚未完成 `END` 确认的活跃流报告 `ClosedByCaller`。
+- `packetaddr` 与 XUDP 按各目标计量，父终因在清理取消前固定。XDRIVE 会话、Hyper HTTP/2 executor 与 HTTP/3 原生驱动均登记到节点 `NodeTasks` 所有者；跨物理请求的 XHTTP 表使用独立节点上下文，不捕获首个 peer 的取消、地址或租约。

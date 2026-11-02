@@ -2,7 +2,7 @@ use super::frame::{self, Frame};
 use crate::carrier;
 use kerlico_core::{
     BoxFuture, BoxStream, CancellationToken, DatagramChannel, DatagramReceiver, DatagramSender,
-    Destination, Error, Result,
+    Destination, Diagnostic, DiagnosticSink, Error, Result,
 };
 use std::{
     collections::HashMap,
@@ -94,12 +94,13 @@ impl Connection {
         let (mut reader, mut writer) = tokio::io::split(stream);
         let weak = Arc::downgrade(&value);
         let stop = cancel.clone();
+        let write_diagnostics = DiagnosticSink::stderr(host.language());
         let writing = host.spawn_tracked(async move {
             loop {
                 let message = tokio::select! {_=stop.cancelled()=>break,message=outgoing.recv()=>match message{Some(v)=>v,None=>break}};
                 let ending=message.frame.status==Status::End;
                 let result = tokio::select! {_=stop.cancelled()=>break,result=frame::write(&mut writer,message.frame)=>result};
-                if let Err(error)=result {if !ending{eprintln!("VLESS Mux 载体写入失败：{error}");}break;}
+                if let Err(error)=result {if !ending{write_diagnostics.emit(Diagnostic { code: "vless.mux.write_failed", error: &error });}break;}
                 if let Some(ack) = message.ack {
                     let _ = ack.send(());
                 }
@@ -115,9 +116,10 @@ impl Connection {
         })?;
         let weak = Arc::downgrade(&value);
         let stop = cancel.clone();
+        let read_diagnostics = DiagnosticSink::stderr(host.language());
         let reading = host.spawn_tracked(async move {
             loop {
-                let frame = tokio::select! {_=stop.cancelled()=>break,frame=frame::read(&mut reader)=>match frame{Ok(Some(v))=>v,Ok(None)=>break,Err(error)=>{eprintln!("VLESS Mux 载体读取失败：{error}");break}}};
+                let frame = tokio::select! {_=stop.cancelled()=>break,frame=frame::read(&mut reader)=>match frame{Ok(Some(v))=>v,Ok(None)=>break,Err(error)=>{read_diagnostics.emit(Diagnostic { code: "vless.mux.read_failed", error: &error });break}}};
                 let Some(value) = weak.upgrade() else { break };
                 value.touch();
                 if frame.status == Status::KeepAlive {

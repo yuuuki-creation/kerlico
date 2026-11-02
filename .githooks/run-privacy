@@ -1,0 +1,10 @@
+#!/bin/sh
+task_root=$(git rev-parse --show-toplevel) || exit 1
+for task_python in python3 python; do
+    if command -v "$task_python" >/dev/null 2>&1 &&
+        "$task_python" -c 'import sys; assert sys.version_info >= (3, 8)' >/dev/null 2>&1; then
+        exec "$task_python" "$task_root/.githooks/privacy-check" "$@"
+    fi
+done
+printf '%s\n' '匿名校验需要可用的 Python 3.8+；操作已阻止。' >&2
+exit 1

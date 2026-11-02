@@ -44,6 +44,13 @@ struct Session {
     sender: mpsc::Sender<Frame>,
     cancel: CancellationToken,
 }
+struct SessionContext {
+    scope_key: Scope,
+    output: mpsc::Sender<Delivery>,
+    access: PeerSession,
+    context: InboundContext,
+    completions: Completions,
+}
 
 pub(crate) async fn serve(
     stream: BoxStream,
@@ -115,7 +122,8 @@ pub(crate) async fn serve(
                     let owner = context.tasks.clone(); let completions = completions.clone();
                     let task = owner.spawn_tracked(async move {
                         let _permit=permit;
-                        let result=if udp {udp_session(id,target,receiver,output.clone(),access,context,completions.clone(),Scope(id,gen_id)).await}else{tcp_session(id,target,receiver,output.clone(),access,context,completions.clone(),Scope(id,gen_id)).await};
+                        let session = SessionContext { scope_key: Scope(id,gen_id), output: output.clone(), access, context, completions: completions.clone() };
+                        let result=if udp {udp_session(target,receiver,session).await}else{tcp_session(target,receiver,session).await};
                         completions.close_scope(Scope(id,gen_id),outcome(&result));
                         if udp || result.is_err() {tokio::select! {_=cancel.cancelled()=>{},_=output.send(Delivery::signal(Frame::end(id,result.is_err())))=>{}}}
                         result
@@ -148,15 +156,18 @@ pub(crate) async fn serve(
 }
 
 async fn tcp_session(
-    id: u16,
     target: Target,
     mut incoming: mpsc::Receiver<Frame>,
-    out: mpsc::Sender<Delivery>,
-    access: PeerSession,
-    context: InboundContext,
-    completions: Completions,
-    scope_key: Scope,
+    session: SessionContext,
 ) -> Result<()> {
+    let SessionContext {
+        scope_key,
+        output: out,
+        access,
+        context,
+        completions,
+    } = session;
+    let id = scope_key.0;
     let target = frame::destination(&target)?;
     let remote = access
         .connect_tcp(
@@ -215,15 +226,17 @@ async fn tcp_session(
 }
 
 async fn udp_session(
-    id: u16,
     initial: Target,
     mut incoming: mpsc::Receiver<Frame>,
-    output: mpsc::Sender<Delivery>,
-    access: PeerSession,
-    context: InboundContext,
-    completions: Completions,
-    scope_key: Scope,
+    session: SessionContext,
 ) -> Result<()> {
+    let SessionContext {
+        scope_key,
+        output,
+        access,
+        context,
+        completions,
+    } = session;
     let scope = context.cancel.child_token();
     let _guard = scope.clone().drop_guard();
     let mut targets: HashMap<Destination, (u64, mpsc::Sender<Vec<u8>>)> = HashMap::new();
@@ -251,7 +264,7 @@ async fn udp_session(
                 let (sender,receiver)=mpsc::channel(16);targets.insert(target.clone(),(gen_id,sender));
                 let target=target.clone();let access=access.clone();let output=output.clone();let mut context=context.clone();context.cancel=scope.child_token();let activity=activity.clone();
                 let owner=context.tasks.clone();let completed=completions.clone();
-                let task=owner.spawn_tracked(async move {let _permit=permit;udp_target(id,&target,receiver,output,access,context,activity,completed,Key(scope_key,gen_id)).await})?;
+                let task=owner.spawn_tracked(async move {let _permit=permit;let session = SessionContext { scope_key, output, access, context, completions: completed };udp_target(&target,receiver,session,activity,gen_id).await})?;
                 let done_target=frame::destination(frame.target.as_ref().unwrap_or(&initial))?;
                 tasks.spawn(async move {(done_target,gen_id,task.await.unwrap_or(Err(Error::Protocol("Mux UDP 任务异常退出"))))});
             }
@@ -269,16 +282,21 @@ async fn udp_session(
 }
 
 async fn udp_target(
-    id: u16,
     target: &Destination,
     mut queue: mpsc::Receiver<Vec<u8>>,
-    out: mpsc::Sender<Delivery>,
-    access: PeerSession,
-    context: InboundContext,
+    session: SessionContext,
     activity: watch::Sender<Instant>,
-    completions: Completions,
-    key: Key,
+    generation: u64,
 ) -> Result<()> {
+    let SessionContext {
+        scope_key,
+        output: out,
+        access,
+        context,
+        completions,
+    } = session;
+    let id = scope_key.0;
+    let key = Key(scope_key, generation);
     let channel = access
         .connect_udp(
             target,
@@ -381,14 +399,15 @@ pub(crate) async fn serve_packetaddr(
     };
     let initial = carrier::target(&Destination::new("127.0.0.1", 1)?, true);
     let serving = udp_session(
-        0,
         initial,
         receiver,
-        output,
-        access,
-        context,
-        completions.clone(),
-        scope_key,
+        SessionContext {
+            scope_key,
+            output,
+            access,
+            context,
+            completions: completions.clone(),
+        },
     );
     tokio::pin!(serving);
     let result = tokio::select! {biased;_=scope.cancelled()=>Err(Error::Cancelled),r=uplink=>r,r=downlink=>r,r=&mut serving=>r};

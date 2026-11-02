@@ -3,8 +3,7 @@
 use crate::{UserId, carrier::Carrier, payload};
 use kerlico_config::{OutboundPlan, TargetSpec};
 use kerlico_core::{
-    BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel, Destination, Error,
-    Outbound, Result,
+    BoxFuture, Capabilities, ConnectContext, DatagramChannel, Destination, Error, Outbound, Result,
 };
 use serde::Deserialize;
 use serde_json::Value;

@@ -234,7 +234,20 @@ async fn upload(
                 let _ = ack.send(Ok(()));
             }
             Upload::Fin(ack) => {
-                let result = post(&client, mode, &token, Some("fin"), None, Bytes::new()).await;
+                let mut attempts = 0;
+                let result = loop {
+                    let result = post(&client, mode, &token, Some("fin"), None, Bytes::new()).await;
+                    let retry = match &result {
+                        Ok(status) => status.is_server_error(),
+                        Err(Error::Io(_) | Error::Timeout) => true,
+                        Err(_) => false,
+                    };
+                    if !retry || attempts == 1 {
+                        break result;
+                    }
+                    // FIN是同一token上的幂等控制；响应丢失只重确认，不重放业务数据。
+                    attempts += 1;
+                };
                 let success = matches!(result, Ok(StatusCode::OK));
                 let _ = ack.send(if success { Ok(()) } else { Err(broken()) });
                 if !success {
@@ -411,6 +424,103 @@ pub(crate) async fn connect(
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn lost_fin_response_is_reconfirmed_without_repeating_payload() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    header.push(stream.read_u8().await.unwrap());
+                    assert!(header.len() <= 4096);
+                }
+                let header = String::from_utf8(header).unwrap();
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).await.unwrap();
+                requests.push((header.lines().next().unwrap().to_owned(), body));
+                if index != 1 {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                }
+                stream.shutdown().await.unwrap();
+            }
+            requests
+        });
+        let config = serde_json::from_value::<crate::config::OutOptions>(serde_json::json!({
+            "server": {"host": "127.0.0.1", "port": address.port()},
+            "protocol": {"key": "synthetic-fin-response-loss-seed"},
+            "http_mask": {"mode": "stream"}
+        }))
+        .unwrap()
+        .prepare()
+        .unwrap();
+        let owner = kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("fin-response-loss").unwrap(),
+            CancellationToken::new(),
+        );
+        let scope = Scope::node(&owner.cancel(), owner);
+        let client = HttpClient::new(
+            &config,
+            Arc::new(crate::carrier::endpoint::Endpoint::new(
+                config.server.clone(),
+            )),
+            scope.clone(),
+            false,
+        );
+        let (sender, receiver) = mpsc::channel(8);
+        sender
+            .send(Upload::Data(Bytes::from_static(b"payload-once")))
+            .await
+            .unwrap();
+        let (ack, received) = oneshot::channel();
+        sender.send(Upload::Fin(ack)).await.unwrap();
+        let uploaded = tokio::time::timeout(
+            Duration::from_secs(2),
+            upload(
+                client,
+                Mode::Stream,
+                "synthetic-token".into(),
+                true,
+                receiver,
+            ),
+        )
+        .await
+        .unwrap();
+        let confirmed = received.await.unwrap();
+        scope.shutdown().await;
+        if uploaded.is_err() || confirmed.is_err() {
+            peer.abort();
+            let _ = peer.await;
+            panic!("已提交FIN的响应丢失后应再次取得确认：upload={uploaded:?}, ack={confirmed:?}");
+        }
+        let requests = tokio::time::timeout(Duration::from_secs(2), peer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(requests[0].1, b"payload-once");
+        assert!(requests[0].0.contains("seq=1"));
+        assert!(
+            requests[1..]
+                .iter()
+                .all(|(head, body)| head.contains("fin=1") && body.is_empty())
+        );
+    }
 
     #[tokio::test]
     async fn rejected_fin_stays_failed_across_shutdown_and_flush() {

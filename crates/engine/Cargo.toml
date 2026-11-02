@@ -16,6 +16,8 @@ tokio.workspace = true
 [dev-dependencies]
 kerlico-net.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
+rusqlite = "=0.40.2"
 
 [lints]
 workspace = true

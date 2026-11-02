@@ -4,8 +4,8 @@ use kerlico_config::{EgressPlan, IngressPlan};
 use kerlico_core::{
     Address, BoxFuture, Capabilities, ConnectContext, DatagramAssociationSender, DatagramReceiver,
     Destination, Error, FamilyMode, FixedUdpFlow, FlowOpen, IngressBinding, NodeId, OpenedTcp,
-    OriginalTarget, OutId, Outbound, Result, ServiceContext, ServiceRetirement, SessionDispatcher,
-    SessionIdentity, ShutdownReport, TargetPolicy, TcpFlow, UdpAssociation,
+    OriginalTarget, OutId, Outbound, Result, RuntimeOptions, ServiceContext, ServiceRetirement,
+    SessionDispatcher, SessionIdentity, ShutdownReport, TargetPolicy, TcpFlow, UdpAssociation,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -17,8 +17,13 @@ use std::{
     time::Duration,
 };
 use tokio::time::{Instant, timeout_at};
+mod history;
 mod meter;
 mod telemetry;
+pub use history::{
+    BandwidthSample, HistoryQuery, HistoryReader, HistoryScope, HistoryWriter, OnlineSource,
+    StoredFlow, StoredUsage,
+};
 pub use telemetry::{
     DatagramTargetRecord, FlowEnd, FlowId, FlowKind, FlowRecord, FlowStage, Telemetry, Usage,
     UsageSnapshot,
@@ -122,25 +127,43 @@ impl Drop for EgressRuntime {
 }
 impl EgressRuntime {
     pub async fn start(plan: EgressPlan, device: DeviceLease, budget: Duration) -> Result<Self> {
-        Self::start_with_resolver(plan, device, budget, Arc::new(SystemResolver)).await
+        Self::start_with_options(plan, RuntimeOptions::new(device), budget).await
+    }
+    pub async fn start_with_options(
+        plan: EgressPlan,
+        options: RuntimeOptions,
+        budget: Duration,
+    ) -> Result<Self> {
+        Self::start_with_resolver(plan, options, budget, Arc::new(SystemResolver)).await
     }
     async fn start_with_resolver(
         plan: EgressPlan,
-        device: DeviceLease,
+        options: RuntimeOptions,
         budget: Duration,
         resolver: Arc<dyn Resolver>,
     ) -> Result<Self> {
         let (plans, bindings, max_flows) = plan.into_parts();
+        let RuntimeOptions { device, language } = options;
         let run = NEXT_RUN
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)
             })
             .map_err(|_| Error::ResourceLimit)?;
         let deadline = Instant::now() + budget;
         let mut started = Vec::new();
         for named in plans {
-            let host = ServiceContext::with_device(named.id.clone(), device.clone());
-            let mut starting = StartingService { host: host.clone(), deadline, armed: true };
+            let host = ServiceContext::with_options(
+                named.id.clone(),
+                RuntimeOptions {
+                    device: device.clone(),
+                    language,
+                },
+            );
+            let mut starting = StartingService {
+                host: host.clone(),
+                deadline,
+                armed: true,
+            };
             let capabilities = named.plan.capabilities();
             let association = named.plan.supports_udp_association();
             let policy = named.plan.target_policy();
@@ -260,7 +283,9 @@ impl EgressRuntime {
     }
     /// 返回独立回收收据，供消费 Engine 或丢弃运行实例后继续确认真实任务释放。
     pub fn service_retirements(&self) -> Vec<(OutId, ServiceRetirement)> {
-        self.dispatcher.services.values()
+        self.dispatcher
+            .services
+            .values()
             .map(|service| (service.id.clone(), service.host.retirement()))
             .collect()
     }

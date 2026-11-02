@@ -17,8 +17,17 @@ use kerlico_core::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc, time::{Duration, Instant}};
-use tokio::{net::UdpSocket, sync::{Notify, mpsc}, time::MissedTickBehavior};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::{
+    net::UdpSocket,
+    sync::{Notify, mpsc},
+    time::MissedTickBehavior,
+};
 
 /// 单UDP入口的原生WireGuard多成员节点工厂。
 pub struct WireGuardNodeFactory;
@@ -27,11 +36,15 @@ struct WireGuardNode {
     credentials: CredentialSet<PeerConfig>,
 }
 impl NodeFactory for WireGuardNodeFactory {
-    fn kind(&self) -> &'static str { "wireguard" }
+    fn kind(&self) -> &'static str {
+        "wireguard"
+    }
     fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Options { tunnel: CommonOptions }
+        struct Options {
+            tunnel: CommonOptions,
+        }
         if input.is_local() || input.native_credentials().is_empty() {
             return Err(Error::Config("WireGuard节点必须配置独立认证成员".into()));
         }
@@ -45,14 +58,27 @@ impl NodeFactory for WireGuardNodeFactory {
                 .map_err(|_| Error::Config("WireGuard成员字段不合法".into()))?;
             let peer = options.prepare()?;
             prepared.validate_peer(&peer)?;
-            if !keys.insert(peer.public_key) || peers.iter().any(|other| {
-                peer.allowed.iter().any(|a| other.allowed.iter().any(|b| a.overlaps(b)))
-            }) || prepared.addresses.iter().any(|address| peer.allows(address)) {
-                return Err(Error::Config("WireGuard成员公钥及来源范围必须独立，不能包含节点接口地址".into()));
+            if !keys.insert(peer.public_key)
+                || peers.iter().any(|other| {
+                    peer.allowed
+                        .iter()
+                        .any(|a| other.allowed.iter().any(|b| a.overlaps(b)))
+                })
+                || prepared
+                    .addresses
+                    .iter()
+                    .any(|address| peer.allows(address))
+            {
+                return Err(Error::Config(
+                    "WireGuard成员公钥及来源范围必须独立，不能包含节点接口地址".into(),
+                ));
             }
             peers.push(peer);
         }
-        Ok(Arc::new(WireGuardNode { prepared, credentials: input.credentials(peers)? }))
+        Ok(Arc::new(WireGuardNode {
+            prepared,
+            credentials: input.credentials(peers)?,
+        }))
     }
 }
 fn fingerprint(domain: &[u8], key: &[u8]) -> [u8; 32] {
@@ -64,23 +90,48 @@ fn fingerprint(domain: &[u8], key: &[u8]) -> [u8; 32] {
 impl InboundProtocol for WireGuardNode {
     fn credential_manifest(&self) -> CredentialManifest {
         let mut manifest = CredentialManifest::new();
-        manifest.protection("wireguard", fingerprint(b"wireguard-static", self.prepared.public_key.as_bytes()));
+        manifest.protection(
+            "wireguard",
+            fingerprint(b"wireguard-static", self.prepared.public_key.as_bytes()),
+        );
         for (index, (_, peer)) in self.credentials.rows().enumerate() {
-            manifest.authentication("wireguard", index, fingerprint(b"wireguard-static", &peer.public_key));
+            manifest.authentication(
+                "wireguard",
+                index,
+                fingerprint(b"wireguard-static", &peer.public_key),
+            );
             if let Some(key) = &peer.preshared_key {
                 manifest.protection("wireguard", fingerprint(b"wireguard-psk", &**key));
             }
         }
         manifest
     }
-    fn requires_udp_association(&self) -> bool { true }
-    fn requires_loopback(&self) -> bool { false }
-    fn supports_tcp(&self) -> bool { false }
-    fn supports_udp(&self) -> bool { true }
-    fn handle<'a>(&'a self, _: BoxStream, _: IngressBinding, _: InboundContext) -> BoxFuture<'a, Result<()>> {
+    fn requires_udp_association(&self) -> bool {
+        true
+    }
+    fn requires_loopback(&self) -> bool {
+        false
+    }
+    fn supports_tcp(&self) -> bool {
+        false
+    }
+    fn supports_udp(&self) -> bool {
+        true
+    }
+    fn handle<'a>(
+        &'a self,
+        _: BoxStream,
+        _: IngressBinding,
+        _: InboundContext,
+    ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Err(Error::Unsupported("WireGuard节点仅接受UDP载体")) })
     }
-    fn handle_udp<'a>(&'a self, socket: Arc<UdpSocket>, ingress: IngressBinding, context: InboundContext) -> BoxFuture<'a, Result<()>> {
+    fn handle_udp<'a>(
+        &'a self,
+        socket: Arc<UdpSocket>,
+        ingress: IngressBinding,
+        context: InboundContext,
+    ) -> BoxFuture<'a, Result<()>> {
         Box::pin(self.run(socket, ingress, context))
     }
 }
@@ -92,13 +143,48 @@ struct Peer {
     fragments: Reassembler,
     runtime: Option<RuntimePeer>,
 }
-struct RuntimePeer {
+pub(crate) struct RuntimePeer {
     stack: Arc<SharedStack>,
     access: PeerSession,
     context: InboundContext,
     udp: HashMap<SocketAddr, mpsc::Sender<flows::PendingDatagram>>,
     last_seen: Instant,
     _lease: StreamLease,
+}
+impl RuntimePeer {
+    pub(crate) fn from_tunnel(
+        stack: Arc<SharedStack>,
+        access: PeerSession,
+        context: InboundContext,
+        lease: StreamLease,
+    ) -> Self {
+        Self {
+            stack,
+            access,
+            context,
+            udp: HashMap::new(),
+            last_seen: Instant::now(),
+            _lease: lease,
+        }
+    }
+    pub(crate) fn receive(
+        &mut self,
+        allowed: &[crate::config::Network],
+        fragments: &mut Reassembler,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.udp.retain(|_, sender| !sender.is_closed());
+        self.last_seen = Instant::now();
+        accept_packet(self, allowed, fragments, bytes)
+    }
+    pub(crate) fn active_flows(&self) -> usize {
+        self.stack.flow_count()
+            + self
+                .udp
+                .values()
+                .filter(|sender| !sender.is_closed())
+                .count()
+    }
 }
 impl Drop for RuntimePeer {
     fn drop(&mut self) {
@@ -109,21 +195,49 @@ impl Drop for RuntimePeer {
 }
 
 impl WireGuardNode {
-    async fn run(&self, socket: Arc<UdpSocket>, ingress: IngressBinding, context: InboundContext) -> Result<()> {
+    async fn run(
+        &self,
+        socket: Arc<UdpSocket>,
+        ingress: IngressBinding,
+        context: InboundContext,
+    ) -> Result<()> {
         if !ingress.supports_udp_association() {
             return Err(Error::Unsupported("WireGuard节点需要真实多目标UDP关联"));
         }
-        let configs = self.credentials.rows().map(|(_, config)| config.clone()).collect::<Vec<_>>();
+        let configs = self
+            .credentials
+            .rows()
+            .map(|(_, config)| config.clone())
+            .collect::<Vec<_>>();
         let index = PeerIndex::new(&self.prepared, &configs);
-        let fragment_budget = FragmentBudget::new(self.prepared.limits.fragment_packets, self.prepared.limits.fragment_bytes);
-        let budget = PacketBudget::new(self.prepared.limits.queue_packets, self.prepared.limits.queue_bytes);
+        let fragment_budget = FragmentBudget::new(
+            self.prepared.limits.fragment_packets,
+            self.prepared.limits.fragment_bytes,
+        );
+        let budget = PacketBudget::new(
+            self.prepared.limits.queue_packets,
+            self.prepared.limits.queue_bytes,
+        );
         let notify = Arc::new(Notify::new());
         let carrier = Carrier::Node(ingress.clone());
-        let mut peers = self.credentials.rows().enumerate().map(|(number, (slot, config))| Peer {
-            slot, config: config.clone(),
-            crypto: CryptoPeer::new(&self.prepared, config, number as u32 + 1, None, index.limiter.clone()),
-            fragments: Reassembler::new(fragment_budget.clone()), runtime: None,
-        }).collect::<Vec<_>>();
+        let mut peers = self
+            .credentials
+            .rows()
+            .enumerate()
+            .map(|(number, (slot, config))| Peer {
+                slot,
+                config: config.clone(),
+                crypto: CryptoPeer::new(
+                    &self.prepared,
+                    config,
+                    number as u32 + 1,
+                    None,
+                    index.limiter.clone(),
+                ),
+                fragments: Reassembler::new(fragment_budget.clone()),
+                runtime: None,
+            })
+            .collect::<Vec<_>>();
         let mut input = vec![0; 65536];
         let mut timer = tokio::time::interval(Duration::from_millis(20));
         timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -164,7 +278,7 @@ impl WireGuardNode {
                     }
                     if let Some(bytes) = received.plain
                         && let Some(runtime) = &mut peer.runtime
-                        && let Err(error) = accept_packet(runtime, &peer.config, &mut peer.fragments, &bytes)
+                        && let Err(error) = accept_packet(runtime, &peer.config.allowed, &mut peer.fragments, &bytes)
                     {
                         runtime.context.events.record(if matches!(error, Error::Cancelled) { NodeEvent::Failed } else { NodeEvent::Dropped });
                     }
@@ -172,60 +286,111 @@ impl WireGuardNode {
                 _ = notify.notified() => {}
             }
             for peer in &mut peers {
-                let Some(runtime) = &mut peer.runtime else { continue; };
+                let Some(runtime) = &mut peer.runtime else {
+                    continue;
+                };
                 runtime.udp.retain(|_, sender| !sender.is_closed());
                 if runtime.context.cancel.is_cancelled() {
                     peer.runtime = None;
                     continue;
                 }
                 runtime.stack.poll()?;
-                if runtime.stack.has_output() && !peer.crypto.ready()
+                if runtime.stack.has_output()
+                    && !peer.crypto.ready()
                     && let Some(packet) = peer.crypto.initiate()
                     && let Some(endpoint) = peer.crypto.endpoint
-                { send(&socket, endpoint, &packet, &context.cancel, &carrier).await?; }
+                {
+                    send(&socket, endpoint, &packet, &context.cancel, &carrier).await?;
+                }
                 if peer.crypto.ready() {
                     for packet in runtime.stack.drain(32)? {
-                        if !peer.config.allows(IpPacket::parse(&packet)?.target) { continue; }
+                        if !peer.config.allows(IpPacket::parse(&packet)?.target) {
+                            continue;
+                        }
                         if let Some(packet) = peer.crypto.encrypt(&packet)?
                             && let Some(endpoint) = peer.crypto.endpoint
-                        { send(&socket, endpoint, &packet, &context.cancel, &carrier).await?; }
+                        {
+                            send(&socket, endpoint, &packet, &context.cancel, &carrier).await?;
+                        }
                     }
-                    if runtime.stack.has_output() { notify.notify_one(); }
+                    if runtime.stack.has_output() {
+                        notify.notify_one();
+                    }
                 }
-                if runtime.udp.is_empty() && runtime.stack.flow_count() == 0
+                if runtime.udp.is_empty()
+                    && runtime.stack.flow_count() == 0
                     && runtime.last_seen.elapsed() >= self.prepared.limits.udp_idle()
-                { peer.runtime = None; }
+                {
+                    peer.runtime = None;
+                }
             }
         }
     }
-    fn admit_peer(&self, peer: &Peer, source: SocketAddr, ingress: &IngressBinding, context: &InboundContext, notify: Arc<Notify>, budget: PacketBudget) -> Result<RuntimePeer> {
+    fn admit_peer(
+        &self,
+        peer: &Peer,
+        source: SocketAddr,
+        ingress: &IngressBinding,
+        context: &InboundContext,
+        notify: Arc<Notify>,
+        budget: PacketBudget,
+    ) -> Result<RuntimePeer> {
         let lease = context.stream_budget.try_acquire()?;
         let mut peer_context = context.clone();
         peer_context.cancel = context.cancel.child_token();
         peer_context.peer_addr = Some(source);
         let verified = self.credentials.verified(&peer.slot, ())?;
         let (access, ()) = ingress.authenticated(verified, &peer_context)?;
-        let stack = SharedStack::new(&self.prepared, peer_context.cancel.clone(), notify, peer.config.allowed.clone(), budget)?;
+        let stack = SharedStack::new(
+            &self.prepared,
+            peer_context.cancel.clone(),
+            notify,
+            peer.config.allowed.clone(),
+            budget,
+        )?;
         context.events.record(NodeEvent::Accepted);
-        Ok(RuntimePeer { stack, access, context: peer_context, udp: HashMap::new(), last_seen: Instant::now(), _lease: lease })
+        Ok(RuntimePeer {
+            stack,
+            access,
+            context: peer_context,
+            udp: HashMap::new(),
+            last_seen: Instant::now(),
+            _lease: lease,
+        })
     }
 }
 
-fn accept_packet(peer: &mut RuntimePeer, config: &PeerConfig, fragments: &mut Reassembler, bytes: &[u8]) -> Result<()> {
+fn accept_packet(
+    peer: &mut RuntimePeer,
+    allowed: &[crate::config::Network],
+    fragments: &mut Reassembler,
+    bytes: &[u8],
+) -> Result<()> {
     let packet = IpPacket::parse(bytes)?;
-    if !config.allows(packet.source) { return Err(Error::Rejected); }
+    if !allowed
+        .iter()
+        .any(|network| network.contains(packet.source))
+    {
+        return Err(Error::Rejected);
+    }
     peer.stack.addresses.for_target(packet.target)?;
-    let Some(bytes) = fragments.accept(bytes, Instant::now())? else { return Ok(()); };
+    let Some(bytes) = fragments.accept(bytes, Instant::now())? else {
+        return Ok(());
+    };
     let packet = IpPacket::parse(&bytes)?;
     match packet.protocol {
         6 => accept_tcp(peer, bytes),
         17 => accept_udp(peer, &packet),
         1 | 58 => {
-            if let Some(reply) = control_reply(&bytes, &peer.stack.addresses)? { peer.stack.queue_packet(reply)?; }
+            if let Some(reply) = control_reply(&bytes, &peer.stack.addresses)? {
+                peer.stack.queue_packet(reply)?;
+            }
             Ok(())
         }
         _ => {
-            if let Some(reply) = unreachable(&bytes, &peer.stack.addresses)? { peer.stack.queue_packet(reply)?; }
+            if let Some(reply) = unreachable(&bytes, &peer.stack.addresses)? {
+                peer.stack.queue_packet(reply)?;
+            }
             Err(Error::Unsupported("WireGuard节点不转发该IP协议"))
         }
     }
@@ -233,13 +398,21 @@ fn accept_packet(peer: &mut RuntimePeer, config: &PeerConfig, fragments: &mut Re
 fn accept_tcp(peer: &mut RuntimePeer, bytes: Vec<u8>) -> Result<()> {
     let packet = IpPacket::parse(&bytes)?;
     let tuple = packet.tcp_tuple()?;
-    if peer.stack.contains_tcp(&tuple) { return peer.stack.input_tcp(bytes); }
+    if peer.stack.contains_tcp(&tuple) {
+        return peer.stack.input_tcp(bytes);
+    }
     if packet.tcp_syn()?.is_none() {
-        if let Some(reset) = tcp_reset(&bytes)? { peer.stack.queue_packet(reset)?; }
+        if let Some(reset) = tcp_reset(&bytes)? {
+            peer.stack.queue_packet(reset)?;
+        }
         return Ok(());
     }
-    if peer.stack.flow_count() + peer.udp.len() >= peer.stack.limits.max_flows.min(peer.context.max_streams) {
-        if let Some(reset) = tcp_reset(&bytes)? { peer.stack.queue_packet(reset)?; }
+    if peer.stack.flow_count() + peer.udp.len()
+        >= peer.stack.limits.max_flows.min(peer.context.max_streams)
+    {
+        if let Some(reset) = tcp_reset(&bytes)? {
+            peer.stack.queue_packet(reset)?;
+        }
         return Err(Error::ResourceLimit);
     }
     let lease = peer.context.stream_budget.try_acquire()?;
@@ -251,14 +424,21 @@ fn accept_tcp(peer: &mut RuntimePeer, bytes: Vec<u8>) -> Result<()> {
     let target = destination(tuple.target)?;
     let events = context.events.clone();
     let owner = context.tasks.clone();
-    owner.spawn(async move { flows::tcp(stream, access, target, context, lease).await; })?;
+    owner.spawn(async move {
+        flows::tcp(stream, access, target, context, lease).await;
+    })?;
     events.record(NodeEvent::Accepted);
     Ok(())
 }
 fn accept_udp(peer: &mut RuntimePeer, packet: &IpPacket<'_>) -> Result<()> {
     let (tuple, payload) = packet.udp()?;
-    if payload.len() > peer.context.max_datagram_size { return Err(Error::ResourceLimit); }
-    let mut pending = flows::PendingDatagram { target: tuple.target, packet: peer.stack.budget.packet(payload.to_vec(), false)? };
+    if payload.len() > peer.context.max_datagram_size {
+        return Err(Error::ResourceLimit);
+    }
+    let mut pending = flows::PendingDatagram {
+        target: tuple.target,
+        packet: peer.stack.budget.packet(payload.to_vec(), false)?,
+    };
     if let Some(sender) = peer.udp.get(&tuple.source) {
         match sender.try_send(pending) {
             Ok(()) => return Ok(()),
@@ -267,7 +447,9 @@ fn accept_udp(peer: &mut RuntimePeer, packet: &IpPacket<'_>) -> Result<()> {
         }
         peer.udp.remove(&tuple.source);
     }
-    if peer.stack.flow_count() + peer.udp.len() >= peer.stack.limits.max_flows.min(peer.context.max_streams) {
+    if peer.stack.flow_count() + peer.udp.len()
+        >= peer.stack.limits.max_flows.min(peer.context.max_streams)
+    {
         return Err(Error::ResourceLimit);
     }
     let lease = peer.context.stream_budget.try_acquire()?;
@@ -278,7 +460,9 @@ fn accept_udp(peer: &mut RuntimePeer, packet: &IpPacket<'_>) -> Result<()> {
     let context = peer.context.clone();
     let events = context.events.clone();
     let owner = context.tasks.clone();
-    owner.spawn(async move { flows::udp(stack, tuple.source, packets, access, context, lease).await; })?;
+    owner.spawn(async move {
+        flows::udp(stack, tuple.source, packets, access, context, lease).await;
+    })?;
     peer.udp.insert(tuple.source, sender);
     events.record(NodeEvent::Accepted);
     Ok(())

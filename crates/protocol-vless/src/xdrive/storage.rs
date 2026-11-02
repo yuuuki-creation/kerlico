@@ -73,7 +73,7 @@ enum Backend {
         secrets: Vec<String>,
     },
     Template {
-        template: Template,
+        template: Box<Template>,
         names: regex::Regex,
         folder: String,
         secrets: Vec<String>,
@@ -113,7 +113,7 @@ impl Plan {
                     concurrency,
                 } => Arc::new(Templated {
                     client,
-                    template: template.clone(),
+                    template: template.as_ref().clone(),
                     names: names.clone(),
                     folder: folder.clone(),
                     secrets: secrets.clone(),
@@ -176,7 +176,7 @@ pub(crate) fn compile(settings: &Settings, ca: Option<&str>) -> Result<Plan> {
                 template.concurrency
             };
             Backend::Template {
-                template,
+                template: Box::new(template),
                 names,
                 folder: settings.remote_folder.clone(),
                 secrets: settings.secrets.clone(),

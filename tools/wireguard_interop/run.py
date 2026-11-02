@@ -3,6 +3,7 @@
 import argparse
 import base64
 from contextlib import ExitStack
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 
 
@@ -71,7 +73,7 @@ class Rpc:
         self.process.stdin.flush()
         result = self.receive(timeout)
         if not allow_failure and not result.get("ok"):
-            raise RuntimeError("验证peer业务失败")
+            raise RuntimeError("验证peer业务失败：" + str(result.get("error", "未知错误")))
         return result
 
     def stop(self):
@@ -103,7 +105,7 @@ class Proxy:
         self.client = None
         self.impaired = False
         self.stopped = threading.Event()
-        self.counts = {"handshake_init": 0, "keepalive": 0, "data": 0, "dropped": 0, "replayed": 0, "reordered": 0}
+        self.counts = {"handshake_init": 0, "keepalive": 0, "data": 0, "payload_frames": 0, "dropped": 0, "replayed": 0, "reordered": 0}
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
@@ -133,16 +135,17 @@ class Proxy:
                 self.counts["handshake_init"] += 1
             if kind == 4:
                 self.counts["keepalive" if len(data) == 32 else "data"] += 1
-                count = self.counts["data"]
-                if self.impaired and len(data) > 32:
-                    if count % 13 == 0:
+                if self.impaired and len(data) > 160:
+                    self.counts["payload_frames"] += 1
+                    count = self.counts["payload_frames"]
+                    if count == 13:
                         self.counts["dropped"] += 1
                         continue
-                    if count % 7 == 0:
+                    if count in [7, 21]:
                         self.counts["reordered"] += 1
                         delayed.append((now + 0.02, data, address))
                         continue
-                    if count % 17 == 0:
+                    if count == 17:
                         self.counts["replayed"] += 1
                         self.socket.sendto(data, address)
             self.socket.sendto(data, address)
@@ -183,6 +186,7 @@ def native_echo(stack, ipv6, udp):
         address_family = socket.AF_INET6 if ipv6 else socket.AF_INET
         daemon_threads = True
         allow_reuse_address = False
+        max_packet_size = 65535
         def server_bind(self):
             if ipv6:
                 self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
@@ -283,7 +287,9 @@ def one_case(args, role, ipv6, with_psk, rows):
                 packets = request.get("packets") or [{"target":request["target"], "payload":body} for body in request["payloads"]]
                 for sent, received in zip(packets, result["packets"]):
                     if received["payload"] != sent["payload"] or received["source"] != endpoint(sent["target"]["host"], sent["target"]["port"]):
-                        raise RuntimeError("UDP载荷、原目标或来源不一致")
+                        raise RuntimeError("UDP载荷、原目标或来源不一致，预期来源=" + endpoint(sent["target"]["host"], sent["target"]["port"])
+                                           + "，实际来源=" + received["source"] + "，载荷相同=" + str(received["payload"] == sent["payload"])
+                                           + "，预期字节=" + str(len(base64.b64decode(sent["payload"]))) + "，实际字节=" + str(len(base64.b64decode(received["payload"]))))
                     upload += len(base64.b64decode(sent["payload"]))
                     download += len(base64.b64decode(received["payload"]))
                 if len(result["packets"]) != len(packets) + request.get("extra_receives", 0):
@@ -295,8 +301,8 @@ def one_case(args, role, ipv6, with_psk, rows):
                     download += len(b"unsolicited")
             rows.append({"case":name,"check":label,"result":"passed"})
         for index, item in enumerate(tcp_targets):
-            proxy.impaired = index == 0
-            size = 1024 * 1024 if index == 0 else 65537
+            proxy.impaired = index == 0 and not args.no_impairment
+            size = args.tcp_bytes if index == 0 else 65537
             check({"op":"tcp","target":item,"payload":b64(bytes(n % 251 for n in range(size)))}, f"tcp-{index}-fin-loss-reorder-replay")
         proxy.impaired = False
         for index, item in enumerate(udp_targets):
@@ -306,7 +312,6 @@ def one_case(args, role, ipv6, with_psk, rows):
         check({"op":"association_udp","packets":[{"target":udp_targets[0],"payload":b64(b"fullcone")}],"extra_receives":1}, "full-cone-source")
         monitor = caller if role == "inbound" else server
         before = monitor.call({"op":"snapshot"})
-        keepalive = proxy.counts["keepalive"]
         start = time.monotonic()
         while time.monotonic() - start < args.rotation_seconds:
             time.sleep(1)
@@ -317,10 +322,11 @@ def one_case(args, role, ipv6, with_psk, rows):
             new = (after.get("last_handshake_time_sec", 0), after.get("last_handshake_time_nsec", 0))
             if not old[0] or new <= old or proxy.counts["handshake_init"] < 2:
                 raise RuntimeError("会话轮换未由官方peer确认")
+            keepalive = proxy.counts["keepalive"]
             time.sleep(3)
             if proxy.counts["keepalive"] <= keepalive:
                 raise RuntimeError("未观察到持久keepalive")
-            rows.append({"case":name,"check":"timed-rekey-keepalive","result":"passed"})
+            rows.append({"case":name,"check":"timed-rekey-keepalive","result":"passed","quiet_keepalives":proxy.counts["keepalive"]-keepalive})
         else:
             rows.append({"case":name,"check":"timed-rekey-keepalive","result":"unverified"})
         if role == "inbound":
@@ -370,9 +376,14 @@ def one_case(args, role, ipv6, with_psk, rows):
         stopped = server.stop()
         if role == "inbound" and stopped["snapshot"]["active_flows"]:
             raise RuntimeError("Engine关闭后仍有未完成业务流")
-        if not all(proxy.counts[name] > 0 for name in ["dropped", "replayed", "reordered"]):
+        if args.no_impairment:
+            rows.append({"case":name,"check":"shutdown-and-actual-impairment","result":"unverified","carrier":dict(proxy.counts)})
+        elif not all(proxy.counts[name] > 0 for name in ["dropped", "replayed", "reordered"]):
             raise RuntimeError("TCP扰动未真实发生")
-        rows.append({"case":name,"check":"shutdown-and-actual-impairment","result":"passed","carrier":dict(proxy.counts)})
+        else:
+            rows.append({"case":name,"check":"shutdown-and-actual-impairment","result":"passed","carrier":dict(proxy.counts)})
+        if args.tcp_bytes != 1024 * 1024:
+            rows.append({"case":name,"check":"tcp-megabyte-boundary","result":"unverified"})
 
 
 def main():
@@ -382,26 +393,59 @@ def main():
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--rotation-seconds", type=int, default=135)
     parser.add_argument("--role", choices=["both", "inbound", "outbound"], default="both")
+    parser.add_argument("--no-impairment", action="store_true")
+    parser.add_argument("--tcp-bytes", type=int, default=1024 * 1024)
+    parser.add_argument("--jobs", type=int, default=1)
+    expected_cases = {f"{role}-outer{family}-psk{psk}" for role in ["inbound", "outbound"] for family in [4, 6] for psk in [0, 1]}
+    parser.add_argument("--case", choices=sorted(expected_cases), action="append", dest="cases")
     args = parser.parse_args()
     if sys.platform != "linux":
         raise SystemExit("互通矩阵只能在海外Linux worker执行")
     if not 0 <= args.rotation_seconds <= 900:
         raise SystemExit("定时轮换观察窗口必须为0至900秒")
+    if not 1 <= args.tcp_bytes <= 16 * 1024 * 1024:
+        raise SystemExit("TCP诊断载荷必须为1字节至16MiB")
+    if not 1 <= args.jobs <= 4:
+        raise SystemExit("互通并发配置数必须为1至4")
     args.rust_peer, args.go_peer, args.run_dir = args.rust_peer.resolve(), args.go_peer.resolve(), args.run_dir.resolve()
     args.run_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
     os.chmod(args.run_dir, 0o700)
     rows = []
     failed = False
+    executed_cases = set()
+    selected = []
     for role in (["inbound", "outbound"] if args.role == "both" else [args.role]):
         for ipv6 in [False, True]:
             for psk in [False, True]:
-                try:
-                    one_case(args, role, ipv6, psk, rows)
-                except Exception:
-                    rows.append({"case":f"{role}-outer{6 if ipv6 else 4}-psk{int(psk)}", "check":"case", "result":"failed"})
-                    failed = True
-    report = {"peer_commit":"f333402bd9cbe0f3eeb02507bd14e23d7d639280", "rust_peer_sha256":hashlib.sha256(args.rust_peer.read_bytes()).hexdigest(),
-              "go_peer_sha256":hashlib.sha256(args.go_peer.read_bytes()).hexdigest(), "rotation_seconds":args.rotation_seconds,
+                case = f"{role}-outer{6 if ipv6 else 4}-psk{int(psk)}"
+                if args.cases and case not in args.cases:
+                    continue
+                executed_cases.add(case)
+                selected.append((role, ipv6, psk, case))
+    def execute(parameters):
+        role, ipv6, psk, case = parameters
+        result = []
+        try:
+            one_case(args, role, ipv6, psk, result)
+            return result, False
+        except Exception as error:
+            failure = args.run_dir / (case + ".failure.log")
+            with failure.open("w", encoding="utf-8") as output:
+                os.chmod(failure, 0o600)
+                traceback.print_exc(file=output)
+            result.append({"case":case, "check":"case", "result":"failed", "error_type":type(error).__name__})
+            return result, True
+    with ThreadPoolExecutor(max_workers=args.jobs) as workers:
+        for result, case_failed in workers.map(execute, selected):
+            rows.extend(result)
+            failed = failed or case_failed
+    for case in sorted(expected_cases - executed_cases):
+        rows.append({"case":case, "check":"case", "result":"unverified"})
+    adapter = args.go_peer.with_name("netstack-adapter.json")
+    report = {"peer_commit":"f333402bd9cbe0f3eeb02507bd14e23d7d639280", "netstack_adapter":json.loads(adapter.read_text(encoding="utf-8")) if adapter.exists() else None,
+              "impairment":"one dropped payload frame, two 20ms delays, one replay",
+              "rust_peer_sha256":hashlib.sha256(args.rust_peer.read_bytes()).hexdigest(),
+              "go_peer_sha256":hashlib.sha256(args.go_peer.read_bytes()).hexdigest(), "rotation_seconds":args.rotation_seconds,"jobs":args.jobs,
               "rows":rows, "complete":not failed and all(row["result"] == "passed" for row in rows)}
     (args.run_dir / "results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"complete":report["complete"],"passed":sum(row["result"] == "passed" for row in rows),

@@ -35,13 +35,20 @@ def flows(path, node):
         if skip is None:
             raise RuntimeError("本工具未实现该链路类型")
         packet = packet[skip:]
-        if not packet or packet[0] >> 4 != 4 or packet[9] != 6:
+        if not packet:
             continue
-        ip_header = (packet[0] & 15) * 4
-        tcp = packet[ip_header:int.from_bytes(packet[2:4], "big")]
+        if packet[0] >> 4 == 4 and len(packet) >= 20 and packet[9] == 6:
+            ip_header = (packet[0] & 15) * 4
+            tcp = packet[ip_header:int.from_bytes(packet[2:4], "big")]
+        elif packet[0] >> 4 == 6 and len(packet) >= 40 and packet[6] == 6:
+            tcp = packet[40:40 + int.from_bytes(packet[4:6], "big")]
+        else:
+            continue
         if len(tcp) < 20:
             continue
         src, dst, sequence = struct.unpack("!HHI", tcp[:8])
+        if src != node and dst != node:
+            continue
         direction, peer = ("c", src) if dst == node else ("s", dst)
         flags, offset = tcp[13], (tcp[12] >> 4) * 4
         body = tcp[offset:]
@@ -139,7 +146,9 @@ def reference_decoder(args, cipher, method, capture_epoch):
     except Exception as failure:
         error = type(failure).__name__
     expected = b"shadowsocks-interoperability|" * 2048
-    return {"cipher_plain_bytes": len(plain), "protocol_plain_bytes": len(decoded), "protocol_error": error, "reference_raw_trans": bool(getattr(layer.obfs, "raw_trans", False)), "address_prefix_valid": decoded[:5] == b"\x01\x7f\0\0\x01", "payload_is_original_prefix": len(decoded) >= 7 and decoded[7:] == expected[:len(decoded) - 7], "received_auth_header": bool(getattr(layer.obfs, "has_recv_header", False))}
+    prefix = b"\x04" + b"\0" * 15 + b"\x01" if args.target_host == "::1" else b"\x01\x7f\0\0\x01"
+    offset = len(prefix) + 2
+    return {"cipher_plain_bytes": len(plain), "protocol_plain_bytes": len(decoded), "protocol_error": error, "reference_raw_trans": bool(getattr(layer.obfs, "raw_trans", False)), "address_prefix_valid": decoded[:len(prefix)] == prefix, "payload_is_original_prefix": len(decoded) >= offset and decoded[offset:] == expected[:len(decoded) - offset], "received_auth_header": bool(getattr(layer.obfs, "has_recv_header", False))}
 
 
 def main(args):
@@ -158,8 +167,9 @@ def main(args):
     method = ("none" if args.protocol.startswith("auth_chain") else "aes-128-cfb") if args.method == "auto" else args.method.replace("cfb128", "cfb")
     cipher = client
     if args.obfs == "random_head":
-        head = next((size for size in range(8, min(len(client), 103) + 1) if binascii.crc32(client[:size]) == 0xffffffff), None)
-        result.update(random_head_crc_valid=head is not None, random_head_bytes=head, server_first_write_bytes=flow["first_s_bytes"])
+        heads = [size for size in range(8, min(len(client), 103) + 1) if binascii.crc32(client[:size]) == 0xffffffff]
+        head = next(iter(heads), None)
+        result.update(random_head_crc_valid=head is not None, random_head_bytes=head, random_head_crc_boundaries=heads, server_first_write_bytes=flow["first_s_bytes"])
         if head is None:
             print(json.dumps(result))
             return
@@ -188,4 +198,5 @@ if __name__ == "__main__":
     parser.add_argument("--protocol", choices=t.PROTOCOLS, required=True)
     parser.add_argument("--obfs", choices=["random_head", "tls1.2_ticket_auth", "tls1.2_ticket_fastauth"], required=True)
     parser.add_argument("--method", default="auto")
+    parser.add_argument("--target-host", choices=["127.0.0.1", "::1"], default="127.0.0.1")
     main(parser.parse_args())

@@ -1,10 +1,10 @@
 # Sudoku 独立验证工具
 
-状态：固定Mihomo与官方原生CLI已在perf-01用项目内Go1.27.2构建成功，生产源码变更均为0；没有启动监听或互通。纯向量导出与原生构建分别记录于SOURCE.json，CLI配置/矩阵工具仍待执行。仅在专用worker的项目目录运行；所有可执行入口核对Linux、/proc和显式`KERLICO_WORKER_ALIAS=perf-01`（也可perf-02/03），本地直接拒绝。别名只是防误用门禁，不替代实际远端授权。没有本地构建、检查、测试或互通结果。工具不嵌入Rust内核，Python只编排进程/测试目标，Go完整对端始终是固定原生参考程序。
+固定Mihomo与官方原生CLI已在perf-01用项目内Go1.27.2构建成功，生产源码变更均为0，实际矩阵结果见[测试记录](../../docs/testing/sudoku.md)。纯向量导出与原生构建分别记录于SOURCE.json。仅在专用worker的项目目录运行；所有可执行入口核对Linux、/proc和显式`KERLICO_WORKER_ALIAS=perf-01`（也可perf-02/03），本地直接拒绝。别名只是防误用门禁，不替代实际远端授权。没有本地构建、检查、测试或互通结果。工具不嵌入Rust内核，Python只编排进程/测试目标，Go完整对端始终是固定原生参考程序。
 
 ## 固定来源
 
-`SOURCE.json`固定Mihomo提交、归档摘要和涉及的生产文件摘要；官方Sudoku固定v0.5.2.0提交及go.mod/go.sum。主任务已只读核对官方原始归档SHA256及318文件与缓存相同，prepare已强制核对该归档SHA256并完成原生构建；尚未运行原生程序监听或互通。不能把研究用Mihomo向量探针、其他版本的发行二进制或官方Go程序视作同一个对端。
+`SOURCE.json`固定Mihomo提交、归档摘要和涉及的生产文件摘要；官方Sudoku固定v0.5.2.0提交及go.mod/go.sum。主任务已只读核对官方原始归档SHA256及318文件与缓存相同，prepare已强制核对该归档SHA256并完成原生构建。不能把研究用Mihomo向量探针、其他版本的发行二进制或官方Go程序视作同一个对端。
 
 `prepare_peers.py`只把原始固定归档解压到新项目标签，校验固定文件、记录全部源文件和二进制摘要，保留原许可证并构建原程序。使用`go build -mod=readonly`并在构建后复核全源清单，生产源码变更为0；不使用Go/Python承载kerlico业务。现有固定资产满足同一来源和摘要时应直接复用，不重复下载。Go工具链需由worker项目已有路径提供；`GOTOOLCHAIN=local`，不安装或自动下载工具链。官方当前go.mod要求Go1.27.2，SOURCE.json已固定并记录官方Linux amd64工具链URL、SHA256、长度及项目内实际版本/二进制摘要，不能沿用旧研究探针的Go1.26.10而宣称构建成功。
 
@@ -52,7 +52,7 @@ openssl req -x509 -newkey ed25519 -nodes -days 2 -subj /CN=localhost -addext sub
 - tls：split的H1/H2和WS H1；自端可强制版本。参考client只有自动版本时另记边界和auto结果，不把它记作强制H1/H2通过。原参考server无证书/私钥字段，工具不添加外部终止器冒充原生服务端TLS。
 - rekey：两AEAD、raw/stream/poll/ws、mux on，真实33MiB双向内容和尾部检查，不修改阈值。
 - credentials：先用同参数正确seed完成真实TCP控制，再换错误seed，有界拒绝且无目标数据，不得回退到其他身份；配置工具另查双节点独立/重复seed和none门槛。
-- lifecycle：有活动流时停止该标签服务进程，观察关闭，再在同端点重启并读写。只终止自身创建的进程组，不接触其他服务。
+- lifecycle：有活动流时停止该标签服务进程，观察关闭，再在同端点重启并读写。固定官方split客户端的旧会话关闭与恢复限制记为`reference_boundary`，随后重建参考客户端，另记`restart-fresh-reference-client`结果。首次新请求前的参考端停滞与业务数据丢失分开记录，部分数据或尾部丢失仍计失败。只终止自身创建的进程组，不接触其他服务。
 
 TCP目标包括IPv4、IPv6和localhost域名，后者只使用本地解析。每包UDP记录0/17/4096/64000/65507字节和来源；参考client经一个原生SOCKS控制连接访问多目标并检查跨族源端口。kerlico client的UDP-forward逐入口固定目标，不把它称为共享多目标关联；真实Full Cone及未预联系来源另由Rust Direct出口集成测试验收。SOCKS入口增加地址首部后可能先超过本地UDP65507上限；该包尚未进入Sudoku，记录entry_limit，不把不发送视作通过。
 

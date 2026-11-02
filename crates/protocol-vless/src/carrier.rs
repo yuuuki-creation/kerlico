@@ -32,7 +32,7 @@ enum LayerPlan {
     HttpUpgrade(HttpUpgradeConfig),
     Grpc(GrpcConfig),
     Xhttp {
-        config: XhttpConfig,
+        config: Box<XhttpConfig>,
         endpoint: XhttpEndpoint,
         version: XhttpHttpVersion,
     },
@@ -50,7 +50,7 @@ impl LayerPlan {
                 version,
             } => TransportLayer::Xhttp(
                 XhttpTransport::new(
-                    config.clone(),
+                    config.as_ref().clone(),
                     endpoint.clone(),
                     *version,
                     XhttpXmuxPolicy::default(),
@@ -657,7 +657,7 @@ fn xhttp(
     )
     .map_err(|_| invalid())?;
     Ok(LayerPlan::Xhttp {
-        config,
+        config: Box::new(config),
         endpoint,
         version,
     })

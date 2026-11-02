@@ -1,6 +1,8 @@
 //! 命名服务的任务所有权与请求资源作用域。
 
-use crate::{CancellationToken, DeviceLease, Error, OutId, Result, Source};
+use crate::{
+    CancellationToken, DeviceLease, Error, Language, OutId, Result, RuntimeOptions, Source,
+};
 use std::{
     future::Future,
     pin::Pin,
@@ -62,15 +64,22 @@ impl ServiceFailure {
 
 #[derive(Clone, Default)]
 pub struct ServiceStatus {
+    language: Language,
     cancel: CancellationToken,
     failure: Arc<Mutex<Option<ServiceFailure>>>,
 }
 impl ServiceStatus {
+    pub fn language(&self) -> Language {
+        self.language
+    }
     pub(crate) fn cancel(&self) -> CancellationToken {
         self.cancel.clone()
     }
     pub fn failure(&self) -> Option<ServiceFailure> {
-        *self.failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        *self
+            .failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
     fn fail(&self, failure: ServiceFailure) {
         self.record_failure(failure);
@@ -83,7 +92,8 @@ impl ServiceStatus {
             .get_or_insert(failure);
     }
     pub(crate) fn error(&self) -> Error {
-        self.failure().map_or(Error::Cancelled, ServiceFailure::error)
+        self.failure()
+            .map_or(Error::Cancelled, ServiceFailure::error)
     }
     pub(crate) fn check(&self) -> Result<()> {
         if let Some(failure) = self.failure() {
@@ -155,7 +165,8 @@ struct JoinedEffects {
 }
 
 fn reclaim_opaque<T>(value: T) -> Option<PanicPayload> {
-    let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value))) else {
+    let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value)))
+    else {
         return None;
     };
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload))).err()
@@ -176,8 +187,12 @@ impl Drop for FailureGuard {
 struct TaskStamp(FailureGuard);
 impl Drop for TaskStamp {
     fn drop(&mut self) {
-        *self.0.facts.completed_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Some(Instant::now());
+        *self
+            .0
+            .facts
+            .completed_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
     }
 }
 impl TaskFacts {
@@ -191,7 +206,10 @@ impl TaskFacts {
         }
     }
     fn completed_at(&self) -> Option<Instant> {
-        *self.completed_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        *self
+            .completed_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -236,22 +254,32 @@ struct ReaperWake {
 }
 impl ReaperWake {
     fn notify(&self) {
-        *self.notified.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        *self
+            .notified
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
         self.changed.notify_one();
     }
     fn wait(&self, deadline: Option<Instant>) {
-        let mut notified = self.notified.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut notified = self
+            .notified
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         while !*notified {
             if let Some(deadline) = deadline {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     return;
                 }
-                let result = self.changed.wait_timeout(notified, remaining)
+                let result = self
+                    .changed
+                    .wait_timeout(notified, remaining)
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 notified = result.0;
             } else {
-                notified = self.changed.wait(notified)
+                notified = self
+                    .changed
+                    .wait(notified)
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
         }
@@ -287,10 +315,17 @@ impl TaskSet {
                 effects.cancel = true;
             }
             let completed = facts.completed_at().expect("真实 join 前已析构任务资源");
-            self.latest_completion = Some(self.latest_completion.map_or(completed, |last| last.max(completed)));
+            self.latest_completion = Some(
+                self.latest_completion
+                    .map_or(completed, |last| last.max(completed)),
+            );
         }
-        let Some(progress) = &mut self.progress else { return effects; };
-        if self.latest_completion.is_some_and(|completed| completed > progress.deadline)
+        let Some(progress) = &mut self.progress else {
+            return effects;
+        };
+        if self
+            .latest_completion
+            .is_some_and(|completed| completed > progress.deadline)
             || self.facts.values().any(|facts| match facts.completed_at() {
                 Some(completed) => completed > progress.deadline,
                 None => Instant::now() >= progress.deadline,
@@ -310,16 +345,22 @@ impl TaskSet {
         self.tasks.is_empty() && self.reclaiming == 0 && self.retained_panics.is_empty()
     }
     fn report(&self, registry: &TaskRegistry) -> ShutdownReport {
-        let mut report = self.progress.as_ref().map_or_else(ShutdownReport::default, |p| p.report.clone());
+        let mut report = self
+            .progress
+            .as_ref()
+            .map_or_else(ShutdownReport::default, |p| p.report.clone());
         report.failed_tasks = registry.failed.load(Ordering::Acquire);
         report
     }
 }
 impl TaskRegistry {
-    fn new() -> Self {
+    fn new(language: Language) -> Self {
         Self {
             state: Mutex::new(TaskSet::default()),
-            service: ServiceStatus::default(),
+            service: ServiceStatus {
+                language,
+                ..ServiceStatus::default()
+            },
             failed: Arc::new(AtomicUsize::new(0)),
             wake: Arc::new(ReaperWake::default()),
             changed: tokio::sync::Notify::new(),
@@ -338,7 +379,10 @@ impl TaskRegistry {
     fn reap(&self) {
         loop {
             self.collect();
-            let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let retired = state.progress.is_some() && state.is_drained();
             let wake_at = state.progress.as_ref().and_then(|progress| {
                 if !progress.forced {
@@ -358,7 +402,10 @@ impl TaskRegistry {
         }
     }
     fn retire(&self, deadline: Instant) {
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Instant::now();
         state.progress.get_or_insert_with(|| DrainProgress {
             deadline,
@@ -375,19 +422,26 @@ impl TaskRegistry {
     fn finish_if_drained(&self) -> Option<ShutdownReport> {
         self.collect();
         let worker = {
-            let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if state.progress.is_none() || !state.is_drained() {
                 return None;
             }
             match &state.worker {
                 ReaperThread::Unstarted | ReaperThread::Joined => return Some(state.report(self)),
                 ReaperThread::Joining => return None,
-                ReaperThread::Running(worker) if worker.thread().id() == std::thread::current().id() => {
+                ReaperThread::Running(worker)
+                    if worker.thread().id() == std::thread::current().id() =>
+                {
                     return None;
                 }
                 ReaperThread::Running(_) => {}
             }
-            let ReaperThread::Running(worker) = std::mem::replace(&mut state.worker, ReaperThread::Joining) else {
+            let ReaperThread::Running(worker) =
+                std::mem::replace(&mut state.worker, ReaperThread::Joining)
+            else {
                 unreachable!()
             };
             worker
@@ -395,14 +449,21 @@ impl TaskRegistry {
         self.wake.notify();
         if let Err(payload) = worker.join() {
             self.failed.fetch_add(1, Ordering::AcqRel);
-            self.service.record_failure(ServiceFailure::Protocol("服务回收线程异常退出"));
+            self.service
+                .record_failure(ServiceFailure::Protocol("服务回收线程异常退出"));
             if let Some(payload) = reclaim_opaque(payload) {
-                self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .retained_panics.push(std::mem::ManuallyDrop::new(payload));
+                self.state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .retained_panics
+                    .push(std::mem::ManuallyDrop::new(payload));
             }
             self.service.cancel.cancel();
         }
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.worker = ReaperThread::Joined;
         let report = state.is_drained().then(|| state.report(self));
         drop(state);
@@ -411,7 +472,10 @@ impl TaskRegistry {
     }
     fn collect(&self) {
         let (effects, reclaiming) = {
-            let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let effects = state.collect(self);
             let reclaiming = !effects.errors.is_empty() || effects.cancel;
             if reclaiming {
@@ -419,19 +483,27 @@ impl TaskRegistry {
             }
             (effects, reclaiming)
         };
-        let retained = effects.errors.into_iter()
+        let retained = effects
+            .errors
+            .into_iter()
             .filter_map(reclaim_opaque)
             .map(std::mem::ManuallyDrop::new)
             .collect::<Vec<_>>();
         if !retained.is_empty() {
-            self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-                .retained_panics.extend(retained);
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retained_panics
+                .extend(retained);
         }
         if effects.cancel {
             self.service.cancel.cancel();
         }
         if reclaiming {
-            self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).reclaiming -= 1;
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .reclaiming -= 1;
         }
         if effects.joined || reclaiming {
             self.wake.notify();
@@ -516,19 +588,25 @@ impl ShutdownReport {
 
 impl ServiceContext {
     pub fn new(id: OutId) -> Self {
-        Self::assemble(id, None)
+        Self::assemble(id, None, Language::default())
     }
     pub fn with_device(id: OutId, device: DeviceLease) -> Self {
-        Self::assemble(id, Some(device))
+        Self::with_options(id, RuntimeOptions::new(device))
     }
-    fn assemble(id: OutId, device: Option<DeviceLease>) -> Self {
+    pub fn with_options(id: OutId, options: RuntimeOptions) -> Self {
+        Self::assemble(id, Some(options.device), options.language)
+    }
+    fn assemble(id: OutId, device: Option<DeviceLease>, language: Language) -> Self {
         Self(Arc::new(ServiceOwner {
             instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
             id,
             device,
             carrier: crate::carrier::CarrierCounter::default(),
-            registry: Arc::new(TaskRegistry::new()),
+            registry: Arc::new(TaskRegistry::new(language)),
         }))
+    }
+    pub fn language(&self) -> Language {
+        self.0.registry.service.language()
     }
     pub fn for_test() -> Self {
         Self::new(OutId::parse("test-service").expect("固定测试标识"))
@@ -557,7 +635,15 @@ impl ServiceContext {
     }
     pub fn check(&self) -> Result<()> {
         self.0.registry.service.check()?;
-        if self.0.registry.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).progress.is_some() {
+        if self
+            .0
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .progress
+            .is_some()
+        {
             Err(Error::Cancelled)
         } else {
             Ok(())
@@ -589,7 +675,10 @@ impl ServiceContext {
         T: Send + 'static,
     {
         let registry = &self.0.registry;
-        let mut state = registry.state.lock().map_err(|_| Error::Protocol("服务任务所有者已损坏"))?;
+        let mut state = registry
+            .state
+            .lock()
+            .map_err(|_| Error::Protocol("服务任务所有者已损坏"))?;
         registry.service.check()?;
         if state.progress.is_some() {
             return Err(Error::Cancelled);
@@ -599,7 +688,10 @@ impl ServiceContext {
         let stamp = registry.stamp();
         let facts = stamp.0.facts.clone();
         let abort = state.tasks.spawn(TrackedFuture {
-            task: Box::pin(task), _failure: stamp.0.clone(), send: Some(send), _stamp: stamp,
+            task: Box::pin(task),
+            _failure: stamp.0.clone(),
+            send: Some(send),
+            _stamp: stamp,
         });
         state.facts.insert(abort.id(), facts);
         drop(state);
@@ -614,7 +706,10 @@ impl ServiceContext {
         T: Send + 'static,
     {
         let registry = &self.0.registry;
-        let mut state = registry.state.lock().map_err(|_| Error::Protocol("服务任务所有者已损坏"))?;
+        let mut state = registry
+            .state
+            .lock()
+            .map_err(|_| Error::Protocol("服务任务所有者已损坏"))?;
         registry.service.check()?;
         if state.progress.is_some() {
             return Err(Error::Cancelled);
@@ -623,7 +718,12 @@ impl ServiceContext {
         let (send, result) = tokio::sync::oneshot::channel();
         let stamp = registry.stamp();
         let facts = stamp.0.facts.clone();
-        let tracked = TrackedBlocking { task: Some(task), _failure: stamp.0.clone(), send: Some(send), _stamp: stamp };
+        let tracked = TrackedBlocking {
+            task: Some(task),
+            _failure: stamp.0.clone(),
+            send: Some(send),
+            _stamp: stamp,
+        };
         let abort = state.tasks.spawn_blocking(move || tracked.run());
         state.facts.insert(abort.id(), facts);
         drop(state);
@@ -635,8 +735,14 @@ impl ServiceContext {
     pub async fn shutdown(&self, deadline: Instant) -> ShutdownReport {
         self.retire(deadline);
         let registry = &self.0.registry;
-        let first_deadline = registry.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-            .progress.as_ref().expect("关闭期限已固定").deadline;
+        let first_deadline = registry
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .progress
+            .as_ref()
+            .expect("关闭期限已固定")
+            .deadline;
         let wait_deadline = deadline.min(first_deadline);
         loop {
             let changed = registry.changed.notified();
@@ -647,7 +753,10 @@ impl ServiceContext {
             }
             if Instant::now() >= wait_deadline {
                 registry.collect();
-                let state = registry.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let state = registry
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let mut report = state.report(registry);
                 report.timed_out = true;
                 return report;

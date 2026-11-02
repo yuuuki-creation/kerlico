@@ -70,10 +70,33 @@ def main():
         raise SystemExit("固定官方源码缓存含额外或缺失文件")
     if digest((upstream / "go.sum").read_bytes()) != source["go_sum_sha256"]:
         raise SystemExit("官方依赖摘要表不匹配")
+    adapted = cache / "peer-wireguard-go"
+    original_tun = (upstream / "tun/netstack/tun.go").read_bytes()
+    old_factories = b"[]stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol}"
+    new_factories = b"[]stack.NetworkProtocolFactory{ipv4.NewProtocolWithOptions(ipv4.Options{AllowExternalLoopbackTraffic: true}), ipv6.NewProtocolWithOptions(ipv6.Options{AllowExternalLoopbackTraffic: true})}"
+    if original_tun.count(old_factories) != 1:
+        raise SystemExit("固定netstack工厂定义与回环适配前提不符")
+    adapted_tun = original_tun.replace(old_factories, new_factories)
+    if not adapted.exists():
+        shutil.copytree(upstream, adapted)
+        (adapted / "tun/netstack/tun.go").write_bytes(adapted_tun)
+    for name in expected:
+        path = adapted / name
+        contents = adapted_tun if name == "tun/netstack/tun.go" else (upstream / name).read_bytes()
+        if path.is_symlink() or not path.is_file() or digest(path.read_bytes()) != digest(contents):
+            raise SystemExit("参考peer回环适配副本与固定输入不符")
+    if {path.relative_to(adapted).as_posix() for path in adapted.rglob("*") if path.is_file()} != expected:
+        raise SystemExit("参考peer回环适配副本含额外或缺失文件")
+    (cache / "netstack-adapter.json").write_text(json.dumps({
+        "source_commit":source["commit"], "file":"tun/netstack/tun.go",
+        "original_sha256":digest(original_tun), "adapted_sha256":digest(adapted_tun),
+        "change":"ipv4/ipv6 NewProtocolWithOptions AllowExternalLoopbackTraffic=true",
+        "scope":"test-only netstack loopback acceptance; WireGuard cryptography and protocol unchanged",
+    }, indent=2) + "\n", encoding="utf-8")
     build = cache / "peer-build"
     build.mkdir(exist_ok=True)
     shutil.copyfile(Path(__file__).parent / "peer" / "main.go", build / "main.go")
-    (build / "go.mod").write_text("module kerlico.invalid/wireguard-interop\n\ngo 1.23.1\n\nrequire golang.zx2c4.com/wireguard v0.0.0\n\nreplace golang.zx2c4.com/wireguard => ../wireguard-go\n", encoding="utf-8")
+    (build / "go.mod").write_text("module kerlico.invalid/wireguard-interop\n\ngo 1.23.1\n\nrequire golang.zx2c4.com/wireguard v0.0.0\n\nreplace golang.zx2c4.com/wireguard => ../peer-wireguard-go\n", encoding="utf-8")
     shutil.copyfile(upstream / "go.sum", build / "go.sum")
     environment = os.environ.copy()
     environment.update(GOTOOLCHAIN="local", GOWORK="off", GOENV="off", GOFLAGS="", GOMAXPROCS="2",

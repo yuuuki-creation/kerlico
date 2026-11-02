@@ -1,7 +1,6 @@
 //! 鉴权及目标解码完成后才调用统一目标访问口；载体、逻辑流和 UDP flow 分别计费。
 use crate::{
     config::{self, Limits, NodeOptions, Transport},
-    io::{BodyIo, Reader, Writer},
     protocol,
 };
 use bytes::Bytes;
@@ -10,6 +9,7 @@ use kerlico_core::{
     BoxFuture, BoxStream, ConnectContext, CredentialManifest, CredentialSet, Destination, Error,
     InboundContext, InboundProtocol, IngressBinding, NodeEvent, Result,
 };
+use kerlico_http_carrier::{BodyIo, Reader, Writer};
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex, Weak},
@@ -67,7 +67,7 @@ impl NodeFactory for TrustTunnelNodeFactory {
 enum Reply {
     H1(BoxStream),
     H2(h2::server::SendResponse<Bytes>, h2::RecvStream),
-    H3(Box<crate::io::H3Server>),
+    H3(Box<kerlico_http_carrier::H3Server>),
 }
 enum RequestExit {
     Finished,
@@ -464,7 +464,7 @@ impl Node {
                         let access = access.clone();
                         let context = context.clone();
                         let flows = flows.clone();
-                        crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move {
+                        kerlico_http_carrier::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move {
                             let _lease = lease;
                             let result = node.request(flows, http::Request::from_parts(request, ()), Reply::H2(reply, body), access, context.clone()).await;
                             context.events.record(if result.is_ok() { NodeEvent::Completed } else { NodeEvent::Failed });
@@ -526,8 +526,9 @@ impl Node {
         standard.set_nonblocking(true)?;
         let mut config = quinn::EndpointConfig::default();
         config.supported_versions(vec![1]);
-        let (socket, _socket_close) = crate::socket::wrap(standard)?;
-        let runtime = crate::runtime::NodeRuntime::new(&context.cancel, context.tasks.clone());
+        let (socket, _socket_close) = kerlico_http_carrier::socket::wrap(standard)?;
+        let runtime =
+            kerlico_http_carrier::runtime::NodeRuntime::new(&context.cancel, context.tasks.clone());
         let _runtime_guard = runtime.guard();
         let mut context = context;
         context.cancel = runtime.cancel();
@@ -574,7 +575,7 @@ impl Node {
                     let access = access.clone();
                     let context = context.clone();
                     let drain = drain.clone();
-                    crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move {
+                    kerlico_http_carrier::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move {
                         let _lease = lease;
                         context.events.record(NodeEvent::Accepted);
                         let connect = ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
@@ -597,7 +598,7 @@ impl Node {
             .unwrap_or_else(|| DrainWindow::new(context.drain_timeout))
             .deadline;
         if runtime.shutdown_at(endpoint, &mut tasks, deadline).await?
-            == crate::runtime::NodeDrain::Forced
+            == kerlico_http_carrier::runtime::NodeDrain::Forced
         {
             context.events.record(NodeEvent::ForcedCleanup);
         }
@@ -694,7 +695,7 @@ impl Node {
                         let access = access.clone();
                         let context = context.clone();
                         let flows = flows.clone();
-                        crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move {
+                        kerlico_http_carrier::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move {
                             let _lease = lease;
                             let connect = ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
                             let result = async {

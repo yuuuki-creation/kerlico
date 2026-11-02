@@ -3,8 +3,8 @@
 use kerlico_config::{ForwardKind, ForwardSpec, Limits, PreparedConfig, PreparedNode};
 use kerlico_core::{
     BoxStream, CancellationToken, ConnectContext, DatagramReceiver, DatagramSender, Destination,
-    Error, FlowFailure, FlowOutcome, InboundContext, IngressBinding, NodeId, NodeTasks,
-    PeerSession, Result, ShutdownReport,
+    Diagnostic, Error, FlowFailure, FlowOutcome, InboundContext, IngressBinding, Language, NodeId,
+    NodeTasks, PeerSession, Result, RuntimeOptions, ServiceRetirement, ShutdownReport,
 };
 use std::{
     collections::{BTreeMap, HashMap, hash_map::Entry},
@@ -14,8 +14,10 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
+mod history;
+use history::{HistoryCommit, HistoryOwner};
+
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream, UdpSocket},
     sync::{Semaphore, mpsc, watch},
     task::JoinSet,
@@ -28,6 +30,8 @@ use tokio::{
 /// 调用方应只读；当前公开原子字段并未在类型层面禁止外部写入。
 #[derive(Default)]
 pub struct Stats {
+    /// 持久化周期提交失败事件；默认保持转发并保留有界积压，最终提交失败仍返回错误。
+    pub history_failures: AtomicU64,
     /// 接纳的会话或逻辑处理单元数，不代表鉴权或目标连接成功。
     pub accepted: AtomicU64,
     /// 正常结束的处理单元数，不代表应用层请求成功。
@@ -60,6 +64,7 @@ struct BoundNode {
 }
 #[derive(Clone)]
 struct NodeResources {
+    language: Language,
     global: Arc<Semaphore>,
     slots: Arc<Semaphore>,
     stats: Arc<Stats>,
@@ -67,11 +72,15 @@ struct NodeResources {
     cleanup: NodeCleanup,
 }
 struct Observer {
+    language: Language,
     global: Arc<Stats>,
     local: Arc<Stats>,
     forced: Arc<AtomicBool>,
 }
 impl kerlico_core::NodeObserver for Observer {
+    fn diagnostic(&self, event: Diagnostic<'_>) {
+        eprintln!("{}", event.localized(self.language));
+    }
     fn record(&self, event: kerlico_core::NodeEvent) {
         if matches!(event, kerlico_core::NodeEvent::ForcedCleanup) {
             self.forced.store(true, Ordering::Release);
@@ -111,6 +120,7 @@ fn node_context(
             resources.slots.clone(),
         ),
         events: Arc::new(Observer {
+            language: resources.language,
             global: resources.stats.clone(),
             local: resources.local_stats.clone(),
             forced: resources.cleanup.forced.clone(),
@@ -194,6 +204,9 @@ fn node_socket(address: SocketAddr, udp: bool) -> Result<socket2::Socket> {
 
 /// 已持有监听器的运行实例；通过统一出口调度固定入口和独立协议节点。
 pub struct Engine {
+    history_owner: Option<HistoryOwner>,
+    history_interval: std::time::Duration,
+    language: Language,
     egress: kerlico_egress::EgressRuntime,
     inbounds: Vec<Inbound>,
     nodes: Vec<BoundNode>,
@@ -208,18 +221,49 @@ impl Engine {
     /// 任一绑定失败会释放此前取得的监听资源；没有入口时返回配置错误。
     /// 节点 IPv6 监听显式仅接收 IPv6，节点身份及带身份的资源分别管理。
     pub async fn bind(config: PreparedConfig) -> Result<Self> {
+        Self::bind_with_options(config, RuntimeOptions::new(kerlico_egress::native_device())).await
+    }
+    /// 使用应用持有的设备租约；Engine 退出不关闭设备所有者。
+    pub async fn bind_with_device(
+        config: PreparedConfig,
+        device: kerlico_core::DeviceLease,
+    ) -> Result<Self> {
+        Self::bind_with_options(config, RuntimeOptions::new(device)).await
+    }
+    pub async fn bind_with_options(
+        config: PreparedConfig,
+        options: RuntimeOptions,
+    ) -> Result<Self> {
         let config = config.into_parts();
         if config.inbounds.is_empty() && config.nodes.is_empty() {
             return Err(Error::Config("没有配置入站".into()));
         }
         let limits = config.limits;
-        let egress = kerlico_egress::EgressRuntime::start(
+        let language = options.language;
+        let egress = kerlico_egress::EgressRuntime::start_with_options(
             config.egress,
-            kerlico_egress::native_device(),
+            options,
             limits.connect_timeout(),
         )
         .await?;
+        let mut history_owner = None;
+        let history_interval = std::time::Duration::from_millis(
+            config
+                .history
+                .as_ref()
+                .map_or(1000, |history| history.sample_interval_ms),
+        );
         let bound = async {
+            if let Some(spec) = config.history {
+                history_owner = Some(
+                    HistoryOwner::start(
+                        spec,
+                        egress.telemetry(),
+                        Instant::now() + limits.connect_timeout(),
+                    )
+                    .await?,
+                );
+            }
             let mut inbounds = Vec::new();
             for spec in config.inbounds {
                 let target = spec.target.destination()?;
@@ -271,6 +315,9 @@ impl Engine {
         .await;
         match bound {
             Ok((inbounds, nodes, node_stats)) => Ok(Self {
+                history_owner,
+                history_interval,
+                language,
                 egress,
                 inbounds,
                 nodes,
@@ -279,7 +326,11 @@ impl Engine {
                 stats: Arc::new(Stats::default()),
             }),
             Err(primary) => {
-                let cleanup = egress.shutdown(limits.drain_timeout()).await;
+                let deadline = Instant::now() + limits.drain_timeout();
+                let mut cleanup = egress.shutdown_at(deadline).await;
+                if let Some(owner) = &mut history_owner {
+                    cleanup.merge(&owner.shutdown(deadline).await);
+                }
                 Err(Error::Startup {
                     primary: Box::new(primary),
                     cleanup_timed_out: cleanup.timed_out,
@@ -292,9 +343,15 @@ impl Engine {
     pub fn telemetry(&self) -> kerlico_egress::Telemetry {
         self.egress.telemetry()
     }
+    /// 历史存储独立于命名出站；超时后仅收据完成才证明原生写者真实释放。
+    pub fn history_retirement(&self) -> Option<ServiceRetirement> {
+        self.history_owner.as_ref().map(HistoryOwner::retirement)
+    }
 
     /// 在消费本实例前取得命名服务回收收据；关闭超时后仍可等待真实任务全部释放。
-    pub fn service_retirements(&self) -> Vec<(kerlico_core::OutId, kerlico_core::ServiceRetirement)> {
+    pub fn service_retirements(
+        &self,
+    ) -> Vec<(kerlico_core::OutId, kerlico_core::ServiceRetirement)> {
         self.egress.service_retirements()
     }
 
@@ -339,7 +396,7 @@ impl Engine {
     /// 单个业务会话失败通常计入统计，不意味着此方法一定返回错误；成功返回也不代表全部业务成功。
     /// 单入口故障与其他入口隔离，保留首个错误并在整个运行退出时返回。
     /// 累计失败计数和业务流记录不能用于判断某个入口或出站服务的当前健康状态。
-    pub async fn run(self, cancel: CancellationToken) -> Result<()> {
+    pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         let scope = cancel.child_token();
         let _guard = scope.clone().drop_guard();
         let semaphore = Arc::new(Semaphore::new(self.limits.max_sessions));
@@ -360,6 +417,7 @@ impl Engine {
                 Some(local_stats.clone()),
             );
             let resources = NodeResources {
+                language: self.language,
                 global: semaphore.clone(),
                 slots: Arc::new(Semaphore::new(bound.spec.max_sessions)),
                 stats: self.stats.clone(),
@@ -421,9 +479,31 @@ impl Engine {
         let mut force_at = None;
         let mut forced = false;
         let mut cleanup = ShutdownReport::default();
+        let mut sample = tokio::time::interval(self.history_interval);
+        sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut history_job: Option<HistoryCommit> = None;
         while !workers.is_empty() || !cleaners.is_empty() {
             tokio::select! {
                 biased;
+                result=async { history_job.as_mut().expect("已启动历史提交").await }, if history_job.is_some()=>{
+                    history_job = None;
+                    match result {
+                        Ok(Ok(())) => {},
+                        Ok(Err(error)) => {
+                            self.stats.history_failures.fetch_add(1, Ordering::Relaxed);
+                            if self.history_owner.as_ref().is_some_and(|owner| owner.failure_policy == kerlico_config::HistoryFailurePolicy::StopEngine) {
+                                failure.get_or_insert(error); scope.cancel();
+                            }
+                        },
+                        Err(_) => { failure.get_or_insert(Error::Protocol("统计历史写者异常退出")); scope.cancel(); },
+                    }
+                },
+                _=sample.tick(), if self.history_owner.is_some() && history_job.is_none() && closing.is_none()=>{
+                    match self.history_owner.as_ref().expect("已配置历史所有者").checkpoint() {
+                        Ok(job) => history_job = Some(job),
+                        Err(error) => { failure.get_or_insert(error); scope.cancel(); },
+                    }
+                },
                 _=scope.cancelled(), if closing.is_none()=>{
                     let now = Instant::now();
                     let deadline = now + self.limits.drain_timeout();
@@ -497,6 +577,33 @@ impl Engine {
             cleanup.merge(&owner.finish(deadline, false).await);
         }
         cleanup.merge(&self.egress.shutdown_at(deadline).await);
+        if let Some(job) = history_job {
+            match tokio::time::timeout_at(deadline, job).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => {
+                    failure.get_or_insert(Error::Protocol("统计历史写者异常退出"));
+                }
+                Err(_) => cleanup.timed_out = true,
+            }
+        }
+        if let Some(owner) = &mut self.history_owner {
+            match owner.finish() {
+                Ok(job) => match tokio::time::timeout_at(deadline, job).await {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(error))) => {
+                        failure.get_or_insert(error);
+                    }
+                    Ok(Err(_)) => {
+                        failure.get_or_insert(Error::Protocol("统计历史最终提交失败"));
+                    }
+                    Err(_) => cleanup.timed_out = true,
+                },
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+            cleanup.merge(&owner.shutdown(deadline).await);
+        }
         if !cleanup.is_clean() {
             return Err(Error::Shutdown {
                 primary: failure.map(Box::new),
@@ -596,6 +703,7 @@ async fn serve_node(
 ) -> Result<()> {
     let shared = resources.clone();
     let NodeResources {
+        language: _,
         global,
         slots,
         stats,
@@ -1028,7 +1136,7 @@ mod peer_io_tests {
     use super::*;
     use std::{future::poll_fn, io, pin::Pin, task::Poll, time::Duration};
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt, ReadBuf},
+        io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
         sync::oneshot,
         time::timeout,
     };

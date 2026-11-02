@@ -2,6 +2,30 @@
 
 更新日期：2026-11-02。完整首轮源码、接口、Rust测试和工具先写齐，再在worker集中验证。当前仍未完成全范围验收，尚未提交或发布。
 
+## IPv6 random_head 剩余失败的三向复现
+
+恢复后的 `ssr-mihomo-shared-r61` 为 191/192，通过数不改写。唯一失败参数是服务端角色、`auth_aes128_md5`、`random_head`、`aes-128-cfb`、IPv6 节点与目标、客户端先发 59392 字节。该轮没有抓包，不能仅凭后续同参数结果确定它的具体坏字节。
+
+`ssr-resume-cli-r2` 在 perf-01 从归档 `bcf21d4c3cf2518ed2b7a1e71f208fdf3f8e1960be547bdbce811d63ceaafb38` 构建 SSR-only CLI，退出 0。冻结产物 SHA-256 为 `edec6b99e6f8ee308e9165be50aa69fdb4b11ee9c84e05f5f5b6843bc6321ccb`。固定 Mihomo SHA-256 为 `817f50b3ac6a8b1c4360c5cf2961906057f3a883d970ebbcb0028a01632b620f`，Python 对照提交为 `fd723a92c488d202b407323f0512987346944136`。
+
+`ssr-diag-ipv6-r2` 保持上述参数，各方向最多 100 次，在该方向首次失败后停止，实际结果如下。不同方向的次数不合并为覆盖矩阵。
+
+| 方向 | 通过 | 失败 | 实际观察 |
+| --- | --- | --- | --- |
+| Mihomo → 当前 Rust CLI | 10 | 1 | 客户端流含重复的 9152 字节 cipher 片段 |
+| Mihomo → 固定 Python 服务端 | 3 | 1 | 客户端流含重复的 53602 字节 cipher 片段 |
+| 当前 Rust CLI → 固定 Python 服务端 | 100 | 0 | 业务完整回显，目标累计收到 59392 字节 |
+
+两条失败抓包 SHA-256 分别为 `dea2c91b6c4ea41256a28fd6e48c366779bfb22af3583a47ea86df055df5a256` 和 `e81ecb9ee9ff4e2470c94fa0376ab0ac6edf0ee873ece1743318bc17c972bb9c`。按 TCP 序号去重重组后仍存在重复 cipher，排除了抓包重复记录。独立 Python 解码都先接受认证、IPv6 地址与合法业务前缀，再拒绝后续校验失败；每条流只有一个合法 random_head CRC 边界，未复现旧零后缀歧义。前一轮旧 CLI 同参数对照也在两种服务端复现坏流，Rust → Python 为 100/100。
+
+这些结果证明固定参考客户端能发出不合法的协议流。Rust 保持拒绝坏 MAC，不加入延迟、自动重试或宽松解码。Mihomo `randomHeadConn.Read` 调用 `Write(nil)`，同时业务侧也可进入 `Write`，共享缓冲没有同步；这与重复片段相符，但本轮没有运行其 race detector，不将此源码推测称为唯一内部根因。此组合保留参考端互通限制，不宣称固定 Mihomo 全矩阵通过。
+
+复现工具新增 `--node-host` 与 `--target-host`，只允许回环字面地址；分析工具支持直接 TCP 的 IPv6 PCAP，并列出全部 CRC 边界。两个工具已在 perf-01 通过 Python 语法检查，实际解析合法与失败 IPv6 抓包；IPv6 扩展首部未实现。
+
+本轮还发现旧配置回归仍预期鉴权组合可以移到 `local_inbounds`。现有 v2 工厂将该入口用于无成员的回环接入，鉴权组合必须在 `nodes.members` 中配置。测试现从完整原始 options 构建本地配置，断言无鉴权组合可用、鉴权组合被拒绝，同时保留节点正向验收；没有修改生产配置或鉴权逻辑。
+
+`ssr-resume-regression-r1` 保留原失败，18 项库测试通过、集成 8 通过 1 失败；`ssr-resume-configuration-r3` 精确复现同一旧配置断言。修订后的 `ssr-resume-regression-r4` 归档为 `513e8207be2d06c14b94d0f759512481274c00d9e1162e60122f1114fb9f3f81`，18 项库测试和 9 项集成测试全部通过，整体退出 0。`ssr-resume-format-r5` 在 perf-01 执行包格式化并取回测试文件。本轮未执行严格 Clippy 或完整新 CLI 192 项矩阵；上述三向用例不能代替后者。
+
 ## 恢复后的实际验证
 
 旧SDK1独立集成快照的25项SSR包级测试通过；固定Mihomo矩阵192条为177通过、15失败。perf-03对原Rust全协议/混淆、双栈及域名组合测试重复执行，第28轮复现自端首包EOF。另一逐层抓取在第14轮再次复现：客户端发出的15字节random_head，其前14字节也满足CRC残数，服务端把末尾零字节当作IV首字节，导致解密后的协议首字节错位；双端网络字节相同。

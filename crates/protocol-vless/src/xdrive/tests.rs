@@ -2,6 +2,121 @@ use super::*;
 use kerlico_core::{NodeObserver, StreamBudget};
 use tokio::sync::{mpsc, oneshot};
 
+struct FailedStorage {
+    fail_writes: bool,
+    operations: Mutex<Vec<Operation>>,
+}
+impl FailedStorage {
+    fn new(fail_writes: bool) -> Self {
+        Self {
+            fail_writes,
+            operations: Mutex::new(Vec::new()),
+        }
+    }
+}
+impl Storage for FailedStorage {
+    fn put<'a>(&'a self, _: &'a str, _: &'a [u8]) -> BoxFuture<'a, Result<()>> {
+        self.operations.lock().unwrap().push(Operation::Write);
+        Box::pin(async {
+            if self.fail_writes {
+                Err(Error::Protocol("XDRIVE 存储请求失败"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+    fn get<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>>> {
+        self.operations.lock().unwrap().push(Operation::Read);
+        Box::pin(async { Err(Error::Protocol("XDRIVE 存储请求失败")) })
+    }
+    fn delete<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn list<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Vec<storage::Entry>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+#[tokio::test]
+async fn storage_failure_emits_structured_diagnostics_in_each_selected_language() {
+    async fn observe(language: kerlico_core::Language) -> Vec<(String, String)> {
+        let (output, mut observed) = mpsc::unbounded_channel();
+        let diagnostics = DiagnosticSink::new(move |event| {
+            output
+                .send((event.code.to_owned(), event.localized(language).to_string()))
+                .unwrap();
+        });
+        let transport = Arc::new(Transport {
+            settings: Settings::default(),
+            store: Arc::new(FailedStorage::new(false)),
+        });
+        let Connection { io, driving } =
+            transport.connection("00000000000000000000000000000001", true, None, diagnostics);
+        let driver = tokio::spawn(driving);
+        let event = tokio::time::timeout(Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(io);
+        tokio::time::timeout(Duration::from_secs(2), driver)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(observed.try_recv().is_err());
+        vec![event]
+    }
+    let (english, chinese) = tokio::join!(
+        observe(kerlico_core::Language::En),
+        observe(kerlico_core::Language::ZhCn)
+    );
+    assert_eq!(english.len(), 1);
+    assert_eq!(chinese.len(), 1);
+    assert_eq!(english[0].0, "vless.xdrive.background_failed");
+    assert_eq!(chinese[0].0, "vless.xdrive.background_failed");
+    assert!(english[0].1.contains("The XDRIVE storage request failed"));
+    assert!(chinese[0].1.contains("XDRIVE 存储请求失败"));
+}
+
+#[tokio::test]
+async fn independent_storage_read_and_write_failures_emit_separate_diagnostics() {
+    let (output, mut observed) = mpsc::unbounded_channel();
+    let diagnostics = DiagnosticSink::new(move |event| {
+        output
+            .send((event.code.to_owned(), event.error.to_string()))
+            .unwrap();
+    });
+    let store = Arc::new(FailedStorage::new(true));
+    let transport = Arc::new(Transport {
+        settings: Settings::default(),
+        store: store.clone(),
+    });
+    let Connection { mut io, driving } =
+        transport.connection("00000000000000000000000000000001", true, None, diagnostics);
+    let driver = tokio::spawn(driving);
+    let first = tokio::time::timeout(Duration::from_secs(2), observed.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(*store.operations.lock().unwrap(), vec![Operation::Read]);
+    // 单独关闭夹具的写半部，确定性触发写 EOF，不与 Drop 的取消竞争。
+    io.io.shutdown().await.unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(2), observed.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        *store.operations.lock().unwrap(),
+        vec![Operation::Read, Operation::Write]
+    );
+    drop(io);
+    tokio::time::timeout(Duration::from_secs(2), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.0, "vless.xdrive.background_failed");
+    assert!(observed.try_recv().is_err());
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Operation {
     Read,
@@ -128,7 +243,12 @@ fn connection(ring: bool, writes_complete: bool) -> (Connection, Probe) {
     ).unwrap()
     });
     (
-        transport.connection("00000000000000000000000000000001", true, ring),
+        transport.connection(
+            "00000000000000000000000000000001",
+            true,
+            ring,
+            kerlico_core::DiagnosticSink::stderr(kerlico_core::Language::En),
+        ),
         Probe {
             entered: entered_rx,
             destroyed: destroyed_rx,
@@ -232,7 +352,7 @@ async fn node_owner_joins_pending_storage_operations_after_outer_handler_abort()
     let task = owner
         .spawn_tracked(session(connection, owner.cancel().child_token(), finished))
         .unwrap();
-    let outer = tokio::spawn(async move { task.await });
+    let outer = tokio::spawn(task);
     probe.both_started().await;
     outer.abort();
     assert!(outer.await.unwrap_err().is_cancelled());
@@ -393,7 +513,12 @@ async fn session_cancel_and_shared_shutdown_close_both_real_http_driver_connecti
             None
         } else {
             Some(tokio::spawn(session(
-                transport.connection("00000000000000000000000000000001", true, None),
+                transport.connection(
+                    "00000000000000000000000000000001",
+                    true,
+                    None,
+                    kerlico_core::DiagnosticSink::stderr(kerlico_core::Language::En),
+                ),
                 node.child_token(),
                 finished,
             )))

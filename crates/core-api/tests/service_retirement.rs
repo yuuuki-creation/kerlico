@@ -1,4 +1,7 @@
-use kerlico_core::{CancellationToken, ConnectContext, Error, FamilyMode, NodeId, Result, ServiceContext, ServiceFailure, Source};
+use kerlico_core::{
+    CancellationToken, ConnectContext, Error, FamilyMode, NodeId, Result, ServiceContext,
+    ServiceFailure, Source,
+};
 use std::{
     fs::{File, OpenOptions},
     future::{Future, poll_fn},
@@ -11,7 +14,10 @@ use std::{
     task::Poll,
     time::Duration,
 };
-use tokio::{sync::oneshot, time::{Instant, sleep_until, timeout}};
+use tokio::{
+    sync::oneshot,
+    time::{Instant, sleep_until, timeout},
+};
 
 struct Gate(Arc<(Mutex<bool>, Condvar)>);
 impl Gate {
@@ -37,13 +43,27 @@ fn blocked(gate: &Arc<(Mutex<bool>, Condvar)>) {
 struct LockPath(PathBuf);
 impl LockPath {
     fn new() -> (Self, File) {
-        let path = std::env::temp_dir().join(format!("kerlico-retirement-{}.lock", kerlico_core::UserId::generate()));
-        let file = OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "kerlico-retirement-{}.lock",
+            kerlico_core::UserId::generate()
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
         file.try_lock().unwrap();
         (Self(path), file)
     }
     fn is_locked(&self) -> bool {
-        OpenOptions::new().read(true).write(true).open(&self.0).unwrap().try_lock().is_err()
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.0)
+            .unwrap()
+            .try_lock()
+            .is_err()
     }
 }
 impl Drop for LockPath {
@@ -72,18 +92,24 @@ async fn last_host_drop_keeps_native_join_late_panic_and_unclaimed_output() {
         let socket = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = socket.local_addr().unwrap();
         let dropped = Arc::new(AtomicBool::new(false));
-        let output = Output { _file: file, _socket: socket, dropped: dropped.clone() };
+        let output = Output {
+            _file: file,
+            _socket: socket,
+            dropped: dropped.clone(),
+        };
         let gate = Gate::new();
         let wait = gate.0.clone();
         let (entered, ready) = oneshot::channel();
-        let task = host.spawn_blocking_tracked(move || {
-            entered.send(()).unwrap();
-            blocked(&wait);
-            if panics {
-                panic!("受控迟到 native 失败");
-            }
-            output
-        }).unwrap();
+        let task = host
+            .spawn_blocking_tracked(move || {
+                entered.send(()).unwrap();
+                blocked(&wait);
+                if panics {
+                    panic!("受控迟到 native 失败");
+                }
+                output
+            })
+            .unwrap();
         ready.await.unwrap();
         drop(task);
         host.retire(Instant::now() + Duration::from_millis(40));
@@ -93,9 +119,14 @@ async fn last_host_drop_keeps_native_join_late_panic_and_unclaimed_output() {
         assert!(path.is_locked());
         assert!(TcpListener::bind(address).is_err());
         assert!(!dropped.load(Ordering::Acquire));
-        assert_eq!(healthy.spawn_tracked(async { 23 }).unwrap().await.unwrap(), 23);
+        assert_eq!(
+            healthy.spawn_tracked(async { 23 }).unwrap().await.unwrap(),
+            23
+        );
         gate.release();
-        let report = timeout(Duration::from_secs(2), receipt.wait()).await.unwrap();
+        let report = timeout(Duration::from_secs(2), receipt.wait())
+            .await
+            .unwrap();
         assert!(report.timed_out);
         assert_eq!(report.failed_tasks, usize::from(panics));
         assert_eq!(report.forced_tasks, 1);
@@ -104,7 +135,12 @@ async fn last_host_drop_keeps_native_join_late_panic_and_unclaimed_output() {
         assert!(!path.is_locked());
         let _rebound = TcpListener::bind(address).unwrap();
         assert!(!healthy.cancel().is_cancelled());
-        assert!(healthy.shutdown(Instant::now() + Duration::from_secs(1)).await.is_clean());
+        assert!(
+            healthy
+                .shutdown(Instant::now() + Duration::from_secs(1))
+                .await
+                .is_clean()
+        );
     }
 }
 
@@ -116,21 +152,29 @@ async fn interrupted_shutdown_distinguishes_completion_time_from_late_observatio
         let gate = Gate::new();
         let wait = gate.0.clone();
         let (entered, ready) = oneshot::channel();
-        let task = host.spawn_blocking_tracked(move || {
-            entered.send(()).unwrap();
-            blocked(&wait);
-        }).unwrap();
+        let task = host
+            .spawn_blocking_tracked(move || {
+                entered.send(()).unwrap();
+                blocked(&wait);
+            })
+            .unwrap();
         ready.await.unwrap();
         let deadline = Instant::now() + Duration::from_millis(250);
         let mut closing = Box::pin(host.shutdown(deadline));
-        assert!(poll_fn(|cx| Poll::Ready(closing.as_mut().poll(cx))).await.is_pending());
+        assert!(
+            poll_fn(|cx| Poll::Ready(closing.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
         drop(closing);
         if late {
             sleep_until(deadline + Duration::from_millis(30)).await;
         }
         gate.release();
         task.await.unwrap();
-        let completed = timeout(Duration::from_secs(1), receipt.wait()).await.unwrap();
+        let completed = timeout(Duration::from_secs(1), receipt.wait())
+            .await
+            .unwrap();
         assert_eq!(completed.timed_out, late);
         assert_eq!(completed.failed_tasks, 0);
         sleep_until(deadline + Duration::from_millis(50)).await;
@@ -143,7 +187,11 @@ async fn interrupted_shutdown_distinguishes_completion_time_from_late_observatio
 
 #[test]
 fn retirement_crosses_original_runtime_shutdown_without_a_global_runtime_owner() {
-    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let gate = Gate::new();
     let wait = gate.0.clone();
     let socket = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -157,7 +205,8 @@ fn retirement_crosses_original_runtime_shutdown_without_a_global_runtime_owner()
             entered.send(()).unwrap();
             blocked(&wait);
             panic!("原 runtime 关闭后的受控失败");
-        }).unwrap();
+        })
+        .unwrap();
         ready.await.unwrap();
         host.retire(Instant::now());
         drop(host);
@@ -167,8 +216,15 @@ fn retirement_crosses_original_runtime_shutdown_without_a_global_runtime_owner()
     assert!(!receipt.is_finished());
     assert!(TcpListener::bind(address).is_err());
     gate.release();
-    let next = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let report = next.block_on(async { timeout(Duration::from_secs(2), receipt.wait()).await.unwrap() });
+    let next = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let report = next.block_on(async {
+        timeout(Duration::from_secs(2), receipt.wait())
+            .await
+            .unwrap()
+    });
     assert!(report.timed_out);
     assert_eq!(report.failed_tasks, 1);
     assert!(receipt.is_finished());
@@ -194,12 +250,24 @@ async fn service_first_failure_survives_normal_cancel_and_later_failures() {
 async fn service_failure_precedes_expired_deadline_but_normal_scoped_cancel_stays_first() {
     let service = ServiceContext::for_test();
     let node = CancellationToken::new();
-    let source = Source::Local { node: NodeId::parse("test-node").unwrap() };
+    let source = Source::Local {
+        node: NodeId::parse("test-node").unwrap(),
+    };
     let context = ConnectContext::new(Duration::ZERO).scoped(
-        &service, &source, node.clone(), CancellationToken::new(), FamilyMode::V4Only,
+        &service,
+        &source,
+        node.clone(),
+        CancellationToken::new(),
+        FamilyMode::V4Only,
     );
     service.fail(ServiceFailure::Protocol("服务已失效"));
-    assert!(matches!(context.run(std::future::pending::<Result<()>>()).await, Err(Error::Protocol("服务已失效"))));
+    assert!(matches!(
+        context.run(std::future::pending::<Result<()>>()).await,
+        Err(Error::Protocol("服务已失效"))
+    ));
     node.cancel();
-    assert!(matches!(context.run(async { Ok(()) }).await, Err(Error::Cancelled)));
+    assert!(matches!(
+        context.run(async { Ok(()) }).await,
+        Err(Error::Cancelled)
+    ));
 }

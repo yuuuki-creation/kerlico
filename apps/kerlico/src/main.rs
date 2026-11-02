@@ -1,19 +1,59 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use kerlico_config::{Registry, parse};
-use kerlico_core::{CancellationToken, Error, Result};
+use kerlico_core::{CancellationToken, Error, Language, Result};
 use kerlico_engine::Engine;
 use kerlico_net::{DirectFactory, RejectFactory};
 use std::path::PathBuf;
+mod cli;
 
 #[derive(Parser)]
 #[command(name = "kerlico", version, about = "模块化代理内核")]
 struct Args {
+    #[arg(long, global = true, value_enum)]
+    lang: Option<CliLanguage>,
     #[command(subcommand)]
     command: Command,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum CliLanguage {
+    #[value(name = "zh-CN")]
+    ZhCn,
+    #[value(name = "en")]
+    En,
+}
+impl From<CliLanguage> for Language {
+    fn from(language: CliLanguage) -> Self {
+        match language {
+            CliLanguage::ZhCn => Self::ZhCn,
+            CliLanguage::En => Self::En,
+        }
+    }
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// 只读查询统计历史，输出可分页的 JSON。
+    History {
+        #[arg(long, default_value = "state/telemetry")]
+        directory: PathBuf,
+        #[arg(long, value_enum, default_value = "usage")]
+        kind: HistoryKind,
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        node: Option<String>,
+        #[arg(long)]
+        outbound: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        since_ms: u64,
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+        #[arg(long, default_value_t = 1000)]
+        limit: usize,
+    },
+    Help {
+        command: Option<String>,
+    },
     /// 从标准输入读取管理密码，输出一次生成的持久账户 JSON。
     AccountNew {
         #[arg(long, default_value = "user")]
@@ -31,6 +71,12 @@ enum Command {
         #[arg(short, long)]
         config: PathBuf,
     },
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum HistoryKind {
+    Usage,
+    Flows,
+    Bandwidth,
 }
 
 fn registry() -> Result<Registry> {
@@ -147,16 +193,115 @@ fn registry() -> Result<Registry> {
 
 #[tokio::main]
 async fn main() {
-    if let Err(error) = execute().await {
-        eprintln!("{error}");
+    let raw: Vec<_> = std::env::args_os().collect();
+    let language = cli::language_from_args(&raw);
+    let args = match cli::parse_args(&raw, language) {
+        Ok(args) => args,
+        Err(error) => {
+            let rendered = cli::render_error(&error, language);
+            if error.use_stderr() {
+                eprint!("{rendered}");
+            } else {
+                print!("{rendered}");
+            }
+            std::process::exit(error.exit_code());
+        }
+    };
+    let language = args.lang.map(Language::from).unwrap_or(language);
+    if let Err(error) = execute(args, language).await {
+        eprintln!("[{}] {}", error.code(), error.localized(language));
         std::process::exit(1);
     }
 }
 
-async fn execute() -> Result<()> {
-    let args = Args::parse();
+async fn execute(args: Args, language: Language) -> Result<()> {
+    if let Command::Help { command } = &args.command {
+        let mut help = cli::command(language);
+        let target = if let Some(name) = command {
+            help.find_subcommand_mut(name)
+                .expect("帮助命令已通过参数校验")
+        } else {
+            &mut help
+        };
+        println!("{}", target.render_long_help());
+        return Ok(());
+    }
     let registry = registry()?;
     let (config, run) = match args.command {
+        Command::History {
+            directory,
+            kind,
+            user,
+            node,
+            outbound,
+            since_ms,
+            after,
+            limit,
+        } => {
+            let user = user
+                .map(|value| kerlico_core::UserId::parse(&value).map(|id| id.to_string()))
+                .transpose()?;
+            let node = node
+                .map(|value| kerlico_core::NodeId::parse(&value).map(|id| id.to_string()))
+                .transpose()?;
+            let outbound = outbound
+                .map(|value| kerlico_core::OutId::parse(&value).map(|id| id.to_string()))
+                .transpose()?;
+            let scope = if matches!(kind, HistoryKind::Flows) {
+                None
+            } else {
+                match (&user, &node, &outbound) {
+                    (None, None, None) => None,
+                    (Some(user), None, None) => Some(kerlico_egress::HistoryScope::User(
+                        kerlico_core::UserId::parse(user)?,
+                    )),
+                    (None, Some(node), None) => Some(kerlico_egress::HistoryScope::Node(
+                        kerlico_core::NodeId::parse(node)?,
+                    )),
+                    (None, None, Some(outbound)) => Some(kerlico_egress::HistoryScope::Outbound(
+                        kerlico_core::OutId::parse(outbound)?,
+                    )),
+                    _ => {
+                        return Err(Error::Config(
+                            "用量和带宽查询一次只可指定一个投影维度".into(),
+                        ));
+                    }
+                }
+            };
+            if matches!(kind, HistoryKind::Usage) && (since_ms != 0 || after != 0 || limit != 1000)
+            {
+                return Err(Error::Config("累计用量不接受时间或分页参数".into()));
+            }
+            let history = kerlico_egress::HistoryReader::open(&directory)?;
+            let result = match kind {
+                HistoryKind::Usage => serde_json::to_value(history.usage_in(scope.as_ref())?),
+                HistoryKind::Flows => {
+                    serde_json::to_value(history.flows(&kerlico_egress::HistoryQuery {
+                        user,
+                        node,
+                        outbound,
+                        since_ms,
+                        after,
+                        limit,
+                        ..Default::default()
+                    })?)
+                }
+                HistoryKind::Bandwidth => serde_json::to_value(history.bandwidth_in(
+                    since_ms,
+                    after,
+                    limit,
+                    scope.as_ref(),
+                )?),
+            }
+            .map_err(|_| Error::Protocol("统计查询无法编码"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result)
+                    .map_err(|_| Error::Protocol("统计查询无法编码"))?
+            );
+            return Ok(());
+        }
+        Command::Help { .. } => unreachable!("帮助命令已处理"),
         Command::AccountNew { prefix } => {
             use std::io::Read;
             let mut password = Vec::new();
@@ -195,12 +340,25 @@ async fn execute() -> Result<()> {
     }
     let prepared = registry.prepare(parse(&std::fs::read(config)?)?)?;
     if !run {
-        println!("配置检查通过");
+        println!(
+            "{}",
+            language.select("配置检查通过", "Configuration is valid")
+        );
         return Ok(());
     }
-    let engine = Engine::bind(prepared).await?;
+    let engine = Engine::bind_with_options(
+        prepared,
+        kerlico_core::RuntimeOptions {
+            device: kerlico_net::native_device(),
+            language,
+        },
+    )
+    .await?;
     for (tag, address) in engine.listeners()? {
-        println!("入口 {tag} 已监听 {address}");
+        match language {
+            Language::ZhCn => println!("入口 {tag} 已监听 {address}"),
+            Language::En => println!("Inbound {tag} is listening on {address}"),
+        }
     }
     let token = CancellationToken::new();
     let running = engine.run(token.clone());
