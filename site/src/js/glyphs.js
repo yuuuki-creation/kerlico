@@ -148,7 +148,7 @@ function createWord(w, h, narrow, rtl) {
     nz: new Float32Array(n),
     tone: new Float32Array(n),
     bottom: top + totalH,
-    cut: { px, py, tx, ty, nx, ny, shift: W * 0.024, gap: Math.max(4, W * 0.0045), len: W * 0.56 },
+    cut: { px, py, tx, ty, nx, ny, shift: W * 0.011, gap: Math.max(3, W * 0.003), len: W * 0.56 },
     buf: new Float32Array((n * 2 + 2) * 15),
   };
   const diag = Math.hypot(w, h);
