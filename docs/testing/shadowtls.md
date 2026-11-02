@@ -94,7 +94,7 @@ r8 重置日志缺少当次开始标记；按该测试严格的循环顺序，�
 
 ## TLS 握手站点的已有独立对照
 
-`tools/diagnose_shadowtls_origin.py` 不经过 kerlico 或参考代理，只连接 worker 回环站点并保持第一条 TLS 连接打开。
+探针不经过 kerlico 或参考代理，只连接 worker 回环站点并保持第一条 TLS 连接打开。
 
 | 已提交作业 | TLS1.2 / TLS1.3 结果 | 终态 |
 | --- | --- | --- |

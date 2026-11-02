@@ -14,6 +14,8 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
 };
+type PacketRead<'a> = BoxFuture<'a, Result<Option<(Destination, Vec<u8>)>>>;
+
 struct Sender {
     writer: Writer,
     output: WriteHalf<BoxStream>,
@@ -144,10 +146,9 @@ fn finish_reply(
     if entries
         .get(&key)
         .is_some_and(|entry| entry.generation == generation)
+        && let Some(entry) = entries.remove(&key)
     {
-        if let Some(entry) = entries.remove(&key) {
-            entry.finish(reason);
-        }
+        entry.finish(reason);
     }
 }
 pub(crate) async fn serve(
@@ -169,7 +170,7 @@ pub(crate) async fn serve(
     tokio::pin!(timer);
     let result: Result<()> = async {
         loop {
-            let reading: BoxFuture<'_, Result<Option<(Destination, Vec<u8>)>>> = Box::pin(async { match reader.next().await? { Some(record) => { let (target, packet) = wire::parse_udp(&record, false)?; Ok(Some((target, packet))) }, None => Ok(None) } });
+            let reading: PacketRead<'_> = Box::pin(async { match reader.next().await? { Some(record) => { let (target, packet) = wire::parse_udp(&record, false)?; Ok(Some((target, packet))) }, None => Ok(None) } });
             tokio::pin!(reading);
             let request = loop {
                 tokio::select! {

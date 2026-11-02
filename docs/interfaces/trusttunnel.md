@@ -1,9 +1,5 @@
 # TrustTunnel 双端接口
 
-2026-11-02 新输入在海外 `flow-tt-unit-r22` 库测试中为 29 项通过、7 项失败。下文新增的 H3 准入拒绝与请求排空所有权修订尚未验证，H2 目标策略拒绝后的收尾错误仍待定位，不能登记当前整包通过。
-
-2026-11-02共享运行迁移已编写，尚未编译、格式检查或测试。本文保留的历史通过记录只对应原输入，不代表当前整树已验收。
-
 配置模式为`version:2`。节点的`members`引用管理账户`user_id`，分别保存`credential_epoch`与`native_credential`。管理用户名、管理密码摘要和协议凭据互不代用。节点工厂接收`NodeBuildContext`，鉴权前只持`IngressBinding`，鉴权后使用`PeerSession`访问共享Dispatcher。
 
 每条成员凭据为`{"username":"node-user","password":"synthetic-password"}`，节点options不再接受users。H1/H2/H3每个CONNECT按实际Basic命中行创建peer；_udp2的各目标flow继承该用户。密码隔离条目只登记Protection。
@@ -120,7 +116,7 @@ Engine持有物理会话租约；H2/H3每CONNECT再取逻辑流预算，UDP每fl
 
 ## 完成权与绑定元数据
 
-本轮完成权迁移源码与回归已编写，尚未运行新输入。底层 `Outbound::connect_tcp` 返回 `OpenedTcp`，本协议没有可证实的目标连接绑定字段，明确返回 `TcpConnectInfo::unknown()`。代理端点和载体本地地址不代填业务绑定。底层 UDP 通道保持原接口，唯一业务计量仍由 Dispatcher 包装。
+底层 `Outbound::connect_tcp` 返回 `OpenedTcp`，本协议没有可证实的目标连接绑定字段，明确返回 `TcpConnectInfo::unknown()`。代理端点和载体本地地址不代填业务绑定。底层 UDP 通道保持原接口，唯一业务计量仍由 Dispatcher 包装。
 
 入站从 `PeerSession` 取得 `TcpFlow`、`FixedUdpFlow` 或 `UdpAssociation`。自定义会话拆出 typed I/O 和唯一完成权，先报告正常协议结束、超时、取消或错误，再释放 I/O。TCP 的单向 EOF 不提前结束反向数据；零长度 UDP 包不作为 EOF。完成权只固定终因，最后计量 I/O 租约释放后才生成稳定终态，不重复累计流量。父级载体保留已建立流的完成权，关闭后拒绝新登记，旧代次结果不能关闭新流。
 
@@ -154,4 +150,4 @@ H3 在逻辑预算不足或已关闭时，对尚未接纳的请求发送 `H3_REQ
 
 固定 h3 的请求结束归属从 `RequestResolver` 创建时开始。解析成功后，同一个 `Arc<RequestEnd>` 移交给 `RequestStream`；解析前拒绝、错误或释放都会归还排空账项。拆分的发送和接收半流继续共享这份归属，最后一个持有者释放后只结算一次。该调整不改变公开函数签名、错误码或现有字段的可移动性，补丁范围见 [h3 补丁记录](../../third_party/h3/PATCHES.md)。
 
-H2 的目标拒绝用例已在原失败输入中完成 502、后续业务往返和合法控制请求，但服务端收尾返回 Protocol。本轮仅增加测试构建中的准确底层诊断，正式错误映射未变。H3 修订与新增回归尚未运行，原七项失败和全部原始时限、负载及断言继续保留。
+H2 的目标拒绝用例已在原失败输入中完成 502、后续业务往返和合法控制请求，但服务端收尾返回 Protocol。本轮仅增加测试构建中的准确底层诊断，正式错误映射未变。

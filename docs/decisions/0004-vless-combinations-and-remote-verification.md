@@ -6,7 +6,7 @@
 
 按总表 `K-V2`、`K-V3`、`K-V4` 推进 REALITY、Vision、XUDP/Mux、XHTTP 各 HTTP 版本、mode 和独立下载、VLESS Encryption 与 XDRIVE。共享传输中的 WS、HTTPUpgrade、gRPC 等分别记录。上游明确拒绝的组合保留负例，不通过忽略配置伪装成支持。详细边界和来源见[开工调研](../../reference/research_notes/vless-combinations-implementation.md)。
 
-继续使用自己的 core/config/engine 契约。协议层可以调用固定版本 Rust 传输、Vision 和 Encryption 原语；不启动外部代理进程，不把整个参考内核替换成本项目。当前采用的 Rust 依赖固定到提交，补丁同时固定，许可证与源码获取说明见[依赖记录](../vless-dependencies.md)。扩展前阶段曾选择 Rust 1.96；加入服务端 REALITY 后的实际依赖要求与 1.99.1 构建基线见末尾复核，旧版结果不外推。
+继续使用自己的 core/config/engine 契约。协议层可以调用固定版本 Rust 传输、Vision 和 Encryption 原语；不启动外部代理进程，不把整个参考内核替换成本项目。当前采用的 Rust 依赖固定到提交，补丁同时固定，许可证与源码获取说明见[依赖记录](../vless-dependencies.md)。扩展前阶段曾选择 Rust 1.96；加入服务端 REALITY 后的实际依赖要求与 1.99.1 构建基线见末尾复核。
 
 所有编译、格式检查、Clippy、Rustdoc、单元/集成测试和真实参考端互通在授权 worker 执行。本地只编辑、阅读、同步及管理 Git，不运行内核二进制或测试。构建使用独立项目工作区、有限并发和固定输入摘要；不修改基础服务。
 

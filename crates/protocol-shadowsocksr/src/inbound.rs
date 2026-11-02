@@ -108,11 +108,11 @@ impl InboundProtocol for ShadowsocksRNode {
         let mut manifest = CredentialManifest::new();
         for (slot, (_, row)) in self.credentials.rows().enumerate() {
             let group = &self.groups[row.group];
-            if row.user.is_some() {
+            if let Some(user) = row.user {
                 for fingerprint in &row.fingerprints {
                     manifest.protection("shadowsocksr", *fingerprint);
                 }
-                let key = group.users.get(&row.user.unwrap()).expect("成员已校验");
+                let key = group.users.get(&user).expect("成员已校验");
                 use sha2::{Digest, Sha256};
                 manifest.authentication("shadowsocksr", slot, Sha256::digest(key).into());
             } else {

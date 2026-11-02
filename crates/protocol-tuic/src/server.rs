@@ -247,7 +247,7 @@ impl State {
                 let lease = self.context.stream_budget.try_acquire()?;
                 let generation = self
                     .generation
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                         value.checked_add(1)
                     })
                     .map_err(|_| Error::ResourceLimit)?;
@@ -407,19 +407,18 @@ impl State {
             }
         };
         let remote = self.flows.tcp(remote)?;
-        if self.version == 4 {
-            if let Err(error) = connect
+        if self.version == 4
+            && let Err(error) = connect
                 .run(async {
                     tokio::io::AsyncWriteExt::write_all(&mut send, &[4, 255, 0]).await?;
                     Ok(())
                 })
                 .await
-            {
-                remote.finish(kerlico_core::FlowOutcome::Failed(
-                    kerlico_core::FlowFailure::from_error(&error),
-                ));
-                return Err(error);
-            }
+        {
+            remote.finish(kerlico_core::FlowOutcome::Failed(
+                kerlico_core::FlowFailure::from_error(&error),
+            ));
+            return Err(error);
         }
         remote
             .relay(

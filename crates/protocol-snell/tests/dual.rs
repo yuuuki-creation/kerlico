@@ -1,8 +1,8 @@
 //! 自端版本/角色矩阵与真实网络，全部在 worker 执行。
 mod support;
 use kerlico_core::{
-    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel, Destination,
-    InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
+    BoxFuture, CancellationToken, ConnectContext, DatagramChannel, Destination, InboundContext,
+    NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use kerlico_snell::{SnellFactory, SnellNodeFactory};
 use serde_json::{Value, json};

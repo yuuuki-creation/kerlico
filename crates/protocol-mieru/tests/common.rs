@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use kerlico_config::NodeFactory;
 use kerlico_core::{
-    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramAssociation, DatagramChannel,
+    BoxFuture, CancellationToken, ConnectContext, DatagramAssociation, DatagramChannel,
     Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use kerlico_mieru::{MieruFactory, MieruNodeFactory};

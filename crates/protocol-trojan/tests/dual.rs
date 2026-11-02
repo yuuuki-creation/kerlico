@@ -1,8 +1,8 @@
 //! 真实回环网络覆盖双端载体、鉴权和 UDP 多目标。
 mod support;
 use kerlico_core::{
-    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel, Destination,
-    InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
+    BoxFuture, CancellationToken, ConnectContext, DatagramChannel, Destination, InboundContext,
+    NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use kerlico_trojan::{TrojanFactory, TrojanNodeFactory};
 use serde_json::{Value, json};

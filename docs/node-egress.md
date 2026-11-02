@@ -42,8 +42,8 @@ flowchart LR
     subgraph H["设备共享出口层"]
         A4["Native4"]
         A6["Native6"]
-        W4["Warp4 (待实现)"]
-        W6["Warp6 (待实现)"]
+        W4["Warp4 (CLI 未接入)"]
+        W6["Warp6 (CLI 未接入)"]
     end
     L <--> A4
     L <--> A6
@@ -97,4 +97,4 @@ flowchart LR
 ## 实现现状与待完成边界
 
 - **已实现（见 [interfaces/node-egress.md](interfaces/node-egress.md)）**：配置 v2 节点成员与凭据隔离（`CredentialManifest`）、`IngressBinding` / `PeerSession` 鉴权交接、全局唯一 `EgressRuntime` / `Dispatcher`、`TargetPolicy::Local`（含 `ipv4-only` / `ipv6-only` / `dual-stack` IPv4 优先及多目标 UDP 256 目标缓存）与 `TargetPolicy::Remote` 原目标透传。
-- **待实现**：双栈缺族时的设备级 CF WARP 自动部署与 `Warp4` / `Warp6` 数据路径、出站选择组（Policy Group）及独立规则路由模块。
+- **待实现**：CLI 接入 `kerlico-device` 以启用 `Warp4` / `Warp6`；出站选择组（Policy Group）与规则路由模块。当前每个节点固定绑定一个命名出站。

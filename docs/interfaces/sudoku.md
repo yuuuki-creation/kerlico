@@ -1,7 +1,5 @@
 # Sudoku 首轮接口记录
 
-2026-11-02共享运行迁移已编写，尚未编译、格式检查或测试。本文保留的历史通过记录只对应原输入，不代表当前整树已验收。
-
 配置模式为`version:2`。节点的`members`引用管理账户`user_id`，分别保存`credential_epoch`与`native_credential`。管理用户名、管理密码摘要和协议凭据互不代用。节点工厂接收`NodeBuildContext`，鉴权前只持`IngressBinding`，鉴权后使用`PeerSession`访问共享Dispatcher。
 
 每条成员凭据为`{"key":"synthetic-sudoku-seed-kept-secret"}`，认证节点options.protocol不再保存key。raw、legacy和split按候选表完成实际AEAD/KIP鉴别，WS先验证同一候选的MAC再验证KIP；候选失败不写入重放表。none仅用Local，options.protocol保留编码key，不能生成管理用户。
@@ -49,7 +47,7 @@ aead仅AES-128-GCM、ChaCha20-Poly1305、none。none必须显式allow_insecure�
 
 table_type支持prefer_ascii、prefer_entropy、up_ascii_down_entropy、up_entropy_down_ascii；空值默认entropy。custom_tables最多16个，布局恰有两个x、两个p、四个v；全ASCII方向拒绝无效自定义布局。客户端随机选一表，服务端额外接纳必要的默认上行表，并按已认证hint选择下行。padding为0–100且min≤max；pure_downlink=false时使用packed下行，不等于业务UDP或会话复用。
 
-待复验的表优化按64选四组合排名存放解码结果，全部288网格参与歧义判断，仅前256个唯一解可承载字节。每份不可变GridOrder的解码数组固定635376个u16，共1270752字节，随配置实例增长、不随流数量增长；另有puzzle列表。遍历等价回归与原Go向量尚待本轮复验，未据此填写性能结果。
+表优化按64选四组合排名存放解码结果，全部288网格参与歧义判断，仅前256个唯一解可承载字节。每份不可变GridOrder的解码数组固定635376个u16，共1270752字节，随配置实例增长、不随流数量增长；另有puzzle列表。
 
 ## 载体与实际数据语义
 
@@ -73,7 +71,7 @@ HTTP传输池使用显式Tokio计时器和pool_idle_ms回收空闲连接；Hyper
 
 下载请求显式发送TE: trailers；Hyper的HTTP/1服务端会丢弃未获允许的trailer，不能仅设置响应Trailer头就推定EOF能送达，见[实现](https://github.com/hyperium/hyper/blob/v1.11.1/src/proto/h1/conn.rs#L690)。H1/H2真实EOF路径均待本轮统一验证。
 
-固定原生Go客户端不声明TE但读取该EOF trailer；H1 split服务端在Hyper前使用有界输入适配器，仅对本节点精确下载路径的HTTP/1.1 GET、唯一stream/poll模式且缺少TE时增加内部能力标记。原有TE不改，Content-Length/chunked正文及pipeline原样透传；拒绝歧义分帧，H2跳过适配器。Auto模式中的WS仅在真实OnUpgrade成功后切换原始透传，被拒升级仍按后续HTTP边界处理。没有修改原生对端或伪造业务EOF；适配器7项纯状态/实际Hyper回归待执行。
+固定原生Go客户端不声明TE但读取该EOF trailer；H1 split服务端在Hyper前使用有界输入适配器，仅对本节点精确下载路径的HTTP/1.1 GET、唯一stream/poll模式且缺少TE时增加内部能力标记。原有TE不改，Content-Length/chunked正文及pipeline原样透传；拒绝歧义分帧，H2跳过适配器。Auto模式中的WS仅在真实OnUpgrade成功后切换原始透传，被拒升级仍按后续HTTP边界处理。没有修改原生对端或伪造业务EOF；适配器有7项纯状态/实际Hyper回归。
 
 cover_fallback只获取配置网站固定根路径的GET/HEAD，限制3秒和1MiB，仅回写状态、Content-Type和正文。不会携带原请求的Cookie、鉴权头、路径、查询或二进制。legacy仅在尚未完成KIP握手且原HTTP方法安全时允许此页面回退；完成握手后目标连接失败不能触发回退。
 
@@ -93,14 +91,14 @@ SudokuNodeFactory提供TCP及虚拟入口：Engine虚拟入口初始化一次全
 
 ## 完成权与绑定元数据
 
-本轮完成权迁移源码与回归已编写，尚未运行新输入。底层 `Outbound::connect_tcp` 返回 `OpenedTcp`，本协议没有可证实的目标连接绑定字段，明确返回 `TcpConnectInfo::unknown()`。代理端点和载体本地地址不代填业务绑定。底层 UDP 通道保持原接口，唯一业务计量仍由 Dispatcher 包装。
+底层 `Outbound::connect_tcp` 返回 `OpenedTcp`，本协议没有可证实的目标连接绑定字段，明确返回 `TcpConnectInfo::unknown()`。代理端点和载体本地地址不代填业务绑定。底层 UDP 通道保持原接口，唯一业务计量仍由 Dispatcher 包装。
 
 入站从 `PeerSession` 取得 `TcpFlow`、`FixedUdpFlow` 或 `UdpAssociation`。自定义会话拆出 typed I/O 和唯一完成权，先报告正常协议结束、超时、取消或错误，再释放 I/O。TCP 的单向 EOF 不提前结束反向数据；零长度 UDP 包不作为 EOF。完成权只固定终因，最后计量 I/O 租约释放后才生成稳定终态，不重复累计流量。父级载体保留已建立流的完成权，关闭后拒绝新登记，旧代次结果不能关闭新流。
 
-WebSocket 升级沿用原 peer 取消域，实际升级任务持 `PeerLease` 到退出。物理 HTTP handler 返回不会提前归还仍由升级连接占用的配额，也不会取消已移交的字节流。单 peer 取消仅结束该连接；节点取消仍结束该节点全部升级连接。节点 Runtime 从节点上下文装配，不保存首个 peer 的租约、地址或取消信号。相关回归已编写，待海外执行。
+WebSocket 升级沿用原 peer 取消域，实际升级任务持 `PeerLease` 到退出。物理 HTTP handler 返回不会提前归还仍由升级连接占用的配额，也不会取消已移交的字节流。单 peer 取消仅结束该连接；节点取消仍结束该节点全部升级连接。节点 Runtime 从节点上下文装配，不保存首个 peer 的租约、地址或取消信号。
 
 seed 候选选择验证完整 AEAD 与 KIP，不比较客户端 UserHash 和本地原始密钥字符串的摘要。规范化到同一 seed 的公钥形式、主标量和拆分材料继续服从同一认证与重放域；UserHash 不新增授权。此次移除了共享迁移中误加的 UserHash 相等条件，依据仍是既有固定参考探针与研究记录。
 
 子任务的完成权票据意外释放时，先从父表唯一移出，再在锁外报告终因：正在展开的 panic 为 Failed，已观察取消为 Cancelled，其余为 ClosedByCaller。显式完成或父级关闭已消费的票据不再次报告，后续正常父级 END 不能覆盖子流失败；已知计时器和协议错误仍显式报告。
 
-服务端虚拟 Runtime 的 Scope 将 HTTP 升级、split 后台任务、cover HTTP 驱动和 Mux 驱动的实际 future 登记到 NodeTasks；H2 服务端与客户端统一使用 ScopeExecutor，客户端 Scope 仍归命名出站 ServiceContext。裸 Mux 启动入口只编译进单元测试。登记拒绝关闭所属 Scope，不能另起未登记任务。Engine 的关闭确认仍要求外层 handler 和实际节点任务均已 join；本次 Scope、H2 执行器和真实 Mux socket 回归尚未运行。
+服务端虚拟 Runtime 的 Scope 将 HTTP 升级、split 后台任务、cover HTTP 驱动和 Mux 驱动的实际 future 登记到 NodeTasks；H2 服务端与客户端统一使用 ScopeExecutor，客户端 Scope 仍归命名出站 ServiceContext。裸 Mux 启动入口只编译进单元测试。登记拒绝关闭所属 Scope，不能另起未登记任务。Engine 的关闭确认仍要求外层 handler 和实际节点任务均已 join。

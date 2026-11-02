@@ -36,5 +36,12 @@
 
 ## 测试执行与记录规范
 
-- **完整首轮编码后集中验证**：按 [协议开发流程](protocol-roadmap.md) 完成目标范围的代码与接口文档后再提交 worker 统一验证。
-- **测试记录要素**：每次验证在 `docs/testing/` 与 [STATUS.md](../STATUS.md) 中记录所用源码输入/提交、工具链版本、参考对端版本、通过/失败项及边界条件（如参考对端自身限制）。
+验证范围见 [0012](decisions/0012-simplified-delivery-and-verification.md)。
+
+发行门禁一条命令：
+
+```sh
+tools/worker_gate.sh perf-01 HEAD
+```
+
+它把提交同步到 worker 的独立工作区，依次执行 `cargo fmt --check`、严格 Clippy、全工作区测试和 release 构建，结束后打印每步退出码、失败项和二进制 SHA-256。结果写入 [STATUS.md](../STATUS.md)。

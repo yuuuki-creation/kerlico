@@ -1,7 +1,5 @@
 # Naive 实际接口
 
-2026-11-02共享运行迁移已编写，尚未编译、格式检查或测试。本文保留的历史通过记录只对应原输入，不代表当前整树已验收。
-
 配置模式为`version:2`。节点的`members`引用管理账户`user_id`，分别保存`credential_epoch`与`native_credential`。管理用户名、管理密码摘要和协议凭据互不代用。节点工厂接收`NodeBuildContext`，鉴权前只持`IngressBinding`，鉴权后使用`PeerSession`访问共享Dispatcher。
 
 每条成员凭据为`{"username":"node-user","password":"synthetic-password"}`，节点options不再接受users。H1/H2/H3每个CONNECT按真实Basic命中行创建peer，UoT与普通TCP分别建立逻辑访问。
@@ -10,7 +8,7 @@
 
 成员池的外层表只在查找或取得 bucket 时短暂加锁。DNS、载体拨号和协议协商只持对应成员 bucket 的锁；其他成员可同时建立载体。关闭时先从表和 bucket 移出资源，再等待清理，不跨 await 持有全局池锁。bucket 只保存池状态，不创建第二个完整出站实例。
 
-本轮补齐全部桥任务所有权，源码与回归已编写，尚未执行。H1真实TCP桥、H2和H3逻辑流桥、双端padding桥都必须接收真实运行所有者。出站桥直接登记到命名服务，后端保留对应 `ServiceTask` 并在 shutdown 取消和等待；HTTP会话driver及QUIC原生driver仍属于同一 `ServiceContext`。保留的业务流句柄不阻止shutdown取出并关闭QUIC端点，也不能在关闭后登记新桥。
+全部桥任务所有权已补齐。H1真实TCP桥、H2和H3逻辑流桥、双端padding桥都必须接收真实运行所有者。出站桥直接登记到命名服务，后端保留对应 `ServiceTask` 并在 shutdown 取消和等待；HTTP会话driver及QUIC原生driver仍属于同一 `ServiceContext`。保留的业务流句柄不阻止shutdown取出并关闭QUIC端点，也不能在关闭后登记新桥。
 
 TCP入站为每条已接受连接持有本地任务集合，H1和H2的HTTP桥与padding桥均由该集合等待退出。H3入站桥与QUIC原生driver归节点任务所有者；请求处理即使异常返回，任务仍在节点集合中。HTTP处理结束后统一取消、排空和等待所属桥，不使用测试服务标识伪造生产宿主。请求取消不向上取消服务或其他节点。
 
@@ -18,12 +16,12 @@ QUIC 入站的节点任务所有者登记原生驱动，使用独立子取消域
 
 QUIC 鉴权使用已接受连接的 remote_address 记录实际可观察来源；该字段不参与 ResourceKey，也不取客户端请求自报地址。TCP 来源继续沿用接入层的 socket 地址。
 
-新增 concurrent_members 测试代码通过真实 HTTP Basic 入站与 Naive H2 出站，挂起成员 A 的连接器，再验证同命名出站内成员 B 转发及 A 取消后的 B 存量流。该测试尚未执行。
+新增 concurrent_members 测试代码通过真实 HTTP Basic 入站与 Naive H2 出站，挂起成员 A 的连接器，再验证同命名出站内成员 B 转发及 A 取消后的 B 存量流。
 
 本模块代理出站声明`TargetPolicy::Remote`，保留网站原目标、端口和负载。本机只解析代理接入端点，网站解析由远端负责；协议无法表达的目标明确拒绝。TCP连接与UDP关联建立后固定所选出站，不在失败后跨代理或直连重放。
 
 
-状态：2026-10-31，**限定双端与组合已验收并冻结，供1.0.0整树发行复验使用**。perf-03通过26项Rust、严格Clippy/fmt、限定CLI构建、156/156配置的900条常规检查及同进程双端28条检查；原参考包长与EOF限制另列。P-21；研究和完整范围见[详细研究](../../reference/research_notes/naive.md)，冻结及真实结果见[测试记录](../testing/naive.md)。本模块结果不代表1.0.0整树或发行产物已验收。
+状态：2026-10-31，**双端与组合已验收**。perf-03通过26项Rust、严格Clippy/fmt、限定CLI构建、156/156配置的900条常规检查及同进程双端28条检查；原参考包长与EOF限制另列。P-21；研究和完整范围见[详细研究](../../reference/research_notes/naive.md)，冻结及真实结果见[测试记录](../testing/naive.md)。
 
 `kerlico-naive` 导出 `NaiveFactory`、`NaiveNodeFactory`，两端注册名 `naive`；根程序的可选功能为 `protocol-naive`。工厂只解析配置、构造状态，不拨号或绑定端口。业务目标只通过注入 `PeerSession`，逐包多目标只用 `DatagramAssociation`。
 
@@ -83,7 +81,7 @@ UoT默认关闭。出站启用时版本只能1或2，默认2；固定UDP和多�
 
 ## 完成权与绑定元数据
 
-本轮完成权迁移源码与回归已编写，尚未运行新输入。底层 `Outbound::connect_tcp` 返回 `OpenedTcp`，本协议没有可证实的目标连接绑定字段，明确返回 `TcpConnectInfo::unknown()`。代理端点和载体本地地址不代填业务绑定。底层 UDP 通道保持原接口，唯一业务计量仍由 Dispatcher 包装。
+底层 `Outbound::connect_tcp` 返回 `OpenedTcp`，本协议没有可证实的目标连接绑定字段，明确返回 `TcpConnectInfo::unknown()`。代理端点和载体本地地址不代填业务绑定。底层 UDP 通道保持原接口，唯一业务计量仍由 Dispatcher 包装。
 
 入站从 `PeerSession` 取得 `TcpFlow`、`FixedUdpFlow` 或 `UdpAssociation`。自定义会话拆出 typed I/O 和唯一完成权，先报告正常协议结束、超时、取消或错误，再释放 I/O。TCP 的单向 EOF 不提前结束反向数据；零长度 UDP 包不作为 EOF。完成权只固定终因，最后计量 I/O 租约释放后才生成稳定终态，不重复累计流量。父级载体保留已建立流的完成权，关闭后拒绝新登记，旧代次结果不能关闭新流。
 

@@ -4,8 +4,8 @@ use crate::{
 };
 use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
-    BoxFuture, BoxStream, CancellationToken, Capabilities, ConnectContext, DatagramChannel,
-    Destination, Error, Outbound, Result,
+    BoxFuture, CancellationToken, Capabilities, ConnectContext, DatagramChannel, Destination,
+    Error, Outbound, Result,
 };
 use russh::{
     ChannelStream, client,

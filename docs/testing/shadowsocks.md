@@ -57,7 +57,7 @@ Xray 临时 freedom 配置显式只允许当前 echo 的目标 IP/port。初版�
 
 因此保留这些参考入口失败记录。零包在本模块全部方法自端路径通过，kerlico 客户端至 sing-box 服务端的标准 AEAD 零包也通过；参考入口丢弃的零包不能记为 kerlico 服务端已完成独立对端验收。Xray 的 12000 字节失败也不能靠缩写矩阵消失，4096 字节通过只证明该限定长度。
 
-公开复测入口为 `tools/diagnose_shadowsocks_udp_ingress.py`，输出实际收包长度与超时；它是测量工具，退出状态不代表所有长度都被参考入口支持。
+
 
 ## 集成审查后的无认证入口增量
 
@@ -73,7 +73,6 @@ cargo test -p kerlico-shadowsocks --all-targets
 cargo clippy -p kerlico-shadowsocks --all-targets -- -D warnings
 cargo build -p kerlico --no-default-features --features protocol-shadowsocks
 python3 tools/interop_shadowsocks.py --help
-python3 tools/diagnose_shadowsocks_udp_ingress.py --help
 ```
 
 互通工具通过 `--methods`、`--directions`、`--node-hosts`、`--target-hosts`、`--udp-sizes` 精确选择矩阵，`--peer-kind` 指定 xray 或 sing-box。完整默认矩阵仍包含零包；参考入口不支持时如实返回失败，不能为获得全绿而静默忽略。

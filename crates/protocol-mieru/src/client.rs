@@ -9,9 +9,9 @@ use crate::{
 };
 use kerlico_config::OutboundPlan;
 use kerlico_core::{
-    Address, BoxFuture, BoxStream, CancellationToken, Capabilities, ConnectContext,
-    DatagramAssociation, DatagramChannel, Destination, Error, Outbound, ResourceKey, Result,
-    ServiceContext, TargetPolicy,
+    Address, BoxFuture, CancellationToken, Capabilities, ConnectContext, DatagramAssociation,
+    DatagramChannel, Destination, Error, Outbound, ResourceKey, Result, ServiceContext,
+    TargetPolicy,
 };
 use std::{
     collections::HashMap,

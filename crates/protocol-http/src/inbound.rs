@@ -4,7 +4,6 @@ use bytes::Bytes;
 use flush::FlushReceipts;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
-use hyper::body::Body as _;
 use hyper::{body::Incoming, service::service_fn};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use kerlico_config::{NodeBuildContext, NodeFactory};

@@ -135,6 +135,11 @@ struct Running {
 impl Running {
     async fn start(name: &str, cached: Option<bool>) -> Self {
         let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        std::fs::set_permissions(
+            directory.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
         let relative = directory.path().file_name().unwrap().to_str().unwrap();
         let options: Options = serde_json::from_value(serde_json::json!({
             "data_directory": relative, "bootstrap_timeout_ms": 60000, "shutdown_timeout_ms": 5000

@@ -23,6 +23,8 @@ use tokio::{
     task::JoinSet,
 };
 
+type PeerSlot = Arc<std::sync::Mutex<Option<([u8; 32], PeerSession)>>>;
+
 struct Delivered {
     source: Destination,
     payload: Vec<u8>,
@@ -271,7 +273,7 @@ impl Drop for Events {
 }
 pub(crate) async fn server(
     connection: quinn::Connection,
-    peer: Arc<std::sync::Mutex<Option<([u8; 32], PeerSession)>>>,
+    peer: PeerSlot,
     context: InboundContext,
     limits: Limits,
     ready: Arc<Notify>,

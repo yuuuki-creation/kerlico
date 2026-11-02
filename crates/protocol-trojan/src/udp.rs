@@ -10,6 +10,8 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
 };
+type PacketRead<'a> = BoxFuture<'a, Result<Option<(Destination, Vec<u8>)>>>;
+
 const MAX_PACKET: usize = 65535;
 struct Sender {
     writer: WriteHalf<BoxStream>,
@@ -108,10 +110,9 @@ fn finish_reply(
     if entries
         .get(&key)
         .is_some_and(|entry| entry.generation == generation)
+        && let Some(entry) = entries.remove(&key)
     {
-        if let Some(entry) = entries.remove(&key) {
-            entry.finish(reason);
-        }
+        entry.finish(reason);
     }
 }
 pub(crate) async fn serve(
@@ -129,7 +130,7 @@ pub(crate) async fn serve(
     tokio::pin!(timer);
     let result: Result<()> = async {
         loop {
-            let reading: BoxFuture<'_, Result<Option<(Destination, Vec<u8>)>>> = Box::pin(async { codec::packet(&mut reader, context.max_datagram_size).await });
+            let reading: PacketRead<'_> = Box::pin(async { codec::packet(&mut reader, context.max_datagram_size).await });
             tokio::pin!(reading);
             let request = loop {
                 tokio::select! {

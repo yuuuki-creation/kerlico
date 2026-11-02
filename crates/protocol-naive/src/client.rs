@@ -96,12 +96,11 @@ impl Session {
             let endpoint = if let Some(session) = weak.upgrade() {
                 session.closed.store(true, Ordering::Release);
                 session.cancel.cancel();
-                let endpoint = session
+                session
                     .endpoint
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take();
-                endpoint
+                    .take()
             } else {
                 None
             };

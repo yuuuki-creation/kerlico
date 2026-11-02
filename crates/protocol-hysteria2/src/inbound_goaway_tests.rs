@@ -599,10 +599,7 @@ async fn tcp_target() -> (Destination, JoinHandle<Vec<u8>>) {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut all = Vec::new();
         let mut bytes = [0; 1024];
-        loop {
-            let Ok(count) = stream.read(&mut bytes).await else {
-                break;
-            };
+        while let Ok(count) = stream.read(&mut bytes).await {
             if count == 0 {
                 let _ = stream.shutdown().await;
                 break;

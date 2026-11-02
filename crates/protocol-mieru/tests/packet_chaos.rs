@@ -5,8 +5,8 @@ use chacha20poly1305::{
 };
 use common::*;
 use kerlico_core::{
-    BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
-    Destination, Outbound, Result,
+    BoxFuture, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel, Destination,
+    Outbound, Result,
 };
 use kerlico_mieru::MieruFactory;
 use pbkdf2::pbkdf2_hmac;

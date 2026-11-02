@@ -52,7 +52,7 @@ cargo test -p kerlico-shadowsocksr --all-targets
 cargo clippy -p kerlico-shadowsocksr --all-targets -- -D warnings
 cargo fmt -p kerlico-shadowsocksr --check
 cargo build -p kerlico --no-default-features --features protocol-shadowsocksr
-python3 -m py_compile tools/interop_shadowsocksr.py tools/shadowsocksr_reference.py tools/shadowsocksr_vectors.py tools/shadowsocksr_cipher_vectors.py tools/diagnose_shadowsocksr_peer.py
+python3 -m py_compile tools/interop_shadowsocksr.py tools/shadowsocksr_reference.py tools/shadowsocksr_vectors.py tools/shadowsocksr_cipher_vectors.py
 ```
 
 r7 的6项单元、9项集成测试、严格 Clippy、fmt 和 CLI 构建通过。复制正在运行的旧CLI时遇到 Text file busy，未覆盖活动文件；另存 r7 版本路径并核验摘要。工具语法单独检查通过；最终工具增量另记，不能把复制失败称为整条脚本成功。
@@ -129,7 +129,7 @@ random_head缺少可靠回写边界；none+origin+HTTP短首部受固定Python�
 
 客户端先发完整复验仍为43/48，具体失败为origin/random_head、AES-SHA1/random_head、chain_A/ticket_auth、chain_B/random_head、chain_B/ticket_fastauth。六种random_head及已出现失败的ticket用例分别固定同一cipher、凭据、节点/目标地址族和负载做mihomo→Rust、mihomo→原Python、Rust→原Python对照。原生mihomo向两种服务端均可复现故障；其发出的raw cipher流可超过输入负载，或在合法认证后出现后续MAC错误；TLS抓包显示双方Finished校验正确、应用记录在Finished之后，但后续记录头已被裸字节破坏。固定Python独立解码同一原始字节也报告错误。
 
-`tools/reproduce_shadowsocksr.py`保存三向参数、每次结果和可选本任务端口抓包；`tools/analyze_shadowsocksr_wire.py`仅分析合成抓包，按捕获时钟重放参考校验；`tools/replay_shadowsocksr_wire.py`确定重放非法TLS前缀。两种原生服务端均先验证握手、接纳合法地址，再拒绝同一非法前缀。原生生产者故障仍为概率复现，不能称每次必现；确定性的是捕获字节的拒绝结果。
+两种原生服务端均先验证握手、接纳合法地址，再拒绝同一非法前缀。原生生产者故障仍为概率复现，不能称每次必现；确定性的是捕获字节的拒绝结果。
 
 六组random_head的Rust→Python对照中，五组10/10；chain_A原有一次Address already in use启动失败且没有SSR业务，不能算协议失败或直接改写为成功。增加项目级端口租约后，该组另行20/20。ticket对照中，origin为Rust→Python20/20，V4为20/20，chain_A及chain_B fastauth分别10/10；mihomo向两种服务端的失败抓包逐项保留。
 

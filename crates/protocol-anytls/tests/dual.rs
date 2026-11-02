@@ -1,8 +1,8 @@
 mod support;
 use kerlico_anytls::{AnyTlsFactory, AnyTlsNodeFactory};
 use kerlico_core::{
-    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel, Destination,
-    InboundContext, Outbound, Result, StreamBudget,
+    BoxFuture, CancellationToken, ConnectContext, DatagramChannel, Destination, InboundContext,
+    Outbound, Result, StreamBudget,
 };
 use serde_json::json;
 use std::{

@@ -1,8 +1,8 @@
 use kerlico_config::{NodeFactory, OutboundFactory};
 use kerlico_core::{
-    AddressedDatagram, BoxFuture, BoxStream, CancellationToken, ConnectContext,
-    DatagramAssociation, DatagramChannel, Destination, InboundContext, NodeEvent, NodeObserver,
-    Outbound, Result, StreamBudget,
+    AddressedDatagram, BoxFuture, CancellationToken, ConnectContext, DatagramAssociation,
+    DatagramChannel, Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result,
+    StreamBudget,
 };
 use kerlico_tuic::{TuicFactory, TuicNodeFactory};
 use serde_json::{Value, json};

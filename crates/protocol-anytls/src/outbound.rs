@@ -50,11 +50,13 @@ fn idle_default() -> u64 {
 fn pool_default() -> usize {
     64
 }
+type SessionPool = Arc<Mutex<Vec<Arc<Session>>>>;
+
 struct AnyTlsOutbound {
     server: Destination,
     password: [u8; 32],
     connector: TcpConnector,
-    sessions: std::sync::Mutex<HashMap<kerlico_core::ResourceKey, Arc<Mutex<Vec<Arc<Session>>>>>>,
+    sessions: std::sync::Mutex<HashMap<kerlico_core::ResourceKey, SessionPool>>,
     host: kerlico_core::ServiceContext,
     idle: std::time::Duration,
     capacity: Arc<tokio::sync::Semaphore>,

@@ -1,7 +1,5 @@
 # Mieru 双端接口
 
-2026-11-02共享运行迁移已编写，尚未编译、格式检查或测试。本文保留的历史通过记录只对应原输入，不代表当前整树已验收。
-
 配置模式为`version:2`。节点的`members`引用管理账户`user_id`，分别保存`credential_epoch`与`native_credential`。管理用户名、管理密码摘要和协议凭据互不代用。节点工厂接收`NodeBuildContext`，鉴权前只持`IngressBinding`，鉴权后使用`PeerSession`访问共享Dispatcher。
 
 TCP节点的每条成员凭据为`{"username":"node-user","password":"synthetic-password"}`，节点options不再接受username/password/users。命中身份来自首次成功解密的实际Key，不能只凭nonce中的用户hint授予身份。旧不安全UDP仅用Local，编码材料保留在options并登记Protection。
@@ -12,17 +10,17 @@ TCP节点的每条成员凭据为`{"username":"node-user","password":"synthetic-
 
 Mieru UnsafeUDP 本地兼容模式在收到真实 recv_from 来源后才建立 Local peer，每条逻辑会话固定此来源；TCP 继续使用接入层来源。兼容模式不会把报文中的用户提示当成已鉴权身份。
 
-本轮逻辑流终止不再持续返回可重试的`Interrupted`。明确请求取消使用独立私有原因，并通过`ConnectionAborted`及`Error::Cancelled`来源返回；普通泵错误、队列关闭和释放路径仍按失败处理，不能只按`ConnectionAborted`种类归为取消。该原因值不进入线格式，也不改变认证或容量。原始出站流的`read_exact`、`write_all`取消回归与未分类失败回归已编写，尚待海外worker执行。
+本轮逻辑流终止不再持续返回可重试的`Interrupted`。明确请求取消使用独立私有原因，并通过`ConnectionAborted`及`Error::Cancelled`来源返回；普通泵错误、队列关闭和释放路径仍按失败处理，不能只按`ConnectionAborted`种类归为取消。该原因值不进入线格式，也不改变认证或容量。原始出站流的`read_exact`、`write_all`取消与未分类失败有回归测试。
 
 本轮后续修订把`abort_cancel`限定为逻辑泵和队列的机制性清理信号。每条入站逻辑会话用真正peer取消域派生自己的目标请求token，relay保留peer取消语义。`run_session`私有所有者持有TCP流或UDP关联的唯一完成权，先报告实际结果，再取消该逻辑请求token回收后端派生资源。普通内部终止先固定Failed，明确空闲期限记Timeout，请求、peer、节点或共享服务的真实取消仍记Cancelled；清理Drop不改写已知Timeout。TCP与旧本地UDP载体的明确idle原因使用同一私有超时值。
 
-建立期使用`FlowOpen`承接同一个完成权。私有`PendingTarget`在目标尚未返回时也能读取Life的首次原因，并在真正建链future被销毁前调用`finish`。其后RequestCleanup才取消本逻辑请求child token。成功返回时完成权随typed flow进入既有SessionTarget，不另开账本。TCP、固定UDP、多目标UDP的公共建立方法保持原名称和await用法，可信构造边界见[核心接口](core.md)。该Pending补漏已编写，尚未运行本输入。
+建立期使用`FlowOpen`承接同一个完成权。私有`PendingTarget`在目标尚未返回时也能读取Life的首次原因，并在真正建链future被销毁前调用`finish`。其后RequestCleanup才取消本逻辑请求child token。成功返回时完成权随typed flow进入既有SessionTarget，不另开账本。TCP、固定UDP、多目标UDP的公共建立方法保持原名称和await用法，可信构造边界见[核心接口](core.md)。
 
-正常对端整会话关闭仍可终止反向剩余数据，不新增半关闭保证。明确`peer_close`与仅因资源析构产生的`finished`分别记录；前者在没有失败或真实取消时按ProtocolEnd完成，后者不能单凭finished推导成功。新增真实入站回归使用生产首帧解密、凭据匹配与PeerSession签发路径，通过既有driver的abort命令触发reason 2，检查真实TCP目标和UDP关联的FlowRecord、单次计量、已交付尾部及原许可。代码与回归均已编写，尚未在本输入执行。
+正常对端整会话关闭仍可终止反向剩余数据，不新增半关闭保证。明确`peer_close`与仅因资源析构产生的`finished`分别记录；前者在没有失败或真实取消时按ProtocolEnd完成，后者不能单凭finished推导成功。新增真实入站回归使用生产首帧解密、凭据匹配与PeerSession签发路径，通过既有driver的abort命令触发reason 2，检查真实TCP目标和UDP关联的FlowRecord、单次计量、已交付尾部及原许可。
 
 目标仍Pending时的正常Frame 4/5同样报告ProtocolEnd。没有已知失败且真实取消域均未取消时，记录可为Opening阶段、Completed终因且业务量为零，不表示网站目标已连接。命名服务已因后台任务失败而取消时，真实FlowLease在Opening阶段固定Cancelled，即使建立future未再次poll；已交付流及已固定终因不被此规则改写。
 
-仅由普通Entry析构发出的finished仍使用ClosedByCaller或真实取消、已知失败兜底。Pending回归在真实Direct后端已持有回环socket时触发内部abort、peer/node取消、idle、建立期限和协议关闭，并检查较早独立失败/超时不会被后续清理改写。新增服务失败回归使用绑定同一命名服务的真实后台panic，确认服务token已取消且当前FlowOpen未再次poll，再经加密载体发送合法Frame 4或5。测试轮询门只延迟指定逻辑会话的PendingTarget，保留原waker，终因和资源回收仍由生产driver与唯一完成权处理。普通系统ConnectionAborted或TimedOut仍归Failed。这些回归已编写、尚未运行，使用TCP载体内的TCP与UDP关联，不代替旧本地UDP载体的线格式验证。
+仅由普通Entry析构发出的finished仍使用ClosedByCaller或真实取消、已知失败兜底。Pending回归在真实Direct后端已持有回环socket时触发内部abort、peer/node取消、idle、建立期限和协议关闭，并检查较早独立失败/超时不会被后续清理改写。新增服务失败回归使用绑定同一命名服务的真实后台panic，确认服务token已取消且当前FlowOpen未再次poll，再经加密载体发送合法Frame 4或5。测试轮询门只延迟指定逻辑会话的PendingTarget，保留原waker，终因和资源回收仍由生产driver与唯一完成权处理。普通系统ConnectionAborted或TimedOut仍归Failed。这些回归使用TCP载体内的TCP与UDP关联。
 
 本模块代理出站声明`TargetPolicy::Remote`，保留网站原目标、端口和负载。本机只解析代理接入端点，网站解析由远端负责；协议无法表达的目标明确拒绝。TCP连接与UDP关联建立后固定所选出站，不在失败后跨代理或直连重放。
 
@@ -113,8 +111,8 @@ UDP 兼容模式乱序缓冲最多 128 段、向对端通告的接收窗口最�
 
 ## 完成权与绑定元数据
 
-本轮完成权迁移源码与回归已编写，尚未运行新输入。底层 `Outbound::connect_tcp` 返回 `OpenedTcp`，本协议没有可证实的目标连接绑定字段，明确返回 `TcpConnectInfo::unknown()`。代理端点和载体本地地址不代填业务绑定。底层 UDP 通道保持原接口，唯一业务计量仍由 Dispatcher 包装。
+底层 `Outbound::connect_tcp` 返回 `OpenedTcp`，本协议没有可证实的目标连接绑定字段，明确返回 `TcpConnectInfo::unknown()`。代理端点和载体本地地址不代填业务绑定。底层 UDP 通道保持原接口，唯一业务计量仍由 Dispatcher 包装。
 
 入站从 `PeerSession` 取得 `TcpFlow`、`FixedUdpFlow` 或 `UdpAssociation`。自定义会话拆出 typed I/O 和唯一完成权，先报告正常协议结束、超时、取消或错误，再释放 I/O。TCP 的单向 EOF 不提前结束反向数据；零长度 UDP 包不作为 EOF。完成权只固定终因，最后计量 I/O 租约释放后才生成稳定终态，不重复累计流量。每个Mieru逻辑会话保留自己的完成权，成功应答失败与双向传输结束分别报告；完成权不绑定整个复用载体。
 
-TCP 与回环 UDP 服务端 Scope 使用本节点 NodeTasks 登记实际泵和会话任务，客户端 Scope 使用命名出站 ServiceContext。服务端外层 handler 被中止后，Engine 仍能等待内部真实任务。单 peer 仅停止自己的 Scope，不关闭 NodeTasks；关闭后的登记直接停止该 Scope，不退回独立 spawn。此补漏及 socket 回归仅已编写，尚未运行。
+TCP 与回环 UDP 服务端 Scope 使用本节点 NodeTasks 登记实际泵和会话任务，客户端 Scope 使用命名出站 ServiceContext。服务端外层 handler 被中止后，Engine 仍能等待内部真实任务。单 peer 仅停止自己的 Scope，不关闭 NodeTasks；关闭后的登记直接停止该 Scope，不退回独立 spawn。

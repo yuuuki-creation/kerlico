@@ -27,4 +27,4 @@ SSH 主机签名不协商 RSA SHA-1，RSA 用户认证要求对端支持 SHA-2�
 
 ## 连接结果元数据
 
-本轮返回类型迁移已编写，尚未运行新输入。`Outbound::connect_tcp` 返回 `OpenedTcp { stream, info }`。本协议没有可证实的业务目标绑定字段，`info` 明确为 `TcpConnectInfo::unknown()`，不使用 SSH 或 SMUX 载体地址代填。Dispatcher 返回业务层 typed flow 并负责唯一计量；本模块不创建第二份完成权或账本。底层固定 UDP 接口及原有未支持能力保持准确边界。
+`Outbound::connect_tcp` 返回 `OpenedTcp { stream, info }`。本协议没有可证实的业务目标绑定字段，`info` 明确为 `TcpConnectInfo::unknown()`，不使用 SSH 或 SMUX 载体地址代填。Dispatcher 返回业务层 typed flow 并负责唯一计量；本模块不创建第二份完成权或账本。底层固定 UDP 接口及原有未支持能力保持准确边界。

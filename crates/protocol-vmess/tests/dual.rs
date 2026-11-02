@@ -1,7 +1,7 @@
 mod support;
 use kerlico_core::{
-    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel, Destination,
-    InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
+    BoxFuture, CancellationToken, ConnectContext, DatagramChannel, Destination, InboundContext,
+    NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use kerlico_vmess::{VmessFactory, VmessNodeFactory};
 use serde_json::{Value, json};

@@ -4,7 +4,7 @@ use kerlico_core::{
     DatagramAssociationSender, FamilyMode, NodeId, NodeTasks, OpenedTcp, Outbound, StreamBudget,
     TargetPolicy,
 };
-use kerlico_egress::{FlowEnd, FlowKind};
+use kerlico_egress::FlowEnd;
 use std::{sync::Arc, time::Duration};
 struct Observer;
 impl kerlico_core::NodeObserver for Observer {

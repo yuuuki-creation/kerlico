@@ -1,7 +1,7 @@
 mod support;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use kerlico_core::{
-    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel, Destination, Error,
+    BoxFuture, CancellationToken, ConnectContext, DatagramChannel, Destination, Error,
     InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use serde_json::json;

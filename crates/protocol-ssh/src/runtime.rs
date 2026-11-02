@@ -136,6 +136,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::async_yields_async)]
     async fn nested_native_spawn_inherits_owner_and_releases_socket() {
         let host = ServiceContext::for_test();
         let drivers = Drivers::new(host.clone());
@@ -174,6 +175,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::async_yields_async)]
     async fn closed_owner_rejects_native_spawn_without_running_it() {
         let host = ServiceContext::for_test();
         let drivers = Drivers::new(host.clone());

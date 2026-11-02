@@ -12,7 +12,7 @@
 | shaped-rustls | [固定提交](https://github.com/aimalygin/shaped-rustls/tree/3a131beaef0183b0cb61e5a9070a703b6be39ed3) | REALITY ClientHello 定制、混合密钥交换与证书验证；许可证以该版本原始文件为准 |
 | quinn / quinn-proto / h3-quinn / blake3 补丁 | 上述 xray-rust 固定提交的 vendor 目录 | 保留上游 H3 与二进制上下文 KDF 行为；各自许可证、补丁来源和范围保留在原始依赖中 |
 
-Cargo.lock 记录实际 Git revision 与注册表校验和。根清单固定 rustls 为补丁提供的 0.23.40，避免 Cargo 选择更高的未修改版本而丢失 REALITY 所需接口。当前构建基线为 Rust 1.99.1。原计划 1.96 已经在隔离容器实际尝试，但固定 rust-reality 2.2.0 及 rr-crypto/rr-linux/rr-session 明确要求 1.99；因此调整工作区清单，不再声称兼容 1.96。此前 1.88 的历史结果仅适用于 0.1。
+Cargo.lock 记录实际 Git revision 与注册表校验和。根清单固定 rustls 为补丁提供的 0.23.40，避免 Cargo 选择更高的未修改版本而丢失 REALITY 所需接口。当前构建基线为 Rust 1.99.1。原计划 1.96 已经在隔离容器实际尝试，但固定 rust-reality 2.2.0 及 rr-crypto/rr-linux/rr-session 明确要求 1.99；因此工作区基线定为 1.99.1。
 
 依赖源码及其原始许可证可从表中固定链接获取，Cargo 也会下载相同来源。分发二进制时必须随发行说明保留这些来源和许可证入口；如修改依赖文件，应另行公开对应源码及修改说明。匿名提交要求不允许删除第三方原有的许可证或署名。
 

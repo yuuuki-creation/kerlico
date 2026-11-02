@@ -65,11 +65,11 @@ async fn connect_response(stream: &mut BoxStream, binding: ConnectReplyBind) -> 
 }
 fn connect_response_four(binding: &TargetBind) -> [u8; 8] {
     let mut bytes = [0, 90, 0, 0, 0, 0, 0, 0];
-    if let TargetBind::Known { endpoint, .. } = binding {
-        if let Address::Ip(IpAddr::V4(ip)) = endpoint.address() {
-            bytes[2..4].copy_from_slice(&endpoint.port().to_be_bytes());
-            bytes[4..].copy_from_slice(&ip.octets());
-        }
+    if let TargetBind::Known { endpoint, .. } = binding
+        && let Address::Ip(IpAddr::V4(ip)) = endpoint.address()
+    {
+        bytes[2..4].copy_from_slice(&endpoint.port().to_be_bytes());
+        bytes[4..].copy_from_slice(&ip.octets());
     }
     bytes
 }

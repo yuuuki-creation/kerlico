@@ -2,8 +2,7 @@
 use kerlico_config::{NodeBuildContext, NodeFactory, OutboundFactory};
 use kerlico_core::{
     BoxFuture, BoxStream, ConnectContext, DatagramChannel, DatagramReceiver, DatagramSender,
-    Destination, InboundContext, InboundProtocol, NodeEvent, NodeObserver, Outbound, Result,
-    StreamBudget,
+    Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use kerlico_ss2022::{Ss2022Factory, Ss2022NodeFactory};
 use std::{sync::Arc, time::Duration};

@@ -2,7 +2,7 @@
 
 更新日期：2026-11-02（Asia/Shanghai）
 
-按“先发布源码、再执行海外整树构建与验证”的推进顺序，`v1.0.0` 源码版已先行发布（见 [1.0.0 发行说明](releases/1.0.0.md)）。本文记录 `1.0.0` 系列完整交付的质量验收门槛，作为发布后持续验证与补丁版本（`1.0.x`）收尾的标准。
+`v1.0.0` 源码版已发布（见 [1.0.0 发行说明](releases/1.0.0.md)）。本文记录 `1.0.x` 的范围和发版条件。
 
 ## 协议与架构范围
 
@@ -15,14 +15,9 @@
    - 节点地址族模式（`ipv4-only` / `ipv6-only` / `dual-stack` 默认 IPv4 优先）、双栈缺族设备共享 CF WARP 自动补齐，以及远端代理原目标透传（[0009](decisions/0009-global-egress-dispatcher.md)、[0010](decisions/0010-node-egress-modes-and-warp.md)）；
    - 单节点多用户管理账户、唯一业务流量计量、采样带宽历史与访问记录持久化（[0011](decisions/0011-users-statistics-and-access-records.md)）。
 
-## 完整交付验收门槛
+## 发版条件
 
-| 验收维度 | 要求与标准 |
-| --- | --- |
-| 协议模块验证 | 每个模块完成包级测试、真实参考对端互通、异常报文/鉴权失败负例、包长/EOF 边界与资源回收测试；明确区分参考对端自身限制与本实现缺陷 |
-| 公共 API 与文档一致 | `core-api`、`config`、`egress`、`engine` 的公开签名、Rustdoc、错误/取消契约与 `docs/interfaces/` 完全一致 |
-| 配置与 CLI | JSON v2 校验、未知/非法配置拒绝、Cargo feature 裁剪行为、`modules`/`check`/`run`/`account-new` 命令与中英双语提示验证通过 |
-| 整树构建与检查 | 同一源码快照在专用海外 worker（Linux `x86_64` / Rust `1.99.1`）通过全工作区测试、严格 Clippy、`cargo fmt --check`、Rustdoc、功能裁剪构建与多节点并发联合运行 |
-| 许可证与源码合规 | 完成 `GPL-3.0-only` 声明及全部实际链接依赖的第三方许可证/署名通知核对（见 [许可说明](licensing.md)） |
-| 匿名与隐私检查 | 通过 `.githooks/privacy-check` 完整历史与产物检查，确保无个人身份信息、主机路径或 `.private/` 凭证泄露 |
-| 正式构建产物 | 上传与对应 Git 标签源码严格匹配的 Release 二进制及 SHA-256 校验摘要，完成启动冒烟与优雅退出验证 |
+1. `tools/worker_gate.sh` 四步通过（见 [0012](decisions/0012-simplified-delivery-and-verification.md)）。
+2. 第三方许可证与署名通知齐全（见 [许可说明](licensing.md)）。
+3. `.githooks/privacy-check` 通过。
+4. 标签提交的 release 二进制和 SHA-256 上传到 Release，`check -c examples/config-v2-minimal.json` 可运行。

@@ -8,7 +8,7 @@ use crate::{
 use jls_quinn::Runtime;
 use kerlico_config::OutboundPlan;
 use kerlico_core::{
-    BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
+    BoxFuture, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
     DatagramReceiver, DatagramSender, Destination, Error, Outbound, ResourceKey, Result,
     ServiceContext, TargetPolicy,
 };

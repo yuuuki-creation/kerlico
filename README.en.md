@@ -4,14 +4,14 @@
 
 `kerlico` is a unified client-and-server proxy core written in Rust, informed by the architectures of mihomo, sing-box, and Xray-core, and compiled into a single executable.
 
-**[Version 1.0.0](docs/releases/1.0.0.md)** has been published as a source-first release, with full-tree builds, verification, and binary packaging running on dedicated Linux workers.
+**[Version 1.0.0](docs/releases/1.0.0.md)** is published as a source release. The next version and the completion plan are in [STATUS.md](STATUS.md).
 
 ## Key Features & Current Scope
 
 - **Unified Client/Server Core & 23 Protocol Modules**: Includes VLESS, VMess, Trojan, Shadowsocks, SS2022, SSR, AnyTLS, ShadowTLS, Snell, TUIC, Hysteria v1, Hysteria2, ShadowQUIC, Mieru, Naive, TrustTunnel, Sudoku, SOCKS, HTTP, SSH, Gost Relay, Tor, and WireGuard as modular crates selectable via Cargo features.
 - **Independent Nodes & Shared Outbound Dispatcher**: IPv4 and IPv6 inbound nodes maintain separate listeners, authentication scopes, and quotas while sharing a single runtime outbound dispatcher (`EgressRuntime`). Local egress follows per-node `ipv4-only`, `ipv6-only`, or `dual-stack` (IPv4-preferred) policy, while remote proxy outbounds pass original targets through without local website DNS resolution.
 - **Multi-User Accounts & Telemetry**: Separates management accounts (`AccountSpec`) from protocol-native credentials (`native_credential`) and provides single-boundary payload accounting, bounded in-memory flow records (`Telemetry`), optional SQLite usage/bandwidth/access history, and read-only `history` queries.
-- **Remaining Work**: Automatic CLI wiring and cross-process device-level CF WARP sharing, independent DNS/error history, complete bilingual user documentation, and six additional tunnel/overlay endpoints (see [STATUS.md](STATUS.md)). Protocol test results apply to their recorded inputs; the next release still requires validation of its final input.
+- **Remaining Work**: CLI wiring for CF WARP, rule-based routing, `dns`/`tun`/`control` modules, DNS and error event history, complete bilingual user documentation, and six tunnel/overlay endpoints.
 
 ## Quick Start (Configuration Schema v2)
 

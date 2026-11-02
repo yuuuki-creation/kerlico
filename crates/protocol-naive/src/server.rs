@@ -141,6 +141,7 @@ impl Node {
         };
         Ok((target, upstream, access))
     }
+    #[allow(clippy::too_many_arguments)]
     async fn route(
         &self,
         owner: &crate::runtime::BridgeOwner,

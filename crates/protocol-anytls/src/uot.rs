@@ -12,6 +12,8 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
 };
+type PacketRead<'a> = BoxFuture<'a, Result<Option<(Destination, Vec<u8>)>>>;
+
 struct Sender(WriteHalf<BoxStream>);
 struct Receiver(ReadHalf<BoxStream>);
 pub fn channel(stream: BoxStream) -> DatagramChannel {
@@ -217,10 +219,9 @@ fn finish_reply(
     if entries
         .get(&key)
         .is_some_and(|entry| entry.generation == generation)
+        && let Some(entry) = entries.remove(&key)
     {
-        if let Some(entry) = entries.remove(&key) {
-            entry.finish(reason);
-        }
+        entry.finish(reason);
     }
 }
 pub async fn serve(
@@ -275,7 +276,7 @@ async fn serve_inner(
     let mut parent_reason = None;
     let mut result: Result<()> = async {
         loop {
-            let reading: BoxFuture<'_, Result<Option<(Destination, Vec<u8>)>>> = Box::pin(async { let target = if let Some(target)=&fixed {target.clone()} else {codec::destination(&mut reader,true).await?};
+            let reading: PacketRead<'_> = Box::pin(async { let target = if let Some(target)=&fixed {target.clone()} else {codec::destination(&mut reader,true).await?};
                     Ok(packet(&mut reader,context.max_datagram_size).await?.map(|packet|(target,packet))) });
             tokio::pin!(reading);
             let request = loop {

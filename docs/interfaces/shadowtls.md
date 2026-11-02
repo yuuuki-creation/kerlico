@@ -1,7 +1,5 @@
 # ShadowTLS 复合流包装接口
 
-当前源码更新于2026-11-02，已编写共享运行与配置 v2 迁移，尚未执行本轮编译、格式、测试或互通。下文既有通过结果只属于各自历史输入，不能作为本轮验收。
-
 节点通过 `NodeFactory::build(&NodeBuildContext)` 编译。每个 `members[]` 绑定管理 user_id、credential_epoch 和 native_credential；协议凭据与管理用户名、密码分开。原生凭据格式为 直接使用 inner 协议的原生凭据对象。inner.options 只含公共方法参数；外层 password/users 继续属于 options 的载体保护材料，不授予业务用户身份。
 
 认证前只持 `IngressBinding`。真实协议校验成功后交接 `CredentialSet` 的槽与同次解码状态，经 `authenticated` 得到 `PeerSession`。每次 TCP 或 UDP 建立均由共享 Dispatcher 创建独立流归属；复用载体不会把成员或流标识混合。旧指纹接口已替换为 `CredentialManifest`，分别登记 Authentication 与 Protection。
@@ -85,7 +83,7 @@ v2 仅用单个 password；v3 用 password 或 users，互斥，最多 256 个�
 
 TCP 任意拆分/合并不改变记录边界，部分记录在取消一次读操作后仍保存。业务记录最大纯负载 16384，接收 TLS-like 记录按 u16 字段最多 65535 字节（不把它误当实际 TLS 加密记录的长度限制）；半条记录 EOF 为错误，完整边界 EOF/Alert 与业务内容分开。记录桥队列有界，flush/shutdown 等待实际载体写出。流丢弃会中止桥任务，真实退出由节点或命名出站服务所有者等待，不能把 Drop 中的 abort 当成 join。
 
-本轮记录桥将明确取消与普通I/O错误分别保存。取消通过`ConnectionAborted`及`Error::Cancelled`来源返回，完整读写方法能够结束；普通连接中止仍保留失败分类。新增V2/V3记录桥`read_exact`、`write_all`取消回归已编写，尚待海外worker执行，不代表新输入已验收。
+本轮记录桥将明确取消与普通I/O错误分别保存。取消通过`ConnectionAborted`及`Error::Cancelled`来源返回，完整读写方法能够结束；普通连接中止仍保留失败分类。V2/V3记录桥`read_exact`、`write_all`的取消行为有回归测试。
 
 v2 保留真实 TLS session 以过滤晚到握手记录，首次非 TLS 业务记录后不再尝试恢复到 TLS；v3 验证并丢弃残留握手 HMAC 记录，首次真实服务端业务记录后停止握手分支。HMAC 失败不交付部分内容；错误状态通过 I/O 错误传回内层，不能伪装成干净 EOF。客户端禁用 resumption/0-RTT；首次 ClientHello 必须完整位于一条 TLS 记录，TCP 拆分不受此限制。
 

@@ -10,4 +10,4 @@
 
 `socket::wrap(std::net::UdpSocket)` 返回 `Arc<dyn quinn::AsyncUdpSocket>` 与 `Close`。关闭句柄会立即释放底层 socket、清理 poller 并唤醒等待者，不要求其他临时 Arc 引用先丢弃。`Close` 需要由对应 endpoint 的所有者保留并显式关闭。
 
-海外验证 `masque-resume-carrier-r6`：共享 crate 原生所有权/socket 两项测试、原 TrustTunnel 单元 35 项、成员分区 1 项与网络 11 项、WireGuard 原 17 项和纯 IP 接口 2 项全部通过。`masque-resume-carrier-fmt-r7` 在海外完成格式化。该证据只说明基础设施迁移与原消费者回归，不构成 MASQUE 互通证据。
+海外验证 `masque-resume-carrier-r6`：共享 crate 原生所有权/socket 两项测试、原 TrustTunnel 单元 35 项、成员分区 1 项与网络 11 项、WireGuard 原 17 项和纯 IP 接口 2 项全部通过。`masque-resume-carrier-fmt-r7` 在海外完成格式化。

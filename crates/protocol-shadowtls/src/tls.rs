@@ -221,34 +221,6 @@ pub(crate) async fn handshake(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn signer_uses_the_real_message_and_keeps_session_id_on_retry() {
-        let signer = Signer {
-            key: Arc::from(b"tls-test-key".as_slice()),
-            session: Mutex::new(None),
-        };
-        let mut message = vec![1, 0, 0, 67, 3, 3];
-        message.extend_from_slice(&[8; 32]);
-        message.push(32);
-        message.extend_from_slice(&[0; 32]);
-        signer.finalize_client_hello(&mut message).unwrap();
-        let record = wire::frame(wire::HANDSHAKE, &message);
-        assert!(wire::client_auth(&record, b"tls-test-key"));
-        assert!(!wire::client_auth(&record, b"other-test-key"));
-        let first = message[39..71].to_vec();
-        message[6] ^= 1;
-        signer.finalize_client_hello(&mut message).unwrap();
-        assert_eq!(first, message[39..71]);
-        assert!(!wire::client_auth(
-            &wire::frame(wire::HANDSHAKE, &message),
-            b"tls-test-key"
-        ));
-    }
-}
-
-#[cfg(test)]
 pub(crate) fn signed_hello_for_replay_test(key: &[u8]) -> Vec<u8> {
     let mut config =
         ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
@@ -275,4 +247,32 @@ pub(crate) fn signed_hello_for_replay_test(key: &[u8]) -> Vec<u8> {
     let length = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
     bytes.truncate(5 + length);
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn signer_uses_the_real_message_and_keeps_session_id_on_retry() {
+        let signer = Signer {
+            key: Arc::from(b"tls-test-key".as_slice()),
+            session: Mutex::new(None),
+        };
+        let mut message = vec![1, 0, 0, 67, 3, 3];
+        message.extend_from_slice(&[8; 32]);
+        message.push(32);
+        message.extend_from_slice(&[0; 32]);
+        signer.finalize_client_hello(&mut message).unwrap();
+        let record = wire::frame(wire::HANDSHAKE, &message);
+        assert!(wire::client_auth(&record, b"tls-test-key"));
+        assert!(!wire::client_auth(&record, b"other-test-key"));
+        let first = message[39..71].to_vec();
+        message[6] ^= 1;
+        signer.finalize_client_hello(&mut message).unwrap();
+        assert_eq!(first, message[39..71]);
+        assert!(!wire::client_auth(
+            &wire::frame(wire::HANDSHAKE, &message),
+            b"tls-test-key"
+        ));
+    }
 }
