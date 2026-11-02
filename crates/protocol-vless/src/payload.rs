@@ -191,6 +191,7 @@ pub(crate) fn datagrams(
     stream: BoxStream,
     target: &Destination,
     encoding: PacketEncoding,
+    global_id: [u8; 8],
 ) -> Result<DatagramChannel> {
     if encoding == PacketEncoding::Packetaddr
         && !matches!(target.address(), kerlico_core::Address::Ip(_))
@@ -204,7 +205,7 @@ pub(crate) fn datagrams(
             target: target.clone(),
             encoding,
             first: true,
-            global_id: rand::random(),
+            global_id,
         }),
         receiver: Box::new(Receiver {
             reader: BufReader::new(reader),

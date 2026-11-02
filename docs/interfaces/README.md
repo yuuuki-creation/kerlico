@@ -23,7 +23,7 @@
 
 | 文档 | 角色与能力范围 |
 | --- | --- |
-| [VLESS](vless.md) | 双端 TCP/UDP，支持 RAW/WS/HTTPUpgrade/gRPC/XHTTP、TLS/REALITY、Vision、Encryption、ML-KEM、Mux、XDRIVE、packetaddr |
+| [VLESS](vless.md) | 双端 TCP/UDP，支持 RAW/WS/HTTPUpgrade/gRPC/XHTTP、TLS/REALITY、Vision、Encryption 混合密钥链、ML-DSA-65 校验、Mux、XUDP 跨载体迁移、XDRIVE、packetaddr |
 | [AnyTLS](anytls.md) | 原生 Rust TLS 双端、会话复用、padding 与 TCP/UoT v2 |
 | [SS2022](ss2022.md) | 三算法双端 TCP/UDP、AES EIH 多用户与客户端身份链 |
 | [SOCKS](socks.md) | SOCKS 4/4a/5 双端与 SOCKS5 UDP 关联 |

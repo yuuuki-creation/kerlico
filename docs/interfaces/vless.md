@@ -19,9 +19,9 @@
 | `uuid` | UUID，Debug 与错误隐藏身份 |
 | `transport` | `tcp`/`raw` 字符串，或下表的带 `type` 对象 |
 | `flow` | 空、`xtls-rprx-vision`、`xtls-rprx-vision-udp443`；后者只在客户端放开业务 UDP/443 |
-| `encryption` | 默认 `none`；使用固定 Xray mlkem768x25519plus 字符串格式 |
+| `encryption` | 默认 `none`；使用固定 Xray mlkem768x25519plus 字符串格式，密钥链见[混合密钥链](#encryption-混合密钥链) |
 | `security` | 默认 TLS；`tls`、`reality`、`none`，字段见下表 |
-| `packet_encoding` | `udp`（默认）、`xudp`、`packetaddr`；Vision 自动使用 XUDP |
+| `packet_encoding` | `udp`（默认）、`xudp`、`packetaddr`；Vision 自动使用 XUDP；跨载体迁移需要 XUDP，见[XUDP 跨载体迁移](#xudp-跨载体迁移) |
 | `mux` | 可选 `{enabled,tcp,udp,concurrency,max_connections}`；默认值为 `true,true,true,8,4`，不提供对象则不建池 |
 
 | 载体对象 | 字段与限制 |
@@ -38,7 +38,7 @@ XHTTP `mode` 为 `auto`、`packet-up`、`stream-up`、`stream-one`；`http_versi
 | 安全对象 | 字段与限制 |
 | --- | --- |
 | `{type:tls}` | `server_name`、`ca_pem`、`alpn`、`fingerprint`；自定义 CA 不能同时启用指纹整形；名称和证书链必须验证 |
-| `{type:reality}` | `server_name`、`public_key`、`short_id`、`fingerprint`、可选 `mldsa65_verify`；指纹默认 `chrome`；只用于 RAW、gRPC、XHTTP/H2 |
+| `{type:reality}` | `server_name`、`public_key`、`short_id`、`fingerprint`、可选 `mldsa65_verify`（见 [REALITY ML-DSA-65](#reality-ml-dsa-65)）；指纹默认 `chrome`；只用于 RAW、gRPC、XHTTP/H2 |
 | `{type:none}` | 未启用 Encryption 时仅允许回环节点地址 |
 
 Vision 要求 RAW TLS/REALITY 或先启用 Encryption；不能用于 XDRIVE。Vision 不能复用 TCP 业务，可将 Mux 设为 `tcp:false,udp:true`。固定 Xray 对 XHTTP 也限制为 UDP Mux，本项目配置阶段拒绝 XHTTP 的 TCP Mux；TCP 使用 XHTTP 自身 XMUX。`packetaddr` 仅接受 IP 目标，不能与 Vision 或 Mux UDP 混用。Mux 并发为 1–256，物理连接为 1–32；达到上限返回资源错误，不无限排队或重放业务。
@@ -52,7 +52,7 @@ Vision 要求 RAW TLS/REALITY 或先启用 Encryption；不能用于 XDRIVE。Vi
 | 节点外层 `members[].native_credential` | 1–256 个 `{uuid,flow}`；不放入 options |
 | `security` | 必填；`none`，或 TLS 的证书/密钥，或 REALITY 身份 |
 | `transport` | 默认 TCP；对象字段见下文 |
-| `decryption` | 默认 `none`；固定 Xray 服务端格式，最多 8 个密钥；暂拒绝非空自定义 padding |
+| `decryption` | 默认 `none`；固定 Xray 服务端格式，最多 8 个密钥，X25519 与 ML-KEM-768 可混合；暂拒绝非空自定义 padding |
 
 TLS 使用 `certificate_pem`/`private_key_pem` 或 `certificate_file`/`private_key_file`；每种材料必须二选一，单项最大 1 MiB。REALITY 使用 `cover:{host,port}`、`private_key`、`server_names`、`short_ids`、`max_time_diff_ms`（默认 60000，最大 300000）；失败握手转发到固定 cover，不能把客户端目标当作回退地址。
 
@@ -78,13 +78,55 @@ TLS 使用 `certificate_pem`/`private_key_pem` 或 `certificate_file`/`private_k
 
 `connect_tcp` 成功表示载体建立并发送请求，不能推定远端已认证或网站已连接；首次读取可能收到响应失败。失败后终止会话，不自动重放已发送字节。普通 VLESS 没有独立请求 EOF 帧；逻辑 shutdown 保留反向读取，`tcp_eof=false`。要求目标 EOF 的入口必须被能力校验拒绝。
 
-数据报保留包边界和零长度；原生长度字段最大 65535，Mux 每帧负载上限 8192，实际对端/网络可能更小。截断、取消、错误身份或超时终止对应关联，不从残留半帧恢复。XUDP global ID 当前按物理载体内的逻辑会话处理；尚未提供跨载体迁移的全局 UDP 会话表。
+数据报保留包边界和零长度；原生长度字段最大 65535，Mux 每帧负载上限 8192，实际对端/网络可能更小。截断、取消、错误身份或超时终止对应关联，不从残留半帧恢复。XUDP 会话可跨物理载体存活，见下节。
 
 `UserId`、`codec` 和 `VlessStream` 保留协议编解码接口；显式连接器扩展使用 `VlessOutbound::compile` 返回计划，再异步 `start`，不公开直接构造运行对象的入口。通用组合由工厂选择。旧 `codec` 的普通流限制不等同于节点入口的扩展解析器。
 
 本轮未实现 mKCP、反向代理控制面、任意上游配置兼容、路由规则语言、TUN/Fake-IP；不得将本轮协议适配登记为完整 VPN 产品。已验证与待验证组合由总表和实际测试记录维护。
 
-ML-DSA 验签、混合 NFS 链及真实云账户尚未互通验收；服务端未提供 ML-DSA 签名 seed 配置。本轮新迁移仍须完成整树远端检查。
+真实云账户尚未互通验收。
+
+## Encryption 混合密钥链
+
+`encryption` 的密钥段串联 1–8 个公钥，`decryption` 按相同顺序串联对应私钥或 seed；X25519 与 ML-KEM-768 可按任意顺序混合，例如 `mlkem768x25519plus.native.1rtt.<ML-KEM>.<X25519>.<ML-KEM>.<X25519>`。
+
+中继与逐跳掩码由固定依赖实现：客户端为 xray-vless-encryption，服务端为 rust-xhttp，本项目没有另写密钥链代码。复验命令为 `tools/interop_vless_matrix.py --full --key-kind chain --only tcp-none-single-auto-` 与 `tools/interop_vless_server.py --matrix --full --key-kind chain --only tcp-none-single-auto-ordinary`，`hybrid` 为 X25519 后接 ML-KEM-768 的两段链。
+
+## REALITY ML-DSA-65
+
+`mldsa65_verify` 填 `xray mldsa65` 输出的 `Verify`（base64url，解码后 1952 字节），与服务端的 `mldsa65Seed` 配对。配置后，客户端在证书 HMAC 校验之外再校验证书首个扩展中的 ML-DSA-65 签名，消息为以 AuthKey 为密钥、依次写入证书公钥、ClientHello、ServerHello 的 HMAC-SHA512，与 Xray `transport/internet/reality/reality.go` 的 `VerifyPeerCertificate` 一致。签名不符时连接被拒绝。
+
+限制：
+
+- Xray 服务端把证书填充到 cover 的 Certificate 记录长度（REALITY `handshake_server_tls13.go`），cover 的证书消息必须长于 ML-DSA-65 证书（约 3.5 KiB），否则 Xray 握手失败。
+- kerlico 节点不提供 ML-DSA 签名：固定的 rust-reality 已移除该能力，`build_server_flight` 没有对应入口。
+
+复验命令为 `tools/interop_vless_matrix.py --mldsa65 --only tcp-reality-single-auto-ordinary-none`，同时检查错误公钥被拒绝。
+
+## XUDP 跨载体迁移
+
+物理载体中断后，同一 UDP 会话换一条新载体继续，目标看到的来源端口不变。
+
+**客户端**：`udp-forward` 入口把本机来源地址传给出站，Global ID 取 `HMAC-SHA256(随机密钥, 来源‖目标)` 的前 8 字节，密钥按 ResourceKey 分区并在进程内不变。VLESS 使用 Vision 或 `packet_encoding: xudp` 时生效，包括 Mux。载体断开后本机会话结束，同一来源的下一个数据报建立新载体，用同一 ID 发 NEW。没有本机来源的调用方（节点中继到 VLESS 出站）每条通道使用随机 ID，不迁移。
+
+**服务端**：节点保存 `(用户 UUID, Global ID)` 到 UDP 会话的表，会话的出口流和配额属于节点任务，不属于单条载体。
+
+- 载体断开或客户端发 END 后，会话等待接回 60 秒，期间回包丢弃；空闲超过 `idle_timeout_ms` 同样结束。
+- 新载体用同一键发 NEW 时接回原出口。原载体仍在时立即被摘下，其后续 Keep 收到 END。
+- 每个 XUDP 会话单独占一个节点流配额。配额耗尽时先回收最早的等待会话；没有可回收的会话时，新 NEW 收到带错误的 END。
+
+**与 Xray 的差异**：
+
+- Xray 的 ID 只按来源计算（`common/xudp/xudp.go`）。这里每个目标一条通道，同来源的第二个目标若共用 ID 会把第一条通道摘下，因此目标也参与计算。线上 ID 不透明，互通不受影响。
+- Xray 的表按进程共用（`common/mux/session.go` 的 `XUDPManager`），任何已认证用户都能用相同 ID 接管。这里按节点分表并把用户放进键。
+- Xray 客户端只在缓冲区带逐包目标时写 Global ID（`common/mux/frame.go` 的 `WriteTo`），`tunnel`/`dokodemo-door` 入站不写，其会话不会迁移；`socks` 入站会写。
+
+**限制**：
+
+- 客户端在察觉载体断开后才换载体；静默断开要等到读写错误或空闲超时。
+- VLESS 出站不提供多目标 UDP 关联，SOCKS5 UDP ASSOCIATE 与 TUN 入站不能走 VLESS，迁移只覆盖 `udp-forward`。
+
+复验命令为 `tools/interop_vless_matrix.py --xudp-migration`（kerlico 客户端到 Xray）与 `tools/interop_vless_server.py --xudp-migration`（Xray 客户端到 kerlico 节点，加 `--control-server` 时服务端换成 Xray 作为对照）。两者用可切断的 TCP 中继模拟载体中断，并用普通 UDP 对照确认端口确实会变。
 
 ## XDRIVE HTTP 迁移依据与差异
 

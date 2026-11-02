@@ -70,10 +70,13 @@ struct User {
     id: UserId,
     vision: bool,
 }
+/// 载体断开后 XUDP 会话等待接回的时长，取 Xray common/mux/session.go 的 Expire。
+const XUDP_DETACHED_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 pub(crate) struct Payload {
     users: CredentialSet<User>,
     decryption: Option<crate::server_encryption::Decryption>,
     mux_udp_only: bool,
+    xudp: Arc<crate::mux::Table>,
 }
 struct VlessNode {
     payload: Arc<Payload>,
@@ -227,6 +230,7 @@ impl NodeFactory for VlessNodeFactory {
                 users: input.credentials(users)?,
                 decryption,
                 mux_udp_only: matches!(transport, crate::server_http::Transport::Xhttp { .. }),
+                xudp: Arc::new(crate::mux::Table::new(XUDP_DETACHED_GRACE)),
             }),
             tls,
             tls_config,
@@ -347,6 +351,19 @@ impl InboundProtocol for VlessNode {
     }
 }
 impl Payload {
+    fn verify(&self, request: &inbound_wire::Request) -> Result<kerlico_core::Verified<bool>> {
+        self.users.verify(request, |user, request| {
+            if !request.user.matches(&user.id) {
+                return Ok(None);
+            }
+            if user.vision != (request.flow == "xtls-rprx-vision")
+                || user.vision && request.command == 2
+            {
+                return Err(Error::Rejected);
+            }
+            Ok(Some(user.vision))
+        })
+    }
     pub(crate) async fn serve(
         &self,
         mut stream: BoxedTransportStream,
@@ -354,24 +371,14 @@ impl Payload {
         context: InboundContext,
     ) -> Result<()> {
         let deadline = Instant::now() + context.connect_timeout;
+        let binding = access;
         let (mut stream, request, vision, access) =
             tokio::time::timeout(context.connect_timeout, async {
                 if let Some(decryption) = &self.decryption {
                     stream = decryption.accept(stream).await?;
                 }
                 let request = inbound_wire::read(&mut stream).await?;
-                let verified = self.users.verify(&request, |user, request| {
-                    if !request.user.matches(&user.id) {
-                        return Ok(None);
-                    }
-                    if user.vision != (request.flow == "xtls-rprx-vision")
-                        || user.vision && request.command == 2
-                    {
-                        return Err(Error::Rejected);
-                    }
-                    Ok(Some(user.vision))
-                })?;
-                let (access, vision) = access.authenticated(verified, &context)?;
+                let (access, vision) = binding.authenticated(self.verify(&request)?, &context)?;
                 Ok::<_, Error>((stream, request, vision, access))
             })
             .await
@@ -433,7 +440,26 @@ impl Payload {
                 } else {
                     Box::new(stream) as BoxStream
                 };
-                crate::mux::serve(local, access, context, vision || self.mux_udp_only).await
+                // XUDP 会话跨载体存活，不能持有首个载体的取消域和 peer 租约。
+                let mut detached = context.clone();
+                detached.peer_lease = None;
+                detached.cancel = detached.tasks.cancel().child_token();
+                let (detached_access, _) =
+                    binding.authenticated(self.verify(&request)?, &detached)?;
+                let migration = crate::mux::Migration {
+                    table: self.xudp.clone(),
+                    user: *request.user.as_bytes(),
+                    access: detached_access,
+                    context: detached,
+                };
+                crate::mux::serve(
+                    local,
+                    access,
+                    context,
+                    vision || self.mux_udp_only,
+                    migration,
+                )
+                .await
             }
             _ => Err(Error::Unsupported("VLESS 指令")),
         }

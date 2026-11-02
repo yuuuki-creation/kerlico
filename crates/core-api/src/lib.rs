@@ -191,6 +191,7 @@ pub struct ConnectContext {
     node_cancel: CancellationToken,
     peer_cancel: CancellationToken,
     target_mode: FamilyMode,
+    udp_source: Option<std::net::SocketAddr>,
 }
 
 /// 只建立代理端点的载体流；网站地址继续由上层代理协议编码。
@@ -222,7 +223,18 @@ impl ConnectContext {
             node_cancel: CancellationToken::new(),
             peer_cancel: CancellationToken::new(),
             target_mode: FamilyMode::DualV4Preferred,
+            udp_source: None,
         }
+    }
+
+    /// 记录本机 UDP 入口的来源地址；出站可据此让同一来源跨载体保持会话身份。
+    pub fn with_udp_source(mut self, source: std::net::SocketAddr) -> Self {
+        self.udp_source = Some(source);
+        self
+    }
+
+    pub fn udp_source(&self) -> Option<std::net::SocketAddr> {
+        self.udp_source
     }
 
     pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {

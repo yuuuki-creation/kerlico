@@ -1,12 +1,14 @@
 //! 组合配置在协议边界校验，核心调度不感知具体传输或安全类型。
 
 use crate::{UserId, carrier::Carrier, payload};
+use hmac::{Hmac, Mac};
 use kerlico_config::{OutboundPlan, TargetSpec};
 use kerlico_core::{
     BoxFuture, Capabilities, ConnectContext, DatagramChannel, Destination, Error, Outbound, Result,
 };
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::Sha256;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -379,6 +381,27 @@ pub(crate) fn compile(value: &Value) -> Result<OutboundPlan> {
 struct Resources {
     encryption: Option<Client>,
     mux: Option<crate::mux::Pool>,
+    xudp_key: [u8; 32],
+}
+/// 同一本机来源到同一目标的 Global ID 跨载体不变，服务端才能接回原 UDP 会话。
+/// Xray 只按来源取值（common/xudp/xudp.go GetGlobalID）；这里每个目标一条通道，
+/// 同来源的第二个目标若共用 ID，会把第一条通道从服务端摘下，因此目标也参与计算。
+fn xudp_global_id(
+    key: &[u8; 32],
+    source: Option<std::net::SocketAddr>,
+    target: &Destination,
+) -> [u8; 8] {
+    let Some(source) = source else {
+        return rand::random();
+    };
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC 接受任意密钥长度");
+    mac.update(source.to_string().as_bytes());
+    mac.update(&[0]);
+    mac.update(target.to_string().as_bytes());
+    let digest = mac.finalize().into_bytes();
+    let mut id = [0; 8];
+    id.copy_from_slice(&digest[..8]);
+    id
 }
 impl ProfileOutbound {
     fn resources(&self, context: &ConnectContext) -> Result<Arc<Resources>> {
@@ -391,6 +414,7 @@ impl ProfileOutbound {
                     mux: self.mux.map(|(concurrency, maximum)| {
                         crate::mux::Pool::new(concurrency, maximum, self.host.clone())
                     }),
+                    xudp_key: rand::random(),
                 })
             })
             .clone())
@@ -481,6 +505,7 @@ impl Outbound for ProfileOutbound {
             {
                 return Err(Error::Unsupported("packetaddr 域名目标"));
             }
+            let global_id = xudp_global_id(&resources.xudp_key, context.udp_source(), target);
             context
                 .run(async {
                     if self.mux_udp {
@@ -488,19 +513,23 @@ impl Outbound for ProfileOutbound {
                             .mux
                             .as_ref()
                             .ok_or(Error::Protocol("Mux 配置不可用"))?
-                            .udp(target, self.encoding == PacketEncoding::Xudp, async {
-                                let carrier = self.carrier.open(context, &self.host).await?;
-                                payload::open(
-                                    carrier,
-                                    resources.encryption.as_ref(),
-                                    self.user,
-                                    target,
-                                    self.vision,
-                                    true,
-                                    PacketEncoding::Xudp,
-                                )
-                                .await
-                            })
+                            .udp(
+                                target,
+                                (self.encoding == PacketEncoding::Xudp).then_some(global_id),
+                                async {
+                                    let carrier = self.carrier.open(context, &self.host).await?;
+                                    payload::open(
+                                        carrier,
+                                        resources.encryption.as_ref(),
+                                        self.user,
+                                        target,
+                                        self.vision,
+                                        true,
+                                        PacketEncoding::Xudp,
+                                    )
+                                    .await
+                                },
+                            )
                             .await;
                     }
                     let carrier = self.carrier.open(context, &self.host).await?;
@@ -514,9 +543,32 @@ impl Outbound for ProfileOutbound {
                         self.encoding,
                     )
                     .await?;
-                    payload::datagrams(stream, target, self.encoding)
+                    payload::datagrams(stream, target, self.encoding, global_id)
                 })
                 .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xudp_global_id_follows_source_and_target() {
+        let key = [7; 32];
+        let source: std::net::SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let other: std::net::SocketAddr = "127.0.0.1:5001".parse().unwrap();
+        let dns = Destination::new("192.0.2.1", 53).unwrap();
+        let ntp = Destination::new("192.0.2.1", 123).unwrap();
+        let id = xudp_global_id(&key, Some(source), &dns);
+        assert_eq!(id, xudp_global_id(&key, Some(source), &dns));
+        assert_ne!(id, xudp_global_id(&key, Some(other), &dns));
+        assert_ne!(id, xudp_global_id(&key, Some(source), &ntp));
+        assert_ne!(id, xudp_global_id(&[8; 32], Some(source), &dns));
+        assert_ne!(
+            xudp_global_id(&key, None, &dns),
+            xudp_global_id(&key, None, &dns)
+        );
     }
 }
