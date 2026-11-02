@@ -69,7 +69,7 @@
 
 ## 互通验证
 
-`tools/interop_openvpn.py` 在 worker 的容器内运行 Alpine 打包的官方 OpenVPN 2.6.20 与 2.4.12 服务端，通过 `kerlico run` 的 SOCKS5 本地入站发送真实 TCP 与 UDP，并检查回显字节。用例覆盖两种载体、三种包装、三种算法、三种身份组合、内层 IPv6、双向换钥、服务端重启后的重连，以及错误密码、不受信 CA 和错误 CN 被拒绝。
+`tools/interop_openvpn.py` 在 worker 的容器内运行 Alpine 打包的官方 OpenVPN 2.6.20 与 2.4.12 服务端，通过 `kerlico run` 的 SOCKS5 本地入站发送真实 TCP 与 UDP，并检查回显字节。用例覆盖两种载体、三种包装、三种算法、三种身份组合、内层 IPv6、双向换钥、服务端重启后的重连，以及错误密码、不受信 CA、错误 CN 和同 CA 签发的无 EKU 证书被拒绝。
 
 ```sh
 cargo build -p kerlico --no-default-features --features protocol-socks,protocol-openvpn
