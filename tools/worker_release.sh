@@ -21,4 +21,5 @@ mkdir -p "$out"
 for name in kerlico THIRD_PARTY_NOTICES.txt; do
   run "cat '$root/target/release/$name'" > "$out/$name"
 done
+chmod +x "$out/kerlico"
 (cd "$out" && sha256sum --binary kerlico THIRD_PARTY_NOTICES.txt | sed 's/ \*/  /' > SHA256SUMS && cat SHA256SUMS)

@@ -17,7 +17,8 @@ export CARGO_TARGET_DIR='$root/target' CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUST_TEST_THREADS=1
 export KERLICO_TEST_ASSETS_DIR='${root%/gate}/resume-test-assets' KERLICO_WORKER_ALIAS='$alias'
 export PATH="\$HOME/.cargo/bin:\$PATH" PROTOC="\$(bash tools/fetch_protoc.sh '${root%/gate}')"
-step() { echo "=== \$1"; shift; "\$@"; echo "=== exit \$?"; }
+failed=0
+step() { echo "=== \$1"; shift; "\$@"; code=\$?; echo "=== exit \$code"; [ "\$code" = 0 ] || failed=1; }
 set +e
 step fmt cargo fmt --all --check
 step clippy cargo clippy --workspace --all-targets --locked --keep-going --no-deps -- -D warnings
@@ -26,10 +27,13 @@ step test-third-party cargo test --locked -p zerotier-node
 step release cargo build --release --locked -p kerlico
 step notices sh -c 'python3 tools/gen_third_party_notices.py > "\$CARGO_TARGET_DIR/release/THIRD_PARTY_NOTICES.txt"'
 sha256sum "\$CARGO_TARGET_DIR/release/kerlico" "\$CARGO_TARGET_DIR/release/THIRD_PARTY_NOTICES.txt"
+echo "=== gate \$failed"
 EOF
 run "rm -f '$root/done'; cd '$root' && nohup setsid nice -n 10 sh -c 'bash job.sh > gate.log 2>&1; touch done' > /dev/null 2>&1 &"
 
 until run "test -f '$root/done'"; do sleep 60; done
 
 echo "gate $rev on $alias"
-run "grep -E '^=== |^test result: .*[1-9][0-9]* failed|^error(\[|:)|^    [a-z_:]+.* FAILED|^[0-9a-f]{64} ' '$root/gate.log' | head -120"
+run "grep -E '^test .* FAILED|^test result: .*[1-9][0-9]* failed|^error(\[|:)' '$root/gate.log' | head -120"
+run "grep -E '^=== |^[0-9a-f]{64} ' '$root/gate.log'"
+run "grep -qx '=== gate 0' '$root/gate.log'" || { echo "gate failed" >&2; exit 1; }
