@@ -1,0 +1,279 @@
+/* Kerlico：低三角形 + 解构主义。装饰都在页头、标题、侧栏、页脚和首页；正文区只有平涂和细线。
+   图片由 site/wiki-theme/gen_assets.py 生成。 */
+html[data-nw-theme="kerlico"] {
+  --ke-ink: #10131C;
+  --ke-bone: #EFE9DC;
+  --ke-vermilion: #FF4B2B;
+  --ke-cobalt: #2D4BFF;
+  --ke-acid: #D7FF3E;
+  --ke-graphite: #3A3F4D;
+  --ke-line: var(--ke-graphite);
+  --ke-slant: polygon(0 0, 100% 0, calc(100% - 0.9rem) 100%, 0 100%);
+  --radius: 0;
+  --field-radius: 0;
+}
+html[data-nw-theme="kerlico"][data-theme="dark"] {
+  --ke-line: #8A8E9A;
+}
+
+/* 页头：实色底，下沿挂一块错位切角的三角面，页头里暴露一条没对齐的细线。 */
+.nw-site-header {
+  background: var(--background);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-bottom: 1px solid var(--foreground);
+}
+.nw-site-header::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 100%;
+  width: min(44vw, 34rem);
+  height: 0.7rem;
+  background: url(assets/band.webp) left center / 100% 100% no-repeat;
+  clip-path: var(--ke-slant);
+  pointer-events: none;
+}
+.nw-site-header::after {
+  content: "";
+  position: absolute;
+  inset-inline: min(44vw, 34rem) 3vw;
+  top: 0.45rem;
+  height: 1px;
+  background: linear-gradient(90deg, var(--ke-vermilion) 0 1.6rem, var(--ke-line) 1.6rem);
+  pointer-events: none;
+}
+.nw-brand {
+  position: relative;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.nw-brand::after {
+  content: "";
+  flex: none;
+  align-self: start;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-top: 0.2rem;
+  background: var(--ke-vermilion);
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+}
+
+/* 文档页：底色保持纯净，让位给正文。 */
+.nw-document {
+  padding-block-start: 2.25rem;
+}
+.nw-document-title {
+  position: relative;
+  padding-block-start: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+.nw-document-title::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 0;
+  width: min(14rem, 60%);
+  height: 0.5rem;
+  background: linear-gradient(100deg, var(--ke-cobalt) 0 46%, var(--ke-graphite) 46% 58%, var(--ke-vermilion) 58%);
+  clip-path: polygon(0.5rem 0, 100% 0, calc(100% - 0.5rem) 100%, 0 100%);
+}
+.nw-document-title::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: min(14.5rem, 62%);
+  top: 0.32rem;
+  width: 2.25rem;
+  height: 0.18rem;
+  background: var(--ke-acid);
+  outline: 1px solid var(--ke-graphite);
+}
+
+/* 侧栏：一条暴露的竖线，当前项的标记故意偏出这条线、再错下去一点。 */
+.nw-sidebar {
+  padding-top: 2.25rem;
+}
+.nw-tree {
+  margin-inline-start: 0.35rem;
+  padding-inline-start: 0.75rem;
+  border-inline-start: 1px solid var(--ke-line);
+}
+.nw-tree li {
+  position: relative;
+}
+.nw-tree [aria-current="page"] {
+  color: var(--foreground);
+  font-weight: 700;
+}
+.nw-tree li:has(> [aria-current="page"], > details > summary > [aria-current="page"])::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset-inline-start: -1.05rem;
+  top: 0.45rem;
+  width: 0.7rem;
+  height: 1.15rem;
+  background: var(--ke-vermilion);
+  clip-path: polygon(0 0, 100% 22%, 100% 100%, 0 78%);
+}
+#nw-toc {
+  padding-top: 2.25rem;
+}
+.nw-toc-link {
+  transition: none;
+}
+
+/* 正文：可读性优先，只把边线和直角接到外观上。 */
+.nw-prose h2 {
+  padding-block-end: 0.35rem;
+  border-block-end: 1px solid var(--separator);
+}
+.nw-prose a:not([class]) {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+.nw-prose pre {
+  border: 1px solid var(--separator);
+  border-inline-start: 3px solid var(--ke-cobalt);
+  border-radius: 0;
+}
+.nw-prose blockquote {
+  border-inline-start: 3px solid var(--ke-vermilion);
+}
+.nw-prose :is(th) {
+  background: var(--surface-secondary);
+}
+
+/* 上一篇、下一篇：顶上一道错开的短线。 */
+.nw-adjacent > a {
+  position: relative;
+  border-top: 1px solid var(--ke-line);
+}
+.nw-adjacent > a::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0.75rem;
+  top: -0.2rem;
+  width: 3rem;
+  height: 0.28rem;
+  background: var(--ke-cobalt);
+  clip-path: var(--ke-slant);
+}
+.nw-adjacent > a:hover::before {
+  background: var(--ke-vermilion);
+}
+
+/* 页脚：两种配色都是深色块，上沿从另一侧挂出一块错位的三角面。平台必需的链接原样保留。 */
+.nw-site-footer {
+  --foreground: var(--ke-bone);
+  --muted: #C9C4B7;
+  --separator: rgb(239 233 220 / 0.2);
+  position: relative;
+  margin-top: 5rem;
+  border-top: 1px solid var(--ke-ink);
+  background: var(--ke-ink);
+  color: var(--ke-bone);
+}
+html[data-nw-theme="kerlico"][data-theme="dark"] .nw-site-footer {
+  border-top-color: var(--ke-graphite);
+  background: #0A0C13;
+}
+.nw-site-footer::before {
+  content: "";
+  position: absolute;
+  inset-inline-end: 0;
+  bottom: 100%;
+  width: min(38vw, 28rem);
+  height: 0.85rem;
+  background: url(assets/band.webp) right center / 100% 100% no-repeat;
+  clip-path: polygon(0.9rem 0, 100% 0, 100% 100%, 0 100%);
+  pointer-events: none;
+}
+.nw-footer-brand {
+  font-weight: 800;
+}
+
+/* 首页：三角面从两侧碎开，文字留在中间的空地上。 */
+.nw-welcome::before {
+  content: "";
+  position: absolute;
+  z-index: -2;
+  inset: 0;
+  background: url(assets/shards-light.webp) center / cover no-repeat;
+}
+html[data-nw-theme="kerlico"][data-theme="dark"] .nw-welcome::before {
+  background-image: url(assets/shards-dark.webp);
+}
+.nw-welcome-name {
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  text-shadow: none;
+}
+.nw-welcome-outline {
+  opacity: 0.35;
+}
+.nw-welcome-choice {
+  position: relative;
+  padding: 1.5rem;
+  border: 1px solid var(--foreground);
+  background: var(--surface);
+  box-shadow: 0.5rem 0.5rem 0 var(--ke-cobalt);
+}
+.nw-welcome-choice + .nw-welcome-choice {
+  box-shadow: 0.5rem 0.5rem 0 var(--ke-vermilion);
+}
+.nw-welcome-arrow {
+  border-radius: 0;
+}
+
+/* 问答页：右下角只露一小片三角面，不压对话。输入框改成直角，发送键仍是平台的按钮。 */
+body[data-page="ask"]::after {
+  content: "";
+  position: fixed;
+  z-index: 0;
+  inset-inline-end: 0;
+  bottom: 0;
+  width: 15vw;
+  height: 34vh;
+  background: url(assets/shards-light.webp) right bottom / 100vw auto no-repeat;
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  pointer-events: none;
+}
+html[data-nw-theme="kerlico"][data-theme="dark"] body[data-page="ask"]::after {
+  background-image: url(assets/shards-dark.webp);
+}
+.nw-qa-composer {
+  border: 1px solid var(--foreground);
+  border-radius: 0;
+  background: var(--field-background);
+}
+html[data-nw-theme="kerlico"] .nw-qa-composer button {
+  border-radius: 0;
+}
+
+@media (max-width: 767px) {
+  .nw-site-header::before {
+    width: 58vw;
+  }
+  .nw-site-header::after {
+    inset-inline-start: 58vw;
+  }
+  .nw-welcome-choice {
+    padding: 0.875rem 1rem;
+  }
+  body[data-page="ask"]::after {
+    display: none;
+  }
+}
+
+@media print {
+  .nw-site-header::before,
+  .nw-site-header::after,
+  .nw-site-footer::before,
+  .nw-document-title::before,
+  .nw-document-title::after {
+    display: none;
+  }
+}

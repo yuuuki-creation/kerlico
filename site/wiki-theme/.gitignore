@@ -1,0 +1,5 @@
+dist/
+__pycache__/
+# 图片由 gen_assets.py 生成；仓库的隐私钩子不收二进制文件。
+assets/
+preview.webp
