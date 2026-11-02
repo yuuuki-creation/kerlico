@@ -133,18 +133,51 @@ fn parse_network_id(value: &str) -> Result<u64> {
     Ok(id)
 }
 
+/// 崩溃不能留下残缺的身份文件：内容写入并落盘后才出现在目标路径。硬链接在目标已存在时失败，
+/// 并发启动的另一方因此不会覆盖先写入的身份；不支持硬链接的文件系统退回 rename。
+/// 返回 false 表示目标已被占用。
+fn publish_secret(path: &Path, temporary: &Path, text: &str) -> std::io::Result<bool> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(temporary)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    let published = match fs::hard_link(temporary, path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => false,
+        Err(_) => {
+            fs::rename(temporary, path)?;
+            true
+        }
+    };
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(published)
+}
+
+fn parse_identity_file(text: &str) -> Result<Identity> {
+    let identity = Identity::parse(text).map_err(|_| Error::Protocol("ZeroTier身份格式不合法"))?;
+    if !identity.has_secret() {
+        return Err(Error::Protocol("ZeroTier身份缺少私钥"));
+    }
+    Ok(identity)
+}
+
 /// 读取 `identity.secret` 格式的身份文件；文件不存在时生成并以 0600 权限写入。
 fn load_or_create_identity(path: &Path) -> Result<Identity> {
     let io_error = || Error::Protocol("ZeroTier身份文件读写失败");
     match fs::read_to_string(path) {
-        Ok(text) => {
-            let identity =
-                Identity::parse(&text).map_err(|_| Error::Protocol("ZeroTier身份格式不合法"))?;
-            if !identity.has_secret() {
-                return Err(Error::Protocol("ZeroTier身份缺少私钥"));
-            }
-            Ok(identity)
-        }
+        Ok(text) => parse_identity_file(&text),
         Err(error) if error.kind() == ErrorKind::NotFound => {
             let identity = Identity::generate();
             let text = identity.to_secret_string().map_err(|_| io_error())?;
@@ -154,14 +187,17 @@ fn load_or_create_identity(path: &Path) -> Result<Identity> {
             {
                 fs::create_dir_all(parent).map_err(|_| io_error())?;
             }
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            let mut file = options.open(path).map_err(|_| io_error())?;
-            file.write_all(text.as_bytes()).map_err(|_| io_error())?;
-            file.sync_all().map_err(|_| io_error())?;
-            Ok(identity)
+            // 新身份的地址是随机的，临时文件名因此不与其他写入者或崩溃残留冲突。
+            let mut name = path.file_name().ok_or_else(io_error)?.to_os_string();
+            name.push(format!(".{}.tmp", identity.address()));
+            let temporary = path.with_file_name(name);
+            let published = publish_secret(path, &temporary, &text);
+            let _ = fs::remove_file(&temporary);
+            if published.map_err(|_| io_error())? {
+                Ok(identity)
+            } else {
+                parse_identity_file(&fs::read_to_string(path).map_err(|_| io_error())?)
+            }
         }
         Err(_) => Err(io_error()),
     }
@@ -284,6 +320,43 @@ mod tests {
         }
         fs::write(&path, "garbage").unwrap();
         assert!(load_or_create_identity(&path).is_err());
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn publishing_leaves_a_complete_private_file_and_never_replaces_an_existing_one() {
+        let directory = std::env::temp_dir().join(format!("kerlico-zt-pub-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("identity.secret");
+        let temporary = directory.join("identity.secret.1.tmp");
+
+        assert!(publish_secret(&path, &temporary, "first").unwrap());
+        fs::remove_file(&temporary).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        assert!(!publish_secret(&path, &temporary, "second").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first");
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn creating_an_identity_leaves_no_temporary_file() {
+        let directory = std::env::temp_dir().join(format!("kerlico-zt-tmp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let path = directory.join("identity.secret");
+        load_or_create_identity(&path).unwrap();
+        let names: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["identity.secret"]);
         fs::remove_dir_all(&directory).unwrap();
     }
 }

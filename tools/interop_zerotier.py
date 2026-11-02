@@ -6,6 +6,7 @@
   root    只配置 root（moon），控制器与成员都靠 WHOIS 发现
   direct  不配置 root，直接配置控制器与成员的端点
   denied  未授权身份应被控制器拒绝，SOCKS 连接立即失败
+  flood   只配置 root，加入和转发期间持续向载体端口发送伪造的未认证包与 MAC 错误的 HELLO
 """
 
 import argparse
@@ -18,6 +19,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -303,6 +305,41 @@ def peer_paths(address):
     return []
 
 
+class ForgedFlood:
+    """向节点的载体端口持续发送随机来源的 28 字节包和 MAC 错误的 HELLO。"""
+
+    def __init__(self, address):
+        self.destination = bytes.fromhex(address)
+        self.target = ("127.0.0.1", 20000 + int(address, 16) % 45000)
+        self.stop = threading.Event()
+        self.sent = 0
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def packet(self, source, verb, body=b""):
+        return os.urandom(8) + self.destination + source + b"\x00" + os.urandom(8) + bytes([verb]) + body
+
+    def hello(self):
+        source = os.urandom(5)
+        identity = source + b"\x00" + os.urandom(64) + b"\x00"
+        return self.packet(source, 0x01, bytes([11, 1, 4, 0, 8]) + os.urandom(8) + identity)
+
+    def run(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            while not self.stop.is_set():
+                sock.sendto(self.packet(os.urandom(5), 0x06), self.target)
+                sock.sendto(self.hello(), self.target)
+                self.sent += 2
+                time.sleep(0.002)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self.stop.set()
+        self.thread.join()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--kerlico", default=os.path.join(os.environ.get("CARGO_TARGET_DIR", "target"), "debug", "kerlico"))
@@ -373,6 +410,15 @@ def main():
         kerlico.wait_listening()
         verify_data_path(kerlico, "direct")
         print(f"direct: member sees kerlico at {peer_paths(address)}", flush=True)
+        kerlico.close()
+        kerlico = None
+
+        with ForgedFlood(address) as flood:
+            time.sleep(1)
+            kerlico = Kerlico(args.kerlico, directory, "flood", dict(base, roots=[root_seed]))
+            kerlico.wait_listening()
+            verify_data_path(kerlico, "flood")
+            print(f"flood: {flood.sent} forged packets sent during the run", flush=True)
         print("zerotier interop passed", flush=True)
     except Exception:
         for path in Path(directory).glob("*.log"):

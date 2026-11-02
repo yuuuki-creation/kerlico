@@ -17,8 +17,12 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::{net::UdpSocket, sync::watch, time::MissedTickBehavior};
-use zerotier_node::{Address, Event, JoinStatus, Node};
+use tokio::{
+    net::UdpSocket,
+    sync::{mpsc, watch},
+    time::MissedTickBehavior,
+};
+use zerotier_node::{Address, Event, IdentityCheck, IdentityVerdict, JoinStatus, Node};
 
 const CAPABILITIES: Capabilities = Capabilities {
     tcp: true,
@@ -170,6 +174,8 @@ async fn drive(
     };
     let node = Node::new(node_options).map_err(|_| Error::Protocol("ZeroTier身份缺少私钥"))?;
     let node_address = node.address();
+    // Node 限制在途校验数，通道长度因此有界。
+    let (verdict_sender, verdicts) = mpsc::unbounded_channel();
     let mut driver = Driver {
         clock: Clock::new(),
         node,
@@ -178,6 +184,8 @@ async fn drive(
         link,
         cancel,
         host: host.clone(),
+        verdict_sender,
+        verdicts,
     };
     let result = driver.run().await;
     driver.close_interface();
@@ -291,6 +299,8 @@ struct Driver {
     link: watch::Sender<Link>,
     cancel: CancellationToken,
     host: ServiceContext,
+    verdict_sender: mpsc::UnboundedSender<IdentityVerdict>,
+    verdicts: mpsc::UnboundedReceiver<IdentityVerdict>,
 }
 
 impl Driver {
@@ -320,6 +330,9 @@ impl Driver {
                     if let (Ok(packet), Some(interface)) = (result, &mut self.interface) {
                         interface.send_ip(&mut self.node, self.clock.now(), packet);
                     }
+                }
+                Some(verdict) = self.verdicts.recv() => {
+                    self.node.on_identity_verdict(self.clock.now(), verdict);
                 }
             }
             self.drain().await;
@@ -367,8 +380,17 @@ impl Driver {
                     }
                 }
                 Event::Config(_) | Event::Status(_) => self.sync_link(),
+                Event::IdentityCheck(check) => self.start_identity_check(check),
             }
         }
+    }
+
+    /// 工作量校验要一次内存密集哈希，不能占用数据面任务。任务未能启动时 Node 按超时释放名额。
+    fn start_identity_check(&self, check: IdentityCheck) {
+        let verdicts = self.verdict_sender.clone();
+        let _ = self.host.spawn_blocking_tracked(move || {
+            let _ = verdicts.send(check.run());
+        });
     }
 
     /// 让数据面跟随加入状态：地址或路由变化时重建 IP 栈，被拒绝时关闭。

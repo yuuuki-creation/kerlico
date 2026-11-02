@@ -18,7 +18,7 @@ use crate::inet;
 use crate::network::{ConfigAssembler, NetworkConfig};
 use crate::packet::{self, error_code, verb};
 use crate::reader::Reader;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -66,6 +66,17 @@ const MAX_STASHED: usize = 64;
 const MAX_PENDING_PEERS: usize = 64;
 const MAX_PENDING_PER_PEER: usize = 16;
 const MAX_EXPECTED_REPLIES: usize = 1024;
+const MAX_UNKNOWN_SOURCES: usize = 64;
+const MAX_UNKNOWN_SOURCE_LOOKUPS: usize = 64;
+const EXPECTED_REPLY_TIMEOUT: i64 = 60_000;
+const WHOIS_PER_SECOND: u32 = 64;
+const UNKNOWN_SOURCE_WHOIS_PER_SECOND: u32 = 8;
+const STRANGER_HELLO_AGREEMENTS_PER_SECOND: u32 = 256;
+// One slot stays free for an identity this node itself asked for.
+const MAX_IDENTITY_CHECKS: usize = 3;
+const MAX_UNSOLICITED_IDENTITY_CHECKS: usize = MAX_IDENTITY_CHECKS - 1;
+const IDENTITY_CHECK_TIMEOUT: i64 = 10_000;
+const REPLAY_SLOTS: usize = 2048;
 const MAX_GROUPS: usize = 1024;
 const MAX_GROUP_MEMBERS: usize = 1024;
 const IDENTITY_GATE_BUCKETS: usize = 16384;
@@ -108,10 +119,93 @@ pub struct Frame {
 
 #[derive(Clone, Debug)]
 pub enum Event {
-    Datagram { to: SocketAddr, data: Vec<u8> },
+    Datagram {
+        to: SocketAddr,
+        data: Vec<u8>,
+    },
     Frame(Frame),
     Config(Arc<NetworkConfig>),
     Status(JoinStatus),
+    /// Run [`IdentityCheck::run`] away from the packet path and pass the result to
+    /// [`Node::on_identity_verdict`]. The node limits how many are outstanding.
+    IdentityCheck(IdentityCheck),
+}
+
+/// One proof of work check, which blocks for a memory-hard hash.
+#[derive(Clone, Debug)]
+pub struct IdentityCheck {
+    id: u64,
+    identity: Identity,
+}
+
+impl IdentityCheck {
+    pub fn run(&self) -> IdentityVerdict {
+        IdentityVerdict {
+            id: self.id,
+            valid: self.identity.locally_validate(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct IdentityVerdict {
+    id: u64,
+    valid: bool,
+}
+
+enum AfterCheck {
+    Hello {
+        from: SocketAddr,
+        wire: Vec<u8>,
+        timestamp: [u8; 8],
+    },
+    Whois,
+}
+
+struct PendingCheck {
+    started: i64,
+    identity: Identity,
+    key: Zeroizing<[u8; 32]>,
+    then: AfterCheck,
+}
+
+/// Packet IDs are random (`Packet.hpp`), so a sequence window is impossible. Each authenticated
+/// ID overwrites one slot, which remembers roughly the last `REPLAY_SLOTS` packets of a peer.
+struct RecentPacketIds(Box<[u64]>);
+
+impl RecentPacketIds {
+    fn new() -> Self {
+        Self(vec![0; REPLAY_SLOTS].into_boxed_slice())
+    }
+
+    fn first_sight(&mut self, id: u64) -> bool {
+        let slot = &mut self.0[id as usize % REPLAY_SLOTS];
+        if *slot == id && id != 0 {
+            return false;
+        }
+        *slot = id;
+        true
+    }
+}
+
+#[derive(Default)]
+struct RateWindow {
+    started: i64,
+    used: u32,
+}
+
+impl RateWindow {
+    fn allow(&mut self, now: i64, limit: u32) -> bool {
+        if now - self.started >= 1_000 {
+            self.started = now;
+            self.used = 0;
+        }
+        if self.used >= limit {
+            return false;
+        }
+        self.used += 1;
+        true
+    }
 }
 
 struct Path {
@@ -135,6 +229,7 @@ struct Peer {
     last_echo: i64,
     last_receive: i64,
     com: Option<CertificateOfMembership>,
+    recent_packets: RecentPacketIds,
 }
 
 impl Peer {
@@ -159,6 +254,7 @@ impl Peer {
             last_echo: i64::MIN / 2,
             last_receive: i64::MIN / 2,
             com: None,
+            recent_packets: RecentPacketIds::new(),
         }
     }
 
@@ -194,10 +290,18 @@ struct Stashed {
     packet: Vec<u8>,
 }
 
+/// A destination this node wants to reach.
 struct PendingPeer {
     first_queued: i64,
     last_whois: i64,
     packets: VecDeque<(u8, Vec<u8>)>,
+}
+
+/// The claimed sender of an unauthenticated packet. Anyone can create these, so they are kept
+/// apart from `PendingPeer`, whose table must stay usable for joining the network.
+struct UnknownSource {
+    first_seen: i64,
+    last_whois: i64,
 }
 
 #[derive(Default)]
@@ -206,25 +310,65 @@ struct Group {
     last_gather: Option<i64>,
 }
 
-#[derive(Default)]
+struct ExpectedReply {
+    peer: Address,
+    verb: u8,
+    sent: i64,
+}
+
+/// Requests awaiting an OK. Oldest entries give way once `capacity` requests have been sent.
 struct ExpectedReplies {
+    capacity: usize,
     order: VecDeque<u64>,
-    ids: HashSet<u64>,
+    entries: HashMap<u64, ExpectedReply>,
 }
 
 impl ExpectedReplies {
-    fn insert(&mut self, id: u64) {
-        if self.ids.insert(id) {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            order: VecDeque::new(),
+            entries: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, id: u64, peer: Address, verb: u8, sent: i64) {
+        let reply = ExpectedReply { peer, verb, sent };
+        if self.entries.insert(id, reply).is_none() {
             self.order.push_back(id);
-            if self.order.len() > MAX_EXPECTED_REPLIES
+            if self.order.len() > self.capacity
                 && let Some(old) = self.order.pop_front()
             {
-                self.ids.remove(&old);
+                self.entries.remove(&old);
             }
         }
     }
-    fn contains(&self, id: u64) -> bool {
-        self.ids.contains(&id)
+
+    /// An ID answers once, with one exception: `Node::ncSendConfig` repeats the request ID on
+    /// every chunk of a network config, so that entry stays until it expires.
+    fn answer(&mut self, id: u64, peer: Address, verb: u8) -> bool {
+        let matches = self
+            .entries
+            .get(&id)
+            .is_some_and(|reply| reply.peer == peer && reply.verb == verb);
+        if matches && verb != verb::NETWORK_CONFIG_REQUEST {
+            self.entries.remove(&id);
+        }
+        matches
+    }
+
+    fn expire(&mut self, now: i64) {
+        while let Some(id) = self.order.front() {
+            if self
+                .entries
+                .get(id)
+                .is_some_and(|reply| now - reply.sent < EXPECTED_REPLY_TIMEOUT)
+            {
+                return;
+            }
+            self.entries.remove(id);
+            self.order.pop_front();
+        }
     }
 }
 
@@ -246,7 +390,15 @@ pub struct Node {
     partial: HashMap<u64, PartialPacket>,
     stashed: VecDeque<Stashed>,
     pending: HashMap<Address, PendingPeer>,
+    unknown_sources: HashMap<Address, UnknownSource>,
     expected: ExpectedReplies,
+    // Lookups for unknown sources stay out of `expected` so forged traffic cannot evict its IDs.
+    unknown_source_lookups: ExpectedReplies,
+    whois_rate: RateWindow,
+    unknown_source_whois_rate: RateWindow,
+    stranger_hello_rate: RateWindow,
+    identity_checks: HashMap<u64, PendingCheck>,
+    next_identity_check: u64,
     identity_gate: Vec<i64>,
     events: VecDeque<Event>,
 }
@@ -301,7 +453,14 @@ impl Node {
             partial: HashMap::new(),
             stashed: VecDeque::new(),
             pending: HashMap::new(),
-            expected: ExpectedReplies::default(),
+            unknown_sources: HashMap::new(),
+            expected: ExpectedReplies::new(MAX_EXPECTED_REPLIES),
+            unknown_source_lookups: ExpectedReplies::new(MAX_UNKNOWN_SOURCE_LOOKUPS),
+            whois_rate: RateWindow::default(),
+            unknown_source_whois_rate: RateWindow::default(),
+            stranger_hello_rate: RateWindow::default(),
+            identity_checks: HashMap::new(),
+            next_identity_check: 0,
             identity_gate: vec![i64::MIN / 2; IDENTITY_GATE_BUCKETS],
             events: VecDeque::new(),
         })
@@ -471,6 +630,13 @@ impl Node {
         }
         self.pending
             .retain(|_, entry| now - entry.first_queued < QUEUE_TIMEOUT);
+        self.unknown_sources
+            .retain(|_, entry| now - entry.first_seen < QUEUE_TIMEOUT);
+        self.expected.expire(now);
+        self.unknown_source_lookups.expire(now);
+        // A check whose task never reports must not hold its slot.
+        self.identity_checks
+            .retain(|_, check| now - check.started < IDENTITY_CHECK_TIMEOUT);
     }
 
     fn expire_group_members(&mut self, now: i64, group: MulticastGroup) {
@@ -520,14 +686,25 @@ impl Node {
     }
 
     fn retry_whois(&mut self, now: i64) {
-        let due: Vec<Address> = self
+        let mut due: Vec<(i64, Address)> = self
             .pending
             .iter()
             .filter(|(_, entry)| now - entry.last_whois >= WHOIS_RETRY_DELAY)
-            .map(|(address, _)| *address)
+            .map(|(address, entry)| (entry.last_whois, *address))
             .collect();
-        for address in due {
+        due.sort_unstable();
+        for (_, address) in due {
             self.request_whois(now, address);
+        }
+        let mut due: Vec<(i64, Address)> = self
+            .unknown_sources
+            .iter()
+            .filter(|(_, entry)| now - entry.last_whois >= WHOIS_RETRY_DELAY)
+            .map(|(address, entry)| (entry.last_whois, *address))
+            .collect();
+        due.sort_unstable();
+        for (_, address) in due {
+            self.request_whois_for_unknown_source(now, address);
         }
     }
 
@@ -543,26 +720,63 @@ impl Node {
             .copied()
     }
 
+    fn send_whois(&mut self, now: i64, address: Address) -> Option<(u64, Address)> {
+        let root = self.best_root(now)?;
+        let id = self.send_verb(now, root, verb::WHOIS, address.to_bytes().to_vec())?;
+        Some((id, root))
+    }
+
     fn request_whois(&mut self, now: i64, address: Address) {
-        let Some(entry) = self.pending.get_mut(&address) else {
+        if !self.pending.contains_key(&address) || !self.whois_rate.allow(now, WHOIS_PER_SECOND) {
             return;
-        };
-        entry.last_whois = now;
-        if let Some(root) = self.best_root(now) {
-            self.send_verb(now, root, verb::WHOIS, address.to_bytes().to_vec());
         }
+        if let Some(entry) = self.pending.get_mut(&address) {
+            entry.last_whois = now;
+        }
+        if let Some((id, root)) = self.send_whois(now, address) {
+            self.expected.insert(id, root, verb::WHOIS, now);
+        }
+    }
+
+    /// Spends the smaller budget first, so forged sources leave most of the global one to
+    /// destinations this node wants.
+    fn request_whois_for_unknown_source(&mut self, now: i64, address: Address) {
+        if !self.unknown_sources.contains_key(&address)
+            || !self
+                .unknown_source_whois_rate
+                .allow(now, UNKNOWN_SOURCE_WHOIS_PER_SECOND)
+            || !self.whois_rate.allow(now, WHOIS_PER_SECOND)
+        {
+            return;
+        }
+        if let Some(entry) = self.unknown_sources.get_mut(&address) {
+            entry.last_whois = now;
+        }
+        if let Some((id, root)) = self.send_whois(now, address) {
+            self.unknown_source_lookups
+                .insert(id, root, verb::WHOIS, now);
+        }
+    }
+
+    fn pending_entry(&mut self, now: i64, destination: Address) -> Option<&mut PendingPeer> {
+        if destination != self.controller
+            && !self.pending.contains_key(&destination)
+            && self.pending.len() >= MAX_PENDING_PEERS
+        {
+            return None;
+        }
+        Some(self.pending.entry(destination).or_insert(PendingPeer {
+            first_queued: now,
+            last_whois: i64::MIN / 2,
+            packets: VecDeque::new(),
+        }))
     }
 
     /// Queues while the peer's identity is unknown, then asks a root for it.
     fn queue_for_peer(&mut self, now: i64, destination: Address, code: u8, body: Vec<u8>) {
-        if !self.pending.contains_key(&destination) && self.pending.len() >= MAX_PENDING_PEERS {
+        let Some(entry) = self.pending_entry(now, destination) else {
             return;
-        }
-        let entry = self.pending.entry(destination).or_insert(PendingPeer {
-            first_queued: now,
-            last_whois: i64::MIN / 2,
-            packets: VecDeque::new(),
-        });
+        };
         if entry.packets.len() < MAX_PENDING_PER_PEER {
             entry.packets.push_back((code, body));
         }
@@ -571,10 +785,17 @@ impl Node {
         }
     }
 
-    fn send_verb(&mut self, now: i64, destination: Address, code: u8, body: Vec<u8>) {
+    /// Returns the packet ID when the packet was sent rather than queued or dropped.
+    fn send_verb(
+        &mut self,
+        now: i64,
+        destination: Address,
+        code: u8,
+        body: Vec<u8>,
+    ) -> Option<u64> {
         let Some(peer) = self.peers.get(&destination) else {
             self.queue_for_peer(now, destination, code, body);
-            return;
+            return None;
         };
         let via = peer.best_alive_path(now).or_else(|| {
             self.best_root(now)
@@ -582,9 +803,7 @@ impl Node {
                 .and_then(|root| root.best_alive_path(now).or_else(|| root.any_address()))
                 .or_else(|| peer.any_address())
         });
-        if let Some(via) = via {
-            self.send_direct(now, destination, via, code, body);
-        }
+        self.send_direct(now, destination, via?, code, body)
     }
 
     fn send_direct(
@@ -594,27 +813,24 @@ impl Node {
         via: SocketAddr,
         code: u8,
         body: Vec<u8>,
-    ) {
-        let Some(peer) = self.peers.get_mut(&destination) else {
-            return;
-        };
+    ) -> Option<u64> {
+        let peer = self.peers.get_mut(&destination)?;
         let wire = packet::new_packet(destination, self.address, code, &body);
         let id = packet::packet_id(&wire);
-        let Some(datagrams) = packet::seal(wire, &peer.key, true) else {
-            return;
-        };
+        let datagrams = packet::seal(wire, &peer.key, true)?;
         if let Some(path) = peer.paths.iter_mut().find(|path| path.address == via) {
             path.last_send = now;
         }
         if matches!(
             code,
-            verb::WHOIS | verb::ECHO | verb::NETWORK_CONFIG_REQUEST | verb::MULTICAST_GATHER
+            verb::ECHO | verb::NETWORK_CONFIG_REQUEST | verb::MULTICAST_GATHER
         ) {
-            self.expected.insert(id);
+            self.expected.insert(id, destination, code, now);
         }
         for data in datagrams {
             self.events.push_back(Event::Datagram { to: via, data });
         }
+        Some(id)
     }
 
     fn send_hello(&mut self, now: i64, destination: Address, at: SocketAddr) {
@@ -641,7 +857,7 @@ impl Node {
         if let Some(path) = peer.paths.iter_mut().find(|path| path.address == at) {
             path.last_send = now;
         }
-        self.expected.insert(id);
+        self.expected.insert(id, destination, verb::HELLO, now);
         self.events
             .push_back(Event::Datagram { to: at, data: wire });
     }
@@ -858,7 +1074,7 @@ impl Node {
             self.on_hello(now, from, wire, false);
             return;
         }
-        let Some(peer) = self.peers.get(&source) else {
+        let Some(peer) = self.peers.get_mut(&source) else {
             if self.stashed.len() >= MAX_STASHED {
                 self.stashed.pop_front();
             }
@@ -867,20 +1083,29 @@ impl Node {
                 from,
                 packet: wire,
             });
-            self.whois_for_stash(now, source);
+            self.note_unknown_source(now, source);
             return;
         };
-        if !packet::dearmor(&mut wire, &peer.key) || !packet::uncompress(&mut wire) {
+        if !packet::dearmor(&mut wire, &peer.key)
+            || !peer.recent_packets.first_sight(packet::packet_id(&wire))
+            || !packet::uncompress(&mut wire)
+        {
             return;
         }
         let code = packet::verb_of(&wire);
+        let mut confirms_path = false;
         match code {
             verb::HELLO => {
                 self.on_hello(now, from, wire, true);
                 return;
             }
             verb::ERROR => self.on_error(now, source, &wire),
-            verb::OK => self.on_ok(now, source, &wire),
+            verb::OK => {
+                if !self.on_ok(now, source, &wire) {
+                    return;
+                }
+                confirms_path = true;
+            }
             verb::RENDEZVOUS => self.on_rendezvous(now, source, &wire),
             verb::FRAME => {
                 if !self.on_frame(now, from, source, &wire) {
@@ -903,23 +1128,42 @@ impl Node {
             }
             _ => {}
         }
-        self.received(now, from, source, packet::hops(&wire), code);
+        self.received(now, from, source, packet::hops(&wire), confirms_path);
     }
 
-    fn whois_for_stash(&mut self, now: i64, source: Address) {
-        let entry = self.pending.entry(source).or_insert(PendingPeer {
-            first_queued: now,
+    fn note_unknown_source(&mut self, now: i64, source: Address) {
+        if self.pending.contains_key(&source) {
+            return;
+        }
+        if !self.unknown_sources.contains_key(&source)
+            && self.unknown_sources.len() >= MAX_UNKNOWN_SOURCES
+            && let Some(oldest) = self
+                .unknown_sources
+                .iter()
+                .min_by_key(|(_, entry)| entry.first_seen)
+                .map(|(address, _)| *address)
+        {
+            self.unknown_sources.remove(&oldest);
+        }
+        let entry = self.unknown_sources.entry(source).or_insert(UnknownSource {
+            first_seen: now,
             last_whois: i64::MIN / 2,
-            packets: VecDeque::new(),
         });
         if now - entry.last_whois >= WHOIS_RETRY_DELAY {
-            self.request_whois(now, source);
+            self.request_whois_for_unknown_source(now, source);
         }
     }
 
-    /// Learns paths only from replies to our own traffic, as `Peer::received` does: anything
+    /// Learns paths only from answers to our own requests, as `Peer::received` does: anything
     /// else arriving on a new path triggers a HELLO, whose OK then confirms that path.
-    fn received(&mut self, now: i64, from: SocketAddr, source: Address, hops: u8, code: u8) {
+    fn received(
+        &mut self,
+        now: i64,
+        from: SocketAddr,
+        source: Address,
+        hops: u8,
+        confirms_path: bool,
+    ) {
         let Some(peer) = self.peers.get_mut(&source) else {
             return;
         };
@@ -931,7 +1175,7 @@ impl Node {
             path.last_receive = now;
             return;
         }
-        if code == verb::OK {
+        if confirms_path {
             if peer.paths.len() >= MAX_PATHS
                 && let Some(oldest) = peer
                     .paths
@@ -998,6 +1242,7 @@ impl Node {
     }
 
     fn peer_learned(&mut self, now: i64, address: Address) {
+        self.unknown_sources.remove(&address);
         if let Some(entry) = self.pending.remove(&address) {
             for (code, body) in entry.packets {
                 self.send_verb(now, address, code, body);
@@ -1034,30 +1279,52 @@ impl Node {
         if version < MIN_PROTOCOL_VERSION || source != identity.address() || identity.has_secret() {
             return;
         }
-        let mut learned = false;
-        match self.peers.get(&source) {
+        let packet_id = packet::packet_id(&wire);
+        match self.peers.get_mut(&source) {
             Some(peer) => {
                 if !authenticated
-                    && (peer.identity != identity || !packet::dearmor(&mut wire, &peer.key))
+                    && (peer.identity != identity
+                        || !packet::dearmor(&mut wire, &peer.key)
+                        || !peer.recent_packets.first_sight(packet_id))
                 {
                     return;
                 }
             }
             None => {
-                if authenticated || !self.identity_gate_passes(now, from) {
+                // The MAC needs the key agreement, so that comes first under its own budget.
+                // The per-network gate is spent only on packets that really carry this identity.
+                if authenticated
+                    || self.identity_checks.len() >= MAX_UNSOLICITED_IDENTITY_CHECKS
+                    || !self
+                        .stranger_hello_rate
+                        .allow(now, STRANGER_HELLO_AGREEMENTS_PER_SECOND)
+                {
                     return;
                 }
                 let Ok(key) = self.identity.agree(&identity) else {
                     return;
                 };
-                if !packet::dearmor(&mut wire, &key) || !identity.locally_validate() {
+                if !packet::dearmor(&mut wire, &key) || !self.identity_gate_passes(now, from) {
                     return;
                 }
-                self.add_peer(identity, key);
-                learned = true;
+                self.start_identity_check(
+                    now,
+                    identity,
+                    key,
+                    AfterCheck::Hello {
+                        from,
+                        wire,
+                        timestamp,
+                    },
+                    MAX_UNSOLICITED_IDENTITY_CHECKS,
+                );
+                return;
             }
         }
+        self.answer_hello(now, from, &wire, timestamp);
+    }
 
+    fn answer_hello(&mut self, now: i64, from: SocketAddr, wire: &[u8], timestamp: [u8; 8]) {
         let mut body = Vec::with_capacity(48);
         body.push(verb::HELLO);
         body.extend_from_slice(&wire[..8]);
@@ -1068,12 +1335,68 @@ impl Node {
         body.extend_from_slice(&SOFTWARE_REVISION.to_be_bytes());
         inet::serialize(from, &mut body);
         body.extend_from_slice(&[0, 0]);
+        let source = packet::source(wire);
         self.send_direct(now, source, from, verb::OK, body);
+        self.received(now, from, source, packet::hops(wire), false);
+    }
 
-        self.received(now, from, source, packet::hops(&wire), verb::HELLO);
-        if learned {
-            self.peer_learned(now, source);
+    fn start_identity_check(
+        &mut self,
+        now: i64,
+        identity: Identity,
+        key: Zeroizing<[u8; 32]>,
+        then: AfterCheck,
+        limit: usize,
+    ) {
+        let address = identity.address();
+        if self.identity_checks.len() >= limit
+            || self
+                .identity_checks
+                .values()
+                .any(|check| check.identity.address() == address)
+        {
+            return;
         }
+        self.next_identity_check += 1;
+        let id = self.next_identity_check;
+        self.events.push_back(Event::IdentityCheck(IdentityCheck {
+            id,
+            identity: identity.clone(),
+        }));
+        self.identity_checks.insert(
+            id,
+            PendingCheck {
+                started: now,
+                identity,
+                key,
+                then,
+            },
+        );
+    }
+
+    /// Learns the peer behind a passed check and resumes what was waiting for it. A verdict
+    /// for a check that already timed out is ignored.
+    pub fn on_identity_verdict(&mut self, now: i64, verdict: IdentityVerdict) {
+        let Some(check) = self.identity_checks.remove(&verdict.id) else {
+            return;
+        };
+        let address = check.identity.address();
+        if !verdict.valid || self.peers.contains_key(&address) {
+            return;
+        }
+        self.add_peer(check.identity, check.key);
+        if let AfterCheck::Hello {
+            from,
+            wire,
+            timestamp,
+        } = check.then
+        {
+            if let Some(peer) = self.peers.get_mut(&address) {
+                peer.recent_packets.first_sight(packet::packet_id(&wire));
+            }
+            self.answer_hello(now, from, &wire, timestamp);
+        }
+        self.peer_learned(now, address);
     }
 
     fn on_error(&mut self, now: i64, source: Address, wire: &[u8]) {
@@ -1135,34 +1458,24 @@ impl Node {
         }
     }
 
-    fn on_ok(&mut self, now: i64, source: Address, wire: &[u8]) {
+    /// Returns whether this OK answers an outstanding request of ours to its sender.
+    fn on_ok(&mut self, now: i64, source: Address, wire: &[u8]) -> bool {
         let mut reader = Reader::new(&wire[packet::IDX_PAYLOAD..]);
         let (Some(in_re), Some(id)) = (reader.u8(), reader.u64()) else {
-            return;
+            return false;
         };
-        if !self.expected.contains(id) {
-            return;
+        if !self.expected.answer(id, source, in_re)
+            && !self.unknown_source_lookups.answer(id, source, in_re)
+        {
+            return false;
         }
         match in_re {
             verb::WHOIS if self.roots.contains(&source) => {
                 while reader.remaining() > 0 {
                     let Some(identity) = Identity::deserialize(&mut reader) else {
-                        return;
+                        return true;
                     };
-                    let address = identity.address();
-                    if self.peers.contains_key(&address)
-                        || address == self.address
-                        || !self.pending.contains_key(&address)
-                        || identity.has_secret()
-                        || !identity.locally_validate()
-                    {
-                        continue;
-                    }
-                    let Ok(key) = self.identity.agree(&identity) else {
-                        continue;
-                    };
-                    self.add_peer(identity, key);
-                    self.peer_learned(now, address);
+                    self.on_whois_identity(now, identity);
                 }
             }
             verb::NETWORK_CONFIG_REQUEST
@@ -1173,6 +1486,24 @@ impl Node {
             }
             verb::MULTICAST_GATHER => self.on_gather_result(now, &mut reader),
             _ => {}
+        }
+        true
+    }
+
+    fn on_whois_identity(&mut self, now: i64, identity: Identity) {
+        let address = identity.address();
+        let limit = if self.pending.contains_key(&address) {
+            MAX_IDENTITY_CHECKS
+        } else if self.unknown_sources.contains_key(&address) {
+            MAX_UNSOLICITED_IDENTITY_CHECKS
+        } else {
+            return;
+        };
+        if self.peers.contains_key(&address) || address == self.address || identity.has_secret() {
+            return;
+        }
+        if let Ok(key) = self.identity.agree(&identity) {
+            self.start_identity_check(now, identity, key, AfterCheck::Whois, limit);
         }
     }
 
@@ -1347,7 +1678,11 @@ impl Node {
             .get(&self.controller)
             .map(|peer| peer.identity.clone())
         else {
-            self.whois_for_stash(now, self.controller);
+            if let Some(entry) = self.pending_entry(now, self.controller)
+                && now - entry.last_whois >= WHOIS_RETRY_DELAY
+            {
+                self.request_whois(now, self.controller);
+            }
             return;
         };
         let Some(peer) = self.peers.get_mut(&source) else {
@@ -1595,7 +1930,6 @@ mod tests {
     fn give_config(node: &mut Node, controller: &Identity, ip: &str, timestamp: u64) {
         let dictionary = dictionary_for(controller, &public(&node.identity), ip, timestamp);
         let chunk = signed_chunk(controller, &dictionary, timestamp, 0..dictionary.len());
-        node.expected.insert(9);
         node.accept_config(0, 9, controller.address(), &chunk)
             .unwrap();
         drain(node);
@@ -1647,7 +1981,7 @@ mod tests {
         forged[packet::IDX_SOURCE] ^= 1;
         a.on_datagram(1000, endpoint(2), &forged);
         assert!(a.peers.is_empty());
-        // A flipped payload byte fails the MAC before any proof of work runs.
+        // A flipped payload byte fails the MAC before any proof of work is requested.
         *data.last_mut().unwrap() ^= 1;
         a.on_datagram(5000, endpoint(2), &data);
         assert!(!a.peers.contains_key(&bob.address()));
@@ -1664,6 +1998,13 @@ mod tests {
             panic!("expected a HELLO");
         };
         a.on_datagram(1000, endpoint(2), &data);
+        assert!(
+            !a.peers.contains_key(&bob.address()),
+            "not before the check"
+        );
+        let checks = identity_checks(&mut a);
+        assert_eq!(checks.len(), 1);
+        a.on_identity_verdict(1000, checks[0].run());
         assert!(a.peers.contains_key(&bob.address()));
         let replies = drain(&mut a);
         assert!(replies.iter().all(|event| matches!(
@@ -1671,6 +2012,16 @@ mod tests {
             Event::Datagram { to, .. } if *to == endpoint(2)
         )));
         assert_eq!(replies.len(), 2, "OK plus a HELLO to confirm the new path");
+    }
+
+    fn identity_checks(node: &mut Node) -> Vec<IdentityCheck> {
+        drain(node)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::IdentityCheck(check) => Some(check),
+                _ => None,
+            })
+            .collect()
     }
 
     fn frames(events: &[Event]) -> Vec<Frame> {
@@ -1819,7 +2170,8 @@ mod tests {
         );
         assert!(a.config().is_none());
 
-        a.expected.insert(5);
+        a.expected
+            .insert(5, controller.address(), verb::NETWORK_CONFIG_REQUEST, 10);
         let wire = packet::new_packet(a.address, controller.address(), verb::OK, &reply);
         a.on_datagram(10, endpoint(3), &packet::seal(wire, &key, true).unwrap()[0]);
         let config = a.config().expect("solicited config is accepted");
@@ -1850,5 +2202,317 @@ mod tests {
         let wire = packet::new_packet(a.address, controller.address(), verb::ERROR, &body);
         a.on_datagram(1, endpoint(3), &packet::seal(wire, &key, true).unwrap()[0]);
         assert_eq!(a.status(), JoinStatus::AccessDenied);
+    }
+
+    fn whois_requests(node: &mut Node, root_key: &[u8; 32]) -> Vec<Address> {
+        let mut asked = Vec::new();
+        for event in drain(node) {
+            if let Event::Datagram { mut data, .. } = event
+                && packet::dearmor(&mut data, root_key)
+                && packet::verb_of(&data) == verb::WHOIS
+            {
+                let bytes = data[packet::IDX_PAYLOAD..][..5].try_into().unwrap();
+                asked.push(Address::from_bytes(&bytes));
+            }
+        }
+        asked
+    }
+
+    fn sent_to(node: &mut Node, destination: SocketAddr) -> Vec<Vec<u8>> {
+        drain(node)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Datagram { to, data } if to == destination => Some(data),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn forged_sources_do_not_block_joining_or_flood_the_root() {
+        let root = Identity::parse(BOB).unwrap();
+        let mut a = Node::new(NodeOptions {
+            identity: Identity::parse(ALICE).unwrap(),
+            network_id: NETWORK,
+            roots: vec![Seed {
+                identity: public(&root),
+                endpoints: vec![endpoint(2)],
+            }],
+            peers: Vec::new(),
+        })
+        .unwrap();
+        let key = root.agree(&public(&a.identity)).unwrap();
+        let controller = a.controller;
+        let mut whois_sent = 0;
+        let mut controller_lookups_after_expiry = 0;
+        for now in (0..10_000).step_by(10) {
+            let forged = packet::new_packet(
+                a.address,
+                Address::new(0x10_0000_0000 + now as u64),
+                verb::FRAME,
+                &[],
+            );
+            a.on_datagram(now, endpoint(9), &forged);
+            if now % 250 == 0 {
+                a.tick(now);
+            }
+            for asked in whois_requests(&mut a, &key) {
+                whois_sent += 1;
+                if asked == controller && now > 6_000 {
+                    controller_lookups_after_expiry += 1;
+                }
+            }
+        }
+        assert!(
+            controller_lookups_after_expiry >= 5,
+            "controller lookups: {controller_lookups_after_expiry}"
+        );
+        assert!(whois_sent <= 120, "WHOIS sent in 10 s: {whois_sent}");
+    }
+
+    #[test]
+    fn replayed_frame_is_delivered_once() {
+        let (mut a, mut b, _) = joined_pair();
+        let now = 200_000;
+        a.tick(now);
+        exchange(now, &mut a, &mut b, &mut Vec::new());
+        a.send_frame(now, b.mac, 0x0800, b"once");
+        let captured = sent_to(&mut a, endpoint(2));
+        for data in captured.iter().chain(&captured) {
+            b.on_datagram(now, endpoint(1), data);
+        }
+        assert_eq!(frames(&drain(&mut b)).len(), 1);
+    }
+
+    #[test]
+    fn only_a_fresh_answer_to_our_own_request_teaches_a_path() {
+        let bob = Identity::parse(BOB).unwrap();
+        let alice = Identity::parse(ALICE).unwrap();
+        let mut a = node(ALICE, &[(&bob, 2)]);
+        let mut b = node(BOB, &[(&alice, 1)]);
+        let key = bob.agree(&public(&alice)).unwrap();
+        let attacker = endpoint(7);
+        let knows = |a: &Node, address| {
+            a.peers[&bob.address()]
+                .paths
+                .iter()
+                .any(|path| path.address == address)
+        };
+
+        let mut unsolicited = vec![verb::HELLO];
+        unsolicited.extend_from_slice(&7u64.to_be_bytes());
+        let wire = packet::new_packet(alice.address(), bob.address(), verb::OK, &unsolicited);
+        a.on_datagram(1000, attacker, &packet::seal(wire, &key, true).unwrap()[0]);
+        assert!(!knows(&a, attacker), "OK that answers nothing");
+
+        a.tick(1000);
+        for data in sent_to(&mut a, endpoint(2)) {
+            b.on_datagram(1000, endpoint(1), &data);
+        }
+        for data in sent_to(&mut b, endpoint(1)) {
+            a.on_datagram(1000, endpoint(2), &data);
+            a.on_datagram(1000, attacker, &data);
+        }
+        assert!(knows(&a, endpoint(2)), "the genuine answer is learned");
+        assert!(!knows(&a, attacker), "a replay of it is not");
+    }
+
+    /// An identity with a working key pair that never went through the proof of work.
+    fn unproven(address: u64, seed: u8) -> String {
+        let exchange = [seed; 32];
+        let public = x25519_dalek::x25519(exchange, x25519_dalek::X25519_BASEPOINT_BYTES);
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let signing = hex(&[seed; 32]);
+        format!(
+            "{address:010x}:0:{}{signing}:{}{signing}",
+            hex(&public),
+            hex(&exchange)
+        )
+    }
+
+    fn hello_from(seed: &str, to: &Identity, now: i64) -> Vec<u8> {
+        let mut sender = node(seed, &[(&public(to), 1)]);
+        sender.tick(now);
+        sent_to(&mut sender, endpoint(1)).remove(0)
+    }
+
+    fn other_network(octet: u8) -> SocketAddr {
+        SocketAddr::from(([198, 51, octet, 1], 9000))
+    }
+
+    #[test]
+    fn hello_with_a_bad_mac_does_not_spend_the_identity_gate() {
+        let alice = Identity::parse(ALICE).unwrap();
+        let mut a = node(ALICE, &[]);
+        let genuine = hello_from(BOB, &alice, 1000);
+        let mut junk = genuine.clone();
+        *junk.last_mut().unwrap() ^= 1;
+        a.on_datagram(1000, endpoint(2), &junk);
+        assert!(identity_checks(&mut a).is_empty());
+        a.on_datagram(1000, endpoint(2), &genuine);
+        assert_eq!(identity_checks(&mut a).len(), 1);
+    }
+
+    #[test]
+    fn stranger_key_agreements_are_rate_limited_per_second() {
+        let alice = Identity::parse(ALICE).unwrap();
+        let mut a = node(ALICE, &[]);
+        let genuine = hello_from(BOB, &alice, 1000);
+        let mut junk = genuine.clone();
+        *junk.last_mut().unwrap() ^= 1;
+        for _ in 0..STRANGER_HELLO_AGREEMENTS_PER_SECOND {
+            a.on_datagram(5000, endpoint(2), &junk);
+        }
+        a.on_datagram(5000, endpoint(2), &genuine);
+        assert!(identity_checks(&mut a).is_empty(), "budget spent");
+        a.on_datagram(6000, endpoint(2), &genuine);
+        assert_eq!(identity_checks(&mut a).len(), 1);
+    }
+
+    #[test]
+    fn identity_without_proof_of_work_is_refused_and_frees_its_slot() {
+        let alice = Identity::parse(ALICE).unwrap();
+        let mut a = node(ALICE, &[]);
+        let stranger = unproven(0x11_1111_1111, 1);
+        a.on_datagram(1000, endpoint(2), &hello_from(&stranger, &alice, 1000));
+        let checks = identity_checks(&mut a);
+        a.on_identity_verdict(1000, checks[0].run());
+        assert!(a.peers.is_empty());
+        assert!(a.identity_checks.is_empty());
+        assert!(drain(&mut a).is_empty(), "no reply to a failed identity");
+    }
+
+    #[test]
+    fn verdict_after_the_timeout_learns_nothing() {
+        let alice = Identity::parse(ALICE).unwrap();
+        let mut a = node(ALICE, &[]);
+        a.on_datagram(1000, endpoint(2), &hello_from(BOB, &alice, 1000));
+        let checks = identity_checks(&mut a);
+        let late = 1000 + IDENTITY_CHECK_TIMEOUT;
+        a.tick(late);
+        assert!(a.identity_checks.is_empty());
+        a.on_identity_verdict(late, checks[0].run());
+        assert!(a.peers.is_empty());
+    }
+
+    #[test]
+    fn saturated_checks_drop_strangers_but_keep_a_slot_for_our_own_lookups() {
+        let alice = Identity::parse(ALICE).unwrap();
+        let mut a = node(ALICE, &[]);
+        for seed in 1..=4 {
+            let stranger = unproven(0x11_1111_1100 + u64::from(seed), seed);
+            let hello = hello_from(&stranger, &alice, 1000);
+            a.on_datagram(1000, other_network(seed), &hello);
+        }
+        assert_eq!(a.identity_checks.len(), MAX_UNSOLICITED_IDENTITY_CHECKS);
+
+        let wanted = public(&Identity::parse(BOB).unwrap());
+        a.pending_entry(1000, wanted.address());
+        a.on_whois_identity(1000, wanted);
+        assert_eq!(a.identity_checks.len(), MAX_IDENTITY_CHECKS);
+    }
+
+    #[test]
+    fn answers_must_come_from_the_asked_peer_and_are_consumed_once() {
+        let mut expected = ExpectedReplies::new(4);
+        let (asked, other) = (Address::new(1), Address::new(2));
+        expected.insert(10, asked, verb::ECHO, 0);
+        assert!(!expected.answer(10, other, verb::ECHO), "wrong peer");
+        assert!(!expected.answer(10, asked, verb::HELLO), "wrong verb");
+        assert!(expected.answer(10, asked, verb::ECHO));
+        assert!(!expected.answer(10, asked, verb::ECHO), "already used");
+
+        expected.insert(11, asked, verb::NETWORK_CONFIG_REQUEST, 0);
+        assert!(expected.answer(11, asked, verb::NETWORK_CONFIG_REQUEST));
+        assert!(
+            expected.answer(11, asked, verb::NETWORK_CONFIG_REQUEST),
+            "each config chunk repeats the request ID"
+        );
+        expected.expire(EXPECTED_REPLY_TIMEOUT);
+        assert!(!expected.answer(11, asked, verb::NETWORK_CONFIG_REQUEST));
+    }
+
+    #[test]
+    fn forged_flood_stays_bounded_and_cannot_evict_our_expected_replies() {
+        let root = Identity::parse(BOB).unwrap();
+        let mut a = Node::new(NodeOptions {
+            identity: Identity::parse(ALICE).unwrap(),
+            network_id: NETWORK,
+            roots: vec![Seed {
+                identity: public(&root),
+                endpoints: vec![endpoint(2)],
+            }],
+            peers: Vec::new(),
+        })
+        .unwrap();
+        a.expected.insert(77, root.address(), verb::ECHO, 0);
+        for now in 0..5_000 {
+            for index in 0..4 {
+                let source = 0x10_0000_0000 + now as u64 * 4 + index;
+                let forged = packet::new_packet(a.address, Address::new(source), verb::FRAME, &[]);
+                a.on_datagram(now, endpoint(9), &forged);
+            }
+            if now % 250 == 0 {
+                a.tick(now);
+            }
+            drain(&mut a);
+            assert!(a.unknown_sources.len() <= MAX_UNKNOWN_SOURCES);
+            assert!(a.pending.len() <= 1, "only the controller is wanted");
+        }
+        assert!(a.expected.answer(77, root.address(), verb::ECHO));
+    }
+
+    #[test]
+    fn whois_answer_for_a_wanted_peer_is_checked_then_flushes_its_queue() {
+        let root = Identity::parse(BOB).unwrap();
+        let wanted = Identity::parse(CONTROLLER).unwrap();
+        let mut a = Node::new(NodeOptions {
+            identity: Identity::parse(ALICE).unwrap(),
+            network_id: NETWORK,
+            roots: vec![Seed {
+                identity: public(&root),
+                endpoints: vec![endpoint(2)],
+            }],
+            peers: Vec::new(),
+        })
+        .unwrap();
+        let key = root.agree(&public(&a.identity)).unwrap();
+        a.tick(1000);
+        let mut request = sent_to(&mut a, endpoint(2))
+            .into_iter()
+            .find(|data| {
+                let mut plain = data.clone();
+                packet::dearmor(&mut plain, &key) && packet::verb_of(&plain) == verb::WHOIS
+            })
+            .expect("the controller is looked up");
+        assert!(packet::dearmor(&mut request, &key));
+
+        let mut answer = vec![verb::WHOIS];
+        answer.extend_from_slice(&request[..8]);
+        public(&wanted).serialize(&mut answer);
+        let wire = packet::new_packet(a.address, root.address(), verb::OK, &answer);
+        a.on_datagram(
+            1000,
+            endpoint(2),
+            &packet::seal(wire, &key, true).unwrap()[0],
+        );
+        assert!(
+            !a.peers.contains_key(&wanted.address()),
+            "not before the check"
+        );
+
+        let checks = identity_checks(&mut a);
+        a.on_identity_verdict(1000, checks[0].run());
+        assert!(a.peers.contains_key(&wanted.address()));
+        assert!(!a.pending.contains_key(&wanted.address()));
+        assert!(
+            !drain(&mut a).is_empty(),
+            "the queued config request goes out"
+        );
     }
 }
