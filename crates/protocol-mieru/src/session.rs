@@ -26,10 +26,12 @@ use tokio::{
         AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
         DuplexStream, ReadBuf,
     },
-    sync::{OwnedSemaphorePermit, mpsc, oneshot, watch},
+    sync::{Notify, OwnedSemaphorePermit, mpsc, oneshot, watch},
 };
 const PIPE_BYTES: usize = 32768;
 pub(crate) const RECEIVE_BYTES: usize = 256 * 1024;
+/// TCP 载体靠停读把背压传给对端，必须在单帧放不下之前停，否则会话会被当成超限中止。
+const RECEIVE_PAUSE_BYTES: usize = RECEIVE_BYTES / 2;
 const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_CANCELLED: u8 = 4;
 pub(crate) const IDLE_TIMEOUT: u8 = 5;
@@ -124,6 +126,9 @@ pub(crate) struct Link {
     pub issued: AtomicUsize,
     next: AtomicU32,
     pub server: Option<Server>,
+    receive_pending: AtomicUsize,
+    receive_blocked: AtomicBool,
+    receive_room: Notify,
     #[cfg(test)]
     pub opening_poll_gate: Mutex<Option<Arc<crate::server::pending_tests::OpeningPollGate>>>,
 }
@@ -152,11 +157,32 @@ impl Link {
                 issued: AtomicUsize::new(0),
                 next: AtomicU32::new((rand::random::<u32>() & 0x7fff_ffff) + 1),
                 server,
+                receive_pending: AtomicUsize::new(0),
+                receive_blocked: AtomicBool::new(false),
+                receive_room: Notify::new(),
                 #[cfg(test)]
                 opening_poll_gate: Mutex::new(None),
             }),
             receive,
         )
+    }
+    fn receive_ready(&self) -> bool {
+        self.receive_pending.load(Ordering::Acquire) == 0
+            && !self.receive_blocked.load(Ordering::Acquire)
+    }
+    async fn wait_receive_room(&self) {
+        loop {
+            let waiter = self.receive_room.notified();
+            tokio::pin!(waiter);
+            waiter.as_mut().enable();
+            if self.receive_ready() {
+                return;
+            }
+            tokio::select! { biased;
+                _ = self.scope.cancel.cancelled() => return,
+                _ = &mut waiter => {}
+            }
+        }
     }
     pub fn reusable(&self) -> bool {
         !self.scope.cancel.is_cancelled()
@@ -758,7 +784,8 @@ pub(crate) fn tcp_link(
             }
             let result: Result<()> = async {
                 let wire = codec::seal_stream(&mut cipher, &operation.frame, &writing.traffic)?;
-                tokio::time::timeout(writing.connect_timeout, writer.write_all(&wire))
+                // 对端停读是合法的背压，只有整段空闲期都写不动才算载体失效。
+                tokio::time::timeout(writing.idle, writer.write_all(&wire))
                     .await
                     .map_err(|_| Error::Timeout)??;
                 Ok(())
@@ -797,6 +824,7 @@ pub(crate) fn tcp_link(
             .await;
             match result {
                 Ok(frame) => {
+                    reading.receive_pending.fetch_add(1, Ordering::AcqRel);
                     if reading
                         .command
                         .send(Command::Incoming(frame))
@@ -805,6 +833,7 @@ pub(crate) fn tcp_link(
                     {
                         break;
                     }
+                    reading.wait_receive_room().await;
                 }
                 Err(_) => break,
             }
@@ -1096,11 +1125,25 @@ impl TcpActor {
                     entry.flush();
                 }
             }
-            Command::Incoming(frame) => self.incoming(frame)?,
+            Command::Incoming(frame) => {
+                let result = self.incoming(frame);
+                self.link.receive_pending.fetch_sub(1, Ordering::AcqRel);
+                result?;
+            }
             Command::Written => self.last_wire = Instant::now(),
         }
         self.flush();
+        self.update_receive_room();
         Ok(())
+    }
+    fn update_receive_room(&self) {
+        let blocked = self.entries.values().any(|entry| {
+            entry.life.received_bytes.load(Ordering::Acquire) >= RECEIVE_PAUSE_BYTES
+        });
+        self.link.receive_blocked.store(blocked, Ordering::Release);
+        if self.link.receive_ready() {
+            self.link.receive_room.notify_waiters();
+        }
     }
     fn maintain(&mut self) -> bool {
         let mut expired = Vec::new();
@@ -1124,6 +1167,7 @@ impl TcpActor {
             self.close(id, true, None);
         }
         self.flush();
+        self.update_receive_room();
         self.entries.is_empty()
             && self.queued.is_empty()
             && (self.stop_when_empty

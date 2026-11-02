@@ -69,6 +69,50 @@ async fn tcp_and_explicit_local_udp_transports_mux_lazy_and_address_families() {
     }
 }
 #[tokio::test]
+async fn slow_tcp_reader_gets_backpressure_instead_of_session_abort() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = Destination::new("127.0.0.1", listener.local_addr().unwrap().port()).unwrap();
+    let echo = tokio::spawn(async move {
+        let mut tasks = JoinSet::new();
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tasks.spawn(async move {
+                let (mut read, mut write) = stream.split();
+                let _ = tokio::io::copy(&mut read, &mut write).await;
+            });
+        }
+    });
+    for multiplex in [false, true] {
+        let mut setup = Setup::new("tcp", "127.0.0.1");
+        setup.multiplex = multiplex;
+        let f = fixture(setup).await;
+        let context = f.context();
+        let stream = f
+            .outbound
+            .connect_tcp(&target, &context)
+            .await
+            .unwrap()
+            .stream;
+        let (mut reader, mut writer) = tokio::io::split(stream);
+        let body = (0..4usize << 20).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let sent = body.clone();
+        let upload = tokio::spawn(async move {
+            writer.write_all(&sent).await.unwrap();
+            writer.flush().await.unwrap();
+            writer
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut received = vec![0; body.len()];
+        tokio::time::timeout(Duration::from_secs(30), reader.read_exact(&mut received))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(received == body, "回显内容不符");
+        drop(upload.await.unwrap());
+    }
+    echo.abort();
+}
+
+#[tokio::test]
 async fn all_low_entropy_modes_rotations_and_32768_boundary_use_complete_wire_codec() {
     let target = tcp_echo("127.0.0.1").await;
     let packet = udp_echo("127.0.0.1").await;
