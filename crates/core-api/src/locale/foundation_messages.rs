@@ -8,6 +8,10 @@ pub(super) const DIAGNOSTICS: &[(&str, &str)] = &[
     ("操作已取消", "Operation cancelled"),
     ("连接被策略拒绝", "Connection rejected by policy"),
     ("资源达到上限", "Resource limit reached"),
+    (
+        "出站登录失败，退避期内不重试",
+        "Outbound login failed; retries are paused during backoff",
+    ),
     ("HTTP DATA流失败", "HTTP DATA stream failed"),
     (
         "HTTP QUIC UDP状态不可用",

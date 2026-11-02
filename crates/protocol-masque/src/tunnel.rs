@@ -135,8 +135,12 @@ async fn open(
         .map_err(|_| protocol())?;
     let quarter_stream_id = stream.id().index();
     let response = stream.recv_response().await.map_err(|_| protocol())?;
-    if !response.status().is_success() {
+    // 4xx 是对这组凭据或路径的结论；其余状态可能是代理的暂时故障，走短退避。
+    if response.status().is_client_error() {
         return Err(Error::Rejected);
+    }
+    if !response.status().is_success() {
+        return Err(protocol());
     }
     if connection
         .max_datagram_size()

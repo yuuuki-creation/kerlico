@@ -5,20 +5,18 @@ use crate::{
 use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     BoxFuture, CancellationToken, Capabilities, ConnectContext, DatagramAssociation,
-    DatagramChannel, Destination, Error, OpenedTcp, Outbound, ResourceKey, Result, ServiceContext,
-    TargetPolicy,
+    DatagramChannel, Destination, Error, LoginBackoff, OpenedTcp, Outbound, ResourceKey, Result,
+    ServiceContext, TargetPolicy,
 };
 use serde_json::Value;
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::{sync::Mutex, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
+use tokio::sync::Mutex;
 
 const CAPABILITIES: Capabilities = Capabilities {
     tcp: true,
     tcp_eof: true,
     udp: true,
 };
-/// ocserv 按错误口令累计封禁分；由流量驱动的重新认证必须限速，否则一次配错就会封禁本机地址。
-const REJECTED_BACKOFF: Duration = Duration::from_secs(60);
 
 pub struct OpenConnectFactory;
 impl OutboundFactory for OpenConnectFactory {
@@ -40,6 +38,7 @@ impl OutboundFactory for OpenConnectFactory {
                         cancel: host.cancel().child_token(),
                         host,
                         slots: Mutex::new(HashMap::new()),
+                        login: Mutex::default(),
                     }) as Arc<dyn Outbound>)
                 })
             },
@@ -47,17 +46,15 @@ impl OutboundFactory for OpenConnectFactory {
     }
 }
 
-#[derive(Default)]
-struct Slot {
-    session: Option<Arc<Session>>,
-    rejected_until: Option<Instant>,
-}
+type Slot = Arc<Mutex<Option<Arc<Session>>>>;
 
 struct OpenConnect {
     config: Config,
     host: ServiceContext,
     cancel: CancellationToken,
-    slots: Mutex<HashMap<ResourceKey, Arc<Mutex<Slot>>>>,
+    slots: Mutex<HashMap<ResourceKey, Slot>>,
+    /// ocserv 按错误口令累计封禁分，而账号属于整个出站：不同来源也必须共用退避并串行登录。
+    login: Mutex<LoginBackoff>,
 }
 impl Drop for OpenConnect {
     fn drop(&mut self) {
@@ -76,29 +73,16 @@ impl OpenConnect {
                     .or_default()
                     .clone();
                 let mut slot = slot.lock().await;
-                if let Some(session) = slot.session.as_ref().filter(|session| !session.is_closed())
-                {
+                if let Some(session) = slot.as_ref().filter(|session| !session.is_closed()) {
                     return Ok(session.clone());
                 }
-                if slot
-                    .rejected_until
-                    .is_some_and(|until| Instant::now() < until)
-                {
-                    return Err(Error::Rejected);
-                }
-                match session::establish(&self.config, &self.host, &self.cancel).await {
-                    Ok(session) => {
-                        let session = Arc::new(session);
-                        slot.session = Some(session.clone());
-                        slot.rejected_until = None;
-                        Ok(session)
-                    }
-                    Err(Error::Rejected) => {
-                        slot.rejected_until = Some(Instant::now() + REJECTED_BACKOFF);
-                        Err(Error::Rejected)
-                    }
-                    Err(error) => Err(error),
-                }
+                let mut login = self.login.lock().await;
+                login.check(Instant::now())?;
+                let established = session::establish(&self.config, &self.host, &self.cancel).await;
+                login.record(Instant::now(), &established);
+                let session = Arc::new(established?);
+                *slot = Some(session.clone());
+                Ok(session)
             })
             .await
     }
@@ -144,5 +128,58 @@ impl Outbound for OpenConnect {
             let session = self.session(context).await?;
             session.tunnel.associate_udp(context)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kerlico_core::{FamilyMode, NodeId, Source};
+    use serde_json::json;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn failed_login_backs_off_for_every_source_of_the_outbound() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let logins = Arc::new(AtomicUsize::new(0));
+        let counted = logins.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let options: Options = serde_json::from_value(json!({
+            "server": {"host": "127.0.0.1", "port": port},
+            "username": "u",
+            "password": "p",
+        }))
+        .unwrap();
+        let host = ServiceContext::for_test();
+        let outbound = OpenConnect {
+            config: options.prepare().unwrap(),
+            cancel: host.cancel().child_token(),
+            host: host.clone(),
+            slots: Mutex::new(HashMap::new()),
+            login: Mutex::default(),
+        };
+        for node in ["source-a", "source-b", "source-c"] {
+            let context = ConnectContext::new(Duration::from_secs(5)).scoped(
+                &host,
+                &Source::Local {
+                    node: NodeId::parse(node).unwrap(),
+                },
+                CancellationToken::new(),
+                CancellationToken::new(),
+                FamilyMode::V4Only,
+            );
+            assert!(outbound.session(&context).await.is_err());
+        }
+        assert_eq!(logins.load(Ordering::SeqCst), 1);
     }
 }

@@ -41,6 +41,7 @@ TLS 固定为 1.3，ALPN 固定为 `h3`，始终校验证书，不发送 0-RTT�
 - **路由归属**：`TargetPolicy::Local`。CONNECT-IP 承载 IP 包，共享调度器先解析网站域名，出站只接受字面 IP。载体端点的解析与业务目标解析分开。
 - **隧道与作用域**：按 `ConnectContext::resource_key()` 为每个可信来源建立一条隧道，一条 QUIC 连接只承载一个 CONNECT-IP 请求。首个流到达时建立，无活动流达到 `idle_timeout_ms` 后关闭，隧道失败不影响其他作用域，下一条流重新建立。隧道失败不重放业务数据，也不回退直连。
 - **建立顺序**：等待对端 SETTINGS 同时开启 Extended CONNECT 和 HTTP Datagram，发送 `:protocol=connect-ip`、`capsule-protocol: ?1`，收到 2xx 后发送 ADDRESS_REQUEST（IPv4、IPv6 各一条），收到第一条可用的 ADDRESS_ASSIGN 后开始转发。
+- **建立退避**：凭据属于整个出站，所以退避按出站计算，所有来源共用，新隧道逐个建立。代理返回 4xx 后 60 秒内不再重试，直接返回 `Rejected`。其他建立失败（5xx、QUIC 或协议错误）按 1 秒到 60 秒指数退避，期间返回明确错误，建立成功后清零。业务连接在建立完成前取消或超时的，这次建立不计入退避。
 - **地址**：每个地址族取第一条未被拒绝的分配。前缀短于地址宽度时取第一个主机地址。代理撤回正在使用的地址时结束隧道。只分配一个地址族时，另一地址族的目标被拒绝。
 - **路由**：收到 ROUTE_ADVERTISEMENT 后，通告范围外的目标直接返回 `Rejected`；收到通告之前不做本地过滤，由代理决定。
 - **数据面**：IP 包走 QUIC DATAGRAM，负载为 Quarter Stream ID、Context ID 0、完整 IP 包。其他 Context ID、其他请求流的数据报及 HTTP/3 流上的 DATAGRAM Capsule 被丢弃。隧道内 MTU 固定为 1280，更大的 UDP 由用户态栈分片。QUIC 路径 MTU 下限为 1350，DATAGRAM 放不下 1280 字节 IP 包时建立失败并返回 `Unsupported`。
