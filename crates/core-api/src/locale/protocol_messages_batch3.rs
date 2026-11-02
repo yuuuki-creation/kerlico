@@ -2,6 +2,71 @@
 
 pub(super) const DIAGNOSTICS: &[(&str, &str)] = &[
     (
+        "OpenConnect 出站字段不合法",
+        "Invalid OpenConnect outbound fields",
+    ),
+    (
+        "OpenConnect 用户名和密码须为1至255字节且不含控制字符",
+        "OpenConnect username and password must be 1 to 255 bytes without control characters",
+    ),
+    (
+        "OpenConnect MTU 须在1280至9000之间",
+        "OpenConnect MTU must be between 1280 and 9000",
+    ),
+    (
+        "OpenConnect 帧负载过长",
+        "OpenConnect frame payload is too long",
+    ),
+    ("OpenConnect 帧头不合法", "Invalid OpenConnect frame header"),
+    (
+        "OpenConnect 认证文档不合法",
+        "Invalid OpenConnect authentication document",
+    ),
+    (
+        "OpenConnect 服务端要求未支持的认证字段",
+        "The OpenConnect server requires an unsupported authentication field",
+    ),
+    (
+        "OpenConnect HTTP 响应不合法",
+        "Invalid OpenConnect HTTP response",
+    ),
+    (
+        "OpenConnect 服务端提前关闭连接",
+        "The OpenConnect server closed the connection early",
+    ),
+    (
+        "OpenConnect 认证响应缺少有效的 Content-Length",
+        "The OpenConnect authentication response has no valid Content-Length",
+    ),
+    (
+        "OpenConnect 服务端分配的地址不合法",
+        "The OpenConnect server assigned an invalid address",
+    ),
+    (
+        "OpenConnect 服务端未分配隧道地址",
+        "The OpenConnect server did not assign a tunnel address",
+    ),
+    (
+        "OpenConnect 服务端未提供有效 MTU",
+        "The OpenConnect server did not provide a valid MTU",
+    ),
+    (
+        "OpenConnect 服务端发送了未协商的压缩帧",
+        "The OpenConnect server sent a compressed frame that was not negotiated",
+    ),
+    (
+        "OpenConnect 服务端返回了非成功 HTTP 状态",
+        "The OpenConnect server returned a non-success HTTP status",
+    ),
+    (
+        "OpenConnect 认证完成但未返回会话 Cookie",
+        "OpenConnect authentication completed without a session cookie",
+    ),
+    (
+        "OpenConnect 认证交互超过轮数上限",
+        "OpenConnect authentication exceeded the round limit",
+    ),
+    (
         "Gost Relay 出站字段不合法",
         "Invalid Gost Relay outbound fields",
     ),

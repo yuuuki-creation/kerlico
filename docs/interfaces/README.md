@@ -48,6 +48,7 @@
 | [WireGuard](wireguard.md) | 基于 Boringtun + smoltcp 的原生双端 TCP/UDP 隧道与多用户 peer 隔离 |
 | [MASQUE](masque.md) | HTTP/3 CONNECT-IP 客户端出站，经用户态 IP 数据面提供 TCP/UDP |
 | [OpenVPN](openvpn.md) | 原生 2.x 客户端出站：UDP/TCP、tls-auth/tls-crypt、AEAD P_DATA_V2、推送配置与换钥 |
+| [OpenConnect](openconnect.md) | 原生 AnyConnect 客户端出站：XML 口令认证、TLS 上的 CSTP 隧道、DPD 与 keepalive（无 DTLS） |
 
 ## 集成与专项验证记录
 
