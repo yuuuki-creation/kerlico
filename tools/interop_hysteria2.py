@@ -1,4 +1,5 @@
 """仅在 worker 验收 Hysteria2 正式 CLI 与固定参考对端的双向矩阵。"""
+from config_v2 import bind_members
 import argparse
 import asyncio
 import hashlib
@@ -45,11 +46,14 @@ def server_options(auth, cert, key, obfs, congestion):
 
 
 def kerlico_server(host, port, auth, cert, key, obfs, congestion):
-    return {"version": 1, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], "nodes": [{"tag": "node", "type": "hysteria2", "listen": h.endpoint(host, port), "outbound": "direct", "options": server_options(auth, cert, key, obfs, congestion)}], "limits": {"connect_timeout_ms": 5000, "idle_timeout_ms": 5000, "drain_timeout_ms": 500, "max_sessions": 128, "max_datagram_size": 65507}}
+    config = {"version": 2, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], "nodes": [{"tag": "node", "type": "hysteria2", "listen": h.endpoint(host, port), "outbound": "direct", "options": server_options(auth, cert, key, obfs, congestion)}], "limits": {"connect_timeout_ms": 5000, "idle_timeout_ms": 5000, "drain_timeout_ms": 500, "max_sessions": 128, "max_datagram_size": 65507}}
+    node = config["nodes"][0]
+    bind_members(config, node, [{"auth": node["options"].pop("auth")}])
+    return config
 
 
 def kerlico_client(forward, host, port, target_host, target_port, auth, cert, obfs, congestion):
-    return {"version": 1, "outbounds": [{"tag": "proxy", "type": "hysteria2", "options": options(host, port, auth, cert, obfs, congestion)}], "nodes": [], "inbounds": [{"tag": network, "type": network + "-forward", "listen": h.endpoint("127.0.0.1", forward), "target": {"host": target_host, "port": target_port}, "outbound": "proxy"} for network in ["tcp", "udp"]], "limits": {"connect_timeout_ms": 5000, "idle_timeout_ms": 5000, "drain_timeout_ms": 500, "max_sessions": 128, "max_datagram_size": 65507}}
+    return {"version": 2, "outbounds": [{"tag": "proxy", "type": "hysteria2", "options": options(host, port, auth, cert, obfs, congestion)}], "nodes": [], "inbounds": [{"tag": network, "type": network + "-forward", "listen": h.endpoint("127.0.0.1", forward), "target": {"host": target_host, "port": target_port}, "outbound": "proxy"} for network in ["tcp", "udp"]], "limits": {"connect_timeout_ms": 5000, "idle_timeout_ms": 5000, "drain_timeout_ms": 500, "max_sessions": 128, "max_datagram_size": 65507}}
 
 
 def peer_config(kind, direction, host, port, forward, target_host, target_port, auth, cert, key, obfs, congestion):

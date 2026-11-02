@@ -1,6 +1,6 @@
 //! 配置准备只构造对象；凭据、会话及协商状态不跨实例共享。
 use base64::{Engine, engine::general_purpose::STANDARD};
-use kerlico_core::{Error, Result, ScopedCredentialFingerprint};
+use kerlico_core::{Error, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, sync::Arc, time::Duration};
@@ -58,7 +58,6 @@ pub(crate) struct ClientOptions {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ServerOptions {
-    pub users: Vec<UserOptions>,
     pub tls: ServerTls,
     #[serde(default = "transports")]
     pub transports: Vec<Transport>,
@@ -179,15 +178,6 @@ impl User {
         hash.update(self.authorization());
         hash.finalize().into()
     }
-}
-pub(crate) fn credentials(users: &[Arc<User>]) -> Vec<ScopedCredentialFingerprint> {
-    users
-        .iter()
-        .map(|user| ScopedCredentialFingerprint {
-            protocol: "http".into(),
-            fingerprint: user.fingerprint(),
-        })
-        .collect()
 }
 pub(crate) fn users(options: Vec<UserOptions>) -> Result<Vec<Arc<User>>> {
     if options.is_empty() || options.len() > 256 {

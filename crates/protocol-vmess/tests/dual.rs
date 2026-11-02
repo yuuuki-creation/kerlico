@@ -1,7 +1,7 @@
-use kerlico_config::{NodeFactory, OutboundFactory};
+mod support;
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel,
-    Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
+    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel, Destination,
+    InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use kerlico_vmess::{VmessFactory, VmessNodeFactory};
 use serde_json::{Value, json};
@@ -18,12 +18,19 @@ impl NodeObserver for Events {
     fn record(&self, _: NodeEvent) {}
 }
 struct Access(Arc<dyn Outbound>);
-impl AccessService for Access {
+impl Outbound for Access {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn connect_tcp<'a>(
         &'a self,
         t: &'a Destination,
         c: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         self.0.connect_tcp(t, c)
     }
     fn connect_udp<'a>(
@@ -36,6 +43,11 @@ impl AccessService for Access {
 }
 fn context(cancel: CancellationToken) -> InboundContext {
     InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         peer_addr: None,
         local_addr: None,
         cancel,
@@ -72,20 +84,22 @@ async fn fixture(cipher: &str, transport: Value, tls: bool, host: &str, flags: u
     } else {
         json!({"type":"none"})
     };
-    let node = VmessNodeFactory
-        .build(&json!({"uuid":ID,"security":server_security,"transport":transport}))
-        .unwrap();
+    let node = support::node(
+        &VmessNodeFactory,
+        &json!({"uuid":ID,"security":server_security,"transport":transport}),
+    )
+    .unwrap();
     let listener = TcpListener::bind((host, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let cancel = CancellationToken::new();
     let scope = cancel.clone();
     let access = Arc::new(Access(
-        kerlico_net::DirectFactory.build(&json!({})).unwrap(),
+        support::outbound(&kerlico_net::DirectFactory, &json!({})).unwrap(),
     ));
     let task = tokio::spawn(async move {
         let mut tasks = JoinSet::new();
         loop {
-            tokio::select! {_=scope.cancelled()=>break,result=listener.accept()=>{let(stream,peer)=result.unwrap();let node=node.clone();let access=access.clone();let mut context=context(scope.clone());context.peer_addr=Some(peer);context.local_addr=Some(stream.local_addr().unwrap());tasks.spawn(async move{let _=node.handle(Box::new(stream),access,context).await;});},_=tasks.join_next(),if !tasks.is_empty()=>{}}
+            tokio::select! {_=scope.cancelled()=>break,result=listener.accept()=>{let(stream,peer)=result.unwrap();let node=node.clone();let access=access.clone();let mut context=context(scope.clone());context.peer_addr=Some(peer);context.local_addr=Some(stream.local_addr().unwrap());tasks.spawn(async move{let _=node.handle_local(Box::new(stream),access,context).await;});},_=tasks.join_next(),if !tasks.is_empty()=>{}}
         }
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
@@ -96,7 +110,7 @@ async fn fixture(cipher: &str, transport: Value, tls: bool, host: &str, flags: u
         json!({"type":"none"})
     };
     let options = json!({"server":{"host":host,"port":port},"uuid":ID,"security":cipher,"tls":client_security,"transport":transport,"chunk_masking":flags&4!=0,"global_padding":flags&8!=0,"authenticated_length":flags&16!=0});
-    let outbound = VmessFactory.build(&options).unwrap();
+    let outbound = support::outbound(&VmessFactory, &options).unwrap();
     Fixture {
         outbound,
         options,
@@ -132,7 +146,8 @@ async fn verify_tcp(f: &Fixture, target: &Destination) {
         .outbound
         .connect_tcp(target, &ConnectContext::new(Duration::from_secs(3)))
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     let data = vec![42; 27000];
     stream.write_all(&data).await.unwrap();
     stream.flush().await.unwrap();
@@ -235,7 +250,8 @@ async fn half_close_preserves_reverse_response() {
         .outbound
         .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(3)))
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     stream.write_all(b"request").await.unwrap();
     stream.shutdown().await.unwrap();
     let mut answer = Vec::new();
@@ -258,21 +274,19 @@ fn rejects_unknown_and_conflicting_configuration() {
     ] {
         let mut options = base.clone();
         options[key] = value;
-        assert!(VmessFactory.build(&options).is_err());
+        assert!(support::outbound(&VmessFactory, &options).is_err());
     }
     assert!(
-        VmessNodeFactory
-            .build(&json!({"users":[{"uuid":ID},{"uuid":ID}]}))
-            .is_err()
+        support::node(
+            &VmessNodeFactory,
+            &json!({"users":[{"uuid":ID},{"uuid":ID}]})
+        )
+        .is_err()
     );
-    assert!(
-        VmessNodeFactory
-            .build(&json!({"uuid":ID,"users":[{"uuid":ID}]}))
-            .is_err()
-    );
-    let node = VmessNodeFactory.build(&json!({"uuid":ID})).unwrap();
+    assert!(support::node(&VmessNodeFactory, &json!({"uuid":ID,"users":[{"uuid":ID}]})).is_err());
+    let node = support::node(&VmessNodeFactory, &json!({"uuid":ID})).unwrap();
     assert!(!node.requires_loopback());
-    assert_eq!(node.credential_fingerprints().len(), 1);
+    assert_eq!(node.manifest().len(), 1);
 }
 
 #[tokio::test]
@@ -281,7 +295,7 @@ async fn wrong_uuid_certificate_name_and_cancellation_fail() {
     let f = fixture("aes-128-gcm", json!({"type":"tcp"}), true, "127.0.0.1", 13).await;
     let mut wrong = f.options.clone();
     wrong["tls"]["server_name"] = json!("wrong.invalid");
-    let outbound = VmessFactory.build(&wrong).unwrap();
+    let outbound = support::outbound(&VmessFactory, &wrong).unwrap();
     assert!(
         outbound
             .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(2)))
@@ -290,11 +304,12 @@ async fn wrong_uuid_certificate_name_and_cancellation_fail() {
     );
     let mut wrong = f.options.clone();
     wrong["uuid"] = json!("00000000-0000-4000-8000-000000000002");
-    let outbound = VmessFactory.build(&wrong).unwrap();
+    let outbound = support::outbound(&VmessFactory, &wrong).unwrap();
     let mut stream = outbound
         .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(2)))
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     let _ = stream.write_all(b"must-not-pass").await;
     let _ = stream.flush().await;
     let mut bytes = [0; 13];
@@ -308,6 +323,11 @@ async fn wrong_uuid_certificate_name_and_cancellation_fail() {
     ));
     let mut options = f.options.clone();
     options["no_termination_signal"] = json!(true);
-    assert!(!VmessFactory.build(&options).unwrap().capabilities().tcp_eof);
+    assert!(
+        !support::outbound(&VmessFactory, &options)
+            .unwrap()
+            .capabilities()
+            .tcp_eof
+    );
     task.abort();
 }

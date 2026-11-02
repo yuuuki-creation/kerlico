@@ -23,6 +23,8 @@ def key(length=16):
 
 
 def save(path, value):
+    from interop_vless import configuration_v2
+    value = configuration_v2(value)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2))
     os.chmod(path, 0o600)
     return path

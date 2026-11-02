@@ -54,7 +54,6 @@ pub struct OutOptions {
 pub struct NodeOptions {
     #[serde(default)]
     pub version: Version,
-    pub auth: Option<Auth>,
     #[serde(default)]
     pub userid: String,
 }

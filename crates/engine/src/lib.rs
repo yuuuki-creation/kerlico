@@ -2,22 +2,24 @@
 
 use kerlico_config::{ForwardKind, ForwardSpec, Limits, PreparedConfig, PreparedNode};
 use kerlico_core::{
-    BoxStream, CancellationToken, ConnectContext, Destination, Error, InboundContext, Outbound,
-    Result,
+    BoxStream, CancellationToken, ConnectContext, DatagramReceiver, DatagramSender, Destination,
+    Error, FlowFailure, FlowOutcome, InboundContext, IngressBinding, NodeId, NodeTasks,
+    PeerSession, Result, ShutdownReport,
 };
 use std::{
     collections::{BTreeMap, HashMap, hash_map::Entry},
     net::SocketAddr,
     sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream, UdpSocket},
     sync::{Semaphore, mpsc, watch},
     task::JoinSet,
-    time::{Instant, timeout},
+    time::Instant,
 };
 
 /// 运行期累计事件计数，供调用方观测；不是活跃连接数或业务成功数。
@@ -34,12 +36,14 @@ pub struct Stats {
     pub failed: AtomicU64,
     /// 因队列、配额等边界丢弃的事件数，可按数据报计数。
     pub dropped: AtomicU64,
+    /// 已确认完成的强制回收事件，不计作业务失败或包丢弃。
+    pub forced_cleanup: AtomicU64,
 }
 
 struct Inbound {
     spec: ForwardSpec,
     target: Destination,
-    outbound: Arc<dyn Outbound>,
+    ingress: IngressBinding,
     socket: Socket,
 }
 
@@ -50,6 +54,7 @@ enum Socket {
 
 struct BoundNode {
     spec: PreparedNode,
+    ingress: IngressBinding,
     tcp: Option<TcpListener>,
     udp: Option<Arc<UdpSocket>>,
 }
@@ -59,19 +64,26 @@ struct NodeResources {
     slots: Arc<Semaphore>,
     stats: Arc<Stats>,
     local_stats: Arc<Stats>,
+    cleanup: NodeCleanup,
 }
 struct Observer {
     global: Arc<Stats>,
     local: Arc<Stats>,
+    forced: Arc<AtomicBool>,
 }
 impl kerlico_core::NodeObserver for Observer {
     fn record(&self, event: kerlico_core::NodeEvent) {
+        if matches!(event, kerlico_core::NodeEvent::ForcedCleanup) {
+            self.forced.store(true, Ordering::Release);
+            return;
+        }
         for stats in [&self.global, &self.local] {
             let counter = match event {
                 kerlico_core::NodeEvent::Accepted => &stats.accepted,
                 kerlico_core::NodeEvent::Completed => &stats.completed,
                 kerlico_core::NodeEvent::Failed => &stats.failed,
                 kerlico_core::NodeEvent::Dropped => &stats.dropped,
+                kerlico_core::NodeEvent::ForcedCleanup => &stats.forced_cleanup,
             };
             counter.fetch_add(1, Ordering::Relaxed);
         }
@@ -84,6 +96,8 @@ fn node_context(
     resources: &NodeResources,
 ) -> InboundContext {
     InboundContext {
+        peer_lease: None,
+        tasks: resources.cleanup.tasks.clone(),
         peer_addr: None,
         local_addr: None,
         cancel,
@@ -99,7 +113,56 @@ fn node_context(
         events: Arc::new(Observer {
             global: resources.stats.clone(),
             local: resources.local_stats.clone(),
+            forced: resources.cleanup.forced.clone(),
         }),
+    }
+}
+
+#[derive(Clone)]
+struct NodeCleanup {
+    tasks: NodeTasks,
+    ingress: IngressBinding,
+    deadline: Arc<Mutex<Option<Instant>>>,
+    forced: Arc<AtomicBool>,
+    global: Arc<Stats>,
+    local: Option<Arc<Stats>>,
+}
+impl NodeCleanup {
+    fn new(
+        id: NodeId,
+        ingress: IngressBinding,
+        global: Arc<Stats>,
+        local: Option<Arc<Stats>>,
+    ) -> Self {
+        Self {
+            tasks: NodeTasks::new(id, ingress.node_cancel()),
+            ingress,
+            deadline: Arc::new(Mutex::new(None)),
+            forced: Arc::new(AtomicBool::new(false)),
+            global,
+            local,
+        }
+    }
+    fn start(&self, proposed: Instant) -> Instant {
+        self.ingress.stop_admission();
+        *self
+            .deadline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_or_insert(proposed)
+    }
+    async fn finish(&self, proposed: Instant, handler_joined: bool) -> ShutdownReport {
+        let report = self.tasks.shutdown_at(self.start(proposed)).await;
+        if handler_joined
+            && report.is_clean()
+            && (report.forced_tasks > 0 || self.forced.load(Ordering::Acquire))
+        {
+            self.global.forced_cleanup.fetch_add(1, Ordering::Relaxed);
+            if let Some(local) = &self.local {
+                local.forced_cleanup.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        report
     }
 }
 fn node_socket(address: SocketAddr, udp: bool) -> Result<socket2::Socket> {
@@ -131,6 +194,7 @@ fn node_socket(address: SocketAddr, udp: bool) -> Result<socket2::Socket> {
 
 /// 已持有监听器的运行实例；通过统一出口调度固定入口和独立协议节点。
 pub struct Engine {
+    egress: kerlico_egress::EgressRuntime,
     inbounds: Vec<Inbound>,
     nodes: Vec<BoundNode>,
     node_stats: BTreeMap<String, Arc<Stats>>,
@@ -144,65 +208,94 @@ impl Engine {
     /// 任一绑定失败会释放此前取得的监听资源；没有入口时返回配置错误。
     /// 节点 IPv6 监听显式仅接收 IPv6，节点身份及带身份的资源分别管理。
     pub async fn bind(config: PreparedConfig) -> Result<Self> {
+        let config = config.into_parts();
         if config.inbounds.is_empty() && config.nodes.is_empty() {
             return Err(Error::Config("没有配置入站".into()));
         }
-        let mut inbounds = Vec::new();
-        for spec in config.inbounds {
-            let target = spec.target.destination()?;
-            let raw_outbound = config
-                .outbounds
-                .get(&spec.outbound)
-                .ok_or_else(|| Error::Config("出站引用不存在".into()))?
-                .clone();
-            let outbound: Arc<dyn Outbound> = Arc::new(kerlico_egress::Egress::new(raw_outbound));
-            let socket = match spec.kind {
-                ForwardKind::Tcp => Socket::Tcp(TcpListener::bind(spec.listen).await?),
-                ForwardKind::Udp => Socket::Udp(Arc::new(UdpSocket::bind(spec.listen).await?)),
-            };
-            inbounds.push(Inbound {
-                spec,
-                target,
-                outbound,
-                socket,
-            });
+        let limits = config.limits;
+        let egress = kerlico_egress::EgressRuntime::start(
+            config.egress,
+            kerlico_egress::native_device(),
+            limits.connect_timeout(),
+        )
+        .await?;
+        let bound = async {
+            let mut inbounds = Vec::new();
+            for spec in config.inbounds {
+                let target = spec.target.destination()?;
+                let ingress = egress.ingress(&NodeId::parse(&spec.tag)?)?;
+                let socket = match spec.kind {
+                    ForwardKind::Tcp => Socket::Tcp(TcpListener::bind(spec.listen).await?),
+                    ForwardKind::Udp => Socket::Udp(Arc::new(UdpSocket::bind(spec.listen).await?)),
+                };
+                inbounds.push(Inbound {
+                    spec,
+                    target,
+                    ingress,
+                    socket,
+                });
+            }
+            let mut nodes = Vec::new();
+            let mut node_stats = BTreeMap::new();
+            for mut node in config.nodes {
+                let ingress = egress.ingress(&NodeId::parse(&node.tag)?)?;
+                let tcp = if node.protocol.supports_tcp() {
+                    let socket = node_socket(node.listen, false)?;
+                    socket.listen(1024)?;
+                    let listener = TcpListener::from_std(socket.into())?;
+                    node.listen = listener.local_addr()?;
+                    Some(listener)
+                } else {
+                    None
+                };
+                let udp = if node.protocol.supports_udp() {
+                    let socket =
+                        Arc::new(UdpSocket::from_std(node_socket(node.listen, true)?.into())?);
+                    if tcp.is_none() {
+                        node.listen = socket.local_addr()?;
+                    }
+                    Some(socket)
+                } else {
+                    None
+                };
+                node_stats.insert(node.tag.clone(), Arc::new(Stats::default()));
+                nodes.push(BoundNode {
+                    spec: node,
+                    ingress,
+                    tcp,
+                    udp,
+                });
+            }
+            Ok::<_, Error>((inbounds, nodes, node_stats))
         }
-        let mut nodes = Vec::new();
-        let mut node_stats = BTreeMap::new();
-        for mut node in config.nodes {
-            let tcp = if node.protocol.supports_tcp() {
-                let socket = node_socket(node.listen, false)?;
-                socket.listen(1024)?;
-                let listener = TcpListener::from_std(socket.into())?;
-                node.listen = listener.local_addr()?;
-                Some(listener)
-            } else {
-                None
-            };
-            let udp = if node.protocol.supports_udp() {
-                let socket = node_socket(node.listen, true)?;
-                let socket = Arc::new(UdpSocket::from_std(socket.into())?);
-                if tcp.is_none() {
-                    node.listen = socket.local_addr()?;
-                }
-                Some(socket)
-            } else {
-                None
-            };
-            node_stats.insert(node.tag.clone(), Arc::new(Stats::default()));
-            nodes.push(BoundNode {
-                spec: node,
-                tcp,
-                udp,
-            });
+        .await;
+        match bound {
+            Ok((inbounds, nodes, node_stats)) => Ok(Self {
+                egress,
+                inbounds,
+                nodes,
+                node_stats,
+                limits,
+                stats: Arc::new(Stats::default()),
+            }),
+            Err(primary) => {
+                let cleanup = egress.shutdown(limits.drain_timeout()).await;
+                Err(Error::Startup {
+                    primary: Box::new(primary),
+                    cleanup_timed_out: cleanup.timed_out,
+                    cleanup_failures: cleanup.failed_tasks,
+                })
+            }
         }
-        Ok(Self {
-            inbounds,
-            nodes,
-            node_stats,
-            limits: config.limits,
-            stats: Arc::new(Stats::default()),
-        })
+    }
+
+    pub fn telemetry(&self) -> kerlico_egress::Telemetry {
+        self.egress.telemetry()
+    }
+
+    /// 在消费本实例前取得命名服务回收收据；关闭超时后仍可等待真实任务全部释放。
+    pub fn service_retirements(&self) -> Vec<(kerlico_core::OutId, kerlico_core::ServiceRetirement)> {
+        self.egress.service_retirements()
     }
 
     /// 返回入口标签与实际绑定地址，包括端口 `0` 分配后的结果。
@@ -240,49 +333,70 @@ impl Engine {
         self.node_stats.clone()
     }
 
-    /// 消费本实例并运行入口，直到取消或入口调度失败；调用方应等待返回以完成回收。
+    /// 消费本实例并运行入口，直到取消或全部入口退出；调用方应等待返回以完成回收。
     ///
     /// 取消后停止新接入，给予已有任务有限排空时间，再取消并回收。
     /// 单个业务会话失败通常计入统计，不意味着此方法一定返回错误；成功返回也不代表全部业务成功。
+    /// 单入口故障与其他入口隔离，保留首个错误并在整个运行退出时返回。
+    /// 累计失败计数和业务流记录不能用于判断某个入口或出站服务的当前健康状态。
     pub async fn run(self, cancel: CancellationToken) -> Result<()> {
         let scope = cancel.child_token();
         let _guard = scope.clone().drop_guard();
         let semaphore = Arc::new(Semaphore::new(self.limits.max_sessions));
         let mut workers = JoinSet::new();
+        let mut owners = HashMap::new();
+        let mut cleaners = JoinSet::new();
+        let mut cleaning_owners: HashMap<tokio::task::Id, NodeCleanup> = HashMap::new();
         for bound in self.nodes {
+            let local_stats = self
+                .node_stats
+                .get(&bound.spec.tag)
+                .expect("节点统计已构造")
+                .clone();
+            let cleanup = NodeCleanup::new(
+                NodeId::parse(&bound.spec.tag)?,
+                bound.ingress.clone(),
+                self.stats.clone(),
+                Some(local_stats.clone()),
+            );
             let resources = NodeResources {
                 global: semaphore.clone(),
                 slots: Arc::new(Semaphore::new(bound.spec.max_sessions)),
                 stats: self.stats.clone(),
-                local_stats: self
-                    .node_stats
-                    .get(&bound.spec.tag)
-                    .expect("节点统计已构造")
-                    .clone(),
+                local_stats,
+                cleanup: cleanup.clone(),
             };
-            workers.spawn(serve_bound_node(
+            let worker = workers.spawn(serve_bound_node(
                 bound,
                 self.limits.clone(),
                 scope.clone(),
                 resources,
             ));
+            owners.insert(worker.id(), cleanup);
         }
         for inbound in self.inbounds {
             let limits = self.limits.clone();
             let token = scope.clone();
             let slots = semaphore.clone();
             let stats = self.stats.clone();
-            workers.spawn(async move {
+            let cleanup = NodeCleanup::new(
+                NodeId::parse(&inbound.spec.tag)?,
+                inbound.ingress.clone(),
+                stats.clone(),
+                None,
+            );
+            let owned = cleanup.clone();
+            let worker = workers.spawn(async move {
                 match inbound.socket {
                     Socket::Tcp(listener) => {
                         serve_tcp(
                             listener,
                             inbound.target,
-                            inbound.outbound,
+                            inbound.ingress,
                             limits,
                             token,
                             slots,
-                            stats,
+                            owned,
                         )
                         .await
                     }
@@ -290,30 +404,105 @@ impl Engine {
                         serve_udp(
                             socket,
                             inbound.target,
-                            inbound.outbound,
+                            inbound.ingress,
                             limits,
                             token,
                             slots,
-                            stats,
+                            owned,
                         )
                         .await
                     }
                 }
             });
+            owners.insert(worker.id(), cleanup);
         }
         let mut failure = None;
-        while let Some(result) = workers.join_next().await {
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    failure.get_or_insert(error);
-                    scope.cancel();
-                }
-                Err(_) => {
-                    failure.get_or_insert(Error::Protocol("入口任务异常退出"));
-                    scope.cancel();
-                }
+        let mut closing = None;
+        let mut force_at = None;
+        let mut forced = false;
+        let mut cleanup = ShutdownReport::default();
+        while !workers.is_empty() || !cleaners.is_empty() {
+            tokio::select! {
+                biased;
+                _=scope.cancelled(), if closing.is_none()=>{
+                    let now = Instant::now();
+                    let deadline = now + self.limits.drain_timeout();
+                    closing = Some(deadline);
+                    force_at = Some(now + self.limits.drain_timeout().mul_f32(0.6));
+                    for owner in owners.values() { owner.start(deadline); }
+                    for owner in cleaning_owners.values() { owner.start(deadline); }
+                },
+                _=tokio::time::sleep_until(force_at.unwrap_or_else(Instant::now)), if closing.is_some() && !forced=>{
+                    forced = true;
+                    for owner in owners.values() {
+                        owner.forced.store(true, Ordering::Release);
+                        owner.tasks.cancel().cancel();
+                    }
+                    workers.abort_all();
+                },
+                _=tokio::time::sleep_until(closing.unwrap_or_else(Instant::now)), if closing.is_some()=>{
+                    cleanup.timed_out = true;
+                    workers.abort_all();
+                    cleaners.abort_all();
+                    break;
+                },
+                result=cleaners.join_next_with_id(), if !cleaners.is_empty()=>{
+                    match result {
+                        Some(Ok((id, report))) => { cleaning_owners.remove(&id); cleanup.merge(&report); },
+                        Some(Err(error)) => {
+                            cleanup.failed_tasks += 1;
+                            if let Some(owner) = cleaning_owners.remove(&error.id()) { owners.insert(error.id(), owner); }
+                        },
+                        None => {},
+                    }
+                },
+                result=workers.join_next_with_id(), if !workers.is_empty()=>{
+                    let (id, stop_node) = match result {
+                        Some(Ok((id, result))) => {
+                            let stopped = result.is_err();
+                            if let Err(error) = result {
+                                let expected_cancel = matches!(error, Error::Cancelled)
+                                    && (closing.is_some() || owners.get(&id).is_some_and(|owner| owner.tasks.cancel().is_cancelled()));
+                                if !expected_cancel {
+                                    failure.get_or_insert(error);
+                                    self.stats.failed.fetch_add(1,Ordering::Relaxed);
+                                }
+                            }
+                            (id, stopped)
+                        }
+                        Some(Err(error)) => {
+                            if !error.is_cancelled() || !forced {
+                                failure.get_or_insert(Error::Protocol("入口任务异常退出"));
+                                self.stats.failed.fetch_add(1,Ordering::Relaxed);
+                            }
+                            (error.id(), true)
+                        }
+                        None => break,
+                    };
+                    if let Some(owner) = owners.remove(&id) {
+                        if stop_node { owner.tasks.cancel().cancel(); }
+                        let deadline = closing.unwrap_or_else(|| Instant::now() + self.limits.drain_timeout());
+                        let copied = owner.clone();
+                        let cleaner = cleaners.spawn(async move { copied.finish(deadline, true).await });
+                        cleaning_owners.insert(cleaner.id(), owner);
+                    }
+                },
             }
+        }
+        let deadline = closing.unwrap_or_else(|| Instant::now() + self.limits.drain_timeout());
+        for owner in owners.values() {
+            cleanup.merge(&owner.finish(deadline, false).await);
+        }
+        for owner in cleaning_owners.values() {
+            cleanup.merge(&owner.finish(deadline, false).await);
+        }
+        cleanup.merge(&self.egress.shutdown_at(deadline).await);
+        if !cleanup.is_clean() {
+            return Err(Error::Shutdown {
+                primary: failure.map(Box::new),
+                cleanup_timed_out: cleanup.timed_out,
+                cleanup_failures: cleanup.failed_tasks,
+            });
         }
         failure.map_or(Ok(()), Err)
     }
@@ -325,45 +514,80 @@ async fn serve_bound_node(
     stop: CancellationToken,
     resources: NodeResources,
 ) -> Result<()> {
-    // 同一节点的 TCP/UDP/虚拟入口共用生命周期，单个入口结束不能取消另一入口的业务。
-    let force = CancellationToken::new();
-    let _guard = force.clone().drop_guard();
+    let force = bound.ingress.node_cancel();
     let mut handlers = JoinSet::new();
     let node = bound.spec;
+    let ingress = bound.ingress;
+    let cleanup = resources.cleanup.clone();
     if let Some(listener) = bound.tcp {
-        handlers.spawn(serve_node(
+        let handler = cleanup.tasks.spawn_tracked(serve_node(
             node.clone(),
+            ingress.clone(),
             listener,
             limits.clone(),
             stop.clone(),
             resources.clone(),
             force.clone(),
-        ));
+        ))?;
+        handlers.spawn(async move { handler.await? });
     }
     if bound.udp.is_some() || node.protocol.supports_virtual() {
-        let force = force.clone();
-        handlers.spawn(async move {
-            let context=node_context(&limits,&node,force.clone(),&resources);let access:Arc<dyn kerlico_core::AccessService>=Arc::new(kerlico_egress::Egress::new(node.outbound.clone()));
-            let running=async {if let Some(socket)=bound.udp {node.protocol.handle_udp(socket,access,context).await}else{node.protocol.handle_virtual(access,context).await}};tokio::pin!(running);
-            tokio::select! {result=&mut running=>result,_=stop.cancelled()=>{resources.slots.close();if timeout(limits.drain_timeout(),&mut running).await.is_err(){force.cancel();}Ok(())}}
-        });
+        let context = node_context(&limits, &node, force.clone(), &resources);
+        let handler = cleanup.tasks.spawn_tracked(async move {
+            if let Some(socket) = bound.udp {
+                node.protocol.handle_udp(socket, ingress, context).await
+            } else {
+                node.protocol.handle_virtual(ingress, context).await
+            }
+        })?;
+        handlers.spawn(async move { handler.await? });
     }
-    while let Some(result) = handlers.join_next().await {
-        let error = match result {
-            Ok(Ok(())) => continue,
-            Ok(Err(error)) => error,
-            Err(_) => Error::Protocol("节点入口任务异常退出"),
-        };
-        force.cancel();
-        handlers.abort_all();
-        while handlers.join_next().await.is_some() {}
-        return Err(error);
+    let mut failure = None;
+    loop {
+        tokio::select! {
+            biased;
+            _=stop.cancelled()=>break,
+            _=force.cancelled()=>break,
+            result=handlers.join_next()=>match result {
+                Some(Ok(Ok(())))=>{},
+                Some(Ok(Err(Error::Cancelled))) if force.is_cancelled()=>{},
+                Some(Ok(Err(error)))=>{ failure=Some(error); force.cancel(); break; },
+                Some(Err(_))=>{ failure=Some(Error::Protocol("节点入口任务异常退出")); force.cancel(); break; },
+                None=>break,
+            }
+        }
     }
-    Ok(())
+    resources.slots.close();
+    let deadline = cleanup.start(Instant::now() + limits.drain_timeout());
+    let graceful = Instant::now() + deadline.saturating_duration_since(Instant::now()) / 2;
+    let mut forced = false;
+    loop {
+        let until = if forced { deadline } else { graceful };
+        match tokio::time::timeout_at(until, handlers.join_next()).await {
+            Ok(Some(Ok(Ok(())))) => {}
+            Ok(Some(Ok(Err(Error::Cancelled)))) if force.is_cancelled() => {}
+            Ok(Some(Ok(Err(error)))) => {
+                failure.get_or_insert(error);
+            }
+            Ok(Some(Err(error))) if error.is_cancelled() && forced => {}
+            Ok(Some(Err(_))) => {
+                failure.get_or_insert(Error::Protocol("节点入口回收失败"));
+            }
+            Ok(None) => break,
+            Err(_) if !forced => {
+                forced = true;
+                cleanup.forced.store(true, Ordering::Release);
+                force.cancel();
+                handlers.abort_all();
+            }
+            Err(_) => return Err(shutdown_error(failure, Error::Timeout)),
+        }
+    }
+    failure.map_or(Ok(()), Err)
 }
-
 async fn serve_node(
     node: PreparedNode,
+    access: IngressBinding,
     listener: TcpListener,
     limits: Limits,
     stop: CancellationToken,
@@ -376,30 +600,33 @@ async fn serve_node(
         slots,
         stats,
         local_stats,
+        cleanup,
     } = resources;
-    let access: Arc<dyn kerlico_core::AccessService> =
-        Arc::new(kerlico_egress::Egress::new(node.outbound.clone()));
     let mut sessions = JoinSet::new();
     let mut failure = None;
     loop {
         tokio::select! {
             biased;
             _=stop.cancelled()=>break,
+            _=force.cancelled()=>break,
             result=sessions.join_next(),if !sessions.is_empty()=>{if result.is_some_and(|r|r.is_err()){stats.failed.fetch_add(1,Ordering::Relaxed);local_stats.failed.fetch_add(1,Ordering::Relaxed);}},
             accepted=listener.accept()=>{
                 let (stream,peer_addr)=match accepted {Ok(v)=>v,Err(error)=>{failure=Some(Error::Io(error));break;}};
-                let (Ok(global_permit),Ok(node_permit))=(global.clone().try_acquire_owned(),slots.clone().try_acquire_owned()) else {stats.dropped.fetch_add(1,Ordering::Relaxed);local_stats.dropped.fetch_add(1,Ordering::Relaxed);continue;};
+                let Ok(budget)=kerlico_core::StreamBudget::new(global.clone(),slots.clone()).try_acquire() else {stats.dropped.fetch_add(1,Ordering::Relaxed);local_stats.dropped.fetch_add(1,Ordering::Relaxed);continue;};
                 let _=stream.set_nodelay(true);
                 let protocol=node.protocol.clone();let access=access.clone();let token=force.child_token();let stats=stats.clone();let local_stats=local_stats.clone();
                 let mut context=node_context(&limits,&node,token.clone(),&shared);
                 context.peer_addr=Some(peer_addr);context.local_addr=stream.local_addr().ok();
+                let lease = kerlico_core::PeerLease::new(token.clone(), budget);
+                context.peer_lease = Some(lease.clone());
+                let stream = PeerIo::new(stream, lease.clone(), token.clone());
                 stats.accepted.fetch_add(1,Ordering::Relaxed);
                 local_stats.accepted.fetch_add(1,Ordering::Relaxed);
-                sessions.spawn(async move {
-                    let _global=global_permit;let _node=node_permit;
+                spawn_session(&cleanup.tasks, &mut sessions, async move {
+                    let _peer_lease=lease;
                     let result=tokio::select! {_=token.cancelled()=>Err(Error::Cancelled),r=protocol.handle(Box::new(stream),access,context)=>r};
                     if result.is_ok(){stats.completed.fetch_add(1,Ordering::Relaxed);local_stats.completed.fetch_add(1,Ordering::Relaxed);}else{stats.failed.fetch_add(1,Ordering::Relaxed);local_stats.failed.fetch_add(1,Ordering::Relaxed);}
-                });
+                })?;
             }
         }
     }
@@ -408,37 +635,82 @@ async fn serve_node(
     if failure.is_some() {
         force.cancel();
     }
-    drain(&mut sessions, &force, &limits).await;
+    match drain(
+        &mut sessions,
+        &force,
+        cleanup.start(Instant::now() + limits.drain_timeout()),
+    )
+    .await
+    {
+        Ok(true) => {
+            cleanup.forced.store(true, Ordering::Release);
+        }
+        Ok(false) => {}
+        Err(cleanup) => return Err(shutdown_error(failure, cleanup)),
+    }
     failure.map_or(Ok(()), Err)
+}
+
+fn shutdown_error(primary: Option<Error>, cleanup: Error) -> Error {
+    let timed_out = matches!(&cleanup, Error::Timeout);
+    Error::Shutdown {
+        primary: Some(Box::new(primary.unwrap_or(cleanup))),
+        cleanup_timed_out: timed_out,
+        cleanup_failures: usize::from(!timed_out),
+    }
+}
+
+fn spawn_session(
+    owner: &NodeTasks,
+    sessions: &mut JoinSet<()>,
+    future: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<tokio::task::AbortHandle> {
+    let task = owner.spawn_tracked(future)?;
+    Ok(sessions.spawn(async move {
+        let _ = task.await;
+    }))
 }
 
 async fn drain<T: Send + 'static>(
     tasks: &mut JoinSet<T>,
     force: &CancellationToken,
-    limits: &Limits,
-) {
-    if timeout(limits.drain_timeout(), async {
-        while tasks.join_next().await.is_some() {}
-    })
-    .await
-    .is_err()
-    {
-        force.cancel();
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
+    deadline: Instant,
+) -> Result<bool> {
+    let start = Instant::now();
+    let graceful = start + deadline.saturating_duration_since(start) / 2;
+    loop {
+        match tokio::time::timeout_at(graceful, tasks.join_next()).await {
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(error))) if error.is_cancelled() => {}
+            Ok(Some(Err(_))) => return Err(Error::Protocol("会话回收时任务异常退出")),
+            Ok(None) => return Ok(false),
+            Err(_) => break,
+        }
+    }
+    force.cancel();
+    tasks.abort_all();
+    loop {
+        match tokio::time::timeout_at(deadline, tasks.join_next()).await {
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(error))) if error.is_cancelled() => {}
+            Ok(Some(Err(_))) => return Err(Error::Protocol("强制回收时任务异常退出")),
+            Ok(None) => return Ok(true),
+            Err(_) => return Err(Error::Timeout),
+        }
     }
 }
 
 async fn serve_tcp(
     listener: TcpListener,
     target: Destination,
-    outbound: Arc<dyn Outbound>,
+    ingress: IngressBinding,
     limits: Limits,
     stop: CancellationToken,
     slots: Arc<Semaphore>,
-    stats: Arc<Stats>,
+    cleanup: NodeCleanup,
 ) -> Result<()> {
-    let force = CancellationToken::new();
+    let stats = cleanup.global.clone();
+    let force = ingress.node_cancel();
     let _guard = force.clone().drop_guard();
     let mut sessions = JoinSet::new();
     let mut failure = None;
@@ -446,17 +718,25 @@ async fn serve_tcp(
         tokio::select! {
             biased;
             _=stop.cancelled()=>break,
+            _=force.cancelled()=>break,
             result=sessions.join_next(),if !sessions.is_empty()=>{ if result.is_some_and(|result|result.is_err()) { stats.failed.fetch_add(1,Ordering::Relaxed); } },
             accepted=listener.accept()=>{
-                let (stream,_)=match accepted { Ok(value)=>value, Err(error)=>{failure=Some(Error::Io(error));break;} };
+                let (stream,peer)=match accepted { Ok(value)=>value, Err(error)=>{failure=Some(Error::Io(error));break;} };
                 let permit=match slots.clone().try_acquire_owned() { Ok(value)=>value,Err(_)=>{stats.dropped.fetch_add(1,Ordering::Relaxed);continue;} };
-                let target=target.clone();let outbound=outbound.clone();let limits=limits.clone();let token=force.child_token();let stats=stats.clone();
+                let target=target.clone();let ingress=ingress.clone();let limits=limits.clone();let token=force.child_token();let stats=stats.clone();
                 stats.accepted.fetch_add(1,Ordering::Relaxed);
-                sessions.spawn(async move {
+                let task_owner = cleanup.tasks.clone();
+                spawn_session(&cleanup.tasks, &mut sessions, async move {
                     let _permit=permit;
-                    let result=tcp_session(stream,&target,outbound.as_ref(),&limits,token).await;
+                    let _session_cancel=token.clone().drop_guard();
+                    let mut context = forward_context(&limits,token.clone(), task_owner);
+                    context.peer_addr=Some(peer);context.local_addr=stream.local_addr().ok();
+                    let result=match ingress.local(&context) {
+                        Ok(outbound)=>tcp_session(stream,&target,&outbound,&limits,token).await,
+                        Err(error)=>Err(error),
+                    };
                     if result.is_ok() { stats.completed.fetch_add(1,Ordering::Relaxed); } else { stats.failed.fetch_add(1,Ordering::Relaxed); }
-                });
+                })?;
             }
         }
     }
@@ -464,28 +744,37 @@ async fn serve_tcp(
     if failure.is_some() {
         force.cancel();
     }
-    drain(&mut sessions, &force, &limits).await;
+    match drain(
+        &mut sessions,
+        &force,
+        cleanup.start(Instant::now() + limits.drain_timeout()),
+    )
+    .await
+    {
+        Ok(true) => {
+            cleanup.forced.store(true, Ordering::Release);
+        }
+        Ok(false) => {}
+        Err(cleanup) => return Err(shutdown_error(failure, cleanup)),
+    }
     failure.map_or(Ok(()), Err)
 }
 
 async fn tcp_session(
     stream: TcpStream,
     target: &Destination,
-    outbound: &dyn Outbound,
+    outbound: &PeerSession,
     limits: &Limits,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let context = ConnectContext {
-        cancel: cancel.clone(),
-        timeout: limits.connect_timeout(),
-    };
+    let context = ConnectContext::new(limits.connect_timeout()).with_cancel(cancel.clone());
     let remote = outbound.connect_tcp(target, &context).await?;
     relay(Box::new(stream), remote, limits, cancel).await
 }
 
 async fn relay(
     a: BoxStream,
-    b: BoxStream,
+    b: kerlico_core::TcpFlow,
     limits: &Limits,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -495,13 +784,14 @@ async fn relay(
 async fn serve_udp(
     socket: Arc<UdpSocket>,
     target: Destination,
-    outbound: Arc<dyn Outbound>,
+    ingress: IngressBinding,
     limits: Limits,
     stop: CancellationToken,
     slots: Arc<Semaphore>,
-    stats: Arc<Stats>,
+    cleanup: NodeCleanup,
 ) -> Result<()> {
-    let force = CancellationToken::new();
+    let stats = cleanup.global.clone();
+    let force = ingress.node_cancel();
     let _guard = force.clone().drop_guard();
     let mut sessions = JoinSet::new();
     let mut senders: HashMap<SocketAddr, (u64, mpsc::Sender<Vec<u8>>)> = HashMap::new();
@@ -513,6 +803,7 @@ async fn serve_udp(
         tokio::select! {
             biased;
             _=stop.cancelled()=>break,
+            _=force.cancelled()=>break,
             result=sessions.join_next_with_id(),if !sessions.is_empty()=>{
                 let finished=match result {
                     Some(Ok((task,())))=>owners.remove(&task),
@@ -530,13 +821,20 @@ async fn serve_udp(
                     generation=match generation.checked_add(1) {Some(value)=>value,None=>{failure=Some(Error::ResourceLimit);break;}};let id=generation;
                     let (sender,receiver)=mpsc::channel(limits.udp_queue_packets);
                     entry.insert((id,sender));
-                    let socket=socket.clone();let target=target.clone();let outbound=outbound.clone();let limits=limits.clone();let token=force.child_token();let stats=stats.clone();
+                    let socket=socket.clone();let target=target.clone();let ingress=ingress.clone();let limits=limits.clone();let token=force.child_token();let stats=stats.clone();
                     stats.accepted.fetch_add(1,Ordering::Relaxed);
-                    let task=sessions.spawn(async move {
+                    let task_owner = cleanup.tasks.clone();
+                    let task=spawn_session(&cleanup.tasks, &mut sessions, async move {
                         let _permit=permit;
-                        let result=udp_session(socket,peer,&target,outbound.as_ref(),receiver,&limits,token).await;
+                        let _session_cancel=token.clone().drop_guard();
+                        let mut context=forward_context(&limits,token.clone(), task_owner);
+                        context.peer_addr=Some(peer);context.local_addr=socket.local_addr().ok();
+                        let result=match ingress.local(&context) {
+                            Ok(outbound)=>udp_session(socket,peer,&target,&outbound,receiver,&limits,token).await,
+                            Err(error)=>Err(error),
+                        };
                         if result.is_ok() {stats.completed.fetch_add(1,Ordering::Relaxed);} else {stats.failed.fetch_add(1,Ordering::Relaxed);}
-                    });
+                    })?;
                     owners.insert(task.id(),(peer,id));
                 }
                 if senders.get(&peer).expect("关联刚建立").1.try_send(buffer[..count].to_vec()).is_err() {stats.dropped.fetch_add(1,Ordering::Relaxed);}
@@ -547,7 +845,19 @@ async fn serve_udp(
     if failure.is_some() {
         force.cancel();
     }
-    drain(&mut sessions, &force, &limits).await;
+    match drain(
+        &mut sessions,
+        &force,
+        cleanup.start(Instant::now() + limits.drain_timeout()),
+    )
+    .await
+    {
+        Ok(true) => {
+            cleanup.forced.store(true, Ordering::Release);
+        }
+        Ok(false) => {}
+        Err(cleanup) => return Err(shutdown_error(failure, cleanup)),
+    }
     failure.map_or(Ok(()), Err)
 }
 
@@ -555,48 +865,338 @@ async fn udp_session(
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     target: &Destination,
-    outbound: &dyn Outbound,
+    outbound: &PeerSession,
     mut queue: mpsc::Receiver<Vec<u8>>,
     limits: &Limits,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let context = ConnectContext {
-        cancel: cancel.clone(),
-        timeout: limits.connect_timeout(),
-    };
+    let context = ConnectContext::new(limits.connect_timeout()).with_cancel(cancel.clone());
     let channel = outbound.connect_udp(target, &context).await?;
-    let mut sender = channel.sender;
-    let mut receiver = channel.receiver;
-    let (activity, mut observed) = watch::channel(Instant::now());
-    let outgoing = async {
-        while let Some(packet) = queue.recv().await {
-            sender.send(&packet).await?;
-            activity.send_replace(Instant::now());
-        }
-        // 入口关闭后仍等候已发送包的回写，由空闲或统一排空预算结束。
-        std::future::pending::<Result<()>>().await
-    };
-    let incoming = async {
-        while let Some(packet) = receiver.recv().await? {
-            if packet.len() > limits.max_datagram_size {
-                return Err(Error::ResourceLimit);
+    let (mut sender, mut receiver, completion) = channel.into_parts();
+    let result = {
+        let (activity, mut observed) = watch::channel(Instant::now());
+        let outgoing = async {
+            while let Some(packet) = queue.recv().await {
+                sender.send(&packet).await?;
+                activity.send_replace(Instant::now());
             }
-            socket.send_to(&packet, peer).await?;
-            activity.send_replace(Instant::now());
+            std::future::pending::<Result<()>>().await
+        };
+        let incoming = async {
+            while let Some(packet) = receiver.recv().await? {
+                if packet.len() > limits.max_datagram_size {
+                    return Err(Error::ResourceLimit);
+                }
+                let sent = socket.send_to(&packet, peer).await?;
+                if sent != packet.len() {
+                    return Err(Error::Protocol("入站UDP回写不完整"));
+                }
+                activity.send_replace(Instant::now());
+            }
+            Ok::<_, Error>(())
+        };
+        tokio::pin!(outgoing, incoming);
+        let timer = tokio::time::sleep(limits.idle_timeout());
+        tokio::pin!(timer);
+        loop {
+            tokio::select! {
+                biased;
+                _=cancel.cancelled()=>break Err(Error::Cancelled),
+                result=&mut outgoing=>break result,
+                result=&mut incoming=>break result,
+                changed=observed.changed()=>{if changed.is_ok(){timer.as_mut().reset(*observed.borrow_and_update()+limits.idle_timeout());}},
+                _=&mut timer=>break Err(Error::Timeout),
+            }
         }
-        Ok::<_, Error>(())
     };
-    tokio::pin!(outgoing, incoming);
-    let timer = tokio::time::sleep(limits.idle_timeout());
-    tokio::pin!(timer);
-    loop {
-        tokio::select! {
-            biased;
-            _=cancel.cancelled()=>return Err(Error::Cancelled),
-            result=&mut outgoing=>return result,
-            result=&mut incoming=>return result,
-            changed=observed.changed()=>{if changed.is_ok(){timer.as_mut().reset(*observed.borrow_and_update()+limits.idle_timeout());}},
-            _=&mut timer=>return Err(Error::Timeout),
+    completion.finish(match &result {
+        Ok(()) => FlowOutcome::ProtocolEnd,
+        Err(error) => FlowOutcome::Failed(FlowFailure::from_error(error)),
+    });
+    result
+}
+
+struct ForwardObserver;
+impl kerlico_core::NodeObserver for ForwardObserver {
+    fn record(&self, _event: kerlico_core::NodeEvent) {}
+}
+fn forward_context(limits: &Limits, cancel: CancellationToken, tasks: NodeTasks) -> InboundContext {
+    InboundContext {
+        peer_lease: None,
+        tasks,
+        peer_addr: None,
+        local_addr: None,
+        cancel,
+        connect_timeout: limits.connect_timeout(),
+        idle_timeout: limits.idle_timeout(),
+        drain_timeout: limits.drain_timeout(),
+        max_datagram_size: limits.max_datagram_size,
+        max_streams: 1,
+        stream_budget: kerlico_core::StreamBudget::new(
+            Arc::new(Semaphore::new(1)),
+            Arc::new(Semaphore::new(1)),
+        ),
+        events: Arc::new(ForwardObserver),
+    }
+}
+
+struct PeerIo {
+    stream: TcpStream,
+    _lease: kerlico_core::PeerLease,
+    read_cancel: Option<kerlico_core::BoxFuture<'static, ()>>,
+    write_cancel: Option<kerlico_core::BoxFuture<'static, ()>>,
+}
+impl PeerIo {
+    fn new(stream: TcpStream, lease: kerlico_core::PeerLease, cancel: CancellationToken) -> Self {
+        let read_cancel = cancel.clone();
+        Self {
+            stream,
+            _lease: lease,
+            read_cancel: Some(Box::pin(async move { read_cancel.cancelled().await })),
+            write_cancel: Some(Box::pin(async move { cancel.cancelled().await })),
         }
+    }
+    fn check(
+        cancellation: &mut Option<kerlico_core::BoxFuture<'static, ()>>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::io::Result<()> {
+        if cancellation
+            .as_mut()
+            .is_some_and(|future| future.as_mut().poll(cx).is_ready())
+        {
+            *cancellation = None;
+        }
+        if cancellation.is_none() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                Error::Cancelled,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+impl tokio::io::AsyncRead for PeerIo {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if let Err(error) = Self::check(&mut this.read_cancel, cx) {
+            return std::task::Poll::Ready(Err(error));
+        }
+        std::pin::Pin::new(&mut this.stream).poll_read(cx, buffer)
+    }
+}
+impl tokio::io::AsyncWrite for PeerIo {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        if let Err(error) = Self::check(&mut this.write_cancel, cx) {
+            return std::task::Poll::Ready(Err(error));
+        }
+        std::pin::Pin::new(&mut this.stream).poll_write(cx, buffer)
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if let Err(error) = Self::check(&mut this.write_cancel, cx) {
+            return std::task::Poll::Ready(Err(error));
+        }
+        std::pin::Pin::new(&mut this.stream).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if let Err(error) = Self::check(&mut this.write_cancel, cx) {
+            return std::task::Poll::Ready(Err(error));
+        }
+        std::pin::Pin::new(&mut this.stream).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod peer_io_tests {
+    use super::*;
+    use std::{future::poll_fn, io, pin::Pin, task::Poll, time::Duration};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt, ReadBuf},
+        sync::oneshot,
+        time::timeout,
+    };
+
+    #[tokio::test]
+    async fn cancelled_physical_relay_preserves_cancelled_outcome() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let global = Arc::new(Semaphore::new(1));
+        let node = Arc::new(Semaphore::new(1));
+        let cancel = CancellationToken::new();
+        let lease = kerlico_core::PeerLease::new(
+            cancel.clone(),
+            kerlico_core::StreamBudget::new(global.clone(), node.clone())
+                .try_acquire()
+                .unwrap(),
+        );
+        let front = PeerIo::new(server, lease, cancel.clone());
+        let (target, _remote) = tokio::io::duplex(1);
+        let (finished, outcome) = oneshot::channel();
+        let flow = kerlico_core::TcpFlow::tracked(
+            Box::new(target),
+            kerlico_core::TcpConnectInfo::unknown(),
+            move |value| {
+                let _ = finished.send(value);
+            },
+        );
+        cancel.cancel();
+        let result = timeout(
+            Duration::from_secs(1),
+            kerlico_core::relay_tcp(
+                Box::new(front),
+                flow,
+                Duration::from_secs(1),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert_eq!(
+            outcome.await.unwrap(),
+            FlowOutcome::Failed(FlowFailure::Cancelled)
+        );
+        assert_eq!(global.available_permits(), 1);
+        assert_eq!(node.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn split_physical_pending_halves_cancel_and_release_socket_and_permits() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        socket2::SockRef::from(&server)
+            .set_send_buffer_size(4096)
+            .unwrap();
+        socket2::SockRef::from(&client)
+            .set_recv_buffer_size(4096)
+            .unwrap();
+        let global = Arc::new(Semaphore::new(1));
+        let node = Arc::new(Semaphore::new(1));
+        let cancel = CancellationToken::new();
+        let lease = kerlico_core::PeerLease::new(
+            cancel.clone(),
+            kerlico_core::StreamBudget::new(global.clone(), node.clone())
+                .try_acquire()
+                .unwrap(),
+        );
+        let stream = PeerIo::new(server, lease, cancel.clone());
+        let (mut read, mut write) = tokio::io::split(stream);
+        let (read_pending, read_ready) = oneshot::channel();
+        let reader = tokio::spawn(async move {
+            let mut pending = Some(read_pending);
+            let mut bytes = [0; 1];
+            let result = poll_fn(|cx| {
+                let result = Pin::new(&mut read).poll_read(cx, &mut ReadBuf::new(&mut bytes));
+                if result.is_pending()
+                    && let Some(pending) = pending.take()
+                {
+                    let _ = pending.send(());
+                }
+                result
+            })
+            .await;
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+            let error = read.read_exact(&mut bytes).await.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+            assert_eq!(
+                FlowFailure::from_error(&Error::Io(error)),
+                FlowFailure::Cancelled
+            );
+        });
+        timeout(Duration::from_secs(1), read_ready)
+            .await
+            .unwrap()
+            .unwrap();
+        let (write_pending, write_ready) = oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let mut pending = Some(write_pending);
+            let bytes = [7; 8192];
+            let mut written = 0;
+            let error = poll_fn(|cx| {
+                loop {
+                    match Pin::new(&mut write).poll_write(cx, &bytes) {
+                        Poll::Ready(Ok(count)) => {
+                            assert!(count > 0);
+                            written += count;
+                        }
+                        Poll::Ready(Err(error)) => return Poll::Ready(error),
+                        Poll::Pending => {
+                            if written > 0
+                                && let Some(pending) = pending.take()
+                            {
+                                let _ = pending.send(());
+                            }
+                            return Poll::Pending;
+                        }
+                    }
+                }
+            })
+            .await;
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+            let error = write.write_all(b"again").await.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+            assert_eq!(
+                FlowFailure::from_error(&Error::Io(error)),
+                FlowFailure::Cancelled
+            );
+            assert_eq!(
+                write.flush().await.unwrap_err().kind(),
+                io::ErrorKind::ConnectionAborted
+            );
+            assert_eq!(
+                write.shutdown().await.unwrap_err().kind(),
+                io::ErrorKind::ConnectionAborted
+            );
+            written
+        });
+        timeout(Duration::from_secs(1), write_ready)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!reader.is_finished());
+        assert!(!writer.is_finished());
+        assert_eq!(global.available_permits(), 0);
+        assert_eq!(node.available_permits(), 0);
+        cancel.cancel();
+        timeout(Duration::from_secs(1), reader)
+            .await
+            .unwrap()
+            .unwrap();
+        let written = timeout(Duration::from_secs(1), writer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(global.available_permits(), 1);
+        assert_eq!(node.available_permits(), 1);
+        let mut received = Vec::new();
+        timeout(Duration::from_secs(1), client.read_to_end(&mut received))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.len(), written);
+        assert!(received.iter().all(|byte| *byte == 7));
     }
 }

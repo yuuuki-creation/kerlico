@@ -1,10 +1,11 @@
 //! 共享 TCP/TLS 连接器与基础直连/拒绝处理器。
 
-use kerlico_config::OutboundFactory;
+use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     Address, BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation,
     DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel, DatagramReceiver,
-    DatagramSender, Destination, Error, Outbound, Result, StreamConnector,
+    DatagramSender, Destination, Error, OpenedTcp, Outbound, Result, StreamConnector, TargetPolicy,
+    TcpConnectInfo,
 };
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use serde::Deserialize;
@@ -47,11 +48,12 @@ impl TcpConnector {
                     .map_err(|_| Error::Config("CA 证书不合法".into()))?;
             }
         }
-        let config = ClientConfig::builder_with_provider(Arc::new(provider))
+        let mut config = ClientConfig::builder_with_provider(Arc::new(provider))
             .with_safe_default_protocol_versions()
             .map_err(|_| Error::Config("TLS 版本不可用".into()))?
             .with_root_certificates(roots)
             .with_no_client_auth();
+        config.resumption = rustls::client::Resumption::disabled();
         let name = ServerName::try_from(server_name.to_owned())
             .map_err(|_| Error::Config("TLS 服务端名称不合法".into()))?;
         Ok(Self {
@@ -85,12 +87,74 @@ impl StreamConnector for TcpConnector {
     }
 }
 
-struct Direct;
+struct Direct {
+    device: kerlico_core::DeviceLease,
+}
+
+struct NativeDevice;
+/// 借用操作系统原生socket提供方，不探测互联网，也不安装或关闭设备服务。
+pub fn native_device() -> kerlico_core::DeviceLease {
+    kerlico_core::DeviceLease::borrow(Arc::new(NativeDevice))
+}
+impl kerlico_core::DeviceNetwork for NativeDevice {
+    fn connect_tcp(&self, target: std::net::SocketAddr) -> BoxFuture<'_, Result<OpenedTcp>> {
+        Box::pin(async move {
+            let stream = TcpStream::connect(target).await?;
+            stream.set_nodelay(true)?;
+            let info = TcpConnectInfo::local_bound(stream.local_addr()?);
+            Ok(OpenedTcp {
+                stream: Box::new(stream),
+                info,
+            })
+        })
+    }
+    fn connect_udp(&self, target: std::net::SocketAddr) -> BoxFuture<'_, Result<Arc<UdpSocket>>> {
+        Box::pin(async move {
+            let socket = UdpSocket::bind(if target.is_ipv6() {
+                "[::]:0"
+            } else {
+                "0.0.0.0:0"
+            })
+            .await?;
+            socket.connect(target).await?;
+            Ok(Arc::new(socket))
+        })
+    }
+    fn udp_association(
+        &self,
+        mode: kerlico_core::FamilyMode,
+    ) -> BoxFuture<'_, Result<Arc<UdpSocket>>> {
+        Box::pin(async move {
+            let ipv6 = mode != kerlico_core::FamilyMode::V4Only;
+            let socket = socket2::Socket::new(
+                if ipv6 {
+                    socket2::Domain::IPV6
+                } else {
+                    socket2::Domain::IPV4
+                },
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )?;
+            if ipv6 {
+                socket.set_only_v6(mode == kerlico_core::FamilyMode::V6Only)?;
+            }
+            socket.set_nonblocking(true)?;
+            let bind = if ipv6 {
+                std::net::SocketAddr::from(([0u16; 8], 0))
+            } else {
+                std::net::SocketAddr::from(([0u8; 4], 0))
+            };
+            socket.bind(&bind.into())?;
+            Ok(Arc::new(UdpSocket::from_std(socket.into())?))
+        })
+    }
+}
 struct DirectDatagram(Arc<UdpSocket>);
 
 struct DirectAssociation {
     socket: Arc<UdpSocket>,
     cancel: kerlico_core::CancellationToken,
+    ipv6: bool,
 }
 impl DatagramAssociationSender for DirectAssociation {
     fn send_to<'a>(
@@ -106,7 +170,7 @@ impl DatagramAssociationSender for DirectAssociation {
                 return Err(Error::Unsupported("多目标直连需要统一出口提供字面 IP"));
             };
             let ip = match ip {
-                std::net::IpAddr::V4(ip) => std::net::IpAddr::V6(ip.to_ipv6_mapped()),
+                std::net::IpAddr::V4(ip) if self.ipv6 => std::net::IpAddr::V6(ip.to_ipv6_mapped()),
                 ip => *ip,
             };
             let count = tokio::select! { biased; _ = self.cancel.cancelled() => return Err(Error::Cancelled), result = self.socket.send_to(packet, std::net::SocketAddr::new(ip, target.port())) => result? };
@@ -134,7 +198,10 @@ impl DatagramAssociationReceiver for DirectAssociation {
 impl DatagramSender for DirectDatagram {
     fn send<'a>(&'a mut self, packet: &'a [u8]) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            self.0.send(packet).await?;
+            let count = self.0.send(packet).await?;
+            if count != packet.len() {
+                return Err(Error::Protocol("UDP通道未发送完整数据报"));
+            }
             Ok(())
         })
     }
@@ -166,23 +233,18 @@ impl Outbound for Direct {
         Box::pin(async move {
             context
                 .run(async {
-                    let socket = socket2::Socket::new(
-                        socket2::Domain::IPV6,
-                        socket2::Type::DGRAM,
-                        Some(socket2::Protocol::UDP),
-                    )?;
-                    socket.set_only_v6(false)?;
-                    socket.set_nonblocking(true)?;
-                    socket.bind(&std::net::SocketAddr::from(([0u16; 8], 0)).into())?;
-                    let socket = Arc::new(UdpSocket::from_std(socket.into())?);
+                    let socket = self.device.udp_association(context.target_mode()).await?;
+                    let ipv6 = socket.local_addr()?.is_ipv6();
                     Ok(DatagramAssociation {
                         sender: Box::new(DirectAssociation {
                             socket: socket.clone(),
                             cancel: context.cancel.clone(),
+                            ipv6,
                         }),
                         receiver: Box::new(DirectAssociation {
                             socket,
                             cancel: context.cancel.clone(),
+                            ipv6,
                         }),
                     })
                 })
@@ -200,8 +262,18 @@ impl Outbound for Direct {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
-        Box::pin(async move { context.run(TcpConnector::plain().connect(target)).await })
+    ) -> BoxFuture<'a, Result<OpenedTcp>> {
+        Box::pin(async move {
+            let Address::Ip(ip) = target.address() else {
+                return Err(Error::Unsupported("直连后端只接受调度器已选定的字面目标"));
+            };
+            context
+                .run(
+                    self.device
+                        .connect_tcp(std::net::SocketAddr::new(*ip, target.port())),
+                )
+                .await
+        })
     }
     fn connect_udp<'a>(
         &'a self,
@@ -211,18 +283,11 @@ impl Outbound for Direct {
         Box::pin(async move {
             context
                 .run(async {
-                    let peer = tokio::net::lookup_host((target.host().as_str(), target.port()))
-                        .await?
-                        .next()
-                        .ok_or(Error::InvalidAddress)?;
-                    let socket = UdpSocket::bind(if peer.is_ipv6() {
-                        "[::]:0"
-                    } else {
-                        "0.0.0.0:0"
-                    })
-                    .await?;
-                    socket.connect(peer).await?;
-                    let socket = Arc::new(socket);
+                    let Address::Ip(ip) = target.address() else {
+                        return Err(Error::Unsupported("直连后端只接受调度器已选定的字面目标"));
+                    };
+                    let peer = std::net::SocketAddr::new(*ip, target.port());
+                    let socket = self.device.connect_udp(peer).await?;
                     Ok(DatagramChannel {
                         sender: Box::new(DirectDatagram(socket.clone())),
                         receiver: Box::new(DirectDatagram(socket)),
@@ -246,7 +311,7 @@ impl Outbound for Reject {
         &'a self,
         _: &'a Destination,
         _: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<OpenedTcp>> {
         Box::pin(async { Err(Error::Rejected) })
     }
     fn connect_udp<'a>(
@@ -277,17 +342,41 @@ impl OutboundFactory for DirectFactory {
     fn kind(&self) -> &'static str {
         "direct"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn Outbound>> {
+    fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         empty(options)?;
-        Ok(Arc::new(Direct))
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp: true,
+            },
+            true,
+            TargetPolicy::Local,
+            |host| {
+                Box::pin(async move {
+                    Ok(Arc::new(Direct {
+                        device: host.device().unwrap_or_else(native_device),
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
 }
 impl OutboundFactory for RejectFactory {
     fn kind(&self) -> &'static str {
         "reject"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn Outbound>> {
+    fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         empty(options)?;
-        Ok(Arc::new(Reject))
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: false,
+                udp: true,
+            },
+            false,
+            TargetPolicy::Remote,
+            |_| Box::pin(async { Ok(Arc::new(Reject) as Arc<dyn Outbound>) }),
+        ))
     }
 }

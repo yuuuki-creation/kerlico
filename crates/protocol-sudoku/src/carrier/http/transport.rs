@@ -1,7 +1,8 @@
 use super::super::{endpoint::Endpoint, tls};
 use crate::{
-    config::{ClientTls, HttpVersion, OutConfig},
+    config::{HttpVersion, OutConfig},
     io::CancelIo,
+    scope::{Scope, ScopeExecutor},
 };
 use bytes::Bytes;
 use http::{Method, Request, Response, Uri};
@@ -12,7 +13,7 @@ use hyper_util::{
         Client,
         connect::{Connected, Connection},
     },
-    rt::{TokioExecutor, TokioIo, TokioTimer},
+    rt::{TokioIo, TokioTimer},
 };
 use kerlico_core::{BoxFuture, BoxStream, CancellationToken, Error, Result};
 use std::{
@@ -75,7 +76,7 @@ impl hyper::rt::Write for CarrierIo {
 #[derive(Clone)]
 struct Connector {
     endpoint: Arc<Endpoint>,
-    tls: Option<ClientTls>,
+    tls: Option<Arc<tls::PreparedTls>>,
     version: HttpVersion,
     authority: String,
     cancel: CancellationToken,
@@ -95,12 +96,7 @@ impl Service<Uri> for Connector {
             {
                 return Err(Error::Rejected);
             }
-            let alpn: &[&[u8]] = match this.version {
-                HttpVersion::H1 => &[b"http/1.1"],
-                HttpVersion::H2 => &[b"h2"],
-                HttpVersion::Auto => &[b"h2", b"http/1.1"],
-            };
-            let (stream, h2) = tokio::select! {biased;_=this.cancel.cancelled()=>return Err(Error::Cancelled),result=tls::connect_meta(&this.endpoint,this.tls.as_ref(),alpn)=>result?};
+            let (stream, h2) = tokio::select! {biased;_=this.cancel.cancelled()=>return Err(Error::Cancelled),result=tls::connect_meta(&this.endpoint,this.tls.as_deref())=>result?};
             if this.version == HttpVersion::H2 && !h2 {
                 return Err(Error::Protocol("HTTP/2要求未被TLS对端协商"));
             }
@@ -130,10 +126,10 @@ impl HttpClient {
     pub fn new(
         config: &OutConfig,
         endpoint: Arc<Endpoint>,
-        parent: &CancellationToken,
+        scope: Arc<Scope>,
         reuse: bool,
     ) -> Arc<Self> {
-        let cancel = parent.child_token();
+        let cancel = scope.cancel.child_token();
         let authority = config
             .mask
             .host
@@ -141,12 +137,12 @@ impl HttpClient {
             .unwrap_or_else(|| config.server.to_string());
         let connector = Connector {
             endpoint,
-            tls: config.mask.tls.clone(),
+            tls: config.tls.clone(),
             version: config.mask.http_version,
             authority: authority.clone(),
             cancel: cancel.clone(),
         };
-        let mut builder = Client::builder(TokioExecutor::new());
+        let mut builder = Client::builder(ScopeExecutor(scope));
         builder
             .pool_idle_timeout(config.idle)
             .pool_timer(TokioTimer::new())
@@ -185,11 +181,11 @@ impl HttpClient {
     }
     pub fn cover(
         host: String,
-        options: Option<ClientTls>,
+        options: Option<Arc<tls::PreparedTls>>,
         endpoint: Arc<Endpoint>,
-        parent: &CancellationToken,
+        scope: Arc<Scope>,
     ) -> Arc<Self> {
-        let cancel = parent.child_token();
+        let cancel = scope.cancel.child_token();
         let scheme = if options.is_some() { "https" } else { "http" };
         let connector = Connector {
             endpoint,
@@ -198,7 +194,7 @@ impl HttpClient {
             authority: host.clone(),
             cancel: cancel.clone(),
         };
-        let mut builder = Client::builder(TokioExecutor::new());
+        let mut builder = Client::builder(ScopeExecutor(scope));
         builder
             .pool_max_idle_per_host(0)
             .http1_max_buf_size(32 * 1024);

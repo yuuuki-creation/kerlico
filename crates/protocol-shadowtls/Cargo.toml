@@ -2,6 +2,7 @@
 name = "kerlico-shadowtls"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
@@ -24,7 +25,7 @@ subtle = "2"
 
 [dev-dependencies]
 kerlico-net.workspace = true
-kerlico-egress.workspace = true
+kerlico-egress = { workspace = true, features = ["test-support"] }
 kerlico-engine.workspace = true
 rcgen.workspace = true
 tokio-rustls.workspace = true

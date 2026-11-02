@@ -6,21 +6,25 @@ use crate::{
     session::{Connection, EndpointOwner},
 };
 use jls_quinn::Runtime;
+use kerlico_config::OutboundPlan;
 use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
-    DatagramReceiver, DatagramSender, Destination, Error, Outbound, Result,
+    DatagramReceiver, DatagramSender, Destination, Error, Outbound, ResourceKey, Result,
+    ServiceContext, TargetPolicy,
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+type MemberConnection = tokio::sync::Mutex<Option<Arc<Connection>>>;
 pub(crate) struct Client {
     server: Destination,
     name: String,
     version: u32,
     mode: Mode,
     crypto: jls_quinn::ClientConfig,
-    current: tokio::sync::Mutex<Option<Arc<Connection>>>,
+    host: ServiceContext,
+    current: tokio::sync::Mutex<HashMap<ResourceKey, Arc<MemberConnection>>>,
 }
 impl Client {
-    pub fn build(options: ClientOptions) -> Result<Self> {
+    pub fn compile(options: ClientOptions) -> Result<OutboundPlan> {
         if !(5..=3600).contains(&options.idle_timeout_secs) {
             return Err(config::invalid());
         }
@@ -34,22 +38,41 @@ impl Client {
             0,
             true,
         )?;
-        Ok(Self {
-            server: options.server.destination()?,
-            name: options.server_name,
-            version,
-            mode,
-            crypto: config::client_crypto(
-                &user,
-                config::alpn_bytes(options.alpn)?,
-                transport,
-                version,
-            )?,
-            current: tokio::sync::Mutex::new(None),
-        })
+        let server = options.server.destination()?;
+        let crypto =
+            config::client_crypto(&user, config::alpn_bytes(options.alpn)?, transport, version)?;
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp: true,
+            },
+            true,
+            TargetPolicy::Remote,
+            move |host| {
+                Box::pin(async move {
+                    Ok(Arc::new(Self {
+                        server,
+                        name: options.server_name,
+                        version,
+                        mode,
+                        crypto,
+                        host,
+                        current: tokio::sync::Mutex::new(HashMap::new()),
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
-    async fn connection(&self) -> Result<Arc<Connection>> {
-        let mut current = self.current.lock().await;
+    async fn connection(&self, context: &ConnectContext) -> Result<Arc<Connection>> {
+        let bucket = {
+            let mut buckets = self.current.lock().await;
+            buckets
+                .entry(context.resource_key().clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+                .clone()
+        };
+        let mut current = bucket.lock().await;
         if let Some(value) = current.as_ref()
             && value.quic.close_reason().is_none()
             && !value.exhausted()
@@ -63,7 +86,7 @@ impl Client {
                 .collect::<Vec<_>>();
         candidates.sort_by_key(|address| address.is_ipv6());
         let peer = *candidates.first().ok_or(Error::InvalidAddress)?;
-        let runtime = ScopedRuntime::new();
+        let runtime = ScopedRuntime::shared(&self.host);
         let mut guard = RuntimeGuard::new(runtime.clone());
         let socket = std::net::UdpSocket::bind(if peer.is_ipv6() {
             "[::]:0"
@@ -79,8 +102,10 @@ impl Client {
             runtime.clone(),
             jls_quinn::JlsForwardConfig::default(),
         )?;
+        let mut crypto = self.crypto.clone();
+        crypto.token_store(Arc::new(jls_quinn::TokenMemoryCache::default()));
         let connection = endpoint
-            .connect_with(self.crypto.clone(), peer, &self.name)
+            .connect_with(crypto, peer, &self.name)
             .map_err(|_| config::invalid())?
             .await
             .map_err(|_| Error::Protocol("ShadowQUIC JLS 握手失败"))?;
@@ -93,6 +118,7 @@ impl Client {
             Some(EndpointOwner { endpoint, runtime }),
             None,
             None,
+            Some(self.host.clone()),
         );
         guard.disarm();
         *current = Some(value.clone());
@@ -100,6 +126,19 @@ impl Client {
     }
 }
 impl Outbound for Client {
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.host.cancel().cancel();
+            let buckets = { std::mem::take(&mut *self.current.lock().await) };
+            for bucket in buckets.into_values() {
+                let connection = { bucket.lock().await.take() };
+                if let Some(connection) = connection {
+                    connection.shutdown().await;
+                }
+            }
+            Ok(())
+        })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tcp: true,
@@ -116,7 +155,12 @@ impl Outbound for Client {
     ) -> BoxFuture<'a, Result<DatagramAssociation>> {
         Box::pin(async move {
             context
-                .run(async { self.connection().await?.open_association(self.mode).await })
+                .run(async {
+                    self.connection(context)
+                        .await?
+                        .open_association(self.mode)
+                        .await
+                })
                 .await
         })
     }
@@ -124,11 +168,15 @@ impl Outbound for Client {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
             context
-                .run(async { self.connection().await?.open_tcp(target).await })
+                .run(async { self.connection(context).await?.open_tcp(target).await })
                 .await
+                .map(|stream| kerlico_core::OpenedTcp {
+                    stream,
+                    info: kerlico_core::TcpConnectInfo::unknown(),
+                })
         })
     }
     fn connect_udp<'a>(

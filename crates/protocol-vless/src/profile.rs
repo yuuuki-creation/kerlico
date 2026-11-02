@@ -1,14 +1,17 @@
 //! 组合配置在协议边界校验，核心调度不感知具体传输或安全类型。
 
 use crate::{UserId, carrier::Carrier, payload};
-use kerlico_config::TargetSpec;
+use kerlico_config::{OutboundPlan, TargetSpec};
 use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel, Destination, Error,
     Outbound, Result,
 };
 use serde::Deserialize;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use xray_vless_encryption::{Client, Encryption};
 
 #[derive(Deserialize)]
@@ -261,13 +264,15 @@ struct ProfileOutbound {
     vision: bool,
     udp443: bool,
     encoding: PacketEncoding,
-    encryption: Option<Client>,
-    mux: Option<crate::mux::Pool>,
+    encryption: Option<xray_vless_encryption::ClientConfig>,
+    mux: Option<(usize, usize)>,
+    resources: Mutex<HashMap<kerlico_core::ResourceKey, Arc<Resources>>>,
+    host: kerlico_core::ServiceContext,
     mux_tcp: bool,
     mux_udp: bool,
 }
 
-pub(crate) fn build(value: &Value) -> Result<Arc<dyn Outbound>> {
+pub(crate) fn compile(value: &Value) -> Result<OutboundPlan> {
     let options: Options = serde_json::from_value(value.clone())
         .map_err(|_| Error::Config("VLESS 配置字段不合法".into()))?;
     let user = UserId::parse(&options.uuid)?;
@@ -310,7 +315,11 @@ pub(crate) fn build(value: &Value) -> Result<Arc<dyn Outbound>> {
         {
             return Err(Error::Config("Mux 并发或连接池参数不合法".into()));
         }
-        if settings.tcp&&matches!(transport,Transport::Xhttp{..}){return Err(Error::Config("XHTTP 的 Mux 仅支持 UDP；TCP 使用载体自己的 XMUX".into()));}
+        if settings.tcp && matches!(transport, Transport::Xhttp { .. }) {
+            return Err(Error::Config(
+                "XHTTP 的 Mux 仅支持 UDP；TCP 使用载体自己的 XMUX".into(),
+            ));
+        }
         if vision && settings.tcp {
             return Err(Error::Config(
                 "Vision 不能复用 TCP 业务；可仅启用 Mux UDP".into(),
@@ -319,10 +328,7 @@ pub(crate) fn build(value: &Value) -> Result<Arc<dyn Outbound>> {
         if settings.udp && options.packet_encoding == PacketEncoding::Packetaddr {
             return Err(Error::Config("packetaddr 与 Mux UDP 必须分开配置".into()));
         }
-        mux = Some(crate::mux::Pool::new(
-            settings.concurrency,
-            settings.max_connections,
-        ));
+        mux = Some((settings.concurrency, settings.max_connections));
         mux_tcp = settings.tcp;
         mux_udp = settings.udp;
     }
@@ -336,24 +342,76 @@ pub(crate) fn build(value: &Value) -> Result<Arc<dyn Outbound>> {
         !encryption.is_none(),
         options.server_family,
     )?;
-    Ok(Arc::new(ProfileOutbound {
-        carrier,
-        user,
-        vision,
-        udp443: options.flow == "xtls-rprx-vision-udp443",
-        encoding: if vision {
-            PacketEncoding::Xudp
-        } else {
-            options.packet_encoding
+    let udp443 = options.flow == "xtls-rprx-vision-udp443";
+    let encoding = if vision {
+        PacketEncoding::Xudp
+    } else {
+        options.packet_encoding
+    };
+    let encryption = encryption.client().cloned();
+    Ok(OutboundPlan::new(
+        Capabilities {
+            tcp: true,
+            tcp_eof: false,
+            udp: true,
         },
-        encryption: encryption.client().cloned().map(Client::new),
-        mux,
-        mux_tcp,
-        mux_udp,
-    }))
+        false,
+        kerlico_core::TargetPolicy::Remote,
+        move |host| {
+            Box::pin(async move {
+                Ok(Arc::new(ProfileOutbound {
+                    carrier: carrier.start(&host)?,
+                    user,
+                    vision,
+                    udp443,
+                    encoding,
+                    encryption,
+                    mux,
+                    mux_tcp,
+                    mux_udp,
+                    resources: Mutex::new(HashMap::new()),
+                    host,
+                }) as Arc<dyn Outbound>)
+            })
+        },
+    ))
+}
+
+struct Resources {
+    encryption: Option<Client>,
+    mux: Option<crate::mux::Pool>,
+}
+impl ProfileOutbound {
+    fn resources(&self, context: &ConnectContext) -> Result<Arc<Resources>> {
+        let mut resources = self.resources.lock().map_err(|_| Error::Rejected)?;
+        Ok(resources
+            .entry(context.resource_key().clone())
+            .or_insert_with(|| {
+                Arc::new(Resources {
+                    encryption: self.encryption.clone().map(Client::new),
+                    mux: self.mux.map(|(concurrency, maximum)| {
+                        crate::mux::Pool::new(concurrency, maximum, self.host.clone())
+                    }),
+                })
+            })
+            .clone())
+    }
 }
 
 impl Outbound for ProfileOutbound {
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let resources =
+                std::mem::take(&mut *self.resources.lock().map_err(|_| Error::Rejected)?);
+            for resource in resources.into_values() {
+                if let Some(mux) = &resource.mux {
+                    mux.shutdown().await?;
+                }
+            }
+            self.carrier.shutdown().await?;
+            Ok(())
+        })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tcp: true,
@@ -365,20 +423,21 @@ impl Outbound for ProfileOutbound {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
+            let resources = self.resources(context)?;
             context
                 .run(async {
                     if self.mux_tcp {
-                        return self
+                        return resources
                             .mux
                             .as_ref()
                             .ok_or(Error::Protocol("Mux 配置不可用"))?
                             .tcp(target, async {
-                                let carrier = self.carrier.open().await?;
+                                let carrier = self.carrier.open(context, &self.host).await?;
                                 payload::open(
                                     carrier,
-                                    self.encryption.as_ref(),
+                                    resources.encryption.as_ref(),
                                     self.user,
                                     target,
                                     false,
@@ -389,10 +448,10 @@ impl Outbound for ProfileOutbound {
                             })
                             .await;
                     }
-                    let carrier = self.carrier.open().await?;
+                    let carrier = self.carrier.open(context, &self.host).await?;
                     payload::open(
                         carrier,
-                        self.encryption.as_ref(),
+                        resources.encryption.as_ref(),
                         self.user,
                         target,
                         self.vision,
@@ -402,6 +461,10 @@ impl Outbound for ProfileOutbound {
                     .await
                 })
                 .await
+                .map(|stream| kerlico_core::OpenedTcp {
+                    stream,
+                    info: kerlico_core::TcpConnectInfo::unknown(),
+                })
         })
     }
     fn connect_udp<'a>(
@@ -410,6 +473,7 @@ impl Outbound for ProfileOutbound {
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramChannel>> {
         Box::pin(async move {
+            let resources = self.resources(context)?;
             if self.vision && !self.udp443 && target.port() == 443 {
                 return Err(Error::Rejected);
             }
@@ -421,15 +485,15 @@ impl Outbound for ProfileOutbound {
             context
                 .run(async {
                     if self.mux_udp {
-                        return self
+                        return resources
                             .mux
                             .as_ref()
                             .ok_or(Error::Protocol("Mux 配置不可用"))?
                             .udp(target, self.encoding == PacketEncoding::Xudp, async {
-                                let carrier = self.carrier.open().await?;
+                                let carrier = self.carrier.open(context, &self.host).await?;
                                 payload::open(
                                     carrier,
-                                    self.encryption.as_ref(),
+                                    resources.encryption.as_ref(),
                                     self.user,
                                     target,
                                     self.vision,
@@ -440,10 +504,10 @@ impl Outbound for ProfileOutbound {
                             })
                             .await;
                     }
-                    let carrier = self.carrier.open().await?;
+                    let carrier = self.carrier.open(context, &self.host).await?;
                     let stream = payload::open(
                         carrier,
-                        self.encryption.as_ref(),
+                        resources.encryption.as_ref(),
                         self.user,
                         target,
                         self.vision,

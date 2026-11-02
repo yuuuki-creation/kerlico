@@ -1,6 +1,7 @@
 //! Snell 记录层与双端适配；节点身份和目标访问遵循统一内核契约。
 
 mod config;
+mod credential_io;
 mod crypto;
 mod inbound;
 mod io;

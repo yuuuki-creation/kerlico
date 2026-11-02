@@ -80,7 +80,7 @@ impl Protocol {
     }
 }
 impl ProtocolOptions {
-    fn prepare(self) -> Result<Arc<Protocol>> {
+    pub(crate) fn prepare(self) -> Result<Arc<Protocol>> {
         if self.padding_min > self.padding_max
             || self.padding_max > 100
             || self.custom_tables.len() > 16
@@ -265,6 +265,7 @@ pub(crate) struct OutConfig {
     pub server: Destination,
     pub protocol: Arc<Protocol>,
     pub mask: ClientMask,
+    pub tls: Option<Arc<crate::carrier::tls::PreparedTls>>,
     pub multiplex: Multiplex,
     pub max_streams: usize,
     pub max_pool: usize,
@@ -298,9 +299,21 @@ impl OutOptions {
         if let Some(host) = self.http_mask.host.as_deref() {
             safe_host(host)?;
         }
-        if let Some(tls) = self.http_mask.tls.as_ref() {
-            let _ = kerlico_net::TcpConnector::tls(&tls.server_name, tls.ca_pem.as_deref())?;
-        }
+        let alpn: &[&[u8]] = if self.http_mask.mode == CarrierMode::Ws
+            || self.http_mask.http_version == HttpVersion::H1
+        {
+            &[b"http/1.1"]
+        } else if self.http_mask.http_version == HttpVersion::H2 {
+            &[b"h2"]
+        } else {
+            &[b"h2", b"http/1.1"]
+        };
+        let tls = self
+            .http_mask
+            .tls
+            .as_ref()
+            .map(|tls| crate::carrier::tls::PreparedTls::new(tls, alpn))
+            .transpose()?;
         self.http_mask.path_root = root(&self.http_mask.path_root)?;
         if !(1..=1024).contains(&self.max_mux_streams)
             || !(1..=16).contains(&self.max_pool_sessions)
@@ -312,6 +325,7 @@ impl OutOptions {
             server,
             protocol,
             mask: self.http_mask,
+            tls,
             multiplex: self.multiplex,
             max_streams: self.max_mux_streams,
             max_pool: self.max_pool_sessions,
@@ -326,6 +340,8 @@ pub(crate) struct CoverFallback {
     pub server: TargetSpec,
     pub host: String,
     pub tls: Option<ClientTls>,
+    #[serde(skip)]
+    pub compiled_tls: Option<Arc<crate::carrier::tls::PreparedTls>>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -365,11 +381,12 @@ impl NodeOptions {
         {
             return Err(Error::Config("Sudoku节点会话预算不合法".into()));
         }
-        if let Some(fallback) = self.cover_fallback.as_ref() {
+        if let Some(fallback) = self.cover_fallback.as_mut() {
             fallback.server.destination()?;
             safe_host(&fallback.host)?;
             if let Some(tls) = fallback.tls.as_ref() {
-                let _ = kerlico_net::TcpConnector::tls(&tls.server_name, tls.ca_pem.as_deref())?;
+                fallback.compiled_tls =
+                    Some(crate::carrier::tls::PreparedTls::new(tls, &[b"http/1.1"])?);
             }
         }
         Ok(NodeConfig {

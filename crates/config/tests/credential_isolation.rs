@@ -1,8 +1,10 @@
-use kerlico_config::{Config, NodeFactory, OutboundFactory, Registry};
+use kerlico_config::{
+    Config, NodeBuildContext, NodeFactory, OutboundFactory, OutboundPlan, Registry,
+};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel,
-    Destination, Error, InboundContext, InboundProtocol, Outbound, Result,
-    ScopedCredentialFingerprint,
+    BoxFuture, BoxStream, Capabilities, ConnectContext, CredentialManifest, DatagramChannel,
+    Destination, Error, InboundContext, InboundProtocol, IngressBinding, Outbound, Result,
+    TargetPolicy,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -20,7 +22,7 @@ impl Outbound for Exit {
         &'a self,
         _: &'a Destination,
         _: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async { Err(Error::Rejected) })
     }
     fn connect_udp<'a>(
@@ -36,8 +38,13 @@ impl OutboundFactory for ExitFactory {
     fn kind(&self) -> &'static str {
         "synthetic-exit"
     }
-    fn build(&self, _: &Value) -> Result<Arc<dyn Outbound>> {
-        Ok(Arc::new(Exit))
+    fn compile(&self, _: &Value) -> Result<OutboundPlan> {
+        Ok(OutboundPlan::new(
+            Exit.capabilities(),
+            false,
+            TargetPolicy::Remote,
+            |_| Box::pin(async { Ok(Arc::new(Exit) as Arc<dyn Outbound>) }),
+        ))
     }
 }
 struct Protocol {
@@ -47,41 +54,27 @@ struct Protocol {
     invalid_scope: bool,
 }
 impl InboundProtocol for Protocol {
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = CredentialManifest::new();
         if self.auth {
-            vec![[self.value; 32]]
-        } else {
-            Vec::new()
+            manifest.authentication("synthetic-auth", 0, [self.value; 32]);
         }
-    }
-    fn scoped_credential_fingerprints(&self, _: &str) -> Vec<ScopedCredentialFingerprint> {
-        self.credential_fingerprints()
-            .into_iter()
-            .map(|fingerprint| ScopedCredentialFingerprint {
-                protocol: "synthetic-auth".into(),
-                fingerprint,
-            })
-            .collect()
-    }
-    fn credential_isolation_fingerprints(&self, _: &str) -> Vec<ScopedCredentialFingerprint> {
-        if self.empty_isolation {
-            Vec::new()
-        } else {
-            vec![ScopedCredentialFingerprint {
-                protocol: if self.invalid_scope {
+        if !self.empty_isolation {
+            manifest.protection(
+                if self.invalid_scope {
                     "invalid scope"
                 } else {
                     "synthetic-auth"
-                }
-                .into(),
-                fingerprint: [self.value; 32],
-            }]
+                },
+                [self.value; 32],
+            );
         }
+        manifest
     }
     fn handle<'a>(
         &'a self,
         _: BoxStream,
-        _: Arc<dyn AccessService>,
+        _: IngressBinding,
         _: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Err(Error::Rejected) })
@@ -95,7 +88,8 @@ impl NodeFactory for Factory {
     fn allows_local_inbound(&self) -> bool {
         true
     }
-    fn build(&self, value: &Value) -> Result<Arc<dyn InboundProtocol>> {
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        let value = input.options();
         Ok(Arc::new(Protocol {
             auth: value["auth"].as_bool().unwrap_or(false),
             value: value["value"].as_u64().unwrap_or(1) as u8,
@@ -111,10 +105,14 @@ fn registry() -> Registry {
     registry
 }
 fn entry(tag: &str, listen: &str, auth: bool, value: u8) -> Value {
-    json!({"tag":tag,"type":"synthetic","listen":listen,"outbound":"exit","options":{"auth":auth,"value":value}})
+    let mut entry = json!({"tag":tag,"type":"synthetic","listen":listen,"outbound":"exit","options":{"auth":auth,"value":value}});
+    if auth {
+        entry["members"] = json!([{"user_id":"00000000-0000-4000-8000-000000000001","native_credential":{"value":value}}]);
+    }
+    entry
 }
 fn config(nodes: Vec<Value>, locals: Vec<Value>) -> Config {
-    serde_json::from_value(json!({"version":1,"outbounds":[{"tag":"exit","type":"synthetic-exit"}],"inbounds":[],"nodes":nodes,"local_inbounds":locals})).unwrap()
+    serde_json::from_value(json!({"version":2,"accounts":[{"user_id":"00000000-0000-4000-8000-000000000001","username":"test-user_00000000-0000-4000-8000-000000000001","password_hash":"$argon2id$v=19$m=19456,t=2,p=1$dGVzdC1zYWx0LTEyMzQ1Ng$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}],"outbounds":[{"tag":"exit","type":"synthetic-exit"}],"inbounds":[],"nodes":nodes,"local_inbounds":locals})).unwrap()
 }
 
 #[test]

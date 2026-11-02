@@ -213,6 +213,7 @@ pub(crate) struct Connection {
     proxy: mpsc::Sender<Bi>,
     authenticated: Arc<AtomicBool>,
     context: InboundContext,
+    accepting: bool,
 }
 impl Connection {
     pub(crate) fn new(
@@ -227,6 +228,85 @@ impl Connection {
             proxy,
             authenticated,
             context,
+            accepting: true,
+        }
+    }
+    pub(crate) fn stop_admission(&mut self) {
+        self.accepting = false;
+    }
+    pub(crate) fn pending_sniffers(&self) -> usize {
+        self.sniffers.len()
+    }
+    fn poll_new_streams(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Result<(), quic::ConnectionErrorIncoming> {
+        let mut accepted = 0;
+        for _ in 0..64 {
+            match <h3_quinn::Connection as quic::Connection<Bytes>>::poll_accept_bidi(
+                &mut self.inner,
+                cx,
+            ) {
+                Poll::Ready(Ok(mut inner)) => {
+                    accepted += 1;
+                    if !self.accepting {
+                        inner.reset(0x10c);
+                        inner.stop_sending(0x10c);
+                        self.context.events.record(NodeEvent::Dropped);
+                        continue;
+                    }
+                    let Ok(lease) = self.context.stream_budget.try_acquire() else {
+                        inner.reset(0x107);
+                        inner.stop_sending(0x107);
+                        self.context.events.record(NodeEvent::Dropped);
+                        continue;
+                    };
+                    let deadline = self.context.connect_timeout;
+                    let cancel = self.context.cancel.clone();
+                    self.sniffers.push(Box::pin(async move {
+                        let mut stream=Bi::new(inner,Some(Arc::new(lease)));
+                        let classified=async {
+                            let mut bytes=Vec::new();loop {
+                                if let Some(first)=bytes.first().copied() { let width=1usize<<(first>>6);if bytes.len()>=width {let mut value=u64::from(first&63);for byte in &bytes[1..width] {value=value<<8|u64::from(*byte);}stream.prefix=Bytes::from(bytes);return Ok::<_,()>(value);} }
+                                let Some(data)=std::future::poll_fn(|cx| stream.inner.poll_data(cx)).await.map_err(|_|())? else{return Err(());};
+                                if bytes.len()+data.len()>65536{return Err(());}bytes.extend_from_slice(&data);
+                            }
+                        };
+                        let value=tokio::select!{_ = cancel.cancelled()=>None,result=tokio::time::timeout(deadline,classified)=>result.ok().and_then(Result::ok)};
+                        match value {Some(value)=>Some((value,stream)),None=>{stream.reject();None}}
+                    }));
+                }
+                Poll::Ready(Err(error)) => return Err(error),
+                Poll::Pending => break,
+            }
+        }
+        if accepted == 64 {
+            cx.waker().wake_by_ref();
+        }
+        Ok(())
+    }
+    fn poll_sniffers(&mut self, cx: &mut Context<'_>) -> Poll<Bi> {
+        loop {
+            match self.sniffers.poll_next_unpin(cx) {
+                Poll::Ready(Some(Some((kind, mut stream)))) => {
+                    if kind == crate::wire::TCP_ID && self.authenticated.load(Ordering::Acquire) {
+                        match self.proxy.try_send(stream) {
+                            Ok(()) => {}
+                            Err(error) => {
+                                let mut stream = error.into_inner();
+                                stream.reject();
+                                self.context.events.record(NodeEvent::Dropped);
+                            }
+                        }
+                    } else if self.accepting {
+                        return Poll::Ready(stream);
+                    } else {
+                        stream.reject();
+                    }
+                }
+                Poll::Ready(Some(None)) => {}
+                Poll::Ready(None) | Poll::Pending => return Poll::Pending,
+            }
         }
     }
 }
@@ -269,58 +349,7 @@ impl quic::Connection<Bytes> for Connection {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Bi, quic::ConnectionErrorIncoming>> {
-        let mut accepted = 0;
-        for _ in 0..64 {
-            match self.inner.poll_accept_bidi(cx) {
-                Poll::Ready(Ok(mut inner)) => {
-                    accepted += 1;
-                    let Ok(lease) = self.context.stream_budget.try_acquire() else {
-                        inner.reset(0x107);
-                        inner.stop_sending(0x107);
-                        self.context.events.record(NodeEvent::Dropped);
-                        continue;
-                    };
-                    let deadline = self.context.connect_timeout;
-                    let cancel = self.context.cancel.clone();
-                    self.sniffers.push(Box::pin(async move {
-                        let mut stream=Bi::new(inner,Some(Arc::new(lease)));
-                        let classified=async {
-                            let mut bytes=Vec::new();loop {
-                                if let Some(first)=bytes.first().copied() { let width=1usize<<(first>>6);if bytes.len()>=width {let mut value=u64::from(first&63);for byte in &bytes[1..width] {value=value<<8|u64::from(*byte);}stream.prefix=Bytes::from(bytes);return Ok::<_,()>(value);} }
-                                let Some(data)=std::future::poll_fn(|cx| stream.inner.poll_data(cx)).await.map_err(|_|())? else{return Err(());};
-                                if bytes.len()+data.len()>65536{return Err(());}bytes.extend_from_slice(&data);
-                            }
-                        };
-                        let value=tokio::select!{_ = cancel.cancelled()=>None,result=tokio::time::timeout(deadline,classified)=>result.ok().and_then(Result::ok)};
-                        match value {Some(value)=>Some((value,stream)),None=>{stream.reject();None}}
-                    }));
-                }
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Pending => break,
-            }
-        }
-        if accepted == 64 {
-            cx.waker().wake_by_ref();
-        }
-        loop {
-            match self.sniffers.poll_next_unpin(cx) {
-                Poll::Ready(Some(Some((kind, stream)))) => {
-                    if kind == crate::wire::TCP_ID && self.authenticated.load(Ordering::Acquire) {
-                        match self.proxy.try_send(stream) {
-                            Ok(()) => {}
-                            Err(error) => {
-                                let mut stream = error.into_inner();
-                                stream.reject();
-                                self.context.events.record(NodeEvent::Dropped);
-                            }
-                        }
-                    } else {
-                        return Poll::Ready(Ok(stream));
-                    }
-                }
-                Poll::Ready(Some(None)) => {}
-                Poll::Ready(None) | Poll::Pending => return Poll::Pending,
-            }
-        }
+        self.poll_new_streams(cx)?;
+        self.poll_sniffers(cx).map(Ok)
     }
 }

@@ -5,8 +5,8 @@ use futures_util::{SinkExt, StreamExt};
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, StreamBody, combinators::UnsyncBoxBody};
 use hyper::body::{Frame, Incoming};
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use kerlico_core::{AccessService, BoxStream, Error, InboundContext, Result};
+use hyper_util::rt::TokioIo;
+use kerlico_core::{BoxStream, Error, InboundContext, IngressBinding, Result};
 use std::{
     convert::Infallible,
     io,
@@ -23,12 +23,26 @@ use tokio_tungstenite::tungstenite::{
     protocol::{Role, WebSocketConfig},
 };
 type Body = UnsyncBoxBody<Bytes, io::Error>;
-struct Jobs(Mutex<JoinSet<()>>);
+#[derive(Clone)]
+struct NodeExecutor(kerlico_core::NodeTasks);
+impl<F> hyper::rt::Executor<F> for NodeExecutor
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    fn execute(&self, future: F) {
+        let _ = self.0.spawn(future);
+    }
+}
+struct Jobs(Mutex<JoinSet<()>>, kerlico_core::NodeTasks);
 impl Jobs {
     fn spawn(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
         if let Ok(mut tasks) = self.0.lock() {
             while tasks.try_join_next().is_some() {}
-            tasks.spawn(task);
+            if let Ok(task) = self.1.spawn_tracked(task) {
+                tasks.spawn(async move {
+                    let _ = task.await;
+                });
+            }
         }
     }
 }
@@ -43,12 +57,13 @@ pub(crate) async fn serve(
     stream: BoxStream,
     transport: Transport,
     payload: Arc<Payload>,
-    access: Arc<dyn AccessService>,
+    access: IngressBinding,
     context: InboundContext,
 ) -> Result<()> {
-    let jobs = Arc::new(Jobs(Mutex::new(JoinSet::new())));
+    let jobs = Arc::new(Jobs(Mutex::new(JoinSet::new()), context.tasks.clone()));
     let tasks = jobs.clone();
     let cancel = context.cancel.clone();
+    let executor = NodeExecutor(context.tasks.clone());
     let service = hyper::service::service_fn(move |request: Request<Incoming>| {
         let jobs = tasks.clone();
         let transport = transport.clone();
@@ -61,7 +76,7 @@ pub(crate) async fn serve(
             )
         }
     });
-    let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+    let builder = hyper_util::server::conn::auto::Builder::new(executor);
     builder
         .serve_connection_with_upgrades(TokioIo::new(stream), service)
         .await
@@ -84,7 +99,7 @@ async fn request_handler(
     mut request: Request<Incoming>,
     transport: Transport,
     payload: Arc<Payload>,
-    access: Arc<dyn AccessService>,
+    access: IngressBinding,
     context: InboundContext,
     jobs: Arc<Jobs>,
 ) -> Response<Body> {
@@ -212,7 +227,7 @@ async fn request_handler(
 async fn serve_payload(
     payload: Arc<Payload>,
     stream: BoxStream,
-    access: Arc<dyn AccessService>,
+    access: IngressBinding,
     context: InboundContext,
 ) -> Result<()> {
     let (stream, activity) = crate::io::observe(stream);

@@ -4,14 +4,12 @@ use crate::{
     http,
 };
 use kerlico_core::{
-    AccessService, Address, AddressedDatagram, BoxFuture, BoxStream, ConnectContext,
-    DatagramAssociation, DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel,
-    DatagramReceiver, DatagramSender, Destination, Error, InboundContext, Result,
+    Address, AddressedDatagram, BoxFuture, BoxStream, ConnectContext, DatagramAssociation,
+    DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel, DatagramReceiver,
+    DatagramSender, Destination, Error, FlowFailure, FlowOutcome, InboundContext, PeerSession,
+    Result,
 };
-use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    sync::Arc,
-};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 pub(crate) fn magic(version: u8) -> Result<Destination> {
     Destination::new(if version == 1 { http::V1 } else { http::V2 }, 1)
@@ -276,22 +274,24 @@ pub(crate) fn channel(
 pub(crate) async fn serve(
     mut stream: BoxStream,
     version: u8,
-    access: Arc<dyn AccessService>,
+    access: PeerSession,
     context: InboundContext,
+    flows: std::sync::Arc<crate::flow::FlowSet>,
 ) -> Result<()> {
-    let connection = ConnectContext {
-        cancel: context.cancel.clone(),
-        timeout: context.connect_timeout,
-    };
+    let connection =
+        ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
     let fixed = connection.run(initial(&mut stream, version)).await?;
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (activity, mut observed) = tokio::sync::watch::channel(tokio::time::Instant::now());
-    let relay = async {
-        if let Some(target) = fixed {
-            let DatagramChannel {
-                mut sender,
-                mut receiver,
-            } = access.connect_udp(&target, &connection).await?;
+    let outcome = |result: &Result<()>| match result {
+        Ok(()) => FlowOutcome::ProtocolEnd,
+        Err(error) => FlowOutcome::Failed(FlowFailure::from_error(error)),
+    };
+    if let Some(target) = fixed {
+        let (mut sender, mut receiver, completion) =
+            access.connect_udp(&target, &connection).await?.into_parts();
+        let completion = flows.register(completion)?;
+        let result = {
             let incoming = async {
                 while let Some((_, packet)) =
                     read(&mut reader, Some(&target), context.max_datagram_size).await?
@@ -315,12 +315,22 @@ pub(crate) async fn serve(
                 }
                 Ok::<_, Error>(())
             };
-            tokio::select! {result=incoming=>result,result=outgoing=>result}
-        } else {
-            let DatagramAssociation {
-                mut sender,
-                mut receiver,
-            } = access.associate_udp(&connection).await?;
+            idle_relay(
+                async {
+                    tokio::select! {result=incoming=>result,result=outgoing=>result}
+                },
+                &context,
+                &mut observed,
+            )
+            .await
+        };
+        completion.finish(outcome(&result));
+        result
+    } else {
+        let (mut sender, mut receiver, completion) =
+            access.associate_udp(&connection).await?.into_parts();
+        let completion = flows.register(completion)?;
+        let result = {
             let incoming = async {
                 while let Some((target, packet)) =
                     read(&mut reader, None, context.max_datagram_size).await?
@@ -344,9 +354,24 @@ pub(crate) async fn serve(
                 }
                 Ok::<_, Error>(())
             };
-            tokio::select! {result=incoming=>result,result=outgoing=>result}
-        }
-    };
+            idle_relay(
+                async {
+                    tokio::select! {result=incoming=>result,result=outgoing=>result}
+                },
+                &context,
+                &mut observed,
+            )
+            .await
+        };
+        completion.finish(outcome(&result));
+        result
+    }
+}
+async fn idle_relay(
+    relay: impl std::future::Future<Output = Result<()>>,
+    context: &InboundContext,
+    observed: &mut tokio::sync::watch::Receiver<tokio::time::Instant>,
+) -> Result<()> {
     tokio::pin!(relay);
     let timer = tokio::time::sleep(context.idle_timeout);
     tokio::pin!(timer);

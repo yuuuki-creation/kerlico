@@ -1,0 +1,7668 @@
+use std::collections::{HashMap, HashSet};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use http::{header, Method, Request};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UdpSocket;
+use tokio::sync::{watch, Notify};
+use tokio::time;
+use xray_routing::{DnsHostTarget, DnsIpFilter, DomainHostIndex, DomainMatcherSet};
+
+use crate::{
+    canonicalize_socket_addr, connect_tcp_happy_eyeballs, BoxedTransportStream,
+    HappyEyeballsConfig, SocketHandle, SocketProtector, TlsClientConfig, TlsConnector,
+    TransportError,
+};
+
+/// A DNS lookup result containing every usable address and its remaining TTL.
+///
+/// `ttl = None` means the resolver cannot expose an authoritative TTL (for
+/// example, the platform system resolver). Cache layers may replace it with a
+/// bounded policy TTL.
+#[derive(Debug, Clone)]
+pub struct DnsLookup {
+    socket_addrs: Arc<[SocketAddr]>,
+    ttl: Option<Duration>,
+    observed_at: Instant,
+}
+
+impl DnsLookup {
+    /// Builds a lookup while preserving the first occurrence of each address.
+    /// IPv4-mapped IPv6 candidates are canonicalized to IPv4 so routing and
+    /// the eventual socket family observe the same endpoint.
+    pub fn new(addresses: impl IntoIterator<Item = SocketAddr>, ttl: Option<Duration>) -> Self {
+        let mut unique = Vec::new();
+        let mut seen = HashSet::new();
+        for address in addresses {
+            let address = canonicalize_socket_addr(address);
+            if seen.insert(address) {
+                unique.push(address);
+            }
+        }
+        Self {
+            socket_addrs: unique.into(),
+            ttl,
+            observed_at: Instant::now(),
+        }
+    }
+
+    /// Builds socket addresses for one destination port from resolved IPs.
+    pub fn from_ips(
+        addresses: impl IntoIterator<Item = IpAddr>,
+        port: u16,
+        ttl: Option<Duration>,
+    ) -> Self {
+        Self::new(
+            addresses
+                .into_iter()
+                .map(|address| SocketAddr::new(address, port)),
+            ttl,
+        )
+    }
+
+    /// Builds a lookup containing one address.
+    pub fn single(address: SocketAddr, ttl: Option<Duration>) -> Self {
+        Self::new([address], ttl)
+    }
+
+    /// Returns candidates in resolver order.
+    pub fn socket_addrs(&self) -> &[SocketAddr] {
+        &self.socket_addrs
+    }
+
+    /// Iterates over candidate IPs in resolver order.
+    pub fn ips(&self) -> impl ExactSizeIterator<Item = IpAddr> + '_ {
+        self.socket_addrs.iter().map(|address| address.ip())
+    }
+
+    /// Returns the authoritative or remaining cache TTL when known.
+    pub fn ttl(&self) -> Option<Duration> {
+        self.remaining_ttl_at(Instant::now())
+    }
+
+    fn first_socket_addr(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+        self.socket_addrs
+            .first()
+            .copied()
+            .ok_or_else(|| TransportError::NoResolvedAddress(domain.to_owned(), port))
+    }
+
+    fn ensure_non_empty(self, domain: &str, port: u16) -> Result<Self, TransportError> {
+        if self.socket_addrs.is_empty() {
+            Err(TransportError::NoResolvedAddress(domain.to_owned(), port))
+        } else {
+            Ok(self)
+        }
+    }
+
+    fn with_ttl_cap(mut self, cap: Duration) -> Self {
+        let now = Instant::now();
+        self.ttl = Some(self.remaining_ttl_at(now).map_or(cap, |ttl| ttl.min(cap)));
+        self.observed_at = now;
+        self
+    }
+
+    fn with_fallback_ttl(mut self, fallback: Duration) -> Self {
+        let now = Instant::now();
+        self.ttl = Some(self.remaining_ttl_at(now).unwrap_or(fallback));
+        self.observed_at = now;
+        self
+    }
+
+    fn with_cache_expiry(&self, expires_at: Instant) -> Self {
+        let observed_at = Instant::now();
+        Self {
+            socket_addrs: Arc::clone(&self.socket_addrs),
+            ttl: Some(expires_at.saturating_duration_since(observed_at)),
+            observed_at,
+        }
+    }
+
+    fn remaining_ttl_at(&self, now: Instant) -> Option<Duration> {
+        self.ttl
+            .map(|ttl| ttl.saturating_sub(now.saturating_duration_since(self.observed_at)))
+    }
+}
+
+/// Resolves a domain into addresses suitable for the configured port.
+///
+/// Callers pass the configured port and must dial returned `SocketAddr`
+/// candidates as-is. A resolver may intentionally replace the port or attach
+/// IPv6 flow/scope metadata.
+///
+/// Existing implementations only need to implement [`DnsResolver::resolve`].
+/// Rich resolvers should override [`DnsResolver::resolve_all`] so routing and
+/// dialing can consume every answer and the DNS TTL.
+#[async_trait]
+pub trait DnsResolver: Send + Sync {
+    async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError>;
+
+    async fn resolve_all(&self, domain: &str, port: u16) -> Result<DnsLookup, TransportError> {
+        let address = self.resolve(domain, port).await?;
+        Ok(DnsLookup::single(address, None))
+    }
+
+    /// Resolves addresses permitted by `strategy`.
+    ///
+    /// The default preserves compatibility with address-oriented resolvers by
+    /// filtering [`DnsResolver::resolve_all`] after it completes. Resolvers
+    /// that control DNS wire queries or family-aware caches should override
+    /// this method so the strategy is applied before I/O and single-flight.
+    async fn resolve_all_with_strategy(
+        &self,
+        domain: &str,
+        port: u16,
+        strategy: DnsQueryStrategy,
+    ) -> Result<DnsLookup, TransportError> {
+        let lookup = self.resolve_all(domain, port).await?;
+        filter_dns_lookup_by_strategy(lookup, domain, port, strategy)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SystemDnsResolver;
+
+#[async_trait]
+impl DnsResolver for SystemDnsResolver {
+    async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+        self.resolve_all(domain, port)
+            .await?
+            .first_socket_addr(domain, port)
+    }
+
+    async fn resolve_all(&self, domain: &str, port: u16) -> Result<DnsLookup, TransportError> {
+        let addrs = tokio::net::lookup_host((domain, port))
+            .await
+            .map_err(|source| TransportError::Dns {
+                domain: domain.to_owned(),
+                port,
+                source,
+            })?;
+
+        DnsLookup::new(addrs, None).ensure_non_empty(domain, port)
+    }
+}
+
+const DNS_DEFAULT_TTL: Duration = Duration::from_secs(300);
+const DNS_NEGATIVE_TTL: Duration = Duration::from_secs(30);
+const DNS_STATIC_HOST_TTL: Duration = Duration::from_secs(10);
+const DNS_CACHE_MAX_ENTRIES: usize = 256;
+const MAX_DNS_UDP_RESPONSE_SIZE: usize = 4096;
+const MAX_DNS_HTTPS_RESPONSE_SIZE: usize = u16::MAX as usize;
+const DNS_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
+const DNS_LOCAL_TCP_FALLBACK_DELAY: Duration = Duration::from_millis(300);
+const MAX_DNS_ALIAS_DEPTH: usize = 8;
+
+/// TTL cache over another resolver. Proxy clients open a new outbound
+/// connection per session; resolving the (usually single) server domain on
+/// every connect adds tens of milliseconds on mobile networks.
+pub struct CachingDnsResolver {
+    inner: Arc<dyn DnsResolver>,
+    ttl: Duration,
+    cap_authoritative_ttl: bool,
+    negative_ttl: Duration,
+    stale_ttl: Option<Duration>,
+    state: Arc<Mutex<DnsCacheState>>,
+    refresh_shutdown: watch::Sender<()>,
+}
+
+#[derive(Default)]
+struct DnsCacheState {
+    resolved: HashMap<(String, u16, DnsQueryStrategy), CachedDnsOutcome>,
+    in_flight: HashMap<(String, u16, DnsQueryStrategy), Arc<InFlightDnsLookup>>,
+    access_sequence: u64,
+}
+
+struct CachedDnsOutcome {
+    outcome: InFlightDnsOutcome,
+    expires_at: Instant,
+    stale_until: Instant,
+    last_used: u64,
+}
+
+impl DnsCacheState {
+    fn next_access_sequence(&mut self) -> u64 {
+        self.access_sequence = self.access_sequence.wrapping_add(1);
+        if self.access_sequence == 0 {
+            for entry in self.resolved.values_mut() {
+                entry.last_used = 0;
+            }
+            self.access_sequence = 1;
+        }
+        self.access_sequence
+    }
+}
+
+struct InFlightDnsLookup {
+    notify: Arc<Notify>,
+    outcome: Mutex<Option<InFlightDnsOutcome>>,
+}
+
+#[derive(Clone)]
+enum InFlightDnsOutcome {
+    Resolved(DnsLookup),
+    NeedsDns(String),
+    Dns {
+        domain: String,
+        port: u16,
+        kind: io::ErrorKind,
+        message: String,
+    },
+    NameError(String, u16),
+    NoData(String, u16),
+    NoResolvedAddress(String, u16),
+    Other(String),
+}
+
+impl InFlightDnsOutcome {
+    fn from_result(result: &Result<DnsLookup, TransportError>) -> Self {
+        match result {
+            Ok(lookup) => Self::Resolved(lookup.clone()),
+            Err(TransportError::NeedsDns(domain)) => Self::NeedsDns(domain.clone()),
+            Err(TransportError::Dns {
+                domain,
+                port,
+                source,
+            }) => Self::Dns {
+                domain: domain.clone(),
+                port: *port,
+                kind: source.kind(),
+                message: source.to_string(),
+            },
+            Err(TransportError::DnsNameError(domain, port)) => {
+                Self::NameError(domain.clone(), *port)
+            }
+            Err(TransportError::DnsNoData(domain, port)) => Self::NoData(domain.clone(), *port),
+            Err(TransportError::NoResolvedAddress(domain, port)) => {
+                Self::NoResolvedAddress(domain.clone(), *port)
+            }
+            Err(error) => Self::Other(error.to_string()),
+        }
+    }
+
+    fn into_result(
+        self,
+        requested_domain: &str,
+        requested_port: u16,
+    ) -> Result<DnsLookup, TransportError> {
+        match self {
+            Self::Resolved(lookup) => Ok(lookup),
+            Self::NeedsDns(domain) => Err(TransportError::NeedsDns(domain)),
+            Self::Dns {
+                domain,
+                port,
+                kind,
+                message,
+            } => Err(TransportError::Dns {
+                domain,
+                port,
+                source: io::Error::new(kind, message),
+            }),
+            Self::NameError(domain, port) => Err(TransportError::DnsNameError(domain, port)),
+            Self::NoData(domain, port) => Err(TransportError::DnsNoData(domain, port)),
+            Self::NoResolvedAddress(domain, port) => {
+                Err(TransportError::NoResolvedAddress(domain, port))
+            }
+            Self::Other(message) => Err(TransportError::Dns {
+                domain: requested_domain.to_owned(),
+                port: requested_port,
+                source: io::Error::other(message),
+            }),
+        }
+    }
+}
+
+impl InFlightDnsLookup {
+    fn new() -> Self {
+        Self {
+            notify: Arc::new(Notify::new()),
+            outcome: Mutex::new(None),
+        }
+    }
+}
+
+struct InFlightDnsLeader {
+    state: Arc<Mutex<DnsCacheState>>,
+    key: (String, u16, DnsQueryStrategy),
+    lookup: Arc<InFlightDnsLookup>,
+    negative_ttl: Duration,
+    stale_ttl: Option<Duration>,
+    active: bool,
+}
+
+impl InFlightDnsLeader {
+    fn finish(&mut self, outcome: InFlightDnsOutcome) {
+        {
+            let mut stored_outcome = self
+                .lookup
+                .outcome
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *stored_outcome = Some(outcome.clone());
+        }
+
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let still_leader = state
+            .in_flight
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.lookup));
+        if still_leader {
+            state.in_flight.remove(&self.key);
+            let (ttl, allow_stale) = match &outcome {
+                InFlightDnsOutcome::Resolved(lookup) => {
+                    (lookup.ttl().filter(|ttl| !ttl.is_zero()), true)
+                }
+                InFlightDnsOutcome::NameError(_, _) | InFlightDnsOutcome::NoData(_, _) => (
+                    (!self.negative_ttl.is_zero()).then_some(self.negative_ttl),
+                    false,
+                ),
+                _ => (None, false),
+            };
+            if let Some(ttl) = ttl {
+                let now = Instant::now();
+                if let Some(expires_at) = now.checked_add(ttl) {
+                    let stale_until = if allow_stale {
+                        self.stale_ttl
+                            .and_then(|ttl| expires_at.checked_add(ttl))
+                            .unwrap_or(expires_at)
+                    } else {
+                        expires_at
+                    };
+                    if state.resolved.len() >= DNS_CACHE_MAX_ENTRIES {
+                        state.resolved.retain(|_, entry| entry.stale_until > now);
+                    }
+                    if state.resolved.len() >= DNS_CACHE_MAX_ENTRIES {
+                        let lru_key = state
+                            .resolved
+                            .iter()
+                            .min_by_key(|(_, entry)| entry.last_used)
+                            .map(|(key, _)| key.clone());
+                        if let Some(lru_key) = lru_key {
+                            state.resolved.remove(&lru_key);
+                        }
+                    }
+                    let access_sequence = state.next_access_sequence();
+                    state.resolved.insert(
+                        self.key.clone(),
+                        CachedDnsOutcome {
+                            outcome,
+                            expires_at,
+                            stale_until,
+                            last_used: access_sequence,
+                        },
+                    );
+                }
+            }
+        }
+        self.active = false;
+        drop(state);
+        self.lookup.notify.notify_waiters();
+    }
+}
+
+impl Drop for InFlightDnsLeader {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let still_leader = state
+            .in_flight
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.lookup));
+        if still_leader {
+            state.in_flight.remove(&self.key);
+        }
+        drop(state);
+        self.lookup.notify.notify_waiters();
+    }
+}
+
+impl CachingDnsResolver {
+    pub fn new(inner: Arc<dyn DnsResolver>) -> Self {
+        Self {
+            inner,
+            ttl: DNS_DEFAULT_TTL,
+            cap_authoritative_ttl: false,
+            negative_ttl: DNS_NEGATIVE_TTL,
+            stale_ttl: None,
+            state: Arc::new(Mutex::new(DnsCacheState::default())),
+            refresh_shutdown: watch::channel(()).0,
+        }
+    }
+
+    pub fn with_ttl(inner: Arc<dyn DnsResolver>, ttl: Duration) -> Self {
+        Self {
+            inner,
+            ttl,
+            cap_authoritative_ttl: true,
+            negative_ttl: DNS_NEGATIVE_TTL,
+            stale_ttl: None,
+            state: Arc::new(Mutex::new(DnsCacheState::default())),
+            refresh_shutdown: watch::channel(()).0,
+        }
+    }
+
+    /// Enables bounded stale-while-revalidate for positive answers.
+    ///
+    /// Authoritative NXDOMAIN/NODATA outcomes still expire after the fixed
+    /// negative-cache TTL and are never served stale.
+    pub fn with_stale_ttl(inner: Arc<dyn DnsResolver>, stale_ttl: Duration) -> Self {
+        Self {
+            inner,
+            ttl: DNS_DEFAULT_TTL,
+            cap_authoritative_ttl: false,
+            negative_ttl: DNS_NEGATIVE_TTL,
+            stale_ttl: (!stale_ttl.is_zero()).then_some(stale_ttl),
+            state: Arc::new(Mutex::new(DnsCacheState::default())),
+            refresh_shutdown: watch::channel(()).0,
+        }
+    }
+
+    fn spawn_refresh(
+        &self,
+        domain: String,
+        port: u16,
+        strategy: DnsQueryStrategy,
+        key: (String, u16, DnsQueryStrategy),
+        lookup: Arc<InFlightDnsLookup>,
+    ) {
+        let inner = Arc::clone(&self.inner);
+        let state = Arc::clone(&self.state);
+        let ttl = self.ttl;
+        let cap_authoritative_ttl = self.cap_authoritative_ttl;
+        let negative_ttl = self.negative_ttl;
+        let stale_ttl = self.stale_ttl;
+        let mut refresh_shutdown = self.refresh_shutdown.subscribe();
+        crate::lifecycle::spawn(async move {
+            let mut leader = InFlightDnsLeader {
+                state,
+                key,
+                lookup,
+                negative_ttl,
+                stale_ttl,
+                active: true,
+            };
+            let resolved = tokio::select! {
+                biased;
+                _ = refresh_shutdown.changed() => return,
+                resolved = resolve_dns_lookup(
+                    inner,
+                    &domain,
+                    port,
+                    strategy,
+                    ttl,
+                    cap_authoritative_ttl,
+                ) => resolved,
+            };
+            leader.finish(InFlightDnsOutcome::from_result(&resolved));
+        });
+    }
+}
+
+async fn resolve_dns_lookup(
+    inner: Arc<dyn DnsResolver>,
+    domain: &str,
+    port: u16,
+    strategy: DnsQueryStrategy,
+    ttl: Duration,
+    cap_authoritative_ttl: bool,
+) -> Result<DnsLookup, TransportError> {
+    let resolved = match strategy {
+        DnsQueryStrategy::UseIp => inner.resolve_all(domain, port).await,
+        DnsQueryStrategy::UseIpv4 | DnsQueryStrategy::UseIpv6 => {
+            inner
+                .resolve_all_with_strategy(domain, port, strategy)
+                .await
+        }
+    };
+    resolved
+        .and_then(|lookup| lookup.ensure_non_empty(domain, port))
+        .map(|lookup| {
+            if cap_authoritative_ttl {
+                lookup.with_ttl_cap(ttl)
+            } else {
+                lookup.with_fallback_ttl(ttl)
+            }
+        })
+}
+
+#[async_trait]
+impl DnsResolver for CachingDnsResolver {
+    async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+        self.resolve_all(domain, port)
+            .await?
+            .first_socket_addr(domain, port)
+    }
+
+    async fn resolve_all(&self, domain: &str, port: u16) -> Result<DnsLookup, TransportError> {
+        self.resolve_all_with_strategy(domain, port, DnsQueryStrategy::UseIp)
+            .await
+    }
+
+    async fn resolve_all_with_strategy(
+        &self,
+        domain: &str,
+        port: u16,
+        strategy: DnsQueryStrategy,
+    ) -> Result<DnsLookup, TransportError> {
+        let key = (
+            normalize_dns_name(domain).unwrap_or_else(|| domain.to_ascii_lowercase()),
+            port,
+            strategy,
+        );
+        let lookup = loop {
+            let now = Instant::now();
+            let (cached, refresh, waiter, leader) = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let access_sequence = state.next_access_sequence();
+                let cached = state.resolved.get_mut(&key).and_then(|entry| {
+                    if entry.expires_at > now {
+                        entry.last_used = access_sequence;
+                        Some((entry.outcome.clone(), entry.expires_at, false))
+                    } else if entry.stale_until > now {
+                        entry.last_used = access_sequence;
+                        Some((entry.outcome.clone(), entry.expires_at, true))
+                    } else {
+                        None
+                    }
+                });
+                if cached.is_none() {
+                    state.resolved.remove(&key);
+                }
+
+                if let Some((outcome, expires_at, stale)) = cached {
+                    let refresh = if stale && !state.in_flight.contains_key(&key) {
+                        let lookup = Arc::new(InFlightDnsLookup::new());
+                        state.in_flight.insert(key.clone(), Arc::clone(&lookup));
+                        Some(lookup)
+                    } else {
+                        None
+                    };
+                    (Some((outcome, expires_at)), refresh, None, None)
+                } else {
+                    match state.in_flight.get(&key) {
+                        Some(lookup) => {
+                            let lookup = Arc::clone(lookup);
+                            let waiter = Arc::clone(&lookup.notify).notified_owned();
+                            (None, None, Some((lookup, waiter)), None)
+                        }
+                        None => {
+                            let lookup = Arc::new(InFlightDnsLookup::new());
+                            state.in_flight.insert(key.clone(), Arc::clone(&lookup));
+                            (None, None, None, Some(lookup))
+                        }
+                    }
+                }
+            };
+
+            if let Some(refresh) = refresh {
+                self.spawn_refresh(domain.to_owned(), port, strategy, key.clone(), refresh);
+            }
+            if let Some((outcome, expires_at)) = cached {
+                let outcome = match outcome {
+                    InFlightDnsOutcome::Resolved(lookup) => {
+                        InFlightDnsOutcome::Resolved(lookup.with_cache_expiry(expires_at))
+                    }
+                    outcome => outcome,
+                };
+                return outcome.into_result(domain, port);
+            }
+            if let Some((lookup, waiter)) = waiter {
+                waiter.await;
+                let outcome = lookup
+                    .outcome
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                match outcome {
+                    Some(outcome) => return outcome.into_result(domain, port),
+                    None => continue,
+                }
+            }
+
+            break leader.expect("a DNS lookup without a waiter must have a leader");
+        };
+
+        let mut leader = InFlightDnsLeader {
+            state: Arc::clone(&self.state),
+            key,
+            lookup,
+            negative_ttl: self.negative_ttl,
+            stale_ttl: self.stale_ttl,
+            active: true,
+        };
+        let resolved = resolve_dns_lookup(
+            Arc::clone(&self.inner),
+            domain,
+            port,
+            strategy,
+            self.ttl,
+            self.cap_authoritative_ttl,
+        )
+        .await;
+        leader.finish(InFlightDnsOutcome::from_result(&resolved));
+        resolved
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameServer {
+    Socket(SocketAddr),
+    Domain { domain: String, port: u16 },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum DnsQueryStrategy {
+    #[default]
+    UseIp,
+    UseIpv4,
+    UseIpv6,
+}
+
+impl DnsQueryStrategy {
+    fn accepts(self, ip: IpAddr) -> bool {
+        match self {
+            Self::UseIp => true,
+            Self::UseIpv4 => match ip {
+                IpAddr::V4(_) => true,
+                IpAddr::V6(ipv6) => ipv6.to_ipv4_mapped().is_some(),
+            },
+            Self::UseIpv6 => match ip {
+                IpAddr::V4(_) => false,
+                IpAddr::V6(ipv6) => ipv6.to_ipv4_mapped().is_none(),
+            },
+        }
+    }
+
+    fn intersect(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (Self::UseIp, strategy) | (strategy, Self::UseIp) => Some(strategy),
+            (Self::UseIpv4, Self::UseIpv4) => Some(Self::UseIpv4),
+            (Self::UseIpv6, Self::UseIpv6) => Some(Self::UseIpv6),
+            (Self::UseIpv4, Self::UseIpv6) | (Self::UseIpv6, Self::UseIpv4) => None,
+        }
+    }
+}
+
+fn filter_dns_lookup_by_strategy(
+    lookup: DnsLookup,
+    domain: &str,
+    port: u16,
+    strategy: DnsQueryStrategy,
+) -> Result<DnsLookup, TransportError> {
+    if strategy == DnsQueryStrategy::UseIp {
+        return lookup.ensure_non_empty(domain, port);
+    }
+
+    let ttl = lookup.ttl();
+    DnsLookup::new(
+        lookup
+            .socket_addrs()
+            .iter()
+            .copied()
+            .filter(|address| strategy.accepts(address.ip())),
+        ttl,
+    )
+    .ensure_non_empty(domain, port)
+    .map_err(|_| TransportError::DnsNoData(domain.to_owned(), port))
+}
+
+/// Wire transport used for a DNS query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsQueryTransportKind {
+    Udp,
+    Tcp,
+    /// DNS over TLS with RFC 7858 length-prefixed DNS messages.
+    Tls,
+    /// DNS over HTTPS with RFC 8484 POST messages.
+    Https,
+    /// DNS over QUIC with one RFC 9250 stream per query.
+    Quic,
+}
+
+/// Determines whether a DNS exchange enters the routing layer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DnsQueryDispatch {
+    /// Route the exchange like any other outbound connection.
+    #[default]
+    Routed,
+    /// Connect to the name server directly, outside configured routing.
+    Local,
+}
+
+/// Routing metadata attached to one encoded DNS exchange.
+///
+/// The inbound tag identifies the configured DNS client to the routing layer;
+/// it is independent from the inbound that triggered the destination lookup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DnsQueryMetadata<'a> {
+    pub inbound_tag: Option<&'a str>,
+    pub dispatch: DnsQueryDispatch,
+    /// HTTP path and optional query for an HTTPS exchange.
+    pub https_path: Option<&'a str>,
+}
+
+impl<'a> DnsQueryMetadata<'a> {
+    /// Constructs metadata for a routed DNS exchange.
+    pub const fn new(inbound_tag: Option<&'a str>) -> Self {
+        Self {
+            inbound_tag,
+            dispatch: DnsQueryDispatch::Routed,
+            https_path: None,
+        }
+    }
+
+    /// Constructs metadata for a local DNS exchange that bypasses routing.
+    pub const fn local(inbound_tag: Option<&'a str>) -> Self {
+        Self {
+            inbound_tag,
+            dispatch: DnsQueryDispatch::Local,
+            https_path: None,
+        }
+    }
+
+    /// Attaches the request path used by a DNS-over-HTTPS exchange.
+    pub const fn with_https_path(mut self, https_path: &'a str) -> Self {
+        self.https_path = Some(https_path);
+        self
+    }
+}
+
+/// Wire and dispatch behavior for one configured DNS client.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NameServerTransport {
+    /// Start with routed UDP and retry over routed TCP only after a valid
+    /// truncated response.
+    #[default]
+    Classic,
+    /// Start immediately with routed TCP.
+    TcpRouted,
+    /// Start immediately with local TCP, bypassing configured routing.
+    TcpLocal,
+    /// Start immediately with routed DNS over TLS.
+    TlsRouted,
+    /// Start immediately with routed DNS over HTTPS.
+    HttpsRouted,
+    /// Start immediately with local DNS over HTTPS.
+    HttpsLocal,
+    /// Start immediately with local DNS over QUIC.
+    QuicLocal,
+}
+
+/// Exchanges already encoded DNS messages with a configured name server.
+///
+/// `ConfiguredDnsResolver` remains responsible for query construction,
+/// response validation, A/AAAA/CNAME handling, failover, and TCP retry. This
+/// boundary lets an embedding runtime route the exchange through a proxy
+/// without duplicating the DNS wire codec. UDP implementations must discard
+/// unrelated datagrams and return only a response whose envelope matches the
+/// supplied query; [`dns_response_matches_query`] implements that check.
+#[async_trait]
+pub trait DnsQueryTransport: Send + Sync {
+    async fn exchange(
+        &self,
+        server: &NameServer,
+        transport: DnsQueryTransportKind,
+        metadata: DnsQueryMetadata<'_>,
+        query: &[u8],
+    ) -> io::Result<Vec<u8>>;
+}
+
+struct DirectDnsQueryTransport {
+    bootstrap_resolver: Arc<dyn DnsResolver>,
+    socket_protector: Option<Arc<dyn SocketProtector>>,
+    tls_connector: Result<Arc<TlsConnector>, String>,
+}
+
+impl DirectDnsQueryTransport {
+    fn new(
+        bootstrap_resolver: Arc<dyn DnsResolver>,
+        socket_protector: Option<Arc<dyn SocketProtector>>,
+    ) -> Self {
+        Self {
+            bootstrap_resolver,
+            socket_protector,
+            tls_connector: TlsConnector::system()
+                .map(Arc::new)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    async fn server_addrs(&self, server: &NameServer) -> io::Result<Vec<SocketAddr>> {
+        match server {
+            NameServer::Socket(addr) => Ok(vec![*addr]),
+            NameServer::Domain { domain, port } => {
+                let lookup = self
+                    .bootstrap_resolver
+                    .resolve_all(domain, *port)
+                    .await
+                    .map_err(io::Error::other)?;
+                if lookup.socket_addrs().is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("no bootstrap address resolved for DNS server {domain}:{port}"),
+                    ));
+                }
+                Ok(lookup.socket_addrs().to_vec())
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl DnsQueryTransport for DirectDnsQueryTransport {
+    async fn exchange(
+        &self,
+        server: &NameServer,
+        transport: DnsQueryTransportKind,
+        metadata: DnsQueryMetadata<'_>,
+        query: &[u8],
+    ) -> io::Result<Vec<u8>> {
+        let server_addrs = self.server_addrs(server).await?;
+        match transport {
+            DnsQueryTransportKind::Udp => {
+                exchange_direct_udp(server_addrs[0], query, self.socket_protector.as_deref()).await
+            }
+            DnsQueryTransportKind::Tcp => {
+                exchange_direct_tcp_candidates(
+                    &server_addrs,
+                    query,
+                    self.socket_protector.as_deref(),
+                )
+                .await
+            }
+            DnsQueryTransportKind::Tls => {
+                let connector = self.tls_connector.as_deref().map_err(|message| {
+                    io::Error::other(format!("DNS TLS connector unavailable: {message}"))
+                })?;
+                exchange_direct_tls_candidates(
+                    server,
+                    &server_addrs,
+                    query,
+                    self.socket_protector.as_deref(),
+                    connector,
+                )
+                .await
+            }
+            DnsQueryTransportKind::Https => {
+                let https_path = metadata.https_path.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "DNS-over-HTTPS exchange is missing its request path",
+                    )
+                })?;
+                let connector = self.tls_connector.as_deref().map_err(|message| {
+                    io::Error::other(format!("DNS TLS connector unavailable: {message}"))
+                })?;
+                exchange_direct_https_candidates(
+                    server,
+                    &server_addrs,
+                    https_path,
+                    query,
+                    self.socket_protector.as_deref(),
+                    connector,
+                )
+                .await
+            }
+            DnsQueryTransportKind::Quic => {
+                if metadata.dispatch != DnsQueryDispatch::Local {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "routed DNS-over-QUIC is not supported",
+                    ));
+                }
+                let connector = self.tls_connector.as_deref().map_err(|message| {
+                    io::Error::other(format!("DNS TLS connector unavailable: {message}"))
+                })?;
+                exchange_dns_quic_candidates(
+                    server,
+                    &server_addrs,
+                    query,
+                    self.socket_protector.clone(),
+                    connector,
+                )
+                .await
+            }
+        }
+    }
+}
+
+/// Exchanges one DNS message over the first usable protected QUIC candidate.
+pub async fn exchange_dns_quic_candidates(
+    server: &NameServer,
+    server_addrs: &[SocketAddr],
+    query: &[u8],
+    socket_protector: Option<Arc<dyn SocketProtector>>,
+    tls_connector: &TlsConnector,
+) -> io::Result<Vec<u8>> {
+    if query.is_empty() || query.len() > usize::from(u16::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "DNS-over-QUIC query size is invalid",
+        ));
+    }
+    let tls = dns_tls_client_config(server);
+    let tls_config = tls_connector
+        .quic_client_config_for(&tls, b"doq")
+        .map_err(io::Error::other)?;
+    let server_name = tls.server_name;
+    let mut last_error = None;
+    for remote_addr in server_addrs.iter().copied() {
+        let config = crate::stream::H3ConnectConfig {
+            remote_addr,
+            server_name: server_name.clone(),
+            tls_config: Arc::clone(&tls_config),
+            socket_protector: socket_protector.clone(),
+            quic: crate::stream::H3QuicConfig::default(),
+        };
+        let (endpoint, connection, _) =
+            match crate::stream::connect_quic_transport(config, b"doq").await {
+                Ok(connected) => connected,
+                Err(error) => {
+                    last_error = Some(io::Error::other(error));
+                    continue;
+                }
+            };
+        let result = exchange_dns_quic_stream(&connection, query).await;
+        let code = quinn::VarInt::from_u32(0);
+        connection.close(code, b"DNS-over-QUIC exchange complete");
+        endpoint.close(code, b"DNS-over-QUIC exchange complete");
+        match result {
+            Ok(response) => return Ok(response),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "DNS-over-QUIC server has no usable address",
+        )
+    }))
+}
+
+async fn exchange_dns_quic_stream(
+    connection: &quinn::Connection,
+    query: &[u8],
+) -> io::Result<Vec<u8>> {
+    let (mut send, mut recv) = connection.open_bi().await.map_err(io::Error::other)?;
+    send.write_u16(u16::try_from(query.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "DNS-over-QUIC query is too large",
+        )
+    })?)
+    .await?;
+    send.write_all(query).await?;
+    send.finish().map_err(io::Error::other)?;
+
+    let response_len = usize::from(recv.read_u16().await?);
+    if response_len == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DNS-over-QUIC response is empty",
+        ));
+    }
+    let mut response = vec![0; response_len];
+    recv.read_exact(&mut response)
+        .await
+        .map_err(io::Error::other)?;
+    let trailing = recv.read_to_end(0).await.map_err(io::Error::other)?;
+    debug_assert!(trailing.is_empty());
+    Ok(response)
+}
+
+/// Exchanges one RFC 8484 POST over an already authenticated HTTP/2 stream.
+pub async fn exchange_dns_https_h2(
+    stream: BoxedTransportStream,
+    server: &NameServer,
+    https_path: &str,
+    query: &[u8],
+) -> io::Result<Vec<u8>> {
+    if query.len() > usize::from(u16::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "DNS-over-HTTPS query is too large",
+        ));
+    }
+    let authority = dns_https_authority(server);
+    let uri = format!("https://{authority}{https_path}")
+        .parse::<http::Uri>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid DNS-over-HTTPS URI"))?;
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/dns-message")
+        .header(header::ACCEPT, "application/dns-message")
+        .header(header::CONTENT_LENGTH, query.len())
+        .body(())
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid DNS-over-HTTPS request",
+            )
+        })?;
+    let client = crate::stream::connect_h2(stream)
+        .await
+        .map_err(io::Error::other)?;
+    let body = client
+        .send_fixed(request, Bytes::copy_from_slice(query))
+        .await
+        .map_err(io::Error::other)?;
+    let content_type = body
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    if content_type != Some("application/dns-message") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DNS-over-HTTPS response has an invalid content type",
+        ));
+    }
+    let mut response = Vec::new();
+    body.take((MAX_DNS_HTTPS_RESPONSE_SIZE + 1) as u64)
+        .read_to_end(&mut response)
+        .await?;
+    if response.len() > MAX_DNS_HTTPS_RESPONSE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DNS-over-HTTPS response is too large",
+        ));
+    }
+    Ok(response)
+}
+
+fn dns_https_authority(server: &NameServer) -> String {
+    match server {
+        NameServer::Socket(address) => match address {
+            SocketAddr::V4(address) if address.port() == 443 => address.ip().to_string(),
+            SocketAddr::V4(_) => address.to_string(),
+            SocketAddr::V6(address) if address.port() == 443 => format!("[{}]", address.ip()),
+            SocketAddr::V6(_) => address.to_string(),
+        },
+        NameServer::Domain { domain, port: 443 } => domain.clone(),
+        NameServer::Domain { domain, port } => format!("{domain}:{port}"),
+    }
+}
+
+/// One configured DNS client together with its Xray selection policy.
+///
+/// Multiple entries may intentionally point at the same endpoint: selection
+/// and failover operate on entries, not on deduplicated socket addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameServerPolicy {
+    pub server: NameServer,
+    /// Inbound tag presented by this DNS client to the routing layer.
+    pub tag: Option<String>,
+    pub transport: NameServerTransport,
+    pub https_path: Option<String>,
+    pub domains: DomainMatcherSet,
+    pub expected_ips: DnsIpFilter,
+    pub unexpected_ips: DnsIpFilter,
+    pub skip_fallback: bool,
+    pub query_strategy: DnsQueryStrategy,
+    pub final_query: bool,
+    /// Overrides the resolver's default wall-clock budget for this client.
+    pub timeout: Option<Duration>,
+}
+
+impl NameServerPolicy {
+    pub fn new(server: NameServer) -> Self {
+        Self {
+            server,
+            tag: None,
+            transport: NameServerTransport::Classic,
+            https_path: None,
+            domains: DomainMatcherSet::default(),
+            expected_ips: DnsIpFilter::default(),
+            unexpected_ips: DnsIpFilter::default(),
+            skip_fallback: false,
+            query_strategy: DnsQueryStrategy::UseIp,
+            final_query: false,
+            timeout: None,
+        }
+    }
+}
+
+/// A compact, query-ready set of configured DNS server policies.
+///
+/// Construction consumes the source policies together with their compiled
+/// [`DomainMatcherSet`] rules. The set preserves configured server indices and
+/// therefore remains suitable for duplicate endpoints and `finalQuery`.
+#[derive(Debug, Default)]
+pub struct CompiledNameServerPolicies {
+    policies: Vec<CompiledNameServerPolicy>,
+    matcher_count: usize,
+    pattern_bytes: usize,
+}
+
+impl CompiledNameServerPolicies {
+    pub fn new(policies: Vec<NameServerPolicy>) -> Self {
+        let mut matcher_count = 0;
+        let mut pattern_bytes = 0;
+        let policies = policies
+            .into_iter()
+            .map(|policy| {
+                let NameServerPolicy {
+                    server,
+                    tag,
+                    transport,
+                    https_path,
+                    domains,
+                    expected_ips,
+                    unexpected_ips,
+                    skip_fallback,
+                    query_strategy,
+                    final_query,
+                    timeout,
+                } = policy;
+                matcher_count += domains.matcher_count();
+                pattern_bytes += domains.pattern_bytes();
+                CompiledNameServerPolicy {
+                    server,
+                    tag,
+                    transport,
+                    https_path,
+                    domains,
+                    expected_ips,
+                    unexpected_ips,
+                    skip_fallback,
+                    query_strategy,
+                    final_query,
+                    timeout,
+                }
+            })
+            .collect();
+        Self {
+            policies,
+            matcher_count,
+            pattern_bytes,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.policies.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.policies.is_empty()
+    }
+
+    /// Returns the configured endpoint at a selected policy index.
+    pub fn name_server(&self, index: usize) -> Option<&NameServer> {
+        self.policies.get(index).map(|policy| &policy.server)
+    }
+
+    /// Returns the routing inbound tag at a selected policy index.
+    pub fn tag(&self, index: usize) -> Option<&str> {
+        self.policies
+            .get(index)
+            .and_then(|policy| policy.tag.as_deref())
+    }
+
+    /// Returns the wire and dispatch behavior at a selected policy index.
+    pub fn transport(&self, index: usize) -> Option<NameServerTransport> {
+        self.policies.get(index).map(|policy| policy.transport)
+    }
+
+    /// Returns the HTTP path and optional query for a selected HTTPS policy.
+    pub fn https_path(&self, index: usize) -> Option<&str> {
+        self.policies
+            .get(index)
+            .and_then(|policy| policy.https_path.as_deref())
+    }
+
+    /// Returns the configured timeout override at a selected policy index.
+    pub fn timeout(&self, index: usize) -> Option<Duration> {
+        self.policies.get(index).and_then(|policy| policy.timeout)
+    }
+
+    /// Returns the number of source domain-matcher entries compiled into this set.
+    pub fn matcher_count(&self) -> usize {
+        self.matcher_count
+    }
+
+    /// Returns the matcher-pattern payload retained by the compact set.
+    ///
+    /// This intentionally excludes allocator and regex-engine overhead, so it
+    /// is a deterministic payload metric rather than a process-RSS estimate.
+    pub fn pattern_bytes(&self) -> usize {
+        self.pattern_bytes
+    }
+
+    /// Builds the serial candidate plan with Xray's match/fallback ordering.
+    pub fn select_indices(
+        &self,
+        domain: &str,
+        disable_fallback: bool,
+        disable_fallback_if_match: bool,
+    ) -> Vec<usize> {
+        let domain = domain.trim_end_matches('.');
+        let mut selected = Vec::with_capacity(self.policies.len());
+        let mut selected_policies = SelectedPolicyTracker::new(self.policies.len());
+        let mut matched = false;
+
+        for (index, policy) in self.policies.iter().enumerate() {
+            if !policy.domains.matches(domain) {
+                continue;
+            }
+            matched = true;
+            selected_policies.insert(index);
+            selected.push(index);
+            if policy.final_query {
+                return selected;
+            }
+        }
+
+        if !(disable_fallback || disable_fallback_if_match && matched) {
+            for (index, policy) in self.policies.iter().enumerate() {
+                if selected_policies.contains(index) || policy.skip_fallback {
+                    continue;
+                }
+                selected_policies.insert(index);
+                selected.push(index);
+                if policy.final_query {
+                    break;
+                }
+            }
+        }
+
+        if selected.is_empty() && !self.policies.is_empty() {
+            selected.push(0);
+        }
+        selected
+    }
+
+    fn get(&self, index: usize) -> Option<&CompiledNameServerPolicy> {
+        self.policies.get(index)
+    }
+}
+
+#[derive(Debug)]
+struct CompiledNameServerPolicy {
+    server: NameServer,
+    tag: Option<String>,
+    transport: NameServerTransport,
+    https_path: Option<String>,
+    domains: DomainMatcherSet,
+    expected_ips: DnsIpFilter,
+    unexpected_ips: DnsIpFilter,
+    skip_fallback: bool,
+    query_strategy: DnsQueryStrategy,
+    final_query: bool,
+    timeout: Option<Duration>,
+}
+
+impl CompiledNameServerPolicy {
+    fn apply_ip_filters(&self, addresses: &mut Vec<IpAddr>) -> bool {
+        // Xray applies both mandatory filters before either preference filter.
+        // The mixed-mode ordering is observable when one filter removes the
+        // only subset preferred by the other.
+        if !self.expected_ips.is_soft() && !self.expected_ips.apply_expected(addresses) {
+            return false;
+        }
+        if !self.unexpected_ips.is_soft() && !self.unexpected_ips.apply_unexpected(addresses) {
+            return false;
+        }
+        if self.expected_ips.is_soft() && !self.expected_ips.apply_expected(addresses) {
+            return false;
+        }
+        if self.unexpected_ips.is_soft() && !self.unexpected_ips.apply_unexpected(addresses) {
+            return false;
+        }
+        true
+    }
+}
+
+enum SelectedPolicyTracker {
+    Small(u64),
+    Large(Vec<u64>),
+}
+
+impl SelectedPolicyTracker {
+    fn new(policy_count: usize) -> Self {
+        if policy_count <= u64::BITS as usize {
+            Self::Small(0)
+        } else {
+            Self::Large(vec![0; policy_count.div_ceil(u64::BITS as usize)])
+        }
+    }
+
+    fn insert(&mut self, index: usize) {
+        let word_index = index / u64::BITS as usize;
+        let bit = 1_u64 << (index % u64::BITS as usize);
+        match self {
+            Self::Small(bits) => *bits |= bit,
+            Self::Large(words) => words[word_index] |= bit,
+        }
+    }
+
+    fn contains(&self, index: usize) -> bool {
+        let word_index = index / u64::BITS as usize;
+        let bit = 1_u64 << (index % u64::BITS as usize);
+        match self {
+            Self::Small(bits) => *bits & bit != 0,
+            Self::Large(words) => words[word_index] & bit != 0,
+        }
+    }
+}
+
+pub struct ConfiguredDnsResolver {
+    hosts: Arc<DomainHostIndex<DnsHostTarget>>,
+    name_servers: Arc<CompiledNameServerPolicies>,
+    fallback: Arc<dyn DnsResolver>,
+    server_timeout: Duration,
+    system_fallback_timeout: Option<Duration>,
+    resolution_timeout: Option<Duration>,
+    query_transport: Arc<dyn DnsQueryTransport>,
+    uses_direct_query_transport: bool,
+    query_strategy: DnsQueryStrategy,
+    disable_fallback: bool,
+    disable_fallback_if_match: bool,
+}
+
+impl ConfiguredDnsResolver {
+    pub fn new(
+        hosts: impl Into<Arc<DomainHostIndex<DnsHostTarget>>>,
+        name_servers: Vec<NameServer>,
+        fallback: Arc<dyn DnsResolver>,
+    ) -> Self {
+        let query_transport = Arc::new(DirectDnsQueryTransport::new(Arc::clone(&fallback), None));
+        Self {
+            hosts: hosts.into(),
+            name_servers: Arc::new(CompiledNameServerPolicies::new(
+                name_servers
+                    .into_iter()
+                    .map(NameServerPolicy::new)
+                    .collect(),
+            )),
+            fallback,
+            server_timeout: Duration::from_secs(4),
+            system_fallback_timeout: Some(DNS_RESOLUTION_TIMEOUT),
+            resolution_timeout: None,
+            query_transport,
+            uses_direct_query_transport: true,
+            query_strategy: DnsQueryStrategy::default(),
+            disable_fallback: false,
+            disable_fallback_if_match: false,
+        }
+    }
+
+    pub fn with_name_server_policies(mut self, name_servers: Vec<NameServerPolicy>) -> Self {
+        self.name_servers = Arc::new(CompiledNameServerPolicies::new(name_servers));
+        self
+    }
+
+    /// Reuses an already compiled policy set across resolvers with different
+    /// DNS query transports (for example, multiple inbound routing contexts).
+    pub fn with_name_server_policy_set(
+        mut self,
+        name_servers: Arc<CompiledNameServerPolicies>,
+    ) -> Self {
+        self.name_servers = name_servers;
+        self
+    }
+
+    pub fn with_name_server_fallback_policy(
+        mut self,
+        disable_fallback: bool,
+        disable_fallback_if_match: bool,
+    ) -> Self {
+        self.disable_fallback = disable_fallback;
+        self.disable_fallback_if_match = disable_fallback_if_match;
+        self
+    }
+
+    pub fn with_query_strategy(mut self, query_strategy: DnsQueryStrategy) -> Self {
+        self.query_strategy = query_strategy;
+        self
+    }
+
+    pub fn with_server_timeout(mut self, timeout: Duration) -> Self {
+        self.server_timeout = timeout;
+        self
+    }
+
+    /// Leaves system fallback timing to the surrounding operation.
+    ///
+    /// This is intended for non-recursive endpoint bootstrap performed inside
+    /// an already bounded configured-server attempt.
+    pub fn without_system_fallback_timeout(mut self) -> Self {
+        self.system_fallback_timeout = None;
+        self
+    }
+
+    pub fn with_resolution_timeout(mut self, timeout: Duration) -> Self {
+        self.resolution_timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_socket_protector(mut self, protector: Arc<dyn SocketProtector>) -> Self {
+        if self.uses_direct_query_transport {
+            self.query_transport = Arc::new(DirectDnsQueryTransport::new(
+                Arc::clone(&self.fallback),
+                Some(protector),
+            ));
+        }
+        self
+    }
+
+    pub fn with_query_transport(mut self, transport: Arc<dyn DnsQueryTransport>) -> Self {
+        self.query_transport = transport;
+        self.uses_direct_query_transport = false;
+        self
+    }
+
+    async fn query_configured_servers(
+        &self,
+        domain: &str,
+        selected_servers: &[usize],
+        query_strategy: DnsQueryStrategy,
+    ) -> ConfiguredServersResult {
+        let mut last_negative = None;
+        let mut saw_compatible_server = false;
+        let mut saw_incompatible_server = false;
+        for &index in selected_servers {
+            let Some(name_server) = self.name_servers.get(index) else {
+                continue;
+            };
+            if query_strategy
+                .intersect(name_server.query_strategy)
+                .is_none()
+            {
+                saw_incompatible_server = true;
+                continue;
+            }
+            saw_compatible_server = true;
+            let deadline =
+                time::sleep(name_server.timeout.unwrap_or(self.server_timeout)).deadline();
+            let mut current_domain = domain.to_owned();
+            let mut cname_ttl_cap = None;
+            for depth in 0..MAX_DNS_ALIAS_DEPTH {
+                let started_at = Instant::now();
+                let result = self
+                    .query_configured_server(name_server, &current_domain, deadline, query_strategy)
+                    .await;
+                cname_ttl_cap = age_ttl_cap(cname_ttl_cap, started_at.elapsed());
+                match result {
+                    Ok(ConfiguredServerResult::Answer(ConfiguredDnsAnswer::Addresses(
+                        mut answer,
+                    ))) => {
+                        if let Some(ttl_cap) = cname_ttl_cap {
+                            answer.ttl = answer.ttl.min(ttl_cap);
+                        }
+                        return ConfiguredServersResult::Answer(answer);
+                    }
+                    Ok(ConfiguredServerResult::Answer(ConfiguredDnsAnswer::Cname {
+                        alias,
+                        ttl,
+                    })) => {
+                        cname_ttl_cap =
+                            Some(cname_ttl_cap.map_or(ttl, |current: Duration| current.min(ttl)));
+                        let alias = normalize_dns_name(&alias).unwrap_or(alias);
+                        if alias == current_domain || depth + 1 == MAX_DNS_ALIAS_DEPTH {
+                            last_negative = Some(ConfiguredDnsNegative::NoData);
+                            break;
+                        }
+                        current_domain = alias;
+                    }
+                    Ok(ConfiguredServerResult::Negative(negative)) => {
+                        last_negative = Some(negative);
+                        break;
+                    }
+                    Err(_) => {
+                        if cname_ttl_cap.is_some() {
+                            last_negative = Some(ConfiguredDnsNegative::NoData);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !saw_compatible_server && saw_incompatible_server {
+            return ConfiguredServersResult::Negative(ConfiguredDnsNegative::NoData);
+        }
+
+        last_negative.map_or(
+            ConfiguredServersResult::Unavailable,
+            ConfiguredServersResult::Negative,
+        )
+    }
+
+    async fn query_configured_server(
+        &self,
+        name_server: &CompiledNameServerPolicy,
+        domain: &str,
+        deadline: time::Instant,
+        query_strategy: DnsQueryStrategy,
+    ) -> io::Result<ConfiguredServerResult> {
+        let Some(query_strategy) = query_strategy.intersect(name_server.query_strategy) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "dns server query strategy has no address family in common with the requested strategy",
+            ));
+        };
+        let (transport, metadata) = match name_server.transport {
+            NameServerTransport::Classic => (
+                DnsQueryTransportKind::Udp,
+                DnsQueryMetadata::new(name_server.tag.as_deref()),
+            ),
+            NameServerTransport::TcpRouted => (
+                DnsQueryTransportKind::Tcp,
+                DnsQueryMetadata::new(name_server.tag.as_deref()),
+            ),
+            NameServerTransport::TcpLocal => (
+                DnsQueryTransportKind::Tcp,
+                DnsQueryMetadata::local(name_server.tag.as_deref()),
+            ),
+            NameServerTransport::TlsRouted => (
+                DnsQueryTransportKind::Tls,
+                DnsQueryMetadata::new(name_server.tag.as_deref()),
+            ),
+            NameServerTransport::HttpsRouted => (
+                DnsQueryTransportKind::Https,
+                DnsQueryMetadata::new(name_server.tag.as_deref()).with_https_path(
+                    name_server.https_path.as_deref().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "DNS-over-HTTPS policy is missing its request path",
+                        )
+                    })?,
+                ),
+            ),
+            NameServerTransport::HttpsLocal => (
+                DnsQueryTransportKind::Https,
+                DnsQueryMetadata::local(name_server.tag.as_deref()).with_https_path(
+                    name_server.https_path.as_deref().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "DNS-over-HTTPS policy is missing its request path",
+                        )
+                    })?,
+                ),
+            ),
+            NameServerTransport::QuicLocal => (
+                DnsQueryTransportKind::Quic,
+                DnsQueryMetadata::local(name_server.tag.as_deref()),
+            ),
+        };
+        let result = match query_strategy {
+            DnsQueryStrategy::UseIp => {
+                let (ipv4, ipv6) = tokio::join!(
+                    self.query_server_until(
+                        &name_server.server,
+                        transport,
+                        metadata,
+                        domain,
+                        DnsRecordType::A,
+                        deadline,
+                    ),
+                    self.query_server_until(
+                        &name_server.server,
+                        transport,
+                        metadata,
+                        domain,
+                        DnsRecordType::Aaaa,
+                        deadline,
+                    ),
+                );
+                merge_configured_family_results([ipv4, ipv6])
+            }
+            DnsQueryStrategy::UseIpv4 => merge_configured_family_results([self
+                .query_server_until(
+                    &name_server.server,
+                    transport,
+                    metadata,
+                    domain,
+                    DnsRecordType::A,
+                    deadline,
+                )
+                .await]),
+            DnsQueryStrategy::UseIpv6 => merge_configured_family_results([self
+                .query_server_until(
+                    &name_server.server,
+                    transport,
+                    metadata,
+                    domain,
+                    DnsRecordType::Aaaa,
+                    deadline,
+                )
+                .await]),
+        }?;
+
+        match result {
+            ConfiguredServerResult::Answer(ConfiguredDnsAnswer::Addresses(mut answer)) => {
+                if name_server.apply_ip_filters(&mut answer.addresses) {
+                    Ok(ConfiguredServerResult::Answer(
+                        ConfiguredDnsAnswer::Addresses(answer),
+                    ))
+                } else {
+                    Ok(ConfiguredServerResult::Negative(
+                        ConfiguredDnsNegative::NoData,
+                    ))
+                }
+            }
+            result => Ok(result),
+        }
+    }
+
+    async fn query_server_until(
+        &self,
+        name_server: &NameServer,
+        initial_transport: DnsQueryTransportKind,
+        metadata: DnsQueryMetadata<'_>,
+        domain: &str,
+        record_type: DnsRecordType,
+        deadline: time::Instant,
+    ) -> io::Result<(ParsedDnsResponse, Instant)> {
+        let query = build_dns_query(domain, record_type)?;
+        let response = time::timeout_at(
+            deadline,
+            self.query_transport
+                .exchange(name_server, initial_transport, metadata, &query),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "dns query timed out"))??;
+        let observed_at = Instant::now();
+
+        match parse_dns_response(&query, &response, record_type)? {
+            response @ (ParsedDnsResponse::Answer(_)
+            | ParsedDnsResponse::NoData
+            | ParsedDnsResponse::NameError
+            | ParsedDnsResponse::ServerFailure(_)) => Ok((response, observed_at)),
+            ParsedDnsResponse::Truncated => {
+                if initial_transport != DnsQueryTransportKind::Udp {
+                    return Err(invalid_dns_response(
+                        "stream DNS response must not be truncated",
+                    ));
+                }
+                let response = time::timeout_at(
+                    deadline,
+                    self.query_transport.exchange(
+                        name_server,
+                        DnsQueryTransportKind::Tcp,
+                        metadata,
+                        &query,
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "dns tcp retry timed out")
+                })??;
+                let observed_at = Instant::now();
+                match parse_dns_response(&query, &response, record_type)? {
+                    ParsedDnsResponse::Truncated => Err(invalid_dns_response(
+                        "DNS TCP response must not be truncated",
+                    )),
+                    response => Ok((response, observed_at)),
+                }
+            }
+        }
+    }
+
+    async fn resolve_configured(
+        &self,
+        domain: &str,
+        port: u16,
+        query_strategy: DnsQueryStrategy,
+    ) -> ConfiguredLookupResult {
+        let mut current_domain = normalize_dns_name(domain).unwrap_or_else(|| domain.to_owned());
+        let mut ttl_cap = None;
+        for depth in 0..MAX_DNS_ALIAS_DEPTH {
+            if let Some(target) = self.hosts.lookup(&current_domain) {
+                match target {
+                    DnsHostTarget::Ip(ip) => {
+                        if !query_strategy.accepts(*ip) {
+                            return ConfiguredLookupResult::Negative {
+                                domain: current_domain,
+                                negative: ConfiguredDnsNegative::NoData,
+                            };
+                        }
+                        return ConfiguredLookupResult::Resolved(cap_lookup_ttl(
+                            DnsLookup::single(
+                                SocketAddr::new(*ip, port),
+                                Some(DNS_STATIC_HOST_TTL),
+                            ),
+                            ttl_cap,
+                        ));
+                    }
+                    DnsHostTarget::Ips(ips) => {
+                        if !ips.iter().copied().any(|ip| query_strategy.accepts(ip)) {
+                            return ConfiguredLookupResult::Negative {
+                                domain: current_domain,
+                                negative: ConfiguredDnsNegative::NoData,
+                            };
+                        }
+                        return ConfiguredLookupResult::Resolved(cap_lookup_ttl(
+                            DnsLookup::from_ips(
+                                ips.iter().copied().filter(|ip| query_strategy.accepts(*ip)),
+                                port,
+                                Some(DNS_STATIC_HOST_TTL),
+                            ),
+                            ttl_cap,
+                        ));
+                    }
+                    DnsHostTarget::Domain(alias) => {
+                        let alias = normalize_dns_name(alias).unwrap_or_else(|| alias.clone());
+                        if alias == current_domain {
+                            break;
+                        }
+                        current_domain = alias;
+                        if depth + 1 < MAX_DNS_ALIAS_DEPTH {
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            let started_at = Instant::now();
+            let server_plan = self.name_servers.select_indices(
+                &current_domain,
+                self.disable_fallback,
+                self.disable_fallback_if_match,
+            );
+            let result = self
+                .query_configured_servers(&current_domain, &server_plan, query_strategy)
+                .await;
+            ttl_cap = age_ttl_cap(ttl_cap, started_at.elapsed());
+            match result {
+                ConfiguredServersResult::Answer(answer) => {
+                    let lookup = DnsLookup::from_ips(
+                        answer
+                            .addresses
+                            .into_iter()
+                            .filter(|ip| query_strategy.accepts(*ip)),
+                        port,
+                        Some(answer.ttl),
+                    );
+                    if lookup.socket_addrs().is_empty() {
+                        return ConfiguredLookupResult::Negative {
+                            domain: current_domain,
+                            negative: ConfiguredDnsNegative::NoData,
+                        };
+                    }
+                    return ConfiguredLookupResult::Resolved(cap_lookup_ttl(lookup, ttl_cap));
+                }
+                ConfiguredServersResult::Negative(negative) => {
+                    return ConfiguredLookupResult::Negative {
+                        domain: current_domain,
+                        negative,
+                    };
+                }
+                ConfiguredServersResult::Unavailable => {
+                    if self.name_servers.is_empty() {
+                        break;
+                    }
+                    return ConfiguredLookupResult::Unavailable {
+                        domain: current_domain,
+                    };
+                }
+            }
+        }
+
+        if self.name_servers.is_empty() {
+            ConfiguredLookupResult::Fallback {
+                domain: current_domain,
+                ttl_cap,
+            }
+        } else {
+            ConfiguredLookupResult::Unavailable {
+                domain: current_domain,
+            }
+        }
+    }
+}
+
+/// Builds the serial managed-DNS candidate plan using Xray's match/fallback
+/// ordering. Returned indices refer to `name_servers` and preserve policy
+/// entries even when multiple entries share one endpoint.
+pub fn select_name_server_indices(
+    name_servers: &[NameServerPolicy],
+    domain: &str,
+    disable_fallback: bool,
+    disable_fallback_if_match: bool,
+) -> Vec<usize> {
+    let domain = domain.trim_end_matches('.');
+    let mut selected = Vec::with_capacity(name_servers.len());
+    let mut selected_policies = SelectedPolicyTracker::new(name_servers.len());
+    let mut matched = false;
+
+    for (index, name_server) in name_servers.iter().enumerate() {
+        if !name_server.domains.matches(domain) {
+            continue;
+        }
+        matched = true;
+        selected_policies.insert(index);
+        selected.push(index);
+        if name_server.final_query {
+            return selected;
+        }
+    }
+
+    if !(disable_fallback || disable_fallback_if_match && matched) {
+        for (index, name_server) in name_servers.iter().enumerate() {
+            if selected_policies.contains(index) || name_server.skip_fallback {
+                continue;
+            }
+            selected_policies.insert(index);
+            selected.push(index);
+            if name_server.final_query {
+                break;
+            }
+        }
+    }
+
+    if selected.is_empty() && !name_servers.is_empty() {
+        selected.push(0);
+    }
+    selected
+}
+
+fn cap_lookup_ttl(lookup: DnsLookup, ttl_cap: Option<Duration>) -> DnsLookup {
+    match ttl_cap {
+        Some(ttl_cap) => lookup.with_ttl_cap(ttl_cap),
+        None => lookup,
+    }
+}
+
+fn age_ttl_cap(ttl_cap: Option<Duration>, elapsed: Duration) -> Option<Duration> {
+    ttl_cap.map(|ttl| ttl.saturating_sub(elapsed))
+}
+
+fn merge_configured_family_results<const N: usize>(
+    results: [io::Result<(ParsedDnsResponse, Instant)>; N],
+) -> io::Result<ConfiguredServerResult> {
+    let mut addresses = Vec::new();
+    let mut answer_ttl = None;
+    let mut cname: Option<(String, Duration)> = None;
+    let mut cname_conflict = false;
+    let mut saw_name_error = false;
+    let mut saw_no_data = false;
+    let mut last_error = None;
+
+    for result in results {
+        match result {
+            Ok((
+                ParsedDnsResponse::Answer(ConfiguredDnsAnswer::Addresses(mut answer)),
+                observed_at,
+            )) => {
+                answer.ttl = answer.ttl.saturating_sub(observed_at.elapsed());
+                addresses.extend_from_slice(&answer.addresses);
+                answer_ttl = Some(
+                    answer_ttl.map_or(answer.ttl, |current: Duration| current.min(answer.ttl)),
+                );
+            }
+            Ok((
+                ParsedDnsResponse::Answer(ConfiguredDnsAnswer::Cname { alias, ttl }),
+                observed_at,
+            )) => {
+                let ttl = ttl.saturating_sub(observed_at.elapsed());
+                answer_ttl = Some(answer_ttl.map_or(ttl, |current: Duration| current.min(ttl)));
+                match &cname {
+                    Some((current, _)) if !alias.eq_ignore_ascii_case(current) => {
+                        cname_conflict = true;
+                    }
+                    Some(_) => {}
+                    None => cname = Some((alias, ttl)),
+                }
+            }
+            Ok((ParsedDnsResponse::NoData, _)) => saw_no_data = true,
+            Ok((ParsedDnsResponse::NameError, _)) => saw_name_error = true,
+            Ok((ParsedDnsResponse::ServerFailure(code), _)) => {
+                last_error = Some(dns_response_code_error(code));
+            }
+            Ok((ParsedDnsResponse::Truncated, _)) => {
+                last_error = Some(invalid_dns_response(
+                    "truncated DNS response after TCP retry",
+                ));
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    if !addresses.is_empty() {
+        return Ok(ConfiguredServerResult::Answer(
+            ConfiguredDnsAnswer::Addresses(ConfiguredDnsAddresses {
+                addresses,
+                ttl: answer_ttl.unwrap_or(DNS_DEFAULT_TTL),
+            }),
+        ));
+    }
+    if cname_conflict {
+        return Err(invalid_dns_response(
+            "DNS A and AAAA responses contain conflicting CNAME targets",
+        ));
+    }
+    if let Some((alias, ttl)) = cname {
+        return Ok(ConfiguredServerResult::Answer(ConfiguredDnsAnswer::Cname {
+            alias,
+            ttl: answer_ttl.unwrap_or(ttl),
+        }));
+    }
+    if saw_name_error {
+        return Ok(ConfiguredServerResult::Negative(
+            ConfiguredDnsNegative::NameError,
+        ));
+    }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    if saw_no_data {
+        return Ok(ConfiguredServerResult::Negative(
+            ConfiguredDnsNegative::NoData,
+        ));
+    }
+
+    Err(invalid_dns_response("DNS server returned no family result"))
+}
+
+impl ConfiguredDnsResolver {
+    async fn resolve_all_for_strategy(
+        &self,
+        domain: &str,
+        port: u16,
+        requested_strategy: DnsQueryStrategy,
+    ) -> Result<DnsLookup, TransportError> {
+        let Some(query_strategy) = self.query_strategy.intersect(requested_strategy) else {
+            return Err(TransportError::DnsNoData(domain.to_owned(), port));
+        };
+        let resolution = async {
+            match self.resolve_configured(domain, port, query_strategy).await {
+                ConfiguredLookupResult::Resolved(lookup) => Ok(lookup),
+                ConfiguredLookupResult::Fallback { domain, ttl_cap } => {
+                    let started_at = Instant::now();
+                    let fallback =
+                        self.fallback
+                            .resolve_all_with_strategy(&domain, port, query_strategy);
+                    let result = match (self.resolution_timeout, self.system_fallback_timeout) {
+                        (None, Some(fallback_timeout)) => time::timeout(fallback_timeout, fallback)
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(TransportError::Dns {
+                                    domain: domain.clone(),
+                                    port,
+                                    source: io::Error::new(
+                                        io::ErrorKind::TimedOut,
+                                        "DNS system fallback timed out",
+                                    ),
+                                })
+                            }),
+                        (Some(_), _) | (None, None) => fallback.await,
+                    };
+                    result
+                        .map(|lookup| {
+                            cap_lookup_ttl(lookup, age_ttl_cap(ttl_cap, started_at.elapsed()))
+                        })
+                        .and_then(|lookup| {
+                            filter_dns_lookup_by_strategy(lookup, &domain, port, query_strategy)
+                        })
+                }
+                ConfiguredLookupResult::Negative {
+                    domain,
+                    negative: ConfiguredDnsNegative::NameError,
+                } => Err(TransportError::DnsNameError(domain, port)),
+                ConfiguredLookupResult::Negative {
+                    domain,
+                    negative: ConfiguredDnsNegative::NoData,
+                } => Err(TransportError::DnsNoData(domain, port)),
+                ConfiguredLookupResult::Unavailable { domain } => Err(TransportError::Dns {
+                    domain,
+                    port,
+                    source: io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        "all configured DNS servers are unavailable",
+                    ),
+                }),
+            }
+        };
+        let Some(resolution_timeout) = self.resolution_timeout else {
+            return resolution.await;
+        };
+        match time::timeout(resolution_timeout, resolution).await {
+            Ok(result) => result,
+            Err(_) => Err(TransportError::Dns {
+                domain: domain.to_owned(),
+                port,
+                source: io::Error::new(io::ErrorKind::TimedOut, "DNS resolution timed out"),
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl DnsResolver for ConfiguredDnsResolver {
+    async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+        self.resolve_all(domain, port)
+            .await?
+            .first_socket_addr(domain, port)
+    }
+
+    async fn resolve_all(&self, domain: &str, port: u16) -> Result<DnsLookup, TransportError> {
+        self.resolve_all_for_strategy(domain, port, DnsQueryStrategy::UseIp)
+            .await
+    }
+
+    async fn resolve_all_with_strategy(
+        &self,
+        domain: &str,
+        port: u16,
+        strategy: DnsQueryStrategy,
+    ) -> Result<DnsLookup, TransportError> {
+        self.resolve_all_for_strategy(domain, port, strategy).await
+    }
+}
+
+enum ConfiguredLookupResult {
+    Resolved(DnsLookup),
+    Fallback {
+        domain: String,
+        ttl_cap: Option<Duration>,
+    },
+    Negative {
+        domain: String,
+        negative: ConfiguredDnsNegative,
+    },
+    Unavailable {
+        domain: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfiguredDnsNegative {
+    NameError,
+    NoData,
+}
+
+enum ConfiguredServerResult {
+    Answer(ConfiguredDnsAnswer),
+    Negative(ConfiguredDnsNegative),
+}
+
+enum ConfiguredServersResult {
+    Answer(ConfiguredDnsAddresses),
+    Negative(ConfiguredDnsNegative),
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfiguredDnsAnswer {
+    Addresses(ConfiguredDnsAddresses),
+    Cname { alias: String, ttl: Duration },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfiguredDnsAddresses {
+    addresses: Vec<IpAddr>,
+    ttl: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DnsRecordType {
+    A,
+    Aaaa,
+}
+
+impl DnsRecordType {
+    fn code(self) -> u16 {
+        match self {
+            Self::A => 1,
+            Self::Aaaa => 28,
+        }
+    }
+}
+
+async fn exchange_direct_udp(
+    server_addr: SocketAddr,
+    query: &[u8],
+    socket_protector: Option<&dyn SocketProtector>,
+) -> io::Result<Vec<u8>> {
+    let bind_addr = if server_addr.is_ipv4() {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from(([0_u16; 8], 0))
+    };
+    let socket = StdUdpSocket::bind(bind_addr)?;
+    if let Some(protector) = socket_protector {
+        protector.protect(SocketHandle::from_std_udp_socket(&socket))?;
+    }
+    socket.set_nonblocking(true)?;
+    let socket = UdpSocket::from_std(socket)?;
+    socket.connect(server_addr).await?;
+    let written = socket.send(query).await?;
+    if written != query.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "short dns udp write",
+        ));
+    }
+
+    let mut buffer = vec![0_u8; MAX_DNS_UDP_RESPONSE_SIZE + 1];
+    loop {
+        let len = socket.recv(&mut buffer).await?;
+        if !dns_response_matches_query(query, &buffer[..len]) {
+            continue;
+        }
+        if len > MAX_DNS_UDP_RESPONSE_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "dns udp response is too large",
+            ));
+        }
+        buffer.truncate(len);
+        return Ok(buffer);
+    }
+}
+
+async fn exchange_direct_tcp_candidates(
+    server_addrs: &[SocketAddr],
+    query: &[u8],
+    socket_protector: Option<&dyn SocketProtector>,
+) -> io::Result<Vec<u8>> {
+    let mut remaining = server_addrs.to_vec();
+    let mut last_error = None;
+    while !remaining.is_empty() {
+        let (mut stream, peer_addr) =
+            match open_direct_tcp_candidates_with_peer(&remaining, socket_protector).await {
+                Ok(connected) => connected,
+                Err(error) => {
+                    last_error = Some(error);
+                    break;
+                }
+            };
+        remaining.retain(|candidate| canonicalize_socket_addr(*candidate) != peer_addr);
+        match exchange_direct_tcp_message(&mut stream, query).await {
+            Ok(response) => return Ok(response),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "DNS-over-TCP server has no usable address",
+        )
+    }))
+}
+
+async fn exchange_direct_tls_candidates(
+    server: &NameServer,
+    server_addrs: &[SocketAddr],
+    query: &[u8],
+    socket_protector: Option<&dyn SocketProtector>,
+    tls_connector: &TlsConnector,
+) -> io::Result<Vec<u8>> {
+    let tls = dns_tls_client_config(server);
+    let mut remaining = server_addrs.to_vec();
+    let mut last_error = None;
+    while !remaining.is_empty() {
+        let (stream, peer_addr) =
+            match open_direct_tcp_candidates_with_peer(&remaining, socket_protector).await {
+                Ok(connected) => connected,
+                Err(error) => {
+                    last_error = Some(error);
+                    break;
+                }
+            };
+        remaining.retain(|candidate| canonicalize_socket_addr(*candidate) != peer_addr);
+        let mut stream = match tls_connector.connect_stream(stream, &tls).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                last_error = Some(io::Error::other(error));
+                continue;
+            }
+        };
+        match exchange_direct_tcp_message(&mut stream, query).await {
+            Ok(response) => return Ok(response),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "DNS-over-TLS server has no usable address",
+        )
+    }))
+}
+
+async fn exchange_direct_https_candidates(
+    server: &NameServer,
+    server_addrs: &[SocketAddr],
+    https_path: &str,
+    query: &[u8],
+    socket_protector: Option<&dyn SocketProtector>,
+    tls_connector: &TlsConnector,
+) -> io::Result<Vec<u8>> {
+    let tls = dns_https_tls_client_config(server);
+    let mut remaining = server_addrs.to_vec();
+    let mut last_error = None;
+    while !remaining.is_empty() {
+        let (stream, peer_addr) =
+            match open_direct_tcp_candidates_with_peer(&remaining, socket_protector).await {
+                Ok(connected) => connected,
+                Err(error) => {
+                    last_error = Some(error);
+                    break;
+                }
+            };
+        remaining.retain(|candidate| canonicalize_socket_addr(*candidate) != peer_addr);
+        let stream = match tls_connector.connect_stream(stream, &tls).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                last_error = Some(io::Error::other(error));
+                continue;
+            }
+        };
+        match exchange_dns_https_h2(stream, server, https_path, query).await {
+            Ok(response) => return Ok(response),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "DNS-over-HTTPS server has no usable address",
+        )
+    }))
+}
+
+fn dns_tls_client_config(server: &NameServer) -> TlsClientConfig {
+    let server_name = match server {
+        NameServer::Socket(address) => address.ip().to_string(),
+        NameServer::Domain { domain, .. } => domain.clone(),
+    };
+    TlsClientConfig {
+        server_name,
+        allow_insecure: false,
+        pinned_peer_cert_sha256: Vec::new(),
+        verify_peer_cert_by_name: Vec::new(),
+        alpn: Vec::new(),
+        fingerprint: None,
+    }
+}
+
+fn dns_https_tls_client_config(server: &NameServer) -> TlsClientConfig {
+    let mut config = dns_tls_client_config(server);
+    config.alpn = vec!["h2".to_owned()];
+    config
+}
+
+async fn open_direct_tcp_candidates_with_peer(
+    server_addrs: &[SocketAddr],
+    socket_protector: Option<&dyn SocketProtector>,
+) -> io::Result<(BoxedTransportStream, SocketAddr)> {
+    let prioritize_ipv6 = server_addrs
+        .first()
+        .is_some_and(|address| canonicalize_socket_addr(*address).is_ipv6());
+    let happy_eyeballs = HappyEyeballsConfig {
+        prioritize_ipv6,
+        try_delay: DNS_LOCAL_TCP_FALLBACK_DELAY,
+        ..HappyEyeballsConfig::default()
+    };
+    let stream = connect_tcp_happy_eyeballs(server_addrs, socket_protector, &happy_eyeballs)
+        .await
+        .map_err(io::Error::other)?;
+    let peer_addr = stream.peer_addr().map(canonicalize_socket_addr)?;
+    Ok((Box::new(stream), peer_addr))
+}
+
+async fn exchange_direct_tcp_message<S>(stream: &mut S, query: &[u8]) -> io::Result<Vec<u8>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    let query_len = u16::try_from(query.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "dns tcp query is too large"))?;
+    stream.write_u16(query_len).await?;
+    stream.write_all(query).await?;
+    stream.flush().await?;
+    let response_len = usize::from(stream.read_u16().await?);
+    let mut response = vec![0_u8; response_len];
+    stream.read_exact(&mut response).await?;
+    Ok(response)
+}
+
+#[cfg(test)]
+async fn query_udp_dns_server(
+    server_addr: SocketAddr,
+    domain: &str,
+    record_type: DnsRecordType,
+    timeout: Duration,
+    socket_protector: Option<&dyn SocketProtector>,
+) -> io::Result<Option<ConfiguredDnsAnswer>> {
+    let query = build_dns_query(domain, record_type)?;
+    let response = time::timeout(
+        timeout,
+        exchange_direct_udp(server_addr, &query, socket_protector),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "dns query timed out"))??;
+    match parse_dns_response(&query, &response, record_type)? {
+        ParsedDnsResponse::Answer(answer) => Ok(Some(answer)),
+        ParsedDnsResponse::NoData
+        | ParsedDnsResponse::NameError
+        | ParsedDnsResponse::ServerFailure(_)
+        | ParsedDnsResponse::Truncated => Ok(None),
+    }
+}
+
+fn build_dns_query(domain: &str, record_type: DnsRecordType) -> io::Result<Vec<u8>> {
+    build_dns_query_with_id(domain, record_type, rand::random())
+}
+
+fn normalize_dns_name(domain: &str) -> Option<String> {
+    let normalized = domain.trim_end_matches('.').to_ascii_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn build_dns_query_with_id(
+    domain: &str,
+    record_type: DnsRecordType,
+    id: u16,
+) -> io::Result<Vec<u8>> {
+    let normalized_domain = domain.trim_end_matches('.');
+    if normalized_domain.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "dns query domain cannot be empty",
+        ));
+    }
+
+    let mut query = Vec::with_capacity(12 + normalized_domain.len() + 6);
+    query.extend_from_slice(&id.to_be_bytes());
+    query.extend_from_slice(&0x0100_u16.to_be_bytes());
+    query.extend_from_slice(&1_u16.to_be_bytes());
+    query.extend_from_slice(&0_u16.to_be_bytes());
+    query.extend_from_slice(&0_u16.to_be_bytes());
+    query.extend_from_slice(&0_u16.to_be_bytes());
+
+    for label in normalized_domain.split('.') {
+        let label_bytes = label.as_bytes();
+        if label_bytes.is_empty() || label_bytes.len() > 63 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "dns query domain has invalid label",
+            ));
+        }
+        query.push(label_bytes.len() as u8);
+        query.extend_from_slice(label_bytes);
+    }
+    query.push(0);
+    query.extend_from_slice(&record_type.code().to_be_bytes());
+    query.extend_from_slice(&1_u16.to_be_bytes());
+    Ok(query)
+}
+
+/// Returns whether a DNS response belongs to the supplied query.
+///
+/// UDP transports use this envelope check to discard stale or unrelated
+/// datagrams from the selected upstream without turning them into resolver
+/// fallback. Full answer and RCODE validation remains the resolver's job.
+pub fn dns_response_matches_query(query: &[u8], response: &[u8]) -> bool {
+    if query.len() < 12 || response.len() < 12 || query[0..2] != response[0..2] {
+        return false;
+    }
+    let Ok(query_flags) = read_u16(query, 2) else {
+        return false;
+    };
+    let Ok(response_flags) = read_u16(response, 2) else {
+        return false;
+    };
+    if query_flags & 0x8000 != 0
+        || response_flags & 0x8000 == 0
+        || query_flags & 0x7800 != response_flags & 0x7800
+    {
+        return false;
+    }
+
+    let Ok(expected_question) = parse_dns_question(query) else {
+        return false;
+    };
+    if read_u16(response, 4).ok() != Some(1) {
+        return false;
+    }
+    let mut offset = 12;
+    read_dns_question(response, &mut offset).is_ok_and(|question| question == expected_question)
+}
+
+fn parse_dns_response(
+    query: &[u8],
+    packet: &[u8],
+    requested_type: DnsRecordType,
+) -> io::Result<ParsedDnsResponse> {
+    if packet.len() < 12 || query.len() < 2 || packet[0..2] != query[0..2] {
+        return Err(invalid_dns_response(
+            "DNS response header or transaction ID does not match",
+        ));
+    }
+
+    let flags = read_u16(packet, 2)?;
+    if flags & 0x8000 == 0 {
+        return Err(invalid_dns_response("DNS packet is not a response"));
+    }
+
+    let (expected_question, expected_type, expected_class) = parse_dns_question(query)?;
+    if expected_type != requested_type.code() || expected_class != 1 {
+        return Err(invalid_dns_response("DNS query type or class is invalid"));
+    }
+
+    let question_count = read_u16(packet, 4)?;
+    if question_count != 1 {
+        return Err(invalid_dns_response(
+            "DNS response must repeat exactly one question",
+        ));
+    }
+    let answer_count = read_u16(packet, 6)?;
+    let mut offset = 12;
+
+    let (response_question, response_type, response_class) =
+        read_dns_question(packet, &mut offset)?;
+    if response_question != expected_question
+        || response_type != expected_type
+        || response_class != expected_class
+    {
+        return Err(invalid_dns_response("DNS response question does not match"));
+    }
+
+    match flags & 0x000F {
+        0 => {}
+        3 => return Ok(ParsedDnsResponse::NameError),
+        code => return Ok(ParsedDnsResponse::ServerFailure(code)),
+    }
+
+    if flags & 0x0200 != 0 {
+        return Ok(ParsedDnsResponse::Truncated);
+    }
+
+    let mut response_ttl = None;
+    let mut addresses = Vec::new();
+    let mut cnames = Vec::new();
+    for _ in 0..answer_count {
+        let owner_name = read_dns_name(packet, &mut offset)?;
+        let record_type = read_u16(packet, offset)?;
+        let record_class = read_u16(packet, offset + 2)?;
+        let ttl = Duration::from_secs(u64::from(read_u32(packet, offset + 4)?.max(1)));
+        response_ttl = Some(response_ttl.map_or(ttl, |current: Duration| current.min(ttl)));
+        let data_len = usize::from(read_u16(packet, offset + 8)?);
+        offset = offset
+            .checked_add(10)
+            .ok_or_else(|| invalid_dns_response("dns answer overflow"))?;
+        let data_end = offset
+            .checked_add(data_len)
+            .ok_or_else(|| invalid_dns_response("dns rdata overflow"))?;
+        if data_end > packet.len() {
+            return Err(invalid_dns_response("truncated dns rdata"));
+        }
+
+        if record_class == 1 && record_type == requested_type.code() {
+            match requested_type {
+                DnsRecordType::A if data_len == 4 => {
+                    addresses.push(ParsedDnsAddress {
+                        owner: owner_name,
+                        address: IpAddr::V4(Ipv4Addr::new(
+                            packet[offset],
+                            packet[offset + 1],
+                            packet[offset + 2],
+                            packet[offset + 3],
+                        )),
+                    });
+                }
+                DnsRecordType::Aaaa if data_len == 16 => {
+                    let segments = [
+                        read_u16(packet, offset)?,
+                        read_u16(packet, offset + 2)?,
+                        read_u16(packet, offset + 4)?,
+                        read_u16(packet, offset + 6)?,
+                        read_u16(packet, offset + 8)?,
+                        read_u16(packet, offset + 10)?,
+                        read_u16(packet, offset + 12)?,
+                        read_u16(packet, offset + 14)?,
+                    ];
+                    let address = Ipv6Addr::new(
+                        segments[0],
+                        segments[1],
+                        segments[2],
+                        segments[3],
+                        segments[4],
+                        segments[5],
+                        segments[6],
+                        segments[7],
+                    );
+                    // Match Xray's address parser: IPv4-mapped data is not a
+                    // usable AAAA result and must remain eligible for
+                    // configured-server failover instead of becoming an IPv4
+                    // dial candidate.
+                    if address.to_ipv4_mapped().is_none() {
+                        addresses.push(ParsedDnsAddress {
+                            owner: owner_name,
+                            address: IpAddr::V6(address),
+                        });
+                    }
+                }
+                _ => {
+                    return Err(invalid_dns_response(
+                        "DNS address record has an invalid RDATA length",
+                    ));
+                }
+            }
+        } else if record_class == 1 && record_type == 5 {
+            let mut cname_offset = offset;
+            let alias = read_dns_name_limited(packet, &mut cname_offset, data_end)?;
+            if cname_offset != data_end {
+                return Err(invalid_dns_response("dns cname rdata length mismatch"));
+            }
+            cnames.push(ParsedDnsCname {
+                owner: owner_name,
+                alias,
+            });
+        }
+
+        offset = data_end;
+    }
+
+    resolve_parsed_dns_answers(
+        &expected_question,
+        addresses,
+        cnames,
+        response_ttl.unwrap_or(DNS_DEFAULT_TTL),
+    )
+}
+
+struct ParsedDnsAddress {
+    owner: String,
+    address: IpAddr,
+}
+
+struct ParsedDnsCname {
+    owner: String,
+    alias: String,
+}
+
+fn resolve_parsed_dns_answers(
+    expected_name: &str,
+    addresses: Vec<ParsedDnsAddress>,
+    cnames: Vec<ParsedDnsCname>,
+    ttl: Duration,
+) -> io::Result<ParsedDnsResponse> {
+    let mut current_name = expected_name.to_owned();
+    let mut visited = vec![current_name.clone()];
+    let mut followed_cname = false;
+
+    for depth in 0..=MAX_DNS_ALIAS_DEPTH {
+        let matched_addresses = addresses
+            .iter()
+            .filter(|record| record.owner.eq_ignore_ascii_case(&current_name))
+            .map(|record| record.address)
+            .collect::<Vec<_>>();
+        if !matched_addresses.is_empty() {
+            return Ok(ParsedDnsResponse::Answer(ConfiguredDnsAnswer::Addresses(
+                ConfiguredDnsAddresses {
+                    addresses: matched_addresses,
+                    ttl,
+                },
+            )));
+        }
+
+        let mut matching_aliases = cnames
+            .iter()
+            .filter(|record| record.owner.eq_ignore_ascii_case(&current_name));
+        let Some(first_alias) = matching_aliases.next() else {
+            return if followed_cname {
+                Ok(ParsedDnsResponse::Answer(ConfiguredDnsAnswer::Cname {
+                    alias: current_name,
+                    ttl,
+                }))
+            } else if addresses.is_empty() && cnames.is_empty() {
+                Ok(ParsedDnsResponse::NoData)
+            } else {
+                Err(invalid_dns_response(
+                    "DNS response contains no answer for the requested name",
+                ))
+            };
+        };
+        if matching_aliases.any(|record| !record.alias.eq_ignore_ascii_case(&first_alias.alias)) {
+            return Err(invalid_dns_response(
+                "DNS response contains conflicting CNAME targets",
+            ));
+        }
+        if depth == MAX_DNS_ALIAS_DEPTH {
+            return Err(invalid_dns_response(
+                "DNS CNAME chain exceeds the depth limit",
+            ));
+        }
+        if visited
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&first_alias.alias))
+        {
+            return Err(invalid_dns_response("DNS CNAME chain contains a cycle"));
+        }
+
+        followed_cname = true;
+        current_name.clone_from(&first_alias.alias);
+        visited.push(current_name.clone());
+    }
+
+    Err(invalid_dns_response(
+        "DNS CNAME chain exceeds the depth limit",
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParsedDnsResponse {
+    Answer(ConfiguredDnsAnswer),
+    NoData,
+    NameError,
+    ServerFailure(u16),
+    Truncated,
+}
+
+fn dns_response_code_error(code: u16) -> io::Error {
+    io::Error::other(format!("DNS server returned response code {code}"))
+}
+
+fn parse_dns_question(packet: &[u8]) -> io::Result<(String, u16, u16)> {
+    let question_count = read_u16(packet, 4)?;
+    if question_count != 1 {
+        return Err(invalid_dns_response("dns query must have one question"));
+    }
+    let mut offset = 12;
+    read_dns_question(packet, &mut offset)
+}
+
+fn read_dns_question(packet: &[u8], offset: &mut usize) -> io::Result<(String, u16, u16)> {
+    let name = read_dns_name(packet, offset)?;
+    let record_type = read_u16(packet, *offset)?;
+    let record_class = read_u16(packet, *offset + 2)?;
+    *offset = (*offset)
+        .checked_add(4)
+        .ok_or_else(|| invalid_dns_response("dns question overflow"))?;
+    if *offset > packet.len() {
+        return Err(invalid_dns_response("truncated dns question"));
+    }
+    Ok((name, record_type, record_class))
+}
+
+fn read_dns_name(packet: &[u8], offset: &mut usize) -> io::Result<String> {
+    read_dns_name_limited(packet, offset, packet.len())
+}
+
+fn read_dns_name_limited(packet: &[u8], offset: &mut usize, limit: usize) -> io::Result<String> {
+    if limit > packet.len() || *offset > limit {
+        return Err(invalid_dns_response("invalid dns name limit"));
+    }
+
+    let mut labels = Vec::new();
+    let mut cursor = *offset;
+    let mut jumped = false;
+
+    for _ in 0..32 {
+        if !jumped && cursor >= limit {
+            return Err(invalid_dns_response("truncated dns name"));
+        }
+        let Some(&length) = packet.get(cursor) else {
+            return Err(invalid_dns_response("truncated dns name"));
+        };
+
+        if length & 0xC0 == 0xC0 {
+            if !jumped && cursor + 2 > limit {
+                return Err(invalid_dns_response("truncated dns name pointer"));
+            }
+            let Some(&next) = packet.get(cursor + 1) else {
+                return Err(invalid_dns_response("truncated dns name pointer"));
+            };
+            if !jumped {
+                *offset = cursor + 2;
+            }
+            cursor = ((usize::from(length & 0x3F)) << 8) | usize::from(next);
+            jumped = true;
+            continue;
+        }
+
+        if length == 0 {
+            if !jumped {
+                *offset = cursor + 1;
+            }
+            return Ok(labels.join("."));
+        }
+
+        if length & 0xC0 != 0 {
+            return Err(invalid_dns_response("unsupported dns label encoding"));
+        }
+
+        cursor += 1;
+        let label_len = usize::from(length);
+        let label_end = cursor
+            .checked_add(label_len)
+            .ok_or_else(|| invalid_dns_response("dns label overflow"))?;
+        if !jumped && label_end > limit {
+            return Err(invalid_dns_response("truncated dns label"));
+        }
+        if label_end > packet.len() {
+            return Err(invalid_dns_response("truncated dns label"));
+        }
+        let label = std::str::from_utf8(&packet[cursor..label_end])
+            .map_err(|_| invalid_dns_response("dns label is not utf-8"))?;
+        labels.push(label.to_ascii_lowercase());
+        cursor = label_end;
+    }
+
+    Err(invalid_dns_response("dns name pointer loop"))
+}
+
+fn read_u16(packet: &[u8], offset: usize) -> io::Result<u16> {
+    let bytes = packet
+        .get(offset..offset + 2)
+        .ok_or_else(|| invalid_dns_response("truncated u16"))?;
+    Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_u32(packet: &[u8], offset: usize) -> io::Result<u32> {
+    let bytes = packet
+        .get(offset..offset + 4)
+        .ok_or_else(|| invalid_dns_response("truncated u32"))?;
+    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn invalid_dns_response(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use bytes::{Bytes, BytesMut};
+    use http::{header, Method, Response};
+    use quinn::crypto::rustls::QuicServerConfig;
+    use rcgen::{generate_simple_self_signed, CertifiedKey};
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, UdpSocket};
+    use tokio::sync::{oneshot, Barrier, Notify};
+    use xray_routing::{
+        Cidr, DnsIpFilter, DomainHostIndex, DomainMatcher, DomainMatcherSet, DomainNameMode,
+        RegexMatcher,
+    };
+
+    use super::{
+        build_dns_query_with_id, exchange_direct_https_candidates, exchange_direct_tls_candidates,
+        exchange_dns_https_h2, exchange_dns_quic_candidates, parse_dns_response,
+        query_udp_dns_server, select_name_server_indices, CachingDnsResolver,
+        CompiledNameServerPolicies, ConfiguredDnsAddresses, ConfiguredDnsAnswer,
+        ConfiguredDnsResolver, DnsHostTarget, DnsLookup, DnsQueryDispatch, DnsQueryMetadata,
+        DnsQueryStrategy, DnsQueryTransport, DnsQueryTransportKind, DnsRecordType, DnsResolver,
+        NameServer, NameServerPolicy, NameServerTransport, DNS_CACHE_MAX_ENTRIES,
+    };
+    use crate::{SocketHandle, SocketProtector, TlsConnector, TransportError};
+
+    #[test]
+    fn build_dns_query_uses_injected_transaction_id() {
+        let query = build_dns_query_with_id("example.com", DnsRecordType::A, 0xA17E)
+            .expect("valid query should encode");
+
+        assert_eq!(&query[..2], &0xA17E_u16.to_be_bytes());
+    }
+
+    fn dns_ip_cidr(network: &str, prefix_len: u8) -> Cidr {
+        Cidr::new(network.parse().expect("valid test IP address"), prefix_len)
+            .expect("valid test prefix")
+    }
+
+    fn dns_ip_filter(cidrs: &[Cidr], soft: bool) -> DnsIpFilter {
+        let mut builder = DnsIpFilter::builder();
+        for cidr in cidrs {
+            builder.custom().insert_cidr(*cidr, false);
+        }
+        builder.set_soft(soft);
+        builder.build()
+    }
+
+    fn hard_dns_ip_filter(cidrs: &[Cidr]) -> DnsIpFilter {
+        dns_ip_filter(cidrs, false)
+    }
+
+    fn soft_dns_ip_filter(cidrs: &[Cidr]) -> DnsIpFilter {
+        dns_ip_filter(cidrs, true)
+    }
+
+    #[test]
+    fn compiled_name_server_policy_applies_expected_before_soft_unexpected() {
+        let server = NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)));
+        let mut policy = NameServerPolicy::new(server);
+        policy.expected_ips = hard_dns_ip_filter(&[dns_ip_cidr("192.0.2.0", 24)]);
+        policy.unexpected_ips = soft_dns_ip_filter(&[dns_ip_cidr("192.0.2.0", 24)]);
+        let policies = CompiledNameServerPolicies::new(vec![policy]);
+        let mut addresses = vec![
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        ];
+
+        assert!(policies.get(0).unwrap().apply_ip_filters(&mut addresses));
+        assert_eq!(addresses, [IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))]);
+    }
+
+    #[test]
+    fn compiled_name_server_policy_applies_hard_unexpected_before_soft_expected() {
+        let server = NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)));
+        let mut policy = NameServerPolicy::new(server);
+        policy.expected_ips = soft_dns_ip_filter(&[dns_ip_cidr("192.0.2.0", 24)]);
+        policy.unexpected_ips = hard_dns_ip_filter(&[dns_ip_cidr("192.0.2.0", 24)]);
+        let policies = CompiledNameServerPolicies::new(vec![policy]);
+        let mut addresses = vec![
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+        ];
+
+        assert!(policies.get(0).unwrap().apply_ip_filters(&mut addresses));
+        assert_eq!(addresses, [IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))]);
+    }
+
+    fn policy(server_octet: u8) -> NameServerPolicy {
+        NameServerPolicy::new(NameServer::Socket(SocketAddr::from((
+            [192, 0, 2, server_octet],
+            53,
+        ))))
+    }
+
+    fn domain_set(matchers: &[DomainMatcher]) -> DomainMatcherSet {
+        DomainMatcherSet::compile(matchers, DomainNameMode::Dns).unwrap()
+    }
+
+    fn full(domain: &str) -> DomainMatcher {
+        DomainMatcher::Full(domain.to_owned())
+    }
+
+    fn suffix(suffix: &str) -> DomainMatcher {
+        DomainMatcher::Suffix(suffix.to_owned())
+    }
+
+    fn keyword(keyword: &str) -> DomainMatcher {
+        DomainMatcher::Keyword(keyword.to_owned())
+    }
+
+    fn full_set(domain: &str) -> DomainMatcherSet {
+        domain_set(&[full(domain)])
+    }
+
+    fn suffix_set(suffix_name: &str) -> DomainMatcherSet {
+        domain_set(&[suffix(suffix_name)])
+    }
+
+    fn hosts<const N: usize>(
+        rules: [(DomainMatcher, DnsHostTarget); N],
+    ) -> DomainHostIndex<DnsHostTarget> {
+        rules.into_iter().collect()
+    }
+
+    #[test]
+    fn compiled_name_server_policy_preserves_timeout_override() {
+        let mut policy = policy(1);
+        policy.timeout = Some(Duration::from_millis(37));
+        let compiled = CompiledNameServerPolicies::new(vec![policy]);
+
+        assert_eq!(compiled.timeout(0), Some(Duration::from_millis(37)));
+        assert_eq!(compiled.timeout(1), None);
+    }
+
+    #[test]
+    fn compiled_name_server_policy_preserves_routing_tag() {
+        let mut policy = policy(1);
+        policy.tag = Some("dns-primary".to_owned());
+        let compiled = CompiledNameServerPolicies::new(vec![policy]);
+
+        assert_eq!(compiled.tag(0), Some("dns-primary"));
+        assert_eq!(compiled.tag(1), None);
+    }
+
+    #[test]
+    fn compiled_name_server_policy_preserves_transport() {
+        let mut policy = policy(1);
+        policy.transport = NameServerTransport::TcpLocal;
+        let compiled = CompiledNameServerPolicies::new(vec![policy]);
+
+        assert_eq!(compiled.transport(0), Some(NameServerTransport::TcpLocal));
+        assert_eq!(compiled.transport(1), None);
+    }
+
+    #[test]
+    fn compiled_name_server_policy_preserves_https_path() {
+        let mut policy = policy(1);
+        policy.transport = NameServerTransport::HttpsRouted;
+        policy.https_path = Some("/dns-query?profile=mobile".to_owned());
+        let compiled = CompiledNameServerPolicies::new(vec![policy]);
+
+        assert_eq!(
+            compiled.transport(0),
+            Some(NameServerTransport::HttpsRouted)
+        );
+        assert_eq!(compiled.https_path(0), Some("/dns-query?profile=mobile"));
+        assert_eq!(compiled.https_path(1), None);
+    }
+
+    #[test]
+    fn dns_query_metadata_defaults_to_routed_dispatch() {
+        assert_eq!(
+            DnsQueryMetadata::new(Some("dns-client")),
+            DnsQueryMetadata {
+                inbound_tag: Some("dns-client"),
+                dispatch: DnsQueryDispatch::Routed,
+                https_path: None,
+            }
+        );
+        assert_eq!(
+            DnsQueryMetadata::local(Some("dns-client")),
+            DnsQueryMetadata {
+                inbound_tag: Some("dns-client"),
+                dispatch: DnsQueryDispatch::Local,
+                https_path: None,
+            }
+        );
+    }
+
+    fn test_tls_pair(
+        server_name: &str,
+        alpn: &[&[u8]],
+    ) -> (Arc<rustls::ServerConfig>, TlsConnector) {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec![server_name.to_owned()])
+                .expect("generate test DNS certificate");
+        let certificate = cert.der().clone();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut server_tls = rustls::ServerConfig::builder_with_provider(Arc::clone(&provider))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.clone()], key)
+            .unwrap();
+        server_tls.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).unwrap();
+        let client_tls = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        (
+            Arc::new(server_tls),
+            TlsConnector::with_pinned_client_config(Arc::new(client_tls)),
+        )
+    }
+
+    fn test_doq_pair(server_name: &str) -> (quinn::ServerConfig, TlsConnector) {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec![server_name.to_owned()])
+                .expect("generate DNS-over-QUIC test certificate");
+        let certificate = cert.der().clone();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut server_tls = rustls::ServerConfig::builder_with_provider(Arc::clone(&provider))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.clone()], key)
+            .unwrap();
+        server_tls.alpn_protocols = vec![b"doq".to_vec()];
+        let server_crypto = QuicServerConfig::try_from(server_tls).unwrap();
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).unwrap();
+        let client_tls = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        (
+            quinn::ServerConfig::with_crypto(Arc::new(server_crypto)),
+            TlsConnector::with_pinned_client_config(Arc::new(client_tls)),
+        )
+    }
+
+    async fn serve_one_doh_response(
+        listener: TcpListener,
+        tls: Arc<rustls::ServerConfig>,
+        status: u16,
+        dns_response: Vec<u8>,
+    ) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let stream = tokio_rustls::TlsAcceptor::from(tls)
+            .accept(stream)
+            .await
+            .unwrap();
+        let mut connection = h2::server::handshake(stream).await.unwrap();
+        let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+        let _connection_driver =
+            crate::lifecycle::spawn(async move { while connection.accept().await.is_some() {} });
+        let mut body = request.into_body();
+        while let Some(chunk) = body.data().await {
+            let chunk = chunk.unwrap();
+            body.flow_control().release_capacity(chunk.len()).unwrap();
+        }
+        let mut response = Response::builder().status(status);
+        if status == 200 {
+            response = response.header(header::CONTENT_TYPE, "application/dns-message");
+        }
+        let response = response.body(()).unwrap();
+        let mut send = respond
+            .send_response(response, dns_response.is_empty())
+            .unwrap();
+        if !dns_response.is_empty() {
+            send.send_data(Bytes::from(dns_response), true).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_over_https_h2_posts_wire_message_and_reads_bounded_response() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let query = build_dns_query_with_id("example.com", DnsRecordType::A, 0xD048)
+            .expect("test query should encode");
+        let dns_response = build_test_a_response(&query, Ipv4Addr::new(192, 0, 2, 44));
+        let expected_query = query.clone();
+        let expected_response = dns_response.clone();
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server_task = crate::lifecycle::spawn(async move {
+            let mut connection = h2::server::handshake(server_io)
+                .await
+                .expect("server h2 handshake should complete");
+            let (request, mut respond) = connection
+                .accept()
+                .await
+                .expect("client should open one request")
+                .expect("request should be valid");
+            let connection_driver =
+                crate::lifecycle::spawn(async move { while connection.accept().await.is_some() {} });
+            assert_eq!(request.method(), Method::POST);
+            assert_eq!(
+                request.uri().path_and_query().unwrap().as_str(),
+                "/dns-query?mobile=1"
+            );
+            assert_eq!(
+                request.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/dns-message"
+            );
+            assert_eq!(
+                request.headers().get(header::ACCEPT).unwrap(),
+                "application/dns-message"
+            );
+            let mut body = request.into_body();
+            let mut received = BytesMut::new();
+            while let Some(chunk) = body.data().await {
+                let chunk = chunk.expect("request body should be readable");
+                received.extend_from_slice(&chunk);
+                body.flow_control()
+                    .release_capacity(chunk.len())
+                    .expect("request flow-control capacity should release");
+            }
+            assert_eq!(received.as_ref(), expected_query);
+
+            let response = Response::builder()
+                .status(200)
+                .header(header::CONTENT_TYPE, "application/dns-message")
+                .body(())
+                .unwrap();
+            let mut send = respond
+                .send_response(response, false)
+                .expect("response headers should send");
+            send.send_data(Bytes::from(expected_response), true)
+                .expect("response body should send");
+            connection_driver.await.unwrap();
+        });
+
+        let actual = exchange_dns_https_h2(
+            Box::new(client_io),
+            &NameServer::Domain {
+                domain: "resolver.example".to_owned(),
+                port: 443,
+            },
+            "/dns-query?mobile=1",
+            &query,
+        )
+        .await
+        .expect("DNS-over-HTTPS exchange should complete");
+
+        assert_eq!(actual, dns_response);
+        server_task.await.unwrap();
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn dns_over_tls_retries_a_bootstrap_candidate_after_protocol_failure() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server_name = "resolver.example";
+        let query = build_dns_query_with_id("dot-failover.example", DnsRecordType::A, 0xD04A)
+            .expect("test query should encode");
+        let dns_response = build_test_a_response(&query, Ipv4Addr::new(192, 0, 2, 46));
+        let (server_tls, connector) = test_tls_pair(server_name, &[]);
+        let broken_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let broken_addr = broken_listener.local_addr().unwrap();
+        let healthy_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let healthy_addr = healthy_listener.local_addr().unwrap();
+
+        let broken_tls = Arc::clone(&server_tls);
+        let broken = crate::lifecycle::spawn(async move {
+            let (stream, _) = broken_listener.accept().await.unwrap();
+            let mut stream = tokio_rustls::TlsAcceptor::from(broken_tls)
+                .accept(stream)
+                .await
+                .unwrap();
+            let query_len = usize::from(stream.read_u16().await.unwrap());
+            let mut received = vec![0; query_len];
+            stream.read_exact(&mut received).await.unwrap();
+        });
+        let expected_response = dns_response.clone();
+        let healthy = crate::lifecycle::spawn(async move {
+            let (stream, _) = healthy_listener.accept().await.unwrap();
+            let mut stream = tokio_rustls::TlsAcceptor::from(server_tls)
+                .accept(stream)
+                .await
+                .unwrap();
+            let query_len = usize::from(stream.read_u16().await.unwrap());
+            let mut received = vec![0; query_len];
+            stream.read_exact(&mut received).await.unwrap();
+            stream
+                .write_u16(u16::try_from(expected_response.len()).unwrap())
+                .await
+                .unwrap();
+            stream.write_all(&expected_response).await.unwrap();
+        });
+
+        let actual = exchange_direct_tls_candidates(
+            &NameServer::Domain {
+                domain: server_name.to_owned(),
+                port: 853,
+            },
+            &[broken_addr, healthy_addr],
+            &query,
+            None,
+            &connector,
+        )
+        .await
+        .expect("DNS-over-TLS should advance to the healthy bootstrap candidate");
+
+        assert_eq!(actual, dns_response);
+        broken.await.unwrap();
+        healthy.await.unwrap();
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn dns_over_https_retries_a_bootstrap_candidate_after_http_failure() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server_name = "resolver.example";
+        let query = build_dns_query_with_id("doh-failover.example", DnsRecordType::A, 0xD04B)
+            .expect("test query should encode");
+        let dns_response = build_test_a_response(&query, Ipv4Addr::new(192, 0, 2, 47));
+        let (server_tls, connector) = test_tls_pair(server_name, &[b"h2"]);
+        let broken_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let broken_addr = broken_listener.local_addr().unwrap();
+        let healthy_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let healthy_addr = healthy_listener.local_addr().unwrap();
+        let broken = crate::lifecycle::spawn(serve_one_doh_response(
+            broken_listener,
+            Arc::clone(&server_tls),
+            503,
+            Vec::new(),
+        ));
+        let healthy = crate::lifecycle::spawn(serve_one_doh_response(
+            healthy_listener,
+            server_tls,
+            200,
+            dns_response.clone(),
+        ));
+
+        let actual = exchange_direct_https_candidates(
+            &NameServer::Domain {
+                domain: server_name.to_owned(),
+                port: 443,
+            },
+            &[broken_addr, healthy_addr],
+            "/dns-query",
+            &query,
+            None,
+            &connector,
+        )
+        .await
+        .expect("DNS-over-HTTPS should advance to the healthy bootstrap candidate");
+
+        assert_eq!(actual, dns_response);
+        broken.await.unwrap();
+        healthy.await.unwrap();
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn dns_over_quic_uses_doq_alpn_and_one_length_prefixed_stream() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server_name = "resolver.example";
+        let query = build_dns_query_with_id("example.com", DnsRecordType::A, 0xD049)
+            .expect("test query should encode");
+        let dns_response = build_test_a_response(&query, Ipv4Addr::new(192, 0, 2, 45));
+        let (server_config, connector) = test_doq_pair(server_name);
+        let server_endpoint =
+            quinn::Endpoint::server(server_config, SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .unwrap();
+        let server_addr = server_endpoint.local_addr().unwrap();
+        let expected_query = query.clone();
+        let expected_response = dns_response.clone();
+        let server_task = crate::lifecycle::spawn(async move {
+            let incoming = server_endpoint
+                .accept()
+                .await
+                .expect("client should open one QUIC connection");
+            let connection = incoming.await.expect("QUIC handshake should complete");
+            let (mut send, mut recv) = connection
+                .accept_bi()
+                .await
+                .expect("client should open one DoQ stream");
+            let query_len = usize::from(recv.read_u16().await.unwrap());
+            let mut received = vec![0; query_len];
+            recv.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, expected_query);
+            assert!(recv.read_to_end(0).await.unwrap().is_empty());
+            send.write_u16(u16::try_from(expected_response.len()).unwrap())
+                .await
+                .unwrap();
+            send.write_all(&expected_response).await.unwrap();
+            send.finish().unwrap();
+            connection.closed().await;
+        });
+
+        let actual = exchange_dns_quic_candidates(
+            &NameServer::Domain {
+                domain: server_name.to_owned(),
+                port: server_addr.port(),
+            },
+            &[server_addr],
+            &query,
+            None,
+            &connector,
+        )
+        .await
+        .expect("DNS-over-QUIC exchange should complete");
+
+        assert_eq!(actual, dns_response);
+        server_task.await.unwrap();
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn dns_over_quic_retries_a_bootstrap_candidate_after_invalid_framing() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server_name = "resolver.example";
+        let query = build_dns_query_with_id("doq-failover.example", DnsRecordType::A, 0xD04C)
+            .expect("test query should encode");
+        let dns_response = build_test_a_response(&query, Ipv4Addr::new(192, 0, 2, 48));
+        let (server_config, connector) = test_doq_pair(server_name);
+        let broken_endpoint = quinn::Endpoint::server(
+            server_config.clone(),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        )
+        .unwrap();
+        let broken_addr = broken_endpoint.local_addr().unwrap();
+        let healthy_endpoint =
+            quinn::Endpoint::server(server_config, SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .unwrap();
+        let healthy_addr = healthy_endpoint.local_addr().unwrap();
+
+        let broken = crate::lifecycle::spawn(async move {
+            let incoming = broken_endpoint.accept().await.unwrap();
+            let connection = incoming.await.unwrap();
+            let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+            let query_len = usize::from(recv.read_u16().await.unwrap());
+            let mut received = vec![0; query_len];
+            recv.read_exact(&mut received).await.unwrap();
+            send.write_u16(0).await.unwrap();
+            send.finish().unwrap();
+            connection.closed().await;
+        });
+        let expected_response = dns_response.clone();
+        let healthy = crate::lifecycle::spawn(async move {
+            let incoming = healthy_endpoint.accept().await.unwrap();
+            let connection = incoming.await.unwrap();
+            let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+            let query_len = usize::from(recv.read_u16().await.unwrap());
+            let mut received = vec![0; query_len];
+            recv.read_exact(&mut received).await.unwrap();
+            send.write_u16(u16::try_from(expected_response.len()).unwrap())
+                .await
+                .unwrap();
+            send.write_all(&expected_response).await.unwrap();
+            send.finish().unwrap();
+            connection.closed().await;
+        });
+
+        let actual = exchange_dns_quic_candidates(
+            &NameServer::Domain {
+                domain: server_name.to_owned(),
+                port: 853,
+            },
+            &[broken_addr, healthy_addr],
+            &query,
+            None,
+            &connector,
+        )
+        .await
+        .expect("DNS-over-QUIC should advance to the healthy bootstrap candidate");
+
+        assert_eq!(actual, dns_response);
+        broken.await.unwrap();
+        healthy.await.unwrap();
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct EncryptedDnsFaultCall {
+        server: NameServer,
+        transport: DnsQueryTransportKind,
+        dispatch: DnsQueryDispatch,
+        inbound_tag: Option<String>,
+        https_path: Option<String>,
+    }
+
+    #[derive(Default)]
+    struct EncryptedDnsFaultTransport {
+        calls: Mutex<Vec<EncryptedDnsFaultCall>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for EncryptedDnsFaultTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            transport: DnsQueryTransportKind,
+            metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            self.calls.lock().unwrap().push(EncryptedDnsFaultCall {
+                server: server.clone(),
+                transport,
+                dispatch: metadata.dispatch,
+                inbound_tag: metadata.inbound_tag.map(str::to_owned),
+                https_path: metadata.https_path.map(str::to_owned),
+            });
+            match transport {
+                DnsQueryTransportKind::Tls => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "injected DNS-over-TLS timeout",
+                )),
+                DnsQueryTransportKind::Https => Ok(vec![0x00, 0x01, 0x02]),
+                DnsQueryTransportKind::Quic => {
+                    Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 49)))
+                }
+                DnsQueryTransportKind::Udp | DnsQueryTransportKind::Tcp => {
+                    panic!("encrypted DNS fault matrix must not downgrade to plaintext")
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_encrypted_dns_fault_matrix_fails_forward_without_system_leak() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let dot = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 853)));
+        let doh = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 443)));
+        let doq = NameServer::Socket(SocketAddr::from(([192, 0, 2, 3], 853)));
+        let mut dot_policy = NameServerPolicy::new(dot.clone());
+        dot_policy.tag = Some("dns-dot".to_owned());
+        dot_policy.transport = NameServerTransport::TlsRouted;
+        dot_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let mut doh_policy = NameServerPolicy::new(doh.clone());
+        doh_policy.tag = Some("dns-doh".to_owned());
+        doh_policy.transport = NameServerTransport::HttpsRouted;
+        doh_policy.https_path = Some("/dns-query?fault=1".to_owned());
+        doh_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let mut doq_policy = NameServerPolicy::new(doq.clone());
+        doq_policy.tag = Some("dns-doq".to_owned());
+        doq_policy.transport = NameServerTransport::QuicLocal;
+        doq_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let fallback = Arc::new(RecordingFallbackResolver {
+            domains: Mutex::new(Vec::new()),
+            result: SocketAddr::from(([198, 51, 100, 99], 0)),
+        });
+        let transport = Arc::new(EncryptedDnsFaultTransport::default());
+        let resolver =
+            ConfiguredDnsResolver::new(DomainHostIndex::default(), Vec::new(), fallback.clone())
+                .with_name_server_policies(vec![dot_policy, doh_policy, doq_policy])
+                .with_query_strategy(DnsQueryStrategy::UseIpv4)
+                .with_query_transport(transport.clone());
+
+        let resolved = resolver
+            .resolve("encrypted-fault.example", 443)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 49], 443)));
+        assert!(fallback.domains.lock().unwrap().is_empty());
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [
+                EncryptedDnsFaultCall {
+                    server: dot,
+                    transport: DnsQueryTransportKind::Tls,
+                    dispatch: DnsQueryDispatch::Routed,
+                    inbound_tag: Some("dns-dot".to_owned()),
+                    https_path: None,
+                },
+                EncryptedDnsFaultCall {
+                    server: doh,
+                    transport: DnsQueryTransportKind::Https,
+                    dispatch: DnsQueryDispatch::Routed,
+                    inbound_tag: Some("dns-doh".to_owned()),
+                    https_path: Some("/dns-query?fault=1".to_owned()),
+                },
+                EncryptedDnsFaultCall {
+                    server: doq,
+                    transport: DnsQueryTransportKind::Quic,
+                    dispatch: DnsQueryDispatch::Local,
+                    inbound_tag: Some("dns-doq".to_owned()),
+                    https_path: None,
+                },
+            ]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[test]
+    fn name_server_selector_matches_before_ordered_fallback() {
+        let fallback = policy(1);
+        let mut matched_suffix = policy(2);
+        matched_suffix.domains = suffix_set("internal.test");
+        let mut matched_full = policy(3);
+        matched_full.domains = full_set("service.internal.test");
+        let mut skipped = policy(4);
+        skipped.skip_fallback = true;
+        skipped.domains = full_set("service.internal.test");
+        let servers = [fallback, matched_suffix, matched_full, skipped];
+
+        assert_eq!(
+            select_name_server_indices(&servers, "service.internal.test", false, false),
+            vec![1, 2, 3, 0]
+        );
+        assert_eq!(
+            select_name_server_indices(&servers, "unmatched.test", false, false),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            select_name_server_indices(&servers, "service.internal.test", true, false),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            select_name_server_indices(&servers, "service.internal.test", false, true),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            select_name_server_indices(&servers, "unmatched.test", false, true),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn name_server_selector_honors_final_query_and_forced_first() {
+        let mut first = policy(1);
+        first.skip_fallback = true;
+        let mut final_match = policy(2);
+        final_match.domains = suffix_set("internal.test");
+        final_match.final_query = true;
+        let mut later_match = policy(3);
+        later_match.domains = full_set("service.internal.test");
+        let servers = [first, final_match, later_match];
+
+        assert_eq!(
+            select_name_server_indices(&servers, "service.internal.test", false, false),
+            vec![1]
+        );
+        assert_eq!(
+            select_name_server_indices(&servers, "unmatched.test", true, false),
+            vec![0]
+        );
+
+        let mut fallback_final = policy(1);
+        fallback_final.final_query = true;
+        assert_eq!(
+            select_name_server_indices(
+                &[fallback_final, policy(2)],
+                "unmatched.test",
+                false,
+                false,
+            ),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn compiled_name_server_selector_matches_reference_semantics() {
+        let fallback = policy(1);
+        let mut exact = policy(2);
+        exact.domains = full_set("SERVICE.INTERNAL.TEST");
+        let mut mixed = policy(3);
+        mixed.domains = domain_set(&[
+            suffix("Internal.Test"),
+            keyword("CORP"),
+            DomainMatcher::Regex(RegexMatcher::new(r"(^|\.)regex\.test$").unwrap()),
+        ]);
+        let mut skipped = policy(4);
+        skipped.skip_fallback = true;
+        skipped.domains = full_set("forced.test");
+        let mut final_query = policy(5);
+        final_query.final_query = true;
+        final_query.domains = suffix_set("final.test");
+        let policies = vec![fallback, exact, mixed, skipped, final_query];
+        let compiled = CompiledNameServerPolicies::new(policies.clone());
+
+        assert_eq!(compiled.matcher_count(), 6);
+        assert!(compiled.pattern_bytes() > 0);
+        assert_eq!(compiled.name_server(0), Some(&policies[0].server));
+        assert_eq!(compiled.name_server(policies.len()), None);
+        for (domain, first_selected) in [
+            ("service.internal.test", 1),
+            ("SERVICE.INTERNAL.TEST.", 1),
+            ("host.internal.test", 2),
+            ("my-corp-zone.test", 2),
+            ("www.regex.test", 2),
+            ("WWW.REGEX.TEST.", 2),
+            ("forced.test", 3),
+            ("www.final.test", 4),
+            ("unmatched.test", 0),
+        ] {
+            assert_eq!(
+                compiled.select_indices(domain, false, true).first(),
+                Some(&first_selected),
+                "domain={domain}"
+            );
+            for (disable_fallback, disable_fallback_if_match) in
+                [(false, false), (true, false), (false, true)]
+            {
+                assert_eq!(
+                    compiled.select_indices(
+                        domain,
+                        disable_fallback,
+                        disable_fallback_if_match,
+                    ),
+                    select_name_server_indices(
+                        &policies,
+                        domain,
+                        disable_fallback,
+                        disable_fallback_if_match,
+                    ),
+                    "domain={domain} disableFallback={disable_fallback} disableFallbackIfMatch={disable_fallback_if_match}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_name_server_selector_indexes_large_exact_rule_set() {
+        let mut indexed = policy(2);
+        indexed.domains = domain_set(
+            &(0..9_999)
+                .map(|index| DomainMatcher::Full(format!("miss-{index}.policy.invalid")))
+                .chain([full("target.policy.test")])
+                .collect::<Vec<_>>(),
+        );
+        let policies = vec![policy(1), indexed];
+        let compiled = CompiledNameServerPolicies::new(policies.clone());
+
+        assert_eq!(compiled.matcher_count(), 10_000);
+        assert_eq!(
+            compiled.select_indices("target.policy.test", false, false),
+            select_name_server_indices(&policies, "target.policy.test", false, false),
+        );
+    }
+
+    #[test]
+    fn compiled_name_server_selector_preserves_low_level_empty_suffix_semantics() {
+        let mut empty_suffix = policy(1);
+        empty_suffix.domains = suffix_set("");
+        let policies = vec![empty_suffix, policy(2)];
+        let compiled = CompiledNameServerPolicies::new(policies.clone());
+
+        for domain in ["", ".", "...", "example.test"] {
+            assert_eq!(
+                compiled.select_indices(domain, false, true),
+                select_name_server_indices(&policies, domain, false, true),
+            );
+            assert_eq!(
+                compiled.select_indices(domain, false, true),
+                if domain == "example.test" {
+                    vec![0, 1]
+                } else {
+                    vec![0]
+                },
+                "domain={domain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn name_server_selectors_scale_past_inline_policy_bitset() {
+        let mut policies = (0..130)
+            .map(|index| policy((index % 254 + 1) as u8))
+            .collect::<Vec<_>>();
+        policies[65].skip_fallback = true;
+        policies[100].domains = full_set("matched.test");
+        let compiled = CompiledNameServerPolicies::new(policies.clone());
+
+        assert_eq!(
+            compiled.select_indices("matched.test", false, false),
+            select_name_server_indices(&policies, "matched.test", false, false),
+        );
+        assert_eq!(
+            compiled.select_indices("unmatched.test", false, false),
+            select_name_server_indices(&policies, "unmatched.test", false, false),
+        );
+    }
+
+    #[test]
+    fn dns_parser_flattens_out_of_order_cname_chain_and_uses_minimum_ttl() {
+        let query = build_dns_query_with_id("origin.example", DnsRecordType::A, 0xA17F).unwrap();
+        let response =
+            build_test_cname_and_a_response(&query, "alias.example", Ipv4Addr::new(192, 0, 2, 84));
+
+        let parsed = parse_dns_response(&query, &response, DnsRecordType::A).unwrap();
+
+        assert_eq!(
+            parsed,
+            super::ParsedDnsResponse::Answer(ConfiguredDnsAnswer::Addresses(
+                ConfiguredDnsAddresses {
+                    addresses: vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 84))],
+                    ttl: Duration::from_secs(20),
+                },
+            ))
+        );
+    }
+
+    #[test]
+    fn dns_parser_preserves_authoritative_ttl_above_300_seconds() {
+        let query = build_dns_query_with_id("long-ttl.example", DnsRecordType::A, 0xA180)
+            .expect("build query");
+        let response = build_test_address_response(
+            &query,
+            &[(1, 900, Ipv4Addr::new(192, 0, 2, 85).octets().to_vec())],
+        );
+
+        let parsed = parse_dns_response(&query, &response, DnsRecordType::A).unwrap();
+
+        assert_eq!(
+            parsed,
+            super::ParsedDnsResponse::Answer(ConfiguredDnsAnswer::Addresses(
+                ConfiguredDnsAddresses {
+                    addresses: vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 85))],
+                    ttl: Duration::from_secs(900),
+                },
+            ))
+        );
+    }
+
+    #[test]
+    fn dns_lookup_preserves_order_and_removes_exact_duplicates() {
+        let first = SocketAddr::from(([192, 0, 2, 10], 443));
+        let second = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 8443, 7, 9));
+        let mapped_first = SocketAddr::V6(SocketAddrV6::new(
+            Ipv4Addr::new(192, 0, 2, 10).to_ipv6_mapped(),
+            443,
+            7,
+            9,
+        ));
+
+        let lookup = DnsLookup::new(
+            [mapped_first, second, first, second],
+            Some(Duration::from_secs(30)),
+        );
+
+        assert_eq!(lookup.socket_addrs(), &[first, second]);
+        assert!(lookup.ttl().is_some_and(|ttl| {
+            ttl <= Duration::from_secs(30) && ttl > Duration::from_secs(29)
+        }));
+    }
+
+    struct LegacySocketDnsResolver(SocketAddr);
+
+    #[async_trait::async_trait]
+    impl DnsResolver for LegacySocketDnsResolver {
+        async fn resolve(&self, _domain: &str, _port: u16) -> Result<SocketAddr, TransportError> {
+            Ok(self.0)
+        }
+    }
+
+    #[tokio::test]
+    async fn default_resolve_all_preserves_legacy_socket_address_as_is() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let expected = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 8443, 17, 9));
+        let resolver = LegacySocketDnsResolver(expected);
+
+        let lookup = resolver.resolve_all("legacy.example", 443).await.unwrap();
+
+        assert_eq!(lookup.socket_addrs(), &[expected]);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn default_resolve_all_with_strategy_filters_legacy_result() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let resolver = LegacySocketDnsResolver(SocketAddr::from((Ipv6Addr::LOCALHOST, 443)));
+
+        let error = resolver
+            .resolve_all_with_strategy("legacy.example", 443, DnsQueryStrategy::UseIpv4)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::DnsNoData(domain, 443) if domain == "legacy.example"
+        ));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[derive(Default)]
+    struct CountingProtector {
+        calls: AtomicUsize,
+    }
+
+    impl SocketProtector for CountingProtector {
+        fn protect(&self, _socket: SocketHandle) -> io::Result<()> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dns_protects_udp_socket_before_query() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("test DNS socket should bind");
+        let protector = CountingProtector::default();
+
+        let result = query_udp_dns_server(
+            server.local_addr().expect("test DNS address should exist"),
+            "example.com",
+            DnsRecordType::A,
+            Duration::from_millis(1),
+            Some(&protector),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(protector.calls.load(Ordering::Relaxed), 1);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn connected_dns_socket_ignores_response_from_different_peer() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("test DNS socket should bind");
+        let server_addr = server.local_addr().expect("server address should exist");
+        let attacker = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("attacker socket should bind");
+        let (observed_tx, observed_rx) = oneshot::channel();
+        let server_task = crate::lifecycle::spawn(async move {
+            let mut packet = [0_u8; 512];
+            let (len, client_addr) = server
+                .recv_from(&mut packet)
+                .await
+                .expect("server should receive query");
+            let query = packet[..len].to_vec();
+            observed_tx
+                .send((client_addr, query.clone()))
+                .expect("test should observe query");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            server
+                .send_to(
+                    &build_test_a_response(&query, Ipv4Addr::new(192, 0, 2, 20)),
+                    client_addr,
+                )
+                .await
+                .expect("server should send legitimate response");
+        });
+        let query_task = crate::lifecycle::spawn(query_udp_dns_server(
+            server_addr,
+            "example.com",
+            DnsRecordType::A,
+            Duration::from_secs(1),
+            None,
+        ));
+        let (client_addr, query) = observed_rx.await.expect("query should be observable");
+        attacker
+            .send_to(
+                &build_test_a_response(&query, Ipv4Addr::new(198, 51, 100, 99)),
+                client_addr,
+            )
+            .await
+            .expect("attacker should send forged response");
+
+        let answer = query_task
+            .await
+            .expect("query task should not panic")
+            .expect("query should complete")
+            .expect("query should return an answer");
+        server_task.await.expect("server task should not panic");
+
+        assert_eq!(
+            answer,
+            ConfiguredDnsAnswer::Addresses(ConfiguredDnsAddresses {
+                addresses: vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20))],
+                ttl: Duration::from_secs(60),
+            })
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn connected_dns_socket_ignores_unrelated_response_from_selected_peer() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("test DNS socket should bind");
+        let server_addr = server.local_addr().expect("server address should exist");
+        let server_task = crate::lifecycle::spawn(async move {
+            let mut packet = [0_u8; 512];
+            let (len, client_addr) = server
+                .recv_from(&mut packet)
+                .await
+                .expect("server should receive query");
+            let query = packet[..len].to_vec();
+            let transaction_id = u16::from_be_bytes([query[0], query[1]]);
+            let unrelated_query =
+                build_dns_query_with_id("unrelated.example", DnsRecordType::A, transaction_id)
+                    .unwrap();
+            server
+                .send_to(
+                    &build_test_a_response(&unrelated_query, Ipv4Addr::new(198, 51, 100, 99)),
+                    client_addr,
+                )
+                .await
+                .expect("server should send unrelated response");
+            server
+                .send_to(
+                    &build_test_a_response(&query, Ipv4Addr::new(192, 0, 2, 21)),
+                    client_addr,
+                )
+                .await
+                .expect("server should send matching response");
+        });
+
+        let answer = query_udp_dns_server(
+            server_addr,
+            "example.com",
+            DnsRecordType::A,
+            Duration::from_secs(1),
+            None,
+        )
+        .await
+        .expect("query should complete")
+        .expect("query should return an answer");
+        server_task.await.expect("server task should not panic");
+
+        assert_eq!(
+            answer,
+            ConfiguredDnsAnswer::Addresses(ConfiguredDnsAddresses {
+                addresses: vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 21))],
+                ttl: Duration::from_secs(60),
+            })
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct RejectingResolver;
+
+    #[async_trait::async_trait]
+    impl DnsResolver for RejectingResolver {
+        async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            Err(TransportError::NoResolvedAddress(domain.to_owned(), port))
+        }
+    }
+
+    #[derive(Default)]
+    struct StrategyRecordingFallback {
+        strategies: Mutex<Vec<DnsQueryStrategy>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for StrategyRecordingFallback {
+        async fn resolve(&self, _domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            Ok(SocketAddr::from(([192, 0, 2, 97], port)))
+        }
+
+        async fn resolve_all(&self, _domain: &str, port: u16) -> Result<DnsLookup, TransportError> {
+            Ok(DnsLookup::from_ips(
+                [
+                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 97)),
+                    IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 97)),
+                ],
+                port,
+                Some(Duration::from_secs(60)),
+            ))
+        }
+
+        async fn resolve_all_with_strategy(
+            &self,
+            _domain: &str,
+            port: u16,
+            strategy: DnsQueryStrategy,
+        ) -> Result<DnsLookup, TransportError> {
+            self.strategies.lock().unwrap().push(strategy);
+            let address = match strategy {
+                DnsQueryStrategy::UseIp | DnsQueryStrategy::UseIpv4 => {
+                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 97))
+                }
+                DnsQueryStrategy::UseIpv6 => {
+                    IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 97))
+                }
+            };
+            Ok(DnsLookup::from_ips(
+                [address],
+                port,
+                Some(Duration::from_secs(60)),
+            ))
+        }
+    }
+
+    #[derive(Default)]
+    struct FamilyRecordingQueryTransport {
+        record_types: Mutex<Vec<u16>>,
+        ipv6_address: Option<Ipv6Addr>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for FamilyRecordingQueryTransport {
+        async fn exchange(
+            &self,
+            _server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let record_type = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
+            self.record_types.lock().unwrap().push(record_type);
+            match record_type {
+                1 => Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 90))),
+                28 => Ok(build_test_address_response(
+                    query,
+                    &[(
+                        28,
+                        60,
+                        self.ipv6_address
+                            .unwrap_or(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 90))
+                            .octets()
+                            .to_vec(),
+                    )],
+                )),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unexpected DNS record type",
+                )),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingFamilyQueryTransport {
+        record_types: Mutex<Vec<u16>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for FailingFamilyQueryTransport {
+        async fn exchange(
+            &self,
+            _server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let record_type = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
+            self.record_types.lock().unwrap().push(record_type);
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "test DNS transport unavailable",
+            ))
+        }
+    }
+
+    struct MappedFirstServerQueryTransport {
+        first: NameServer,
+        calls: Mutex<Vec<NameServer>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for MappedFirstServerQueryTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            self.calls.lock().unwrap().push(server.clone());
+            let address = if server == &self.first {
+                Ipv4Addr::new(192, 0, 2, 96).to_ipv6_mapped()
+            } else {
+                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 96)
+            };
+            Ok(build_test_address_response(
+                query,
+                &[(28, 60, address.octets().to_vec())],
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dns_use_ipv6_rejects_mapped_ipv4_wire_answer() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let fallback = Arc::new(DelayedCountingResolver {
+            calls: AtomicUsize::new(0),
+            result: Some(SocketAddr::from(([192, 0, 2, 94], 0))),
+        });
+        let transport = Arc::new(FamilyRecordingQueryTransport {
+            record_types: Mutex::new(Vec::new()),
+            ipv6_address: Some(Ipv4Addr::new(192, 0, 2, 95).to_ipv6_mapped()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)))],
+            fallback.clone(),
+        )
+        .with_query_strategy(DnsQueryStrategy::UseIpv6)
+        .with_query_transport(transport.clone());
+
+        let error = resolver
+            .resolve("mapped-wire.example", 443)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::DnsNoData(domain, 443) if domain == "mapped-wire.example"
+        ));
+        assert_eq!(*transport.record_types.lock().unwrap(), [28]);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_mapped_aaaa_keeps_server_failover_available() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 53)));
+        let transport = Arc::new(MappedFirstServerQueryTransport {
+            first: first.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![first.clone(), second.clone()],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_strategy(DnsQueryStrategy::UseIpv6)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver
+            .resolve("mapped-failover.example", 443)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolved,
+            SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 96), 443))
+        );
+        assert_eq!(*transport.calls.lock().unwrap(), [first, second]);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_query_strategy_sends_only_selected_family() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        for (strategy, record_type, expected) in [
+            (
+                DnsQueryStrategy::UseIpv4,
+                1,
+                SocketAddr::from(([192, 0, 2, 90], 443)),
+            ),
+            (
+                DnsQueryStrategy::UseIpv6,
+                28,
+                SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 90), 443)),
+            ),
+        ] {
+            let transport = Arc::new(FamilyRecordingQueryTransport::default());
+            let resolver = ConfiguredDnsResolver::new(
+                DomainHostIndex::default(),
+                vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)))],
+                Arc::new(RejectingResolver),
+            )
+            .with_query_strategy(strategy)
+            .with_query_transport(transport.clone());
+
+            let resolved = resolver.resolve("family.example", 443).await.unwrap();
+
+            assert_eq!(resolved, expected);
+            assert_eq!(*transport.record_types.lock().unwrap(), [record_type]);
+        }
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_requested_ipv4_queries_only_a() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let transport = Arc::new(FamilyRecordingQueryTransport::default());
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)))],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_transport(transport.clone());
+
+        let lookup = resolver
+            .resolve_all_with_strategy("family.example", 443, DnsQueryStrategy::UseIpv4)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lookup.socket_addrs(),
+            &[SocketAddr::from(([192, 0, 2, 90], 443))]
+        );
+        assert_eq!(*transport.record_types.lock().unwrap(), [1]);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_requested_family_skips_incompatible_server_without_io() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 54], 53)));
+        let mut incompatible = NameServerPolicy::new(first);
+        incompatible.query_strategy = DnsQueryStrategy::UseIpv6;
+        let mut compatible = NameServerPolicy::new(second);
+        compatible.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(FamilyRecordingQueryTransport::default());
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![incompatible, compatible])
+        .with_query_transport(transport.clone());
+
+        let lookup = resolver
+            .resolve_all_with_strategy("family.example", 443, DnsQueryStrategy::UseIpv4)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lookup.socket_addrs(),
+            &[SocketAddr::from(([192, 0, 2, 90], 443))]
+        );
+        assert_eq!(*transport.record_types.lock().unwrap(), [1]);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_all_incompatible_servers_return_nodata_without_io() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server = NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)));
+        let mut incompatible = NameServerPolicy::new(server);
+        incompatible.query_strategy = DnsQueryStrategy::UseIpv6;
+        let transport = Arc::new(FamilyRecordingQueryTransport::default());
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![incompatible])
+        .with_query_transport(transport.clone());
+
+        let error = resolver
+            .resolve_all_with_strategy("family.example", 443, DnsQueryStrategy::UseIpv4)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::DnsNoData(domain, 443) if domain == "family.example"
+        ));
+        assert!(transport.record_types.lock().unwrap().is_empty());
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_incompatible_server_does_not_mask_compatible_transport_failure() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 54], 53)));
+        let mut incompatible = NameServerPolicy::new(first);
+        incompatible.query_strategy = DnsQueryStrategy::UseIpv6;
+        let mut compatible = NameServerPolicy::new(second);
+        compatible.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(FailingFamilyQueryTransport::default());
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![incompatible, compatible])
+        .with_query_transport(transport.clone());
+
+        let error = resolver
+            .resolve_all_with_strategy("family.example", 443, DnsQueryStrategy::UseIpv4)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::Dns {
+                domain,
+                port: 443,
+                source,
+            } if domain == "family.example" && source.kind() == io::ErrorKind::NotConnected
+        ));
+        assert_eq!(*transport.record_types.lock().unwrap(), [1]);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_requested_ipv6_queries_only_aaaa() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let transport = Arc::new(FamilyRecordingQueryTransport::default());
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)))],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_transport(transport.clone());
+
+        let lookup = resolver
+            .resolve_all_with_strategy("family.example", 443, DnsQueryStrategy::UseIpv6)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lookup.socket_addrs(),
+            &[SocketAddr::from((
+                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 90),
+                443,
+            ))]
+        );
+        assert_eq!(*transport.record_types.lock().unwrap(), [28]);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_propagates_requested_family_to_system_fallback() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let fallback = Arc::new(StrategyRecordingFallback::default());
+        let resolver =
+            ConfiguredDnsResolver::new(DomainHostIndex::default(), Vec::new(), fallback.clone());
+
+        let ipv4 = resolver
+            .resolve_all_with_strategy("fallback.example", 443, DnsQueryStrategy::UseIpv4)
+            .await
+            .unwrap();
+        let ipv6 = resolver
+            .resolve_all_with_strategy("fallback.example", 443, DnsQueryStrategy::UseIpv6)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ipv4.socket_addrs(),
+            &[SocketAddr::from(([192, 0, 2, 97], 443))]
+        );
+        assert_eq!(
+            ipv6.socket_addrs(),
+            &[SocketAddr::from((
+                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 97),
+                443,
+            ))]
+        );
+        assert_eq!(
+            *fallback.strategies.lock().unwrap(),
+            [DnsQueryStrategy::UseIpv4, DnsQueryStrategy::UseIpv6]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_query_strategy_filters_static_hosts_and_mapped_ipv4() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let native_ipv6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 91);
+        let mapped_ipv4 = Ipv4Addr::new(192, 0, 2, 91).to_ipv6_mapped();
+        let native_ipv4 = Ipv4Addr::new(192, 0, 2, 92);
+        let host_rules = Arc::new(hosts([(
+            full("mixed.example"),
+            DnsHostTarget::Ips(vec![
+                IpAddr::V6(native_ipv6),
+                IpAddr::V6(mapped_ipv4),
+                IpAddr::V4(native_ipv4),
+            ]),
+        )]));
+
+        let ipv4 = ConfiguredDnsResolver::new(
+            Arc::clone(&host_rules),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .resolve_all("mixed.example", 443)
+        .await
+        .unwrap();
+        let ipv6 = ConfiguredDnsResolver::new(host_rules, Vec::new(), Arc::new(RejectingResolver))
+            .with_query_strategy(DnsQueryStrategy::UseIpv6)
+            .resolve_all("mixed.example", 443)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ipv4.socket_addrs(),
+            [
+                SocketAddr::new(
+                    IpAddr::V4(mapped_ipv4.to_ipv4_mapped().expect("mapped IPv4")),
+                    443,
+                ),
+                SocketAddr::new(IpAddr::V4(native_ipv4), 443),
+            ]
+        );
+        assert_eq!(
+            ipv6.socket_addrs(),
+            [SocketAddr::new(IpAddr::V6(native_ipv6), 443)]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_requested_family_filters_static_hosts_before_fallback() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let fallback = Arc::new(DelayedCountingResolver {
+            calls: AtomicUsize::new(0),
+            result: Some(SocketAddr::from(([192, 0, 2, 94], 0))),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            hosts([(
+                full("mixed-host.example"),
+                DnsHostTarget::Ips(vec![
+                    Ipv4Addr::new(192, 0, 2, 95).into(),
+                    Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 95).into(),
+                ]),
+            )]),
+            Vec::new(),
+            fallback.clone(),
+        );
+
+        let lookup = resolver
+            .resolve_all_with_strategy("mixed-host.example", 443, DnsQueryStrategy::UseIpv6)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lookup.socket_addrs(),
+            &[SocketAddr::from((
+                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 95),
+                443,
+            ))]
+        );
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_wrong_family_static_host_is_terminal_nodata() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let fallback = Arc::new(DelayedCountingResolver {
+            calls: AtomicUsize::new(0),
+            result: Some(SocketAddr::from(([192, 0, 2, 93], 0))),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            hosts([(
+                full("ipv6-only.example"),
+                DnsHostTarget::Ip(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            )]),
+            Vec::new(),
+            fallback.clone(),
+        )
+        .with_query_strategy(DnsQueryStrategy::UseIpv4);
+
+        let error = resolver
+            .resolve("ipv6-only.example", 443)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::DnsNoData(domain, 443) if domain == "ipv6-only.example"
+        ));
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_exact_host_mapping_wins_over_broader_mapping() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let resolver = ConfiguredDnsResolver::new(
+            hosts([
+                (
+                    keyword("example"),
+                    DnsHostTarget::Ip(Ipv4Addr::new(192, 0, 2, 1).into()),
+                ),
+                (
+                    full("PROXY.EXAMPLE"),
+                    DnsHostTarget::Ip(Ipv4Addr::new(192, 0, 2, 2).into()),
+                ),
+            ]),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        );
+
+        let lookup = resolver.resolve_all("PROXY.EXAMPLE.", 443).await.unwrap();
+
+        assert_eq!(
+            lookup.socket_addrs(),
+            &[SocketAddr::from(([192, 0, 2, 2], 443))]
+        );
+        assert!(lookup
+            .ttl()
+            .is_some_and(|ttl| { ttl <= Duration::from_secs(10) && ttl > Duration::from_secs(9) }));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_static_host_mapping_preserves_all_ip_candidates() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let resolver = ConfiguredDnsResolver::new(
+            hosts([(
+                full("proxy.example"),
+                DnsHostTarget::Ips(vec![
+                    Ipv6Addr::LOCALHOST.into(),
+                    Ipv4Addr::new(192, 0, 2, 44).into(),
+                    Ipv6Addr::LOCALHOST.into(),
+                ]),
+            )]),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        );
+
+        let lookup = resolver.resolve_all("proxy.example", 8443).await.unwrap();
+
+        assert_eq!(
+            lookup.socket_addrs(),
+            &[
+                SocketAddr::from((Ipv6Addr::LOCALHOST, 8443)),
+                SocketAddr::from((Ipv4Addr::new(192, 0, 2, 44), 8443)),
+            ]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct MultiAddressQueryTransport;
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for MultiAddressQueryTransport {
+        async fn exchange(
+            &self,
+            _server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let record_type = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
+            match record_type {
+                1 => Ok(build_test_address_response(
+                    query,
+                    &[
+                        (1, 120, Ipv4Addr::new(192, 0, 2, 80).octets().to_vec()),
+                        (1, 30, Ipv4Addr::new(192, 0, 2, 81).octets().to_vec()),
+                    ],
+                )),
+                28 => Ok(build_test_address_response(
+                    query,
+                    &[
+                        (
+                            28,
+                            90,
+                            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 80)
+                                .octets()
+                                .to_vec(),
+                        ),
+                        (
+                            28,
+                            45,
+                            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 81)
+                                .octets()
+                                .to_vec(),
+                        ),
+                    ],
+                )),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unexpected DNS query type",
+                )),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dns_returns_all_families_with_minimum_answer_ttl() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)))],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_transport(Arc::new(MultiAddressQueryTransport));
+
+        let lookup = resolver.resolve_all("multi.example", 443).await.unwrap();
+
+        assert_eq!(
+            lookup.ips().collect::<Vec<_>>(),
+            vec![
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 80)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 81)),
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 80)),
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 81)),
+            ]
+        );
+        assert!(lookup.ttl().is_some_and(|ttl| {
+            ttl <= Duration::from_secs(30) && ttl > Duration::from_secs(29)
+        }));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_filters_merged_families_without_reordering_or_recomputing_ttl() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server = NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)));
+        let mut policy = NameServerPolicy::new(server);
+        policy.expected_ips = hard_dns_ip_filter(&[
+            Cidr::host(Ipv4Addr::new(192, 0, 2, 80).into()),
+            Cidr::host(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 80).into()),
+        ]);
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![policy])
+        .with_query_transport(Arc::new(MultiAddressQueryTransport));
+
+        let lookup = resolver
+            .resolve_all("filtered-multi.example", 443)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lookup.ips().collect::<Vec<_>>(),
+            [
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 80)),
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 80)),
+            ]
+        );
+        assert!(lookup.ttl().is_some_and(|ttl| {
+            ttl <= Duration::from_secs(30) && ttl > Duration::from_secs(29)
+        }));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[derive(Default)]
+    struct FamilyTtlRecordingQueryTransport {
+        record_types: Mutex<Vec<u16>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for FamilyTtlRecordingQueryTransport {
+        async fn exchange(
+            &self,
+            _server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let record_type = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
+            self.record_types.lock().unwrap().push(record_type);
+            match record_type {
+                1 => Ok(build_test_address_response(
+                    query,
+                    &[(1, 20, Ipv4Addr::new(192, 0, 2, 98).octets().to_vec())],
+                )),
+                28 => Ok(build_test_address_response(
+                    query,
+                    &[(
+                        28,
+                        120,
+                        Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 98)
+                            .octets()
+                            .to_vec(),
+                    )],
+                )),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unexpected DNS query type",
+                )),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn caching_dns_separates_family_keys_and_preserves_family_ttl() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let transport = Arc::new(FamilyTtlRecordingQueryTransport::default());
+        let configured = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)))],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_transport(transport.clone());
+        let resolver = CachingDnsResolver::new(Arc::new(configured));
+
+        let ipv4 = resolver
+            .resolve_all_with_strategy("family-cache.example", 443, DnsQueryStrategy::UseIpv4)
+            .await
+            .unwrap();
+        let ipv4_cached = resolver
+            .resolve_all_with_strategy("family-cache.example", 443, DnsQueryStrategy::UseIpv4)
+            .await
+            .unwrap();
+        let ipv6 = resolver
+            .resolve_all_with_strategy("family-cache.example", 443, DnsQueryStrategy::UseIpv6)
+            .await
+            .unwrap();
+        let ipv6_cached = resolver
+            .resolve_all_with_strategy("family-cache.example", 443, DnsQueryStrategy::UseIpv6)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ipv4.socket_addrs(),
+            &[SocketAddr::from(([192, 0, 2, 98], 443))]
+        );
+        assert_eq!(ipv4_cached.socket_addrs(), ipv4.socket_addrs());
+        assert_eq!(
+            ipv6.socket_addrs(),
+            &[SocketAddr::from((
+                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 98),
+                443,
+            ))]
+        );
+        assert_eq!(ipv6_cached.socket_addrs(), ipv6.socket_addrs());
+        assert!(ipv4.ttl().is_some_and(|ttl| {
+            ttl <= Duration::from_secs(20) && ttl > Duration::from_secs(19)
+        }));
+        assert!(ipv6.ttl().is_some_and(|ttl| {
+            ttl <= Duration::from_secs(120) && ttl > Duration::from_secs(119)
+        }));
+        assert_eq!(*transport.record_types.lock().unwrap(), [1, 28]);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct TtlCountingResolver {
+        calls: AtomicUsize,
+        ttl: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for TtlCountingResolver {
+        async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            self.resolve_all(domain, port)
+                .await?
+                .first_socket_addr(domain, port)
+        }
+
+        async fn resolve_all(
+            &self,
+            _domain: &str,
+            _port: u16,
+        ) -> Result<DnsLookup, TransportError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(DnsLookup::from_ips(
+                [
+                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 82)),
+                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 83)),
+                ],
+                _port,
+                Some(self.ttl),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn caching_dns_expires_multi_address_result_using_upstream_ttl() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let inner = Arc::new(TtlCountingResolver {
+            calls: AtomicUsize::new(0),
+            ttl: Duration::from_secs(1),
+        });
+        let resolver = CachingDnsResolver::new(inner.clone());
+
+        let first = resolver.resolve_all("ttl.example", 443).await.unwrap();
+        let first_ttl = first.ttl().unwrap();
+        let cached = resolver.resolve_all("ttl.example", 443).await.unwrap();
+        let cached_ttl = cached.ttl().unwrap();
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let refreshed = resolver.resolve_all("ttl.example", 443).await.unwrap();
+
+        assert_eq!(first.socket_addrs(), cached.socket_addrs());
+        assert_eq!(cached.socket_addrs(), refreshed.socket_addrs());
+        assert!(!cached_ttl.is_zero());
+        assert!(cached_ttl <= first_ttl);
+        assert!(refreshed.ttl().is_some_and(|ttl| {
+            ttl <= Duration::from_secs(1) && ttl > Duration::from_millis(900)
+        }));
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 2);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn default_cache_preserves_authoritative_ttl_above_policy_fallback() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let inner = Arc::new(TtlCountingResolver {
+            calls: AtomicUsize::new(0),
+            ttl: Duration::from_secs(900),
+        });
+        let resolver = CachingDnsResolver::new(inner);
+
+        let lookup = resolver.resolve_all("long-ttl.example", 443).await.unwrap();
+
+        assert!(lookup.ttl().is_some_and(|ttl| {
+            ttl <= Duration::from_secs(900) && ttl > Duration::from_secs(899)
+        }));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct DelayedCountingResolver {
+        calls: AtomicUsize,
+        result: Option<SocketAddr>,
+    }
+
+    struct ImmediateCountingResolver {
+        calls: AtomicUsize,
+        result: SocketAddr,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for ImmediateCountingResolver {
+        async fn resolve(&self, _domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(SocketAddr::new(self.result.ip(), port))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for DelayedCountingResolver {
+        async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.result
+                .map(|addr| SocketAddr::new(addr.ip(), port))
+                .ok_or_else(|| TransportError::NoResolvedAddress(domain.to_owned(), port))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn caching_dns_single_flights_concurrent_successes() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let inner = Arc::new(DelayedCountingResolver {
+            calls: AtomicUsize::new(0),
+            result: Some(SocketAddr::from(([192, 0, 2, 60], 0))),
+        });
+        let resolver = Arc::new(CachingDnsResolver::new(inner.clone()));
+        let barrier = Arc::new(Barrier::new(33));
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let resolver = Arc::clone(&resolver);
+            let barrier = Arc::clone(&barrier);
+            tasks.push(crate::lifecycle::spawn(async move {
+                barrier.wait().await;
+                resolver.resolve("burst.example", 443).await
+            }));
+        }
+        barrier.wait().await;
+
+        for task in tasks {
+            assert_eq!(
+                task.await.unwrap().unwrap(),
+                SocketAddr::from(([192, 0, 2, 60], 443))
+            );
+        }
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 1);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn caching_dns_reuses_canonical_names() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let inner = Arc::new(DelayedCountingResolver {
+            calls: AtomicUsize::new(0),
+            result: Some(SocketAddr::from(([192, 0, 2, 61], 0))),
+        });
+        let resolver = CachingDnsResolver::new(inner.clone());
+
+        resolver.resolve("Cache.Example", 443).await.unwrap();
+        resolver.resolve("cache.example", 443).await.unwrap();
+        resolver.resolve("CACHE.EXAMPLE.", 443).await.unwrap();
+
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 1);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn caching_dns_evicts_only_the_least_recently_used_live_entry() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let inner = Arc::new(ImmediateCountingResolver {
+            calls: AtomicUsize::new(0),
+            result: SocketAddr::from(([192, 0, 2, 62], 0)),
+        });
+        let resolver = CachingDnsResolver::new(inner.clone());
+        for index in 0..DNS_CACHE_MAX_ENTRIES {
+            resolver
+                .resolve(&format!("entry-{index}.example"), 443)
+                .await
+                .unwrap();
+        }
+        resolver.resolve("entry-0.example", 443).await.unwrap();
+        resolver.resolve("overflow.example", 443).await.unwrap();
+        resolver.resolve("entry-0.example", 443).await.unwrap();
+        resolver.resolve("entry-1.example", 443).await.unwrap();
+
+        assert_eq!(
+            inner.calls.load(Ordering::Relaxed),
+            DNS_CACHE_MAX_ENTRIES + 2
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn caching_dns_single_flights_concurrent_failures() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let inner = Arc::new(DelayedCountingResolver {
+            calls: AtomicUsize::new(0),
+            result: None,
+        });
+        let resolver = Arc::new(CachingDnsResolver::new(inner.clone()));
+        let barrier = Arc::new(Barrier::new(33));
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let resolver = Arc::clone(&resolver);
+            let barrier = Arc::clone(&barrier);
+            tasks.push(crate::lifecycle::spawn(async move {
+                barrier.wait().await;
+                resolver.resolve("missing.example", 443).await
+            }));
+        }
+        barrier.wait().await;
+
+        for task in tasks {
+            assert!(task.await.unwrap().is_err());
+        }
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 1);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct DelayedNameErrorResolver {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for DelayedNameErrorResolver {
+        async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Err(TransportError::DnsNameError(domain.to_owned(), port))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn caching_dns_preserves_negative_outcome_for_all_singleflight_waiters() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let inner = Arc::new(DelayedNameErrorResolver {
+            calls: AtomicUsize::new(0),
+        });
+        let resolver = Arc::new(CachingDnsResolver::new(inner.clone()));
+        let barrier = Arc::new(Barrier::new(17));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let resolver = Arc::clone(&resolver);
+            let barrier = Arc::clone(&barrier);
+            tasks.push(crate::lifecycle::spawn(async move {
+                barrier.wait().await;
+                resolver.resolve("missing.example", 443).await
+            }));
+        }
+        barrier.wait().await;
+
+        for task in tasks {
+            assert!(matches!(
+                task.await.unwrap(),
+                Err(TransportError::DnsNameError(domain, 443)) if domain == "missing.example"
+            ));
+        }
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 1);
+
+        assert!(matches!(
+            resolver.resolve("missing.example", 443).await,
+            Err(TransportError::DnsNameError(domain, 443)) if domain == "missing.example"
+        ));
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 1);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct ImmediateDnsFailureResolver {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for ImmediateDnsFailureResolver {
+        async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(TransportError::Dns {
+                domain: domain.to_owned(),
+                port,
+                source: io::Error::new(io::ErrorKind::ConnectionRefused, "test failure"),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn caching_dns_never_negative_caches_transport_failures() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let inner = Arc::new(ImmediateDnsFailureResolver {
+            calls: AtomicUsize::new(0),
+        });
+        let resolver = CachingDnsResolver::new(inner.clone());
+
+        assert!(resolver.resolve("unavailable.example", 443).await.is_err());
+        assert!(resolver.resolve("unavailable.example", 443).await.is_err());
+
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 2);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct RefreshingDnsResolver {
+        calls: AtomicUsize,
+        release_refresh: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for RefreshingDnsResolver {
+        async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            self.resolve_all(domain, port)
+                .await?
+                .first_socket_addr(domain, port)
+        }
+
+        async fn resolve_all(&self, _domain: &str, port: u16) -> Result<DnsLookup, TransportError> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            if call > 0 {
+                self.release_refresh.notified().await;
+            }
+            let octet = if call == 0 { 70 } else { 71 };
+            Ok(DnsLookup::single(
+                SocketAddr::from(([192, 0, 2, octet], port)),
+                Some(if call == 0 {
+                    Duration::from_millis(20)
+                } else {
+                    Duration::from_secs(1)
+                }),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn caching_dns_serves_bounded_stale_and_single_flights_background_refresh() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let inner = Arc::new(RefreshingDnsResolver {
+            calls: AtomicUsize::new(0),
+            release_refresh: Notify::new(),
+        });
+        let resolver =
+            CachingDnsResolver::with_stale_ttl(inner.clone(), Duration::from_millis(250));
+        let original = SocketAddr::from(([192, 0, 2, 70], 443));
+        let refreshed = SocketAddr::from(([192, 0, 2, 71], 443));
+
+        assert_eq!(
+            resolver.resolve("stale.example", 443).await.unwrap(),
+            original
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        for _ in 0..16 {
+            assert_eq!(
+                resolver.resolve("stale.example", 443).await.unwrap(),
+                original
+            );
+        }
+        while inner.calls.load(Ordering::Relaxed) < 2 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 2);
+
+        inner.release_refresh.notify_one();
+        let actual = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let lookup = resolver.resolve("stale.example", 443).await.unwrap();
+                if lookup == refreshed {
+                    break lookup;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background DNS refresh should replace the stale entry");
+
+        assert_eq!(actual, refreshed);
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 2);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct FailingRefreshResolver {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for FailingRefreshResolver {
+        async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            self.resolve_all(domain, port)
+                .await?
+                .first_socket_addr(domain, port)
+        }
+
+        async fn resolve_all(&self, domain: &str, port: u16) -> Result<DnsLookup, TransportError> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Ok(DnsLookup::single(
+                    SocketAddr::from(([192, 0, 2, 72], port)),
+                    Some(Duration::from_millis(20)),
+                ));
+            }
+            Err(TransportError::Dns {
+                domain: domain.to_owned(),
+                port,
+                source: io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "injected stale refresh failure",
+                ),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn caching_dns_refresh_failure_keeps_stale_only_until_its_deadline() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let inner = Arc::new(FailingRefreshResolver {
+            calls: AtomicUsize::new(0),
+        });
+        let resolver =
+            CachingDnsResolver::with_stale_ttl(inner.clone(), Duration::from_millis(100));
+        let stale = SocketAddr::from(([192, 0, 2, 72], 443));
+
+        assert_eq!(
+            resolver
+                .resolve("refresh-failure.example", 443)
+                .await
+                .unwrap(),
+            stale
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(
+            resolver
+                .resolve("refresh-failure.example", 443)
+                .await
+                .unwrap(),
+            stale
+        );
+        while inner.calls.load(Ordering::Relaxed) < 2 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let error = resolver
+            .resolve("refresh-failure.example", 443)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TransportError::Dns { source, .. }
+            if source.kind() == io::ErrorKind::ConnectionRefused));
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 3);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct RefreshLifecycleResolver {
+        calls: AtomicUsize,
+        refresh_started: Notify,
+        refresh_dropped: Arc<AtomicBool>,
+    }
+
+    struct RefreshDropGuard(Arc<AtomicBool>);
+
+    impl Drop for RefreshDropGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for RefreshLifecycleResolver {
+        async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            self.resolve_all(domain, port)
+                .await?
+                .first_socket_addr(domain, port)
+        }
+
+        async fn resolve_all(&self, _domain: &str, port: u16) -> Result<DnsLookup, TransportError> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Ok(DnsLookup::single(
+                    SocketAddr::from(([192, 0, 2, 73], port)),
+                    Some(Duration::from_millis(10)),
+                ));
+            }
+            let _guard = RefreshDropGuard(Arc::clone(&self.refresh_dropped));
+            self.refresh_started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn caching_dns_owner_drop_cancels_pending_stale_refresh() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let refresh_dropped = Arc::new(AtomicBool::new(false));
+        let inner = Arc::new(RefreshLifecycleResolver {
+            calls: AtomicUsize::new(0),
+            refresh_started: Notify::new(),
+            refresh_dropped: Arc::clone(&refresh_dropped),
+        });
+        let resolver = CachingDnsResolver::with_stale_ttl(inner.clone(), Duration::from_secs(1));
+
+        resolver.resolve("refresh-drop.example", 443).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        resolver.resolve("refresh-drop.example", 443).await.unwrap();
+        inner.refresh_started.notified().await;
+        drop(resolver);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !refresh_dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the cache owner should cancel its stale refresh");
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 2);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct CancelOnceResolver {
+        calls: AtomicUsize,
+        first_started: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for CancelOnceResolver {
+        async fn resolve(&self, _domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                self.first_started.notify_one();
+                std::future::pending().await
+            } else {
+                Ok(SocketAddr::from(([192, 0, 2, 61], port)))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn caching_dns_wakes_waiters_when_lookup_leader_is_cancelled() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let inner = Arc::new(CancelOnceResolver {
+            calls: AtomicUsize::new(0),
+            first_started: Notify::new(),
+        });
+        let resolver = Arc::new(CachingDnsResolver::new(inner.clone()));
+        let leader_resolver = Arc::clone(&resolver);
+        let leader =
+            crate::lifecycle::spawn(async move { leader_resolver.resolve("cancelled.example", 443).await });
+        inner.first_started.notified().await;
+        let waiter_resolver = Arc::clone(&resolver);
+        let waiter =
+            crate::lifecycle::spawn(async move { waiter_resolver.resolve("cancelled.example", 443).await });
+        tokio::task::yield_now().await;
+
+        leader.abort();
+        let resolved = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter should be released after leader cancellation")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 61], 443)));
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 2);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[derive(Default)]
+    struct TruncatingQueryTransport {
+        calls: Mutex<Vec<DnsQueryTransportKind>>,
+    }
+
+    struct InvalidTruncatedQueryTransport {
+        first: NameServer,
+        calls: Mutex<Vec<(NameServer, DnsQueryTransportKind)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for TruncatingQueryTransport {
+        async fn exchange(
+            &self,
+            _server: &NameServer,
+            transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            self.calls.lock().unwrap().push(transport);
+            match transport {
+                DnsQueryTransportKind::Udp => {
+                    let mut response = Vec::with_capacity(query.len());
+                    response.extend_from_slice(&query[..2]);
+                    response.extend_from_slice(&0x8380_u16.to_be_bytes());
+                    response.extend_from_slice(&1_u16.to_be_bytes());
+                    response.extend_from_slice(&0_u16.to_be_bytes());
+                    response.extend_from_slice(&0_u16.to_be_bytes());
+                    response.extend_from_slice(&0_u16.to_be_bytes());
+                    response.extend_from_slice(&query[12..]);
+                    Ok(response)
+                }
+                DnsQueryTransportKind::Tcp
+                | DnsQueryTransportKind::Tls
+                | DnsQueryTransportKind::Https
+                | DnsQueryTransportKind::Quic => {
+                    Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 25)))
+                }
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for InvalidTruncatedQueryTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            self.calls.lock().unwrap().push((server.clone(), transport));
+            if server == &self.first {
+                let mut response = build_test_truncated_response(query);
+                response[0] ^= 1;
+                Ok(response)
+            } else {
+                Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 26)))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dns_retries_valid_truncated_udp_response_over_tcp() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let transport = Arc::new(TruncatingQueryTransport::default());
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)))],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("example.com", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 25], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            vec![
+                DnsQueryTransportKind::Udp,
+                DnsQueryTransportKind::Tcp,
+                DnsQueryTransportKind::Udp,
+                DnsQueryTransportKind::Tcp,
+            ]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_does_not_retry_invalid_truncated_udp_response_over_tcp() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 54], 53)));
+        let mut first_policy = NameServerPolicy::new(first.clone());
+        first_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let mut second_policy = NameServerPolicy::new(second.clone());
+        second_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(InvalidTruncatedQueryTransport {
+            first: first.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![first_policy, second_policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("invalid-tc.test", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 26], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [
+                (first, DnsQueryTransportKind::Udp),
+                (second, DnsQueryTransportKind::Udp),
+            ]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct FixedResolver(SocketAddr);
+
+    #[async_trait::async_trait]
+    impl DnsResolver for FixedResolver {
+        async fn resolve(&self, _domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            Ok(SocketAddr::new(self.0.ip(), port))
+        }
+    }
+
+    struct PendingQueryTransport;
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for PendingQueryTransport {
+        async fn exchange(
+            &self,
+            _server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            _query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            std::future::pending().await
+        }
+    }
+
+    struct ResponseCodeQueryTransport {
+        response_code: u16,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for ResponseCodeQueryTransport {
+        async fn exchange(
+            &self,
+            _server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(build_test_empty_response(query, self.response_code))
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dns_nxdomain_is_terminal_and_does_not_use_fallback() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let fallback = Arc::new(DelayedCountingResolver {
+            calls: AtomicUsize::new(0),
+            result: Some(SocketAddr::from(([192, 0, 2, 70], 0))),
+        });
+        let transport = Arc::new(ResponseCodeQueryTransport {
+            response_code: 3,
+            calls: AtomicUsize::new(0),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)))],
+            fallback.clone(),
+        )
+        .with_query_transport(transport.clone());
+
+        let error = resolver.resolve("missing.example", 443).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::DnsNameError(domain, 443) if domain == "missing.example"
+        ));
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_nodata_is_terminal_after_a_and_aaaa() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let fallback = Arc::new(DelayedCountingResolver {
+            calls: AtomicUsize::new(0),
+            result: Some(SocketAddr::from(([192, 0, 2, 71], 0))),
+        });
+        let transport = Arc::new(ResponseCodeQueryTransport {
+            response_code: 0,
+            calls: AtomicUsize::new(0),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)))],
+            fallback.clone(),
+        )
+        .with_query_transport(transport.clone());
+
+        let error = resolver.resolve("nodata.example", 443).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::DnsNoData(domain, 443) if domain == "nodata.example"
+        ));
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_single_family_negative_is_terminal() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let fallback = Arc::new(DelayedCountingResolver {
+            calls: AtomicUsize::new(0),
+            result: Some(SocketAddr::from(([192, 0, 2, 71], 0))),
+        });
+        let transport = Arc::new(ResponseCodeQueryTransport {
+            response_code: 3,
+            calls: AtomicUsize::new(0),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)))],
+            fallback.clone(),
+        )
+        .with_query_strategy(DnsQueryStrategy::UseIpv6)
+        .with_query_transport(transport.clone());
+
+        let error = resolver
+            .resolve("missing-v6.example", 443)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::DnsNameError(domain, 443) if domain == "missing-v6.example"
+        ));
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct FirstServerResponseCodeTransport {
+        first: NameServer,
+        response_code: u16,
+        calls: Mutex<Vec<NameServer>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for FirstServerResponseCodeTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            self.calls.lock().unwrap().push(server.clone());
+            if server == &self.first {
+                Ok(build_test_empty_response(query, self.response_code))
+            } else {
+                Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 72)))
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct TaggedDnsCall {
+        server: NameServer,
+        transport: DnsQueryTransportKind,
+        dispatch: DnsQueryDispatch,
+        inbound_tag: Option<String>,
+        domain: String,
+    }
+
+    struct TaggedCnameFailoverTransport {
+        first: NameServer,
+        calls: Mutex<Vec<TaggedDnsCall>>,
+    }
+
+    struct RecordingPolicyTransport {
+        truncated_server: Option<NameServer>,
+        answer: Ipv4Addr,
+        calls: Mutex<Vec<TaggedDnsCall>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for RecordingPolicyTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            transport: DnsQueryTransportKind,
+            metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let (domain, _, _) = super::parse_dns_question(query)?;
+            self.calls.lock().unwrap().push(TaggedDnsCall {
+                server: server.clone(),
+                transport,
+                dispatch: metadata.dispatch,
+                inbound_tag: metadata.inbound_tag.map(str::to_owned),
+                domain,
+            });
+            if self.truncated_server.as_ref() == Some(server) {
+                Ok(build_test_truncated_response(query))
+            } else {
+                Ok(build_test_a_response(query, self.answer))
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for TaggedCnameFailoverTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            transport: DnsQueryTransportKind,
+            metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let (domain, _, _) = super::parse_dns_question(query)?;
+            self.calls.lock().unwrap().push(TaggedDnsCall {
+                server: server.clone(),
+                transport,
+                dispatch: metadata.dispatch,
+                inbound_tag: metadata.inbound_tag.map(str::to_owned),
+                domain: domain.clone(),
+            });
+
+            if server != &self.first {
+                return Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 73)));
+            }
+            match (domain.as_str(), transport) {
+                ("origin.tag.test", DnsQueryTransportKind::Udp) => {
+                    Ok(build_test_cname_response(query, "alias.tag.test"))
+                }
+                ("alias.tag.test", DnsQueryTransportKind::Udp) => {
+                    Ok(build_test_truncated_response(query))
+                }
+                ("alias.tag.test", DnsQueryTransportKind::Tcp) => {
+                    Ok(build_test_empty_response(query, 2))
+                }
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unexpected tagged DNS test exchange",
+                )),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dns_uses_each_policy_tag_across_cname_tcp_retry_and_failover() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 53)));
+        let mut first_policy = NameServerPolicy::new(first.clone());
+        first_policy.tag = Some("dns-primary".to_owned());
+        first_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let mut second_policy = NameServerPolicy::new(second.clone());
+        second_policy.tag = Some("dns-fallback".to_owned());
+        second_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(TaggedCnameFailoverTransport {
+            first: first.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![first_policy, second_policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("origin.tag.test", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 73], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [
+                TaggedDnsCall {
+                    server: first.clone(),
+                    transport: DnsQueryTransportKind::Udp,
+                    dispatch: DnsQueryDispatch::Routed,
+                    inbound_tag: Some("dns-primary".to_owned()),
+                    domain: "origin.tag.test".to_owned(),
+                },
+                TaggedDnsCall {
+                    server: first.clone(),
+                    transport: DnsQueryTransportKind::Udp,
+                    dispatch: DnsQueryDispatch::Routed,
+                    inbound_tag: Some("dns-primary".to_owned()),
+                    domain: "alias.tag.test".to_owned(),
+                },
+                TaggedDnsCall {
+                    server: first,
+                    transport: DnsQueryTransportKind::Tcp,
+                    dispatch: DnsQueryDispatch::Routed,
+                    inbound_tag: Some("dns-primary".to_owned()),
+                    domain: "alias.tag.test".to_owned(),
+                },
+                TaggedDnsCall {
+                    server: second,
+                    transport: DnsQueryTransportKind::Udp,
+                    dispatch: DnsQueryDispatch::Routed,
+                    inbound_tag: Some("dns-fallback".to_owned()),
+                    domain: "origin.tag.test".to_owned(),
+                },
+            ]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_tcp_routed_starts_with_tagged_routed_tcp() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server = NameServer::Socket(SocketAddr::from(([192, 0, 2, 10], 53)));
+        let mut policy = NameServerPolicy::new(server.clone());
+        policy.tag = Some("dns-tcp".to_owned());
+        policy.transport = NameServerTransport::TcpRouted;
+        policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(RecordingPolicyTransport {
+            truncated_server: None,
+            answer: Ipv4Addr::new(192, 0, 2, 74),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("tcp-routed.test", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 74], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [TaggedDnsCall {
+                server,
+                transport: DnsQueryTransportKind::Tcp,
+                dispatch: DnsQueryDispatch::Routed,
+                inbound_tag: Some("dns-tcp".to_owned()),
+                domain: "tcp-routed.test".to_owned(),
+            }]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_tcp_local_starts_with_tagged_local_tcp() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server = NameServer::Socket(SocketAddr::from(([192, 0, 2, 11], 53)));
+        let mut policy = NameServerPolicy::new(server.clone());
+        policy.tag = Some("dns-local".to_owned());
+        policy.transport = NameServerTransport::TcpLocal;
+        policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(RecordingPolicyTransport {
+            truncated_server: None,
+            answer: Ipv4Addr::new(192, 0, 2, 75),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("tcp-local.test", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 75], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [TaggedDnsCall {
+                server,
+                transport: DnsQueryTransportKind::Tcp,
+                dispatch: DnsQueryDispatch::Local,
+                inbound_tag: Some("dns-local".to_owned()),
+                domain: "tcp-local.test".to_owned(),
+            }]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_tls_starts_with_tagged_routed_tls() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server = NameServer::Socket(SocketAddr::from(([192, 0, 2, 12], 853)));
+        let mut policy = NameServerPolicy::new(server.clone());
+        policy.tag = Some("dns-tls".to_owned());
+        policy.transport = NameServerTransport::TlsRouted;
+        policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(RecordingPolicyTransport {
+            truncated_server: None,
+            answer: Ipv4Addr::new(192, 0, 2, 76),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("tls-routed.test", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 76], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [TaggedDnsCall {
+                server,
+                transport: DnsQueryTransportKind::Tls,
+                dispatch: DnsQueryDispatch::Routed,
+                inbound_tag: Some("dns-tls".to_owned()),
+                domain: "tls-routed.test".to_owned(),
+            }]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_https_local_preserves_path_and_dispatch() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        #[derive(Debug, PartialEq, Eq)]
+        struct HttpsCall {
+            server: NameServer,
+            dispatch: DnsQueryDispatch,
+            inbound_tag: Option<String>,
+            https_path: Option<String>,
+        }
+
+        struct HttpsTransport {
+            calls: Mutex<Vec<HttpsCall>>,
+        }
+
+        #[async_trait::async_trait]
+        impl DnsQueryTransport for HttpsTransport {
+            async fn exchange(
+                &self,
+                server: &NameServer,
+                transport: DnsQueryTransportKind,
+                metadata: DnsQueryMetadata<'_>,
+                query: &[u8],
+            ) -> io::Result<Vec<u8>> {
+                assert_eq!(transport, DnsQueryTransportKind::Https);
+                self.calls.lock().unwrap().push(HttpsCall {
+                    server: server.clone(),
+                    dispatch: metadata.dispatch,
+                    inbound_tag: metadata.inbound_tag.map(str::to_owned),
+                    https_path: metadata.https_path.map(str::to_owned),
+                });
+                Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 77)))
+            }
+        }
+
+        let server = NameServer::Domain {
+            domain: "resolver.example".to_owned(),
+            port: 8443,
+        };
+        let mut policy = NameServerPolicy::new(server.clone());
+        policy.tag = Some("dns-doh-local".to_owned());
+        policy.transport = NameServerTransport::HttpsLocal;
+        policy.https_path = Some("/dns-query?profile=mobile".to_owned());
+        policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(HttpsTransport {
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("https-local.test", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 77], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [HttpsCall {
+                server,
+                dispatch: DnsQueryDispatch::Local,
+                inbound_tag: Some("dns-doh-local".to_owned()),
+                https_path: Some("/dns-query?profile=mobile".to_owned()),
+            }]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct MultiCandidateBootstrapResolver {
+        candidates: Vec<SocketAddr>,
+    }
+
+    struct FailingBootstrapResolver {
+        domains: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for FailingBootstrapResolver {
+        async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            self.resolve_all(domain, port)
+                .await?
+                .first_socket_addr(domain, port)
+        }
+
+        async fn resolve_all(&self, domain: &str, port: u16) -> Result<DnsLookup, TransportError> {
+            self.domains.lock().unwrap().push(domain.to_owned());
+            Err(TransportError::NoResolvedAddress(domain.to_owned(), port))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for MultiCandidateBootstrapResolver {
+        async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            self.resolve_all(domain, port)
+                .await?
+                .first_socket_addr(domain, port)
+        }
+
+        async fn resolve_all(
+            &self,
+            _domain: &str,
+            _port: u16,
+        ) -> Result<DnsLookup, TransportError> {
+            Ok(DnsLookup::new(self.candidates.iter().copied(), None))
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_tcp_dns_falls_forward_after_bootstrap_candidate_protocol_failure() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let broken_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let broken_addr = broken_listener.local_addr().unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let working = listener.local_addr().unwrap();
+        let broken_task = crate::lifecycle::spawn(async move {
+            let (mut stream, _) = broken_listener.accept().await.unwrap();
+            let query_len = usize::from(stream.read_u16().await.unwrap());
+            let mut query = vec![0_u8; query_len];
+            stream.read_exact(&mut query).await.unwrap();
+        });
+        let server_task = crate::lifecycle::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let query_len = usize::from(stream.read_u16().await.unwrap());
+            let mut query = vec![0_u8; query_len];
+            stream.read_exact(&mut query).await.unwrap();
+            let response = build_test_a_response(&query, Ipv4Addr::new(192, 0, 2, 77));
+            stream.write_u16(response.len() as u16).await.unwrap();
+            stream.write_all(&response).await.unwrap();
+        });
+
+        let bootstrap = Arc::new(MultiCandidateBootstrapResolver {
+            candidates: vec![broken_addr, working],
+        });
+        let mut policy = NameServerPolicy::new(NameServer::Domain {
+            domain: "bootstrap.multi.test".to_owned(),
+            port: working.port(),
+        });
+        policy.transport = NameServerTransport::TcpLocal;
+        policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let resolver =
+            ConfiguredDnsResolver::new(DomainHostIndex::default(), Vec::new(), bootstrap)
+                .with_name_server_policies(vec![policy])
+                .with_name_server_fallback_policy(true, false)
+                .with_query_strategy(DnsQueryStrategy::UseIpv4);
+
+        let resolved = resolver.resolve("answer.multi.test", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 77], 443)));
+        broken_task.await.unwrap();
+        server_task.await.unwrap();
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_bootstrap_failure_advances_without_resolving_original_name() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let udp_addr = udp.local_addr().unwrap();
+        let server_task = crate::lifecycle::spawn(async move {
+            let mut query = vec![0; 512];
+            let (query_len, client) = udp.recv_from(&mut query).await.unwrap();
+            query.truncate(query_len);
+            let response = build_test_a_response(&query, Ipv4Addr::new(192, 0, 2, 78));
+            udp.send_to(&response, client).await.unwrap();
+        });
+        let bootstrap = Arc::new(FailingBootstrapResolver {
+            domains: Mutex::new(Vec::new()),
+        });
+        let mut unavailable = NameServerPolicy::new(NameServer::Domain {
+            domain: "missing-bootstrap.example".to_owned(),
+            port: 853,
+        });
+        unavailable.transport = NameServerTransport::TlsRouted;
+        unavailable.query_strategy = DnsQueryStrategy::UseIpv4;
+        let mut healthy = NameServerPolicy::new(NameServer::Socket(udp_addr));
+        healthy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let resolver =
+            ConfiguredDnsResolver::new(DomainHostIndex::default(), Vec::new(), bootstrap.clone())
+                .with_name_server_policies(vec![unavailable, healthy])
+                .with_query_strategy(DnsQueryStrategy::UseIpv4);
+
+        let resolved = resolver
+            .resolve("bootstrap-fault.example", 443)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 78], 443)));
+        assert_eq!(
+            *bootstrap.domains.lock().unwrap(),
+            ["missing-bootstrap.example".to_owned()]
+        );
+        server_task.await.unwrap();
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_does_not_retry_truncated_initial_tcp_response() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 12], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 13], 53)));
+        let mut first_policy = NameServerPolicy::new(first.clone());
+        first_policy.tag = Some("dns-primary".to_owned());
+        first_policy.transport = NameServerTransport::TcpRouted;
+        first_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let mut second_policy = NameServerPolicy::new(second.clone());
+        second_policy.tag = Some("dns-fallback".to_owned());
+        second_policy.transport = NameServerTransport::TcpLocal;
+        second_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(RecordingPolicyTransport {
+            truncated_server: Some(first.clone()),
+            answer: Ipv4Addr::new(192, 0, 2, 76),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![first_policy, second_policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("tcp-truncated.test", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 76], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [
+                TaggedDnsCall {
+                    server: first,
+                    transport: DnsQueryTransportKind::Tcp,
+                    dispatch: DnsQueryDispatch::Routed,
+                    inbound_tag: Some("dns-primary".to_owned()),
+                    domain: "tcp-truncated.test".to_owned(),
+                },
+                TaggedDnsCall {
+                    server: second,
+                    transport: DnsQueryTransportKind::Tcp,
+                    dispatch: DnsQueryDispatch::Local,
+                    inbound_tag: Some("dns-fallback".to_owned()),
+                    domain: "tcp-truncated.test".to_owned(),
+                },
+            ]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_servfail_moves_to_the_next_server() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 53)));
+        let transport = Arc::new(FirstServerResponseCodeTransport {
+            first: first.clone(),
+            response_code: 2,
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![first.clone(), second.clone()],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("servfail.example", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 72], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            vec![first.clone(), first, second.clone(), second]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_single_family_failover_queries_each_server_once() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 53)));
+        let transport = Arc::new(FirstServerResponseCodeTransport {
+            first: first.clone(),
+            response_code: 2,
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![first.clone(), second.clone()],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("servfail-v4.example", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 72], 443)));
+        assert_eq!(*transport.calls.lock().unwrap(), [first, second]);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[derive(Default)]
+    struct RecordingAddressQueryTransport {
+        calls: Mutex<Vec<(NameServer, u16)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for RecordingAddressQueryTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let (_, record_type, _) = super::parse_dns_question(query)?;
+            self.calls
+                .lock()
+                .unwrap()
+                .push((server.clone(), record_type));
+            Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 73)))
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dns_intersects_global_and_per_server_query_strategy() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let server = NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)));
+        let transport = Arc::new(RecordingAddressQueryTransport::default());
+        let mut policy = NameServerPolicy::new(server.clone());
+        policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![policy])
+        .with_query_strategy(DnsQueryStrategy::UseIp)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("strategy.example", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 73], 443)));
+        assert_eq!(*transport.calls.lock().unwrap(), [(server, 1)]);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct StickyCnameQueryTransport {
+        cname_server: NameServer,
+        calls: Mutex<Vec<(NameServer, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for StickyCnameQueryTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let (domain, record_type, _) = super::parse_dns_question(query)?;
+            if record_type != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "sticky CNAME test expects only A queries",
+                ));
+            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push((server.clone(), domain.clone()));
+            if server != &self.cname_server {
+                if domain == "origin.internal.test" {
+                    return Ok(build_test_empty_response(query, 2));
+                }
+                return Ok(build_test_a_response(
+                    query,
+                    Ipv4Addr::new(198, 51, 100, 99),
+                ));
+            }
+            if domain == "origin.internal.test" {
+                Ok(build_test_cname_response(query, "alias.public.test"))
+            } else {
+                Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 74)))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dns_keeps_cname_follow_on_the_answering_server() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let failing_internal = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let cname_internal = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 53)));
+        let public = NameServer::Socket(SocketAddr::from(([192, 0, 2, 3], 53)));
+        let mut failing_policy = NameServerPolicy::new(failing_internal.clone());
+        failing_policy.domains = suffix_set("internal.test");
+        let mut cname_policy = NameServerPolicy::new(cname_internal.clone());
+        cname_policy.domains = suffix_set("internal.test");
+        let mut public_policy = NameServerPolicy::new(public);
+        public_policy.domains = suffix_set("public.test");
+        let transport = Arc::new(StickyCnameQueryTransport {
+            cname_server: cname_internal.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![failing_policy, cname_policy, public_policy])
+        .with_name_server_fallback_policy(false, true)
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("origin.internal.test", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 74], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [
+                (failing_internal, "origin.internal.test".to_owned(),),
+                (cname_internal.clone(), "origin.internal.test".to_owned()),
+                (cname_internal, "alias.public.test".to_owned()),
+            ]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct FilteredCnameFailoverQueryTransport {
+        filtered_server: NameServer,
+        calls: Mutex<Vec<(NameServer, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for FilteredCnameFailoverQueryTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let (domain, record_type, _) = super::parse_dns_question(query)?;
+            if record_type != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "filtered CNAME test expects only A queries",
+                ));
+            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push((server.clone(), domain.clone()));
+
+            if server == &self.filtered_server {
+                return if domain == "origin.filtered.test" {
+                    Ok(build_test_cname_response(query, "alias.filtered.test"))
+                } else {
+                    Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 75)))
+                };
+            }
+
+            if domain != "origin.filtered.test" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "server failover must restart from the original query name",
+                ));
+            }
+            Ok(build_test_a_response(
+                query,
+                Ipv4Addr::new(198, 51, 100, 75),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dns_filtered_cname_answer_fails_over_with_original_query_name() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let filtered = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let fallback = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 53)));
+        let mut filtered_policy = NameServerPolicy::new(filtered.clone());
+        filtered_policy.expected_ips = hard_dns_ip_filter(&[dns_ip_cidr("203.0.113.0", 24)]);
+        let transport = Arc::new(FilteredCnameFailoverQueryTransport {
+            filtered_server: filtered.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![
+            filtered_policy,
+            NameServerPolicy::new(fallback.clone()),
+        ])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("origin.filtered.test", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([198, 51, 100, 75], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [
+                (filtered.clone(), "origin.filtered.test".to_owned()),
+                (filtered, "alias.filtered.test".to_owned()),
+                (fallback, "origin.filtered.test".to_owned()),
+            ]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct CnameThenUnavailableQueryTransport;
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for CnameThenUnavailableQueryTransport {
+        async fn exchange(
+            &self,
+            _server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let (domain, _, _) = super::parse_dns_question(query)?;
+            if domain == "origin.internal.test" {
+                Ok(build_test_cname_response(query, "alias.public.test"))
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "CNAME continuation unavailable",
+                ))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dns_cname_continuation_does_not_leak_to_outer_fallback() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let fallback = Arc::new(DelayedCountingResolver {
+            calls: AtomicUsize::new(0),
+            result: Some(SocketAddr::from(([198, 51, 100, 99], 0))),
+        });
+        let mut policy = policy(1);
+        policy.domains = suffix_set("internal.test");
+        let resolver =
+            ConfiguredDnsResolver::new(DomainHostIndex::default(), Vec::new(), fallback.clone())
+                .with_name_server_policies(vec![policy])
+                .with_name_server_fallback_policy(false, true)
+                .with_query_strategy(DnsQueryStrategy::UseIpv4)
+                .with_query_transport(Arc::new(CnameThenUnavailableQueryTransport));
+
+        let error = resolver
+            .resolve("origin.internal.test", 443)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::DnsNoData(domain, 443) if domain == "origin.internal.test"
+        ));
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_nxdomain_moves_to_the_next_server() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 53)));
+        let transport = Arc::new(FirstServerResponseCodeTransport {
+            first: first.clone(),
+            response_code: 3,
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![first.clone(), second.clone()],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("nxdomain.example", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 72], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            vec![first.clone(), first, second.clone(), second]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct PendingResolver;
+
+    #[async_trait::async_trait]
+    impl DnsResolver for PendingResolver {
+        async fn resolve(&self, _domain: &str, _port: u16) -> Result<SocketAddr, TransportError> {
+            std::future::pending().await
+        }
+    }
+
+    struct RecordingFallbackResolver {
+        domains: Mutex<Vec<String>>,
+        result: SocketAddr,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for RecordingFallbackResolver {
+        async fn resolve(&self, domain: &str, port: u16) -> Result<SocketAddr, TransportError> {
+            self.domains.lock().unwrap().push(domain.to_owned());
+            Ok(SocketAddr::new(self.result.ip(), port))
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dns_resolution_timeout_includes_system_fallback() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(PendingResolver),
+        )
+        .with_resolution_timeout(Duration::from_millis(10));
+
+        let error = resolver
+            .resolve("bounded-fallback.example", 443)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::Dns { source, .. }
+                if source.kind() == io::ErrorKind::TimedOut
+        ));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_dns_bounds_system_fallback_by_default() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(PendingResolver),
+        );
+        let started_at = tokio::time::Instant::now();
+
+        let error = resolver
+            .resolve("default-bounded-fallback.example", 443)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::Dns { source, .. }
+                if source.kind() == io::ErrorKind::TimedOut
+        ));
+        assert_eq!(started_at.elapsed(), Duration::from_secs(5));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_alias_depth_exhaustion_stays_on_configured_servers() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let host_rules = (0..8)
+            .map(|index| {
+                (
+                    DomainMatcher::Full(format!("alias{index}.example")),
+                    DnsHostTarget::Domain(format!("alias{}.example", index + 1)),
+                )
+            })
+            .collect::<DomainHostIndex<_>>();
+        let server = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let mut policy = NameServerPolicy::new(server);
+        policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let fallback = Arc::new(RecordingFallbackResolver {
+            domains: Mutex::new(Vec::new()),
+            result: SocketAddr::from(([198, 51, 100, 1], 0)),
+        });
+        let transport = Arc::new(RecordingPolicyTransport {
+            truncated_server: None,
+            answer: Ipv4Addr::new(192, 0, 2, 80),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(host_rules, Vec::new(), fallback.clone())
+            .with_name_server_policies(vec![policy])
+            .with_query_transport(transport.clone());
+
+        let resolved = resolver.resolve("alias0.example", 443).await.unwrap();
+        let queried_domains = transport
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.domain.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            (
+                resolved,
+                queried_domains,
+                fallback.domains.lock().unwrap().clone(),
+            ),
+            (
+                SocketAddr::from(([192, 0, 2, 80], 443)),
+                vec!["alias8.example".to_owned()],
+                Vec::<String>::new(),
+            )
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_alias_depth_exhaustion_uses_fallback_without_servers() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let host_rules = (0..8)
+            .map(|index| {
+                (
+                    DomainMatcher::Full(format!("alias{index}.example")),
+                    DnsHostTarget::Domain(format!("alias{}.example", index + 1)),
+                )
+            })
+            .collect::<DomainHostIndex<_>>();
+        let fallback = Arc::new(RecordingFallbackResolver {
+            domains: Mutex::new(Vec::new()),
+            result: SocketAddr::from(([198, 51, 100, 2], 0)),
+        });
+        let resolver = ConfiguredDnsResolver::new(host_rules, Vec::new(), fallback.clone());
+
+        let resolved = resolver.resolve("alias0.example", 443).await.unwrap();
+
+        assert_eq!(
+            (resolved, fallback.domains.lock().unwrap().clone()),
+            (
+                SocketAddr::from(([198, 51, 100, 2], 443)),
+                vec!["alias8.example".to_owned()],
+            )
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_dns_can_leave_bootstrap_fallback_to_an_outer_deadline() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(PendingResolver),
+        )
+        .without_system_fallback_timeout();
+        let started_at = tokio::time::Instant::now();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(6),
+            resolver.resolve("outer-bounded.example", 443),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(started_at.elapsed(), Duration::from_secs(6));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    struct FirstServerPendingTransport {
+        first: NameServer,
+        calls: Mutex<Vec<(NameServer, u16)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for FirstServerPendingTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let record_type = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
+            self.calls
+                .lock()
+                .unwrap()
+                .push((server.clone(), record_type));
+            if server == &self.first {
+                std::future::pending().await
+            } else {
+                Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 62)))
+            }
+        }
+    }
+
+    struct FreshServerDeadlineTransport {
+        first: NameServer,
+        calls: Mutex<Vec<NameServer>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for FreshServerDeadlineTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            self.calls.lock().unwrap().push(server.clone());
+            if server == &self.first {
+                std::future::pending().await
+            } else {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 64)))
+            }
+        }
+    }
+
+    struct PendingAaaaQueryTransport;
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for PendingAaaaQueryTransport {
+        async fn exchange(
+            &self,
+            _server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let record_type = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
+            if record_type == 1 {
+                Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 63)))
+            } else {
+                std::future::pending().await
+            }
+        }
+    }
+
+    struct ExchangeDropGuard(Arc<AtomicBool>);
+
+    impl Drop for ExchangeDropGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct DropObservedPendingTransport {
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for DropObservedPendingTransport {
+        async fn exchange(
+            &self,
+            _server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            _query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let _guard = ExchangeDropGuard(Arc::clone(&self.dropped));
+            std::future::pending().await
+        }
+    }
+
+    struct NxdomainPendingAaaaQueryTransport;
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for NxdomainPendingAaaaQueryTransport {
+        async fn exchange(
+            &self,
+            _server: &NameServer,
+            _transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let record_type = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
+            if record_type == 1 {
+                Ok(build_test_empty_response(query, 3))
+            } else {
+                std::future::pending().await
+            }
+        }
+    }
+
+    struct TcpRetryRemainderTransport {
+        first: NameServer,
+        calls: Mutex<Vec<(NameServer, DnsQueryTransportKind)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for TcpRetryRemainderTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            transport: DnsQueryTransportKind,
+            _metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            self.calls.lock().unwrap().push((server.clone(), transport));
+            if server != &self.first {
+                return Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 65)));
+            }
+
+            tokio::time::sleep(Duration::from_millis(7)).await;
+            match transport {
+                DnsQueryTransportKind::Udp => Ok(build_test_truncated_response(query)),
+                DnsQueryTransportKind::Tcp
+                | DnsQueryTransportKind::Tls
+                | DnsQueryTransportKind::Https
+                | DnsQueryTransportKind::Quic => {
+                    Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 66)))
+                }
+            }
+        }
+    }
+
+    struct CnameDeadlineTransport {
+        first: NameServer,
+        calls: Mutex<Vec<TaggedDnsCall>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsQueryTransport for CnameDeadlineTransport {
+        async fn exchange(
+            &self,
+            server: &NameServer,
+            transport: DnsQueryTransportKind,
+            metadata: DnsQueryMetadata<'_>,
+            query: &[u8],
+        ) -> io::Result<Vec<u8>> {
+            let (domain, record_type, _) = super::parse_dns_question(query)?;
+            if record_type != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "CNAME deadline test expects only A queries",
+                ));
+            }
+            self.calls.lock().unwrap().push(TaggedDnsCall {
+                server: server.clone(),
+                transport,
+                dispatch: metadata.dispatch,
+                inbound_tag: metadata.inbound_tag.map(str::to_owned),
+                domain: domain.clone(),
+            });
+            if server != &self.first {
+                if domain != "origin.deadline.test" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "server failover must restart from the original query name",
+                    ));
+                }
+                return Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 67)));
+            }
+
+            tokio::time::sleep(Duration::from_millis(7)).await;
+            if domain == "origin.deadline.test" {
+                Ok(build_test_cname_response(query, "alias.deadline.test"))
+            } else {
+                Ok(build_test_a_response(query, Ipv4Addr::new(192, 0, 2, 68)))
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_dns_default_server_timeout_matches_xray_four_seconds() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)))],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(Arc::new(PendingQueryTransport));
+        let started_at = tokio::time::Instant::now();
+
+        let error = resolver
+            .resolve("default-timeout.example", 443)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TransportError::Dns { source, .. }
+            if source.kind() == io::ErrorKind::NotConnected));
+        assert_eq!(started_at.elapsed(), Duration::from_secs(4));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_dns_policy_timeout_overrides_resolver_default() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let mut policy =
+            NameServerPolicy::new(NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53))));
+        policy.timeout = Some(Duration::from_millis(10));
+        policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(Arc::new(PendingQueryTransport))
+        .with_server_timeout(Duration::from_millis(1));
+        let started_at = tokio::time::Instant::now();
+
+        let error = resolver
+            .resolve("policy-timeout.example", 443)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TransportError::Dns { source, .. }
+            if source.kind() == io::ErrorKind::NotConnected));
+        assert_eq!(started_at.elapsed(), Duration::from_millis(10));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_dns_domain_bootstrap_consumes_the_candidate_deadline() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let mut policy = NameServerPolicy::new(NameServer::Domain {
+            domain: "resolver.example".to_owned(),
+            port: 53,
+        });
+        policy.timeout = Some(Duration::from_secs(6));
+        policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(PendingResolver),
+        )
+        .with_name_server_policies(vec![policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4);
+        let started_at = tokio::time::Instant::now();
+
+        let error = resolver
+            .resolve("domain-bootstrap.example", 443)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TransportError::Dns { source, .. }
+            if source.kind() == io::ErrorKind::NotConnected));
+        assert_eq!(started_at.elapsed(), Duration::from_secs(6));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_dns_timeout_drops_the_in_flight_exchange_future() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut policy =
+            NameServerPolicy::new(NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53))));
+        policy.timeout = Some(Duration::from_millis(10));
+        policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(Arc::new(DropObservedPendingTransport {
+            dropped: Arc::clone(&dropped),
+        }));
+
+        let _ = resolver.resolve("cancel.example", 443).await;
+
+        assert!(dropped.load(Ordering::SeqCst));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_dns_tcp_retry_uses_only_the_remaining_policy_budget() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 53)));
+        let mut first_policy = NameServerPolicy::new(first.clone());
+        first_policy.timeout = Some(Duration::from_millis(10));
+        first_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let mut second_policy = NameServerPolicy::new(second.clone());
+        second_policy.timeout = Some(Duration::from_millis(20));
+        second_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(TcpRetryRemainderTransport {
+            first: first.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![first_policy, second_policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+        let started_at = tokio::time::Instant::now();
+
+        let resolved = resolver
+            .resolve("tcp-remainder.example", 443)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 65], 443)));
+        assert_eq!(started_at.elapsed(), Duration::from_millis(10));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [
+                (first.clone(), DnsQueryTransportKind::Udp),
+                (first, DnsQueryTransportKind::Tcp),
+                (second, DnsQueryTransportKind::Udp),
+            ]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_dns_cname_chain_shares_policy_deadline_and_failover_restarts_qname() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 53)));
+        let mut first_policy = NameServerPolicy::new(first.clone());
+        first_policy.tag = Some("dns-local".to_owned());
+        first_policy.transport = NameServerTransport::TcpLocal;
+        first_policy.timeout = Some(Duration::from_millis(10));
+        first_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let mut second_policy = NameServerPolicy::new(second.clone());
+        second_policy.tag = Some("dns-routed".to_owned());
+        second_policy.transport = NameServerTransport::TcpRouted;
+        second_policy.timeout = Some(Duration::from_millis(20));
+        second_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(CnameDeadlineTransport {
+            first: first.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![first_policy, second_policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+        let started_at = tokio::time::Instant::now();
+
+        let resolved = resolver.resolve("origin.deadline.test", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 67], 443)));
+        assert_eq!(started_at.elapsed(), Duration::from_millis(10));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            [
+                TaggedDnsCall {
+                    server: first.clone(),
+                    transport: DnsQueryTransportKind::Tcp,
+                    dispatch: DnsQueryDispatch::Local,
+                    inbound_tag: Some("dns-local".to_owned()),
+                    domain: "origin.deadline.test".to_owned(),
+                },
+                TaggedDnsCall {
+                    server: first,
+                    transport: DnsQueryTransportKind::Tcp,
+                    dispatch: DnsQueryDispatch::Local,
+                    inbound_tag: Some("dns-local".to_owned()),
+                    domain: "alias.deadline.test".to_owned(),
+                },
+                TaggedDnsCall {
+                    server: second,
+                    transport: DnsQueryTransportKind::Tcp,
+                    dispatch: DnsQueryDispatch::Routed,
+                    inbound_tag: Some("dns-routed".to_owned()),
+                    domain: "origin.deadline.test".to_owned(),
+                },
+            ]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_dns_keeps_positive_family_at_the_shared_policy_deadline() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let mut policy =
+            NameServerPolicy::new(NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53))));
+        policy.timeout = Some(Duration::from_millis(10));
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![policy])
+        .with_query_transport(Arc::new(PendingAaaaQueryTransport));
+        let started_at = tokio::time::Instant::now();
+
+        let lookup = resolver.resolve_all("partial.example", 443).await.unwrap();
+
+        assert_eq!(
+            lookup.socket_addrs(),
+            &[SocketAddr::from(([192, 0, 2, 63], 443))]
+        );
+        assert!(lookup
+            .ttl()
+            .is_some_and(|ttl| { ttl < Duration::from_secs(60) && ttl > Duration::from_secs(59) }));
+        assert_eq!(started_at.elapsed(), Duration::from_millis(10));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_nxdomain_wins_when_other_family_times_out() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)))],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_transport(Arc::new(NxdomainPendingAaaaQueryTransport))
+        .with_server_timeout(Duration::from_millis(10));
+
+        let error = resolver.resolve("missing.example", 443).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::DnsNameError(domain, 443) if domain == "missing.example"
+        ));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test]
+    async fn configured_dns_gives_each_server_one_a_and_aaaa_budget() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 53)));
+        let transport = Arc::new(FirstServerPendingTransport {
+            first: first.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![first.clone(), second.clone()],
+            Arc::new(RejectingResolver),
+        )
+        .with_query_transport(transport.clone())
+        .with_server_timeout(Duration::from_millis(20))
+        .with_resolution_timeout(Duration::from_millis(200));
+
+        let resolved = resolver.resolve("failover.example", 443).await.unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 62], 443)));
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            vec![
+                (first.clone(), 1),
+                (first, 28),
+                (second.clone(), 1),
+                (second, 28)
+            ]
+        );
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_dns_gives_each_policy_a_fresh_deadline_without_hidden_overall_cap() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let first = NameServer::Socket(SocketAddr::from(([192, 0, 2, 1], 53)));
+        let second = NameServer::Socket(SocketAddr::from(([192, 0, 2, 2], 53)));
+        let mut first_policy = NameServerPolicy::new(first.clone());
+        first_policy.timeout = Some(Duration::from_secs(4));
+        first_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let mut second_policy = NameServerPolicy::new(second.clone());
+        second_policy.timeout = Some(Duration::from_secs(3));
+        second_policy.query_strategy = DnsQueryStrategy::UseIpv4;
+        let transport = Arc::new(FreshServerDeadlineTransport {
+            first: first.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            Vec::new(),
+            Arc::new(RejectingResolver),
+        )
+        .with_name_server_policies(vec![first_policy, second_policy])
+        .with_query_strategy(DnsQueryStrategy::UseIpv4)
+        .with_query_transport(transport.clone());
+        let started_at = tokio::time::Instant::now();
+
+        let resolved = resolver
+            .resolve("fresh-deadline.example", 443)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, SocketAddr::from(([192, 0, 2, 64], 443)));
+        assert_eq!(started_at.elapsed(), Duration::from_secs(6));
+        assert_eq!(*transport.calls.lock().unwrap(), [first, second]);
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_dns_bounds_the_whole_server_alias_and_fallback_sequence() {
+        let task_owner = crate::lifecycle::TaskOwner::new();
+        let task_owner_guard = task_owner.abort_on_drop();
+        let test_result = task_owner.scope(async {
+        let fallback = SocketAddr::from(([192, 0, 2, 40], 0));
+        let resolver = ConfiguredDnsResolver::new(
+            DomainHostIndex::default(),
+            vec![NameServer::Socket(SocketAddr::from(([192, 0, 2, 53], 53)))],
+            Arc::new(FixedResolver(fallback)),
+        )
+        .with_query_transport(Arc::new(PendingQueryTransport))
+        .with_resolution_timeout(Duration::from_millis(10));
+
+        let started_at = tokio::time::Instant::now();
+
+        let error = resolver.resolve("bounded.example", 8443).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransportError::Dns { source, .. }
+                if source.kind() == io::ErrorKind::TimedOut
+        ));
+        assert_eq!(started_at.elapsed(), Duration::from_millis(10));
+    
+        }).await;
+        task_owner.shutdown().await;
+        drop(task_owner_guard);
+        test_result
+    }
+
+    fn build_test_truncated_response(query: &[u8]) -> Vec<u8> {
+        let mut response = Vec::with_capacity(query.len());
+        response.extend_from_slice(&query[..2]);
+        response.extend_from_slice(&0x8380_u16.to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&query[12..]);
+        response
+    }
+
+    fn build_test_a_response(query: &[u8], answer: Ipv4Addr) -> Vec<u8> {
+        build_test_address_response(query, &[(1, 60, answer.octets().to_vec())])
+    }
+
+    fn build_test_address_response(query: &[u8], answers: &[(u16, u32, Vec<u8>)]) -> Vec<u8> {
+        let mut response = Vec::with_capacity(query.len() + answers.len() * 28);
+        response.extend_from_slice(&query[..2]);
+        response.extend_from_slice(&0x8180_u16.to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&query[12..]);
+        for (record_type, ttl, answer) in answers {
+            response.extend_from_slice(&0xC00C_u16.to_be_bytes());
+            response.extend_from_slice(&record_type.to_be_bytes());
+            response.extend_from_slice(&1_u16.to_be_bytes());
+            response.extend_from_slice(&ttl.to_be_bytes());
+            response.extend_from_slice(&(answer.len() as u16).to_be_bytes());
+            response.extend_from_slice(answer);
+        }
+        response
+    }
+
+    fn build_test_cname_and_a_response(query: &[u8], alias: &str, answer: Ipv4Addr) -> Vec<u8> {
+        let encoded_alias = encode_test_dns_name(alias);
+        let mut response = Vec::with_capacity(query.len() + encoded_alias.len() * 2 + 42);
+        response.extend_from_slice(&query[..2]);
+        response.extend_from_slice(&0x8180_u16.to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&2_u16.to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&query[12..]);
+
+        response.extend_from_slice(&encoded_alias);
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&90_u32.to_be_bytes());
+        response.extend_from_slice(&4_u16.to_be_bytes());
+        response.extend_from_slice(&answer.octets());
+
+        response.extend_from_slice(&0xC00C_u16.to_be_bytes());
+        response.extend_from_slice(&5_u16.to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&20_u32.to_be_bytes());
+        response.extend_from_slice(&(encoded_alias.len() as u16).to_be_bytes());
+        response.extend_from_slice(&encoded_alias);
+        response
+    }
+
+    fn build_test_cname_response(query: &[u8], alias: &str) -> Vec<u8> {
+        let encoded_alias = encode_test_dns_name(alias);
+        let mut response = Vec::with_capacity(query.len() + encoded_alias.len() + 18);
+        response.extend_from_slice(&query[..2]);
+        response.extend_from_slice(&0x8180_u16.to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&query[12..]);
+        response.extend_from_slice(&0xC00C_u16.to_be_bytes());
+        response.extend_from_slice(&5_u16.to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&20_u32.to_be_bytes());
+        response.extend_from_slice(&(encoded_alias.len() as u16).to_be_bytes());
+        response.extend_from_slice(&encoded_alias);
+        response
+    }
+
+    fn encode_test_dns_name(domain: &str) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        for label in domain.split('.') {
+            encoded.push(label.len() as u8);
+            encoded.extend_from_slice(label.as_bytes());
+        }
+        encoded.push(0);
+        encoded
+    }
+
+    fn build_test_empty_response(query: &[u8], response_code: u16) -> Vec<u8> {
+        let mut response = Vec::with_capacity(query.len());
+        response.extend_from_slice(&query[..2]);
+        response.extend_from_slice(&(0x8180_u16 | response_code).to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&0_u16.to_be_bytes());
+        response.extend_from_slice(&query[12..]);
+        response
+    }
+}

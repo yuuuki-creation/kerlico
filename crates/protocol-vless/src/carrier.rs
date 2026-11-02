@@ -7,9 +7,8 @@ use std::{io::Cursor, net::SocketAddr, sync::Arc};
 use xray_routing::{Network, Target, TargetAddr};
 use xray_transport::stream::{
     Authority, GrpcConfig, GrpcTransport, HeaderMap, HeaderValue, HttpUpgradeConfig,
-    TransportLayer, WebSocketConfig, XhttpConfig, XhttpConfigInput,
-    XhttpEndpoint, XhttpHttpVersion, XhttpModeSelection, XhttpRange, XhttpScheme, XhttpTransport,
-    XhttpXmuxPolicy,
+    TransportLayer, WebSocketConfig, XhttpConfig, XhttpConfigInput, XhttpEndpoint,
+    XhttpHttpVersion, XhttpModeSelection, XhttpRange, XhttpScheme, XhttpTransport, XhttpXmuxPolicy,
 };
 use xray_transport::{
     BoxedTransportStream, ConnectorConfig, RealityClientConfig, RealityRuntimeEngine,
@@ -27,15 +26,56 @@ pub(crate) fn target(value: &Destination, udp: bool) -> Target {
     )
 }
 
+enum LayerPlan {
+    Raw,
+    WebSocket(WebSocketConfig),
+    HttpUpgrade(HttpUpgradeConfig),
+    Grpc(GrpcConfig),
+    Xhttp {
+        config: XhttpConfig,
+        endpoint: XhttpEndpoint,
+        version: XhttpHttpVersion,
+    },
+}
+impl LayerPlan {
+    fn start(&self) -> Result<TransportLayer> {
+        Ok(match self {
+            Self::Raw => TransportLayer::Raw,
+            Self::WebSocket(config) => TransportLayer::WebSocket(config.clone()),
+            Self::HttpUpgrade(config) => TransportLayer::HttpUpgrade(config.clone()),
+            Self::Grpc(config) => TransportLayer::Grpc(GrpcTransport::new(config.clone())),
+            Self::Xhttp {
+                config,
+                endpoint,
+                version,
+            } => TransportLayer::Xhttp(
+                XhttpTransport::new(
+                    config.clone(),
+                    endpoint.clone(),
+                    *version,
+                    XhttpXmuxPolicy::default(),
+                )
+                .map_err(|_| invalid())?,
+            ),
+        })
+    }
+}
+
 pub(crate) struct Carrier {
     server: Destination,
     connector: ConnectorConfig,
-    transport: TransportLayer,
+    transport: LayerPlan,
     dialer: TransportDialer,
     download: Option<Box<Carrier>>,
-    storage: Option<Arc<crate::xdrive::Transport>>,
+    storage: Option<crate::xdrive::Plan>,
+    storage_resources: std::sync::Mutex<
+        std::collections::HashMap<kerlico_core::ResourceKey, Arc<crate::xdrive::Transport>>,
+    >,
     quic_tls: Option<Arc<rustls::ClientConfig>>,
     family: Family,
+    resources:
+        std::sync::Mutex<std::collections::HashMap<kerlico_core::ResourceKey, TransportLayer>>,
+    owner: Option<xray_transport::lifecycle::TaskOwner>,
 }
 
 fn invalid() -> Error {
@@ -46,6 +86,23 @@ fn io_failure() -> Error {
 }
 
 impl Carrier {
+    pub fn start(mut self, host: &kerlico_core::ServiceContext) -> Result<Self> {
+        let owner = xray_transport::lifecycle::TaskOwner::new();
+        let stop = host.cancel();
+        let waiting = owner.clone();
+        let guard = owner.abort_on_drop();
+        host.spawn(async move {
+            let _guard = guard;
+            tokio::select! {_=stop.cancelled()=>{},_=waiting.failed()=>{stop.cancel();}}
+            waiting.shutdown().await;
+        })?;
+        self.owner = Some(owner);
+        if let Some(download) = self.download.take() {
+            self.download = Some(Box::new((*download).start(host)?));
+        }
+        Ok(self)
+    }
+
     pub fn build(
         server: Destination,
         security: Security,
@@ -76,16 +133,19 @@ impl Carrier {
                 }
                 Security::Reality { .. } => return Err(Error::Unsupported("XDRIVE REALITY")),
             };
-            let storage = crate::xdrive::Transport::new(settings, ca.as_deref())?;
+            let storage = crate::xdrive::Transport::compile(settings, ca.as_deref())?;
             return Ok(Self {
                 server,
                 connector: ConnectorConfig::Tcp,
-                transport: TransportLayer::Raw,
+                transport: LayerPlan::Raw,
                 dialer: TransportDialer::system().map_err(|_| invalid())?,
                 download: None,
                 storage: Some(storage),
+                storage_resources: std::sync::Mutex::new(std::collections::HashMap::new()),
                 quic_tls: None,
                 family,
+                resources: std::sync::Mutex::new(std::collections::HashMap::new()),
+                owner: None,
             });
         }
         if let Address::Ip(ip) = server.address()
@@ -204,6 +264,7 @@ impl Carrier {
                     .map_err(|_| invalid())?
                     .with_root_certificates(roots)
                     .with_no_client_auth();
+                    config.resumption = rustls::client::Resumption::disabled();
                     config.alpn_protocols = if matches!(transport, Transport::Grpc { .. }) {
                         vec![b"h2".to_vec()]
                     } else if matches!(
@@ -249,7 +310,7 @@ impl Carrier {
         };
         let mut download = None;
         let layer = match transport {
-            Transport::Tcp => TransportLayer::Raw,
+            Transport::Tcp => LayerPlan::Raw,
             Transport::Xdrive { .. } => return Err(invalid()),
             Transport::Ws {
                 path,
@@ -259,7 +320,7 @@ impl Carrier {
                 heartbeat_period_secs,
             } => {
                 validate_http(&path, host.as_deref(), &headers)?;
-                TransportLayer::WebSocket(WebSocketConfig {
+                LayerPlan::WebSocket(WebSocketConfig {
                     path,
                     host: host.unwrap_or(authority),
                     headers,
@@ -273,7 +334,7 @@ impl Carrier {
                 headers,
             } => {
                 validate_http(&path, host.as_deref(), &headers)?;
-                TransportLayer::HttpUpgrade(HttpUpgradeConfig {
+                LayerPlan::HttpUpgrade(HttpUpgradeConfig {
                     path,
                     host: host.unwrap_or(authority),
                     headers,
@@ -293,7 +354,7 @@ impl Carrier {
                 }
                 let authority: Authority =
                     host.unwrap_or(authority).parse().map_err(|_| invalid())?;
-                TransportLayer::Grpc(GrpcTransport::new(GrpcConfig {
+                LayerPlan::Grpc(GrpcConfig {
                     service_name,
                     authority,
                     multi_mode,
@@ -302,7 +363,7 @@ impl Carrier {
                     health_check_timeout_secs,
                     permit_without_stream,
                     initial_windows_size: initial_window_size,
-                }))
+                })
             }
             Transport::Xhttp { mut settings } => {
                 if let Some(mut down) = settings.download.take() {
@@ -328,7 +389,7 @@ impl Carrier {
                         down.server_family,
                     )?));
                 }
-                TransportLayer::Xhttp(xhttp(settings, &connector, &authority)?)
+                xhttp(settings, &connector, &authority)?
             }
         };
         Ok(Self {
@@ -338,8 +399,11 @@ impl Carrier {
             dialer,
             download,
             storage: None,
+            storage_resources: std::sync::Mutex::new(std::collections::HashMap::new()),
             quic_tls,
             family,
+            resources: std::sync::Mutex::new(std::collections::HashMap::new()),
+            owner: None,
         })
     }
 
@@ -407,9 +471,65 @@ impl Carrier {
         })))
     }
 
-    pub async fn open(&self) -> Result<BoxedTransportStream> {
-        if let Some(storage) = &self.storage {
-            return storage.open().await;
+    pub async fn shutdown(&self) -> Result<()> {
+        let owner = self.owner.as_ref().ok_or_else(invalid)?;
+        owner.close_admission();
+        self.resources.lock().map_err(|_| invalid())?.clear();
+        self.storage_resources
+            .lock()
+            .map_err(|_| invalid())?
+            .clear();
+        if let Some(down) = &self.download {
+            Box::pin(down.shutdown()).await?;
+        }
+        owner.shutdown().await;
+        if owner.failed_tasks() > 0 {
+            return Err(Error::Protocol("载体后台任务异常退出"));
+        }
+        Ok(())
+    }
+    fn resource(&self, context: &kerlico_core::ConnectContext) -> Result<TransportLayer> {
+        let mut resources = self.resources.lock().map_err(|_| invalid())?;
+        if let Some(layer) = resources.get(context.resource_key()) {
+            return Ok(layer.clone());
+        }
+        let layer = self.transport.start()?;
+        resources.insert(context.resource_key().clone(), layer.clone());
+        Ok(layer)
+    }
+    pub async fn open(
+        &self,
+        context: &kerlico_core::ConnectContext,
+        host: &kerlico_core::ServiceContext,
+    ) -> Result<BoxedTransportStream> {
+        let owner = self.owner.as_ref().ok_or_else(invalid)?;
+        if owner.is_closed() {
+            return Err(Error::Cancelled);
+        }
+        if owner.is_closed() {
+            return Err(Error::Cancelled);
+        }
+        let stream = owner.scope(self.open_scoped(context, host)).await?;
+        Ok(owner.wrap(stream))
+    }
+    async fn open_scoped(
+        &self,
+        context: &kerlico_core::ConnectContext,
+        host: &kerlico_core::ServiceContext,
+    ) -> Result<BoxedTransportStream> {
+        let transport = self.resource(context)?;
+        if let Some(plan) = &self.storage {
+            let storage = {
+                let mut resources = self.storage_resources.lock().map_err(|_| invalid())?;
+                if let Some(storage) = resources.get(context.resource_key()) {
+                    storage.clone()
+                } else {
+                    let storage = plan.start()?;
+                    resources.insert(context.resource_key().clone(), storage.clone());
+                    storage
+                }
+            };
+            return storage.open(host).await;
         }
         let server = target(&self.server, false);
         let candidates: Vec<SocketAddr> =
@@ -425,8 +545,9 @@ impl Carrier {
                     .filter(|address| down.family.accepts(address.ip()))
                     .map(|address| SocketAddr::new(address.ip().to_canonical(), address.port()))
                     .collect();
+            let down_transport = down.resource(context)?;
             let (TransportLayer::Xhttp(up), TransportLayer::Xhttp(download)) =
-                (&self.transport, &down.transport)
+                (&transport, &down_transport)
             else {
                 return Err(invalid());
             };
@@ -439,7 +560,7 @@ impl Carrier {
             .map_err(|_| io_failure())
         } else {
             self.dialer
-                .connect_stream(&self.connector, &self.transport, &server, &candidates, None)
+                .connect_stream(&self.connector, &transport, &server, &candidates, None)
                 .await
                 .map_err(|_| io_failure())
         }
@@ -471,7 +592,7 @@ fn xhttp(
     settings: XhttpSettings,
     security: &ConnectorConfig,
     authority: &str,
-) -> Result<XhttpTransport> {
+) -> Result<LayerPlan> {
     let reality = matches!(security, ConnectorConfig::Reality(_));
     let version = match (security, settings.http_version) {
         (ConnectorConfig::Reality(_), HttpVersion::Auto | HttpVersion::H2) => {
@@ -535,8 +656,11 @@ fn xhttp(
         settings.host.unwrap_or_else(|| authority.into()),
     )
     .map_err(|_| invalid())?;
-    XhttpTransport::new(config, endpoint, version, XhttpXmuxPolicy::default())
-        .map_err(|_| invalid())
+    Ok(LayerPlan::Xhttp {
+        config,
+        endpoint,
+        version,
+    })
 }
 
 fn quic_config(ca: Option<&str>) -> Result<Arc<rustls::ClientConfig>> {
@@ -556,6 +680,7 @@ fn quic_config(ca: Option<&str>) -> Result<Arc<rustls::ClientConfig>> {
     .map_err(|_| invalid())?
     .with_root_certificates(roots)
     .with_no_client_auth();
+    config.resumption = rustls::client::Resumption::disabled();
     config.alpn_protocols = vec![b"h3".to_vec()];
     Ok(Arc::new(config))
 }

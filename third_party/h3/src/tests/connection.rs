@@ -864,6 +864,202 @@ async fn graceful_shutdown_client() {
 }
 
 #[tokio::test]
+async fn unresolved_request_drop_allows_graceful_shutdown() {
+    let mut pair = Pair::default();
+    let mut server = pair.server();
+    let (dropped, wait_dropped) = oneshot::channel();
+    let client_fut = async {
+        let (mut driver, mut sender) = client::new(pair.client().await).await.unwrap();
+        let _request = sender
+            .send_request(
+                Request::get("https://localhost/unresolved")
+                    .body(())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        wait_dropped.await.unwrap();
+        driver.shutdown(0).await.unwrap();
+        assert_matches!(
+            future::poll_fn(|cx| driver.poll_close(cx)).await,
+            ConnectionError::Remote(ConnectionErrorIncoming::ApplicationClose {
+                error_code,
+                ..
+            }) if error_code == Code::H3_NO_ERROR.value()
+        );
+    };
+    let server_fut = async {
+        let mut incoming = server::Connection::new(server.next().await).await.unwrap();
+        let resolver = incoming.accept().await.unwrap().unwrap();
+        drop(resolver);
+        dropped.send(()).unwrap();
+        incoming.shutdown(0).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), incoming.accept())
+                .await
+                .expect("未读取请求头的 resolver 释放后应允许自然排空")
+                .unwrap()
+                .is_none()
+        );
+    };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(client_fut, server_fut);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn rejected_unresolved_request_preserves_active_split_stream_and_drains() {
+    let mut pair = Pair::default();
+    let mut server = pair.server();
+    let client_fut = async {
+        let (mut driver, mut sender) = client::new(pair.client().await).await.unwrap();
+        let mut active = sender
+            .send_request(Request::post("https://localhost/active").body(()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            active.recv_response().await.unwrap().status(),
+            StatusCode::OK
+        );
+        let mut denied = sender
+            .send_request(Request::get("https://localhost/denied").body(()).unwrap())
+            .await
+            .unwrap();
+        assert_matches!(
+            denied.recv_response().await.unwrap_err(),
+            StreamError::RemoteTerminate {
+                code: Code::H3_REQUEST_REJECTED
+            }
+        );
+        active
+            .send_data(Bytes::from_static(b"after"))
+            .await
+            .unwrap();
+        let mut echoed = Vec::new();
+        while let Some(mut data) = active.recv_data().await.unwrap() {
+            let count = data.remaining();
+            echoed.extend_from_slice(&data.copy_to_bytes(count));
+        }
+        assert_eq!(echoed, b"after");
+        active.finish().await.unwrap();
+        driver.shutdown(0).await.unwrap();
+        assert_matches!(
+            future::poll_fn(|cx| driver.poll_close(cx)).await,
+            ConnectionError::Remote(ConnectionErrorIncoming::ApplicationClose {
+                error_code,
+                ..
+            }) if error_code == Code::H3_NO_ERROR.value()
+        );
+    };
+    let server_fut = async {
+        let mut incoming = server::Connection::new(server.next().await).await.unwrap();
+        let (_, mut active) = incoming
+            .accept()
+            .await
+            .unwrap()
+            .unwrap()
+            .resolve_request()
+            .await
+            .unwrap();
+        active.send_response(Response::new(())).await.unwrap();
+        let (mut send, mut receive) = active.split();
+        let mut denied = incoming.accept().await.unwrap().unwrap();
+        denied.frame_stream.reset(Code::H3_REQUEST_REJECTED.value());
+        quic::RecvStream::stop_sending(
+            &mut denied.frame_stream.stream,
+            Code::H3_REQUEST_REJECTED.value(),
+        );
+        drop(denied);
+        let mut received = Vec::new();
+        while received.len() < 5 {
+            let mut data = receive.recv_data().await.unwrap().unwrap();
+            let count = data.remaining();
+            received.extend_from_slice(&data.copy_to_bytes(count));
+        }
+        assert_eq!(received, b"after");
+        send.send_data(Bytes::from(received)).await.unwrap();
+        send.finish().await.unwrap();
+        drop(send);
+        let mut closed = Box::pin(incoming.accept());
+        tokio::select! { biased;
+            _ = &mut closed => panic!("接收半流仍被拥有时不能提前排空"),
+            eof = receive.recv_data() => assert!(eof.unwrap().is_none()),
+        }
+        drop(receive);
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut closed)
+            .await
+            .expect("被拒 resolver 与既有半流全部释放后应自然排空")
+            .unwrap()
+            .is_none());
+    };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(client_fut, server_fut);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn incomplete_request_resolution_keeps_error_and_allows_graceful_shutdown() {
+    let mut pair = Pair::default();
+    let mut server = pair.server();
+    let (resolved, wait_resolved) = oneshot::channel();
+    let client_fut = async {
+        let (mut driver, mut sender) = client::new(pair.client().await).await.unwrap();
+        let mut settings = crate::config::Settings::default();
+        settings.max_field_section_size = 12;
+        sender.set_settings(settings);
+        assert_matches!(
+            sender
+                .send_request(Request::get("http://localhost/salut").body(()).unwrap())
+                .await
+                .err()
+                .unwrap(),
+            StreamError::HeaderTooBig {
+                actual_size: 179,
+                max_size: 12
+            }
+        );
+        wait_resolved.await.unwrap();
+        driver.shutdown(0).await.unwrap();
+        assert_matches!(
+            future::poll_fn(|cx| driver.poll_close(cx)).await,
+            ConnectionError::Remote(ConnectionErrorIncoming::ApplicationClose {
+                error_code,
+                ..
+            }) if error_code == Code::H3_NO_ERROR.value()
+        );
+    };
+    let server_fut = async {
+        let mut incoming = server::Connection::new(server.next().await).await.unwrap();
+        let resolver = incoming.accept().await.unwrap().unwrap();
+        assert_matches!(
+            resolver.resolve_request().await.err().unwrap(),
+            StreamError::StreamError {
+                code: Code::H3_REQUEST_INCOMPLETE,
+                ..
+            }
+        );
+        resolved.send(()).unwrap();
+        incoming.shutdown(0).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), incoming.accept())
+                .await
+                .expect("请求头解析失败后应归还同一排空账项")
+                .unwrap()
+                .is_none()
+        );
+    };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(client_fut, server_fut);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 // This test is to ensure that the server does still process requests even if a stream is started but has not sent any data
 async fn server_not_blocking_on_idle_request() {
     init_tracing();

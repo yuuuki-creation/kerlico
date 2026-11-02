@@ -1,4 +1,4 @@
-use kerlico_config::{NodeFactory, OutboundFactory, Registry, parse};
+use kerlico_config::{NodeFactory, Registry, parse};
 use kerlico_core::{CancellationToken, ConnectContext, Destination};
 use kerlico_engine::Engine;
 use kerlico_net::DirectFactory;
@@ -49,10 +49,22 @@ async fn node_limits(
     let mut registry = Registry::default();
     registry.register(DirectFactory).unwrap();
     registry.register_node(SocksNodeFactory).unwrap();
-    let config = json!({"version":1,"outbounds":[{"tag":"exit","type":"direct"}],"inbounds":[],"local_inbounds":[{"tag":"node","type":"socks","listen":listen,"outbound":"exit","options":options}],"limits":limits});
+    let authenticated = options.get("auth").is_some_and(|auth| !auth.is_null());
+    let mut config = json!({"version":2,"outbounds":[{"tag":"exit","type":"direct"}],"inbounds":[],"local_inbounds":[{"tag":"node","type":"socks","listen":listen,"outbound":"exit","options":options}],"limits":limits});
+    if authenticated {
+        let nodes = config
+            .as_object_mut()
+            .unwrap()
+            .remove("local_inbounds")
+            .unwrap();
+        config["nodes"] = nodes;
+    }
     let engine = Engine::bind(
         registry
-            .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .prepare(
+                parse(&serde_json::to_vec(&shared::configuration(config.clone())).unwrap())
+                    .unwrap(),
+            )
             .unwrap(),
     )
     .await
@@ -84,16 +96,30 @@ async fn all_versions_tcp_keep_half_close_and_remote_domain() {
             let (address, cancel, task) = node(options.clone()).await;
             let mut outbound = options;
             outbound["server"] = json!({"host":address.ip().to_string(),"port":address.port()});
-            let outbound = SocksFactory.build(&outbound).unwrap();
+            let outbound = shared::outbound(&SocksFactory, &outbound).await.unwrap();
             let target = Destination::new(
                 if domain { "localhost" } else { "127.0.0.1" },
                 target.port(),
             )
             .unwrap();
+            if version == "4" && domain {
+                assert!(
+                    outbound
+                        .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(2)))
+                        .await
+                        .is_err()
+                );
+                echo.abort();
+                let _ = echo.await;
+                cancel.cancel();
+                task.await.unwrap().unwrap();
+                continue;
+            }
             let mut stream = outbound
                 .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(2)))
                 .await
-                .unwrap();
+                .unwrap()
+                .stream;
             let payload = vec![0x51; 8193];
             stream.write_all(&payload).await.unwrap();
             stream.shutdown().await.unwrap();
@@ -122,9 +148,12 @@ async fn socks5_udp_preserves_empty_large_and_control_lifetime() {
         }
     });
     let (address, cancel, task) = node(json!({})).await;
-    let outbound = SocksFactory
-        .build(&json!({"server":{"host":address.ip().to_string(),"port":address.port()}}))
-        .unwrap();
+    let outbound = shared::outbound(
+        &SocksFactory,
+        &json!({"server":{"host":address.ip().to_string(),"port":address.port()}}),
+    )
+    .await
+    .unwrap();
     let mut channel = outbound
         .connect_udp(&target, &ConnectContext::new(Duration::from_secs(2)))
         .await
@@ -153,7 +182,7 @@ async fn socks5_udp_preserves_empty_large_and_control_lifetime() {
 #[tokio::test]
 async fn wrong_auth_and_forbidden_command_are_rejected() {
     let (address, cancel, task) = node(json!({"auth":{"username":"a","password":"b"}})).await;
-    let outbound=SocksFactory.build(&json!({"server":{"host":"127.0.0.1","port":address.port()},"auth":{"username":"a","password":"wrong"}})).unwrap();
+    let outbound=shared::outbound(&SocksFactory, &json!({"server":{"host":"127.0.0.1","port":address.port()},"auth":{"username":"a","password":"wrong"}})).await.unwrap();
     assert!(
         outbound
             .connect_tcp(
@@ -243,9 +272,12 @@ async fn socks5_node_and_udp_target_families_are_independent() {
             echo.send_to(&bytes[..count], from).await.unwrap();
         });
         let (address, cancel, task) = node_on(json!({}), listen).await;
-        let out = SocksFactory
-            .build(&json!({"server":{"host":address.ip().to_string(),"port":address.port()}}))
-            .unwrap();
+        let out = shared::outbound(
+            &SocksFactory,
+            &json!({"server":{"host":address.ip().to_string(),"port":address.port()}}),
+        )
+        .await
+        .unwrap();
         let mut channel = out
             .connect_udp(&target, &ConnectContext::new(Duration::from_secs(2)))
             .await
@@ -266,8 +298,8 @@ async fn socks5_node_and_udp_target_families_are_independent() {
     }
 }
 
-#[test]
-fn rejects_unsupported_and_conflicting_configurations() {
+#[tokio::test]
+async fn rejects_unsupported_and_conflicting_configurations() {
     for options in [
         json!({"version":"6"}),
         json!({"version":"4","auth":{"username":"a","password":"b"}}),
@@ -275,46 +307,65 @@ fn rejects_unsupported_and_conflicting_configurations() {
         json!({"userid":"unexpected"}),
         json!({"unknown":true}),
     ] {
-        assert!(SocksNodeFactory.build(&options).is_err());
+        assert!(
+            SocksNodeFactory
+                .build(&shared::node_input("socks", &options))
+                .is_err()
+        );
     }
     for version in ["4", "4a"] {
-        let out = SocksFactory
-            .build(&json!({"server":{"host":"127.0.0.1","port":1080},"version":version}))
-            .unwrap();
+        let out = shared::outbound(
+            &SocksFactory,
+            &json!({"server":{"host":"127.0.0.1","port":1080},"version":version}),
+        )
+        .await
+        .unwrap();
         assert!(!out.capabilities().udp);
     }
     let mut registry = Registry::default();
     registry.register(DirectFactory).unwrap();
     registry.register_node(SocksNodeFactory).unwrap();
-    let mut config = json!({"version":1,"outbounds":[{"tag":"exit","type":"direct"}],"inbounds":[],"nodes":[{"tag":"node4","type":"socks","listen":"127.0.0.1:0","outbound":"exit","options":{"auth":{"username":"a","password":"b"}}},{"tag":"node6","type":"socks","listen":"[::1]:0","outbound":"exit","options":{"auth":{"username":"a","password":"b"}}}]});
+    let mut config = json!({"version":2,"outbounds":[{"tag":"exit","type":"direct"}],"inbounds":[],"nodes":[{"tag":"node4","type":"socks","listen":"127.0.0.1:0","outbound":"exit","options":{"auth":{"username":"a","password":"b"}}},{"tag":"node6","type":"socks","listen":"[::1]:0","outbound":"exit","options":{"auth":{"username":"a","password":"b"}}}]});
     assert!(
         registry
-            .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .prepare(
+                parse(&serde_json::to_vec(&shared::configuration(config.clone())).unwrap())
+                    .unwrap()
+            )
             .is_err()
     );
-    let mut local = json!({"version":1,"outbounds":[{"tag":"exit","type":"direct"}],"inbounds":[],"local_inbounds":[{"tag":"local","type":"socks","listen":"127.0.0.1:0","outbound":"exit","options":{}}]});
+    let mut local = json!({"version":2,"outbounds":[{"tag":"exit","type":"direct"}],"inbounds":[],"local_inbounds":[{"tag":"local","type":"socks","listen":"127.0.0.1:0","outbound":"exit","options":{}}]});
     assert!(
         registry
-            .prepare(parse(&serde_json::to_vec(&local).unwrap()).unwrap())
+            .prepare(
+                parse(&serde_json::to_vec(&shared::configuration(local.clone())).unwrap()).unwrap()
+            )
             .is_ok()
     );
     local["local_inbounds"][0]["listen"] = json!("0.0.0.0:1080");
     assert!(
         registry
-            .prepare(parse(&serde_json::to_vec(&local).unwrap()).unwrap())
+            .prepare(
+                parse(&serde_json::to_vec(&shared::configuration(local.clone())).unwrap()).unwrap()
+            )
             .is_err()
     );
     local["local_inbounds"][0]["listen"] = json!("127.0.0.1:0");
     local["local_inbounds"][0]["type"] = json!("direct");
     assert!(
         registry
-            .prepare(parse(&serde_json::to_vec(&local).unwrap()).unwrap())
+            .prepare(
+                parse(&serde_json::to_vec(&shared::configuration(local.clone())).unwrap()).unwrap()
+            )
             .is_err()
     );
     config["nodes"] = json!([{"tag":"node","type":"socks","listen":"0.0.0.0:1080","outbound":"exit","options":{}}]);
     assert!(
         registry
-            .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .prepare(
+                parse(&serde_json::to_vec(&shared::configuration(config.clone())).unwrap())
+                    .unwrap()
+            )
             .is_err()
     );
 }
@@ -337,7 +388,7 @@ async fn association(address: SocketAddr) -> (TcpStream, UdpSocket, SocketAddr) 
 }
 
 #[tokio::test]
-async fn udp_source_port_control_close_and_target_budget_are_enforced() {
+async fn udp_source_port_control_close_and_single_association_are_enforced() {
     let (address,cancel,task)=node_limits(json!({}),"127.0.0.1:0",json!({"max_sessions":2,"connect_timeout_ms":300,"idle_timeout_ms":2000,"drain_timeout_ms":30})).await;
     let (control, client, relay) = association(address).await;
     let first = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -366,11 +417,12 @@ async fn udp_source_port_control_close_and_target_budget_are_enforced() {
     );
     packet[8..10].copy_from_slice(&second.local_addr().unwrap().port().to_be_bytes());
     client.send_to(&packet, relay).await.unwrap();
-    assert!(
-        timeout(Duration::from_millis(100), second.recv_from(&mut bytes))
-            .await
-            .is_err()
-    );
+    let (count, second_source) = timeout(Duration::from_secs(1), second.recv_from(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&bytes[..count], &[7]);
+    assert_eq!(second_source, from);
     drop(control);
     timeout(Duration::from_secs(1), async {
         loop {
@@ -467,9 +519,12 @@ async fn udp_relay_family_can_differ_from_tcp_control() {
         assert_eq!(&bytes[..count], &[0, 0, 0, 1, 127, 0, 0, 1, 0, 9, 7]);
         relay.send_to(&bytes[..count], source).await.unwrap();
     });
-    let outbound = SocksFactory
-        .build(&json!({"server":{"host":"127.0.0.1","port":address.port()}}))
-        .unwrap();
+    let outbound = shared::outbound(
+        &SocksFactory,
+        &json!({"server":{"host":"127.0.0.1","port":address.port()}}),
+    )
+    .await
+    .unwrap();
     let mut channel = outbound
         .connect_udp(
             &Destination::new("127.0.0.1", 9).unwrap(),
@@ -564,4 +619,12 @@ async fn one_way_udp_activity_preserves_the_target_socket() {
     drop(control);
     cancel.cancel();
     task.await.unwrap().unwrap();
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

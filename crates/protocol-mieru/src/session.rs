@@ -6,8 +6,8 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use kerlico_core::{
-    AccessService, BoxStream, CancellationToken, ConnectContext, Error, InboundContext, NodeEvent,
-    Result, StreamLease,
+    BoxStream, CancellationToken, ConnectContext, Error, InboundContext, IngressBinding, NodeEvent,
+    NodeTask, NodeTasks, PeerSession, Result, ServiceContext, ServiceTask, StreamLease,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -27,20 +27,34 @@ use tokio::{
         DuplexStream, ReadBuf,
     },
     sync::{OwnedSemaphorePermit, mpsc, oneshot, watch},
-    task::JoinSet,
 };
 const PIPE_BYTES: usize = 32768;
 pub(crate) const RECEIVE_BYTES: usize = 256 * 1024;
 const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+const REQUEST_CANCELLED: u8 = 4;
+pub(crate) const IDLE_TIMEOUT: u8 = 5;
 pub(crate) struct Scope {
     pub cancel: CancellationToken,
-    tasks: Mutex<JoinSet<()>>,
+    tasks: Mutex<Vec<Task>>,
+    owner: Owner,
+}
+enum Owner {
+    Node(NodeTasks),
+    Shared(ServiceContext),
 }
 impl Scope {
-    pub fn new(parent: &CancellationToken) -> Arc<Self> {
+    pub fn node(parent: &CancellationToken, owner: NodeTasks) -> Arc<Self> {
         Arc::new(Self {
             cancel: parent.child_token(),
-            tasks: Mutex::new(JoinSet::new()),
+            tasks: Mutex::new(Vec::new()),
+            owner: Owner::Node(owner),
+        })
+    }
+    pub fn shared(host: &ServiceContext) -> Arc<Self> {
+        Arc::new(Self {
+            cancel: host.cancel().child_token(),
+            tasks: Mutex::new(Vec::new()),
+            owner: Owner::Shared(host.clone()),
         })
     }
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
@@ -49,31 +63,52 @@ impl Scope {
         }
         let cancel = self.cancel.clone();
         if let Ok(mut tasks) = self.tasks.lock() {
-            while tasks.try_join_next().is_some() {}
-            tasks.spawn(async move {
+            tasks.retain(|task| !task.finished());
+            let future = async move {
                 tokio::select! { biased; _ = cancel.cancelled() => {}, _ = future => {} }
-            });
+            };
+            match &self.owner {
+                Owner::Shared(host) => match host.spawn_tracked(future) {
+                    Ok(task) => tasks.push(Task::Shared(task)),
+                    Err(_) => self.cancel.cancel(),
+                },
+                Owner::Node(owner) => match owner.spawn_tracked(future) {
+                    Ok(task) => tasks.push(Task::Node(task)),
+                    Err(_) => self.cancel.cancel(),
+                },
+            }
+        } else {
+            self.cancel.cancel();
         }
     }
     pub fn stop(&self) {
         self.cancel.cancel();
-        if let Ok(mut tasks) = self.tasks.lock() {
-            tasks.abort_all();
+        if let Ok(tasks) = self.tasks.lock() {
+            for task in tasks.iter() {
+                task.abort();
+            }
         }
     }
     pub async fn shutdown(&self) {
         self.stop();
-        let mut tasks = if let Ok(mut tasks) = self.tasks.lock() {
+        let tasks = if let Ok(mut tasks) = self.tasks.lock() {
             std::mem::take(&mut *tasks)
         } else {
             return;
         };
-        while tasks.join_next().await.is_some() {}
+        for task in tasks {
+            task.join().await;
+        }
     }
 }
 #[derive(Clone)]
+pub(crate) enum ServerAccess {
+    Authenticated(PeerSession),
+    Local(IngressBinding),
+}
+#[derive(Clone)]
 pub(crate) struct Server {
-    pub access: Arc<dyn AccessService>,
+    pub access: ServerAccess,
     pub context: InboundContext,
 }
 pub(crate) struct Link {
@@ -89,6 +124,8 @@ pub(crate) struct Link {
     pub issued: AtomicUsize,
     next: AtomicU32,
     pub server: Option<Server>,
+    #[cfg(test)]
+    pub opening_poll_gate: Mutex<Option<Arc<crate::server::pending_tests::OpeningPollGate>>>,
 }
 impl Link {
     pub fn new(
@@ -115,6 +152,8 @@ impl Link {
                 issued: AtomicUsize::new(0),
                 next: AtomicU32::new((rand::random::<u32>() & 0x7fff_ffff) + 1),
                 server,
+                #[cfg(test)]
+                opening_poll_gate: Mutex::new(None),
             }),
             receive,
         )
@@ -166,7 +205,7 @@ impl Link {
         let life = io.life.clone();
         let request_cancel = context.cancel.clone();
         let finished = life.finished.clone();
-        self.scope.spawn(async move { tokio::select! { biased; _ = finished.cancelled() => {}, _ = request_cancel.cancelled() => life.abort(2) } });
+        self.scope.spawn(async move { tokio::select! { biased; _ = finished.cancelled() => {}, _ = request_cancel.cancelled() => life.abort(REQUEST_CANCELLED) } });
         Ok((io, handshake))
     }
 }
@@ -178,6 +217,7 @@ pub(crate) struct Life {
     pub abort_cancel: CancellationToken,
     pub finished: CancellationToken,
     pub closed: AtomicBool,
+    peer_ended: AtomicBool,
     pub reason: AtomicU8,
     pub graceful: AtomicBool,
     pub peer_low: AtomicBool,
@@ -219,15 +259,48 @@ impl Life {
         self.finished.cancel();
         self.wake();
     }
+    pub fn peer_ended(&self) -> bool {
+        self.peer_ended.load(Ordering::Acquire)
+    }
     fn io_error(&self) -> io::Error {
-        io::Error::new(
-            if self.reason.load(Ordering::Acquire) == 2 {
-                io::ErrorKind::Interrupted
-            } else {
-                io::ErrorKind::BrokenPipe
-            },
-            "Mieru 逻辑会话已终止",
-        )
+        match self.reason.load(Ordering::Acquire) {
+            REQUEST_CANCELLED => io::Error::new(io::ErrorKind::ConnectionAborted, Error::Cancelled),
+            IDLE_TIMEOUT => io::Error::new(io::ErrorKind::TimedOut, Error::Timeout),
+            2 => io::Error::new(io::ErrorKind::ConnectionAborted, "Mieru 逻辑会话已终止"),
+            _ => io::Error::new(io::ErrorKind::BrokenPipe, "Mieru 逻辑会话已终止"),
+        }
+    }
+    pub fn failure(&self) -> Option<kerlico_core::FlowFailure> {
+        match self.reason.load(Ordering::Acquire) {
+            0 => None,
+            REQUEST_CANCELLED => Some(kerlico_core::FlowFailure::Cancelled),
+            IDLE_TIMEOUT => Some(kerlico_core::FlowFailure::Timeout),
+            _ => Some(kerlico_core::FlowFailure::Failed),
+        }
+    }
+    pub fn error(&self) -> Error {
+        match self.failure() {
+            Some(kerlico_core::FlowFailure::Cancelled) => Error::Cancelled,
+            Some(kerlico_core::FlowFailure::Timeout) => Error::Timeout,
+            _ => Error::Io(self.io_error()),
+        }
+    }
+    fn drop_reason(&self) -> u8 {
+        let owner_cancelled = match &self.link.scope.owner {
+            Owner::Node(owner) => owner.cancel().is_cancelled(),
+            Owner::Shared(host) => host.cancel().is_cancelled(),
+        };
+        if owner_cancelled
+            || self
+                .link
+                .server
+                .as_ref()
+                .is_some_and(|server| server.context.cancel.is_cancelled())
+        {
+            REQUEST_CANCELLED
+        } else {
+            2
+        }
     }
 }
 pub(crate) struct SessionIo {
@@ -318,7 +391,7 @@ impl AsyncWrite for SessionIo {
 impl Drop for SessionIo {
     fn drop(&mut self) {
         if !self.shutting_down && !self.life.closed.load(Ordering::Acquire) {
-            self.life.abort(2);
+            self.life.abort(self.life.drop_reason());
         }
     }
 }
@@ -388,6 +461,7 @@ impl Entry {
             abort_cancel: CancellationToken::new(),
             finished: CancellationToken::new(),
             closed: AtomicBool::new(false),
+            peer_ended: AtomicBool::new(false),
             reason: AtomicU8::new(0),
             graceful: AtomicBool::new(false),
             peer_low: AtomicBool::new(false),
@@ -544,6 +618,7 @@ impl Entry {
     }
     pub fn peer_close(&mut self) {
         self.peer_closed = true;
+        self.life.peer_ended.store(true, Ordering::Release);
         self.life.finish_peer();
         self.flush();
     }
@@ -606,9 +681,27 @@ pub(crate) enum Command {
     Incoming(Frame),
     Written,
 }
-pub(crate) fn server_entry(link: &Arc<Link>, id: u32, wire_id: u32) -> Result<Entry> {
+pub(crate) fn server_entry(
+    link: &Arc<Link>,
+    id: u32,
+    wire_id: u32,
+    observed: Option<std::net::SocketAddr>,
+) -> Result<Entry> {
     let server = link.server.as_ref().ok_or_else(codec::bad)?;
-    let lease = Arc::new(server.context.stream_budget.try_acquire()?);
+    let mut context = server.context.clone();
+    if let Some(observed) = observed {
+        context.peer_addr = Some(observed);
+    }
+    let access = match &server.access {
+        ServerAccess::Authenticated(peer) => peer.clone(),
+        ServerAccess::Local(ingress) => {
+            if observed.is_none() {
+                return Err(Error::Protocol("Mieru本地UDP缺少实际来源地址"));
+            }
+            ingress.local(&context)?
+        }
+    };
+    let lease = Arc::new(context.stream_budget.try_acquire()?);
     let (entry, io, _) = Entry::new(
         link.clone(),
         id,
@@ -618,12 +711,11 @@ pub(crate) fn server_entry(link: &Arc<Link>, id: u32, wire_id: u32) -> Result<En
         false,
         server.context.connect_timeout,
     );
-    let server = server.clone();
     let life = io.life.clone();
     link.scope.spawn(async move {
-        server.context.events.record(NodeEvent::Accepted);
-        let result = tokio::select! { biased; _ = life.finished.cancelled() => if life.reason.load(Ordering::Acquire) == 0 { Ok(()) } else { Err(Error::Cancelled) }, result = crate::server::run_session(io, server.access, server.context.clone()) => result };
-        server.context.events.record(if result.is_ok() { NodeEvent::Completed } else { NodeEvent::Failed });
+        context.events.record(NodeEvent::Accepted);
+        let result = tokio::select! { biased; _ = life.finished.cancelled() => if life.failure().is_none() && life.peer_ended() { Ok(()) } else { Err(life.error()) }, result = crate::server::run_session(io, access, context.clone()) => result };
+        context.events.record(if result.is_ok() { NodeEvent::Completed } else { NodeEvent::Failed });
         if result.is_err() { life.abort(1); }
     });
     Ok(entry)
@@ -894,7 +986,7 @@ impl TcpActor {
             {
                 return Ok(());
             }
-            let Ok(mut entry) = server_entry(&self.link, id, id) else {
+            let Ok(mut entry) = server_entry(&self.link, id, id, None) else {
                 return Ok(());
             };
             entry.started = true;
@@ -1017,9 +1109,10 @@ impl TcpActor {
             entry.flush();
             if entry.peer_closed && entry.drained() {
                 finished.push(*id);
-            } else if entry.life.abort_cancel.is_cancelled()
-                || entry.last_data.elapsed() >= self.link.idle
-            {
+            } else if entry.life.abort_cancel.is_cancelled() {
+                expired.push(*id);
+            } else if entry.last_data.elapsed() >= self.link.idle {
+                entry.life.abort(IDLE_TIMEOUT);
                 expired.push(*id);
             }
         }
@@ -1062,5 +1155,176 @@ impl TcpActor {
             }
         }
         self.link.scope.cancel.cancel();
+    }
+}
+
+enum Task {
+    Node(NodeTask<()>),
+    Shared(ServiceTask<()>),
+}
+impl Task {
+    fn finished(&self) -> bool {
+        match self {
+            Self::Node(task) => task.is_finished(),
+            Self::Shared(task) => task.is_finished(),
+        }
+    }
+    fn abort(&self) {
+        match self {
+            Self::Node(task) => task.abort(),
+            Self::Shared(task) => task.abort(),
+        }
+    }
+    async fn join(self) {
+        match self {
+            Self::Node(task) => {
+                let _ = task.await;
+            }
+            Self::Shared(task) => {
+                let _ = task.await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::Scope;
+    use kerlico_core::{CancellationToken, NodeId, NodeTasks};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::{net::TcpListener, sync::oneshot, time::Instant};
+
+    struct Released(Arc<AtomicBool>);
+    impl Drop for Released {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn terminated_session_write_all_and_read_exact_keep_unclassified_failure() {
+        use super::{Entry, Link};
+        use kerlico_core::{Error, FlowFailure};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let owner = NodeTasks::new(
+            NodeId::parse("mieru-io-test").unwrap(),
+            CancellationToken::new(),
+        );
+        let scope = Scope::node(&owner.cancel(), owner.clone());
+        let (link, _commands) = Link::new(
+            scope.clone(),
+            false,
+            crate::config::Traffic::default(),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            false,
+            None,
+        );
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let (entry, mut stream, _handshake) = Entry::new(
+            link,
+            1,
+            1,
+            Some(slots.clone().try_acquire_owned().unwrap()),
+            None,
+            false,
+            Duration::from_secs(1),
+        );
+        stream.life.abort(2);
+        let error = tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut [0; 1]))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(
+            FlowFailure::from_error(&Error::Io(error)),
+            FlowFailure::Failed
+        );
+        let error =
+            tokio::time::timeout(Duration::from_secs(1), stream.write_all(b"after-failure"))
+                .await
+                .unwrap()
+                .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(
+            FlowFailure::from_error(&Error::Io(error)),
+            FlowFailure::Failed
+        );
+        drop(stream);
+        drop(entry);
+        scope.shutdown().await;
+        assert!(
+            owner
+                .shutdown_at(Instant::now() + Duration::from_secs(1))
+                .await
+                .is_clean()
+        );
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn node_owner_joins_scope_socket_driver_after_handler_abort() {
+        let owner = NodeTasks::new(
+            NodeId::parse("mieru-scope-test").unwrap(),
+            CancellationToken::new(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let released = Arc::new(AtomicBool::new(false));
+        let witness = Released(released.clone());
+        let child_owner = owner.clone();
+        let (started, ready) = oneshot::channel();
+        let handler = tokio::spawn(async move {
+            let scope = Scope::node(&child_owner.cancel(), child_owner.clone());
+            let active = scope.clone();
+            scope.spawn(async move {
+                let _active = active;
+                let _witness = witness;
+                let _ = started.send(());
+                while listener.accept().await.is_ok() {}
+            });
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        handler.abort();
+        assert!(handler.await.unwrap_err().is_cancelled());
+        assert!(!released.load(Ordering::Acquire));
+        let report = owner
+            .shutdown_at(Instant::now() + Duration::from_millis(200))
+            .await;
+        assert!(report.is_clean());
+        assert!(released.load(Ordering::Acquire));
+        let _rebound = TcpListener::bind(address).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_node_rejects_scope_driver_without_spawning() {
+        let owner = NodeTasks::new(
+            NodeId::parse("mieru-scope-test").unwrap(),
+            CancellationToken::new(),
+        );
+        assert!(
+            owner
+                .shutdown_at(Instant::now() + Duration::from_millis(100))
+                .await
+                .is_clean()
+        );
+        let scope = Scope::node(&CancellationToken::new(), owner);
+        let released = Arc::new(AtomicBool::new(false));
+        let witness = Released(released.clone());
+        scope.spawn(async move {
+            let _witness = witness;
+            panic!("关闭后的作用域任务不得启动");
+        });
+        assert!(scope.cancel.is_cancelled());
+        assert!(released.load(Ordering::Acquire));
+        assert!(scope.tasks.lock().unwrap().is_empty());
     }
 }

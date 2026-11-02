@@ -1,8 +1,10 @@
+#[path = "../../protocol-shadowsocks/tests/support/mod.rs"]
+mod support;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel,
-    Destination, Error, InboundContext, InboundProtocol, NodeEvent, NodeObserver, Outbound, Result,
-    ScopedCredentialFingerprint, StreamBudget, StreamConnector,
+    BoxFuture, BoxStream, CancellationToken, ConnectContext, CredentialManifest, DatagramChannel,
+    Destination, Error, InboundContext, InboundProtocol, IngressBinding, NodeEvent, NodeObserver,
+    Outbound, Result, StreamBudget, StreamConnector,
 };
 use kerlico_net::{DirectFactory, TcpConnector};
 use kerlico_shadowsocks::{
@@ -25,12 +27,19 @@ use tokio::{
 struct Echo {
     targets: Mutex<Vec<Destination>>,
 }
-impl AccessService for Echo {
+impl Outbound for Echo {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: false,
+        }
+    }
     fn connect_tcp<'a>(
         &'a self,
         target: &'a Destination,
         _: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
             self.targets.lock().unwrap().push(target.clone());
             let (local, mut remote) = tokio::io::duplex(4096);
@@ -39,7 +48,10 @@ impl AccessService for Echo {
                 remote.read_to_end(&mut bytes).await.unwrap();
                 remote.write_all(&bytes).await.unwrap();
             });
-            Ok(Box::new(local) as BoxStream)
+            Ok(kerlico_core::OpenedTcp {
+                stream: Box::new(local),
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
     fn connect_udp<'a>(
@@ -56,6 +68,11 @@ impl NodeObserver for Observer {
 }
 fn context() -> InboundContext {
     InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         peer_addr: None,
         local_addr: None,
         cancel: CancellationToken::new(),
@@ -127,39 +144,46 @@ async fn ss_stream_injection_keeps_endpoint_target_eih_and_capabilities_separate
             client["identity_keys"] = json!([STANDARD.encode(vec![1; size])]);
             node["users"] = json!([STANDARD.encode(vec![2; size])]);
         }
+        let (options, credentials, _) = support::credentials(kind, &node);
+        let input = kerlico_config::NodeBuildContext::for_test(options, credentials);
         let inner: Arc<dyn InboundProtocol> = if kind == "shadowsocks" {
-            Arc::new(ShadowsocksNode::from_options(&node).unwrap())
+            Arc::new(ShadowsocksNode::from_context(&input).unwrap())
         } else {
-            Arc::new(Ss2022Node::from_options(&node).unwrap())
+            Arc::new(Ss2022Node::from_context(&input).unwrap())
         };
         let connector = Arc::new(RecordedConnector {
             endpoints: Mutex::new(Vec::new()),
             eof: false,
         });
         let out: Arc<dyn Outbound> = if kind == "shadowsocks" {
-            Arc::new(
-                ShadowsocksOutbound::from_options_with_connector(&client, connector.clone())
+            support::start(
+                ShadowsocksOutbound::compile_with_connector(&client, Some(connector.clone()))
                     .unwrap(),
             )
+            .unwrap()
         } else {
-            Arc::new(
-                Ss2022Outbound::from_options_with_connector(&client, connector.clone()).unwrap(),
+            support::start(
+                Ss2022Outbound::compile_with_connector(&client, Some(connector.clone())).unwrap(),
             )
+            .unwrap()
         };
         assert!(!out.capabilities().udp);
         assert!(!out.capabilities().tcp_eof);
         let access = Arc::new(Echo::default());
         let observed = access.clone();
+        let ingress =
+            kerlico_egress::testing::ingress(&input, access, kerlico_core::TargetPolicy::Remote)
+                .unwrap();
         let handler = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             inner
-                .handle(Box::new(stream), access, context())
+                .handle(Box::new(stream), ingress, context())
                 .await
                 .unwrap();
         });
         let target = Destination::new("site.invalid", 443).unwrap();
         let budget = ConnectContext::new(Duration::from_secs(3));
-        let mut stream = out.connect_tcp(&target, &budget).await.unwrap();
+        let mut stream = out.connect_tcp(&target, &budget).await.unwrap().stream;
         let payload = vec![0x53; 65_537];
         stream.write_all(&payload).await.unwrap();
         stream.shutdown().await.unwrap();
@@ -186,9 +210,13 @@ async fn ss_stream_injection_keeps_endpoint_target_eih_and_capabilities_separate
             eof: true,
         });
         let out: Arc<dyn Outbound> = if kind == "shadowsocks" {
-            Arc::new(ShadowsocksOutbound::from_options_with_connector(&client, direct).unwrap())
+            support::start(
+                ShadowsocksOutbound::compile_with_connector(&client, Some(direct)).unwrap(),
+            )
+            .unwrap()
         } else {
-            Arc::new(Ss2022Outbound::from_options_with_connector(&client, direct).unwrap())
+            support::start(Ss2022Outbound::compile_with_connector(&client, Some(direct)).unwrap())
+                .unwrap()
         };
         assert!(out.capabilities().tcp_eof);
         assert!(!out.capabilities().udp);
@@ -199,21 +227,15 @@ struct Wrapped {
     inner: ShadowsocksNode,
 }
 impl InboundProtocol for Wrapped {
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
-        self.inner.credential_fingerprints()
-    }
-    fn scoped_credential_fingerprints(&self, _: &str) -> Vec<ScopedCredentialFingerprint> {
-        let mut fingerprints = self.inner.scoped_credential_fingerprints("shadowsocks");
-        fingerprints.push(ScopedCredentialFingerprint {
-            protocol: "shadowtls".into(),
-            fingerprint: [9; 32],
-        });
-        fingerprints
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = self.inner.credential_manifest();
+        manifest.protection("shadowtls", [9; 32]);
+        manifest
     }
     fn handle<'a>(
         &'a self,
         stream: BoxStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         self.inner.handle(stream, access, context)
@@ -224,9 +246,9 @@ impl kerlico_config::NodeFactory for WrappedFactory {
     fn kind(&self) -> &'static str {
         self.0
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn InboundProtocol>> {
+    fn build(&self, input: &kerlico_config::NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
         Ok(Arc::new(Wrapped {
-            inner: ShadowsocksNode::from_options(options)?,
+            inner: ShadowsocksNode::from_context(input)?,
         }))
     }
 }
@@ -238,13 +260,13 @@ fn actual_inner_and_outer_authentication_domains_prevent_wrapper_alias_bypass() 
     registry.register_node(ShadowsocksNodeFactory).unwrap();
     registry.register_node(WrappedFactory("wrapped-a")).unwrap();
     registry.register_node(WrappedFactory("wrapped-b")).unwrap();
-    let entry = |tag: &str, kind: &str, address: &str, password: &str| json!({"tag":tag,"type":kind,"listen":address,"outbound":"direct","options":{"method":"aes-128-gcm","password":password}});
-    let mut value = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[entry("plain","shadowsocks","127.0.0.1:0","first-secret"),entry("wrapped","wrapped-a","[::1]:0","first-secret")]});
+    let entry = |tag: &str, kind: &str, address: &str, password: &str| json!({"tag":tag,"type":kind,"listen":address,"outbound":"direct","options":{"method":"aes-128-gcm"},"members":[{"user_id":"10000000-0000-4000-8000-000000000001","credential_epoch":1,"native_credential":{"password":password}}]});
+    let mut value = json!({"version":2,"accounts":[{"user_id":"10000000-0000-4000-8000-000000000001","username":"fixture_10000000-0000-4000-8000-000000000001","password_hash":"$argon2id$v=19$m=19456,t=2,p=1$c3ludGhldGljLXRlc3Qtc2FsdA$c3ludGhldGljLXRlc3QtZGlnZXN0LWNvbnRlbnQ"}],"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[entry("plain","shadowsocks","127.0.0.1:0","first-secret"),entry("wrapped","wrapped-a","[::1]:0","first-secret")]});
     let prepare = |value: &Value| {
         registry.prepare(kerlico_config::parse(&serde_json::to_vec(value).unwrap()).unwrap())
     };
     assert!(prepare(&value).is_err());
-    value["nodes"][1]["options"]["password"] = json!("second-secret");
+    value["nodes"][1]["members"][0]["native_credential"]["password"] = json!("second-secret");
     assert!(prepare(&value).is_ok());
     value["nodes"].as_array_mut().unwrap().push(entry(
         "other-wrapper",

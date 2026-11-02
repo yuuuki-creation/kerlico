@@ -1,8 +1,8 @@
 //! 自端版本/角色矩阵与真实网络，全部在 worker 执行。
-use kerlico_config::{NodeFactory, OutboundFactory};
+mod support;
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel,
-    Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
+    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel, Destination,
+    InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use kerlico_snell::{SnellFactory, SnellNodeFactory};
 use serde_json::{Value, json};
@@ -20,12 +20,19 @@ use tokio::{
     task::JoinSet,
 };
 struct Access(Arc<dyn Outbound>);
-impl AccessService for Access {
+impl Outbound for Access {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn connect_tcp<'a>(
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         self.0.connect_tcp(target, context)
     }
     fn connect_udp<'a>(
@@ -42,6 +49,11 @@ impl NodeObserver for Observer {
 }
 fn context(cancel: CancellationToken) -> InboundContext {
     InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         cancel,
         connect_timeout: Duration::from_secs(3),
         idle_timeout: Duration::from_secs(5),
@@ -81,7 +93,7 @@ impl Harness {
             node["mode"] = json!(mode);
             options["mode"] = json!(mode);
         }
-        let node = SnellNodeFactory.build(&node).unwrap();
+        let node = support::node(&SnellNodeFactory, &node).unwrap();
         let listener = TcpListener::bind((host, 0)).await.unwrap();
         let server = Destination::new(host, listener.local_addr().unwrap().port()).unwrap();
         let echo = TcpListener::bind((host, 0)).await.unwrap();
@@ -90,8 +102,8 @@ impl Harness {
         let udp = Destination::new(host, socket.local_addr().unwrap().port()).unwrap();
         let cancel = CancellationToken::new();
         let mut tasks = JoinSet::new();
-        let access: Arc<dyn AccessService> = Arc::new(Access(
-            kerlico_net::DirectFactory.build(&json!({})).unwrap(),
+        let access: Arc<dyn Outbound> = Arc::new(Access(
+            support::outbound(&kerlico_net::DirectFactory, &json!({})).unwrap(),
         ));
         let accepted = Arc::new(AtomicUsize::new(0));
         let count = accepted.clone();
@@ -103,7 +115,7 @@ impl Harness {
                 result=listener.accept()=>{
                     let Ok((stream,peer))=result else{break;};count.fetch_add(1,Ordering::SeqCst);
                     let node=node.clone();let access=access.clone();let mut context=context(token.clone());context.peer_addr=Some(peer);context.local_addr=stream.local_addr().ok();
-                    peers.spawn(async move{let _=node.handle(Box::new(stream),access,context).await;});
+                    peers.spawn(async move{let _=node.handle_local(Box::new(stream),access,context).await;});
                 },
                 _=peers.join_next(),if !peers.is_empty()=>{},
             }}
@@ -155,10 +167,14 @@ async fn complete_roles_modes_obfs_reuse_and_datagrams() {
             for reuse in [false, true] {
                 eprintln!("验证 Snell {mode} obfs={obfs} reuse={reuse}");
                 let (harness, options) = Harness::new(mode, obfs, reuse, false).await;
-                let outbound = SnellFactory.build(&options).unwrap();
+                let outbound = support::outbound(&SnellFactory, &options).unwrap();
                 let budget = ConnectContext::new(Duration::from_secs(3));
                 for index in 0..3 {
-                    let mut stream = outbound.connect_tcp(&harness.tcp, &budget).await.unwrap();
+                    let mut stream = outbound
+                        .connect_tcp(&harness.tcp, &budget)
+                        .await
+                        .unwrap()
+                        .stream;
                     let payload = vec![37 + index; 65536];
                     stream.write_all(&payload).await.unwrap();
                     stream.flush().await.unwrap();
@@ -193,10 +209,11 @@ async fn bad_psk_userkey_and_cancellation() {
     for mode in ["v4", "default", "unshaped", "unsafe-raw"] {
         let (harness, mut options) = Harness::new(mode, "none", false, false).await;
         options["userkey"] = json!("invalid-test-userkey");
-        let outbound = SnellFactory.build(&options).unwrap();
+        let outbound = support::outbound(&SnellFactory, &options).unwrap();
         let budget = ConnectContext::new(Duration::from_secs(2));
         let mut data = [0; 16];
-        if let Ok(mut stream) = outbound.connect_tcp(&harness.tcp, &budget).await {
+        if let Ok(opened) = outbound.connect_tcp(&harness.tcp, &budget).await {
+            let mut stream = opened.stream;
             let _ = stream.write_all(b"denied").await;
             let _ = stream.flush().await;
             assert!(matches!(stream.read(&mut data).await, Ok(0) | Err(_)));
@@ -204,8 +221,9 @@ async fn bad_psk_userkey_and_cancellation() {
         if mode != "unsafe-raw" {
             options["userkey"] = json!("primary-test-only");
             options["psk"] = json!("wrong-test-psk-long-enough");
-            let outbound = SnellFactory.build(&options).unwrap();
-            if let Ok(mut stream) = outbound.connect_tcp(&harness.tcp, &budget).await {
+            let outbound = support::outbound(&SnellFactory, &options).unwrap();
+            if let Ok(opened) = outbound.connect_tcp(&harness.tcp, &budget).await {
+                let mut stream = opened.stream;
                 let _ = stream.write_all(b"denied").await;
                 let _ = stream.flush().await;
                 assert!(matches!(stream.read(&mut data).await, Ok(0) | Err(_)));
@@ -224,7 +242,7 @@ async fn bad_psk_userkey_and_cancellation() {
 #[tokio::test]
 async fn ipv6_and_business_peer_metadata() {
     let (harness, options) = Harness::new("default", "none", true, true).await;
-    let outbound = SnellFactory.build(&options).unwrap();
+    let outbound = support::outbound(&SnellFactory, &options).unwrap();
     let budget = ConnectContext::new(Duration::from_secs(3));
     let mut channel = outbound.connect_udp(&harness.udp, &budget).await.unwrap();
     channel.sender.send(b"v6-data").await.unwrap();
@@ -234,7 +252,7 @@ async fn ipv6_and_business_peer_metadata() {
     );
     assert_eq!(channel.receiver.peer_addr(), Some(harness.udp.clone()));
     let target = Destination::new("localhost", harness.tcp.port()).unwrap();
-    let mut stream = outbound.connect_tcp(&target, &budget).await.unwrap();
+    let mut stream = outbound.connect_tcp(&target, &budget).await.unwrap().stream;
     stream.write_all(b"domain").await.unwrap();
     stream.flush().await.unwrap();
     let mut bytes = [0; 6];
@@ -251,14 +269,14 @@ fn configuration_roles_plaintext_and_credentials() {
         json!({"server":{"host":"192.0.2.1","port":1},"version":6,"psk":"valid-test-only-key","mode":"unsafe-raw","userkey":"test-user"}),
         json!({"server":{"host":"127.0.0.1","port":1},"version":6,"psk":"valid-test-only-key","obfs_mode":"http"}),
     ] {
-        assert!(SnellFactory.build(&value).is_err());
+        assert!(support::outbound(&SnellFactory, &value).is_err());
     }
     let raw = |psk: &str| {
-        SnellNodeFactory.build(&json!({"version":6,"psk":psk,"mode":"unsafe-raw","users":[{"userkey":"same-test-only-key"}]})).unwrap()
+        support::node(&SnellNodeFactory,&json!({"version":6,"psk":psk,"mode":"unsafe-raw","users":[{"userkey":"same-test-only-key"}]})).unwrap()
     };
     assert_eq!(
-        raw("first-test-psk-long").credential_fingerprints(),
-        raw("other-test-psk-long").credential_fingerprints()
+        raw("first-test-psk-long").manifest(),
+        raw("other-test-psk-long").manifest()
     );
     let mut registry = kerlico_config::Registry::default();
     registry.register(kerlico_net::DirectFactory).unwrap();
@@ -267,7 +285,12 @@ fn configuration_roles_plaintext_and_credentials() {
     let value = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[node("node4","127.0.0.1:0","first-test-psk-long"),node("node6","[::1]:0","other-test-psk-long")]});
     assert!(
         registry
-            .prepare(kerlico_config::parse(&serde_json::to_vec(&value).unwrap()).unwrap())
+            .prepare(
+                kerlico_config::parse(
+                    &serde_json::to_vec(&support::configuration(value.clone())).unwrap()
+                )
+                .unwrap()
+            )
             .is_err()
     );
 }
@@ -281,11 +304,11 @@ async fn unified_domain_udp_and_active_drain_release_port() {
             let mut options=json!({"version":if mode=="v4"{5}else{6},"psk":"snell-engine-test-psk","users":[{"userkey":"engine-test-user"}],"obfs_mode":obfs});
             if mode!="v4"{options["mode"]=json!(mode);}
             let value=json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[{"tag":"node","type":"snell","listen":"127.0.0.1:0","outbound":"direct","options":options}],"limits":{"connect_timeout_ms":1000,"idle_timeout_ms":2000,"drain_timeout_ms":500,"max_sessions":64}});
-            let engine=kerlico_engine::Engine::bind(registry.prepare(kerlico_config::parse(&serde_json::to_vec(&value).unwrap()).unwrap()).unwrap()).await.unwrap();let address=engine.listeners().unwrap()[0].1;let cancel=CancellationToken::new();let running=tokio::spawn(engine.run(cancel.clone()));
+            let engine=kerlico_engine::Engine::bind(registry.prepare(kerlico_config::parse(&serde_json::to_vec(&support::configuration(value.clone())).unwrap()).unwrap()).unwrap()).await.unwrap();let address=engine.listeners().unwrap()[0].1;let cancel=CancellationToken::new();let running=tokio::spawn(engine.run(cancel.clone()));
             let mut client=json!({"version":if mode=="v4"{4}else{6},"psk":"snell-engine-test-psk","userkey":"engine-test-user","obfs_mode":obfs,"reuse":true,"server":{"host":"127.0.0.1","port":address.port()}});if mode!="v4"{client["mode"]=json!(mode);}
-            let outbound=SnellFactory.build(&client).unwrap();let budget=ConnectContext::new(Duration::from_secs(2));let domain=Destination::new("localhost",target.udp.port()).unwrap();
+            let outbound=support::outbound(&SnellFactory,&client).unwrap();let budget=ConnectContext::new(Duration::from_secs(2));let domain=Destination::new("localhost",target.udp.port()).unwrap();
             let mut udp=outbound.connect_udp(&domain,&budget).await.unwrap();udp.sender.send(b"domain-udp").await.unwrap();assert_eq!(udp.receiver.recv().await.unwrap(),Some(b"domain-udp".to_vec()));let peer=udp.receiver.peer_addr().unwrap();assert_eq!(peer.host(),"127.0.0.1");assert_eq!(peer.port(),target.udp.port());drop(udp);
-            let mut stream=outbound.connect_tcp(&target.tcp,&budget).await.unwrap();stream.write_all(b"before").await.unwrap();stream.flush().await.unwrap();let mut bytes=[0;6];stream.read_exact(&mut bytes).await.unwrap();assert_eq!(&bytes,b"before");
+            let mut stream=outbound.connect_tcp(&target.tcp,&budget).await.unwrap().stream;stream.write_all(b"before").await.unwrap();stream.flush().await.unwrap();let mut bytes=[0;6];stream.read_exact(&mut bytes).await.unwrap();assert_eq!(&bytes,b"before");
             cancel.cancel();tokio::time::sleep(Duration::from_millis(20)).await;stream.write_all(b"during").await.unwrap();stream.flush().await.unwrap();stream.read_exact(&mut bytes).await.unwrap();assert_eq!(&bytes,b"during");stream.shutdown().await.unwrap();let mut tail=Vec::new();stream.read_to_end(&mut tail).await.unwrap();assert_eq!(tail,b"after-eof");drop(stream);drop(outbound);
             tokio::time::timeout(Duration::from_secs(2),running).await.unwrap().unwrap().unwrap();let listener=TcpListener::bind(address).await.unwrap();drop(listener);
         }
@@ -320,10 +343,14 @@ async fn target_can_speak_before_client_sends_business_payload() {
             ("unsafe-raw", "none"),
         ] {
             let (_harness, options) = Harness::new(mode, obfs, false, false).await;
-            let outbound = SnellFactory.build(&options).unwrap();
+            let outbound = support::outbound(&SnellFactory, &options).unwrap();
             let budget = ConnectContext::new(Duration::from_secs(2));
             let destination = Destination::new("127.0.0.1", address.port()).unwrap();
-            let mut stream = outbound.connect_tcp(&destination, &budget).await.unwrap();
+            let mut stream = outbound
+                .connect_tcp(&destination, &budget)
+                .await
+                .unwrap()
+                .stream;
             let mut greeting = [0; 8];
             stream.read_exact(&mut greeting).await.unwrap();
             assert_eq!(&greeting, b"greeting");

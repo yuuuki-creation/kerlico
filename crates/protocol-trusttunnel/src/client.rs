@@ -5,13 +5,14 @@ use crate::{
     protocol,
 };
 use bytes::Bytes;
-use kerlico_config::OutboundFactory;
+use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel, Destination, Error,
-    Outbound, Result,
+    Outbound, ResourceKey, Result, ServiceContext, ServiceTask, TargetPolicy,
 };
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     sync::{
         Arc, Mutex,
@@ -22,7 +23,6 @@ use std::{
 use tokio::{
     io::AsyncReadExt,
     sync::{OwnedSemaphorePermit, Semaphore},
-    task::JoinHandle,
 };
 pub struct TrustTunnelFactory;
 type H3Sender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
@@ -35,7 +35,8 @@ pub(crate) struct Carrier {
     slots: Arc<Semaphore>,
     closed: Arc<AtomicBool>,
     last: Mutex<Instant>,
-    driver: Mutex<Option<JoinHandle<()>>>,
+    driver: Mutex<Option<ServiceTask<()>>>,
+    maintenance: Mutex<Option<ServiceTask<()>>>,
     quic: Option<(quinn::Endpoint, quinn::Connection)>,
     socket: Option<crate::socket::Close>,
 }
@@ -58,8 +59,8 @@ impl Carrier {
         if let Some(socket) = &self.socket {
             socket.close();
         }
-        if let Ok(mut driver) = self.driver.lock()
-            && let Some(driver) = driver.take()
+        if let Ok(driver) = self.driver.lock()
+            && let Some(driver) = driver.as_ref()
         {
             driver.abort();
         }
@@ -118,7 +119,7 @@ impl Drop for Carrier {
     fn drop(&mut self) {
         self.close();
         if let Ok(driver) = self.driver.get_mut()
-            && let Some(driver) = driver.take()
+            && let Some(driver) = driver.as_ref()
         {
             driver.abort();
         }
@@ -127,25 +128,28 @@ impl Drop for Carrier {
 struct Pool {
     carriers: Vec<Arc<Carrier>>,
 }
+type MemberPool = tokio::sync::Mutex<Pool>;
 struct Client {
     server: Destination,
     auth: String,
     tls: Arc<rustls::ClientConfig>,
     name: String,
     transport: Transport,
+    h2_allow_missing_alpn: bool,
     limits: Limits,
     udp: bool,
     udp_slots: Arc<Semaphore>,
     app: String,
     all: Arc<Semaphore>,
     h1: Arc<Semaphore>,
-    pool: tokio::sync::Mutex<Pool>,
+    pool: tokio::sync::Mutex<HashMap<ResourceKey, Arc<MemberPool>>>,
+    host: ServiceContext,
 }
 impl OutboundFactory for TrustTunnelFactory {
     fn kind(&self) -> &'static str {
         "trusttunnel"
     }
-    fn build(&self, value: &Value) -> Result<Arc<dyn Outbound>> {
+    fn compile(&self, value: &Value) -> Result<OutboundPlan> {
         let options: ClientOptions =
             serde_json::from_value(value.clone()).map_err(|_| crate::invalid())?;
         options.auth.validate()?;
@@ -153,23 +157,45 @@ impl OutboundFactory for TrustTunnelFactory {
         if options.app_name.len() > 255 || options.app_name.chars().any(char::is_control) {
             return Err(crate::invalid());
         }
+        let h2_allow_missing_alpn = options.tls.h2_allow_missing_alpn;
+        if h2_allow_missing_alpn && value.get("transport").and_then(Value::as_str) != Some("h2") {
+            return Err(crate::invalid());
+        }
         let (tls, name) = config::client_tls(options.tls, options.transport)?;
-        Ok(Arc::new(Client {
-            server: options.server.destination()?,
-            auth: options.auth.header(),
-            tls,
-            name,
-            transport: options.transport,
+        let server = options.server.destination()?;
+        if options.transport == Transport::H3 {
+            options.limits.quic(0)?;
+        }
+        let capabilities = Capabilities {
+            tcp: true,
+            tcp_eof: false,
             udp: options.udp,
-            udp_slots: Arc::new(Semaphore::new(options.limits.max_udp_flows)),
-            app: options.app_name,
-            all: Arc::new(Semaphore::new(options.limits.max_streams)),
-            h1: Arc::new(Semaphore::new(options.limits.max_connections)),
-            limits: options.limits,
-            pool: tokio::sync::Mutex::new(Pool {
-                carriers: Vec::new(),
-            }),
-        }))
+        };
+        Ok(OutboundPlan::new(
+            capabilities,
+            false,
+            TargetPolicy::Remote,
+            move |host| {
+                Box::pin(async move {
+                    Ok(Arc::new(Client {
+                        server,
+                        auth: options.auth.header(),
+                        tls,
+                        name,
+                        transport: options.transport,
+                        h2_allow_missing_alpn,
+                        udp: options.udp,
+                        udp_slots: Arc::new(Semaphore::new(options.limits.max_udp_flows)),
+                        app: options.app_name,
+                        all: Arc::new(Semaphore::new(options.limits.max_streams)),
+                        h1: Arc::new(Semaphore::new(options.limits.max_connections)),
+                        limits: options.limits,
+                        pool: tokio::sync::Mutex::new(HashMap::new()),
+                        host,
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
 }
 impl Client {
@@ -185,9 +211,10 @@ impl Client {
             .await?;
         let actual = stream.get_ref().1.alpn_protocol();
         let expected = self.transport.alpn();
-        // 旧 H1 对端可不发送 ALPN；H2/H3 必须协商到明确版本。
         if actual != Some(expected[0].as_slice())
-            && !(self.transport == Transport::H1 && actual.is_none())
+            && !(actual.is_none()
+                && (self.transport == Transport::H1
+                    || self.transport == Transport::H2 && self.h2_allow_missing_alpn))
         {
             return Err(protocol());
         }
@@ -202,15 +229,15 @@ impl Client {
             let io = self.tls().await?;
             let (sender, connection) = h2::client::Builder::new()
                 .initial_window_size(131072)
-                .initial_connection_window_size(2*1024*1024)
+                .initial_connection_window_size(2 * 1024 * 1024)
                 .max_header_list_size(16384)
                 .handshake(io)
                 .await
                 .map_err(|_| protocol())?;
-            let driver = tokio::spawn(async move {
+            let driver = self.host.spawn_tracked(async move {
                 let _ = connection.await;
                 mark.store(true, Ordering::Relaxed);
-            });
+            })?;
             (Sender::H2(sender), driver)
         } else {
             let mut peers: Vec<SocketAddr> =
@@ -234,7 +261,7 @@ impl Client {
                 quinn::EndpointConfig::default(),
                 None,
                 socket,
-                Arc::new(quinn::TokioRuntime),
+                crate::runtime::ServiceRuntime::new(self.host.clone()),
             )?;
             let crypto = quinn::crypto::rustls::QuicClientConfig::try_from((*self.tls).clone())
                 .map_err(|_| crate::invalid())?;
@@ -252,11 +279,11 @@ impl Client {
                 .await
                 .map_err(|_| protocol())?;
             let conn = connection.clone();
-            let driver = tokio::spawn(async move {
+            let driver = self.host.spawn_tracked(async move {
                 let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
                 mark.store(true, Ordering::Relaxed);
                 conn.close(0x100u32.into(), b"");
-            });
+            })?;
             quic = Some((endpoint, connection));
             (Sender::H3(sender), driver)
         };
@@ -270,18 +297,20 @@ impl Client {
             closed,
             last: Mutex::new(Instant::now()),
             driver: Mutex::new(Some(driver)),
+            maintenance: Mutex::new(None),
             quic,
             socket: socket_close,
         });
         let weak = Arc::downgrade(&carrier);
         let idle = self.limits.idle();
-        tokio::spawn(async move {
+        let cancel = self.host.cancel();
+        let maintenance = self.host.spawn_tracked(async move {
             let mut ticks = tokio::time::interval((idle / 4).clamp(
                 std::time::Duration::from_millis(20),
                 std::time::Duration::from_secs(1),
             ));
             loop {
-                ticks.tick().await;
+                tokio::select! { biased; _=cancel.cancelled()=>break, _=ticks.tick()=>{} }
                 let Some(carrier) = weak.upgrade() else {
                     break;
                 };
@@ -293,11 +322,26 @@ impl Client {
                     break;
                 }
             }
-        });
+        })?;
+        *carrier.maintenance.lock().map_err(|_| protocol())? = Some(maintenance);
         Ok(carrier)
     }
-    async fn carrier(&self) -> Result<(Arc<Carrier>, OwnedSemaphorePermit)> {
-        let mut pool = self.pool.lock().await;
+    async fn carrier(
+        &self,
+        context: &ConnectContext,
+    ) -> Result<(Arc<Carrier>, OwnedSemaphorePermit)> {
+        let bucket = {
+            let mut pools = self.pool.lock().await;
+            pools
+                .entry(context.resource_key().clone())
+                .or_insert_with(|| {
+                    Arc::new(tokio::sync::Mutex::new(Pool {
+                        carriers: Vec::new(),
+                    }))
+                })
+                .clone()
+        };
+        let mut pool = bucket.lock().await;
         pool.carriers.retain(|c| !c.closed.load(Ordering::Relaxed));
         for carrier in &pool.carriers {
             if let Ok(slot) = carrier.slots.clone().try_acquire_owned() {
@@ -343,7 +387,7 @@ impl Client {
                         crate::http1::connect(self.tls().await?, authority, &self.auth).await?;
                     return Ok(HeldIo::boxed(io, None, slot, Some(all)));
                 }
-                let (carrier, slot) = self.carrier().await?;
+                let (carrier, slot) = self.carrier(context).await?;
                 let io = match carrier.open(authority, &self.auth).await {
                     Ok(io) => io,
                     Err(error) => {
@@ -363,6 +407,32 @@ impl Client {
     }
 }
 impl Outbound for Client {
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.host.cancel().cancel();
+            let buckets = { std::mem::take(&mut *self.pool.lock().await) };
+            for bucket in buckets.into_values() {
+                let carriers = { std::mem::take(&mut bucket.lock().await.carriers) };
+                for carrier in carriers {
+                    carrier.close();
+                    let driver = carrier.driver.lock().ok().and_then(|mut task| task.take());
+                    let maintenance = carrier
+                        .maintenance
+                        .lock()
+                        .ok()
+                        .and_then(|mut task| task.take());
+                    for task in [driver, maintenance].into_iter().flatten() {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                    if let Some((endpoint, _)) = &carrier.quic {
+                        endpoint.wait_idle().await;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tcp: true,
@@ -374,8 +444,15 @@ impl Outbound for Client {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
-        Box::pin(async move { self.open(&target.to_string(), context).await })
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
+        Box::pin(async move {
+            self.open(&target.to_string(), context)
+                .await
+                .map(|stream| kerlico_core::OpenedTcp {
+                    stream,
+                    info: kerlico_core::TcpConnectInfo::unknown(),
+                })
+        })
     }
     fn connect_udp<'a>(
         &'a self,
@@ -402,5 +479,206 @@ impl Outbound for Client {
                 udp_slot,
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod alpn_tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn material() -> (String, String) {
+        let cert = rcgen::generate_simple_self_signed(vec!["tt.example.invalid".into()]).unwrap();
+        (cert.cert.pem(), cert.signing_key.serialize_pem())
+    }
+    async fn peer(
+        alpn: Option<&[u8]>,
+        version: &str,
+        cert: &str,
+        key: &str,
+        reject: bool,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let input = serde_json::from_value(
+            json!({"certificate_pem":cert,"private_key_pem":key,"version":version}),
+        )
+        .unwrap();
+        let mut tls = config::server_tls(input, Transport::H2).unwrap();
+        Arc::make_mut(&mut tls).alpn_protocols = alpn.into_iter().map(<[u8]>::to_vec).collect();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let Ok(tls) = tokio_rustls::TlsAcceptor::from(tls).accept(socket).await else {
+                return;
+            };
+            let Ok(mut connection) = h2::server::handshake(tls).await else {
+                return;
+            };
+            let mut tasks = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    joined = tasks.join_next(), if !tasks.is_empty() => { if joined.is_some_and(|result| result.is_err()) { break; } },
+                    request = connection.accept() => {
+                        let Some(Ok((request, mut reply))) = request else { break; };
+                        if reject {
+                            let _ = reply.send_response(http::Response::builder().status(407).body(()).unwrap(), true);
+                            continue;
+                        }
+                        let udp = request.uri().authority().is_some_and(|a| a.as_str() == "_udp2");
+                        let send = reply.send_response(http::Response::builder().status(200).body(()).unwrap(), false).unwrap();
+                        let mut io = BodyIo::boxed(Writer::H2(send), Reader::H2(request.into_body()));
+                        tasks.spawn(async move {
+                            if udp {
+                                while let Ok(Some(packet)) = crate::udp::read(&mut io, true, crate::udp::MAX_PAYLOAD).await {
+                                    let reply = crate::udp::encode(packet.target, packet.source, None, &packet.data, crate::udp::MAX_PAYLOAD).unwrap();
+                                    if io.write_all(&reply).await.is_err() || io.flush().await.is_err() { break; }
+                                }
+                            } else {
+                                let mut bytes = [0; 1024];
+                                while let Ok(n) = io.read(&mut bytes).await {
+                                    if n == 0 { break; }
+                                    if io.write_all(&bytes[..n]).await.is_err() || io.flush().await.is_err() { break; }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+        });
+        (address, task)
+    }
+    fn options(address: SocketAddr, cert: &str, version: &str, compatible: bool) -> Value {
+        json!({"transport":"h2","server":{"host":"127.0.0.1","port":address.port()},"auth":{"username":"test","password":"fixture-password"},"tls":{"server_name":"tt.example.invalid","ca_pem":cert,"version":version,"h2_allow_missing_alpn":compatible}})
+    }
+    async fn close(
+        outbound: Arc<dyn Outbound>,
+        host: ServiceContext,
+        task: tokio::task::JoinHandle<()>,
+    ) {
+        outbound.shutdown().await.unwrap();
+        assert!(
+            host.shutdown(tokio::time::Instant::now() + Duration::from_secs(2))
+                .await
+                .is_clean()
+        );
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn authenticated_h2_without_alpn_is_strict_by_default_and_explicitly_compatible() {
+        let (cert, key) = material();
+        for version in ["tls12", "tls13"] {
+            for compatible in [false, true] {
+                let (address, task) = peer(None, version, &cert, &key, false).await;
+                let host = ServiceContext::new(kerlico_core::OutId::parse("alpn-test").unwrap());
+                let outbound = TrustTunnelFactory
+                    .compile(&options(address, &cert, version, compatible))
+                    .unwrap()
+                    .start(host.clone())
+                    .await
+                    .unwrap();
+                let context = ConnectContext::new(Duration::from_secs(2));
+                let target = Destination::new("192.0.2.10", 443).unwrap();
+                let result = outbound.connect_tcp(&target, &context).await;
+                if compatible {
+                    let mut io = result.unwrap().stream;
+                    io.write_all(b"h2-compatible").await.unwrap();
+                    io.flush().await.unwrap();
+                    let mut reply = [0; 13];
+                    context
+                        .run(async {
+                            io.read_exact(&mut reply).await?;
+                            Ok(())
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(&reply, b"h2-compatible");
+                    drop(io);
+                    let mut udp = outbound
+                        .connect_udp(&Destination::new("192.0.2.10", 53).unwrap(), &context)
+                        .await
+                        .unwrap();
+                    udp.sender.send(b"").await.unwrap();
+                    assert_eq!(
+                        context.run(udp.receiver.recv()).await.unwrap(),
+                        Some(Vec::new())
+                    );
+                    udp.sender.send(b"datagram").await.unwrap();
+                    assert_eq!(
+                        context.run(udp.receiver.recv()).await.unwrap(),
+                        Some(b"datagram".to_vec())
+                    );
+                    drop(udp);
+                } else {
+                    assert!(result.is_err());
+                }
+                close(outbound, host, task).await;
+            }
+        }
+    }
+    #[tokio::test]
+    async fn compatibility_keeps_wrong_alpn_certificate_name_and_authentication_rejected() {
+        let (cert, key) = material();
+        let (untrusted, _) = material();
+        for compatible in [false, true] {
+            for failure in ["alpn", "certificate", "name", "authentication"] {
+                let (address, task) = peer(
+                    if failure == "alpn" {
+                        Some(b"http/1.1")
+                    } else {
+                        Some(b"h2")
+                    },
+                    "tls13",
+                    &cert,
+                    &key,
+                    failure == "authentication",
+                )
+                .await;
+                let mut value = options(address, &cert, "tls13", compatible);
+                if failure == "certificate" {
+                    value["tls"]["ca_pem"] = json!(untrusted);
+                }
+                if failure == "name" {
+                    value["tls"]["server_name"] = json!("other.example.invalid");
+                }
+                let host =
+                    ServiceContext::new(kerlico_core::OutId::parse("negative-alpn-test").unwrap());
+                let outbound = TrustTunnelFactory
+                    .compile(&value)
+                    .unwrap()
+                    .start(host.clone())
+                    .await
+                    .unwrap();
+                assert!(
+                    outbound
+                        .connect_tcp(
+                            &Destination::new("192.0.2.10", 443).unwrap(),
+                            &ConnectContext::new(Duration::from_secs(2))
+                        )
+                        .await
+                        .is_err()
+                );
+                close(outbound, host, task).await;
+            }
+        }
+    }
+    #[test]
+    fn missing_alpn_compatibility_requires_explicit_h2_configuration() {
+        let (cert, _) = material();
+        for transport in [None, Some("h1"), Some("h3")] {
+            let mut value = options("127.0.0.1:443".parse().unwrap(), &cert, "tls13", true);
+            if let Some(transport) = transport {
+                value["transport"] = json!(transport);
+            } else {
+                value.as_object_mut().unwrap().remove("transport");
+            }
+            assert!(TrustTunnelFactory.compile(&value).is_err());
+        }
     }
 }

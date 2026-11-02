@@ -1,12 +1,12 @@
 //! 地址映射、UDP 控制流及双端业务适配；映射不跨关联覆盖或复用。
 use crate::{
     codec::{self, Mode},
-    runtime::ScopedRuntime,
+    runtime::{ScopedRuntime, Task},
 };
 use kerlico_core::{
-    AccessService, AddressedDatagram, BoxFuture, BoxStream, CancellationToken, ConnectContext,
+    AddressedDatagram, BoxFuture, BoxStream, CancellationToken, ConnectContext,
     DatagramAssociation, DatagramAssociationReceiver, DatagramAssociationSender, Destination,
-    Error, InboundContext, NodeEvent, Result, StreamLease,
+    Error, InboundContext, NodeEvent, PeerSession, Result, ServiceContext, StreamLease,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -18,7 +18,6 @@ use std::{
 };
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
-    task::JoinSet,
     time::Instant,
 };
 const MAX_IDS: usize = 4096;
@@ -67,10 +66,12 @@ impl Drop for EndpointOwner {
     }
 }
 pub(crate) struct Connection {
+    flows: Arc<crate::flow::FlowSet>,
     pub quic: jls_quinn::Connection,
     _owner: Option<EndpointOwner>,
     pub cancel: CancellationToken,
-    tasks: Mutex<JoinSet<()>>,
+    tasks: Mutex<Vec<Task>>,
+    host: Option<ServiceContext>,
     maps: Mutex<Maps>,
     changes: watch::Sender<u64>,
     next_id: AtomicU32,
@@ -80,25 +81,35 @@ pub(crate) struct Connection {
     uni_slots: Arc<Semaphore>,
     send_slots: Arc<Semaphore>,
     context: Option<InboundContext>,
-    access: Option<Arc<dyn AccessService>>,
+    access: Option<PeerSession>,
 }
 impl Connection {
     pub fn new(
         quic: jls_quinn::Connection,
         owner: Option<EndpointOwner>,
         context: Option<InboundContext>,
-        access: Option<Arc<dyn AccessService>>,
+        access: Option<PeerSession>,
+        host: Option<ServiceContext>,
     ) -> Arc<Self> {
         let cancel = context
             .as_ref()
             .map(|context| context.cancel.child_token())
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                host.as_ref()
+                    .map(|host| host.cancel().child_token())
+                    .unwrap_or_default()
+            });
         let (changes, _) = watch::channel(0);
         let value = Arc::new(Self {
+            flows: crate::flow::FlowSet::new(
+                context.as_ref().map_or(1024, |context| context.max_streams),
+                cancel.clone(),
+            ),
             quic,
             _owner: owner,
             cancel,
-            tasks: Mutex::new(JoinSet::new()),
+            tasks: Mutex::new(Vec::new()),
+            host,
             maps: Mutex::new(Maps::new()),
             changes,
             next_id: AtomicU32::new(0),
@@ -115,8 +126,18 @@ impl Connection {
     }
     fn spawn(&self, future: impl std::future::Future<Output = ()> + Send + 'static) {
         if let Ok(mut tasks) = self.tasks.lock() {
-            while tasks.try_join_next().is_some() {}
-            tasks.spawn(future);
+            if self.cancel.is_cancelled() {
+                return;
+            }
+            tasks.retain(|task| !task.finished());
+            let task = match &self.context {
+                Some(context) => context.tasks.spawn_tracked(future).map(Task::Node),
+                None => Task::spawn(&self.host, future),
+            };
+            match task {
+                Ok(task) => tasks.push(task),
+                Err(_) => self.cancel.cancel(),
+            }
         }
     }
     fn event(&self, event: NodeEvent) {
@@ -137,20 +158,36 @@ impl Connection {
         self.next_id.load(Ordering::Acquire) > 65535
     }
     pub fn stop(&self) {
+        self.flows.close(kerlico_core::FlowOutcome::Failed(
+            if self.cancel.is_cancelled() {
+                kerlico_core::FlowFailure::Cancelled
+            } else {
+                kerlico_core::FlowFailure::Failed
+            },
+        ));
         self.cancel.cancel();
         self.quic.close(0u32.into(), b"");
-        if let Ok(mut tasks) = self.tasks.lock() {
-            tasks.abort_all();
+        if let Ok(tasks) = self.tasks.lock() {
+            for task in tasks.iter() {
+                task.abort();
+            }
         }
     }
-    async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         self.stop();
-        let mut tasks = if let Ok(mut tasks) = self.tasks.lock() {
+        let tasks = if let Ok(mut tasks) = self.tasks.lock() {
             std::mem::take(&mut *tasks)
         } else {
             return;
         };
-        while tasks.join_next().await.is_some() {}
+        for task in tasks {
+            task.join().await;
+        }
+        if let Some(owner) = &self._owner {
+            owner.endpoint.close(0u32.into(), b"");
+            owner.endpoint.wait_idle().await;
+            owner.runtime.shutdown().await;
+        }
     }
     fn start(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
@@ -453,24 +490,33 @@ impl Connection {
     async fn serve_udp(
         &self,
         mut local: DatagramAssociation,
-        access: Arc<dyn AccessService>,
+        access: PeerSession,
         context: InboundContext,
     ) -> Result<()> {
-        let connect = ConnectContext {
-            cancel: context.cancel.clone(),
-            timeout: context.connect_timeout,
-        };
-        let mut remote = access.associate_udp(&connect).await?;
+        let connect =
+            ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
+        let (mut sender, mut receiver, completion) =
+            access.associate_udp(&connect).await?.into_parts();
+        let completion = self.flows.register(completion)?;
+        let result = async {
         let timer = tokio::time::sleep(context.idle_timeout);
         tokio::pin!(timer);
         loop {
             tokio::select! {
                 biased;
-                _=context.cancel.cancelled()=>return Ok(()),_=&mut timer=>return Ok(()),
-                packet=local.receiver.recv_from()=>{let Some((target,packet))=packet?else{return Ok(());};if packet.len()>context.max_datagram_size{return Err(Error::ResourceLimit);}tokio::select!{_=context.cancel.cancelled()=>return Ok(()),result=remote.sender.send_to(&packet,&target)=>result?};timer.as_mut().reset(Instant::now()+context.idle_timeout);},
-                packet=remote.receiver.recv_from()=>{let Some((source,packet))=packet?else{return Ok(());};if packet.len()>context.max_datagram_size{return Err(Error::ResourceLimit);}let result=tokio::select!{_=context.cancel.cancelled()=>return Ok(()),result=local.sender.send_to(&packet,&source)=>result};match result{Ok(())=>{},Err(Error::Unsupported(_)|Error::ResourceLimit)=>self.event(NodeEvent::Dropped),Err(error)=>return Err(error)}timer.as_mut().reset(Instant::now()+context.idle_timeout);}
+                _=context.cancel.cancelled()=>return Err(Error::Cancelled),_=&mut timer=>return Err(Error::Timeout),
+                packet=local.receiver.recv_from()=>{let Some((target,packet))=packet?else{return Ok(());};if packet.len()>context.max_datagram_size{return Err(Error::ResourceLimit);}tokio::select!{_=context.cancel.cancelled()=>return Err(Error::Cancelled),result=sender.send_to(&packet,&target)=>result?};timer.as_mut().reset(Instant::now()+context.idle_timeout);},
+                packet=receiver.recv_from()=>{let Some((source,packet))=packet?else{return Ok(());};if packet.len()>context.max_datagram_size{return Err(Error::ResourceLimit);}let result=tokio::select!{_=context.cancel.cancelled()=>return Err(Error::Cancelled),result=local.sender.send_to(&packet,&source)=>result};match result{Ok(())=>{},Err(Error::Unsupported(_)|Error::ResourceLimit)=>self.event(NodeEvent::Dropped),Err(error)=>return Err(error)}timer.as_mut().reset(Instant::now()+context.idle_timeout);}
             }
         }
+        }.await;
+        completion.finish(match &result {
+            Ok(()) => kerlico_core::FlowOutcome::ProtocolEnd,
+            Err(error) => {
+                kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::from_error(error))
+            }
+        });
+        result
     }
     async fn request(
         self: Arc<Self>,
@@ -480,10 +526,7 @@ impl Connection {
     ) -> Result<()> {
         let context = self.context.as_ref().ok_or_else(codec::malformed)?.clone();
         let access = self.access.as_ref().ok_or_else(codec::malformed)?.clone();
-        let connect = ConnectContext {
-            cancel: self.cancel.clone(),
-            timeout: context.connect_timeout,
-        };
+        let connect = ConnectContext::new(context.connect_timeout).with_cancel(self.cancel.clone());
         let command = connect
             .run(async { Ok(tokio::io::AsyncReadExt::read_u8(&mut recv).await?) })
             .await?;
@@ -497,18 +540,20 @@ impl Connection {
                     })
                     .await?;
                 let _lease = lease;
-                let remote = access.connect_tcp(&target, &connect).await?;
-                kerlico_core::relay_tcp(
-                    Box::new(crate::io::QuicIo {
-                        send,
-                        recv,
-                        owner: None,
-                    }),
-                    remote,
-                    context.idle_timeout,
-                    self.cancel.clone(),
-                )
-                .await
+                let remote = self
+                    .flows
+                    .tcp(access.connect_tcp(&target, &connect).await?)?;
+                remote
+                    .relay(
+                        Box::new(crate::io::QuicIo {
+                            send,
+                            recv,
+                            owner: None,
+                        }),
+                        context.idle_timeout,
+                        self.cancel.clone(),
+                    )
+                    .await
             }
             3 | 4 => {
                 let _ = connect.run(codec::read_address(&mut recv, true)).await?;
@@ -555,8 +600,10 @@ impl Connection {
     }
     pub async fn serve(self: Arc<Self>) -> Result<()> {
         let _guard = ConnectionGuard(self.clone());
+        let _flows_guard = self.flows.guard();
         let context = self.context.as_ref().ok_or_else(codec::malformed)?.clone();
-        let result=async{loop{tokio::select!{_=self.cancel.cancelled()=>return Ok(()),_=self.quic.closed()=>return Ok(()),stream=self.quic.accept_bi()=>{let(send,recv)=stream.map_err(|_|codec::malformed())?;let Ok(lease)=context.stream_budget.try_acquire()else{self.event(NodeEvent::Dropped);continue;};let value=self.clone();self.spawn(async move{value.event(NodeEvent::Accepted);let result=value.clone().request(send,recv,lease).await;value.event(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});});}}}}.await;
+        let result=async{loop{tokio::select!{_=self.cancel.cancelled()=>return Err(Error::Cancelled),_=self.quic.closed()=>return Err(Error::Protocol("ShadowQUIC载体已关闭")),stream=self.quic.accept_bi()=>{let(send,recv)=stream.map_err(|_|codec::malformed())?;let Ok(lease)=context.stream_budget.try_acquire()else{self.event(NodeEvent::Dropped);continue;};let value=self.clone();self.spawn(async move{value.event(NodeEvent::Accepted);let result=value.clone().request(send,recv,lease).await;value.event(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});});}}}}.await;
+        self.flows.close(crate::flow::outcome(&result));
         self.shutdown().await;
         result
     }
@@ -566,7 +613,9 @@ impl Drop for Connection {
         self.cancel.cancel();
         self.quic.close(0u32.into(), b"");
         if let Ok(tasks) = self.tasks.get_mut() {
-            tasks.abort_all();
+            for task in tasks.iter() {
+                task.abort();
+            }
         }
     }
 }

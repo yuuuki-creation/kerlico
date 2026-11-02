@@ -1,10 +1,11 @@
+mod support;
 use bytes::BytesMut;
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel,
-    DatagramReceiver, DatagramSender, Destination, InboundContext, InboundProtocol, NodeEvent,
-    NodeObserver, Outbound, Result, StreamBudget,
+    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel, DatagramReceiver,
+    DatagramSender, Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result,
+    StreamBudget,
 };
-use kerlico_shadowsocks::{AEAD_METHODS, LEGACY_METHODS, ShadowsocksNode, ShadowsocksOutbound};
+use kerlico_shadowsocks::{AEAD_METHODS, LEGACY_METHODS};
 use serde_json::json;
 use shadowsocks::{
     ServerConfig,
@@ -36,6 +37,11 @@ impl NodeObserver for Events {
 }
 fn context() -> InboundContext {
     InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         cancel: CancellationToken::new(),
         connect_timeout: Duration::from_secs(2),
         idle_timeout: Duration::from_secs(2),
@@ -70,28 +76,42 @@ impl DatagramReceiver for Receive {
         Box::pin(async move { Ok(self.0.recv().await) })
     }
 }
-impl AccessService for Echo {
+impl Outbound for Echo {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn connect_tcp<'a>(
         &'a self,
         _: &'a Destination,
         _: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
-            self.0.fetch_add(1, Ordering::Relaxed);
-            let (client, mut server) = tokio::io::duplex(128 * 1024);
-            tokio::spawn(async move {
-                server.write_all(b"banner").await.unwrap();
-                let mut buf = vec![0; 8192];
-                loop {
-                    let n = server.read(&mut buf).await.unwrap();
-                    if n == 0 {
-                        server.shutdown().await.unwrap();
-                        break;
+            let opening: kerlico_core::BoxFuture<'_, Result<BoxStream>> = Box::pin(async move {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                let (client, mut server) = tokio::io::duplex(128 * 1024);
+                tokio::spawn(async move {
+                    server.write_all(b"banner").await.unwrap();
+                    let mut buf = vec![0; 8192];
+                    loop {
+                        let n = server.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            server.shutdown().await.unwrap();
+                            break;
+                        }
+                        server.write_all(&buf[..n]).await.unwrap();
                     }
-                    server.write_all(&buf[..n]).await.unwrap();
-                }
+                });
+                Ok(Box::new(client) as BoxStream)
             });
-            Ok(Box::new(client) as BoxStream)
+            let stream = opening.await?;
+            Ok(kerlico_core::OpenedTcp {
+                stream,
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
     fn connect_udp<'a>(
@@ -113,13 +133,13 @@ async fn endpoints(
     method: &str,
     ipv6: bool,
 ) -> (
-    ShadowsocksOutbound,
+    Arc<dyn Outbound>,
     InboundContext,
     tokio::task::JoinHandle<()>,
     tokio::task::JoinHandle<Result<()>>,
     Arc<Echo>,
 ) {
-    let node = Arc::new(ShadowsocksNode::from_options(&json!({"method":method,"password":"synthetic-shadowsocks-secret","allow_insecure":true})).unwrap());
+    let node = Arc::new(support::node(&kerlico_shadowsocks::ShadowsocksNodeFactory,&json!({"method":method,"password":"synthetic-shadowsocks-secret","allow_insecure":true})).unwrap());
     let host = if ipv6 { "::1" } else { "127.0.0.1" };
     let mut sockets = None;
     for _ in 0..32 {
@@ -156,7 +176,7 @@ async fn endpoints(
         let ctx = ctx.clone();
         tokio::spawn(async move { node.serve_udp(socket, access, ctx).await })
     };
-    let outbound = ShadowsocksOutbound::from_options(&json!({"server":host,"port":port,"method":method,"password":"synthetic-shadowsocks-secret","allow_insecure":true})).unwrap();
+    let outbound = support::outbound(&kerlico_shadowsocks::ShadowsocksFactory,&json!({"server":host,"port":port,"method":method,"password":"synthetic-shadowsocks-secret","allow_insecure":true})).unwrap();
     (outbound, ctx, tcp, udp, access)
 }
 #[tokio::test]
@@ -178,7 +198,11 @@ async fn complete_cipher_tcp_udp_matrix() {
         for host in ["example.invalid", "127.0.0.1", "::1"] {
             let target = Destination::new(host, 443).unwrap();
             let connect = ConnectContext::new(Duration::from_secs(3));
-            let mut stream = outbound.connect_tcp(&target, &connect).await.unwrap();
+            let mut stream = outbound
+                .connect_tcp(&target, &connect)
+                .await
+                .unwrap()
+                .stream;
             let mut banner = [0; 6];
             tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut banner))
                 .await
@@ -231,7 +255,11 @@ async fn ipv6_proxy_carrier_is_independent_of_target_family() {
         for host in ["127.0.0.1", "::1"] {
             let target = Destination::new(host, 53).unwrap();
             let connect = ConnectContext::new(Duration::from_secs(2));
-            let mut stream = outbound.connect_tcp(&target, &connect).await.unwrap();
+            let mut stream = outbound
+                .connect_tcp(&target, &connect)
+                .await
+                .unwrap()
+                .stream;
             let mut banner = [0; 6];
             stream.read_exact(&mut banner).await.unwrap();
             assert_eq!(&banner, b"banner");
@@ -255,10 +283,15 @@ async fn ipv6_proxy_carrier_is_independent_of_target_family() {
 fn rejects_unsafe_unknown_or_inapplicable_options() {
     for method in LEGACY_METHODS.iter().copied().chain(["none", "plain"]) {
         assert!(
-            ShadowsocksNode::from_options(&json!({"method":method,"password":"secret"})).is_err()
+            support::node(
+                &kerlico_shadowsocks::ShadowsocksNodeFactory,
+                &json!({"method":method,"password":"secret"})
+            )
+            .is_err()
         );
         assert!(
-            ShadowsocksNode::from_options(
+            support::node(
+                &kerlico_shadowsocks::ShadowsocksNodeFactory,
                 &json!({"method":method,"password":"secret","allow_insecure":true})
             )
             .is_ok()
@@ -266,52 +299,81 @@ fn rejects_unsafe_unknown_or_inapplicable_options() {
     }
     for method in ["", "aes-192-gcm", "2022-blake3-aes-128-gcm", "unknown"] {
         assert!(
-            ShadowsocksNode::from_options(
+            support::node(
+                &kerlico_shadowsocks::ShadowsocksNodeFactory,
                 &json!({"method":method,"password":"secret","allow_insecure":true})
             )
             .is_err()
         );
     }
-    assert!(ShadowsocksNode::from_options(&json!({"method":"aes-128-gcm","password":""})).is_err());
     assert!(
-        ShadowsocksNode::from_options(
+        support::node(
+            &kerlico_shadowsocks::ShadowsocksNodeFactory,
+            &json!({"method":"aes-128-gcm","password":""})
+        )
+        .is_err()
+    );
+    assert!(
+        support::node(
+            &kerlico_shadowsocks::ShadowsocksNodeFactory,
             &json!({"method":"aes-128-gcm","password":"secret","plugin":"obfs"})
         )
         .is_err()
     );
     assert!(
-        ShadowsocksNode::from_options(&json!({"method":"aes-128-gcm","password":"x".repeat(4097)}))
-            .is_err()
+        support::node(
+            &kerlico_shadowsocks::ShadowsocksNodeFactory,
+            &json!({"method":"aes-128-gcm","password":"x".repeat(4097)})
+        )
+        .is_err()
     );
-    let a =
-        ShadowsocksNode::from_options(&json!({"method":"aes-128-gcm","password":"first"})).unwrap();
-    let b = ShadowsocksNode::from_options(&json!({"method":"aes-128-gcm","password":"second"}))
-        .unwrap();
-    let c = ShadowsocksNode::from_options(
+    let a = support::node(
+        &kerlico_shadowsocks::ShadowsocksNodeFactory,
+        &json!({"method":"aes-128-gcm","password":"first"}),
+    )
+    .unwrap();
+    let b = support::node(
+        &kerlico_shadowsocks::ShadowsocksNodeFactory,
+        &json!({"method":"aes-128-gcm","password":"second"}),
+    )
+    .unwrap();
+    let c = support::node(
+        &kerlico_shadowsocks::ShadowsocksNodeFactory,
         &json!({"method":"aes-128-cfb","password":"first","allow_insecure":true}),
     )
     .unwrap();
-    assert_ne!(a.credential_fingerprints(), b.credential_fingerprints());
-    assert_eq!(a.credential_fingerprints(), c.credential_fingerprints());
-    let d =
-        ShadowsocksNode::from_options(&json!({"method":"aes-256-gcm","password":"first"})).unwrap();
+    assert_ne!(a.manifest(), b.manifest());
+    assert_eq!(a.manifest(), c.manifest());
+    assert!(c.requires_loopback());
     assert!(
-        a.credential_fingerprints()
+        c.scoped_manifest("shadowsocks")
             .iter()
-            .any(|value| d.credential_fingerprints().contains(value))
+            .all(|entry| entry.purpose == kerlico_core::CredentialPurpose::Protection)
+    );
+    let d = support::node(
+        &kerlico_shadowsocks::ShadowsocksNodeFactory,
+        &json!({"method":"aes-256-gcm","password":"first"}),
+    )
+    .unwrap();
+    assert!(
+        a.manifest()
+            .iter()
+            .any(|value| d.manifest().contains(value))
     );
     assert!(
-        ShadowsocksNode::from_options(
+        support::node(
+            &kerlico_shadowsocks::ShadowsocksNodeFactory,
             &json!({"method":"none","password":"","allow_insecure":true})
         )
         .unwrap()
         .requires_loopback()
     );
-    let none = ShadowsocksNode::from_options(
+    let none = support::node(
+        &kerlico_shadowsocks::ShadowsocksNodeFactory,
         &json!({"method":"none","password":"ignored","allow_insecure":true}),
     )
     .unwrap();
-    assert!(none.credential_fingerprints().is_empty());
+    assert!(none.manifest().is_empty());
     let mut registry = kerlico_config::Registry::default();
     registry
         .register(kerlico_shadowsocks::ShadowsocksFactory)
@@ -320,7 +382,7 @@ fn rejects_unsafe_unknown_or_inapplicable_options() {
         .register_node(kerlico_shadowsocks::ShadowsocksNodeFactory)
         .unwrap();
     let entry = json!({"tag":"local","type":"shadowsocks","listen":"127.0.0.1:0","outbound":"proxy","options":{"method":"none","password":"","allow_insecure":true}});
-    let mut config = json!({"version":1,"outbounds":[{"tag":"proxy","type":"shadowsocks","options":{"server":"127.0.0.1","port":1,"method":"none","password":"","allow_insecure":true}}],"inbounds":[],"nodes":[entry.clone()]});
+    let mut config = json!({"version":2,"outbounds":[{"tag":"proxy","type":"shadowsocks","options":{"server":"127.0.0.1","port":1,"method":"none","password":"","allow_insecure":true}}],"inbounds":[],"nodes":[entry.clone()]});
     assert!(
         registry
             .prepare(kerlico_config::parse(&serde_json::to_vec(&config).unwrap()).unwrap())
@@ -344,9 +406,12 @@ fn rejects_unsafe_unknown_or_inapplicable_options() {
 async fn wrong_aead_password_never_opens_target() {
     for method in AEAD_METHODS {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let outbound = ShadowsocksOutbound::from_options(&json!({"server":"127.0.0.1","port":listener.local_addr().unwrap().port(),"method":method,"password":"wrong"})).unwrap();
-        let node =
-            ShadowsocksNode::from_options(&json!({"method":method,"password":"correct"})).unwrap();
+        let outbound = support::outbound(&kerlico_shadowsocks::ShadowsocksFactory,&json!({"server":"127.0.0.1","port":listener.local_addr().unwrap().port(),"method":method,"password":"wrong"})).unwrap();
+        let node = support::node(
+            &kerlico_shadowsocks::ShadowsocksNodeFactory,
+            &json!({"method":method,"password":"correct"}),
+        )
+        .unwrap();
         let access = Arc::new(Echo::default());
         let task = {
             let access = access.clone();
@@ -361,7 +426,8 @@ async fn wrong_aead_password_never_opens_target() {
                 &ConnectContext::new(Duration::from_secs(2)),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         let _ = stream.write_all(b"reject").await;
         assert!(task.await.unwrap().is_err());
         assert_eq!(access.0.load(Ordering::Relaxed), 0);
@@ -375,7 +441,8 @@ async fn udp_replay_and_invalid_authentication_are_rejected() {
         .chain(["aes-128-cfb", "chacha20-ietf"])
     {
         let node = Arc::new(
-            ShadowsocksNode::from_options(
+            support::node(
+                &kerlico_shadowsocks::ShadowsocksNodeFactory,
                 &json!({"method":method,"password":"secret","allow_insecure":true}),
             )
             .unwrap(),
@@ -453,8 +520,11 @@ async fn udp_replay_and_invalid_authentication_are_rejected() {
 #[tokio::test]
 async fn udp_budget_idle_cleanup_and_cancel() {
     let node = Arc::new(
-        ShadowsocksNode::from_options(&json!({"method":"aes-128-gcm","password":"secret"}))
-            .unwrap(),
+        support::node(
+            &kerlico_shadowsocks::ShadowsocksNodeFactory,
+            &json!({"method":"aes-128-gcm","password":"secret"}),
+        )
+        .unwrap(),
     );
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let port = socket.local_addr().unwrap().port();
@@ -467,7 +537,8 @@ async fn udp_budget_idle_cleanup_and_cancel() {
         let access = access.clone();
         tokio::spawn(async move { node.serve_udp(socket, access, ctx).await })
     };
-    let outbound = ShadowsocksOutbound::from_options(
+    let outbound = support::outbound(
+        &kerlico_shadowsocks::ShadowsocksFactory,
         &json!({"server":"127.0.0.1","port":port,"method":"aes-128-gcm","password":"secret"}),
     )
     .unwrap();
@@ -530,7 +601,8 @@ async fn tcp_salt_or_iv_replay_never_reopens_target() {
         encoder.shutdown().await.unwrap();
         let mut wire = Vec::new();
         capture.read_to_end(&mut wire).await.unwrap();
-        let node = ShadowsocksNode::from_options(
+        let node = support::node(
+            &kerlico_shadowsocks::ShadowsocksNodeFactory,
             &json!({"method":method,"password":"secret","allow_insecure":true}),
         )
         .unwrap();
@@ -549,4 +621,150 @@ async fn tcp_salt_or_iv_replay_never_reopens_target() {
         }
         assert_eq!(access.0.load(Ordering::Relaxed), 1, "{method}");
     }
+}
+
+#[derive(Default)]
+struct IdentityTarget {
+    echo: Echo,
+    observed: std::sync::Mutex<Vec<(kerlico_core::Source, Destination)>>,
+}
+impl Outbound for IdentityTarget {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
+    fn connect_tcp<'a>(
+        &'a self,
+        target: &'a Destination,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
+        self.observed.lock().unwrap().push((
+            context
+                .resource_key()
+                .source()
+                .cloned()
+                .ok_or(kerlico_core::Error::Rejected)
+                .unwrap(),
+            target.clone(),
+        ));
+        self.echo.connect_tcp(target, context)
+    }
+    fn connect_udp<'a>(
+        &'a self,
+        target: &'a Destination,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<DatagramChannel>> {
+        self.observed.lock().unwrap().push((
+            context
+                .resource_key()
+                .source()
+                .cloned()
+                .ok_or(kerlico_core::Error::Rejected)
+                .unwrap(),
+            target.clone(),
+        ));
+        self.echo.connect_udp(target, context)
+    }
+}
+#[tokio::test]
+async fn native_second_member_keeps_tcp_udp_identity_and_original_domain() {
+    use kerlico_config::{NodeBuildContext, NodeFactory};
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let method = "aes-128-gcm";
+        let credentials = [
+            "first-synthetic-member".to_owned(),
+            "second-synthetic-member".to_owned(),
+        ];
+        let input = NodeBuildContext::for_test(
+            json!({"method":method}),
+            credentials
+                .iter()
+                .map(|credential| json!({"password":credential}))
+                .collect(),
+        );
+        let node = kerlico_shadowsocks::ShadowsocksNodeFactory
+            .build(&input)
+            .unwrap();
+        let observed = Arc::new(IdentityTarget::default());
+        let ingress = kerlico_egress::testing::ingress(
+            &input,
+            observed.clone(),
+            kerlico_core::TargetPolicy::Remote,
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let socket = Arc::new(UdpSocket::bind(("127.0.0.1", port)).await.unwrap());
+        let context = context();
+        let cancel = context.cancel.clone();
+        let mut tasks = tokio::task::JoinSet::new();
+        {
+            let node = node.clone();
+            let ingress = ingress.clone();
+            let context = context.clone();
+            tasks.spawn(async move {
+                let _ = node.handle_udp(socket, ingress, context).await;
+            });
+        }
+        {
+            let context = context.clone();
+            tasks.spawn(async move {
+                let mut peers = tokio::task::JoinSet::new();
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let node = node.clone();
+                    let ingress = ingress.clone();
+                    let context = context.clone();
+                    peers.spawn(async move {
+                        let _ = node.handle(Box::new(stream), ingress, context).await;
+                    });
+                }
+                while peers.join_next().await.is_some() {}
+            });
+        }
+        let target = Destination::new("identity-target.invalid", 443).unwrap();
+        for credential in &credentials {
+            let outbound = support::outbound(
+                &kerlico_shadowsocks::ShadowsocksFactory,
+                &json!({"server":"127.0.0.1","port":port,"method":method,"password":credential}),
+            )
+            .unwrap();
+            let connect = ConnectContext::new(Duration::from_secs(2));
+            let mut stream = outbound
+                .connect_tcp(&target, &connect)
+                .await
+                .unwrap()
+                .stream;
+            let mut banner = [0; 6];
+            stream.read_exact(&mut banner).await.unwrap();
+            assert_eq!(&banner, b"banner");
+            stream.write_all(b"member").await.unwrap();
+            let mut bytes = [0; 6];
+            stream.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, b"member");
+            drop(stream);
+            let connect = ConnectContext::new(Duration::from_secs(2));
+            let mut channel = outbound.connect_udp(&target, &connect).await.unwrap();
+            channel.sender.send(b"member-udp").await.unwrap();
+            assert_eq!(
+                channel.receiver.recv().await.unwrap().unwrap(),
+                b"member-udp"
+            );
+            drop(channel);
+            outbound.shutdown().await.unwrap();
+        }
+        let records = observed.observed.lock().unwrap().clone();
+        assert_eq!(records.len(), 4);
+        assert!(records.iter().all(|(_, original)| original == &target));
+        assert_eq!(records[0].0, records[1].0);
+        assert_eq!(records[2].0, records[3].0);
+        assert_ne!(records[0].0, records[2].0);
+        cancel.cancel();
+        while tasks.join_next().await.is_some() {}
+    })
+    .await
+    .expect("多成员真实鉴别或回收超时");
 }

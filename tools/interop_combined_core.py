@@ -13,6 +13,7 @@ import subprocess
 
 import interop_vless as h
 from interop_vless_matrix import material, tcp
+from config_v2 import bind_members
 
 
 class Udp6(h.UdpServer):
@@ -104,7 +105,28 @@ def verify(args, root):
                 local = fresh_port()
                 inbounds.append({"tag": tag+"bad", "type": "tcp-forward", "listen": "127.0.0.1:"+str(local), "target": {"host": "127.0.0.1", "port": targets[0][2]}, "outbound": tag+"bad"})
                 wrong.append((tag, local))
-        config = {"version": 1, "outbounds": outbounds, "nodes": nodes, "inbounds": inbounds, "limits": {"connect_timeout_ms": 2000, "idle_timeout_ms": 6000, "drain_timeout_ms": 200, "max_sessions": args.max_sessions}}
+        config = {"version": 2, "outbounds": outbounds, "nodes": nodes, "inbounds": inbounds, "limits": {"connect_timeout_ms": 2000, "idle_timeout_ms": 6000, "drain_timeout_ms": 200, "max_sessions": args.max_sessions}}
+        for entry in nodes:
+            options, kind = entry["options"], entry["type"]
+            if kind in {"vless", "vmess"}:
+                native = {"uuid": options.pop("uuid")}
+            elif kind == "anytls":
+                native = {"password": options.pop("passwords")[0]}
+            elif kind in {"trojan", "shadowsocks"}:
+                native = {"password": options.pop("password")}
+            elif kind == "ss2022":
+                native = {"key": options.pop("key")}
+            elif kind in {"socks", "http"}:
+                native = options.pop("auth")
+            elif kind == "snell":
+                native = {"psk": options.pop("psk")}
+            elif kind == "tuic":
+                native = {"uuid": options.pop("uuid"), "password": options.pop("password")}
+            elif kind == "hysteria2":
+                native = {"auth": options.pop("auth")}
+            else:
+                raise RuntimeError("联合测试缺少原生凭据映射")
+            bind_members(config, entry, [native])
         path = root / "combined.json"
         h.write_json(path, config)
         checked = subprocess.run([args.kerlico, "check", "-c", str(path)], capture_output=True, timeout=10)

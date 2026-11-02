@@ -94,7 +94,8 @@ async fn h2_h3_concurrent_streams_share_session_and_survive_neighbor_drop() {
             .outbound
             .connect_tcp(&echo.target, &context)
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         drop(dropped);
         tcp(&fixture.outbound, &context, &echo.target, 17).await;
         fixture.stop().await;
@@ -165,7 +166,8 @@ async fn native_half_close_delivers_target_eof_then_reverse_reply() {
             .outbound
             .connect_tcp(&target, &fixture.context())
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         stream.write_all(b"request").await.unwrap();
         stream.shutdown().await.unwrap();
         let mut bytes = Vec::new();
@@ -196,7 +198,7 @@ async fn authentication_name_ca_and_reserved_address_fail_before_target_access()
                     options["tls"].as_object_mut().unwrap().remove("ca_pem");
                 }
             }
-            let bad = NaiveFactory.build(&options).unwrap();
+            let bad = shared::outbound(&NaiveFactory, &options).await.unwrap();
             assert!(
                 bad.connect_tcp(&echo.target, &fixture.context())
                     .await
@@ -229,20 +231,27 @@ async fn configuration_rejects_unimplemented_flags_and_invalid_combinations() {
     ] {
         let mut options = fixture.options.clone();
         options[key] = value;
-        assert!(NaiveFactory.build(&options).is_err());
+        assert!(NaiveFactory.compile(&options).is_err());
     }
     let mut options = fixture.options.clone();
     options["transport"] = json!("h3");
     assert!(
-        NaiveFactory::build_with_connector(&options, Arc::new(kerlico_net::TcpConnector::plain()))
-            .is_err()
+        NaiveFactory::compile_with_connector(
+            &options,
+            Arc::new(kerlico_net::TcpConnector::plain())
+        )
+        .is_err()
     );
     let mut node = fixture.node_options.clone();
     node["transports"] = json!(["h2", "h2"]);
-    assert!(NaiveNodeFactory.build(&node).is_err());
+    assert!(
+        NaiveNodeFactory
+            .build(&shared::node_input("naive", &node))
+            .is_err()
+    );
     let mut options = fixture.options.clone();
     options["udp_over_tcp"]["enabled"] = json!(false);
-    let outbound = NaiveFactory.build(&options).unwrap();
+    let outbound = shared::outbound(&NaiveFactory, &options).await.unwrap();
     assert!(!outbound.supports_udp_association());
     assert!(matches!(
         outbound.associate_udp(&fixture.context()).await,
@@ -278,7 +287,7 @@ async fn independent_ipv4_ipv6_nodes_reject_each_others_real_credentials() {
         let mut crossed = left.options.clone();
         crossed["server"] = right.options["server"].clone();
         crossed["tls"] = right.options["tls"].clone();
-        let bad = NaiveFactory.build(&crossed).unwrap();
+        let bad = shared::outbound(&NaiveFactory, &crossed).await.unwrap();
         assert!(
             bad.connect_tcp(&four.target, &right.context())
                 .await
@@ -288,7 +297,7 @@ async fn independent_ipv4_ipv6_nodes_reject_each_others_real_credentials() {
         let mut crossed = right.options.clone();
         crossed["server"] = left.options["server"].clone();
         crossed["tls"] = left.options["tls"].clone();
-        let bad = NaiveFactory.build(&crossed).unwrap();
+        let bad = shared::outbound(&NaiveFactory, &crossed).await.unwrap();
         assert!(bad.connect_tcp(&six.target, &left.context()).await.is_err());
         assert_eq!(left.accesses.load(Ordering::Acquire), 0);
         tcp(&left.outbound, &left.context(), &six.target, 12000).await;
@@ -303,12 +312,13 @@ async fn actual_stream_limit_waits_with_timeout_then_recovers_after_release() {
         let mut fixture = fixture(transport, "127.0.0.1", 2).await;
         let mut options = fixture.options.clone();
         options["max_streams"] = json!(1);
-        let outbound = NaiveFactory.build(&options).unwrap();
+        let outbound = shared::outbound(&NaiveFactory, &options).await.unwrap();
         let echo = tcp_echo("127.0.0.1").await;
         let held = outbound
             .connect_tcp(&echo.target, &fixture.context())
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         let mut short = fixture.context();
         short.timeout = Duration::from_millis(70);
         assert!(matches!(
@@ -330,7 +340,8 @@ async fn slow_download_does_not_block_neighbor_and_idle_session_is_reaped() {
             .outbound
             .connect_tcp(&echo.target, &fixture.context())
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         slow.write_u32(2 * 1024 * 1024).await.unwrap();
         slow.write_all(&vec![51; 2 * 1024 * 1024]).await.unwrap();
         slow.flush().await.unwrap();
@@ -345,9 +356,7 @@ async fn slow_download_does_not_block_neighbor_and_idle_session_is_reaped() {
 }
 #[tokio::test]
 async fn default_node_binds_tcp_and_udp_same_port_and_prefers_h2_alpn() {
-    use kerlico_core::{
-        AccessService, CancellationToken, InboundContext, NodeEvent, NodeObserver, StreamBudget,
-    };
+    use kerlico_core::{CancellationToken, InboundContext, NodeEvent, NodeObserver, StreamBudget};
     struct Observer;
     impl NodeObserver for Observer {
         fn record(&self, _: NodeEvent) {}
@@ -355,13 +364,22 @@ async fn default_node_binds_tcp_and_udp_same_port_and_prefers_h2_alpn() {
     let certificate = rcgen::generate_simple_self_signed(vec!["proxy.invalid".into()]).unwrap();
     let cert = certificate.cert.pem();
     let key = certificate.signing_key.serialize_pem();
-    let node=NaiveNodeFactory.build(&json!({"users":[{"username":"dual-node","password":"dual-secret"}],"tls":{"certificate_pem":cert,"private_key_pem":key},"udp_over_tcp":true})).unwrap();
+    let input = shared::node_input(
+        "naive",
+        &json!({"users":[{"username":"dual-node","password":"dual-secret"}],"tls":{"certificate_pem":cert,"private_key_pem":key},"udp_over_tcp":true}),
+    );
+    let node = NaiveNodeFactory.build(&input).unwrap();
     assert!(node.supports_tcp() && node.supports_udp());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let socket = Arc::new(tokio::net::UdpSocket::bind(address).await.unwrap());
     let cancel = CancellationToken::new();
     let context = InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         peer_addr: None,
         local_addr: Some(address),
         cancel: cancel.clone(),
@@ -376,9 +394,14 @@ async fn default_node_binds_tcp_and_udp_same_port_and_prefers_h2_alpn() {
         ),
         events: Arc::new(Observer),
     };
-    let access: Arc<dyn AccessService> = Arc::new(kerlico_egress::Egress::new(
-        kerlico_net::DirectFactory.build(&json!({})).unwrap(),
-    ));
+    let access = kerlico_egress::testing::ingress(
+        &input,
+        shared::outbound(&kerlico_net::DirectFactory, &json!({}))
+            .await
+            .unwrap(),
+        kerlico_core::TargetPolicy::Local,
+    )
+    .unwrap();
     let udp_node = node.clone();
     let udp_access = access.clone();
     let udp_context = context.clone();
@@ -398,7 +421,7 @@ async fn default_node_binds_tcp_and_udp_same_port_and_prefers_h2_alpn() {
     let echo = tcp_echo("127.0.0.1").await;
     let connection = kerlico_core::ConnectContext::new(Duration::from_secs(5));
     for transport in ["h1", "h2", "h3"] {
-        let outbound=NaiveFactory.build(&json!({"server":{"host":"127.0.0.1","port":address.port()},"username":"dual-node","password":"dual-secret","tls":{"server_name":"proxy.invalid","ca_pem":cert},"transport":transport})).unwrap();
+        let outbound=shared::outbound(&NaiveFactory, &json!({"server":{"host":"127.0.0.1","port":address.port()},"username":"dual-node","password":"dual-secret","tls":{"server_name":"proxy.invalid","ca_pem":cert},"transport":transport})).await.unwrap();
         tcp(&outbound, &connection, &echo.target, 12000).await;
     }
     let mut roots = rustls::RootCertStore::empty();
@@ -435,4 +458,12 @@ async fn default_node_binds_tcp_and_udp_same_port_and_prefers_h2_alpn() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

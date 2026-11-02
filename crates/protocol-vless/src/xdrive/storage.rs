@@ -1,8 +1,9 @@
 use super::Settings;
+use super::http::Client;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
+use http::Method;
 use kerlico_core::{BoxFuture, Error, Result};
-use reqwest::{Client, Method, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -12,6 +13,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use url::Url;
 
 pub(crate) struct Entry {
     pub name: String,
@@ -51,40 +53,100 @@ fn safe(name: &str) -> bool {
             .any(|p| p.is_empty() || p == "." || p == ".." || p.starts_with(".xdrive-tmp-"))
         && !name.chars().any(|c| c.is_control() || c == '\\')
 }
-fn backend(settings: &Settings, ca: Option<&str>) -> Result<Arc<dyn Storage>> {
-    if settings.service == "local" {
-        if settings.remote_folder.is_empty() {
-            return Err(invalid());
-        }
-        return Ok(Arc::new(Local {
-            root: PathBuf::from(&settings.remote_folder),
-        }));
+#[derive(Clone)]
+pub(crate) struct Plan {
+    backend: Backend,
+    tls: Arc<rustls::ClientConfig>,
+    concurrency: usize,
+}
+#[derive(Clone)]
+enum Backend {
+    Local(PathBuf),
+    S3 {
+        base: Url,
+        prefix: String,
+        region: String,
+        secrets: Vec<String>,
+    },
+    Drive {
+        folder: String,
+        secrets: Vec<String>,
+    },
+    Template {
+        template: Template,
+        names: regex::Regex,
+        folder: String,
+        secrets: Vec<String>,
+        concurrency: usize,
+    },
+}
+impl Plan {
+    pub fn start(&self) -> Result<Arc<dyn Storage>> {
+        let inner: Arc<dyn Storage> = if let Backend::Local(root) = &self.backend {
+            Arc::new(Local { root: root.clone() })
+        } else {
+            let client = Client::new(self.tls.clone());
+            match &self.backend {
+                Backend::S3 {
+                    base,
+                    prefix,
+                    region,
+                    secrets,
+                } => Arc::new(S3 {
+                    client,
+                    base: base.clone(),
+                    prefix: prefix.clone(),
+                    region: region.clone(),
+                    secrets: secrets.clone(),
+                }),
+                Backend::Drive { folder, secrets } => Arc::new(Drive {
+                    client,
+                    folder: folder.clone(),
+                    secrets: secrets.clone(),
+                    token: tokio::sync::Mutex::new(None),
+                }),
+                Backend::Template {
+                    template,
+                    names,
+                    folder,
+                    secrets,
+                    concurrency,
+                } => Arc::new(Templated {
+                    client,
+                    template: template.clone(),
+                    names: names.clone(),
+                    folder: folder.clone(),
+                    secrets: secrets.clone(),
+                    token: tokio::sync::Mutex::new(None),
+                    inflight: tokio::sync::Semaphore::new(*concurrency),
+                }),
+                Backend::Local(_) => return Err(invalid()),
+            }
+        };
+        Ok(Arc::new(Limited {
+            inner,
+            gate: tokio::sync::Semaphore::new(self.concurrency),
+        }))
     }
-    let mut client = Client::builder()
-        .timeout(Duration::from_secs(60))
-        .redirect(reqwest::redirect::Policy::none());
-    if let Some(ca) = ca {
-        let certs = rustls_pemfile::certs(&mut std::io::Cursor::new(ca))
-            .collect::<std::io::Result<Vec<_>>>()?;
-        for certificate in certs {
-            client = client.add_root_certificate(
-                reqwest::Certificate::from_der(certificate.as_ref()).map_err(|_| invalid())?,
-            );
+}
+pub(crate) fn compile(settings: &Settings, ca: Option<&str>) -> Result<Plan> {
+    let tls = super::http::tls(ca)?;
+    let backend = match settings.service.as_str() {
+        "local" => {
+            if settings.remote_folder.is_empty() {
+                return Err(invalid());
+            }
+            Backend::Local(PathBuf::from(&settings.remote_folder))
         }
-    }
-    let client = client.build().map_err(|_| invalid())?;
-    match settings.service.as_str() {
-        "s3" => Ok(Arc::new(S3::new(client, settings)?)),
+        "s3" => prepare_s3(settings)?,
         "google-drive" | "Google Drive" => {
             if settings.secrets.len() != 3 || settings.secrets.iter().any(String::is_empty) {
                 return Err(invalid());
             }
-            Ok(Arc::new(Drive {
-                client,
+            Backend::Drive {
                 folder: settings.remote_folder.clone(),
                 secrets: settings.secrets.clone(),
-                token: tokio::sync::Mutex::new(None),
-            }))
+            }
         }
         "template" => {
             let template: Template =
@@ -108,29 +170,26 @@ fn backend(settings: &Settings, ca: Option<&str>) -> Result<Arc<dyn Storage>> {
             {
                 return Err(invalid());
             }
-            let inflight = tokio::sync::Semaphore::new(if template.concurrency == 0 {
+            let concurrency = if template.concurrency == 0 {
                 settings.concurrency
             } else {
                 template.concurrency
-            });
-            Ok(Arc::new(Templated {
-                client,
+            };
+            Backend::Template {
                 template,
                 names,
                 folder: settings.remote_folder.clone(),
                 secrets: settings.secrets.clone(),
-                token: tokio::sync::Mutex::new(None),
-                inflight,
-            }))
+                concurrency,
+            }
         }
-        _ => Err(invalid()),
-    }
-}
-pub(crate) fn create(settings: &Settings, ca: Option<&str>) -> Result<Arc<dyn Storage>> {
-    Ok(Arc::new(Limited {
-        inner: backend(settings, ca)?,
-        gate: tokio::sync::Semaphore::new(settings.concurrency),
-    }))
+        _ => return Err(invalid()),
+    };
+    Ok(Plan {
+        backend,
+        tls,
+        concurrency: settings.concurrency,
+    })
 }
 struct Limited {
     inner: Arc<dyn Storage>,
@@ -268,7 +327,7 @@ impl Storage for Local {
         })
     }
 }
-async fn body(mut response: reqwest::Response) -> Result<(u16, Vec<u8>)> {
+async fn body(mut response: super::http::Response) -> Result<(u16, Vec<u8>)> {
     let status = response.status().as_u16();
     let mut data = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|_| remote())? {
@@ -306,41 +365,6 @@ struct S3 {
     secrets: Vec<String>,
 }
 impl S3 {
-    fn new(client: Client, settings: &Settings) -> Result<Self> {
-        let s3 = settings.s3.as_ref().ok_or_else(invalid)?;
-        let mut base = Url::parse(&s3.endpoint).map_err(|_| invalid())?;
-        if !matches!(base.scheme(), "http" | "https")
-            || base.host_str().is_none()
-            || !base.username().is_empty()
-            || base.password().is_some()
-            || base.query().is_some()
-            || base.fragment().is_some()
-            || !safe(&s3.bucket)
-            || s3.bucket.contains('/')
-            || !safe(&settings.remote_folder)
-            || !(2..=3).contains(&settings.secrets.len())
-        {
-            return Err(invalid());
-        }
-        if s3.path_style {
-            let path = format!("{}/{}", base.path().trim_end_matches('/'), s3.bucket);
-            base.set_path(&path);
-        } else {
-            let host = format!("{}.{}", s3.bucket, base.host_str().ok_or_else(invalid)?);
-            base.set_host(Some(&host)).map_err(|_| invalid())?;
-        }
-        Ok(Self {
-            client,
-            base,
-            prefix: settings.remote_folder.trim_end_matches('/').into(),
-            region: if s3.region.is_empty() {
-                "us-east-1".into()
-            } else {
-                s3.region.clone()
-            },
-            secrets: settings.secrets.clone(),
-        })
-    }
     async fn request(
         &self,
         method: Method,
@@ -425,7 +449,7 @@ impl S3 {
         for (name, value) in headers {
             request = request.header(name, value);
         }
-        body(request.send().await.map_err(|_| remote())?).await
+        body(request.send().await?).await
     }
 }
 #[derive(Deserialize)]
@@ -485,7 +509,7 @@ impl Storage for S3 {
                 return Err(invalid());
             }
             let full = format!("{}/{prefix}/", self.prefix);
-            let mut next:Option<String> = None;
+            let mut next: Option<String> = None;
             let mut output = std::collections::BTreeSet::new();
             for _ in 0..64 {
                 let mut query = Url::parse("https://storage.invalid/").map_err(|_| invalid())?;
@@ -527,7 +551,7 @@ impl Storage for S3 {
     }
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 struct Auth {
     #[serde(rename = "type")]
@@ -540,7 +564,7 @@ struct Auth {
     token_path: String,
     expiry_path: String,
 }
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 struct Operation {
     method: String,
@@ -551,13 +575,13 @@ struct Operation {
     href_path: String,
     href_method: String,
 }
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 struct Retry {
     status: Vec<u16>,
     rate_reason: String,
 }
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Template {
     flatten: bool,
@@ -621,8 +645,7 @@ impl Templated {
                 .post(substitute(&self.template.auth.token_url, vars))
                 .form(&form)
                 .send()
-                .await
-                .map_err(|_| remote())?,
+                .await?,
         )
         .await?;
         if !success(status) {
@@ -718,7 +741,7 @@ impl Templated {
                     _ => return Err(invalid()),
                 }
             }
-            let response = body(request.send().await.map_err(|_| remote())?).await?;
+            let response = body(request.send().await?).await?;
             if response.0 == 401 && self.template.auth.kind == "oauth2" && !presigned {
                 *self.token.lock().await = None;
                 continue;
@@ -908,8 +931,7 @@ impl Drive {
                 .post("https://oauth2.googleapis.com/token")
                 .form(&form)
                 .send()
-                .await
-                .map_err(|_| remote())?,
+                .await?,
         )
         .await?;
         if !success(status) {
@@ -946,7 +968,7 @@ impl Drive {
             if let Some(content) = content_type {
                 request = request.header("content-type", content);
             }
-            let result = body(request.send().await.map_err(|_| remote())?).await?;
+            let result = body(request.send().await?).await?;
             if result.0 == 401 {
                 *self.token.lock().await = None;
             } else if result.0 != 429 && result.0 < 500 {
@@ -960,7 +982,7 @@ impl Drive {
         Err(remote())
     }
     async fn query(&self, condition: &str) -> Result<Vec<DriveFile>> {
-        let mut next:Option<String> = None;
+        let mut next: Option<String> = None;
         let mut output = Vec::new();
         let folder = self.folder.replace('\\', "\\\\").replace('\'', "\\'");
         for _ in 0..64 {
@@ -1212,4 +1234,39 @@ impl Storage for Drive {
             }
         })
     }
+}
+
+fn prepare_s3(settings: &Settings) -> Result<Backend> {
+    let s3 = settings.s3.as_ref().ok_or_else(invalid)?;
+    let mut base = Url::parse(&s3.endpoint).map_err(|_| invalid())?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+        || !safe(&s3.bucket)
+        || s3.bucket.contains('/')
+        || !safe(&settings.remote_folder)
+        || !(2..=3).contains(&settings.secrets.len())
+    {
+        return Err(invalid());
+    }
+    if s3.path_style {
+        let path = format!("{}/{}", base.path().trim_end_matches('/'), s3.bucket);
+        base.set_path(&path);
+    } else {
+        let host = format!("{}.{}", s3.bucket, base.host_str().ok_or_else(invalid)?);
+        base.set_host(Some(&host)).map_err(|_| invalid())?;
+    }
+    Ok(Backend::S3 {
+        base,
+        prefix: settings.remote_folder.trim_end_matches('/').into(),
+        region: if s3.region.is_empty() {
+            "us-east-1".into()
+        } else {
+            s3.region.clone()
+        },
+        secrets: settings.secrets.clone(),
+    })
 }

@@ -3,28 +3,24 @@ use crate::{
     config::{ServerSecurity, Transport, TransportInput, server_tls},
     invalid, key,
 };
-use kerlico_config::NodeFactory;
+use kerlico_config::{NodeBuildContext, NodeFactory};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, ConnectContext, InboundContext, InboundProtocol, Result,
+    BoxFuture, BoxStream, ConnectContext, CredentialManifest, CredentialSet, InboundContext,
+    InboundProtocol, IngressBinding, Result,
 };
 use serde::Deserialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, sync::Arc};
 pub struct TrojanNodeFactory;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Options {
-    #[serde(default)]
-    password: Option<String>,
-    #[serde(default)]
-    passwords: Vec<String>,
     security: ServerSecurity,
     #[serde(default)]
     transport: TransportInput,
 }
 pub(crate) struct Payload {
-    pub users: Vec<[u8; 56]>,
+    pub users: CredentialSet<[u8; 56]>,
 }
 struct TrojanNode {
     payload: Arc<Payload>,
@@ -35,22 +31,26 @@ impl NodeFactory for TrojanNodeFactory {
     fn kind(&self) -> &'static str {
         "trojan"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn InboundProtocol>> {
-        let mut options: Options =
-            serde_json::from_value(options.clone()).map_err(|_| invalid())?;
-        if let Some(password) = options.password {
-            if !options.passwords.is_empty() {
-                return Err(invalid());
-            }
-            options.passwords.push(password);
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        let options: Options =
+            serde_json::from_value(input.options().clone()).map_err(|_| invalid())?;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Credential {
+            password: String,
         }
-        if options.passwords.is_empty() || options.passwords.len() > 256 {
+        let credentials = input
+            .native_credentials()
+            .iter()
+            .map(|value| serde_json::from_value::<Credential>(value.clone()).map_err(|_| invalid()))
+            .collect::<Result<Vec<_>>>()?;
+        if credentials.is_empty() || credentials.len() > 256 {
             return Err(invalid());
         }
         let mut seen = BTreeSet::new();
         let mut users = Vec::new();
-        for password in options.passwords {
-            let value = key(&password)?;
+        for credential in credentials {
+            let value = key(&credential.password)?;
             if !seen.insert(value) {
                 return Err(invalid());
             }
@@ -59,24 +59,24 @@ impl NodeFactory for TrojanNodeFactory {
         let transport = options.transport.normalize()?;
         let tls = server_tls(options.security, &transport)?;
         Ok(Arc::new(TrojanNode {
-            payload: Arc::new(Payload { users }),
+            payload: Arc::new(Payload {
+                users: input.credentials(users)?,
+            }),
             tls,
             transport,
         }))
     }
 }
 impl InboundProtocol for TrojanNode {
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
-        self.payload
-            .users
-            .iter()
-            .map(|key| {
-                let mut hash = Sha256::new();
-                hash.update(b"kerlico/trojan/node-password/");
-                hash.update(key);
-                hash.finalize().into()
-            })
-            .collect()
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = CredentialManifest::new();
+        for (slot, (_, key)) in self.payload.users.rows().enumerate() {
+            let mut hash = Sha256::new();
+            hash.update(b"kerlico/trojan/node-password/");
+            hash.update(key);
+            manifest.authentication("trojan", slot, hash.finalize().into());
+        }
+        manifest
     }
     fn requires_loopback(&self) -> bool {
         self.tls.is_none()
@@ -84,14 +84,12 @@ impl InboundProtocol for TrojanNode {
     fn handle<'a>(
         &'a self,
         stream: BoxStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let connect = ConnectContext {
-                cancel: context.cancel.clone(),
-                timeout: context.connect_timeout,
-            };
+            let connect =
+                ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
             let stream: BoxStream = connect
                 .run(async {
                     match &self.tls {
@@ -131,16 +129,16 @@ impl Payload {
     pub async fn serve(
         &self,
         mut stream: BoxStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
-        let connect = ConnectContext {
-            cancel: context.cancel.clone(),
-            timeout: context.connect_timeout,
-        };
-        let (target, udp) = connect
+        let connect =
+            ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
+        let (slot, target, udp) = connect
             .run(codec::request(&mut stream, &self.users))
             .await?;
+        let (access, (target, udp)) =
+            access.authenticated(self.users.verified(&slot, (target, udp))?, &context)?;
         if udp {
             return crate::udp::serve(stream, access, context).await;
         }

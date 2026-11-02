@@ -39,10 +39,15 @@ impl Engine {
         let mut registry = Registry::default();
         registry.register(kerlico_net::DirectFactory).unwrap();
         registry.register_node(Hysteria1NodeFactory).unwrap();
-        let value = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":nodes,"limits":{"connect_timeout_ms":3000,"idle_timeout_ms":2000,"drain_timeout_ms":400,"max_sessions":128,"max_datagram_size":maximum}});
+        let value = json!({"version":2,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":nodes,"limits":{"connect_timeout_ms":3000,"idle_timeout_ms":2000,"drain_timeout_ms":400,"max_sessions":128,"max_datagram_size":maximum}});
         let engine = kerlico_engine::Engine::bind(
             registry
-                .prepare(kerlico_config::parse(&serde_json::to_vec(&value).unwrap()).unwrap())
+                .prepare(
+                    kerlico_config::parse(
+                        &serde_json::to_vec(&shared::configuration(value.clone())).unwrap(),
+                    )
+                    .unwrap(),
+                )
                 .unwrap(),
         )
         .await
@@ -161,7 +166,14 @@ if stream.write_all(&bytes[..n]).await.is_err(){return;}}});},
 }
 async fn tcp(outbound: &dyn Outbound, target: &Destination, payload: &[u8]) {
     let context = ConnectContext::new(Duration::from_secs(3));
-    let mut stream = outbound.connect_tcp(target, &context).await.unwrap();
+    let mut stream = outbound
+        .connect_tcp(
+            target,
+            &kerlico_core::ConnectContext::new(context.timeout).with_cancel(context.cancel.clone()),
+        )
+        .await
+        .unwrap()
+        .stream;
     let mut greeting = [0; 2];
     stream.read_exact(&mut greeting).await.unwrap();
     assert_eq!(&greeting, b"hi");
@@ -201,18 +213,31 @@ async fn all_v1_carriers_obfuscation_and_standard_controllers_are_dual_role() {
                         obfs,
                         cc,
                     );
-                    let outbound = Hysteria1Factory.build(&options).unwrap();
+                    let outbound = shared::outbound(&Hysteria1Factory, &options).await.unwrap();
                     tcp(outbound.as_ref(), &targets.tcp4, &vec![37; 65536]).await;
                     tcp(outbound.as_ref(), &targets.tcp6, b"cross-family").await;
                     let context = ConnectContext::new(Duration::from_secs(3));
-                    let mut channel = outbound.connect_udp(&targets.udp4, &context).await.unwrap();
+                    let mut channel = outbound
+                        .connect_udp(
+                            &targets.udp4,
+                            &kerlico_core::ConnectContext::new(context.timeout)
+                                .with_cancel(context.cancel.clone()),
+                        )
+                        .await
+                        .unwrap();
                     for size in [0, 17, 4096, 12000] {
                         let payload = vec![size as u8; size];
                         channel.sender.send(&payload).await.unwrap();
                         assert_eq!(channel.receiver.recv().await.unwrap(), Some(payload));
                     }
                     drop(channel);
-                    let mut association = outbound.associate_udp(&context).await.unwrap();
+                    let mut association = outbound
+                        .associate_udp(
+                            &kerlico_core::ConnectContext::new(context.timeout)
+                                .with_cancel(context.cancel.clone()),
+                        )
+                        .await
+                        .unwrap();
                     for target in [&targets.udp4, &targets.udp6] {
                         association
                             .sender
@@ -283,12 +308,24 @@ async fn ipv6_independent_auth_binary_alias_and_same_socket_associations() {
                 options.as_object_mut().unwrap().remove("auth_str");
                 options["auth"] = json!(base64::engine::general_purpose::STANDARD.encode(binary));
             }
-            let outbound = Hysteria1Factory.build(&options).unwrap();
+            let outbound = shared::outbound(&Hysteria1Factory, &options).await.unwrap();
             tcp(outbound.as_ref(), &targets.tcp4, b"target4").await;
             tcp(outbound.as_ref(), &targets.tcp6, b"target6").await;
             let context = ConnectContext::new(Duration::from_secs(3));
-            let mut one = outbound.associate_udp(&context).await.unwrap();
-            let mut two = outbound.associate_udp(&context).await.unwrap();
+            let mut one = outbound
+                .associate_udp(
+                    &kerlico_core::ConnectContext::new(context.timeout)
+                        .with_cancel(context.cancel.clone()),
+                )
+                .await
+                .unwrap();
+            let mut two = outbound
+                .associate_udp(
+                    &kerlico_core::ConnectContext::new(context.timeout)
+                        .with_cancel(context.cancel.clone()),
+                )
+                .await
+                .unwrap();
             let first = format!("{tag}-first").into_bytes();
             let second = format!("{tag}-second").into_bytes();
             for target in [&targets.udp4, &targets.udp6] {
@@ -315,8 +352,17 @@ async fn ipv6_independent_auth_binary_alias_and_same_socket_associations() {
             let before = targets.accepted.load(Ordering::SeqCst);
             options["auth_str"] = json!("other-node-credential");
             options.as_object_mut().unwrap().remove("auth");
-            let invalid = Hysteria1Factory.build(&options).unwrap();
-            assert!(invalid.connect_tcp(&targets.tcp4, &context).await.is_err());
+            let invalid = shared::outbound(&Hysteria1Factory, &options).await.unwrap();
+            assert!(
+                invalid
+                    .connect_tcp(
+                        &targets.tcp4,
+                        &kerlico_core::ConnectContext::new(context.timeout)
+                            .with_cancel(context.cancel.clone())
+                    )
+                    .await
+                    .is_err()
+            );
             assert_eq!(targets.accepted.load(Ordering::SeqCst), before);
         }
         engine.stop().await;
@@ -339,16 +385,12 @@ async fn active_tcp_drains_and_concurrent_streams_do_not_share_payloads() {
         )]))
         .await;
         let address = engine.addresses[0].1;
-        let outbound = Hysteria1Factory
-            .build(&client(
-                address,
-                "hy1-drain-test",
-                &cert,
-                "udp",
-                true,
-                "newreno",
-            ))
-            .unwrap();
+        let outbound = shared::outbound(
+            &Hysteria1Factory,
+            &client(address, "hy1-drain-test", &cert, "udp", true, "newreno"),
+        )
+        .await
+        .unwrap();
         let mut flows = JoinSet::new();
         for n in 0..4 {
             let outbound = outbound.clone();
@@ -361,7 +403,15 @@ async fn active_tcp_drains_and_concurrent_streams_do_not_share_payloads() {
             result.unwrap();
         }
         let context = ConnectContext::new(Duration::from_secs(3));
-        let mut stream = outbound.connect_tcp(&targets.tcp4, &context).await.unwrap();
+        let mut stream = outbound
+            .connect_tcp(
+                &targets.tcp4,
+                &kerlico_core::ConnectContext::new(context.timeout)
+                    .with_cancel(context.cancel.clone()),
+            )
+            .await
+            .unwrap()
+            .stream;
         let mut greeting = [0; 2];
         stream.read_exact(&mut greeting).await.unwrap();
         engine.cancel.cancel();
@@ -406,10 +456,19 @@ async fn tcp_only_and_bad_tls_alpn_cancellation_are_explicit() {
             false,
             "cubic",
         );
-        let outbound = Hysteria1Factory.build(&options).unwrap();
+        let outbound = shared::outbound(&Hysteria1Factory, &options).await.unwrap();
         let context = ConnectContext::new(Duration::from_secs(2));
         tcp(outbound.as_ref(), &targets.tcp4, b"tcp-only").await;
-        assert!(outbound.connect_udp(&targets.udp4, &context).await.is_err());
+        assert!(
+            outbound
+                .connect_udp(
+                    &targets.udp4,
+                    &kerlico_core::ConnectContext::new(context.timeout)
+                        .with_cancel(context.cancel.clone())
+                )
+                .await
+                .is_err()
+        );
         for mutation in ["name", "ca", "alpn"] {
             let mut invalid = options.clone();
             match mutation {
@@ -419,8 +478,17 @@ async fn tcp_only_and_bad_tls_alpn_cancellation_are_explicit() {
                 }
                 _ => invalid["tls"]["alpn"] = json!(["wrong-alpn"]),
             }
-            let outbound = Hysteria1Factory.build(&invalid).unwrap();
-            assert!(outbound.connect_tcp(&targets.tcp4, &context).await.is_err());
+            let outbound = shared::outbound(&Hysteria1Factory, &invalid).await.unwrap();
+            assert!(
+                outbound
+                    .connect_tcp(
+                        &targets.tcp4,
+                        &kerlico_core::ConnectContext::new(context.timeout)
+                            .with_cancel(context.cancel.clone())
+                    )
+                    .await
+                    .is_err()
+            );
         }
         let cancelled = ConnectContext::new(Duration::from_secs(2));
         cancelled.cancel.cancel();
@@ -435,8 +503,8 @@ async fn tcp_only_and_bad_tls_alpn_cancellation_are_explicit() {
     .await
     .expect("无效条件检查超时");
 }
-#[test]
-fn credential_aliases_and_unsupported_branches_are_rejected() {
+#[tokio::test]
+async fn credential_aliases_and_unsupported_branches_are_rejected() {
     let (cert, key) = certificate();
     let base = node(
         "one",
@@ -459,10 +527,15 @@ fn credential_aliases_and_unsupported_branches_are_rejected() {
     let mut registry = Registry::default();
     registry.register(kerlico_net::DirectFactory).unwrap();
     registry.register_node(Hysteria1NodeFactory).unwrap();
-    let value = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[base,second]});
+    let value = json!({"version":2,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[base,second]});
     assert!(
         registry
-            .prepare(kerlico_config::parse(&serde_json::to_vec(&value).unwrap()).unwrap())
+            .prepare(
+                kerlico_config::parse(
+                    &serde_json::to_vec(&shared::configuration(value.clone())).unwrap()
+                )
+                .unwrap()
+            )
             .is_err()
     );
     let mut options = client(
@@ -474,13 +547,13 @@ fn credential_aliases_and_unsupported_branches_are_rejected() {
         "cubic",
     );
     options["transport"] = json!("faketcp");
-    assert!(Hysteria1Factory.build(&options).is_err());
+    assert!(Hysteria1Factory.compile(&options).is_err());
     options["transport"] = json!("udp");
     options["limits"]["congestion_control"] = json!("brutal");
-    assert!(Hysteria1Factory.build(&options).is_err());
+    assert!(Hysteria1Factory.compile(&options).is_err());
     options["limits"]["congestion_control"] = json!("cubic");
     options["server_ports"] = json!([1, 2]);
-    assert!(Hysteria1Factory.build(&options).is_err());
+    assert!(Hysteria1Factory.compile(&options).is_err());
 }
 
 #[tokio::test]
@@ -516,18 +589,28 @@ async fn datagram_limits_apply_before_site_send_and_before_reply() {
             4,
         )
         .await;
-        let outbound = Hysteria1Factory
-            .build(&client(
+        let outbound = shared::outbound(
+            &Hysteria1Factory,
+            &client(
                 engine.addresses[0].1,
                 "hy1-packet-limit",
                 &cert,
                 "udp",
                 false,
                 "cubic",
-            ))
-            .unwrap();
+            ),
+        )
+        .await
+        .unwrap();
         let context = ConnectContext::new(Duration::from_secs(3));
-        let mut channel = outbound.connect_udp(&target, &context).await.unwrap();
+        let mut channel = outbound
+            .connect_udp(
+                &target,
+                &kerlico_core::ConnectContext::new(context.timeout)
+                    .with_cancel(context.cancel.clone()),
+            )
+            .await
+            .unwrap();
         channel.sender.send(b"ok").await.unwrap();
         assert_eq!(
             channel.receiver.recv().await.unwrap(),
@@ -566,8 +649,8 @@ async fn multiple_auth_materials_are_verified_in_one_node() {
         use base64::Engine as _;
         let targets=Targets::new().await;let(cert,key)=certificate();let mut configured=node("node","127.0.0.1:0","unused",&cert,&key,("udp",false,"cubic",true));configured["options"].as_object_mut().unwrap().remove("auth_str");let binary=[0,255,1,128];configured["options"]["users"]=json!([{"auth_str":"first-valid-auth"},{"auth":base64::engine::general_purpose::STANDARD.encode(binary)}]);
         let engine=Engine::start(json!([configured])).await;
-        for encoded in [false,true]{let mut options=client(engine.addresses[0].1,"first-valid-auth",&cert,"udp",false,"cubic");if encoded{options.as_object_mut().unwrap().remove("auth_str");options["auth"]=json!(base64::engine::general_purpose::STANDARD.encode(binary));}let outbound=Hysteria1Factory.build(&options).unwrap();tcp(outbound.as_ref(),&targets.tcp4,b"allowed").await;}
-        let before=targets.accepted.load(Ordering::SeqCst);let invalid=Hysteria1Factory.build(&client(engine.addresses[0].1,"not-a-valid-auth",&cert,"udp",false,"cubic")).unwrap();assert!(invalid.connect_tcp(&targets.tcp4,&ConnectContext::new(Duration::from_secs(3))).await.is_err());assert_eq!(targets.accepted.load(Ordering::SeqCst),before);engine.stop().await;
+        for encoded in [false,true]{let mut options=client(engine.addresses[0].1,"first-valid-auth",&cert,"udp",false,"cubic");if encoded{options.as_object_mut().unwrap().remove("auth_str");options["auth"]=json!(base64::engine::general_purpose::STANDARD.encode(binary));}let outbound=shared::outbound(&Hysteria1Factory, &options).await.unwrap();tcp(outbound.as_ref(),&targets.tcp4,b"allowed").await;}
+        let before=targets.accepted.load(Ordering::SeqCst);let invalid=shared::outbound(&Hysteria1Factory, &client(engine.addresses[0].1,"not-a-valid-auth",&cert,"udp",false,"cubic")).await.unwrap();assert!(invalid.connect_tcp(&targets.tcp4,&ConnectContext::new(Duration::from_secs(3))).await.is_err());assert_eq!(targets.accepted.load(Ordering::SeqCst),before);engine.stop().await;
     }).await.expect("同节点多凭据鉴权超时");
 }
 
@@ -594,7 +677,7 @@ async fn idle_client_cache_releases_the_old_connection() {
             "cubic",
         );
         options["limits"]["idle_timeout_ms"] = json!(150);
-        let outbound = Hysteria1Factory.build(&options).unwrap();
+        let outbound = shared::outbound(&Hysteria1Factory, &options).await.unwrap();
         tcp(outbound.as_ref(), &targets.tcp4, b"first").await;
         let before = engine.stats["node"]
             .accepted
@@ -610,4 +693,12 @@ async fn idle_client_cache_releases_the_old_connection() {
     })
     .await
     .expect("客户端空闲连接未回收");
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

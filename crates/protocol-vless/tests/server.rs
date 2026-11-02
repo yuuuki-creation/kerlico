@@ -1,3 +1,4 @@
+mod support;
 use kerlico_config::{Registry, parse};
 use kerlico_core::{CancellationToken, ConnectContext, Destination, Outbound, Result};
 use kerlico_engine::Engine;
@@ -44,8 +45,7 @@ fn configuration(nodes: Value) -> Value {
     json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":nodes,"limits":{"connect_timeout_ms":500,"idle_timeout_ms":1000,"drain_timeout_ms":30,"max_sessions":16}})
 }
 fn client(address: SocketAddr, uuid: &str, cert: &str) -> Arc<dyn Outbound> {
-    use kerlico_config::OutboundFactory;
-    VlessFactory.build(&json!({"server":{"host":address.ip().to_string(),"port":address.port()},"uuid":uuid,"security":{"type":"tls","server_name":"localhost","ca_pem":cert}})).unwrap()
+    support::outbound(&VlessFactory,&json!({"server":{"host":address.ip().to_string(),"port":address.port()},"uuid":uuid,"security":{"type":"tls","server_name":"localhost","ca_pem":cert}})).unwrap()
 }
 async fn exchange(client: &dyn Outbound, target: SocketAddr, bytes: &[u8]) -> Result<Vec<u8>> {
     let context = ConnectContext::new(Duration::from_millis(500));
@@ -54,7 +54,8 @@ async fn exchange(client: &dyn Outbound, target: SocketAddr, bytes: &[u8]) -> Re
             &Destination::new(&target.ip().to_string(), target.port())?,
             &context,
         )
-        .await?;
+        .await?
+        .stream;
     stream.write_all(bytes).await?;
     let mut output = vec![0; bytes.len()];
     stream.read_exact(&mut output).await?;
@@ -69,7 +70,9 @@ async fn independent_node_credentials_and_both_target_families() {
         node("node6", "[::1]:0", V6_USER, &cert, &key)
     ]));
     let prepared = registry()
-        .prepare(parse(&serde_json::to_vec(&value).unwrap()).unwrap())
+        .prepare(
+            parse(&serde_json::to_vec(&support::configuration(value.clone())).unwrap()).unwrap(),
+        )
         .unwrap();
     let engine = Engine::bind(prepared).await.unwrap();
     let addresses = engine.listeners().unwrap();
@@ -146,15 +149,28 @@ async fn independent_node_credentials_and_both_target_families() {
 #[test]
 fn duplicate_node_credentials_are_rejected_without_disclosure() {
     let (cert, key) = certificate();
+    let independent = configuration(json!([
+        node("node4", "127.0.0.1:0", V4_USER, &cert, &key),
+        node("node6", "[::1]:0", V6_USER, &cert, &key)
+    ]));
+    assert!(
+        registry()
+            .prepare(
+                parse(&serde_json::to_vec(&support::configuration(independent)).unwrap()).unwrap()
+            )
+            .is_ok()
+    );
     let value = configuration(json!([
         node("node4", "127.0.0.1:0", V4_USER, &cert, &key),
         node("node6", "[::1]:0", V4_USER, &cert, &key)
     ]));
     let error = registry()
-        .prepare(parse(&serde_json::to_vec(&value).unwrap()).unwrap())
+        .prepare(
+            parse(&serde_json::to_vec(&support::configuration(value.clone())).unwrap()).unwrap(),
+        )
         .err()
         .unwrap();
-    assert!(error.to_string().contains("认证凭据重复"));
+    assert!(matches!(error, kerlico_core::Error::Config(_)));
     assert!(!error.to_string().contains(V4_USER));
 }
 
@@ -164,7 +180,10 @@ async fn ipv6_node_is_v6_only_and_incomplete_handshake_drains() {
     let value = configuration(json!([node("node6", "[::]:0", V6_USER, &cert, &key)]));
     let engine = Engine::bind(
         registry()
-            .prepare(parse(&serde_json::to_vec(&value).unwrap()).unwrap())
+            .prepare(
+                parse(&serde_json::to_vec(&support::configuration(value.clone())).unwrap())
+                    .unwrap(),
+            )
             .unwrap(),
     )
     .await
@@ -221,7 +240,10 @@ async fn one_engine_runs_client_and_server_roles_together() {
     registry.register(VlessFactory).unwrap();
     let engine = Engine::bind(
         registry
-            .prepare(parse(&serde_json::to_vec(&value).unwrap()).unwrap())
+            .prepare(
+                parse(&serde_json::to_vec(&support::configuration(value.clone())).unwrap())
+                    .unwrap(),
+            )
             .unwrap(),
     )
     .await

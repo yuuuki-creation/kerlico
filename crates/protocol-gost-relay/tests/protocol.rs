@@ -1,4 +1,4 @@
-use kerlico_config::OutboundFactory;
+mod support;
 use kerlico_core::{ConnectContext, Destination, Error};
 use kerlico_gost_relay::GostRelayFactory;
 use serde_json::{Value, json};
@@ -32,13 +32,18 @@ async fn request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Vec<u8> {
 fn configuration_capabilities_and_no_association_fallback() {
     let factory = GostRelayFactory;
     let base = json!({"server":{"host":"127.0.0.1","port":10443}});
-    let outbound = factory.build(&base).unwrap();
+    let outbound = support::outbound(&factory, &base).unwrap();
     assert!(outbound.capabilities().tcp_eof);
     assert!(outbound.capabilities().udp);
     assert!(!outbound.supports_udp_association());
     let mut mux = base.clone();
     mux["mux"] = json!(true);
-    assert!(!factory.build(&mux).unwrap().capabilities().tcp_eof);
+    assert!(
+        !support::outbound(&factory, &mux)
+            .unwrap()
+            .capabilities()
+            .tcp_eof
+    );
     for patch in [
         json!({"server":{"host":"192.0.2.1","port":443}}),
         json!({"server":{"host":"localhost","port":443}}),
@@ -54,12 +59,12 @@ fn configuration_capabilities_and_no_association_fallback() {
         for (key, value_patch) in patch.as_object().unwrap() {
             value[key] = value_patch.clone();
         }
-        assert!(factory.build(&value).is_err());
+        assert!(support::outbound(&factory, &value).is_err());
     }
     let remote = json!({"server":{"host":"192.0.2.1","port":443},"allow_insecure":true});
-    assert!(factory.build(&remote).is_ok());
+    assert!(support::outbound(&factory, &remote).is_ok());
     let empty_password = json!({"server":{"host":"127.0.0.1","port":443},"username":"user"});
-    assert!(factory.build(&empty_password).is_ok());
+    assert!(support::outbound(&factory, &empty_password).is_ok());
 }
 
 #[tokio::test]
@@ -105,9 +110,9 @@ async fn tcp_families_targets_features_prefetched_response_and_half_close() {
                 assert_eq!(body, vec![0x93; 65537]);
                 stream.write_all(b"after-fin").await.unwrap();
             });
-            let outbound = GostRelayFactory.build(&options(addr)).unwrap();
+            let outbound = support::outbound(&GostRelayFactory, &options(addr)).unwrap();
             let ctx = context();
-            let mut stream = outbound.connect_tcp(&website, &ctx).await.unwrap();
+            let mut stream = outbound.connect_tcp(&website, &ctx).await.unwrap().stream;
             let mut greeting = [0; 2];
             stream.read_exact(&mut greeting).await.unwrap();
             assert_eq!(&greeting, b"hi");
@@ -127,7 +132,7 @@ async fn fixed_forward_checks_before_dial_and_omits_address() {
     let addr = listener.local_addr().unwrap();
     let mut value = options(addr);
     value["forward_target"] = json!({"host":"192.0.2.11","port":443});
-    let outbound = GostRelayFactory.build(&value).unwrap();
+    let outbound = support::outbound(&GostRelayFactory, &value).unwrap();
     let ctx = context();
     assert!(matches!(
         outbound
@@ -150,7 +155,7 @@ async fn fixed_forward_checks_before_dial_and_omits_address() {
         }
         stream.write_all(&[1, 0, 0, 0]).await.unwrap();
     });
-    drop(outbound.connect_tcp(&target(), &ctx).await.unwrap());
+    drop(outbound.connect_tcp(&target(), &ctx).await.unwrap().stream);
     peer.await.unwrap();
 }
 
@@ -175,7 +180,7 @@ async fn udp_packet_boundaries_large_zero_and_oversize_without_truncation() {
             stream.write_all(&body).await.unwrap();
         }
     });
-    let outbound = GostRelayFactory.build(&options(addr)).unwrap();
+    let outbound = support::outbound(&GostRelayFactory, &options(addr)).unwrap();
     let ctx = context();
     let mut channel = outbound.connect_udp(&target(), &ctx).await.unwrap();
     assert_eq!(channel.receiver.peer_addr(), Some(target()));
@@ -204,7 +209,7 @@ async fn response_rejection_truncation_and_unsupported_association_do_not_send_p
             stream.read_to_end(&mut bytes).await.unwrap();
             assert!(bytes.is_empty());
         });
-        let outbound = GostRelayFactory.build(&options(addr)).unwrap();
+        let outbound = support::outbound(&GostRelayFactory, &options(addr)).unwrap();
         let ctx = context();
         assert!(outbound.connect_tcp(&target(), &ctx).await.is_err());
         assert!(outbound.associate_udp(&ctx).await.is_err());
@@ -222,7 +227,7 @@ async fn response_rejection_truncation_and_unsupported_association_do_not_send_p
             request(&mut stream).await;
             stream.write_all(&response).await.unwrap();
         });
-        let outbound = GostRelayFactory.build(&options(addr)).unwrap();
+        let outbound = support::outbound(&GostRelayFactory, &options(addr)).unwrap();
         assert!(outbound.connect_tcp(&target(), &context()).await.is_err());
         peer.await.unwrap();
     }
@@ -247,9 +252,9 @@ async fn deferred_response_sends_first_payload_and_preserves_fragment_progress()
     });
     let mut value = options(addr);
     value["response_mode"] = json!("deferred");
-    let outbound = GostRelayFactory.build(&value).unwrap();
+    let outbound = support::outbound(&GostRelayFactory, &value).unwrap();
     let ctx = context();
-    let mut stream = outbound.connect_tcp(&target(), &ctx).await.unwrap();
+    let mut stream = outbound.connect_tcp(&target(), &ctx).await.unwrap().stream;
     stream.write_all(b"hello").await.unwrap();
     stream.flush().await.unwrap();
     let mut one = [0; 1];
@@ -278,8 +283,12 @@ async fn deferred_status_and_deadline_are_reported_before_business_bytes() {
         });
         let mut value = options(addr);
         value["response_mode"] = json!("deferred");
-        let outbound = GostRelayFactory.build(&value).unwrap();
-        let mut stream = outbound.connect_tcp(&target(), &context()).await.unwrap();
+        let outbound = support::outbound(&GostRelayFactory, &value).unwrap();
+        let mut stream = outbound
+            .connect_tcp(&target(), &context())
+            .await
+            .unwrap()
+            .stream;
         assert!(stream.read(&mut [0; 1]).await.is_err());
         assert!(stream.write_all(b"must-fail").await.is_err());
         drop(stream);
@@ -296,9 +305,9 @@ async fn deferred_status_and_deadline_are_reported_before_business_bytes() {
     });
     let mut value = options(addr);
     value["response_mode"] = json!("deferred");
-    let outbound = GostRelayFactory.build(&value).unwrap();
+    let outbound = support::outbound(&GostRelayFactory, &value).unwrap();
     let ctx = ConnectContext::new(Duration::from_millis(50));
-    let mut stream = outbound.connect_tcp(&target(), &ctx).await.unwrap();
+    let mut stream = outbound.connect_tcp(&target(), &ctx).await.unwrap().stream;
     assert!(
         tokio::time::timeout(Duration::from_secs(1), stream.read(&mut [0; 1]))
             .await
@@ -321,7 +330,7 @@ async fn establish_timeout_cancel_active_stream_and_drop_release_real_socket() {
         stream.read_to_end(&mut bytes).await.unwrap();
         assert!(bytes.is_empty());
     });
-    let outbound = GostRelayFactory.build(&options(addr)).unwrap();
+    let outbound = support::outbound(&GostRelayFactory, &options(addr)).unwrap();
     let short = ConnectContext::new(Duration::from_millis(40));
     assert!(matches!(
         outbound.connect_tcp(&target(), &short).await,
@@ -348,7 +357,11 @@ async fn establish_timeout_cancel_active_stream_and_drop_release_real_socket() {
         assert!(bytes.is_empty());
     });
     let active = context();
-    let mut stream = outbound.connect_tcp(&target(), &active).await.unwrap();
+    let mut stream = outbound
+        .connect_tcp(&target(), &active)
+        .await
+        .unwrap()
+        .stream;
     active.cancel.cancel();
     assert!(stream.read(&mut [0; 1]).await.is_err());
     drop(stream);
@@ -397,11 +410,11 @@ async fn tls_validates_name_and_issuer_before_authentication() {
     ] {
         let mut value = options(addr);
         value["tls"] = json!({"server_name":name,"ca_pem":ca});
-        let outbound = GostRelayFactory.build(&value).unwrap();
+        let outbound = support::outbound(&GostRelayFactory, &value).unwrap();
         assert!(!outbound.capabilities().tcp_eof);
         let result = outbound.connect_tcp(&target(), &context()).await;
         if valid {
-            let mut stream = result.unwrap();
+            let mut stream = result.unwrap().stream;
             let mut bytes = [0; 8];
             stream.read_exact(&mut bytes).await.unwrap();
             assert_eq!(&bytes, b"verified");

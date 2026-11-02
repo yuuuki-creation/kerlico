@@ -5,8 +5,8 @@ use futures_util::{SinkExt, StreamExt};
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, StreamBody, combinators::UnsyncBoxBody};
 use hyper::body::Frame;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use kerlico_core::{AccessService, BoxStream, Error, InboundContext, Result};
+use hyper_util::rt::TokioIo;
+use kerlico_core::{BoxStream, Error, InboundContext, IngressBinding, Result};
 use std::{
     convert::Infallible,
     io,
@@ -20,6 +20,16 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 type Body = UnsyncBoxBody<Bytes, io::Error>;
 type Tasks = Arc<Mutex<JoinSet<Result<()>>>>;
+#[derive(Clone)]
+struct NodeExecutor(kerlico_core::NodeTasks);
+impl<F> hyper::rt::Executor<F> for NodeExecutor
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    fn execute(&self, future: F) {
+        let _ = self.0.spawn(future);
+    }
+}
 fn empty_body() -> Body {
     Empty::<Bytes>::new()
         .map_err(|never: Infallible| match never {})
@@ -47,13 +57,20 @@ fn upgrade(request: &Request<hyper::body::Incoming>) -> bool {
 }
 fn spawn(
     tasks: &Tasks,
+    owner: &kerlico_core::NodeTasks,
     future: impl std::future::Future<Output = Result<()>> + Send + 'static,
 ) -> bool {
     let Ok(mut tasks) = tasks.lock() else {
         return false;
     };
     while tasks.try_join_next().is_some() {}
-    tasks.spawn(future);
+    let Ok(task) = owner.spawn_tracked(future) else {
+        return false;
+    };
+    tasks.spawn(async move {
+        task.await
+            .unwrap_or(Err(Error::Protocol("VMess HTTP 任务异常退出")))
+    });
     true
 }
 struct TaskGuard(Tasks);
@@ -68,13 +85,14 @@ pub(crate) async fn serve(
     inner: BoxStream,
     transport: Transport,
     payload: Arc<Payload>,
-    access: Arc<dyn AccessService>,
+    access: IngressBinding,
     context: InboundContext,
 ) -> Result<()> {
     let tasks = Arc::new(Mutex::new(JoinSet::new()));
     let _guard = TaskGuard(tasks.clone());
     let all = tasks.clone();
     let cancel = context.cancel.clone();
+    let executor = NodeExecutor(context.tasks.clone());
     let idle = context.idle_timeout;
     let (activity, mut changed) = tokio::sync::watch::channel(tokio::time::Instant::now());
     let inner = ActiveIo { inner, activity };
@@ -89,7 +107,7 @@ pub(crate) async fn serve(
         }
     });
     let serving = async {
-        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+        hyper_util::server::conn::auto::Builder::new(executor)
             .serve_connection_with_upgrades(TokioIo::new(inner), service)
             .await
             .map_err(|_| Error::Protocol("VMess HTTP 载体失败"))?;
@@ -110,7 +128,7 @@ async fn handle(
     mut request: Request<hyper::body::Incoming>,
     transport: Transport,
     payload: Arc<Payload>,
-    access: Arc<dyn AccessService>,
+    access: IngressBinding,
     context: InboundContext,
     tasks: Tasks,
 ) -> Response<Body> {
@@ -163,7 +181,7 @@ async fn handle(
             }
             let accept = xray_transport::stream::accept_key_for(key);
             let upgraded = hyper::upgrade::on(&mut request);
-            if !spawn(&tasks, async move {
+            if !spawn(&tasks, &context.tasks.clone(), async move {
                 let _lease = lease;
                 let socket = upgraded
                     .await
@@ -205,7 +223,7 @@ async fn handle(
                 return empty(StatusCode::BAD_REQUEST);
             }
             let upgraded = hyper::upgrade::on(&mut request);
-            if !spawn(&tasks, async move {
+            if !spawn(&tasks, &context.tasks.clone(), async move {
                 let _lease = lease;
                 let socket = upgraded
                     .await
@@ -238,7 +256,7 @@ async fn handle(
             let (sender, receiver) = mpsc::channel(16);
             let body = StreamBody::new(ReceiverStream::new(receiver)).boxed_unsync();
             let (local, peer) = tokio::io::duplex(64 * 1024);
-            if !spawn(&tasks, async move {
+            if !spawn(&tasks, &context.tasks.clone(), async move {
                 let _lease = lease;
                 let run = payload.serve(Box::new(local), access, context.clone());
                 let bridge = grpc_bridge(request.into_body(), peer, sender);

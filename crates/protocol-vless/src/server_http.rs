@@ -5,8 +5,8 @@ use futures_util::{SinkExt, StreamExt};
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, StreamBody, combinators::UnsyncBoxBody};
 use hyper::body::Frame;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use kerlico_core::{AccessService, BoxStream, Error, InboundContext, Result};
+use hyper_util::rt::TokioIo;
+use kerlico_core::{BoxStream, Error, InboundContext, IngressBinding, Result};
 use rust_xhttp::session::{OpenDownload, PushResult, SessionConfig, SessionConn, SessionTable};
 use serde::Deserialize;
 use std::{
@@ -15,16 +15,33 @@ use std::{
     future::Future,
     io,
     pin::Pin,
-    sync::{Arc, Mutex, OnceLock,atomic::{AtomicBool,Ordering}},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
-    sync::{Semaphore, mpsc,watch},
+    sync::{Semaphore, mpsc, watch},
     task::JoinSet,
 };
 use tokio_stream::wrappers::ReceiverStream;
 type Body = UnsyncBoxBody<Bytes, io::Error>;
+
+#[cfg(test)]
+mod task_tests;
+
+#[derive(Clone)]
+struct NodeExecutor(kerlico_core::NodeTasks);
+impl<F> hyper::rt::Executor<F> for NodeExecutor
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    fn execute(&self, future: F) {
+        let _ = self.0.spawn(future);
+    }
+}
 
 #[derive(Deserialize, Default)]
 #[serde(untagged)]
@@ -142,21 +159,90 @@ impl Transport {
 
 #[derive(Clone)]
 struct Physical(Arc<PhysicalState>);
-struct PhysicalState {count:watch::Sender<usize>,failed:AtomicBool}
+struct PhysicalState {
+    count: watch::Sender<usize>,
+    failed: AtomicBool,
+}
 struct PhysicalLease(Physical);
 impl Physical {
-    fn new()->Self {let (count,_)=watch::channel(0);Self(Arc::new(PhysicalState {count,failed:AtomicBool::new(false)}))}
-    fn lease(&self)->PhysicalLease {self.0.count.send_modify(|count|*count+=1);PhysicalLease(self.clone())}
-    fn fail(&self){self.0.failed.store(true,Ordering::Release);}
-    async fn drained(&self)->Result<()> {let mut count=self.0.count.subscribe();loop {let active=*count.borrow_and_update();if active==0{break;}if count.changed().await.is_err(){break;}}if self.0.failed.load(Ordering::Acquire){Err(Error::Protocol("HTTP 升级会话失败"))}else{Ok(())}}
+    fn new() -> Self {
+        let (count, _) = watch::channel(0);
+        Self(Arc::new(PhysicalState {
+            count,
+            failed: AtomicBool::new(false),
+        }))
+    }
+    fn lease(&self) -> PhysicalLease {
+        self.0.count.send_modify(|count| *count += 1);
+        PhysicalLease(self.clone())
+    }
+    fn fail(&self) {
+        self.0.failed.store(true, Ordering::Release);
+    }
+    async fn drained(&self) -> Result<()> {
+        let mut count = self.0.count.subscribe();
+        loop {
+            let active = *count.borrow_and_update();
+            if active == 0 {
+                break;
+            }
+            if count.changed().await.is_err() {
+                break;
+            }
+        }
+        if self.0.failed.load(Ordering::Acquire) {
+            Err(Error::Protocol("HTTP 升级会话失败"))
+        } else {
+            Ok(())
+        }
+    }
 }
-impl Drop for PhysicalLease {fn drop(&mut self){self.0.0.count.send_modify(|count|*count=count.saturating_sub(1));}}
-struct ObservedIo {inner:BoxStream,activity:watch::Sender<tokio::time::Instant>}
-impl AsyncRead for ObservedIo {fn poll_read(self:Pin<&mut Self>,cx:&mut Context<'_>,out:&mut ReadBuf<'_>)->Poll<io::Result<()>> {let this=self.get_mut();let before=out.filled().len();let result=Pin::new(&mut this.inner).poll_read(cx,out);if matches!(result,Poll::Ready(Ok(())))&&out.filled().len()>before{this.activity.send_replace(tokio::time::Instant::now());}result}}
+impl Drop for PhysicalLease {
+    fn drop(&mut self) {
+        self.0
+            .0
+            .count
+            .send_modify(|count| *count = count.saturating_sub(1));
+    }
+}
+struct ObservedIo {
+    inner: BoxStream,
+    activity: watch::Sender<tokio::time::Instant>,
+}
+impl AsyncRead for ObservedIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = out.filled().len();
+        let result = Pin::new(&mut this.inner).poll_read(cx, out);
+        if matches!(result, Poll::Ready(Ok(()))) && out.filled().len() > before {
+            this.activity.send_replace(tokio::time::Instant::now());
+        }
+        result
+    }
+}
 impl AsyncWrite for ObservedIo {
-    fn poll_write(self:Pin<&mut Self>,cx:&mut Context<'_>,bytes:&[u8])->Poll<io::Result<usize>>{let this=self.get_mut();let result=Pin::new(&mut this.inner).poll_write(cx,bytes);if matches!(result,Poll::Ready(Ok(count)) if count>0){this.activity.send_replace(tokio::time::Instant::now());}result}
-    fn poll_flush(self:Pin<&mut Self>,cx:&mut Context<'_>)->Poll<io::Result<()>>{Pin::new(&mut self.get_mut().inner).poll_flush(cx)}
-    fn poll_shutdown(self:Pin<&mut Self>,cx:&mut Context<'_>)->Poll<io::Result<()>>{Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)}
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write(cx, bytes);
+        if matches!(result,Poll::Ready(Ok(count)) if count>0) {
+            this.activity.send_replace(tokio::time::Instant::now());
+        }
+        result
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
 }
 
 pub(crate) struct State {
@@ -176,10 +262,18 @@ impl State {
             input_budget: Arc::new(Semaphore::new(16 * 1024 * 1024)),
         })
     }
-    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+    fn spawn(
+        &self,
+        owner: &kerlico_core::NodeTasks,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) {
         if let Ok(mut tasks) = self.tasks.lock() {
             while tasks.try_join_next().is_some() {}
-            tasks.spawn(task);
+            if let Ok(task) = owner.spawn_tracked(task) {
+                tasks.spawn(async move {
+                    let _ = task.await;
+                });
+            }
         }
     }
     fn remove(&self, id: &str) {
@@ -193,35 +287,67 @@ impl State {
     fn table(
         self: &Arc<Self>,
         payload: Arc<Payload>,
-        access: Arc<dyn AccessService>,
-        context: InboundContext,
+        access: IngressBinding,
+        mut context: InboundContext,
     ) -> Arc<SessionTable> {
+        context.peer_lease = None;
+        context.peer_addr = None;
+        context.local_addr = None;
+        context.cancel = context.tasks.cancel().child_token();
         self.table.get_or_init(||{let limits=context.clone();let weak=Arc::downgrade(self);let handler:rust_xhttp::session::Handler=Arc::new(move |connection|{
-            let Some(state)=weak.upgrade() else{return};let Ok(lease)=context.stream_budget.try_acquire() else{return};let payload=payload.clone();let access=access.clone();let context=context.clone();
-            state.spawn(async move {let _lease=lease;let stream=SessionIo::new(connection);let _=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),result=payload.serve(Box::new(Plain(Box::new(stream))),access,context.clone())=>result};});
+            let Some(state)=weak.upgrade() else{return};let Ok(lease)=context.stream_budget.try_acquire() else{return};let payload=payload.clone();let access=access.clone();let mut context=context.clone();context.cancel=context.cancel.child_token();
+            state.spawn(&context.tasks.clone(),async move {let _lease=lease;let stream=SessionIo::new(connection);let _=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),result=payload.serve(Box::new(Plain(Box::new(stream))),access,context.clone())=>result};});
         });SessionTable::new(SessionConfig {max_sessions:limits.max_streams,max_pending_packets:32,max_pending_bytes:1024*1024,downlink_capacity:16,grace:limits.connect_timeout,..Default::default()},handler,Arc::new(rust_xhttp::metrics::Metrics::default()))}).clone()
     }
     pub async fn serve(
         self: Arc<Self>,
         stream: BoxStream,
         payload: Arc<Payload>,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
-        let idle=context.idle_timeout;let cancel=context.cancel.clone();let physical=Physical::new();let request_physical=physical.clone();let (activity,mut changes)=watch::channel(tokio::time::Instant::now());
-        let stream=ObservedIo {inner:stream,activity};
-        let service=hyper::service::service_fn(move |mut request:Request<hyper::body::Incoming>|{request.extensions_mut().insert(request_physical.clone());let state=self.clone();let payload=payload.clone();let access=access.clone();let context=context.clone();async move {Ok::<_,Infallible>(state.request(request,payload,access,context).await)}});
-        let builder=hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
-        let serving=async {builder.serve_connection_with_upgrades(TokioIo::new(stream),service).await.map_err(|_|Error::Protocol("HTTP 节点连接失败"))?;physical.drained().await};tokio::pin!(serving);
-        let timer=tokio::time::sleep(idle);tokio::pin!(timer);
-        loop {tokio::select! {_=cancel.cancelled()=>return Err(Error::Cancelled),r=&mut serving=>return r,_=&mut timer=>return Err(Error::Timeout),r=changes.changed()=>{if r.is_ok(){timer.as_mut().reset(*changes.borrow_and_update()+idle);}}}}
+        let idle = context.idle_timeout;
+        let cancel = context.cancel.clone();
+        let executor = NodeExecutor(context.tasks.clone());
+        let physical = Physical::new();
+        let request_physical = physical.clone();
+        let (activity, mut changes) = watch::channel(tokio::time::Instant::now());
+        let stream = ObservedIo {
+            inner: stream,
+            activity,
+        };
+        let service =
+            hyper::service::service_fn(move |mut request: Request<hyper::body::Incoming>| {
+                request.extensions_mut().insert(request_physical.clone());
+                let state = self.clone();
+                let payload = payload.clone();
+                let access = access.clone();
+                let context = context.clone();
+                async move {
+                    Ok::<_, Infallible>(state.request(request, payload, access, context).await)
+                }
+            });
+        let builder = hyper_util::server::conn::auto::Builder::new(executor);
+        let serving = async {
+            builder
+                .serve_connection_with_upgrades(TokioIo::new(stream), service)
+                .await
+                .map_err(|_| Error::Protocol("HTTP 节点连接失败"))?;
+            physical.drained().await
+        };
+        tokio::pin!(serving);
+        let timer = tokio::time::sleep(idle);
+        tokio::pin!(timer);
+        loop {
+            tokio::select! {_=cancel.cancelled()=>return Err(Error::Cancelled),r=&mut serving=>return r,_=&mut timer=>return Err(Error::Timeout),r=changes.changed()=>{if r.is_ok(){timer.as_mut().reset(*changes.borrow_and_update()+idle);}}}
+        }
     }
 
     pub(crate) async fn request<B>(
         self: Arc<Self>,
         mut request: Request<B>,
         payload: Arc<Payload>,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> Response<Body>
     where
@@ -286,9 +412,10 @@ impl State {
                 let Ok(lease) = context.stream_budget.try_acquire() else {
                     return empty(StatusCode::TOO_MANY_REQUESTS);
                 };
-                let physical=request.extensions().get::<Physical>().cloned();let tracked=physical.as_ref().map(Physical::lease);
+                let physical = request.extensions().get::<Physical>().cloned();
+                let tracked = physical.as_ref().map(Physical::lease);
                 let upgrade = hyper::upgrade::on(&mut request);
-                self.spawn(async move {let _lease=lease;let _tracked=tracked;if let Ok(io)=upgrade.await {
+                self.spawn(&context.tasks.clone(), async move {let _lease=lease;let _tracked=tracked;if let Ok(io)=upgrade.await {
                     let mut config=tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();config.max_message_size=Some(1024*1024);config.max_frame_size=Some(1024*1024);config.write_buffer_size=8192;config.max_write_buffer_size=65536;
                     let websocket=tokio_tungstenite::WebSocketStream::from_raw_socket(TokioIo::new(io),tokio_tungstenite::tungstenite::protocol::Role::Server,Some(config)).await;
                     let (local,peer)=tokio::io::duplex(64*1024);let running=payload.serve(Box::new(Plain(Box::new(local))),access,context.clone());let bridge=websocket_bridge(websocket,peer,early,context.clone());let result=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),result=async{tokio::try_join!(running,bridge).map(|_|())}=>result};if result.is_err()&&let Some(physical)=&physical{physical.fail();}
@@ -308,9 +435,26 @@ impl State {
                 let Ok(lease) = context.stream_budget.try_acquire() else {
                     return empty(StatusCode::TOO_MANY_REQUESTS);
                 };
-                let physical=request.extensions().get::<Physical>().cloned();let tracked=physical.as_ref().map(Physical::lease);
-                let upgrade=hyper::upgrade::on(&mut request);
-                self.spawn(async move {let _lease=lease;let _tracked=tracked;let result=match upgrade.await {Ok(io)=>payload.serve(Box::new(Plain(Box::new(TokioIo::new(io)))),access,context).await,Err(_)=>Err(Error::Protocol("HTTPUpgrade 升级失败"))};if result.is_err()&&let Some(physical)=physical{physical.fail();}});
+                let physical = request.extensions().get::<Physical>().cloned();
+                let tracked = physical.as_ref().map(Physical::lease);
+                let upgrade = hyper::upgrade::on(&mut request);
+                self.spawn(&context.tasks.clone(), async move {
+                    let _lease = lease;
+                    let _tracked = tracked;
+                    let result = match upgrade.await {
+                        Ok(io) => {
+                            payload
+                                .serve(Box::new(Plain(Box::new(TokioIo::new(io)))), access, context)
+                                .await
+                        }
+                        Err(_) => Err(Error::Protocol("HTTPUpgrade 升级失败")),
+                    };
+                    if result.is_err()
+                        && let Some(physical) = physical
+                    {
+                        physical.fail();
+                    }
+                });
                 Response::builder()
                     .status(StatusCode::SWITCHING_PROTOCOLS)
                     .header("upgrade", "websocket")
@@ -406,7 +550,7 @@ impl State {
                     };
                     let (sender, body) = body_channel();
                     let weak = Arc::downgrade(&self);
-                    self.spawn(async move {
+                    self.spawn(&context.tasks.clone(), async move {
                         let _cleanup = SessionGuard { state: weak, id };
                         while let Some(bytes) = reader.recv().await {
                             if sender.send(Ok(Frame::data(bytes))).await.is_err() {
@@ -438,7 +582,7 @@ impl State {
                     let mut body = request.into_body();
                     let table = table.clone();
                     let context = context.clone();
-                    self.spawn(async move {
+                    self.spawn(&context.tasks.clone(), async move {
                         let _hold = hold;
                         let mut sequence = 0u64;
                         while let Some(frame) = body.frame().await {
@@ -474,7 +618,7 @@ impl State {
         self: &Arc<Self>,
         body: B,
         payload: Arc<Payload>,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
         grpc: Option<bool>,
     ) -> Response<Body>
@@ -487,7 +631,7 @@ impl State {
         };
         let (sender, response_body) = body_channel();
         let (local, peer) = tokio::io::duplex(64 * 1024);
-        self.spawn(async move {let _lease=lease;let running=payload.serve(Box::new(Plain(Box::new(local))),access,context.clone());let bridge=http_bridge(body,peer,sender,grpc);let _=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),r=async {tokio::try_join!(running,bridge).map(|_|())}=>r};});
+        self.spawn(&context.tasks.clone(), async move {let _lease=lease;let running=payload.serve(Box::new(Plain(Box::new(local))),access,context.clone());let bridge=http_bridge(body,peer,sender,grpc);let _=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),r=async {tokio::try_join!(running,bridge).map(|_|())}=>r};});
         response(response_body, grpc.is_some())
     }
 }

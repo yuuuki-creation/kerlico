@@ -1,6 +1,6 @@
 //! 有界流桥；关闭写端保留读取，释放整个对象才取消双向任务。
 use futures_util::task::AtomicWaker;
-use kerlico_core::{BoxStream, CancellationToken};
+use kerlico_core::{BoxStream, CancellationToken, Result};
 use std::{
     future::Future,
     io,
@@ -166,10 +166,11 @@ impl AsyncWrite for Managed {
     }
 }
 pub(crate) fn spawn<F, Fut>(
+    owner: &crate::runtime::BridgeOwner,
     parent: CancellationToken,
     hold: Option<Box<dyn Send + Sync>>,
     task: F,
-) -> BoxStream
+) -> Result<BoxStream>
 where
     F: FnOnce(DuplexStream, ReadCompletion) -> Fut + Send + 'static,
     Fut: Future<Output = io::Result<()>> + Send + 'static,
@@ -188,17 +189,23 @@ where
     let worker_cancel = cancel.clone();
     let worker_completion = ReadCompletion(completion.clone());
     let read_completion = worker_completion.clone();
-    tokio::spawn(async move {
-        let result = tokio::select! { biased; _=worker_cancel.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"Naive流已取消")), result=task(peer,read_completion)=>result };
+    let owner_cancel = owner.cancel();
+    let stream_cancel = cancel.clone();
+    owner.spawn(async move {
+        let result = tokio::select! { biased;
+            _=owner_cancel.cancelled()=>{stream_cancel.cancel(); Err(io::Error::new(io::ErrorKind::ConnectionAborted,"Naive所属运行服务已关闭"))},
+            _=worker_cancel.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"Naive流已取消")),
+            result=task(peer,read_completion)=>result
+        };
         worker_completion.finish_read(&result);
         worker_completion.finish_write(&result);
-    });
-    Box::new(Managed {
+    })?;
+    Ok(Box::new(Managed {
         inner,
         cancel,
         completion,
         _hold: hold,
-    })
+    }))
 }
 pub(crate) fn failed() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "Naive 载体或分帧不合法")
@@ -213,7 +220,10 @@ mod tests {
         let reverse = Arc::new(tokio::sync::Notify::new());
         let worker_drain = drain.clone();
         let worker_reverse = reverse.clone();
+        let bridges = crate::runtime::ServiceBridges::new(kerlico_core::ServiceContext::for_test());
+        let owner = crate::runtime::BridgeOwner::Service(bridges.clone());
         let mut stream = spawn(
+            &owner,
             CancellationToken::new(),
             None,
             move |peer, complete| async move {
@@ -239,7 +249,8 @@ mod tests {
                 tokio::try_join!(incoming, outgoing)?;
                 Ok(())
             },
-        );
+        )
+        .unwrap();
         stream.write_all(b"queued").await.unwrap();
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), stream.shutdown())
@@ -261,6 +272,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(bytes, b"tail");
+        bridges.shutdown().await.unwrap();
     }
 }
 #[cfg(test)]
@@ -271,7 +283,10 @@ mod flush_tests {
     async fn flush_waits_until_encoder_accepts_all_prior_bytes() {
         let release = Arc::new(tokio::sync::Notify::new());
         let worker_release = release.clone();
+        let bridges = crate::runtime::ServiceBridges::new(kerlico_core::ServiceContext::for_test());
+        let owner = crate::runtime::BridgeOwner::Service(bridges.clone());
         let mut stream = spawn(
+            &owner,
             CancellationToken::new(),
             None,
             move |mut peer, progress| async move {
@@ -282,7 +297,8 @@ mod flush_tests {
                 progress.advance_write(3);
                 std::future::pending::<io::Result<()>>().await
             },
-        );
+        )
+        .unwrap();
         stream.write_all(b"abc").await.unwrap();
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), stream.flush())
@@ -294,6 +310,7 @@ mod flush_tests {
             .await
             .unwrap()
             .unwrap();
+        bridges.shutdown().await.unwrap();
     }
 }
 #[cfg(test)]
@@ -303,10 +320,13 @@ mod cancel_tests {
     #[tokio::test]
     async fn pending_read_and_next_write_report_permanent_cancellation() {
         let cancel = CancellationToken::new();
-        let mut stream = spawn(cancel.clone(), None, |peer, _| async move {
+        let bridges = crate::runtime::ServiceBridges::new(kerlico_core::ServiceContext::for_test());
+        let owner = crate::runtime::BridgeOwner::Service(bridges.clone());
+        let mut stream = spawn(&owner, cancel.clone(), None, |peer, _| async move {
             let _peer = peer;
             std::future::pending::<io::Result<()>>().await
-        });
+        })
+        .unwrap();
         let trigger = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             cancel.cancel();
@@ -321,5 +341,118 @@ mod cancel_tests {
             io::ErrorKind::ConnectionAborted
         );
         trigger.await.unwrap();
+        bridges.shutdown().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use crate::runtime::{BridgeOwner, NodeRuntime, ServiceBridges};
+    use kerlico_core::ServiceContext;
+    use tokio::{
+        io::AsyncReadExt,
+        net::{TcpListener, TcpStream},
+        task::JoinSet,
+    };
+
+    struct Dropped(Arc<AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    async fn live_bridge(owner: &BridgeOwner) -> (BoxStream, TcpStream, Arc<AtomicBool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let marker = Dropped(dropped.clone());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let stream = spawn(
+            owner,
+            CancellationToken::new(),
+            None,
+            move |mut local, _| async move {
+                let _marker = marker;
+                started.send(()).unwrap();
+                tokio::io::copy_bidirectional(&mut socket, &mut local).await?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        ready.await.unwrap();
+        (stream, peer, dropped)
+    }
+
+    #[tokio::test]
+    async fn service_shutdown_joins_socket_bridge_with_retained_stream() {
+        let host = ServiceContext::for_test();
+        let bridges = ServiceBridges::new(host.clone());
+        let owner = BridgeOwner::Service(bridges.clone());
+        let (mut stream, mut peer, dropped) = live_bridge(&owner).await;
+        bridges.shutdown().await.unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(
+            peer.read_u8().await.unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(
+            stream.read_u8().await.unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert!(
+            spawn(&owner, CancellationToken::new(), None, |_, _| async {
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(
+            host.shutdown(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+                .await
+                .is_clean()
+        );
+    }
+
+    #[tokio::test]
+    async fn node_shutdown_joins_socket_bridge_without_cancelling_other_node() {
+        let parent = CancellationToken::new();
+        let first = NodeRuntime::new(
+            &parent,
+            kerlico_core::NodeTasks::new(
+                kerlico_core::NodeId::parse("test-node").unwrap(),
+                parent.child_token(),
+            ),
+        );
+        let second = NodeRuntime::new(
+            &parent,
+            kerlico_core::NodeTasks::new(
+                kerlico_core::NodeId::parse("test-node").unwrap(),
+                parent.child_token(),
+            ),
+        );
+        let (mut stream, mut peer, dropped) = live_bridge(&BridgeOwner::Node(first.clone())).await;
+        first
+            .shutdown(None, &mut JoinSet::new(), std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(!parent.is_cancelled());
+        assert!(!second.cancel().is_cancelled());
+        assert_eq!(
+            peer.read_u8().await.unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(
+            stream.read_u8().await.unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        second
+            .shutdown(None, &mut JoinSet::new(), std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
     }
 }

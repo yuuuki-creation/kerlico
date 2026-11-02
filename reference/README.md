@@ -1,6 +1,6 @@
 # VPN 内核参考调研
 
-本目录保存 mihomo、sing-box、Xray-core 的参考证据。上游能力、kerlico 实现与验证状态分别记录；当前已进入框架与 VLESS 开发，进度见 [STATUS.md](../STATUS.md)，真实接口见[实现文档](../docs/interfaces/README.md)。
+本目录保存mihomo、sing-box、Xray-core的参考证据。上游能力、kerlico实现与验证状态分别记录；当前代码保留停止快照，正在同步架构及统计设计，见[STATUS](../STATUS.md)与[实际接口](../docs/interfaces/README.md)。
 
 调研日期：**2026-10-30，Asia/Shanghai**。集中支持调研为静态源码与文档核验；后续普通 VLESS 的实际构建和互通另见[验证记录](../docs/testing/vless-ordinary-flow.md)，不覆盖其余组合或完整系统 VPN。
 
@@ -14,6 +14,7 @@
 | [mihomo 独立记录](research_notes/Rust%20VPN%20内核参考调研/mihomo.md) | 元数据、TCP/UDP 调度、策略组/provider、DNS、TUN、配置应用与 API |
 | [sing-box 独立记录](research_notes/Rust%20VPN%20内核参考调研/sing-box.md) | 注册与生命周期、路由动作、DNS 演进、TUN/宿主边界、配置与控制接口 |
 | [Xray-core 独立记录](research_notes/Rust%20VPN%20内核参考调研/xray.md) | Feature/Dispatcher、协议与传输分层、会话目标、原生 TUN、动态 API |
+| [Xray用户统计与访问记录](research_notes/xray-statistics-and-access.md) | v26.10.31固定源码的日志、用量、在线、查询及保存边界，与kerlico统计目标的区别 |
 
 ## 本轮固定基线
 
@@ -31,7 +32,7 @@
 
 本目录保存上游证据与分析；本项目自己的设计放在 [docs](../docs/README.md)，项目进度放在 [STATUS.md](../STATUS.md)。具体维护方式见[文档与资料约定](../docs/repository-workflow.md)。
 
-用户已按[0002 当前流程](../docs/decisions/0002-support-catalog-before-implementation.md)明确要求先集中形成支持总表；随后框架先行、逐项实现，开工前仍补齐具体规范/依赖与验证研究。原有整体架构记录保留，总表和新证据不覆盖历史报告。
+用户曾按[0002](../docs/decisions/0002-support-catalog-before-implementation.md)要求集中形成总表，首轮编码和验证顺序后来由[0007](../docs/decisions/0007-protocol-development-cycle.md)调整。恢复实现前仍补齐具体规范、依赖及验证研究。原有架构记录与固定基线保留，总表和新证据不覆盖历史报告。
 
 更新资料时记录日期、发行标签和完整提交号；代码引用固定到 SHA，并单独标注滚动文档的版本与访问边界。保留来源不一致和未验证项，清楚区分**源码事实、研究推论、待决问题**。
 

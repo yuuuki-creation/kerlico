@@ -3,7 +3,10 @@ use super::{
     layout::{Layout, Mode},
 };
 use kerlico_core::{Error, Result};
-use rand::{Rng, distributions::{Distribution, Uniform}};
+use rand::{
+    Rng,
+    distributions::{Distribution, Uniform},
+};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, OnceLock};
 
@@ -43,10 +46,30 @@ const AMBIGUOUS: u16 = u16::MAX - 1;
 
 // S4的全部24排列。一次均匀选[0,24*n)与独立选n个puzzle及均匀Shuffle4等价。
 const PERMUTATIONS: [[u8; 4]; 24] = [
-    [0,1,2,3], [0,1,3,2], [0,2,1,3], [0,2,3,1], [0,3,1,2], [0,3,2,1],
-    [1,0,2,3], [1,0,3,2], [1,2,0,3], [1,2,3,0], [1,3,0,2], [1,3,2,0],
-    [2,0,1,3], [2,0,3,1], [2,1,0,3], [2,1,3,0], [2,3,0,1], [2,3,1,0],
-    [3,0,1,2], [3,0,2,1], [3,1,0,2], [3,1,2,0], [3,2,0,1], [3,2,1,0],
+    [0, 1, 2, 3],
+    [0, 1, 3, 2],
+    [0, 2, 1, 3],
+    [0, 2, 3, 1],
+    [0, 3, 1, 2],
+    [0, 3, 2, 1],
+    [1, 0, 2, 3],
+    [1, 0, 3, 2],
+    [1, 2, 0, 3],
+    [1, 2, 3, 0],
+    [1, 3, 0, 2],
+    [1, 3, 2, 0],
+    [2, 0, 1, 3],
+    [2, 0, 3, 1],
+    [2, 1, 0, 3],
+    [2, 1, 3, 0],
+    [2, 3, 0, 1],
+    [2, 3, 1, 0],
+    [3, 0, 1, 2],
+    [3, 0, 2, 1],
+    [3, 1, 0, 2],
+    [3, 1, 2, 0],
+    [3, 2, 0, 1],
+    [3, 2, 1, 0],
 ];
 
 const fn coefficients() -> [[usize; 4]; 64] {
@@ -56,7 +79,11 @@ const fn coefficients() -> [[usize; 4]; 64] {
         let mut count = 1;
         let mut choose = 1;
         while count <= 4 {
-            choose = if count > number { 0 } else { choose * (number - count + 1) / count };
+            choose = if count > number {
+                0
+            } else {
+                choose * (number - count + 1) / count
+            };
             result[number][count - 1] = choose;
             count += 1;
         }
@@ -128,7 +155,9 @@ impl GridOrder {
             });
             // n最多为16选4=1820，24*n最多43680。空表仍由Pair检查拒绝，
             // 这里用一个不会被有效Table访问的非空占位区间避免初始化时panic。
-            order.choices.push(Uniform::new(0u32, (puzzles.len().max(1) * 24) as u32));
+            order
+                .choices
+                .push(Uniform::new(0u32, (puzzles.len().max(1) * 24) as u32));
             order.clues.push(puzzles);
         }
         order
@@ -144,9 +173,11 @@ fn for_each_puzzle(grid: &Grid, mut visit: impl FnMut([u8; 4])) {
         for b in a + 1..14 {
             for c in b + 1..15 {
                 for d in c + 1..16 {
-                    visit([a, b, c, d].map(|position| {
-                        ((position << 2) | (grid[position] as usize - 1)) as u8
-                    }));
+                    visit(
+                        [a, b, c, d].map(|position| {
+                            ((position << 2) | (grid[position] as usize - 1)) as u8
+                        }),
+                    );
                 }
             }
         }
@@ -161,8 +192,12 @@ pub(crate) struct Table {
 }
 impl Table {
     fn new(layout: Layout, order: Arc<GridOrder>) -> Self {
-        let wire_hints = std::array::from_fn(|hint|layout.hints[hint & 3][hint >> 2]);
-        Self { layout, order, wire_hints }
+        let wire_hints = std::array::from_fn(|hint| layout.hints[hint & 3][hint >> 2]);
+        Self {
+            layout,
+            order,
+            wire_hints,
+        }
     }
     pub fn decode(&self, clues: [u8; 4]) -> Result<u8> {
         self.order.decode(clues).ok_or_else(crate::invalid)
@@ -172,14 +207,22 @@ impl Table {
     }
     pub fn puzzle(&self, byte: u8, index: usize) -> [u8; 4] {
         let hints = self.order.clues[byte as usize][index];
-        [self.wire_hints[hints[0] as usize], self.wire_hints[hints[1] as usize],
-         self.wire_hints[hints[2] as usize], self.wire_hints[hints[3] as usize]]
+        [
+            self.wire_hints[hints[0] as usize],
+            self.wire_hints[hints[1] as usize],
+            self.wire_hints[hints[2] as usize],
+            self.wire_hints[hints[3] as usize],
+        ]
     }
     fn choice(&self, byte: u8, choice: u32) -> [u8; 4] {
         let puzzle = self.puzzle(byte, (choice / 24) as usize);
         let permutation = PERMUTATIONS[(choice % 24) as usize];
-        [puzzle[permutation[0] as usize], puzzle[permutation[1] as usize],
-         puzzle[permutation[2] as usize], puzzle[permutation[3] as usize]]
+        [
+            puzzle[permutation[0] as usize],
+            puzzle[permutation[1] as usize],
+            puzzle[permutation[2] as usize],
+            puzzle[permutation[3] as usize],
+        ]
     }
     pub fn randomized_puzzle<R: Rng + ?Sized>(&self, byte: u8, random: &mut R) -> [u8; 4] {
         let choice = self.order.choices[byte as usize].sample(random);
@@ -210,13 +253,19 @@ impl Pair {
         .join("\0");
         let hash = Sha256::digest(hint_input.as_bytes());
         let hint = u32::from_be_bytes(hash[..4].try_into().unwrap());
-        let up = Arc::new(Table::new(Layout::new(mode.ascii(true), up_pattern)?, order.clone()));
+        let up = Arc::new(Table::new(
+            Layout::new(mode.ascii(true), up_pattern)?,
+            order.clone(),
+        ));
         let down = if mode.ascii(true) == mode.ascii(false) {
             up.clone()
         } else {
-            Arc::new(Table::new(Layout::new(mode.ascii(false), down_pattern)?, order))
+            Arc::new(Table::new(
+                Layout::new(mode.ascii(false), down_pattern)?,
+                order,
+            ))
         };
-        if (0..=255).any(|byte|up.puzzle_count(byte) == 0) {
+        if (0..=255).any(|byte| up.puzzle_count(byte) == 0) {
             return Err(Error::Protocol("Sudoku表生成缺少唯一编码"));
         }
         Ok(Self { up, down, hint })
@@ -242,31 +291,61 @@ mod tests {
         let oracle = |hints: [u8; 4]| {
             let mut selected = None;
             for (word, _) in sets[0].iter().enumerate() {
-                let intersection = hints.iter().fold(u64::MAX, |set, &hint| set & sets[hint as usize][word]);
-                if intersection == 0 { continue; }
-                if selected.is_some() || intersection.count_ones() != 1 { return None; }
+                let intersection = hints
+                    .iter()
+                    .fold(u64::MAX, |set, &hint| set & sets[hint as usize][word]);
+                if intersection == 0 {
+                    continue;
+                }
+                if selected.is_some() || intersection.count_ones() != 1 {
+                    return None;
+                }
                 let rank = word * 64 + intersection.trailing_zeros() as usize;
-                if rank >= 256 { return None; }
+                if rank >= 256 {
+                    return None;
+                }
                 selected = Some(rank as u8);
             }
             selected
         };
         let mut visited = vec![false; CLUE_SETS];
-        for a in 0u8..61 { for b in a+1..62 { for c in b+1..63 { for d in c+1..64 {
-            let hints = [a,b,c,d];
-            let index = sorted_rank(hints);
-            assert!(!visited[index]);visited[index] = true;
-            assert_eq!(order.decode(hints), oracle(hints), "hints={hints:?}");
-        }}}}
+        for a in 0u8..61 {
+            for b in a + 1..62 {
+                for c in b + 1..63 {
+                    for d in c + 1..64 {
+                        let hints = [a, b, c, d];
+                        let index = sorted_rank(hints);
+                        assert!(!visited[index]);
+                        visited[index] = true;
+                        assert_eq!(order.decode(hints), oracle(hints), "hints={hints:?}");
+                    }
+                }
+            }
+        }
         assert!(visited.into_iter().all(|value| value));
         for (value, puzzles) in order.clues.iter().enumerate() {
             let hints = puzzles[0];
-            for a in 0..4 { for b in 0..4 { for c in 0..4 { for d in 0..4 {
-                if a == b || a == c || a == d || b == c || b == d || c == d { continue; }
-                assert_eq!(order.decode([hints[a],hints[b],hints[c],hints[d]]), Some(value as u8));
-            }}}}
-            assert!(order.decode([hints[0],hints[0],hints[2],hints[3]]).is_none());
-            assert!(order.decode([64,hints[1],hints[2],hints[3]]).is_none());
+            for a in 0..4 {
+                for b in 0..4 {
+                    for c in 0..4 {
+                        for d in 0..4 {
+                            if a == b || a == c || a == d || b == c || b == d || c == d {
+                                continue;
+                            }
+                            assert_eq!(
+                                order.decode([hints[a], hints[b], hints[c], hints[d]]),
+                                Some(value as u8)
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(
+                order
+                    .decode([hints[0], hints[0], hints[2], hints[3]])
+                    .is_none()
+            );
+            assert!(order.decode([64, hints[1], hints[2], hints[3]]).is_none());
         }
     }
 
@@ -314,87 +393,147 @@ mod tests {
 #[cfg(test)]
 mod joint_sampling_tests {
     use super::*;
-    use std::collections::BTreeSet;
     use rand::RngCore;
+    use std::collections::BTreeSet;
 
     #[test]
     fn joint_uniform_index_is_the_product_of_every_puzzle_and_shuffle4() {
-        let mut original=BTreeSet::new();
-        for third in 0..4 {for second in 0..3 {for first in 0..2 {
-            let mut permutation=[0u8,1,2,3];permutation.swap(3,third);permutation.swap(2,second);permutation.swap(1,first);
-            assert!(original.insert(permutation));
-        }}}
-        let selected:BTreeSet<_>=PERMUTATIONS.into_iter().collect();
-        assert_eq!(original.len(),24);assert_eq!(selected.len(),24);assert_eq!(selected,original);
-        for count in [1usize,2,1820] {
-            let mut per_puzzle=vec![0usize;count];let mut per_permutation=[0usize;24];let mut pairs=BTreeSet::new();
-            for choice in 0..count*24 {
-                let puzzle=choice/24;let permutation=choice%24;
-                assert!(pairs.insert((puzzle,PERMUTATIONS[permutation])));
-                per_puzzle[puzzle]+=1;per_permutation[permutation]+=1;
+        let mut original = BTreeSet::new();
+        for third in 0..4 {
+            for second in 0..3 {
+                for first in 0..2 {
+                    let mut permutation = [0u8, 1, 2, 3];
+                    permutation.swap(3, third);
+                    permutation.swap(2, second);
+                    permutation.swap(1, first);
+                    assert!(original.insert(permutation));
+                }
             }
-            assert_eq!(pairs.len(),count*24);assert!(per_puzzle.into_iter().all(|n|n==24));assert!(per_permutation.into_iter().all(|n|n==count));
+        }
+        let selected: BTreeSet<_> = PERMUTATIONS.into_iter().collect();
+        assert_eq!(original.len(), 24);
+        assert_eq!(selected.len(), 24);
+        assert_eq!(selected, original);
+        for count in [1usize, 2, 1820] {
+            let mut per_puzzle = vec![0usize; count];
+            let mut per_permutation = [0usize; 24];
+            let mut pairs = BTreeSet::new();
+            for choice in 0..count * 24 {
+                let puzzle = choice / 24;
+                let permutation = choice % 24;
+                assert!(pairs.insert((puzzle, PERMUTATIONS[permutation])));
+                per_puzzle[puzzle] += 1;
+                per_permutation[permutation] += 1;
+            }
+            assert_eq!(pairs.len(), count * 24);
+            assert!(per_puzzle.into_iter().all(|n| n == 24));
+            assert!(per_permutation.into_iter().all(|n| n == count));
         }
     }
 
     #[test]
     fn cached_hint_mapping_preserves_every_puzzle_and_all_shuffle_choices() {
-        let order=Arc::new(GridOrder::new("synthetic-joint-choice-layouts"));
-        for mode in [Mode::Ascii,Mode::Entropy,Mode::AsciiUp,Mode::EntropyUp] {
-            for pattern in ["","xpxvvpvv","vxpvxvvp"] {
-                let pair=Pair::new("synthetic-joint-choice-layouts",mode,pattern,order.clone()).unwrap();
-                let mut tables=vec![pair.up.clone()];if !Arc::ptr_eq(&pair.up,&pair.down){tables.push(pair.down.clone());}
-                for table in tables {for byte in 0..=255u8 {
-                    let count=table.puzzle_count(byte);assert!((1..=1820).contains(&count));
-                    for index in 0..count {
-                        let hints=order.clues[byte as usize][index];
-                        let original=hints.map(|hint|table.layout.hints[(hint&3) as usize][(hint>>2) as usize]);
-                        assert_eq!(table.puzzle(byte,index),original);
-                        let roundtrip=original.map(|wire|table.layout.hint_index[wire as usize].unwrap());
-                        assert_eq!(table.decode(roundtrip).unwrap(),byte);
-                        // 默认双布局逐puzzle穷举24排列；自定义/方向布局穷举所有
-                        // canonical映射及每字节首puzzle的24排列，组合定律另独立验证。
-                        let exhaustive=pattern.is_empty() && matches!(mode,Mode::Ascii|Mode::Entropy);
-                        if exhaustive || index==0 {
-                            for (permutation,indices) in PERMUTATIONS.iter().enumerate() {
-                                let expected=indices.map(|position|original[position as usize]);
-                                let encoded=table.choice(byte,(index*24+permutation) as u32);
-                                assert_eq!(encoded,expected);
-                                if index==0 {
-                                    let hints=encoded.map(|wire|table.layout.hint_index[wire as usize].unwrap());
-                                    assert_eq!(table.decode(hints).unwrap(),byte);
+        let order = Arc::new(GridOrder::new("synthetic-joint-choice-layouts"));
+        for mode in [Mode::Ascii, Mode::Entropy, Mode::AsciiUp, Mode::EntropyUp] {
+            for pattern in ["", "xpxvvpvv", "vxpvxvvp"] {
+                let pair = Pair::new(
+                    "synthetic-joint-choice-layouts",
+                    mode,
+                    pattern,
+                    order.clone(),
+                )
+                .unwrap();
+                let mut tables = vec![pair.up.clone()];
+                if !Arc::ptr_eq(&pair.up, &pair.down) {
+                    tables.push(pair.down.clone());
+                }
+                for table in tables {
+                    for byte in 0..=255u8 {
+                        let count = table.puzzle_count(byte);
+                        assert!((1..=1820).contains(&count));
+                        for index in 0..count {
+                            let hints = order.clues[byte as usize][index];
+                            let original = hints.map(|hint| {
+                                table.layout.hints[(hint & 3) as usize][(hint >> 2) as usize]
+                            });
+                            assert_eq!(table.puzzle(byte, index), original);
+                            let roundtrip = original
+                                .map(|wire| table.layout.hint_index[wire as usize].unwrap());
+                            assert_eq!(table.decode(roundtrip).unwrap(), byte);
+                            let exhaustive =
+                                pattern.is_empty() && matches!(mode, Mode::Ascii | Mode::Entropy);
+                            if exhaustive || index == 0 {
+                                for (permutation, indices) in PERMUTATIONS.iter().enumerate() {
+                                    let expected =
+                                        indices.map(|position| original[position as usize]);
+                                    let encoded =
+                                        table.choice(byte, (index * 24 + permutation) as u32);
+                                    assert_eq!(encoded, expected);
+                                    if index == 0 {
+                                        let hints = encoded.map(|wire| {
+                                            table.layout.hint_index[wire as usize].unwrap()
+                                        });
+                                        assert_eq!(table.decode(hints).unwrap(), byte);
+                                    }
                                 }
                             }
                         }
                     }
-                }}
+                }
             }
         }
     }
 
     #[derive(Default)]
-    struct MaximumWords { u32_calls:usize, u64_calls:usize }
+    struct MaximumWords {
+        u32_calls: usize,
+        u64_calls: usize,
+    }
     impl RngCore for MaximumWords {
-        fn next_u32(&mut self)->u32{self.u32_calls+=1;u32::MAX}
-        fn next_u64(&mut self)->u64{self.u64_calls+=1;u64::MAX}
-        fn fill_bytes(&mut self,output:&mut[u8]){for byte in output{*byte=0xff;}}
-        fn try_fill_bytes(&mut self,output:&mut[u8])->std::result::Result<(),rand::Error>{self.fill_bytes(output);Ok(())}
+        fn next_u32(&mut self) -> u32 {
+            self.u32_calls += 1;
+            u32::MAX
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.u64_calls += 1;
+            u64::MAX
+        }
+        fn fill_bytes(&mut self, output: &mut [u8]) {
+            for byte in output {
+                *byte = 0xff;
+            }
+        }
+        fn try_fill_bytes(&mut self, output: &mut [u8]) -> std::result::Result<(), rand::Error> {
+            self.fill_bytes(output);
+            Ok(())
+        }
     }
     #[test]
     fn cached_u32_sampler_covers_last_choice_with_bounded_cache_memory() {
-        let order=Arc::new(GridOrder::new("synthetic-joint-u32-sampler"));
-        let pair=Pair::new("synthetic-joint-u32-sampler",Mode::Entropy,"",order.clone()).unwrap();
-        assert_eq!(order.choices.len(),256);
+        let order = Arc::new(GridOrder::new("synthetic-joint-u32-sampler"));
+        let pair = Pair::new(
+            "synthetic-joint-u32-sampler",
+            Mode::Entropy,
+            "",
+            order.clone(),
+        )
+        .unwrap();
+        assert_eq!(order.choices.len(), 256);
         // sampler无堆分配；不存储puzzle×24展开表，新增每GridOrder至多4KiB。
-        assert!(std::mem::size_of::<Uniform<u32>>()<=16);
-        assert_eq!(std::mem::size_of_val(&pair.up.wire_hints),64);
-        assert_eq!(std::mem::size_of_val(&PERMUTATIONS),96);
-        let mut random=MaximumWords::default();
+        assert!(std::mem::size_of::<Uniform<u32>>() <= 16);
+        assert_eq!(std::mem::size_of_val(&pair.up.wire_hints), 64);
+        assert_eq!(std::mem::size_of_val(&PERMUTATIONS), 96);
+        let mut random = MaximumWords::default();
         for byte in 0..=255u8 {
-            let total=pair.up.puzzle_count(byte)*24;assert!((24..=43680).contains(&total));
-            assert_eq!(pair.up.randomized_puzzle(byte,&mut random),pair.up.choice(byte,total as u32-1));
+            let total = pair.up.puzzle_count(byte) * 24;
+            assert!((24..=43680).contains(&total));
+            assert_eq!(
+                pair.up.randomized_puzzle(byte, &mut random),
+                pair.up.choice(byte, total as u32 - 1)
+            );
         }
         // 最大u32在这些边界不会触发拒绝采样；每次仅取一个u32，不走usize/u64路径。
-        assert_eq!(random.u32_calls,256);assert_eq!(random.u64_calls,0);
+        assert_eq!(random.u32_calls, 256);
+        assert_eq!(random.u64_calls, 0);
     }
 }

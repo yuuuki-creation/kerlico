@@ -1,5 +1,8 @@
 //! 带取消与空闲预算的双向流转发，保留半关闭后的反向数据。
-use crate::{BoxStream, CancellationToken, Error, Result};
+use crate::{
+    BoxStream, CancellationToken, Error, FlowFailure, FlowOutcome, IoStream, Result, TcpFlow,
+    TcpFlowIo,
+};
 use std::{
     pin::Pin,
     task::{Context, Poll},
@@ -18,7 +21,43 @@ use tokio::{
 /// 最终目标是否收到半关闭取决于载体及出站能力，不能由此函数单独保证。
 pub async fn relay_tcp(
     a: BoxStream,
-    b: BoxStream,
+    b: TcpFlow,
+    idle_timeout: Duration,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let (mut io, completion) = b.into_parts();
+    let result = relay_tcp_io(a, &mut io, idle_timeout, cancel).await;
+    completion.finish(match &result {
+        Ok(()) => FlowOutcome::DuplexEof,
+        Err(error) => FlowOutcome::Failed(FlowFailure::from_error(error)),
+    });
+    result
+}
+
+/// 借用已拆分的业务 I/O 转发；本函数不创建或消费完成权。
+/// 父会话所有者须先报告本次真实退出结果，再取消或释放仍存活的 I/O 与子任务。
+pub async fn relay_tcp_io(
+    mut front: BoxStream,
+    io: &mut TcpFlowIo,
+    idle_timeout: Duration,
+    cancel: CancellationToken,
+) -> Result<()> {
+    copy_streams(front.as_mut(), io, idle_timeout, cancel).await
+}
+
+/// 转发载体或掩护流；不得接收业务访问返回的 typed flow。
+pub async fn relay_streams(
+    mut a: BoxStream,
+    mut b: BoxStream,
+    idle_timeout: Duration,
+    cancel: CancellationToken,
+) -> Result<()> {
+    copy_streams(a.as_mut(), b.as_mut(), idle_timeout, cancel).await
+}
+
+async fn copy_streams(
+    a: &mut dyn IoStream,
+    b: &mut dyn IoStream,
     idle_timeout: Duration,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -36,18 +75,25 @@ pub async fn relay_tcp(
         tokio::select! {
             biased;
             _=cancel.cancelled()=>return Err(Error::Cancelled),
-            result=&mut copy=>return result.map(|_|()).map_err(Error::Io),
+            result=&mut copy=>return result.map(|_|()).map_err(|error| {
+                let error = Error::Io(error);
+                if FlowFailure::from_error(&error) == FlowFailure::Cancelled {
+                    Error::Cancelled
+                } else {
+                    error
+                }
+            }),
             changed=observed.changed()=>{ if changed.is_ok() { timer.as_mut().reset(*observed.borrow_and_update()+idle_timeout); } },
             _=&mut timer=>return Err(Error::Timeout),
         }
     }
 }
 
-struct ActiveIo {
-    inner: BoxStream,
+struct ActiveIo<'a> {
+    inner: &'a mut dyn IoStream,
     activity: watch::Sender<Instant>,
 }
-impl AsyncRead for ActiveIo {
+impl AsyncRead for ActiveIo<'_> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -62,7 +108,7 @@ impl AsyncRead for ActiveIo {
         result
     }
 }
-impl AsyncWrite for ActiveIo {
+impl AsyncWrite for ActiveIo<'_> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

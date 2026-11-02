@@ -4,7 +4,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 use common::*;
-use kerlico_config::{NodeFactory, OutboundFactory};
+use kerlico_config::NodeFactory;
 use kerlico_core::{
     Address, CancellationToken, Destination, InboundContext, NodeEvent, NodeObserver, StreamBudget,
 };
@@ -156,10 +156,19 @@ impl NodeObserver for Observer {
 }
 #[tokio::test]
 async fn unsafe_udp_runtime_guard_rejects_wildcard_socket_even_without_config_registry() {
-    let node = MieruNodeFactory.build(&json!({"transport":"udp","unsafe_udp_compatibility":true,"username":"node-user","password":"synthetic-password"})).unwrap();
+    let input = shared::node_input(
+        "mieru",
+        &json!({"transport":"udp","unsafe_udp_compatibility":true,"username":"node-user","password":"synthetic-password"}),
+    );
+    let node = MieruNodeFactory.build(&input).unwrap();
     let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.unwrap());
     let global = Arc::new(Semaphore::new(64));
     let context = InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         peer_addr: None,
         local_addr: Some(socket.local_addr().unwrap()),
         cancel: CancellationToken::new(),
@@ -171,9 +180,22 @@ async fn unsafe_udp_runtime_guard_rejects_wildcard_socket_even_without_config_re
         stream_budget: StreamBudget::new(global.clone(), Arc::new(Semaphore::new(64))),
         events: Arc::new(Observer),
     };
-    let access = Arc::new(kerlico_egress::Egress::new(
-        kerlico_net::DirectFactory.build(&json!({})).unwrap(),
-    ));
+    let access = kerlico_egress::testing::ingress(
+        &input,
+        shared::outbound(&kerlico_net::DirectFactory, &json!({}))
+            .await
+            .unwrap(),
+        kerlico_core::TargetPolicy::Local,
+    )
+    .unwrap();
     assert!(node.handle_udp(socket, access, context).await.is_err());
     assert_eq!(global.available_permits(), 64);
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

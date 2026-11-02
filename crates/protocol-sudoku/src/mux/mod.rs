@@ -1,4 +1,6 @@
 mod driver;
+#[cfg(test)]
+mod fairness_tests;
 mod state;
 mod stream;
 #[cfg(test)]
@@ -19,7 +21,6 @@ use std::{
 pub(crate) use stream::LogicalStream;
 use tokio::{
     sync::{Semaphore, mpsc, oneshot},
-    task::JoinHandle,
     time::Instant,
 };
 
@@ -51,11 +52,13 @@ pub(crate) struct Accepted {
 }
 struct Owner {
     cancel: CancellationToken,
-    tasks: Mutex<Vec<JoinHandle<()>>>,
+    #[cfg(test)]
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 impl Drop for Owner {
     fn drop(&mut self) {
         self.cancel.cancel();
+        #[cfg(test)]
         for task in self.tasks.lock().unwrap().drain(..) {
             task.abort();
         }
@@ -192,7 +195,13 @@ pub(crate) struct Session {
     _owner: Arc<Owner>,
     incoming: Option<tokio::sync::Mutex<mpsc::Receiver<Accepted>>>,
 }
+enum DriverOwner<'a> {
+    Scope(&'a crate::scope::Scope),
+    #[cfg(test)]
+    Local,
+}
 impl Session {
+    #[cfg(test)]
     pub fn start(
         stream: BoxStream,
         parent: &CancellationToken,
@@ -201,12 +210,66 @@ impl Session {
         budget: Option<StreamBudget>,
         server: bool,
     ) -> Self {
+        Self::start_inner(
+            stream,
+            parent,
+            maximum,
+            idle,
+            budget,
+            server,
+            DriverOwner::Local,
+        )
+    }
+    pub fn start_node(
+        stream: BoxStream,
+        scope: &crate::scope::Scope,
+        parent: &CancellationToken,
+        maximum: usize,
+        idle: Duration,
+        budget: StreamBudget,
+    ) -> Self {
+        Self::start_inner(
+            stream,
+            parent,
+            maximum,
+            idle,
+            Some(budget),
+            true,
+            DriverOwner::Scope(scope),
+        )
+    }
+    pub fn start_shared(
+        stream: BoxStream,
+        scope: &crate::scope::Scope,
+        maximum: usize,
+        idle: Duration,
+    ) -> Self {
+        Self::start_inner(
+            stream,
+            &scope.cancel,
+            maximum,
+            idle,
+            None,
+            false,
+            DriverOwner::Scope(scope),
+        )
+    }
+    fn start_inner(
+        stream: BoxStream,
+        parent: &CancellationToken,
+        maximum: usize,
+        idle: Duration,
+        budget: Option<StreamBudget>,
+        server: bool,
+        driver_owner: DriverOwner<'_>,
+    ) -> Self {
         let cancel = parent.child_token();
         let (data, data_rx) = mpsc::channel(64);
         let (control, control_rx) = mpsc::channel(64);
         let (accept, accept_rx) = mpsc::channel(32);
         let owner = Arc::new(Owner {
             cancel: cancel.clone(),
+            #[cfg(test)]
             tasks: Mutex::new(Vec::new()),
         });
         let shared = Arc::new(Shared {
@@ -226,7 +289,7 @@ impl Session {
         let _ = shared.owner.set(Arc::downgrade(&owner));
         let (reader, writer) = tokio::io::split(stream);
         let driving = shared.clone();
-        let driver = tokio::spawn(async move {
+        let driver = async move {
             {
                 // RecordStream/ObfsStream的读操作也会推进待写缓冲。两个方向必须
                 // 使用同一任务waker，避免读侧替换写就绪注册后遗失写侧推进。
@@ -240,8 +303,12 @@ impl Session {
                 }
             }
             driving.transport_ended();
-        });
-        owner.tasks.lock().unwrap().push(driver);
+        };
+        match driver_owner {
+            DriverOwner::Scope(scope) => scope.spawn(driver),
+            #[cfg(test)]
+            DriverOwner::Local => owner.tasks.lock().unwrap().push(tokio::spawn(driver)),
+        }
         Self {
             shared,
             _owner: owner,

@@ -1,4 +1,4 @@
-use kerlico_config::{OutboundFactory, Registry, parse};
+use kerlico_config::{Registry, parse};
 use kerlico_core::{CancellationToken, ConnectContext, Destination};
 use kerlico_engine::Engine;
 use kerlico_http::{HttpFactory, HttpNodeFactory};
@@ -36,10 +36,22 @@ async fn node_limits(
     let mut registry = Registry::default();
     registry.register(DirectFactory).unwrap();
     registry.register_node(HttpNodeFactory).unwrap();
-    let config = json!({"version":1,"outbounds":[{"tag":"exit","type":"direct"}],"inbounds":[],"local_inbounds":[{"tag":"node","type":"http","listen":"127.0.0.1:0","outbound":"exit","options":options}],"limits":limits});
+    let authenticated = options.get("auth").is_some_and(|auth| !auth.is_null());
+    let mut config = json!({"version":2,"outbounds":[{"tag":"exit","type":"direct"}],"inbounds":[],"local_inbounds":[{"tag":"node","type":"http","listen":"127.0.0.1:0","outbound":"exit","options":options}],"limits":limits});
+    if authenticated {
+        let nodes = config
+            .as_object_mut()
+            .unwrap()
+            .remove("local_inbounds")
+            .unwrap();
+        config["nodes"] = nodes;
+    }
     let engine = Engine::bind(
         registry
-            .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .prepare(
+                parse(&serde_json::to_vec(&shared::configuration(config.clone())).unwrap())
+                    .unwrap(),
+            )
             .unwrap(),
     )
     .await
@@ -71,14 +83,15 @@ async fn plain_tls_connect_preserves_half_close() {
         }
         let (address, cancel, task) = node(server).await;
         client["server"] = json!({"host":"127.0.0.1","port":address.port()});
-        let outbound = HttpFactory.build(&client).unwrap();
+        let outbound = shared::outbound(&HttpFactory, &client).await.unwrap();
         let mut stream = outbound
             .connect_tcp(
                 &Destination::new("localhost", port).unwrap(),
                 &ConnectContext::new(Duration::from_secs(3)),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         stream.write_all(b"half-close").await.unwrap();
         stream.shutdown().await.unwrap();
         let mut bytes = Vec::new();
@@ -110,9 +123,12 @@ async fn outbound_does_not_drop_prefetched_payload_and_rejects_failure() {
                 .await
                 .unwrap();
         });
-        let out = HttpFactory
-            .build(&json!({"server":{"host":"127.0.0.1","port":port}}))
-            .unwrap();
+        let out = shared::outbound(
+            &HttpFactory,
+            &json!({"server":{"host":"127.0.0.1","port":port}}),
+        )
+        .await
+        .unwrap();
         let result = out
             .connect_tcp(
                 &Destination::new("example.invalid", 443).unwrap(),
@@ -122,7 +138,7 @@ async fn outbound_does_not_drop_prefetched_payload_and_rejects_failure() {
         if status == 407 {
             assert!(result.is_err());
         } else {
-            let mut stream = result.unwrap();
+            let mut stream = result.unwrap().stream;
             let mut bytes = Vec::new();
             stream.read_to_end(&mut bytes).await.unwrap();
             assert_eq!(bytes, b"first-payload");
@@ -171,7 +187,7 @@ async fn ordinary_post_strips_hop_and_proxy_auth_and_streams_chunks() {
 #[tokio::test]
 async fn wrong_auth_and_conflicting_host_are_rejected() {
     let (address, cancel, task) = node(json!({"auth":{"username":"a","password":"b"}})).await;
-    let out=HttpFactory.build(&json!({"server":{"host":"127.0.0.1","port":address.port()},"auth":{"username":"a","password":"wrong"}})).unwrap();
+    let out=shared::outbound(&HttpFactory, &json!({"server":{"host":"127.0.0.1","port":address.port()},"auth":{"username":"a","password":"wrong"}})).await.unwrap();
     assert!(
         out.connect_tcp(
             &Destination::new("127.0.0.1", 9).unwrap(),
@@ -215,16 +231,20 @@ async fn active_tunnel_drains_and_listener_can_be_rebound() {
         json!({"connect_timeout_ms":1000,"idle_timeout_ms":2000,"drain_timeout_ms":1000}),
     )
     .await;
-    let out = HttpFactory
-        .build(&json!({"server":{"host":"127.0.0.1","port":address.port()}}))
-        .unwrap();
+    let out = shared::outbound(
+        &HttpFactory,
+        &json!({"server":{"host":"127.0.0.1","port":address.port()}}),
+    )
+    .await
+    .unwrap();
     let mut stream = out
         .connect_tcp(
             &Destination::new("127.0.0.1", port).unwrap(),
             &ConnectContext::new(Duration::from_secs(2)),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     stream.write_all(b"before").await.unwrap();
     let mut bytes = [0; 6];
     stream.read_exact(&mut bytes).await.unwrap();
@@ -357,4 +377,12 @@ async fn ordinary_get_head_and_chunked_post_keep_message_boundaries() {
         cancel.cancel();
         task.await.unwrap().unwrap();
     }
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

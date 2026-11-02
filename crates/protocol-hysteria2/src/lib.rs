@@ -2,9 +2,11 @@
 
 mod config;
 mod dispatch;
+mod flow;
 mod inbound;
 mod io;
 mod outbound;
+mod runtime;
 mod socket;
 mod udp;
 mod wire;
@@ -24,8 +26,5 @@ fn target(text: &str) -> Result<Destination> {
     Destination::new(host, port.parse().map_err(|_| invalid())?)
 }
 fn budget(context: &InboundContext) -> ConnectContext {
-    ConnectContext {
-        cancel: context.cancel.clone(),
-        timeout: context.connect_timeout,
-    }
+    ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone())
 }

@@ -172,7 +172,7 @@ pub(crate) async fn handshake(
                 if strict && !tls13 {
                     return Err(wire::error());
                 }
-                if !(tls13 && seed==wire::HRR_RANDOM) {
+                if !(tls13 && seed == wire::HRR_RANDOM) {
                     authorized = !tls13;
                     ignore = Some(wire::hash(&key, &seed));
                     random = Some(seed);
@@ -249,10 +249,30 @@ mod tests {
 }
 
 #[cfg(test)]
-pub(crate) fn signed_hello_for_replay_test(key:&[u8])->Vec<u8>{
-    let mut config=ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_protocol_versions(&[&rustls::version::TLS13]).unwrap().with_root_certificates(RootCertStore::empty()).with_no_client_auth();
-    config.resumption=rustls::client::Resumption::disabled();
-    config.client_hello_customizer=Some(Arc::new(Customize{signer:Arc::new(Signer{key:Arc::from(key),session:Mutex::new(None)})}));
-    let mut session=ClientConnection::new(Arc::new(config),"shadowtls.example.invalid".try_into().unwrap()).unwrap();let mut bytes=Vec::new();while session.wants_write(){session.write_tls(&mut bytes).unwrap();}
-    let length=u16::from_be_bytes([bytes[3],bytes[4]]) as usize;bytes.truncate(5+length);bytes
+pub(crate) fn signed_hello_for_replay_test(key: &[u8]) -> Vec<u8> {
+    let mut config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+    config.resumption = rustls::client::Resumption::disabled();
+    config.client_hello_customizer = Some(Arc::new(Customize {
+        signer: Arc::new(Signer {
+            key: Arc::from(key),
+            session: Mutex::new(None),
+        }),
+    }));
+    let mut session = ClientConnection::new(
+        Arc::new(config),
+        "shadowtls.example.invalid".try_into().unwrap(),
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    while session.wants_write() {
+        session.write_tls(&mut bytes).unwrap();
+    }
+    let length = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+    bytes.truncate(5 + length);
+    bytes
 }

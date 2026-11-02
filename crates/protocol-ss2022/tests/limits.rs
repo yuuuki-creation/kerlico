@@ -1,10 +1,9 @@
+mod support;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel,
-    Destination, Error, InboundContext, InboundProtocol, NodeEvent, NodeObserver, Outbound, Result,
-    StreamBudget,
+    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel, Destination, Error,
+    InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
-use kerlico_ss2022::{Ss2022Node, Ss2022Outbound};
 use serde_json::json;
 use std::{
     sync::{
@@ -16,12 +15,19 @@ use std::{
 use tokio::{net::UdpSocket, sync::Semaphore};
 
 struct DenyTarget(AtomicUsize);
-impl AccessService for DenyTarget {
+impl Outbound for DenyTarget {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn connect_tcp<'a>(
         &'a self,
         _: &'a Destination,
         _: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async { Err(Error::Rejected) })
     }
     fn connect_udp<'a>(
@@ -62,7 +68,11 @@ impl NodeObserver for Counts {
 async fn udp_budget_denial_and_cancel_release_resources() {
     let method = "2022-blake3-aes-128-gcm";
     let key = STANDARD.encode([7; 16]);
-    let node = Ss2022Node::from_options(&json!({"method":method,"key":key})).unwrap();
+    let node = support::node(
+        &kerlico_ss2022::Ss2022NodeFactory,
+        &json!({"method":method,"key":key}),
+    )
+    .unwrap();
     assert!(node.supports_udp());
     assert!(!node.requires_loopback());
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
@@ -73,8 +83,13 @@ async fn udp_budget_denial_and_cancel_release_resources() {
     let cancel = CancellationToken::new();
     let access = Arc::new(DenyTarget(AtomicUsize::new(0)));
     let context = InboundContext {
-            peer_addr: None,
-            local_addr: None,
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
+        peer_addr: None,
+        local_addr: None,
         cancel: cancel.clone(),
         connect_timeout: Duration::from_secs(1),
         idle_timeout: Duration::from_secs(1),
@@ -88,7 +103,8 @@ async fn udp_budget_denial_and_cancel_release_resources() {
         let access = access.clone();
         tokio::spawn(async move { node.serve_udp(socket, access, context).await })
     };
-    let outbound = Ss2022Outbound::from_options(
+    let outbound = support::outbound(
+        &kerlico_ss2022::Ss2022Factory,
         &json!({"server":"127.0.0.1","port":port,"method":method,"key":key}),
     )
     .unwrap();

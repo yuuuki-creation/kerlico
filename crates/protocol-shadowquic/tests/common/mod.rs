@@ -1,9 +1,8 @@
 #![allow(dead_code)]
-use kerlico_config::{NodeFactory, OutboundFactory};
+use kerlico_config::NodeFactory;
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramAssociation,
-    DatagramChannel, Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result,
-    StreamBudget,
+    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramAssociation, DatagramChannel,
+    Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use kerlico_shadowquic::{ShadowQuicFactory, ShadowQuicNodeFactory};
 use serde_json::{Value, json};
@@ -146,10 +145,17 @@ impl NodeObserver for Observer {
     fn record(&self, _: NodeEvent) {}
 }
 struct Access {
-    inner: kerlico_egress::Egress,
+    inner: Arc<dyn Outbound>,
     count: Arc<AtomicUsize>,
 }
-impl AccessService for Access {
+impl Outbound for Access {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn supports_udp_association(&self) -> bool {
         true
     }
@@ -158,15 +164,15 @@ impl AccessService for Access {
         c: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramAssociation>> {
         self.count.fetch_add(1, Ordering::AcqRel);
-        AccessService::associate_udp(&self.inner, c)
+        self.inner.associate_udp(c)
     }
     fn connect_tcp<'a>(
         &'a self,
         t: &'a Destination,
         c: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         self.count.fetch_add(1, Ordering::AcqRel);
-        AccessService::connect_tcp(&self.inner, t, c)
+        self.inner.connect_tcp(t, c)
     }
     fn connect_udp<'a>(
         &'a self,
@@ -174,7 +180,7 @@ impl AccessService for Access {
         c: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramChannel>> {
         self.count.fetch_add(1, Ordering::AcqRel);
-        AccessService::connect_udp(&self.inner, t, c)
+        self.inner.connect_udp(t, c)
     }
 }
 pub struct Fixture {
@@ -237,12 +243,18 @@ pub async fn fixture_custom(
     let username = format!("node-{identity}");
     let password = format!("synthetic-password-{identity}");
     let node_options = json!({"username":username,"password":password,"upstream":{"host":cover.address.ip().to_string(),"port":cover.address.port()},"server_name":NAME,"quic_versions":["v1","v2"],"congestion_control":congestion});
-    let node = ShadowQuicNodeFactory.build(&node_options).unwrap();
+    let input = shared::node_input("shadowquic", &node_options);
+    let node = ShadowQuicNodeFactory.build(&input).unwrap();
     let socket = Arc::new(UdpSocket::bind((host, 0)).await.unwrap());
     let address = socket.local_addr().unwrap();
     let cancel = CancellationToken::new();
     let global = Arc::new(Semaphore::new(64));
     let context = InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         peer_addr: None,
         local_addr: Some(address),
         cancel: cancel.clone(),
@@ -256,14 +268,21 @@ pub async fn fixture_custom(
     };
     let count = Arc::new(AtomicUsize::new(0));
     let access = Arc::new(Access {
-        inner: kerlico_egress::Egress::new(
-            outbound.unwrap_or_else(|| kerlico_net::DirectFactory.build(&json!({})).unwrap()),
+        inner: outbound.unwrap_or(
+            shared::outbound(&kerlico_net::DirectFactory, &json!({}))
+                .await
+                .unwrap(),
         ),
         count: count.clone(),
     });
+    let access =
+        kerlico_egress::testing::ingress(&input, access, kerlico_core::TargetPolicy::Local)
+            .unwrap();
     let task = tokio::spawn(async move { node.handle_udp(socket, access, context).await });
     let options = json!({"username":username,"password":password,"server":{"host":host,"port":address.port()},"server_name":NAME,"quic_version":version,"udp_mode":mode,"congestion_control":congestion});
-    let outbound = ShadowQuicFactory.build(&options).unwrap();
+    let outbound = shared::outbound(&ShadowQuicFactory, &options)
+        .await
+        .unwrap();
     Fixture {
         outbound,
         options,
@@ -306,4 +325,12 @@ pub async fn plain_connection(
     })
     .unwrap();
     (endpoint, connection)
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

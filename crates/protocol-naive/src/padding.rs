@@ -1,5 +1,5 @@
 //! 先八帧填充，再原流；状态按方向、逻辑流独立。
-use kerlico_core::{BoxStream, CancellationToken};
+use kerlico_core::{BoxStream, CancellationToken, Result};
 use rand::{Rng, RngCore};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -23,8 +23,12 @@ pub(crate) fn header(response: bool) -> String {
         })
         .collect()
 }
-pub(crate) fn wrap(stream: BoxStream, cancel: CancellationToken) -> BoxStream {
-    crate::io::spawn(cancel, None, move |peer, completed| async move {
+pub(crate) fn wrap(
+    owner: &crate::runtime::BridgeOwner,
+    stream: BoxStream,
+    cancel: CancellationToken,
+) -> Result<BoxStream> {
+    crate::io::spawn(owner, cancel, None, move |peer, completed| async move {
         let (source, sink) = tokio::io::split(stream);
         let (reader, writer) = tokio::io::split(peer);
         let receive = async {

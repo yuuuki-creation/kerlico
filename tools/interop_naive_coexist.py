@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """专用worker：同一kerlico进程同时运行独立双族Naive节点与三载体客户端。"""
+from config_v2 import bind_members
 import argparse
 from contextlib import ExitStack
 import hashlib
@@ -20,7 +21,7 @@ def main():
     os.umask(0o077)
     root = Path(args.work_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    config = {"version": 1, "limits": {"max_sessions": 256, "idle_timeout_ms": 5000, "drain_timeout_ms": 500}, "outbounds": [{"tag": "direct", "type": "direct"}], "nodes": [], "inbounds": []}
+    config = {"version": 2, "limits": {"max_sessions": 256, "idle_timeout_ms": 5000, "drain_timeout_ms": 500}, "outbounds": [{"tag": "direct", "type": "direct"}], "nodes": [], "inbounds": []}
     used, endpoints, checks = set(), [], []
     def free():
         while True:
@@ -61,6 +62,8 @@ def main():
         config["outbounds"].append(wrong)
         bad_port = free()
         config["inbounds"].append({"tag": "wrong-tcp", "type": "tcp-forward", "listen": h.address("127.0.0.1", bad_port), "target": {"host": "127.0.0.1", "port": tcp_site}, "outbound": "wrong-node"})
+        for node in config["nodes"]:
+            bind_members(config, node, node["options"].pop("users"))
         h.h.write_json(root / "config.json", config)
         command = [args.kerlico, "run", "-c", str(root / "config.json")]
         kernel = stack.enter_context(h.process(command, root, "kernel"))

@@ -2,8 +2,7 @@ use super::{body::Body, codec::Mode, pull, query, session::Registry};
 use crate::{
     carrier::ws::{self, WsIo},
     config::CarrierMode,
-    handshake::EarlyServer,
-    wire::kip,
+    members::Opening,
 };
 use base64::{
     Engine,
@@ -21,9 +20,8 @@ use tokio_tungstenite::{
     tungstenite::{handshake::derive_accept_key, protocol::Role},
 };
 
-pub(crate) type UpgradedHandler = Arc<
-    dyn Fn(BoxStream, Option<EarlyServer>, StreamLease) -> BoxFuture<'static, ()> + Send + Sync,
->;
+pub(crate) type UpgradedHandler =
+    Arc<dyn Fn(BoxStream, Option<Opening>, StreamLease) -> BoxFuture<'static, ()> + Send + Sync>;
 pub(crate) type CoverHandler =
     Arc<dyn Fn(Method) -> BoxFuture<'static, Response<Body>> + Send + Sync>;
 pub(crate) struct Handler {
@@ -48,7 +46,9 @@ fn header<'a>(request: &'a Request<Incoming>, name: &str) -> Option<&'a str> {
 fn contains(request: &Request<Incoming>, name: &str, expected: &str) -> bool {
     request.headers().get_all(name).iter().any(|value| {
         value.to_str().ok().is_some_and(|value| {
-            value.split(',').any(|word| word.trim().eq_ignore_ascii_case(expected))
+            value
+                .split(',')
+                .any(|word| word.trim().eq_ignore_ascii_case(expected))
         })
     })
 }
@@ -224,9 +224,6 @@ impl Handler {
         let auth = header(&request, "authorization")
             .or_else(|| query.get("auth").map(String::as_str))
             .unwrap_or("");
-        if !ws::verify(&self.registry.protocol.material.seed, auth, kip::now()?) {
-            return Err(Error::Rejected);
-        }
         if request
             .headers()
             .contains_key(http::header::TRANSFER_ENCODING)
@@ -237,12 +234,11 @@ impl Handler {
         {
             return Err(crate::invalid());
         }
-        let prepared = query
+        let early = query
             .get("ed")
             .map(|bytes| URL_SAFE_NO_PAD.decode(bytes).map_err(|_| crate::invalid()))
-            .transpose()?
-            .map(|bytes| EarlyServer::prepare(self.registry.protocol.clone(), &bytes))
             .transpose()?;
+        let prepared = Some(self.registry.members.websocket(auth, early.as_deref())?);
         let lease = self.registry.context.stream_budget.try_acquire()?;
         let upgrade = hyper::upgrade::on(&mut request);
         let callback = self.upgraded.clone();
@@ -261,10 +257,10 @@ impl Handler {
             http::HeaderValue::from_str(&derive_accept_key(key.as_bytes()))
                 .map_err(|_| crate::invalid())?,
         );
-        if let Some(prepared) = prepared.as_ref() {
+        if let Some(response) = prepared.as_ref().and_then(|prepared| prepared.response()) {
             reply.headers_mut().insert(
                 ws::EARLY,
-                http::HeaderValue::from_str(&URL_SAFE_NO_PAD.encode(&prepared.response))
+                http::HeaderValue::from_str(&URL_SAFE_NO_PAD.encode(response))
                     .map_err(|_| crate::invalid())?,
             );
         }

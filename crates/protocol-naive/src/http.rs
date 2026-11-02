@@ -4,7 +4,7 @@ use crate::{
     padding,
 };
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
-use kerlico_core::{Destination, Error, Result};
+use kerlico_core::{CredentialSet, Destination, Error, Result, Verified};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub(crate) const V1: &str = "sp.udp-over-tcp.arpa";
@@ -70,7 +70,10 @@ pub(crate) fn request(target: &Destination, user: &User) -> Result<Request<()>> 
         .body(())
         .map_err(|_| malformed())
 }
-pub(crate) fn check_request<T>(request: &Request<T>, users: &[Arc<User>]) -> Result<Destination> {
+pub(crate) fn check_request<T>(
+    request: &Request<T>,
+    users: &CredentialSet<Arc<User>>,
+) -> Result<Verified<Destination>> {
     bounded(request.headers())?;
     if request.method() != Method::CONNECT
         || request.uri().scheme().is_some()
@@ -92,13 +95,6 @@ pub(crate) fn check_request<T>(request: &Request<T>, users: &[Arc<User>]) -> Res
         }
     }
     let authorization = unique(request.headers(), "proxy-authorization")?.ok_or(Error::Rejected)?;
-    let mut authenticated = false;
-    for user in users {
-        authenticated |= user.matches(authorization);
-    }
-    if !authenticated {
-        return Err(Error::Rejected);
-    }
     let padding = unique(request.headers(), "padding")?.ok_or_else(malformed)?;
     if padding.is_empty() || padding.len() > 1024 {
         return Err(malformed());
@@ -124,7 +120,10 @@ pub(crate) fn check_request<T>(request: &Request<T>, users: &[Arc<User>]) -> Res
     {
         return Err(malformed());
     }
-    authority(value)
+    let target = authority(value)?;
+    users.verify(&authorization, |user, authorization| {
+        Ok(user.matches(authorization).then(|| target.clone()))
+    })
 }
 pub(crate) fn response() -> Response<()> {
     let mut response = Response::new(());
@@ -270,8 +269,8 @@ pub(crate) async fn write_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn authority_and_negotiation_reject_ambiguous_inputs() {
+    #[tokio::test]
+    async fn authority_and_negotiation_reject_ambiguous_inputs() {
         for value in [
             "x:0", "x:1/a", "[::1]", "::1:80", "x:65536", "x:+1", "x: 1", "x:1@evil",
         ] {
@@ -285,17 +284,58 @@ mod tests {
         }
         assert!(authority("not-udp-over-tcp.arpa:0").is_err());
         let user = Arc::new(User::new("test".into(), "secret".into()).unwrap());
+        let input = kerlico_config::NodeBuildContext::for_test(
+            serde_json::json!({}),
+            vec![serde_json::json!({"username":"test","password":"secret"})],
+        );
+        let users = input.credentials(vec![user.clone()]).unwrap();
+        use kerlico_config::OutboundFactory;
+        let outbound = kerlico_net::RejectFactory
+            .compile(&serde_json::json!({}))
+            .unwrap()
+            .start(kerlico_core::ServiceContext::for_test())
+            .await
+            .unwrap();
+        let ingress =
+            kerlico_egress::testing::ingress(&input, outbound, kerlico_core::TargetPolicy::Remote)
+                .unwrap();
+        struct Observer;
+        impl kerlico_core::NodeObserver for Observer {
+            fn record(&self, _: kerlico_core::NodeEvent) {}
+        }
+        let context = kerlico_core::InboundContext {
+            peer_lease: None,
+            tasks: kerlico_core::NodeTasks::new(
+                kerlico_core::NodeId::parse("test-node").unwrap(),
+                kerlico_core::CancellationToken::new(),
+            ),
+            peer_addr: None,
+            local_addr: None,
+            cancel: kerlico_core::CancellationToken::new(),
+            connect_timeout: std::time::Duration::from_secs(1),
+            idle_timeout: std::time::Duration::from_secs(1),
+            drain_timeout: std::time::Duration::from_secs(1),
+            max_datagram_size: 1500,
+            max_streams: 1,
+            stream_budget: kerlico_core::StreamBudget::new(
+                Arc::new(tokio::sync::Semaphore::new(1)),
+                Arc::new(tokio::sync::Semaphore::new(1)),
+            ),
+            events: Arc::new(Observer),
+        };
         let target = Destination::new("example.invalid", 443).unwrap();
         let mut request = request(&target, &user).unwrap();
-        assert_eq!(
-            check_request(&request, std::slice::from_ref(&user)).unwrap(),
-            target
-        );
+        let (peer, decoded) = ingress
+            .authenticated(check_request(&request, &users).unwrap(), &context)
+            .unwrap();
+        assert_eq!(decoded, target);
+        assert!(matches!(peer.source(), kerlico_core::Source::User { .. }));
+        assert_eq!(peer.source().node(), input.issuer().node());
         request.headers_mut().append(
             "proxy-authorization",
             HeaderValue::from_static("Basic invalid"),
         );
-        assert!(check_request(&request, &[user]).is_err());
+        assert!(check_request(&request, &users).is_err());
         let mut response = response();
         check_response(&response).unwrap();
         response

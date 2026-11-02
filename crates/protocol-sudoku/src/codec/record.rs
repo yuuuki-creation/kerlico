@@ -225,7 +225,7 @@ impl Receiver {
                 || (epoch == previous && sequence != expected)
                 || epoch.saturating_sub(previous) > 8)
         {
-                return Err(crate::invalid());
+            return Err(crate::invalid());
         }
         if self.cipher.as_ref().map(|(epoch, _)| *epoch) != Some(epoch) {
             self.cipher = Some((epoch, Cipher::new(self.method, &self.base, epoch)?));
@@ -283,7 +283,10 @@ impl<T> RecordStream<T> {
         &mut self.inner
     }
     fn fail(&mut self) {
-        if !self.failed { self.failed = true; self.wake.wake_both(); }
+        if !self.failed {
+            self.failed = true;
+            self.wake.wake_both();
+        }
     }
     pub fn rekey(&mut self, send: [u8; 32], receive: [u8; 32]) -> Result<()> {
         if self.failed
@@ -315,7 +318,10 @@ impl<T: AsyncWrite + Unpin> RecordStream<T> {
                     self.fail();
                     return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
                 }
-                Ok(n) => { self.written += n; self.wake.wake_writer(); },
+                Ok(n) => {
+                    self.written += n;
+                    self.wake.wake_writer();
+                }
                 Err(error) => {
                     self.fail();
                     return Poll::Ready(Err(error));
@@ -330,13 +336,26 @@ impl<T: AsyncWrite + Unpin> RecordStream<T> {
         ready!(self.drain(cx))?;
         if self.write_closed && !self.shutdown_done {
             match ready!(Pin::new(&mut self.inner).poll_shutdown(cx)) {
-                Ok(()) => { self.shutdown_done = true; self.flush_pending = false; self.wake.wake_writer(); },
-                Err(error) => { self.fail(); return Poll::Ready(Err(error)); },
+                Ok(()) => {
+                    self.shutdown_done = true;
+                    self.flush_pending = false;
+                    self.wake.wake_writer();
+                }
+                Err(error) => {
+                    self.fail();
+                    return Poll::Ready(Err(error));
+                }
             }
         } else if self.flush_pending {
             match ready!(Pin::new(&mut self.inner).poll_flush(cx)) {
-                Ok(()) => { self.flush_pending = false; self.wake.wake_writer(); },
-                Err(error) => { self.fail(); return Poll::Ready(Err(error)); },
+                Ok(()) => {
+                    self.flush_pending = false;
+                    self.wake.wake_writer();
+                }
+                Err(error) => {
+                    self.fail();
+                    return Poll::Ready(Err(error));
+                }
             }
         }
         Poll::Ready(Ok(()))
@@ -364,7 +383,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for RecordStream<T> {
         }
         if this.method == Method::None {
             let result = Pin::new(&mut this.inner).poll_read(cx, output);
-            if matches!(result, Poll::Ready(Err(_))) { this.fail(); }
+            if matches!(result, Poll::Ready(Err(_))) {
+                this.fail();
+            }
             return result;
         }
         for _ in 0..64 {
@@ -448,12 +469,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RecordStream<T> {
         ready!(this.output(cx))?;
         if this.method == Method::None {
             let result = Pin::new(&mut this.inner).poll_write(cx, bytes);
-            if matches!(result, Poll::Ready(Err(_))) { this.fail(); }
+            if matches!(result, Poll::Ready(Err(_))) {
+                this.fail();
+            }
             return result;
         }
         let count = bytes.len().min(MAX_PLAIN);
         match this.sender.seal(&bytes[..count]) {
-            Ok(frame) => { this.pending = frame; this.wake.wake_reader(); },
+            Ok(frame) => {
+                this.pending = frame;
+                this.wake.wake_reader();
+            }
             Err(error) => {
                 this.fail();
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, error)));
@@ -469,7 +495,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RecordStream<T> {
         if this.failed {
             return Poll::Ready(Err(broken()));
         }
-        if !this.shutdown_done { this.flush_pending = true; }
+        if !this.shutdown_done {
+            this.flush_pending = true;
+        }
         this.output(cx)
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -565,123 +593,342 @@ mod tests {
 #[cfg(test)]
 mod task_wake_tests {
     use super::{Method, RecordStream};
-    use crate::codec::{layout::Mode, obfs::ObfsStream, table::{GridOrder, Pair}};
+    use crate::codec::{
+        layout::Mode,
+        obfs::ObfsStream,
+        table::{GridOrder, Pair},
+    };
     use kerlico_core::BoxStream;
     use std::{
-        future::{Future,poll_fn},
+        future::{Future, poll_fn},
         io,
         pin::Pin,
-        sync::{Arc,OnceLock},
-        task::{Context,Poll},
+        sync::{Arc, OnceLock},
+        task::{Context, Poll},
         time::Duration,
     };
-    use tokio::{io::{AsyncRead,AsyncReadExt,AsyncWrite,AsyncWriteExt,ReadBuf},sync::{Notify,oneshot}};
+    use tokio::{
+        io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
+        sync::{Notify, oneshot},
+    };
 
     fn table() -> Arc<Pair> {
         static TABLE: OnceLock<Arc<Pair>> = OnceLock::new();
-        TABLE.get_or_init(|| {
-            let order = Arc::new(GridOrder::new("synthetic-codec-dual-task-wake"));
-            Arc::new(Pair::new("synthetic-codec-dual-task-wake",Mode::parse("prefer_entropy").unwrap(),"",order).unwrap())
-        }).clone()
+        TABLE
+            .get_or_init(|| {
+                let order = Arc::new(GridOrder::new("synthetic-codec-dual-task-wake"));
+                Arc::new(
+                    Pair::new(
+                        "synthetic-codec-dual-task-wake",
+                        Mode::parse("prefer_entropy").unwrap(),
+                        "",
+                        order,
+                    )
+                    .unwrap(),
+                )
+            })
+            .clone()
     }
-    struct ObservedIo { inner: tokio::io::DuplexStream, blocked: Arc<Notify> }
+    struct ObservedIo {
+        inner: tokio::io::DuplexStream,
+        blocked: Arc<Notify>,
+    }
     impl AsyncRead for ObservedIo {
-        fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, data: &mut ReadBuf<'_>) -> Poll<io::Result<()>> { Pin::new(&mut self.get_mut().inner).poll_read(cx,data) }
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            data: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_read(cx, data)
+        }
     }
     impl AsyncWrite for ObservedIo {
-        fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
-            let this=self.get_mut();let result=Pin::new(&mut this.inner).poll_write(cx,data);
-            if result.is_pending(){this.blocked.notify_one();}result
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            data: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            let result = Pin::new(&mut this.inner).poll_write(cx, data);
+            if result.is_pending() {
+                this.blocked.notify_one();
+            }
+            result
         }
-        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> { Pin::new(&mut self.get_mut().inner).poll_flush(cx) }
-        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> { Pin::new(&mut self.get_mut().inner).poll_shutdown(cx) }
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        }
     }
-    fn layered(method: Method, packed: bool) -> (BoxStream,BoxStream,Arc<Notify>) {
-        let pair=table();let (a,b)=tokio::io::duplex(97);let blocked=Arc::new(Notify::new());
-        let client=ObfsStream::new(Box::new(ObservedIo{inner:a,blocked:blocked.clone()}),pair.down.clone(),pair.up.clone(),packed,false,0,0).unwrap();
-        let server=ObfsStream::new(Box::new(b),pair.up.clone(),pair.down.clone(),false,packed,0,0).unwrap();
-        (Box::new(RecordStream::new(client,method,[1;32],[2;32]).unwrap()),Box::new(RecordStream::new(server,method,[2;32],[1;32]).unwrap()),blocked)
+    fn layered(method: Method, packed: bool) -> (BoxStream, BoxStream, Arc<Notify>) {
+        let pair = table();
+        let (a, b) = tokio::io::duplex(97);
+        let blocked = Arc::new(Notify::new());
+        let client = ObfsStream::new(
+            Box::new(ObservedIo {
+                inner: a,
+                blocked: blocked.clone(),
+            }),
+            pair.down.clone(),
+            pair.up.clone(),
+            packed,
+            false,
+            0,
+            0,
+        )
+        .unwrap();
+        let server = ObfsStream::new(
+            Box::new(b),
+            pair.up.clone(),
+            pair.down.clone(),
+            false,
+            packed,
+            0,
+            0,
+        )
+        .unwrap();
+        (
+            Box::new(RecordStream::new(client, method, [1; 32], [2; 32]).unwrap()),
+            Box::new(RecordStream::new(server, method, [2; 32], [1; 32]).unwrap()),
+            blocked,
+        )
     }
 
     #[tokio::test]
     async fn real_record_obfs_split_two_tasks_keep_full_duplex_and_eof() {
-        for method in [Method::Aes,Method::ChaCha,Method::None] {for packed in [false,true] {
-            let (client,server,_)=layered(method,packed);
-            let (mut cr,mut cw)=tokio::io::split(client);let (mut sr,mut sw)=tokio::io::split(server);
-            let client_read=tokio::spawn(async move{let mut data=Vec::new();cr.read_to_end(&mut data).await.unwrap();assert_eq!(data,vec![0x62;100003]);});
-            let client_write=tokio::spawn(async move{cw.write_all(&vec![0x31;98305]).await.unwrap();cw.flush().await.unwrap();cw.shutdown().await.unwrap();});
-            let server_read=tokio::spawn(async move{let mut data=Vec::new();sr.read_to_end(&mut data).await.unwrap();assert_eq!(data,vec![0x31;98305]);});
-            let server_write=tokio::spawn(async move{sw.write_all(&vec![0x62;100003]).await.unwrap();sw.flush().await.unwrap();sw.shutdown().await.unwrap();});
-            tokio::time::timeout(Duration::from_secs(8),async{client_read.await.unwrap();client_write.await.unwrap();server_read.await.unwrap();server_write.await.unwrap();}).await.expect("真实叠层、独立读写Task和大于缓冲的双向数据必须完成");
-        }}
+        for method in [Method::Aes, Method::ChaCha, Method::None] {
+            for packed in [false, true] {
+                let (client, server, _) = layered(method, packed);
+                let (mut cr, mut cw) = tokio::io::split(client);
+                let (mut sr, mut sw) = tokio::io::split(server);
+                let client_read = tokio::spawn(async move {
+                    let mut data = Vec::new();
+                    cr.read_to_end(&mut data).await.unwrap();
+                    assert_eq!(data, vec![0x62; 100003]);
+                });
+                let client_write = tokio::spawn(async move {
+                    cw.write_all(&vec![0x31; 98305]).await.unwrap();
+                    cw.flush().await.unwrap();
+                    cw.shutdown().await.unwrap();
+                });
+                let server_read = tokio::spawn(async move {
+                    let mut data = Vec::new();
+                    sr.read_to_end(&mut data).await.unwrap();
+                    assert_eq!(data, vec![0x31; 98305]);
+                });
+                let server_write = tokio::spawn(async move {
+                    sw.write_all(&vec![0x62; 100003]).await.unwrap();
+                    sw.flush().await.unwrap();
+                    sw.shutdown().await.unwrap();
+                });
+                tokio::time::timeout(Duration::from_secs(8), async {
+                    client_read.await.unwrap();
+                    client_write.await.unwrap();
+                    server_read.await.unwrap();
+                    server_write.await.unwrap();
+                })
+                .await
+                .expect("真实叠层、独立读写Task和大于缓冲的双向数据必须完成");
+            }
+        }
     }
 
     #[tokio::test]
     async fn abandoned_reader_cannot_steal_blocked_writer_wakeup() {
-        let (client,mut server,blocked)=layered(Method::ChaCha,false);let (mut read,mut write)=tokio::io::split(client);
-        let writer=tokio::spawn(async move{write.write_all(&vec![0x43;96001]).await.unwrap();write.flush().await.unwrap();write.shutdown().await.unwrap();});
-        tokio::time::timeout(Duration::from_secs(3),blocked.notified()).await.unwrap();
-        // 先保证写Task真的被小载体阻塞，再用另一个Task读poll推进同一待写缓冲。
-        let cancelled_reader=tokio::spawn(async move {
-            let mut byte=[0;1];let mut future=Box::pin(read.read(&mut byte));
-            assert!(poll_fn(|cx|Poll::Ready(future.as_mut().poll(cx).is_pending())).await);
-            drop(future);read
+        let (client, mut server, blocked) = layered(Method::ChaCha, false);
+        let (mut read, mut write) = tokio::io::split(client);
+        let writer = tokio::spawn(async move {
+            write.write_all(&vec![0x43; 96001]).await.unwrap();
+            write.flush().await.unwrap();
+            write.shutdown().await.unwrap();
         });
-        let mut read=cancelled_reader.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), blocked.notified())
+            .await
+            .unwrap();
+        // 先保证写Task真的被小载体阻塞，再用另一个Task读poll推进同一待写缓冲。
+        let cancelled_reader = tokio::spawn(async move {
+            let mut byte = [0; 1];
+            let mut future = Box::pin(read.read(&mut byte));
+            assert!(poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx).is_pending())).await);
+            drop(future);
+            read
+        });
+        let mut read = cancelled_reader.await.unwrap();
         // 此时读Future及其Task都已结束；释放对端容量仍须唤醒原写Task。
-        let peer=tokio::spawn(async move{let mut data=Vec::new();server.read_to_end(&mut data).await.unwrap();assert_eq!(data,vec![0x43;96001]);server.write_all(b"after-cancelled-read").await.unwrap();server.shutdown().await.unwrap();});
-        tokio::time::timeout(Duration::from_secs(8),async{writer.await.unwrap();let mut data=Vec::new();read.read_to_end(&mut data).await.unwrap();assert_eq!(data,b"after-cancelled-read");peer.await.unwrap();}).await.expect("放弃读Future不能夺走原写Task的就绪通知");
+        let peer = tokio::spawn(async move {
+            let mut data = Vec::new();
+            server.read_to_end(&mut data).await.unwrap();
+            assert_eq!(data, vec![0x43; 96001]);
+            server.write_all(b"after-cancelled-read").await.unwrap();
+            server.shutdown().await.unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(8), async {
+            writer.await.unwrap();
+            let mut data = Vec::new();
+            read.read_to_end(&mut data).await.unwrap();
+            assert_eq!(data, b"after-cancelled-read");
+            peer.await.unwrap();
+        })
+        .await
+        .expect("放弃读Future不能夺走原写Task的就绪通知");
     }
 
     #[tokio::test]
     async fn abandoned_buffered_write_wakes_already_pending_reader() {
-        for method in [Method::Aes,Method::ChaCha,Method::None] {
-            let (client,mut server,_)=layered(method,true);let (mut read,mut write)=tokio::io::split(client);
-            let (registered,ready)=oneshot::channel();
-            let reader=tokio::spawn(async move{
-                let mut data=Vec::new();let mut future=Box::pin(read.read_to_end(&mut data));
-                assert!(poll_fn(|cx|Poll::Ready(future.as_mut().poll(cx).is_pending())).await);
-                registered.send(()).unwrap();future.await.unwrap();data
+        for method in [Method::Aes, Method::ChaCha, Method::None] {
+            let (client, mut server, _) = layered(method, true);
+            let (mut read, mut write) = tokio::io::split(client);
+            let (registered, ready) = oneshot::channel();
+            let reader = tokio::spawn(async move {
+                let mut data = Vec::new();
+                let mut future = Box::pin(read.read_to_end(&mut data));
+                assert!(poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx).is_pending())).await);
+                registered.send(()).unwrap();
+                future.await.unwrap();
+                data
             });
             ready.await.unwrap();
-            let bytes=vec![0x74;32768];let expected=bytes.clone();
-            let writer=tokio::spawn(async move{let accepted=write.write(&bytes).await.unwrap();(write,accepted)});
-            let (held,accepted)=writer.await.unwrap();assert!(accepted>97);
+            let bytes = vec![0x74; 32768];
+            let expected = bytes.clone();
+            let writer = tokio::spawn(async move {
+                let accepted = write.write(&bytes).await.unwrap();
+                (write, accepted)
+            });
+            let (held, accepted) = writer.await.unwrap();
+            assert!(accepted > 97);
             // 写Task已完成，既不flush也不shutdown；已接受的缓冲必须由读侧继续推进。
-            let peer=tokio::spawn(async move{let mut data=vec![0;accepted];server.read_exact(&mut data).await.unwrap();assert_eq!(data,&expected[..accepted]);server.write_all(b"after-buffered-write").await.unwrap();server.shutdown().await.unwrap();});
-            tokio::time::timeout(Duration::from_secs(8),async{assert_eq!(reader.await.unwrap(),b"after-buffered-write");peer.await.unwrap();}).await.expect("接受写缓冲后必须唤醒已等待的读Task");drop(held);
+            let peer = tokio::spawn(async move {
+                let mut data = vec![0; accepted];
+                server.read_exact(&mut data).await.unwrap();
+                assert_eq!(data, &expected[..accepted]);
+                server.write_all(b"after-buffered-write").await.unwrap();
+                server.shutdown().await.unwrap();
+            });
+            tokio::time::timeout(Duration::from_secs(8), async {
+                assert_eq!(reader.await.unwrap(), b"after-buffered-write");
+                peer.await.unwrap();
+            })
+            .await
+            .expect("接受写缓冲后必须唤醒已等待的读Task");
+            drop(held);
         }
     }
 
     #[tokio::test]
     async fn read_continues_abandoned_flush_and_shutdown_without_repeating_bytes() {
-        for method in [Method::Aes,Method::ChaCha,Method::None] {for shutdown in [false,true] {
-            let (mut client,mut server,_)=layered(method,false);let bytes=vec![0x85;32768];let accepted=client.write(&bytes).await.unwrap();assert!(accepted>97);let bytes=bytes[..accepted].to_vec();
-            let mut future:Pin<Box<dyn Future<Output=io::Result<()>>+'_>>=if shutdown{Box::pin(client.shutdown())}else{Box::pin(client.flush())};
-            assert!(poll_fn(|cx|Poll::Ready(future.as_mut().poll(cx).is_pending())).await);drop(future);
-            let peer=tokio::spawn(async move{
-                let mut data=Vec::new();if shutdown{server.read_to_end(&mut data).await.unwrap();}else{data.resize(bytes.len(),0);server.read_exact(&mut data).await.unwrap();}assert_eq!(data,bytes);server.write_all(b"after-owned-output").await.unwrap();server.shutdown().await.unwrap();
-            });
-            let mut reply=Vec::new();tokio::time::timeout(Duration::from_secs(8),async{client.read_to_end(&mut reply).await.unwrap();peer.await.unwrap();}).await.expect("放弃输出Future后读侧仍须完成已有输出及EOF");assert_eq!(reply,b"after-owned-output");
-            if shutdown {client.shutdown().await.unwrap();assert!(client.write(b"late").await.is_err());}
-        }}
+        for method in [Method::Aes, Method::ChaCha, Method::None] {
+            for shutdown in [false, true] {
+                let (mut client, mut server, _) = layered(method, false);
+                let bytes = vec![0x85; 32768];
+                let accepted = client.write(&bytes).await.unwrap();
+                assert!(accepted > 97);
+                let bytes = bytes[..accepted].to_vec();
+                let mut future: Pin<Box<dyn Future<Output = io::Result<()>> + '_>> = if shutdown {
+                    Box::pin(client.shutdown())
+                } else {
+                    Box::pin(client.flush())
+                };
+                assert!(poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx).is_pending())).await);
+                drop(future);
+                let peer = tokio::spawn(async move {
+                    let mut data = Vec::new();
+                    if shutdown {
+                        server.read_to_end(&mut data).await.unwrap();
+                    } else {
+                        data.resize(bytes.len(), 0);
+                        server.read_exact(&mut data).await.unwrap();
+                    }
+                    assert_eq!(data, bytes);
+                    server.write_all(b"after-owned-output").await.unwrap();
+                    server.shutdown().await.unwrap();
+                });
+                let mut reply = Vec::new();
+                tokio::time::timeout(Duration::from_secs(8), async {
+                    client.read_to_end(&mut reply).await.unwrap();
+                    peer.await.unwrap();
+                })
+                .await
+                .expect("放弃输出Future后读侧仍须完成已有输出及EOF");
+                assert_eq!(reply, b"after-owned-output");
+                if shutdown {
+                    client.shutdown().await.unwrap();
+                    assert!(client.write(b"late").await.is_err());
+                }
+            }
+        }
     }
 
-    struct RejectOutput { shutdown: bool }
+    struct RejectOutput {
+        shutdown: bool,
+    }
     impl AsyncRead for RejectOutput {
-        fn poll_read(self:Pin<&mut Self>,_:&mut Context<'_>,_:&mut ReadBuf<'_>)->Poll<io::Result<()>>{Poll::Pending}
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
     }
     impl AsyncWrite for RejectOutput {
-        fn poll_write(self:Pin<&mut Self>,_:&mut Context<'_>,bytes:&[u8])->Poll<io::Result<usize>>{Poll::Ready(Ok(bytes.len()))}
-        fn poll_flush(self:Pin<&mut Self>,_:&mut Context<'_>)->Poll<io::Result<()>>{if self.shutdown{Poll::Ready(Ok(()))}else{Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))}}
-        fn poll_shutdown(self:Pin<&mut Self>,_:&mut Context<'_>)->Poll<io::Result<()>>{Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))}
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if self.shutdown {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
+            }
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
+        }
     }
     #[tokio::test]
     async fn output_failure_wakes_independent_reader_and_stays_failed() {
-        for shutdown in [false,true] {
-            let pair=table();let obfs=ObfsStream::new(Box::new(RejectOutput{shutdown}),pair.down.clone(),pair.up.clone(),false,false,0,0).unwrap();let stream=RecordStream::new(obfs,Method::Aes,[1;32],[2;32]).unwrap();let(mut read,mut write)=tokio::io::split(stream);let(registered,ready)=oneshot::channel();
-            let reader=tokio::spawn(async move{let mut byte=[0;1];let mut future=Box::pin(read.read(&mut byte));assert!(poll_fn(|cx|Poll::Ready(future.as_mut().poll(cx).is_pending())).await);registered.send(()).unwrap();assert!(future.await.is_err());});ready.await.unwrap();
-            let result=if shutdown{write.shutdown().await}else{write.flush().await};assert!(result.is_err());assert!(write.flush().await.is_err());assert!(write.shutdown().await.is_err());assert!(write.write(b"late").await.is_err());tokio::time::timeout(Duration::from_secs(2),reader).await.unwrap().unwrap();
+        for shutdown in [false, true] {
+            let pair = table();
+            let obfs = ObfsStream::new(
+                Box::new(RejectOutput { shutdown }),
+                pair.down.clone(),
+                pair.up.clone(),
+                false,
+                false,
+                0,
+                0,
+            )
+            .unwrap();
+            let stream = RecordStream::new(obfs, Method::Aes, [1; 32], [2; 32]).unwrap();
+            let (mut read, mut write) = tokio::io::split(stream);
+            let (registered, ready) = oneshot::channel();
+            let reader = tokio::spawn(async move {
+                let mut byte = [0; 1];
+                let mut future = Box::pin(read.read(&mut byte));
+                assert!(poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx).is_pending())).await);
+                registered.send(()).unwrap();
+                assert!(future.await.is_err());
+            });
+            ready.await.unwrap();
+            let result = if shutdown {
+                write.shutdown().await
+            } else {
+                write.flush().await
+            };
+            assert!(result.is_err());
+            assert!(write.flush().await.is_err());
+            assert!(write.shutdown().await.is_err());
+            assert!(write.write(b"late").await.is_err());
+            tokio::time::timeout(Duration::from_secs(2), reader)
+                .await
+                .unwrap()
+                .unwrap();
         }
     }
 }

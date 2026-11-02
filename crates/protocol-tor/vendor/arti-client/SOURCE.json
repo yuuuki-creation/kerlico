@@ -1,0 +1,16 @@
+{
+  "name": "arti-client",
+  "version": "0.47.0",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://gitlab.torproject.org/tpo/core/arti.git",
+  "commit": "ce8bc6e0998bd5a4efdf06dd62dce53c98ea1087",
+  "release_tag": "arti-v2.7.0",
+  "release_tag_object": "ce6cad8886837970d99ad9033da8da63614567a3",
+  "archive": "https://static.crates.io/crates/arti-client/arti-client-0.47.0.crate",
+  "archive_sha256": "43e6531f26fe6f44d71dabdc63b7845bae81547cc738aa942f0e3e482f776388",
+  "path_in_repository": "crates/arti-client",
+  "license_files_source": "同一固定官方Git提交的根LICENSE-MIT与LICENSE-APACHE",
+  "modified_files": ["src/builder.rs", "src/client.rs"],
+  "local_change": "可选可信嵌入方fatal协议事件回调，保留检测条件及未设置回调时的原版退出行为",
+  "validation": "已编写，未构建或测试"
+}

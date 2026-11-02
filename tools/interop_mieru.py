@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """专用 worker：Mieru TCP 与显式本地旧 UDP 的双角色独立对端矩阵。"""
+from config_v2 import bind_members
 import argparse
 from contextlib import ExitStack
 import hashlib
@@ -68,7 +69,7 @@ def verify(args,root,transport,host,target_host,mux,no_wait,mode,rotation,role):
   tcp_server=h.TcpServer6 if ':' in target_host else h.TcpServer;udp_server=UdpServer6 if ':' in target_host else UdpServer
   tp=stack.enter_context(h.serve(tcp_server((target_host,0),h.TcpEcho)));up=stack.enter_context(h.serve(udp_server((target_host,0),h.UdpEcho)))
   np,tcp_port,udp_port=port(),port(),port()
-  own={'version':1,'inbounds':[],'outbounds':[],'limits':{'connect_timeout_ms':4000,'idle_timeout_ms':10000,'drain_timeout_ms':500,'max_sessions':128,'max_datagram_size':65535}}
+  own={'version':2,'inbounds':[],'outbounds':[],'limits':{'connect_timeout_ms':4000,'idle_timeout_ms':10000,'drain_timeout_ms':500,'max_sessions':128,'max_datagram_size':65535}}
   reference={'mode':'rule','rules':['MATCH,DIRECT'],'log-level':'error','geo-auto-update':False,'ipv6':True}
   auth={'username':USERNAME,'password':PASSWORD};traffic={'low_entropy_mode':mode,'mask_rotation':rotation,'max_padding':32}
   if role=='client':
@@ -80,6 +81,8 @@ def verify(args,root,transport,host,target_host,mux,no_wait,mode,rotation,role):
    own['nodes' if transport=='tcp' else 'local_inbounds']=[{'tag':'node','type':'mieru','listen':address(host,np),'outbound':'direct','options':{'transport':transport,'unsafe_udp_compatibility':transport=='udp','traffic':traffic,**auth}}]
    reference['proxies']=[{'name':'relay','type':'mieru','server':host,'port':np,'transport':transport.upper(),'udp':True,'multiplexing':'MULTIPLEXING_HIGH' if mux else 'MULTIPLEXING_OFF','handshake-mode':'HANDSHAKE_NO_WAIT' if no_wait else 'HANDSHAKE_STANDARD','traffic-pattern':pattern,**auth}]
    reference['listeners']=[{'name':'tcp','type':'tunnel','listen':'127.0.0.1','port':str(tcp_port),'network':['tcp'],'target':address(target_host,tp),'proxy':'relay'},{'name':'udp','type':'tunnel','listen':'127.0.0.1','port':str(udp_port),'network':['udp'],'target':address(target_host,up),'proxy':'relay'}]
+  for node in own.get('nodes',[]):
+   bind_members(own,node,[{field:node['options'].pop(field) for field in ('username','password')}])
   h.write_json(work/'own.json',own);h.write_json(work/'peer.json',reference)
   own_args=[args.kerlico,'run','-c',str(work/'own.json')];ref_args=[args.reference,'-d',str(work),'-f',str(work/'peer.json')]
   first=stack.enter_context(h.process(ref_args if role=='client' else own_args,work,'first'));wait_listener(first,np,transport)

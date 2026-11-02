@@ -1,44 +1,651 @@
-//! 与协议无关的目标访问；域名优先 IPv4，候选只在建立阶段切换。
+//! 一个 Engine 的唯一命名出站所有者、可信目标调度与业务计量边界。
 
+use kerlico_config::{EgressPlan, IngressPlan};
 use kerlico_core::{
-    AccessService, Address, BoxFuture, BoxStream, Capabilities, ConnectContext,
-    DatagramAssociation, DatagramAssociationSender, DatagramChannel, DatagramReceiver, Destination,
-    Error, Outbound, Result,
+    Address, BoxFuture, Capabilities, ConnectContext, DatagramAssociationSender, DatagramReceiver,
+    Destination, Error, FamilyMode, FixedUdpFlow, FlowOpen, IngressBinding, NodeId, OpenedTcp,
+    OriginalTarget, OutId, Outbound, Result, ServiceContext, ServiceRetirement, SessionDispatcher,
+    SessionIdentity, ShutdownReport, TargetPolicy, TcpFlow, UdpAssociation,
 };
-use std::{collections::HashSet, sync::Arc, time::Duration};
-use tokio::time::Instant;
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    net::IpAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+use tokio::time::{Instant, timeout_at};
+mod meter;
+mod telemetry;
+pub use telemetry::{
+    DatagramTargetRecord, FlowEnd, FlowId, FlowKind, FlowRecord, FlowStage, Telemetry, Usage,
+    UsageSnapshot,
+};
+use telemetry::{FlowKind as Kind, FlowLease};
 
-pub struct Egress {
-    outbound: Arc<dyn Outbound>,
+static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
+
+pub trait Resolver: Send + Sync {
+    fn resolve<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Vec<IpAddr>>>;
 }
-
-struct ResolvedReceiver {
-    inner: Box<dyn DatagramReceiver>,
-    target: Destination,
-}
-
-struct ResolvedAssociationSender {
-    inner: Box<dyn DatagramAssociationSender>,
-    context: ConnectContext,
-}
-
-impl DatagramAssociationSender for ResolvedAssociationSender {
-    fn send_to<'a>(
-        &'a mut self,
-        packet: &'a [u8],
-        target: &'a Destination,
-    ) -> BoxFuture<'a, Result<()>> {
+struct SystemResolver;
+impl Resolver for SystemResolver {
+    fn resolve<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Vec<IpAddr>>> {
         Box::pin(async move {
-            self.context
-                .run(async {
-                    let targets = Egress::candidates(target).await?;
-                    self.inner.send_to(packet, &targets[0]).await
-                })
-                .await
+            Ok(tokio::net::lookup_host((host, 0))
+                .await?
+                .map(|address| address.ip())
+                .collect())
         })
     }
 }
 
+pub use kerlico_core::DeviceLease;
+pub use kerlico_net::native_device;
+
+struct RunningService {
+    id: OutId,
+    backend: Arc<dyn Outbound>,
+    host: ServiceContext,
+    policy: TargetPolicy,
+    capabilities: Capabilities,
+    association: bool,
+}
+impl Drop for RunningService {
+    fn drop(&mut self) {
+        self.host.retire(Instant::now());
+    }
+}
+struct StartingService {
+    host: ServiceContext,
+    deadline: Instant,
+    armed: bool,
+}
+impl Drop for StartingService {
+    fn drop(&mut self) {
+        if self.armed {
+            self.host.retire(self.deadline);
+        }
+    }
+}
+struct Binding {
+    outbound: OutId,
+    mode: FamilyMode,
+}
+
+struct Dispatcher {
+    services: BTreeMap<OutId, RunningService>,
+    service_order: Vec<OutId>,
+    bindings: BTreeMap<NodeId, Binding>,
+    resolver: Arc<dyn Resolver>,
+    telemetry: Telemetry,
+    closed: AtomicBool,
+    shutdown: tokio::sync::Mutex<Option<RuntimeDrain>>,
+    _device: DeviceLease,
+}
+
+struct RuntimeDrain {
+    deadline: Instant,
+    services: Vec<ServiceDrain>,
+}
+#[derive(Default)]
+struct ServiceDrain {
+    backend: Option<ShutdownReport>,
+    tasks: ShutdownReport,
+}
+impl RuntimeDrain {
+    fn report(&self) -> ShutdownReport {
+        let mut report = ShutdownReport::default();
+        for service in &self.services {
+            if let Some(backend) = &service.backend {
+                report.merge(backend);
+            }
+            report.merge(&service.tasks);
+        }
+        report
+    }
+}
+
+pub struct EgressRuntime {
+    dispatcher: Arc<Dispatcher>,
+    ingresses: BTreeMap<NodeId, IngressBinding>,
+}
+impl Drop for EgressRuntime {
+    fn drop(&mut self) {
+        self.dispatcher.closed.store(true, Ordering::Release);
+        for service in self.dispatcher.services.values() {
+            service.host.retire(Instant::now());
+        }
+    }
+}
+impl EgressRuntime {
+    pub async fn start(plan: EgressPlan, device: DeviceLease, budget: Duration) -> Result<Self> {
+        Self::start_with_resolver(plan, device, budget, Arc::new(SystemResolver)).await
+    }
+    async fn start_with_resolver(
+        plan: EgressPlan,
+        device: DeviceLease,
+        budget: Duration,
+        resolver: Arc<dyn Resolver>,
+    ) -> Result<Self> {
+        let (plans, bindings, max_flows) = plan.into_parts();
+        let run = NEXT_RUN
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| Error::ResourceLimit)?;
+        let deadline = Instant::now() + budget;
+        let mut started = Vec::new();
+        for named in plans {
+            let host = ServiceContext::with_device(named.id.clone(), device.clone());
+            let mut starting = StartingService { host: host.clone(), deadline, armed: true };
+            let capabilities = named.plan.capabilities();
+            let association = named.plan.supports_udp_association();
+            let policy = named.plan.target_policy();
+            let result = timeout_at(deadline, named.plan.start(host.clone()))
+                .await
+                .map_err(|_| Error::Timeout)
+                .and_then(|value| value);
+            match result {
+                Ok(backend) => {
+                    let valid = backend.capabilities() == capabilities
+                        && backend.supports_udp_association() == association
+                        && !host.cancel().is_cancelled();
+                    started.push(RunningService {
+                        id: named.id,
+                        backend,
+                        host,
+                        policy,
+                        capabilities,
+                        association,
+                    });
+                    starting.armed = false;
+                    if !valid {
+                        let cleanup = shutdown_services(started.iter().rev(), deadline).await;
+                        return Err(startup(
+                            Error::Protocol("运行后端与编译能力或启动状态不一致"),
+                            cleanup,
+                        ));
+                    }
+                }
+                Err(primary) => {
+                    let mut cleanup = host.shutdown(deadline).await;
+                    cleanup.merge(&shutdown_services(started.iter().rev(), deadline).await);
+                    return Err(startup(primary, cleanup));
+                }
+            }
+        }
+        let service_order = started.iter().map(|service| service.id.clone()).collect();
+        let mut services = BTreeMap::new();
+        for service in started {
+            services.insert(service.id.clone(), service);
+        }
+        let routes = bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding.issuer.node().clone(),
+                    Binding {
+                        outbound: binding.outbound.clone(),
+                        mode: binding.mode,
+                    },
+                )
+            })
+            .collect();
+        let dispatcher = Arc::new(Dispatcher {
+            services,
+            service_order,
+            bindings: routes,
+            resolver,
+            telemetry: Telemetry::new(max_flows),
+            closed: AtomicBool::new(false),
+            shutdown: tokio::sync::Mutex::new(None),
+            _device: device,
+        });
+        let mut ingresses = BTreeMap::new();
+        for binding in bindings {
+            let result = Self::bind(&dispatcher, binding, run);
+            match result {
+                Ok((node, ingress)) => {
+                    ingresses.insert(node, ingress);
+                }
+                Err(primary) => {
+                    let cleanup = shutdown_services(
+                        dispatcher
+                            .service_order
+                            .iter()
+                            .rev()
+                            .filter_map(|id| dispatcher.services.get(id)),
+                        deadline,
+                    )
+                    .await;
+                    return Err(startup(primary, cleanup));
+                }
+            }
+        }
+        Ok(Self {
+            dispatcher,
+            ingresses,
+        })
+    }
+    fn bind(
+        dispatcher: &Arc<Dispatcher>,
+        binding: IngressPlan,
+        run: u64,
+    ) -> Result<(NodeId, IngressBinding)> {
+        binding.issuer.activate(run)?;
+        let association = dispatcher
+            .services
+            .get(&binding.outbound)
+            .ok_or_else(|| Error::Config("出站绑定不存在".into()))?
+            .association;
+        let node = binding.issuer.node().clone();
+        Ok((
+            node,
+            IngressBinding::assemble(
+                binding.issuer,
+                binding.local,
+                dispatcher.clone(),
+                association,
+            ),
+        ))
+    }
+    pub fn ingress(&self, node: &NodeId) -> Result<IngressBinding> {
+        self.ingresses.get(node).cloned().ok_or(Error::Rejected)
+    }
+    pub fn telemetry(&self) -> Telemetry {
+        self.dispatcher.telemetry.clone()
+    }
+    /// 返回独立回收收据，供消费 Engine 或丢弃运行实例后继续确认真实任务释放。
+    pub fn service_retirements(&self) -> Vec<(OutId, ServiceRetirement)> {
+        self.dispatcher.services.values()
+            .map(|service| (service.id.clone(), service.host.retirement()))
+            .collect()
+    }
+    pub async fn shutdown(&self, budget: Duration) -> ShutdownReport {
+        self.shutdown_at(Instant::now() + budget).await
+    }
+    pub async fn shutdown_at(&self, deadline: Instant) -> ShutdownReport {
+        let mut shutdown = match timeout_at(deadline, self.dispatcher.shutdown.lock()).await {
+            Ok(shutdown) => shutdown,
+            Err(_) => {
+                return ShutdownReport {
+                    timed_out: true,
+                    ..ShutdownReport::default()
+                };
+            }
+        };
+        let progress = shutdown.get_or_insert_with(|| RuntimeDrain {
+            deadline,
+            services: (0..self.dispatcher.service_order.len())
+                .map(|_| ServiceDrain::default())
+                .collect(),
+        });
+        self.dispatcher.closed.store(true, Ordering::Release);
+        for (index, id) in self.dispatcher.service_order.iter().rev().enumerate() {
+            let service = self.dispatcher.services.get(id).expect("命名服务已装配");
+            if deadline < progress.deadline && Instant::now() >= deadline {
+                let mut report = progress.report();
+                report.timed_out = true;
+                return report;
+            }
+            if progress.services[index].backend.is_none() {
+                service.host.cancel().cancel();
+                let mut report = ShutdownReport::default();
+                match timeout_at(deadline.min(progress.deadline), service.backend.shutdown()).await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => report.failed_tasks = 1,
+                    Err(_) if Instant::now() < progress.deadline => {
+                        let mut report = progress.report();
+                        report.timed_out = true;
+                        return report;
+                    }
+                    Err(_) => report.timed_out = true,
+                }
+                progress.services[index].backend = Some(report);
+            }
+            let report = if deadline < progress.deadline {
+                match timeout_at(deadline, service.host.shutdown(progress.deadline)).await {
+                    Ok(report) => report,
+                    Err(_) => {
+                        let mut report = progress.report();
+                        report.timed_out = true;
+                        return report;
+                    }
+                }
+            } else {
+                service.host.shutdown(progress.deadline).await
+            };
+            progress.services[index].tasks = report;
+        }
+        progress.report()
+    }
+}
+fn startup(primary: Error, cleanup: ShutdownReport) -> Error {
+    Error::Startup {
+        primary: Box::new(primary),
+        cleanup_timed_out: cleanup.timed_out,
+        cleanup_failures: cleanup.failed_tasks,
+    }
+}
+async fn shutdown_services<'a>(
+    services: impl Iterator<Item = &'a RunningService>,
+    deadline: Instant,
+) -> ShutdownReport {
+    let mut report = ShutdownReport::default();
+    for service in services {
+        service.host.cancel().cancel();
+        match timeout_at(deadline, service.backend.shutdown()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => report.failed_tasks += 1,
+            Err(_) => report.timed_out = true,
+        }
+        report.merge(&service.host.shutdown(deadline).await);
+    }
+    report
+}
+
+impl Dispatcher {
+    fn route(&self, identity: &SessionIdentity) -> Result<(&RunningService, FamilyMode)> {
+        if self.closed.load(Ordering::Acquire)
+            || !identity.is_accepting()
+            || identity.cancel().is_cancelled()
+            || identity.node_cancel().is_cancelled()
+        {
+            return Err(Error::Cancelled);
+        }
+        let binding = self
+            .bindings
+            .get(identity.source().node())
+            .ok_or(Error::Rejected)?;
+        let service = self
+            .services
+            .get(&binding.outbound)
+            .ok_or(Error::Rejected)?;
+        service.host.check()?;
+        Ok((service, binding.mode))
+    }
+    fn tcp<'a>(
+        &'a self,
+        identity: &'a SessionIdentity,
+        original: OriginalTarget,
+        context: &'a ConnectContext,
+    ) -> Result<FlowOpen<'a, TcpFlow>> {
+        if context.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let (service, mode) = self.route(identity)?;
+        if !service.capabilities.tcp {
+            return Err(Error::Unsupported("所选命名出站没有 TCP 能力"));
+        }
+        let scoped = context.scoped(
+            &service.host,
+            identity.source(),
+            identity.node_cancel(),
+            identity.cancel(),
+            mode,
+        );
+        let ledger =
+            self.telemetry
+                .open(identity, &service.id, Some(original.clone()), Kind::Tcp)?;
+        let lease = FlowLease::new(ledger.clone(), &scoped, identity);
+        let completion = lease.clone();
+        Ok(FlowOpen::tcp(
+            Box::pin(async move {
+                let result = match service.policy {
+                    TargetPolicy::Remote => scoped
+                        .run(service.backend.connect_tcp(original.target(), &scoped))
+                        .await
+                        .map(|stream| (stream, None)),
+                    TargetPolicy::Local => {
+                        scoped
+                            .run(async {
+                                let candidates =
+                                    candidates(self.resolver.as_ref(), original.target(), mode)
+                                        .await?;
+                                let mut last = Error::InvalidAddress;
+                                for (index, target) in candidates.iter().enumerate() {
+                                    let remaining = scoped.remaining();
+                                    if remaining.is_zero() {
+                                        return Err(Error::Timeout);
+                                    }
+                                    let budget = if index + 1 < candidates.len() {
+                                        remaining.min(Duration::from_secs(1))
+                                    } else {
+                                        remaining
+                                    };
+                                    let attempt = scoped.with_timeout(budget);
+                                    match attempt
+                                        .run(service.backend.connect_tcp(target, &attempt))
+                                        .await
+                                    {
+                                        Ok(stream) => return Ok((stream, Some(target.clone()))),
+                                        Err(error @ (Error::Io(_) | Error::Timeout)) => {
+                                            last = error
+                                        }
+                                        Err(error) => return Err(error),
+                                    }
+                                }
+                                Err(last)
+                            })
+                            .await
+                    }
+                };
+                match result {
+                    Ok((stream, observed)) => {
+                        ledger.ready(service.policy == TargetPolicy::Local, observed);
+                        ledger.target_bind(stream.info.target_bind().clone());
+                        Ok(OpenedTcp {
+                            stream: meter::stream(stream.stream, lease.clone()),
+                            info: stream.info,
+                        })
+                    }
+                    Err(error) => {
+                        lease.failed(&error);
+                        Err(error)
+                    }
+                }
+            }),
+            move |outcome| completion.conclude(outcome),
+        ))
+    }
+    fn udp<'a>(
+        &'a self,
+        identity: &'a SessionIdentity,
+        original: OriginalTarget,
+        context: &'a ConnectContext,
+    ) -> Result<FlowOpen<'a, FixedUdpFlow>> {
+        if context.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let (service, mode) = self.route(identity)?;
+        if !service.capabilities.udp {
+            return Err(Error::Unsupported("所选命名出站没有固定 UDP 能力"));
+        }
+        let scoped = context.scoped(
+            &service.host,
+            identity.source(),
+            identity.node_cancel(),
+            identity.cancel(),
+            mode,
+        );
+        let ledger = self.telemetry.open(
+            identity,
+            &service.id,
+            Some(original.clone()),
+            Kind::FixedUdp,
+        )?;
+        let lease = FlowLease::new(ledger.clone(), &scoped, identity);
+        let completion = lease.clone();
+        Ok(FlowOpen::fixed_udp(
+            Box::pin(async move {
+                let result = scoped
+                    .run(async {
+                        let target = match service.policy {
+                            TargetPolicy::Remote => original.target().clone(),
+                            TargetPolicy::Local => {
+                                candidates(self.resolver.as_ref(), original.target(), mode)
+                                    .await?
+                                    .remove(0)
+                            }
+                        };
+                        let mut channel = service.backend.connect_udp(&target, &scoped).await?;
+                        let observed = if service.policy == TargetPolicy::Local {
+                            channel.receiver = Box::new(ResolvedReceiver {
+                                inner: channel.receiver,
+                                target: target.clone(),
+                            });
+                            Some(target)
+                        } else {
+                            None
+                        };
+                        Ok((channel, observed))
+                    })
+                    .await;
+                match result {
+                    Ok((channel, observed)) => {
+                        ledger.ready(service.policy == TargetPolicy::Local, observed);
+                        Ok(meter::fixed(channel, lease.clone()))
+                    }
+                    Err(error) => {
+                        lease.failed(&error);
+                        Err(error)
+                    }
+                }
+            }),
+            move |outcome| completion.conclude(outcome),
+        ))
+    }
+    fn association<'a>(
+        &'a self,
+        identity: &'a SessionIdentity,
+        context: &'a ConnectContext,
+    ) -> Result<FlowOpen<'a, UdpAssociation>> {
+        if context.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let (service, mode) = self.route(identity)?;
+        if !service.association {
+            return Err(Error::Unsupported("所选命名出站没有多目标 UDP 关联能力"));
+        }
+        let scoped = context.scoped(
+            &service.host,
+            identity.source(),
+            identity.node_cancel(),
+            identity.cancel(),
+            mode,
+        );
+        let ledger = self
+            .telemetry
+            .open(identity, &service.id, None, Kind::UdpAssociation)?;
+        let lease = FlowLease::new(ledger.clone(), &scoped, identity);
+        let completion = lease.clone();
+        Ok(FlowOpen::association(
+            Box::pin(async move {
+                match scoped.run(service.backend.associate_udp(&scoped)).await {
+                    Ok(mut channel) => {
+                        if service.policy == TargetPolicy::Local {
+                            channel.sender = Box::new(LocalAssociationSender {
+                                inner: channel.sender,
+                                resolver: self.resolver.clone(),
+                                mode,
+                                context: scoped.clone(),
+                                targets: HashMap::new(),
+                                ledger: ledger.clone(),
+                            });
+                        }
+                        ledger.ready(service.policy == TargetPolicy::Local, None);
+                        Ok(meter::association(channel, lease.clone()))
+                    }
+                    Err(error) => {
+                        lease.failed(&error);
+                        Err(error)
+                    }
+                }
+            }),
+            move |outcome| completion.conclude(outcome),
+        ))
+    }
+}
+impl SessionDispatcher for Dispatcher {
+    fn supports_udp_association(&self, identity: &SessionIdentity) -> bool {
+        self.route(identity)
+            .is_ok_and(|(service, _)| service.association)
+    }
+    fn connect_tcp<'a>(
+        &'a self,
+        identity: &'a SessionIdentity,
+        target: OriginalTarget,
+        context: &'a ConnectContext,
+    ) -> FlowOpen<'a, TcpFlow> {
+        FlowOpen::deferred(move || self.tcp(identity, target, context))
+    }
+    fn connect_udp<'a>(
+        &'a self,
+        identity: &'a SessionIdentity,
+        target: OriginalTarget,
+        context: &'a ConnectContext,
+    ) -> FlowOpen<'a, FixedUdpFlow> {
+        FlowOpen::deferred(move || self.udp(identity, target, context))
+    }
+    fn associate_udp<'a>(
+        &'a self,
+        identity: &'a SessionIdentity,
+        context: &'a ConnectContext,
+    ) -> FlowOpen<'a, UdpAssociation> {
+        FlowOpen::deferred(move || self.association(identity, context))
+    }
+}
+
+async fn candidates(
+    resolver: &dyn Resolver,
+    target: &Destination,
+    mode: FamilyMode,
+) -> Result<Vec<Destination>> {
+    let accepts = |ip: &IpAddr| match mode {
+        FamilyMode::V4Only => ip.is_ipv4(),
+        FamilyMode::V6Only => ip.is_ipv6(),
+        FamilyMode::DualV4Preferred => true,
+    };
+    match target.address() {
+        Address::Ip(ip) => {
+            if ip.to_canonical() != *ip {
+                Err(Error::InvalidAddress)
+            } else if accepts(ip) {
+                Ok(vec![target.clone()])
+            } else {
+                Err(Error::Rejected)
+            }
+        }
+        Address::Domain(host) => {
+            let mut seen = HashSet::new();
+            let mut addresses: Vec<_> = resolver
+                .resolve(host)
+                .await?
+                .into_iter()
+                .map(|ip| ip.to_canonical())
+                .filter(accepts)
+                .filter(|ip| seen.insert(*ip))
+                .collect();
+            addresses.sort_by_key(IpAddr::is_ipv6);
+            addresses.truncate(32);
+            if addresses.is_empty() {
+                return Err(Error::InvalidAddress);
+            }
+            addresses
+                .into_iter()
+                .map(|ip| Destination::new(&ip.to_string(), target.port()))
+                .collect()
+        }
+    }
+}
+struct ResolvedReceiver {
+    inner: Box<dyn DatagramReceiver>,
+    target: Destination,
+}
 impl DatagramReceiver for ResolvedReceiver {
     fn peer_addr(&self) -> Option<Destination> {
         Some(self.target.clone())
@@ -47,158 +654,101 @@ impl DatagramReceiver for ResolvedReceiver {
         self.inner.recv()
     }
 }
-
-impl Egress {
-    pub fn new(outbound: Arc<dyn Outbound>) -> Self {
-        Self { outbound }
-    }
-
-    async fn candidates(target: &Destination) -> Result<Vec<Destination>> {
-        if matches!(target.address(), Address::Ip(_)) {
-            return Ok(vec![target.clone()]);
-        }
-        let mut seen = HashSet::new();
-        let mut values: Vec<_> = tokio::net::lookup_host((target.host().as_str(), target.port()))
-            .await?
-            .filter(|s| seen.insert(s.ip()))
-            .take(32)
-            .map(|s| Destination::new(&s.ip().to_string(), s.port()))
-            .collect::<Result<_>>()?;
-        values.sort_by_key(|s| matches!(s.address(), Address::Ip(std::net::IpAddr::V6(_))));
-        if values.is_empty() {
-            return Err(Error::InvalidAddress);
-        }
-        Ok(values)
-    }
-
-    async fn tcp(&self, target: &Destination, context: &ConnectContext) -> Result<BoxStream> {
-        let deadline = Instant::now() + context.timeout;
-        context
-            .run(async {
-                let candidates = Self::candidates(target).await?;
-                let mut last = Error::InvalidAddress;
-                for (index, candidate) in candidates.iter().enumerate() {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Err(Error::Timeout);
-                    }
-                    let budget = if index + 1 < candidates.len() {
-                        remaining.min(Duration::from_millis(1000))
-                    } else {
-                        remaining
-                    };
-                    let attempt = ConnectContext {
-                        cancel: context.cancel.clone(),
-                        timeout: budget,
-                    };
-                    match self.outbound.connect_tcp(candidate, &attempt).await {
-                        Ok(stream) => return Ok(stream),
-                        Err(error @ (Error::Io(_) | Error::Timeout)) => last = error,
-                        Err(error) => return Err(error),
-                    }
+struct LocalAssociationSender {
+    inner: Box<dyn DatagramAssociationSender>,
+    resolver: Arc<dyn Resolver>,
+    mode: FamilyMode,
+    context: ConnectContext,
+    targets: HashMap<Destination, Destination>,
+    ledger: Arc<telemetry::FlowLedger>,
+}
+impl DatagramAssociationSender for LocalAssociationSender {
+    fn send_to<'a>(
+        &'a mut self,
+        packet: &'a [u8],
+        target: &'a Destination,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if !self.targets.contains_key(target) {
+                if self.targets.len() >= 256 {
+                    return Err(Error::ResourceLimit);
                 }
-                Err(last)
-            })
-            .await
-    }
-
-    async fn udp(&self, target: &Destination, context: &ConnectContext) -> Result<DatagramChannel> {
-        let deadline = Instant::now() + context.timeout;
-        context
-            .run(async {
-                let candidates = Self::candidates(target).await?;
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(Error::Timeout);
-                }
-                // 数据报建立不证明远端可达，固定首个候选后不靠收包超时重发。
-                let channel = self
-                    .outbound
-                    .connect_udp(
-                        &candidates[0],
-                        &ConnectContext {
-                            cancel: context.cancel.clone(),
-                            timeout: remaining,
-                        },
-                    )
-                    .await?;
-                Ok(DatagramChannel {
-                    sender: channel.sender,
-                    receiver: Box::new(ResolvedReceiver {
-                        inner: channel.receiver,
-                        target: candidates[0].clone(),
-                    }),
-                })
-            })
-            .await
-    }
-
-    async fn association(&self, context: &ConnectContext) -> Result<DatagramAssociation> {
-        context
-            .run(async {
-                let association = self.outbound.associate_udp(context).await?;
-                Ok(DatagramAssociation {
-                    sender: Box::new(ResolvedAssociationSender {
-                        inner: association.sender,
-                        context: context.clone(),
-                    }),
-                    receiver: association.receiver,
-                })
-            })
-            .await
+                let operation = self.context.new_operation(self.context.timeout);
+                let resolved = operation
+                    .run(candidates(self.resolver.as_ref(), target, self.mode))
+                    .await?
+                    .remove(0);
+                self.ledger.bind_datagram_target(target, resolved.clone());
+                self.targets.insert(target.clone(), resolved);
+            }
+            let selected = self.targets.get(target).expect("目标已绑定");
+            self.inner.send_to(packet, selected).await
+        })
     }
 }
 
-impl Outbound for Egress {
-    fn supports_udp_association(&self) -> bool {
-        self.outbound.supports_udp_association()
+#[cfg(feature = "test-support")]
+pub mod testing {
+    use super::*;
+    pub fn ingress(
+        input: &kerlico_config::NodeBuildContext,
+        outbound: Arc<dyn Outbound>,
+        policy: TargetPolicy,
+    ) -> Result<IngressBinding> {
+        ingress_with_resolver(
+            input,
+            outbound,
+            policy,
+            FamilyMode::DualV4Preferred,
+            Arc::new(SystemResolver),
+        )
+        .map(|(ingress, _)| ingress)
     }
-    fn associate_udp<'a>(
-        &'a self,
-        context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<DatagramAssociation>> {
-        Box::pin(self.association(context))
+    pub fn ingress_with_resolver(
+        input: &kerlico_config::NodeBuildContext,
+        outbound: Arc<dyn Outbound>,
+        policy: TargetPolicy,
+        mode: FamilyMode,
+        resolver: Arc<dyn Resolver>,
+    ) -> Result<(IngressBinding, Telemetry)> {
+        let id = OutId::parse("test-outbound")?;
+        let host = ServiceContext::with_device(id, native_device());
+        ingress_with_service(input, outbound, policy, mode, resolver, host)
     }
-    fn capabilities(&self) -> Capabilities {
-        self.outbound.capabilities()
-    }
-    fn connect_tcp<'a>(
-        &'a self,
-        target: &'a Destination,
-        context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
-        Box::pin(self.tcp(target, context))
-    }
-    fn connect_udp<'a>(
-        &'a self,
-        target: &'a Destination,
-        context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<DatagramChannel>> {
-        Box::pin(self.udp(target, context))
-    }
-}
-impl AccessService for Egress {
-    fn supports_udp_association(&self) -> bool {
-        self.outbound.supports_udp_association()
-    }
-    fn associate_udp<'a>(
-        &'a self,
-        context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<DatagramAssociation>> {
-        Box::pin(self.association(context))
-    }
-    fn connect_tcp<'a>(
-        &'a self,
-        target: &'a Destination,
-        context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
-        Box::pin(self.tcp(target, context))
-    }
-    fn connect_udp<'a>(
-        &'a self,
-        target: &'a Destination,
-        context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<DatagramChannel>> {
-        Box::pin(self.udp(target, context))
+    pub fn ingress_with_service(
+        input: &kerlico_config::NodeBuildContext,
+        outbound: Arc<dyn Outbound>,
+        policy: TargetPolicy,
+        mode: FamilyMode,
+        resolver: Arc<dyn Resolver>,
+        host: ServiceContext,
+    ) -> Result<(IngressBinding, Telemetry)> {
+        let id = host.id().clone();
+        let association = outbound.supports_udp_association();
+        let service = RunningService {
+            id: id.clone(),
+            capabilities: outbound.capabilities(),
+            association,
+            backend: outbound,
+            host,
+            policy,
+        };
+        let issuer = input.issuer();
+        issuer.activate(NEXT_RUN.fetch_add(1, Ordering::AcqRel))?;
+        let telemetry = Telemetry::new(4096);
+        let dispatcher = Arc::new(Dispatcher {
+            services: BTreeMap::from([(id.clone(), service)]),
+            service_order: vec![id.clone()],
+            bindings: BTreeMap::from([(issuer.node().clone(), Binding { outbound: id, mode })]),
+            resolver,
+            telemetry: telemetry.clone(),
+            closed: AtomicBool::new(false),
+            shutdown: tokio::sync::Mutex::new(None),
+            _device: native_device(),
+        });
+        Ok((
+            IngressBinding::assemble(issuer, input.is_local(), dispatcher, association),
+            telemetry,
+        ))
     }
 }

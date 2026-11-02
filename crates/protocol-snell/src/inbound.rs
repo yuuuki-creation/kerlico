@@ -1,16 +1,18 @@
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod support;
 use crate::{
     config::{Mode, Obfs, Settings, userkey},
     invalid, obfs, protocol,
     stream::{Pool, Session, Stream},
     wire,
 };
-use kerlico_config::NodeFactory;
+use kerlico_config::{NodeBuildContext, NodeFactory};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, ConnectContext, Error, InboundContext, InboundProtocol,
-    NodeEvent, Result,
+    BoxFuture, BoxStream, ConnectContext, CredentialManifest, CredentialSet, Error, InboundContext,
+    InboundProtocol, IngressBinding, NodeEvent, Result,
 };
 use serde::Deserialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -23,9 +25,6 @@ pub struct SnellNodeFactory;
 #[serde(deny_unknown_fields)]
 struct Options {
     version: u8,
-    psk: String,
-    #[serde(default)]
-    users: Vec<User>,
     #[serde(default)]
     mode: Option<Mode>,
     #[serde(default)]
@@ -38,67 +37,75 @@ struct Options {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct User {
+    psk: String,
+    #[serde(default)]
     userkey: String,
+}
+struct Credential {
+    settings: Arc<Settings>,
+    user: Option<[u8; 32]>,
 }
 struct SnellNode {
     settings: Arc<Settings>,
-    users: Vec<[u8; 32]>,
+    credentials: CredentialSet<Credential>,
     replays: Mutex<HashMap<[u8; 16], Instant>>,
 }
 impl NodeFactory for SnellNodeFactory {
     fn kind(&self) -> &'static str {
         "snell"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn InboundProtocol>> {
-        let options: Options = serde_json::from_value(options.clone()).map_err(|_| invalid())?;
-        let settings = Arc::new(Settings::new(
-            options.version,
-            options.psk,
-            options.mode,
-            options.obfs_mode,
-            options.obfs_host,
-            options.obfs_uri,
-            true,
-        )?);
-        if options.users.len() > 256 || (settings.raw() && options.users.is_empty()) {
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        let options: Options =
+            serde_json::from_value(input.options().clone()).map_err(|_| invalid())?;
+        let mut rows = Vec::new();
+        let mut seen = BTreeSet::new();
+        for value in input.native_credentials() {
+            let user: User = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+            let settings = Arc::new(Settings::new(
+                options.version,
+                user.psk,
+                options.mode,
+                options.obfs_mode.clone(),
+                options.obfs_host.clone(),
+                options.obfs_uri.clone(),
+                true,
+            )?);
+            let key = userkey(&user.userkey)?;
+            if settings.raw() && key.is_empty() {
+                return Err(invalid());
+            }
+            let hash = (!key.is_empty()).then(|| <[u8; 32]>::from(Sha256::digest(&key)));
+            let effective = if settings.raw() {
+                Vec::new()
+            } else {
+                settings.psk.to_vec()
+            };
+            if !seen.insert((effective.clone(), hash))
+                || rows.iter().any(|row: &Credential| {
+                    !settings.raw()
+                        && row.settings.psk.as_ref() == effective.as_slice()
+                        && (row.user.is_none() || hash.is_none())
+                })
+            {
+                return Err(invalid());
+            }
+            rows.push(Credential {
+                settings,
+                user: hash,
+            });
+        }
+        if rows.is_empty() || rows.len() > 256 {
             return Err(invalid());
         }
-        let mut seen = BTreeSet::new();
-        let mut users = Vec::new();
-        for user in options.users {
-            let key = userkey(&user.userkey)?;
-            if key.is_empty() {
-                return Err(invalid());
-            }
-            let hash: [u8; 32] = Sha256::digest(&key).into();
-            if !seen.insert(hash) {
-                return Err(invalid());
-            }
-            users.push(hash);
-        }
+        let settings = rows[0].settings.clone();
         Ok(Arc::new(SnellNode {
             settings,
-            users,
+            credentials: input.credentials(rows)?,
             replays: Mutex::new(HashMap::new()),
         }))
     }
 }
 impl SnellNode {
-    fn authenticate(&self, key: &[u8]) -> Result<()> {
-        if self.users.is_empty() {
-            return Ok(());
-        }
-        let hash: [u8; 32] = Sha256::digest(key).into();
-        let mut accepted = subtle::Choice::from(0);
-        for user in &self.users {
-            accepted |= user.ct_eq(&hash);
-        }
-        if bool::from(accepted) {
-            Ok(())
-        } else {
-            Err(protocol())
-        }
-    }
     fn replay(&self, salt: Option<[u8; 16]>) -> Result<()> {
         let Some(salt) = salt else {
             return Ok(());
@@ -117,25 +124,65 @@ impl SnellNode {
     async fn serve(
         &self,
         stream: BoxStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
-        let budget = ConnectContext {
-            cancel: context.cancel.clone(),
-            timeout: context.connect_timeout,
-        };
-        let mut session = budget
+        let budget =
+            ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
+        let raw = budget
             .run(async {
-                let stream = obfs::wrap(stream, &self.settings, true).await?;
-                Ok(Session::new(stream, self.settings.clone())?)
+                obfs::wrap(stream, &self.settings, true)
+                    .await
+                    .map_err(Error::from)
             })
             .await?;
-        let mut first = true;
+        let candidates = crate::credential_io::Candidates::new(raw);
+        let mut tasks = tokio::task::JoinSet::new();
+        for (slot, row) in self.credentials.rows() {
+            let settings = row.settings.clone();
+            let user = row.user;
+            let raw = candidates.reader();
+            let owner = context.tasks.clone();
+            let task = owner.spawn_tracked(async move {
+                let mut session = Session::new(Box::new(raw), settings)?;
+                let record = session.reader.next().await?.ok_or_else(protocol)?;
+                let request = wire::parse_request(&record)?;
+                let hash: [u8; 32] = Sha256::digest(&request.userkey).into();
+                if user.is_some_and(|expected| !bool::from(expected.ct_eq(&hash))) {
+                    return Err(protocol());
+                }
+                Ok::<_, Error>((slot, user, session, record))
+            })?;
+            tasks.spawn(async move {
+                task.await
+                    .unwrap_or(Err(Error::Protocol("Snell 认证任务异常退出")))
+            });
+        }
+        let selected = budget
+            .run(async {
+                while let Some(result) = tasks.join_next().await {
+                    if let Ok(Ok(result)) = result {
+                        return Ok(result);
+                    }
+                }
+                Err(Error::Rejected)
+            })
+            .await;
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        let (slot, user, mut session, first_record) = selected?;
+        self.replay(session.reader.salt())?;
+        candidates.accept();
+        let (access, ()) = access.authenticated(self.credentials.verified(&slot, ())?, &context)?;
+        let mut first_record = Some(first_record);
         loop {
-            let record = if first {
-                budget
-                    .run(async { session.reader.next().await?.ok_or_else(protocol) })
-                    .await?
+            let opening = if first_record.is_some() {
+                budget.clone()
+            } else {
+                ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone())
+            };
+            let record = if let Some(record) = first_record.take() {
+                record
             } else {
                 match session.reader.next().await? {
                     Some(record) => record,
@@ -143,10 +190,9 @@ impl SnellNode {
                 }
             };
             let request = wire::parse_request(&record)?;
-            self.authenticate(&request.userkey)?;
-            if first {
-                self.replay(session.reader.salt())?;
-                first = false;
+            let hash: [u8; 32] = Sha256::digest(&request.userkey).into();
+            if user.is_some_and(|expected| !bool::from(expected.ct_eq(&hash))) {
+                return Err(protocol());
             }
             match request.command {
                 0 => {
@@ -157,7 +203,9 @@ impl SnellNode {
                     if !request.tail.is_empty() {
                         return Err(protocol());
                     }
-                    session.send(&[0]).await?;
+                    opening
+                        .run(async { session.send(&[0]).await.map_err(Error::Io) })
+                        .await?;
                     return crate::udp::serve(session, access, context).await;
                 }
                 1 | 5 => {
@@ -171,14 +219,22 @@ impl SnellNode {
                         None
                     };
                     let target = request.target.ok_or_else(protocol)?;
-                    let remote = match access.connect_tcp(&target, &budget).await {
+                    let remote = match access.connect_tcp(&target, &opening).await {
                         Ok(remote) => remote,
                         Err(error) => {
                             let _ = session.send(&wire::error_reply(1, "目标连接失败")).await;
                             return Err(error);
                         }
                     };
-                    session.send(&[0]).await?;
+                    if let Err(error) = opening
+                        .run(async { session.send(&[0]).await.map_err(Error::Io) })
+                        .await
+                    {
+                        remote.finish(kerlico_core::FlowOutcome::Failed(
+                            kerlico_core::FlowFailure::from_error(&error),
+                        ));
+                        return Err(error);
+                    }
                     let handoff = if reuse { Some(Pool::new(1)) } else { None };
                     let stream = Stream::new(session, false, request.tail, handoff.clone(), reuse);
                     if reuse {
@@ -214,29 +270,34 @@ impl InboundProtocol for SnellNode {
     fn requires_loopback(&self) -> bool {
         self.settings.raw()
     }
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
-        if self.settings.raw() {
-            return self
-                .users
-                .iter()
-                .map(|user| {
-                    let mut hash = Sha256::new();
-                    hash.update(b"kerlico/snell/raw/");
-                    hash.update(user);
-                    hash.finalize().into()
-                })
-                .collect();
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = CredentialManifest::new();
+        for (slot, (_, row)) in self.credentials.rows().enumerate() {
+            let mut hash = Sha256::new();
+            if row.settings.raw() {
+                hash.update(b"kerlico/snell/raw/");
+                hash.update(row.user.expect("raw 成员已校验"));
+                manifest.authentication("snell", slot, hash.finalize().into());
+            } else if let Some(user) = row.user {
+                hash.update(b"kerlico/snell/sealed/");
+                hash.update(&*row.settings.psk);
+                manifest.protection("snell", hash.finalize().into());
+                let mut hash = Sha256::new();
+                hash.update(b"kerlico/snell/user/");
+                hash.update(user);
+                manifest.authentication("snell", slot, hash.finalize().into());
+            } else {
+                hash.update(b"kerlico/snell/sealed/");
+                hash.update(&*row.settings.psk);
+                manifest.authentication("snell", slot, hash.finalize().into());
+            }
         }
-        // 单 PSK 节点接受任意 client-id，因此所有加密节点都登记 PSK 本身的范围。
-        let mut hash = Sha256::new();
-        hash.update(b"kerlico/snell/sealed/");
-        hash.update(&*self.settings.psk);
-        vec![hash.finalize().into()]
+        manifest
     }
     fn handle<'a>(
         &'a self,
         stream: BoxStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
@@ -271,7 +332,9 @@ mod tests {
         );
         let node = SnellNode {
             settings,
-            users: Vec::new(),
+            credentials: NodeBuildContext::local_for_test(serde_json::json!({}))
+                .credentials(Vec::new())
+                .unwrap(),
             replays: Mutex::new(HashMap::new()),
         };
         assert!(node.replay(Some([17; 16])).is_ok());
@@ -298,16 +361,22 @@ mod tests {
 #[cfg(test)]
 mod multi_target_test {
     use super::*;
-    use kerlico_config::OutboundFactory;
     use kerlico_core::{DatagramChannel, Destination, NodeObserver, Outbound, StreamBudget};
     use tokio::{net::UdpSocket, sync::Semaphore, task::JoinSet};
     struct Direct(Arc<dyn Outbound>);
-    impl AccessService for Direct {
+    impl Outbound for Direct {
+        fn capabilities(&self) -> kerlico_core::Capabilities {
+            kerlico_core::Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp: true,
+            }
+        }
         fn connect_tcp<'a>(
             &'a self,
             target: &'a Destination,
             context: &'a ConnectContext,
-        ) -> BoxFuture<'a, Result<BoxStream>> {
+        ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
             self.0.connect_tcp(target, context)
         }
         fn connect_udp<'a>(
@@ -330,8 +399,8 @@ mod multi_target_test {
                 let socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();let target=Destination::new("127.0.0.1",socket.local_addr().unwrap().port()).unwrap();targets.push((target,marker));
                 tasks.spawn(async move{let mut bytes=[0;64];let(n,peer)=socket.recv_from(&mut bytes).await.unwrap();let mut packet=vec![marker];packet.extend_from_slice(&bytes[..n]);socket.send_to(&packet,peer).await.unwrap();});
             }
-            let node=SnellNodeFactory.build(&serde_json::json!({"version":6,"psk":"snell-multi-target-psk","users":[{"userkey":"test-user"}]})).unwrap();let access:Arc<dyn AccessService>=Arc::new(Direct(kerlico_net::DirectFactory.build(&serde_json::json!({})).unwrap()));let cancel=kerlico_core::CancellationToken::new();
-            let context=InboundContext{cancel:cancel.clone(),connect_timeout:Duration::from_secs(1),idle_timeout:Duration::from_secs(2),drain_timeout:Duration::from_secs(1),max_datagram_size:65535,max_streams:16,stream_budget:StreamBudget::new(Arc::new(Semaphore::new(32)),Arc::new(Semaphore::new(32))),events:Arc::new(Events),peer_addr:None,local_addr:None};
+            let node=support::node(&SnellNodeFactory,&serde_json::json!({"version":6,"psk":"snell-multi-target-psk","users":[{"userkey":"test-user"}]})).unwrap();let access:Arc<dyn Outbound>=Arc::new(Direct(support::outbound(&kerlico_net::DirectFactory,&serde_json::json!({})).unwrap()));let cancel=kerlico_core::CancellationToken::new();
+            let context=InboundContext{peer_lease:None,tasks:kerlico_core::NodeTasks::new(kerlico_core::NodeId::parse("test-node").unwrap(),kerlico_core::CancellationToken::new()),cancel:cancel.clone(),connect_timeout:Duration::from_secs(1),idle_timeout:Duration::from_secs(2),drain_timeout:Duration::from_secs(1),max_datagram_size:65535,max_streams:16,stream_budget:StreamBudget::new(Arc::new(Semaphore::new(32)),Arc::new(Semaphore::new(32))),events:Arc::new(Events),peer_addr:None,local_addr:None};
             let(left,right)=tokio::io::duplex(65536);tasks.spawn(async move{let _=node.handle(Box::new(right),access,context).await;});
             let settings=Arc::new(Settings::new(6,"snell-multi-target-psk".into(),Some(Mode::Default),Obfs::None,None,None,false).unwrap());let mut session=Session::new(Box::new(left),settings).unwrap();session.send(&wire::request(6,b"test-user",None)).await.unwrap();assert_eq!(wire::reply(session.reader.next().await.unwrap().unwrap()).unwrap(),Vec::<u8>::new());
             for(target,_)in &targets{session.send(&wire::udp_request(target,b"packet").unwrap()).await.unwrap();}
@@ -344,8 +413,8 @@ mod multi_target_test {
         tokio::time::timeout(Duration::from_secs(5),async{
             let target=UdpSocket::bind("127.0.0.1:0").await.unwrap();let destination=Destination::new("127.0.0.1",target.local_addr().unwrap().port()).unwrap();let mut tasks=JoinSet::new();
             tasks.spawn(async move{let mut bytes=[0;64];for _ in 0..2{let(n,peer)=target.recv_from(&mut bytes).await.unwrap();let mut reply=bytes[..n].to_vec();reply.extend_from_slice(&bytes[..n]);target.send_to(&reply,peer).await.unwrap();}});
-            let node=SnellNodeFactory.build(&serde_json::json!({"version":6,"psk":"snell-reply-limit-key","mode":"unshaped","users":[{"userkey":"test-user"}]})).unwrap();let access:Arc<dyn AccessService>=Arc::new(Direct(kerlico_net::DirectFactory.build(&serde_json::json!({})).unwrap()));let cancel=kerlico_core::CancellationToken::new();
-            let context=InboundContext{cancel,connect_timeout:Duration::from_secs(1),idle_timeout:Duration::from_secs(2),drain_timeout:Duration::from_secs(1),max_datagram_size:4,max_streams:16,stream_budget:StreamBudget::new(Arc::new(Semaphore::new(32)),Arc::new(Semaphore::new(32))),events:Arc::new(Events),peer_addr:None,local_addr:None};
+            let node=support::node(&SnellNodeFactory,&serde_json::json!({"version":6,"psk":"snell-reply-limit-key","mode":"unshaped","users":[{"userkey":"test-user"}]})).unwrap();let access:Arc<dyn Outbound>=Arc::new(Direct(support::outbound(&kerlico_net::DirectFactory,&serde_json::json!({})).unwrap()));let cancel=kerlico_core::CancellationToken::new();
+            let context=InboundContext{peer_lease:None,tasks:kerlico_core::NodeTasks::new(kerlico_core::NodeId::parse("test-node").unwrap(),kerlico_core::CancellationToken::new()),cancel,connect_timeout:Duration::from_secs(1),idle_timeout:Duration::from_secs(2),drain_timeout:Duration::from_secs(1),max_datagram_size:4,max_streams:16,stream_budget:StreamBudget::new(Arc::new(Semaphore::new(32)),Arc::new(Semaphore::new(32))),events:Arc::new(Events),peer_addr:None,local_addr:None};
             let(left,right)=tokio::io::duplex(65536);let running=tokio::spawn(async move{node.handle(Box::new(right),access,context).await});
             let settings=Arc::new(Settings::new(6,"snell-reply-limit-key".into(),Some(Mode::Unshaped),Obfs::None,None,None,false).unwrap());let mut session=Session::new(Box::new(left),settings).unwrap();session.send(&wire::request(6,b"test-user",None)).await.unwrap();wire::reply(session.reader.next().await.unwrap().unwrap()).unwrap();
             session.send(&wire::udp_request(&destination,b"ok").unwrap()).await.unwrap();let record=session.reader.next().await.unwrap().unwrap();assert_eq!(wire::parse_udp(&record,true).unwrap().1,b"okok");

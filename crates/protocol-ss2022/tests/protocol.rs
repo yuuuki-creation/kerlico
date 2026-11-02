@@ -1,11 +1,11 @@
+mod support;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::BytesMut;
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel,
-    DatagramReceiver, DatagramSender, Destination, InboundContext, InboundProtocol, NodeEvent,
-    NodeObserver, Outbound, Result, StreamBudget,
+    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel, DatagramReceiver,
+    DatagramSender, Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result,
+    StreamBudget,
 };
-use kerlico_ss2022::{Ss2022Node, Ss2022Outbound};
 use serde_json::json;
 use shadowsocks::{
     ServerConfig,
@@ -61,6 +61,11 @@ impl NodeObserver for Events {
 }
 fn context() -> InboundContext {
     InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         peer_addr: None,
         local_addr: None,
         cancel: CancellationToken::new(),
@@ -95,27 +100,41 @@ impl DatagramReceiver for Receive {
         Box::pin(async move { Ok(self.0.recv().await) })
     }
 }
-impl AccessService for Echo {
+impl Outbound for Echo {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn connect_tcp<'a>(
         &'a self,
         _: &'a Destination,
         _: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
-            self.0.fetch_add(1, Ordering::Relaxed);
-            let (client, mut server) = tokio::io::duplex(128 * 1024);
-            tokio::spawn(async move {
-                let mut buf = vec![0; 8192];
-                loop {
-                    let n = server.read(&mut buf).await.unwrap();
-                    if n == 0 {
-                        server.shutdown().await.unwrap();
-                        break;
+            let opening: kerlico_core::BoxFuture<'_, Result<BoxStream>> = Box::pin(async move {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                let (client, mut server) = tokio::io::duplex(128 * 1024);
+                tokio::spawn(async move {
+                    let mut buf = vec![0; 8192];
+                    loop {
+                        let n = server.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            server.shutdown().await.unwrap();
+                            break;
+                        }
+                        server.write_all(&buf[..n]).await.unwrap();
                     }
-                    server.write_all(&buf[..n]).await.unwrap();
-                }
+                });
+                Ok(Box::new(client) as BoxStream)
             });
-            Ok(Box::new(client) as BoxStream)
+            let stream = opening.await?;
+            Ok(kerlico_core::OpenedTcp {
+                stream,
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
     fn connect_udp<'a>(
@@ -138,7 +157,7 @@ async fn endpoints(
     method: &str,
     multi: bool,
 ) -> (
-    Ss2022Outbound,
+    Arc<dyn Outbound>,
     InboundContext,
     tokio::task::JoinHandle<()>,
     tokio::task::JoinHandle<Result<()>>,
@@ -146,7 +165,7 @@ async fn endpoints(
 ) {
     let user_key = key(method, 11);
     let service_key = key(method, 22);
-    let node = Arc::new(Ss2022Node::from_options(&json!({"method":method,"key":if multi { &service_key } else { &user_key }, "users":if multi { vec![user_key.clone(),key(method,33)] } else {vec![]} })).unwrap());
+    let node = Arc::new(support::node(&kerlico_ss2022::Ss2022NodeFactory,&json!({"method":method,"key":if multi { &service_key } else { &user_key }, "users":if multi { vec![user_key.clone(),key(method,33)] } else {vec![]} })).unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let socket = Arc::new(UdpSocket::bind(("127.0.0.1", port)).await.unwrap());
@@ -167,7 +186,7 @@ async fn endpoints(
         let ctx = ctx.clone();
         tokio::spawn(async move { node.serve_udp(socket, access, ctx).await })
     };
-    let outbound = Ss2022Outbound::from_options(&json!({"server":"127.0.0.1","port":port,"method":method,"key":user_key,"identity_keys":if multi {vec![service_key]} else {vec![]} })).unwrap();
+    let outbound = support::outbound(&kerlico_ss2022::Ss2022Factory,&json!({"server":"127.0.0.1","port":port,"method":method,"key":user_key,"identity_keys":if multi {vec![service_key]} else {vec![]} })).unwrap();
     (outbound, ctx, tcp, udp, access)
 }
 
@@ -181,7 +200,11 @@ async fn three_methods_tcp_udp_and_eih() {
             let (outbound, ctx, tcp, udp, access) = endpoints(method, multi).await;
             let target = Destination::new("example.invalid", 443).unwrap();
             let connect = ConnectContext::new(Duration::from_secs(3));
-            let mut stream = outbound.connect_tcp(&target, &connect).await.unwrap();
+            let mut stream = outbound
+                .connect_tcp(&target, &connect)
+                .await
+                .unwrap()
+                .stream;
             let payload = vec![0x59; 100_000];
             stream.write_all(&payload).await.unwrap();
             stream.shutdown().await.unwrap();
@@ -213,25 +236,41 @@ async fn three_methods_tcp_udp_and_eih() {
 #[test]
 fn rejects_invalid_config_and_isolates_keys() {
     for method in METHODS {
-        assert!(Ss2022Node::from_options(&json!({"method":method,"key":"password"})).is_err());
-        assert!(Ss2022Outbound::from_options(&json!({"server":"127.0.0.1","port":8388,"method":method,"key":key(method,1),"plugin":"anything"})).is_err());
-        let a = Ss2022Node::from_options(&json!({"method":method,"key":key(method,1)})).unwrap();
-        let b = Ss2022Node::from_options(&json!({"method":method,"key":key(method,2)})).unwrap();
-        assert_ne!(a.credential_fingerprints(), b.credential_fingerprints());
         assert!(
-            Ss2022Node::from_options(
+            support::node(
+                &kerlico_ss2022::Ss2022NodeFactory,
+                &json!({"method":method,"key":"password"})
+            )
+            .is_err()
+        );
+        assert!(support::outbound(&kerlico_ss2022::Ss2022Factory,&json!({"server":"127.0.0.1","port":8388,"method":method,"key":key(method,1),"plugin":"anything"})).is_err());
+        let a = support::node(
+            &kerlico_ss2022::Ss2022NodeFactory,
+            &json!({"method":method,"key":key(method,1)}),
+        )
+        .unwrap();
+        let b = support::node(
+            &kerlico_ss2022::Ss2022NodeFactory,
+            &json!({"method":method,"key":key(method,2)}),
+        )
+        .unwrap();
+        assert_ne!(a.manifest(), b.manifest());
+        assert!(
+            support::node(
+                &kerlico_ss2022::Ss2022NodeFactory,
                 &json!({"method":method,"key":key(method,1),"users":[key(method,1)]})
             )
             .is_err()
         );
         if method.contains("chacha") {
             assert!(
-                Ss2022Node::from_options(
+                support::node(
+                    &kerlico_ss2022::Ss2022NodeFactory,
                     &json!({"method":method,"key":key(method,1),"users":[key(method,2)]})
                 )
                 .is_err()
             );
-            assert!(Ss2022Outbound::from_options(&json!({"server":"127.0.0.1","port":8388,"method":method,"key":key(method,1),"identity_keys":[key(method,2)]})).is_err());
+            assert!(support::outbound(&kerlico_ss2022::Ss2022Factory,&json!({"server":"127.0.0.1","port":8388,"method":method,"key":key(method,1),"identity_keys":[key(method,2)]})).is_err());
         }
     }
 }
@@ -242,8 +281,12 @@ async fn authentication_failure_never_opens_target() {
         let (outbound, ctx, tcp, udp, access) = endpoints(method, false).await;
         // 地址从已构造出站配置中独立建立，错误 key 不得触发目标服务。
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let node = Ss2022Node::from_options(&json!({"method":method,"key":key(method,2)})).unwrap();
-        let wrong = Ss2022Outbound::from_options(&json!({"server":"127.0.0.1","port":listener.local_addr().unwrap().port(),"method":method,"key":key(method,1)})).unwrap();
+        let node = support::node(
+            &kerlico_ss2022::Ss2022NodeFactory,
+            &json!({"method":method,"key":key(method,2)}),
+        )
+        .unwrap();
+        let wrong = support::outbound(&kerlico_ss2022::Ss2022Factory,&json!({"server":"127.0.0.1","port":listener.local_addr().unwrap().port(),"method":method,"key":key(method,1)})).unwrap();
         let other_access = Arc::new(Echo::default());
         let task = {
             let access = other_access.clone();
@@ -258,7 +301,8 @@ async fn authentication_failure_never_opens_target() {
                 &ConnectContext::new(Duration::from_secs(2)),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         stream.write_all(b"reject").await.unwrap();
         assert!(task.await.unwrap().is_err());
         assert_eq!(other_access.0.load(Ordering::Relaxed), 0);
@@ -274,7 +318,11 @@ async fn authentication_failure_never_opens_target() {
 async fn udp_replay_rejection_migration_and_multiple_targets() {
     for method in METHODS {
         let node = Arc::new(
-            Ss2022Node::from_options(&json!({"method":method,"key":key(method,7)})).unwrap(),
+            support::node(
+                &kerlico_ss2022::Ss2022NodeFactory,
+                &json!({"method":method,"key":key(method,7)}),
+            )
+            .unwrap(),
         );
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let peer = socket.local_addr().unwrap();
@@ -383,8 +431,11 @@ async fn eih_users_with_identical_session_ids_remain_independent() {
     for method in &METHODS[..2] {
         let service = key(method, 22);
         let users = [key(method, 11), key(method, 33)];
-        let node = Ss2022Node::from_options(&json!({"method":method,"key":service,"users":users}))
-            .unwrap();
+        let node = support::node(
+            &kerlico_ss2022::Ss2022NodeFactory,
+            &json!({"method":method,"key":service,"users":users}),
+        )
+        .unwrap();
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let peer = socket.local_addr().unwrap();
         let ctx = context();
@@ -436,12 +487,19 @@ async fn eih_users_with_identical_session_ids_remain_independent() {
 }
 
 struct FailsOnce(AtomicUsize);
-impl AccessService for FailsOnce {
+impl Outbound for FailsOnce {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn connect_tcp<'a>(
         &'a self,
         _: &'a Destination,
         _: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async { Err(kerlico_core::Error::Rejected) })
     }
     fn connect_udp<'a>(
@@ -465,7 +523,11 @@ impl AccessService for FailsOnce {
 async fn udp_new_packet_recovers_closed_target_without_replaying_old_payload() {
     let method = METHODS[0];
     let user_key = key(method, 11);
-    let node = Ss2022Node::from_options(&json!({"method":method,"key":user_key})).unwrap();
+    let node = support::node(
+        &kerlico_ss2022::Ss2022NodeFactory,
+        &json!({"method":method,"key":user_key}),
+    )
+    .unwrap();
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let port = socket.local_addr().unwrap().port();
     let ctx = context();
@@ -475,7 +537,8 @@ async fn udp_new_packet_recovers_closed_target_without_replaying_old_payload() {
         let access = access.clone();
         tokio::spawn(async move { node.serve_udp(socket, access, ctx).await })
     };
-    let outbound = Ss2022Outbound::from_options(
+    let outbound = support::outbound(
+        &kerlico_ss2022::Ss2022Factory,
         &json!({"server":"127.0.0.1","port":port,"method":method,"key":user_key}),
     )
     .unwrap();
@@ -500,4 +563,103 @@ async fn udp_new_packet_recovers_closed_target_without_replaying_old_payload() {
     assert_eq!(access.0.load(Ordering::Relaxed), 2);
     ctx.cancel.cancel();
     let _ = task.await.unwrap();
+}
+
+#[derive(Default)]
+struct IdentityTarget {
+    echo: Echo,
+    observed: std::sync::Mutex<Vec<(kerlico_core::Source, Destination)>>,
+}
+impl Outbound for IdentityTarget {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
+    fn connect_tcp<'a>(
+        &'a self,
+        target: &'a Destination,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
+        self.observed.lock().unwrap().push((
+            context
+                .resource_key()
+                .source()
+                .cloned()
+                .ok_or(kerlico_core::Error::Rejected)
+                .unwrap(),
+            target.clone(),
+        ));
+        self.echo.connect_tcp(target, context)
+    }
+    fn connect_udp<'a>(
+        &'a self,
+        target: &'a Destination,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<DatagramChannel>> {
+        self.observed.lock().unwrap().push((
+            context
+                .resource_key()
+                .source()
+                .cloned()
+                .ok_or(kerlico_core::Error::Rejected)
+                .unwrap(),
+            target.clone(),
+        ));
+        self.echo.connect_udp(target, context)
+    }
+}
+#[tokio::test]
+async fn native_second_member_keeps_tcp_udp_identity_and_original_domain() {
+    use kerlico_config::{NodeBuildContext, NodeFactory};
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let method = "2022-blake3-aes-128-gcm"; let credentials = [key(method, 71), key(method, 72)]; let identity = key(method, 73);
+        let input = NodeBuildContext::for_test(
+            json!({"method":method,"identity_key":identity}),
+            credentials.iter().map(|credential| json!({"key":credential})).collect(),
+        );
+        let node = kerlico_ss2022::Ss2022NodeFactory.build(&input).unwrap();
+        let observed = Arc::new(IdentityTarget::default());
+        let ingress = kerlico_egress::testing::ingress(&input, observed.clone(), kerlico_core::TargetPolicy::Remote).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let socket = Arc::new(UdpSocket::bind(("127.0.0.1", port)).await.unwrap());
+        let context = context();
+        let cancel = context.cancel.clone();
+        let mut tasks = tokio::task::JoinSet::new();
+        { let node = node.clone(); let ingress = ingress.clone(); let context = context.clone();
+            tasks.spawn(async move { let _ = node.handle_udp(socket, ingress, context).await; });
+        }
+        { let context = context.clone();
+            tasks.spawn(async move {
+                let mut peers = tokio::task::JoinSet::new();
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap(); let node = node.clone(); let ingress = ingress.clone(); let context = context.clone();
+                    peers.spawn(async move { let _ = node.handle(Box::new(stream), ingress, context).await; });
+                }
+                while peers.join_next().await.is_some() {}
+            });
+        }
+        let target = Destination::new("identity-target.invalid", 443).unwrap();
+        for credential in &credentials {
+            let outbound = support::outbound(&kerlico_ss2022::Ss2022Factory, &json!({"server":"127.0.0.1","port":port,"method":method,"key":credential,"identity_keys":[identity]})).unwrap();
+            let connect = ConnectContext::new(Duration::from_secs(2));
+            let mut stream = outbound.connect_tcp(&target, &connect).await.unwrap().stream;
+            stream.write_all(b"member").await.unwrap();
+            let mut bytes = [0;6]; stream.read_exact(&mut bytes).await.unwrap(); assert_eq!(&bytes, b"member"); drop(stream);
+            let connect = ConnectContext::new(Duration::from_secs(2));
+            let mut channel = outbound.connect_udp(&target, &connect).await.unwrap();
+            channel.sender.send(b"member-udp").await.unwrap();
+            assert_eq!(channel.receiver.recv().await.unwrap().unwrap(), b"member-udp");
+            drop(channel); outbound.shutdown().await.unwrap();
+        }
+        let records = observed.observed.lock().unwrap().clone();
+        assert_eq!(records.len(), 4);
+        assert!(records.iter().all(|(_, original)| original == &target));
+        assert_eq!(records[0].0, records[1].0); assert_eq!(records[2].0, records[3].0); assert_ne!(records[0].0, records[2].0);
+        cancel.cancel();
+        while tasks.join_next().await.is_some() {}
+    }).await.expect("多成员真实鉴别或回收超时");
 }

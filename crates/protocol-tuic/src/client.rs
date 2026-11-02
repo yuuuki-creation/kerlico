@@ -4,10 +4,12 @@ use crate::{
     config::{self, ClientOptions, Credential},
     wire,
 };
+use kerlico_config::OutboundPlan;
 use kerlico_core::{
     AddressedDatagram, BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation,
     DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel, DatagramReceiver,
-    DatagramSender, Destination, Error, Outbound, Result,
+    DatagramSender, Destination, Error, Outbound, ResourceKey, Result, ServiceContext, ServiceTask,
+    TargetPolicy,
 };
 use std::{
     collections::HashMap,
@@ -17,8 +19,9 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{sync::mpsc, task::JoinSet, time::Instant};
+use tokio::{sync::mpsc, time::Instant};
 
+type MemberConnection = tokio::sync::Mutex<Option<Arc<Connection>>>;
 pub(crate) struct Client {
     server: Destination,
     tls: quinn::ClientConfig,
@@ -26,7 +29,8 @@ pub(crate) struct Client {
     credential: Credential,
     mode: Mode,
     heartbeat: Duration,
-    current: tokio::sync::Mutex<Option<Arc<Connection>>>,
+    host: ServiceContext,
+    current: tokio::sync::Mutex<HashMap<ResourceKey, Arc<MemberConnection>>>,
 }
 pub(crate) struct Connection {
     pub quic: quinn::Connection,
@@ -37,14 +41,18 @@ pub(crate) struct Connection {
     active: AtomicUsize,
     entries: Mutex<HashMap<u32, mpsc::Sender<AddressedDatagram>>>,
     fragments: Mutex<Reassembler>,
-    tasks: Mutex<JoinSet<()>>,
+    tasks: Mutex<Vec<ServiceTask<()>>>,
+    host: ServiceContext,
     activity: Mutex<Instant>,
 }
 impl Connection {
     fn spawn(&self, future: impl std::future::Future<Output = ()> + Send + 'static) {
         if let Ok(mut tasks) = self.tasks.lock() {
-            while tasks.try_join_next().is_some() {}
-            tasks.spawn(future);
+            tasks.retain(|task| !task.is_finished());
+            match self.host.spawn_tracked(future) {
+                Ok(task) => tasks.push(task),
+                Err(_) => self.quic.close(0u32.into(), b""),
+            }
         }
     }
     fn touch(&self) {
@@ -199,7 +207,9 @@ impl Drop for Connection {
     fn drop(&mut self) {
         self.quic.close(0u32.into(), b"");
         if let Ok(tasks) = self.tasks.get_mut() {
-            tasks.abort_all();
+            for task in tasks.iter() {
+                task.abort();
+            }
         }
     }
 }
@@ -272,7 +282,7 @@ impl DatagramAssociationReceiver for Receiver {
     }
 }
 impl Client {
-    pub fn build(options: ClientOptions) -> Result<Self> {
+    pub fn compile(options: ClientOptions) -> Result<OutboundPlan> {
         if !(5..=3600).contains(&options.idle_timeout_secs)
             || options.heartbeat_interval_secs == 0
             || options.heartbeat_interval_secs >= options.idle_timeout_secs
@@ -286,23 +296,48 @@ impl Client {
             128,
         )?;
         let (tls, server_name) = config::client_tls(options.tls, transport)?;
-        Ok(Self {
-            server: options.server.destination()?,
-            tls,
-            server_name,
-            credential: Credential::parse(
-                options.version,
-                options.token,
-                options.uuid,
-                options.password,
-            )?,
-            mode: config::mode(&options.udp_relay_mode)?,
-            heartbeat: Duration::from_secs(options.heartbeat_interval_secs),
-            current: tokio::sync::Mutex::new(None),
-        })
+        let server = options.server.destination()?;
+        let credential = Credential::parse(
+            options.version,
+            options.token,
+            options.uuid,
+            options.password,
+        )?;
+        let mode = config::mode(&options.udp_relay_mode)?;
+        let heartbeat = Duration::from_secs(options.heartbeat_interval_secs);
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp: true,
+            },
+            true,
+            TargetPolicy::Remote,
+            move |host| {
+                Box::pin(async move {
+                    Ok(Arc::new(Self {
+                        server,
+                        tls,
+                        server_name,
+                        credential,
+                        mode,
+                        heartbeat,
+                        host,
+                        current: tokio::sync::Mutex::new(HashMap::new()),
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
-    async fn connection(&self) -> Result<Arc<Connection>> {
-        let mut current = self.current.lock().await;
+    async fn connection(&self, context: &ConnectContext) -> Result<Arc<Connection>> {
+        let bucket = {
+            let mut buckets = self.current.lock().await;
+            buckets
+                .entry(context.resource_key().clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+                .clone()
+        };
+        let mut current = bucket.lock().await;
         if let Some(connection) = current.as_ref()
             && connection.quic.close_reason().is_none()
             && connection.next.load(Ordering::Acquire)
@@ -320,13 +355,22 @@ impl Client {
             .collect::<Vec<_>>();
         let mut last = Error::InvalidAddress;
         for peer in candidates {
-            let endpoint = quinn::Endpoint::client(if peer.is_ipv6() {
-                "[::]:0".parse().map_err(|_| config::invalid())?
+            let socket = std::net::UdpSocket::bind(if peer.is_ipv6() {
+                "[::]:0"
             } else {
-                "0.0.0.0:0".parse().map_err(|_| config::invalid())?
+                "0.0.0.0:0"
             })?;
+            socket.set_nonblocking(true)?;
+            let endpoint = quinn::Endpoint::new(
+                quinn::EndpointConfig::default(),
+                None,
+                socket,
+                crate::runtime::ServiceRuntime::new(self.host.clone()),
+            )?;
+            let mut tls = self.tls.clone();
+            tls.token_store(Arc::new(quinn::TokenMemoryCache::default()));
             let connecting = endpoint
-                .connect_with(self.tls.clone(), peer, &self.server_name)
+                .connect_with(tls, peer, &self.server_name)
                 .map_err(|_| config::invalid())?;
             let quic = match connecting.await {
                 Ok(value) => value,
@@ -345,7 +389,8 @@ impl Client {
                 active: AtomicUsize::new(0),
                 entries: Mutex::new(HashMap::new()),
                 fragments: Mutex::new(Reassembler::new()),
-                tasks: Mutex::new(JoinSet::new()),
+                tasks: Mutex::new(Vec::new()),
+                host: self.host.clone(),
                 activity: Mutex::new(Instant::now()),
             });
             connection.start(self.heartbeat);
@@ -356,6 +401,33 @@ impl Client {
     }
 }
 impl Outbound for Client {
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.host.cancel().cancel();
+            let buckets = { std::mem::take(&mut *self.current.lock().await) };
+            for bucket in buckets.into_values() {
+                let connection = { bucket.lock().await.take() };
+                let Some(connection) = connection else {
+                    continue;
+                };
+                connection.quic.close(0u32.into(), b"");
+                connection._endpoint.close(0u32.into(), b"");
+                let tasks = connection
+                    .tasks
+                    .lock()
+                    .map(|mut tasks| std::mem::take(&mut *tasks))
+                    .unwrap_or_default();
+                for task in &tasks {
+                    task.abort();
+                }
+                for task in tasks {
+                    let _ = task.await;
+                }
+                connection._endpoint.wait_idle().await;
+            }
+            Ok(())
+        })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tcp: true,
@@ -372,7 +444,7 @@ impl Outbound for Client {
     ) -> BoxFuture<'a, Result<DatagramAssociation>> {
         Box::pin(async move {
             context
-                .run(async { self.connection().await?.association() })
+                .run(async { self.connection(context).await?.association() })
                 .await
         })
     }
@@ -380,11 +452,11 @@ impl Outbound for Client {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
             context
                 .run(async {
-                    let connection = self.connection().await?;
+                    let connection = self.connection(context).await?;
                     let (mut send, mut recv) = connection
                         .quic
                         .open_bi()
@@ -409,6 +481,10 @@ impl Outbound for Client {
                     }) as BoxStream)
                 })
                 .await
+                .map(|stream| kerlico_core::OpenedTcp {
+                    stream,
+                    info: kerlico_core::TcpConnectInfo::unknown(),
+                })
         })
     }
     fn connect_udp<'a>(

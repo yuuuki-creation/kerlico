@@ -24,6 +24,8 @@ def endpoint(host, number):
 
 
 def save(root, name, value):
+    from interop_vless import configuration_v2
+    value = configuration_v2(value)
     path = root / name
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2))
     os.chmod(path, 0o600)
@@ -35,7 +37,7 @@ def limits():
 
 
 def kerlico_server(host, number, method, secret):
-    entry_kind = "local_inbounds" if method in {"none", "plain"} else "nodes"
+    entry_kind = "nodes" if any(marker in method for marker in ("gcm", "poly1305", "ccm")) else "local_inbounds"
     return {"version": 1, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], entry_kind: [{"tag": "node", "type": "shadowsocks", "listen": endpoint(host, number), "outbound": "direct", "options": {"method": method, "password": secret, "allow_insecure": True}}], "limits": limits()}
 
 

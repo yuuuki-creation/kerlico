@@ -1,15 +1,14 @@
 //! UDP 每帧保留目的地址，节点按目标维护有界关联。
 use crate::{codec, protocol};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, ConnectContext, DatagramChannel, DatagramReceiver,
-    DatagramSender, Destination, Error, InboundContext, NodeEvent, Result,
+    BoxFuture, BoxStream, ConnectContext, DatagramChannel, DatagramReceiver, DatagramSender,
+    Destination, Error, InboundContext, PeerSession, Result,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 use tokio::{
     io::{ReadHalf, WriteHalf},
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot},
     task::JoinSet,
-    time::Instant,
 };
 const MAX_PACKET: usize = 65535;
 struct Sender {
@@ -55,91 +54,195 @@ impl DatagramReceiver for Receiver {
     }
 }
 struct Entry {
-    sender: Box<dyn DatagramSender>,
+    generation: u64,
+    sender: kerlico_core::FixedUdpSender,
+    completion: Option<kerlico_core::FlowCompletion>,
     cancel: kerlico_core::CancellationToken,
-    activity: watch::Sender<Instant>,
+    activity: tokio::sync::watch::Sender<tokio::time::Instant>,
+}
+impl Entry {
+    fn finish(mut self, outcome: kerlico_core::FlowOutcome) {
+        if let Some(completion) = self.completion.take() {
+            completion.finish(outcome);
+        }
+    }
 }
 impl Drop for Entry {
     fn drop(&mut self) {
+        drop(self.completion.take());
         self.cancel.cancel();
+    }
+}
+enum Reply {
+    Packet {
+        key: Destination,
+        generation: u64,
+        source: Destination,
+        packet: Vec<u8>,
+        delivered: oneshot::Sender<()>,
+    },
+    End {
+        key: Destination,
+        generation: u64,
+        outcome: kerlico_core::FlowOutcome,
+    },
+}
+enum ReceiveEnd {
+    Eof,
+    WriterGone,
+}
+fn outcome(result: &Result<()>) -> kerlico_core::FlowOutcome {
+    match result {
+        Ok(()) => kerlico_core::FlowOutcome::ProtocolEnd,
+        Err(error) => {
+            kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::from_error(error))
+        }
+    }
+}
+fn finish_reply(
+    entries: &mut HashMap<Destination, Entry>,
+    key: Destination,
+    generation: u64,
+    reason: kerlico_core::FlowOutcome,
+) {
+    if entries
+        .get(&key)
+        .is_some_and(|entry| entry.generation == generation)
+    {
+        if let Some(entry) = entries.remove(&key) {
+            entry.finish(reason);
+        }
     }
 }
 pub(crate) async fn serve(
     stream: BoxStream,
-    access: Arc<dyn AccessService>,
+    access: PeerSession,
     context: InboundContext,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let (responses, mut packets) = mpsc::channel::<(Destination, Vec<u8>)>(32);
-    let download = async {
-        while let Some((target, packet)) = packets.recv().await {
-            codec::write_packet(&mut writer, &target, &packet, context.max_datagram_size).await?;
-        }
-        Ok::<_, Error>(())
-    };
-    let upload = async {
-        let mut entries = HashMap::<Destination, Entry>::new();
-        let mut tasks = JoinSet::new();
-        while let Some((target, packet)) =
-            codec::packet(&mut reader, context.max_datagram_size).await?
-        {
-            while tasks.try_join_next().is_some() {}
-            entries.retain(|_, entry| !entry.cancel.is_cancelled());
-            if !entries.contains_key(&target) {
-                if entries.len() >= context.max_streams {
-                    return Err(Error::ResourceLimit);
-                }
-                let lease = context.stream_budget.try_acquire()?;
-                let connect = ConnectContext {
-                    cancel: context.cancel.clone(),
-                    timeout: context.connect_timeout,
-                };
-                let channel = access.connect_udp(&target, &connect).await?;
-                let cancel = context.cancel.child_token();
-                let (activity, changes) = watch::channel(Instant::now());
-                let mut receiver = channel.receiver;
-                let replies = responses.clone();
-                let peer = target.clone();
-                let token = cancel.clone();
-                let events = context.events.clone();
-                let idle = context.idle_timeout;
-                let received_activity = activity.clone();
-                tasks.spawn(async move {
-                    let _lease = lease;
-                    let receiving = async {
-                        while let Some(packet) = receiver.recv().await? {
-                            received_activity.send_replace(Instant::now());
-                            replies
-                                .send((peer.clone(), packet))
-                                .await
-                                .map_err(|_| Error::Cancelled)?;
-                        }
-                        Ok(())
-                    };
-                    let result = crate::io::bounded(receiving, changes, idle, token.clone()).await;
-                    token.cancel();
-                    events.record(if result.is_ok() {
-                        NodeEvent::Completed
-                    } else {
-                        NodeEvent::Failed
-                    });
-                });
-                entries.insert(
-                    target.clone(),
-                    Entry {
-                        sender: channel.sender,
-                        cancel,
-                        activity,
+    let (replies, mut received) = mpsc::channel::<Reply>(32);
+    let mut entries = HashMap::<Destination, Entry>::new();
+    let mut tasks = JoinSet::new();
+    let mut generation = 0u64;
+    let scope = context.cancel.child_token();
+    let timer = tokio::time::sleep(context.idle_timeout);
+    tokio::pin!(timer);
+    let result: Result<()> = async {
+        loop {
+            let reading: BoxFuture<'_, Result<Option<(Destination, Vec<u8>)>>> = Box::pin(async { codec::packet(&mut reader, context.max_datagram_size).await });
+            tokio::pin!(reading);
+            let request = loop {
+                tokio::select! {
+                    biased;
+                    _=context.cancel.cancelled()=>return Err(Error::Cancelled),
+                    _=&mut timer=>return Err(Error::Timeout),
+                    reply=received.recv()=>match reply {
+                        Some(Reply::End{key,generation,outcome})=>finish_reply(&mut entries,key,generation,outcome),
+                        Some(Reply::Packet{key,generation,source,packet,delivered})=>{
+                            if !entries.get(&key).is_some_and(|entry|entry.generation==generation) {continue;}
+                            if packet.len()>context.max_datagram_size {return Err(Error::ResourceLimit);}
+                            let writing=async { codec::write_packet(&mut writer, &source, &packet, context.max_datagram_size).await };
+                            tokio::select! { biased; _=context.cancel.cancelled()=>return Err(Error::Cancelled), result=tokio::time::timeout(context.idle_timeout,writing)=>result.map_err(|_|Error::Timeout)?? }
+                            let _ = delivered.send(());
+                            timer.as_mut().reset(tokio::time::Instant::now()+context.idle_timeout);
+                        },
+                        None=>return Err(Error::Cancelled),
                     },
-                );
-                context.events.record(NodeEvent::Accepted);
+                    done=tasks.join_next(),if !tasks.is_empty()=>{if done.is_some_and(|r|r.is_err()){return Err(Error::Protocol("UDP 接收所有者异常退出"));}},
+                    request=&mut reading=>break request?,
+                }
+            };
+            let Some((target,packet))=request else{return Ok(())};
+            if packet.len()>context.max_datagram_size{return Err(Error::ResourceLimit);}
+            if !entries.contains_key(&target) {
+                if entries.len()>=context.max_streams {return Err(Error::ResourceLimit);}
+                let lease=context.stream_budget.try_acquire()?;
+                generation=generation.checked_add(1).ok_or(Error::ResourceLimit)?;
+                let gen_id=generation;
+                let opening=ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
+                let channel=access.connect_udp(&target,&opening).await?;
+                let (sender,mut receiver,completion)=channel.into_parts();
+                let peer = target.clone();
+                let cancel=scope.child_token();let token=cancel.clone();
+                let (activity,mut observed)=tokio::sync::watch::channel(tokio::time::Instant::now());
+                let incoming_activity=activity.clone();let output=replies.clone();let key=target.clone();
+                let idle=context.idle_timeout;
+                entries.insert(target.clone(),Entry{generation:gen_id,sender,completion:Some(completion),cancel,activity});
+                let task=context.tasks.spawn_tracked(async move {
+                    let _lease=lease;
+                    let receiving: Result<ReceiveEnd> = async {
+                        let timer=tokio::time::sleep(idle);tokio::pin!(timer);
+                        loop {
+                            let packet={let receiving=receiver.recv();tokio::pin!(receiving);loop {tokio::select! {
+                                biased;
+                                _=token.cancelled()=>return Err(Error::Cancelled),
+                                _=&mut timer=>return Err(Error::Timeout),
+                                changed=observed.changed()=>{if changed.is_ok(){timer.as_mut().reset(*observed.borrow_and_update()+idle);}continue;},
+                                packet=&mut receiving=>break packet?,
+                            }}};
+                            let Some(packet)=packet else{return Ok(ReceiveEnd::Eof)};
+                            let source = peer.clone();
+                            let now = tokio::time::Instant::now();
+                            incoming_activity.send_replace(now);
+                            timer.as_mut().reset(now + idle);
+                            let (delivered, written) = oneshot::channel();
+                            tokio::select! {biased;_=token.cancelled()=>return Err(Error::Cancelled), result=output.send(Reply::Packet{key:key.clone(),generation:gen_id,source,packet,delivered})=>result.map_err(|_|Error::Cancelled)?}
+                            tokio::select! {
+                                biased;
+                                _ = token.cancelled() => return Err(Error::Cancelled),
+                                _ = &mut timer => return Err(Error::Timeout),
+                                result = written => if result.is_err() { return Ok(ReceiveEnd::WriterGone); },
+                            }
+                        }
+                    }.await;
+                    let reason = match receiving {
+                        Ok(ReceiveEnd::Eof) => kerlico_core::FlowOutcome::ProtocolEnd,
+                        Ok(ReceiveEnd::WriterGone) => return,
+                        Err(error) => outcome(&Err(error)),
+                    };
+                    let _=output.send(Reply::End{key,generation:gen_id,outcome:reason}).await;
+                })?;
+                let output=replies.clone();let key=target.clone();
+                tasks.spawn(async move {
+                    if task.await.is_err() { let _=output.send(Reply::End{key,generation:gen_id,outcome:kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::Failed)}).await; }
+                });
+                context.events.record(kerlico_core::NodeEvent::Accepted);
             }
-            let entry = entries.get_mut(&target).ok_or_else(protocol)?;
-            entry.sender.send(&packet).await?;
-            entry.activity.send_replace(Instant::now());
+            let entry=entries.get_mut(&target).ok_or(Error::Cancelled)?;
+            tokio::select! {biased;_=context.cancel.cancelled()=>return Err(Error::Cancelled),result=tokio::time::timeout(context.idle_timeout,entry.sender.send(&packet))=>result.map_err(|_|Error::Timeout)??}
+            entry.activity.send_replace(tokio::time::Instant::now());
+            timer.as_mut().reset(tokio::time::Instant::now()+context.idle_timeout);
         }
-        Ok::<_, Error>(())
-    };
-    // 物理连接输入结束时销毁本关联的所有目标和读取任务。
-    tokio::select! { biased; _ = context.cancel.cancelled() => Err(Error::Cancelled), result = upload => result, result = download => result }
+    }.await;
+    let reason = outcome(&result);
+    received.close();
+    while let Ok(reply) = received.try_recv() {
+        if let Reply::End {
+            key,
+            generation,
+            outcome,
+        } = reply
+        {
+            finish_reply(&mut entries, key, generation, outcome);
+        }
+    }
+    for entry in entries.into_values() {
+        entry.finish(reason);
+    }
+    scope.cancel();
+    let deadline = tokio::time::Instant::now() + context.drain_timeout;
+    while !tasks.is_empty() {
+        if tokio::time::timeout_at(deadline, tasks.join_next())
+            .await
+            .is_err()
+        {
+            tasks.abort_all();
+            return result.and(Err(Error::Timeout));
+        }
+    }
+    result
 }
+
+#[cfg(test)]
+#[path = "udp_delivery_tests.rs"]
+mod delivery_tests;

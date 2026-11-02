@@ -4,19 +4,13 @@ use crate::{
 };
 use bytes::BytesMut;
 use kerlico_core::{
-    AccessService, AddressedDatagram, BoxFuture, CancellationToken, ConnectContext,
-    DatagramAssociation, DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel,
-    DatagramReceiver, DatagramSender, Destination, Error, InboundContext, NodeEvent, NodeObserver,
-    Result,
+    AddressedDatagram, BoxFuture, CancellationToken, ConnectContext, DatagramAssociation,
+    DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel, DatagramReceiver,
+    DatagramSender, Destination, Error, InboundContext, IngressBinding, NodeEvent, NodeObserver,
+    PeerSession, Result,
 };
 use shadowsocks::relay::socks5::Address;
-use std::{
-    collections::HashMap,
-    io::Cursor,
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, io::Cursor, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     net::UdpSocket,
     sync::{OwnedSemaphorePermit, Semaphore, mpsc},
@@ -240,7 +234,6 @@ struct Queued {
 }
 struct Entry {
     sender: mpsc::Sender<Queued>,
-    seen: Arc<Mutex<Instant>>,
     cancel: CancellationToken,
 }
 impl Drop for Entry {
@@ -258,12 +251,13 @@ impl Drop for Events {
 struct Key {
     peer: SocketAddr,
     user: Option<u32>,
+    group: usize,
 }
 impl ShadowsocksRNode {
     pub async fn serve_udp(
         &self,
         socket: Arc<UdpSocket>,
-        access: Arc<dyn AccessService>,
+        ingress: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
         if !self.cfg.udp {
@@ -272,10 +266,14 @@ impl ShadowsocksRNode {
         if !self.cfg.authenticated() && !socket.local_addr()?.ip().is_loopback() {
             return Err(Error::Unsupported("未鉴权 SSR UDP 只能用作回环本地接入"));
         }
-        if !access.supports_udp_association() {
+        if !ingress.supports_udp_association() {
             return Err(Error::Unsupported("SSR UDP 需要同源口多目标访问服务"));
         }
-        let codec = Arc::new(UdpCodec::new(self.cfg.clone()));
+        let codecs: Vec<_> = self
+            .groups
+            .iter()
+            .map(|cfg| Arc::new(UdpCodec::new(cfg.clone())))
+            .collect();
         let byte_budget = Arc::new(Semaphore::new(self.cfg.limits.udp_queue_bytes));
         let mut entries: HashMap<Key, Entry> = HashMap::new();
         let mut tasks = JoinSet::new();
@@ -286,20 +284,36 @@ impl ShadowsocksRNode {
                 biased;
                 _ = context.cancel.cancelled()=>break,
                 _ = tasks.join_next(),if !tasks.is_empty()=>{entries.retain(|_,entry|!entry.sender.is_closed());},
-                _ = maintenance.tick()=>{let moment=Instant::now();entries.retain(|_,entry|!entry.sender.is_closed()&&entry.seen.lock().is_ok_and(|seen|moment.duration_since(*seen)<context.idle_timeout));},
+                _ = maintenance.tick()=>{entries.retain(|_,entry|!entry.sender.is_closed());},
                 received=socket.recv_from(&mut buffer)=>{
-                    let (count,peer)=received?;let Ok((iv,plain))=decode(&self.cfg,&buffer[..count]) else{continue};let Ok(decoded)=codec.decode_client(&plain) else{continue};let Ok((target,payload))=unpack(&decoded.data) else{continue};if payload.len()>context.max_datagram_size.min(MAX_PACKET){continue;}
-                    if self.cfg.replay.nonce(&iv).is_err(){context.events.record(NodeEvent::Dropped);continue;}
-                    if iv.is_empty()&&decoded.replay&&self.cfg.replay.insert(b"udp-chain-request",&plain,Duration::from_secs(120)).is_err(){context.events.record(NodeEvent::Dropped);continue;}
-                    entries.retain(|_,entry|!entry.sender.is_closed());let key=Key{peer,user:decoded.user};
+                    let (count,peer)=received?;
+                    let mut selected = None;
+                    for (group, codec) in codecs.iter().enumerate() {
+                        let Ok((iv, plain)) = decode(&codec.cfg, &buffer[..count]) else { continue; };
+                        let Ok(decoded) = codec.decode_client(&plain) else { continue; };
+                        let Ok((target, payload)) = unpack(&decoded.data) else { continue; };
+                        if payload.len() > context.max_datagram_size.min(MAX_PACKET) { continue; }
+                        let access = if self.credentials.is_empty() { ingress.local(&{ let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer); peer_context })? } else {
+                            let Some((slot, _)) = self.credentials.rows().find(|(_, row)| row.group == group && row.user == decoded.user) else { continue; };
+                            ingress.authenticated(self.credentials.verified(&slot, ())?, &{ let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer); peer_context })?.0
+                        };
+                        if selected.is_some() { selected = None; break; }
+                        selected = Some((group, codec.clone(), iv, plain, decoded, target, payload, access));
+                    }
+                    let Some((group, codec, iv, plain, decoded, target, payload, access)) = selected else { continue; };
+                    if codec.cfg.replay.nonce(&iv).is_err(){context.events.record(NodeEvent::Dropped);continue;}
+                    if iv.is_empty()&&decoded.replay&&codec.cfg.replay.insert(b"udp-chain-request",&plain,Duration::from_secs(120)).is_err(){context.events.record(NodeEvent::Dropped);continue;}
+                    entries.retain(|_,entry|!entry.sender.is_closed());let key=Key{peer,user:decoded.user,group};
                     if !entries.contains_key(&key){
                         if entries.len()>=context.max_streams.min(self.cfg.limits.max_sessions)||context.stream_budget.is_closed(){context.events.record(NodeEvent::Dropped);continue;}
                         let Ok(global)=context.stream_budget.try_acquire() else{context.events.record(NodeEvent::Dropped);continue;};let Ok(local)=self.slots.clone().try_acquire_owned() else{context.events.record(NodeEvent::Dropped);continue;};
-                        let (sender,receiver)=mpsc::channel(self.cfg.limits.udp_queue_packets);let seen=Arc::new(Mutex::new(Instant::now()));let token=context.cancel.child_token();let mut child=context.clone();child.cancel=token.clone();entries.insert(key,Entry{sender,seen:seen.clone(),cancel:token});
+                        let (sender,receiver)=mpsc::channel(self.cfg.limits.udp_queue_packets);let token=context.cancel.child_token();let mut child=context.clone();child.cancel=token.clone();entries.insert(key,Entry{sender,cancel:token});
                         let socket=socket.clone();let codec=codec.clone();let access=access.clone();let uid=decoded.user;context.events.record(NodeEvent::Accepted);
-                        tasks.spawn(async move{let _global=global;let _local=local;let _events=Events(child.events.clone());if session(socket,codec,access,child.clone(),peer,uid,seen,receiver).await.is_err(){child.events.record(NodeEvent::Failed);}});
+                        let owner=child.tasks.clone();
+                    let task=owner.spawn_tracked(async move {let _global=global;let _local=local;let _events=Events(child.events.clone());if session(socket,codec,access,child.clone(),peer,uid,receiver).await.is_err(){child.events.record(NodeEvent::Failed);}})?;
+                    tasks.spawn(async move {let _=task.await;});
                     }
-                    let Some(entry)=entries.get(&Key{peer,user:decoded.user}) else{continue};if let Ok(mut seen)=entry.seen.lock(){*seen=Instant::now();}
+                    let Some(entry)=entries.get(&Key{peer,user:decoded.user,group}) else{continue};
                     let Ok(permit)=byte_budget.clone().try_acquire_many_owned(payload.len() as u32) else{context.events.record(NodeEvent::Dropped);continue;};if entry.sender.try_send(Queued{packet:(target,payload),_bytes:permit}).is_err(){context.events.record(NodeEvent::Dropped);}
                 }
             }
@@ -314,29 +328,42 @@ impl ShadowsocksRNode {
 async fn session(
     socket: Arc<UdpSocket>,
     codec: Arc<UdpCodec>,
-    access: Arc<dyn AccessService>,
+    access: PeerSession,
     context: InboundContext,
     peer: SocketAddr,
     user: Option<u32>,
-    seen: Arc<Mutex<Instant>>,
     mut packets: mpsc::Receiver<Queued>,
 ) -> Result<()> {
-    let establish = ConnectContext {
-        cancel: context.cancel.clone(),
-        timeout: context.connect_timeout,
-    };
-    let mut channel = establish.run(access.associate_udp(&establish)).await?;
+    let establish =
+        ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
+    let channel = establish.run(access.associate_udp(&establish)).await?;
+    let (mut sender, mut receiver, completion) = channel.into_parts();
+    let mut accepting_packets = true;
+    let result = async {
     let timer = tokio::time::sleep(context.idle_timeout);
     tokio::pin!(timer);
     loop {
+        let received={let receiving=receiver.recv_from();tokio::pin!(receiving);loop {
         tokio::select! {
             biased;
-            _ = context.cancel.cancelled()=>return Ok(()),_ = &mut timer=>return Ok(()),
-            packet=packets.recv()=>{let Some(Queued{packet:(target,payload),..})=packet else{return Ok(())};tokio::select!{_ = context.cancel.cancelled()=>return Ok(()),result=tokio::time::timeout(context.idle_timeout,channel.sender.send_to(&payload,&target))=>result.map_err(|_|Error::Timeout)??}if let Ok(mut seen)=seen.lock(){*seen=Instant::now();}timer.as_mut().reset(tokio::time::Instant::now()+context.idle_timeout);},
-            packet=channel.receiver.recv_from()=>{let Some((source,payload))=packet? else{return Ok(())};if payload.len()>context.max_datagram_size.min(MAX_PACKET){return Err(Error::ResourceLimit);}let body=codec.encode_server(&pack(&source,&payload),user)?;let bytes=encode(&codec.cfg,&body)?;
-                tokio::select!{_ = context.cancel.cancelled()=>return Ok(()),result=tokio::time::timeout(context.idle_timeout,socket.send_to(&bytes,peer))=>{if result.map_err(|_|Error::Timeout)??!=bytes.len(){return Err(invalid());}}}
-                if let Ok(mut seen)=seen.lock(){*seen=Instant::now();}timer.as_mut().reset(tokio::time::Instant::now()+context.idle_timeout);
-            }
-        }
+            _ = context.cancel.cancelled()=>return Err(Error::Cancelled),_ = &mut timer=>return Err(Error::Timeout),
+            packet=packets.recv(),if accepting_packets=>{let Some(Queued{packet:(target,payload),..})=packet else{accepting_packets=false;continue;};tokio::select!{_ = context.cancel.cancelled()=>return Err(Error::Cancelled),result=tokio::time::timeout(context.idle_timeout,sender.send_to(&payload,&target))=>result.map_err(|_|Error::Timeout)??}timer.as_mut().reset(tokio::time::Instant::now()+context.idle_timeout);},
+            packet=&mut receiving=>break packet?,
+        }}};
+        let Some((source,payload))=received else{return Ok(())};if payload.len()>context.max_datagram_size.min(MAX_PACKET){return Err(Error::ResourceLimit);}let body=codec.encode_server(&pack(&source,&payload),user)?;let bytes=encode(&codec.cfg,&body)?;
+                tokio::select!{_ = context.cancel.cancelled()=>return Err(Error::Cancelled),result=tokio::time::timeout(context.idle_timeout,socket.send_to(&bytes,peer))=>{if result.map_err(|_|Error::Timeout)??!=bytes.len(){return Err(invalid());}}}
+                timer.as_mut().reset(tokio::time::Instant::now()+context.idle_timeout);
     }
+}.await;
+    completion.finish(match &result {
+        Ok(()) => kerlico_core::FlowOutcome::ProtocolEnd,
+        Err(error) => {
+            kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::from_error(error))
+        }
+    });
+    result
 }
+
+#[cfg(test)]
+#[path = "udp_flow_tests.rs"]
+mod flow_tests;

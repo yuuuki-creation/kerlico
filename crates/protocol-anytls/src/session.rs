@@ -11,7 +11,7 @@ use std::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU32, AtomicUsize, Ordering},
     },
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 use tokio::{
@@ -23,25 +23,172 @@ use tokio::{
 struct Entry {
     data: mpsc::Sender<Vec<u8>>,
     cancel: CancellationToken,
+    ending: tokio::sync::watch::Sender<Option<kerlico_core::FlowOutcome>>,
+    delivery: Arc<Delivery>,
+}
+impl Entry {
+    fn end(self, reason: kerlico_core::FlowOutcome) {
+        let (reason, waiter) = self.delivery.end(reason);
+        self.ending.send_replace(Some(reason));
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+    }
+}
+#[derive(Default, PartialEq, Eq)]
+enum FinState {
+    #[default]
+    Open,
+    Pending,
+    Flushed,
+}
+#[derive(Default)]
+struct DeliveryState {
+    submitted: u64,
+    flushed: u64,
+    fin: FinState,
+    ending: Option<kerlico_core::FlowOutcome>,
+    waiter: Option<Waker>,
+}
+#[derive(Default)]
+struct Delivery(Mutex<DeliveryState>);
+enum WriteMark {
+    Bytes(u64),
+    Fin(tokio::sync::oneshot::Sender<()>),
+}
+struct FrameDelivery {
+    stream: Arc<Delivery>,
+    mark: WriteMark,
+}
+struct QueuedFrame {
+    frame: Frame,
+    delivery: Option<FrameDelivery>,
+}
+impl Delivery {
+    fn poll_write(
+        &self,
+        io: &mut DuplexStream,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let mut state = self.0.lock().unwrap();
+        if let Some(reason) = state.ending {
+            return Poll::Ready(Err(Self::error(reason)));
+        }
+        if state.submitted.checked_add(buf.len() as u64).is_none() {
+            return Poll::Ready(Err(io::Error::other("AnyTLS 流字节序号耗尽")));
+        }
+        let result = Pin::new(io).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = &result {
+            state.submitted += *n as u64;
+        }
+        result
+    }
+    fn poll_flush(&self, cx: &mut Context<'_>, fin: bool) -> Poll<io::Result<()>> {
+        let mut state = self.0.lock().unwrap();
+        if state.flushed == state.submitted && (!fin || state.fin == FinState::Flushed) {
+            return Poll::Ready(Ok(()));
+        }
+        if let Some(reason) = state.ending {
+            return Poll::Ready(Err(Self::error(reason)));
+        }
+        state.waiter = Some(cx.waker().clone());
+        Poll::Pending
+    }
+    fn request_fin(&self) -> io::Result<()> {
+        let mut state = self.0.lock().unwrap();
+        if state.fin == FinState::Flushed {
+            return Ok(());
+        }
+        if let Some(reason) = state.ending {
+            return Err(Self::error(reason));
+        }
+        state.fin = FinState::Pending;
+        Ok(())
+    }
+    fn confirm(&self, mark: WriteMark) {
+        let (waiter, fin) = {
+            let mut state = self.0.lock().unwrap();
+            if state.ending.is_some() {
+                return;
+            }
+            let fin = match mark {
+                WriteMark::Bytes(position) => {
+                    state.flushed = position;
+                    None
+                }
+                WriteMark::Fin(delivered) => {
+                    state.fin = FinState::Flushed;
+                    Some(delivered)
+                }
+            };
+            (state.waiter.take(), fin)
+        };
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+        if let Some(fin) = fin {
+            let _ = fin.send(());
+        }
+    }
+    fn end(&self, reason: kerlico_core::FlowOutcome) -> (kerlico_core::FlowOutcome, Option<Waker>) {
+        let mut state = self.0.lock().unwrap();
+        let reason = if matches!(
+            reason,
+            kerlico_core::FlowOutcome::ProtocolEnd | kerlico_core::FlowOutcome::DuplexEof
+        ) && (state.submitted != state.flushed || state.fin == FinState::Pending)
+        {
+            kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::Failed)
+        } else {
+            reason
+        };
+        let reason = *state.ending.get_or_insert(reason);
+        (reason, state.waiter.take())
+    }
+    fn error(reason: kerlico_core::FlowOutcome) -> io::Error {
+        match reason {
+            kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::Timeout) => {
+                io::Error::new(io::ErrorKind::TimedOut, Error::Timeout)
+            }
+            kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::Cancelled) => {
+                io::Error::new(io::ErrorKind::ConnectionAborted, Error::Cancelled)
+            }
+            _ => io::Error::new(io::ErrorKind::BrokenPipe, "AnyTLS 流在物理交付前结束"),
+        }
+    }
 }
 pub struct Session {
-    frames: mpsc::Sender<Frame>,
+    frames: mpsc::Sender<QueuedFrame>,
     streams: Mutex<HashMap<u32, Entry>>,
     pub closed: CancellationToken,
+    reason: Mutex<Option<kerlico_core::FlowOutcome>>,
     next: AtomicU32,
     pub active: AtomicUsize,
     idle_since: Mutex<Instant>,
     padding: Arc<RwLock<Padding>>,
     client: bool,
     max_streams: usize,
+    host: Owner,
+    tasks: Mutex<Vec<Task>>,
+    permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
+}
+pub(crate) enum Owner {
+    Node(kerlico_core::NodeTasks),
+    Service(kerlico_core::ServiceContext),
+}
+enum Task {
+    Local(kerlico_core::NodeTask<()>),
+    Shared(kerlico_core::ServiceTask<()>),
 }
 pub struct Incoming {
     pub id: u32,
     pub stream: BoxStream,
+    pub ending: tokio::sync::watch::Receiver<Option<kerlico_core::FlowOutcome>>,
 }
 struct LogicalStream {
     io: DuplexStream,
     cancel: CancellationToken,
+    delivery: Arc<Delivery>,
     client: bool,
     write_closed: bool,
 }
@@ -61,25 +208,29 @@ impl AsyncRead for LogicalStream {
 }
 impl AsyncWrite for LogicalStream {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         if self.write_closed {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
-        Pin::new(&mut self.io).poll_write(cx, buf)
+        let this = self.get_mut();
+        this.delivery.poll_write(&mut this.io, cx, buf)
     }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.io).poll_flush(cx)
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.delivery.poll_flush(cx, false)
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.write_closed = true;
+        std::task::ready!(self.delivery.poll_flush(cx, false))?;
         if self.client {
             // AnyTLS FIN 会结束全流；本地停写只禁写并保留回包，不向目标承诺 EOF。
-            self.write_closed = true;
-            Pin::new(&mut self.io).poll_flush(cx)
+            Poll::Ready(Ok(()))
         } else {
-            Pin::new(&mut self.io).poll_shutdown(cx)
+            self.delivery.request_fin()?;
+            std::task::ready!(Pin::new(&mut self.io).poll_shutdown(cx))?;
+            self.delivery.poll_flush(cx, true)
         }
     }
 }
@@ -91,26 +242,31 @@ impl Session {
         max_streams: usize,
         idle: Duration,
         incoming: Option<mpsc::Sender<Incoming>>,
+        host: Owner,
     ) -> Result<Arc<Self>> {
-        let (tx, mut rx) = mpsc::channel::<Frame>(64);
+        let (tx, mut rx) = mpsc::channel::<QueuedFrame>(64);
         let session = Arc::new(Self {
             frames: tx,
             streams: Mutex::new(HashMap::new()),
             closed: CancellationToken::new(),
+            reason: Mutex::new(None),
             next: AtomicU32::new(0),
             active: AtomicUsize::new(0),
             idle_since: Mutex::new(Instant::now()),
             padding,
             client,
             max_streams,
+            host,
+            tasks: Mutex::new(Vec::new()),
+            permit: Mutex::new(None),
         });
         let (mut reader, mut writer) = tokio::io::split(stream);
         let write_session = session.clone();
-        tokio::spawn(async move {
+        session.spawn(async move {
             let result = async {
                 let mut packet = 0u32;
                 loop {
-                    let frame = tokio::select! {_ = write_session.closed.cancelled()=>return Ok::<_,Error>(()), frame=rx.recv()=>match frame {Some(f)=>f,None=>return Ok(())}};
+                    let QueuedFrame { frame, delivery } = tokio::select! {_ = write_session.closed.cancelled()=>return Ok::<_,Error>(()), frame=rx.recv()=>match frame {Some(f)=>f,None=>return Ok(())}};
                     let mut bytes = frame.encode()?;
                     packet = packet.saturating_add(1);
                     let scheme = write_session.padding.read().unwrap().clone();
@@ -147,29 +303,33 @@ impl Session {
                         writer.write_all(&bytes).await?;
                     }
                     writer.flush().await?;
+                    if let Some(delivery) = delivery {
+                        delivery.stream.confirm(delivery.mark);
+                    }
                 }
             };
-            tokio::select! {_ = write_session.closed.cancelled()=>{}, _ = result=>{}}
-            write_session.close();
-        });
+            let result=tokio::select! {_ = write_session.closed.cancelled()=>return, result=result=>result};
+            write_session.close_with(crate::flow::reason(&result));
+        })?;
         let read_session = session.clone();
-        tokio::spawn(async move {
+        session.spawn(async move {
             let result = read_session.receive(&mut reader, incoming);
-            tokio::select! {_ = read_session.closed.cancelled()=>{}, _ = result=>{}}
-            read_session.close();
-        });
+            let result =
+                tokio::select! {_ = read_session.closed.cancelled()=>return, result=result=>result};
+            read_session.close_with(crate::flow::reason(&result));
+        })?;
         let idle_session = session.clone();
-        tokio::spawn(async move {
+        session.spawn(async move {
             loop {
                 tokio::select! {_ = idle_session.closed.cancelled()=>break,_ = tokio::time::sleep(idle.min(Duration::from_secs(5)))=>{}}
                 if idle_session.active.load(Ordering::Acquire) == 0
                     && idle_session.idle_since.lock().unwrap().elapsed() >= idle
                 {
-                    idle_session.close();
+                    idle_session.close_with(kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::Timeout));
                     break;
                 }
             }
-        });
+        })?;
         if client {
             let md5 = session.padding.read().unwrap().md5.clone();
             session
@@ -182,11 +342,74 @@ impl Session {
         }
         Ok(session)
     }
+    fn spawn(&self, future: impl std::future::Future<Output = ()> + Send + 'static) -> Result<()> {
+        let task = match &self.host {
+            Owner::Service(host) => Task::Shared(host.spawn_tracked(future)?),
+            Owner::Node(owner) => Task::Local(owner.spawn_tracked(future)?),
+        };
+        self.tasks.lock().map_err(|_| Error::Rejected)?.push(task);
+        Ok(())
+    }
+    pub async fn shutdown(&self) {
+        self.close();
+        let tasks = self
+            .tasks
+            .lock()
+            .map(|mut tasks| std::mem::take(&mut *tasks))
+            .unwrap_or_default();
+        for task in tasks {
+            match task {
+                Task::Local(task) => {
+                    task.abort();
+                    let _ = task.await;
+                }
+                Task::Shared(task) => {
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+        }
+    }
+    pub fn assign_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) {
+        let mut held = self.permit.lock().unwrap();
+        if !self.closed.is_cancelled() {
+            *held = Some(permit);
+        }
+    }
+    pub fn finish_reason(&self) -> kerlico_core::FlowOutcome {
+        self.reason
+            .lock()
+            .ok()
+            .and_then(|value| *value)
+            .unwrap_or(kerlico_core::FlowOutcome::ClosedByCaller)
+    }
+    pub fn close_with(&self, reason: kerlico_core::FlowOutcome) {
+        if let Ok(mut value) = self.reason.lock() {
+            value.get_or_insert(reason);
+        }
+        self.close();
+    }
     pub fn close(&self) {
+        let reason = *self
+            .reason
+            .lock()
+            .unwrap()
+            .get_or_insert(kerlico_core::FlowOutcome::ClosedByCaller);
+        let entries = std::mem::take(&mut *self.streams.lock().unwrap());
+        for entry in entries.into_values() {
+            entry.end(reason);
+        }
         self.closed.cancel();
-        self.streams.lock().unwrap().clear();
+        self.permit.lock().unwrap().take();
     }
     pub async fn send(&self, frame: Frame) -> Result<()> {
+        self.queue(QueuedFrame {
+            frame,
+            delivery: None,
+        })
+        .await
+    }
+    async fn queue(&self, frame: QueuedFrame) -> Result<()> {
         tokio::select! {biased;_ = self.closed.cancelled()=>Err(Error::Protocol("AnyTLS 会话已关闭")),r=self.frames.send(frame)=>r.map_err(|_|Error::Protocol("AnyTLS 会话已关闭"))}
     }
     fn logical(self: &Arc<Self>, id: u32) -> Result<BoxStream> {
@@ -197,27 +420,54 @@ impl Session {
         let (app, network) = tokio::io::duplex(65536);
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
         let cancel = CancellationToken::new();
+        let delivery = Arc::new(Delivery::default());
         streams.insert(
             id,
             Entry {
                 data: tx,
                 cancel: cancel.clone(),
+                ending: tokio::sync::watch::channel(None).0,
+                delivery: delivery.clone(),
             },
         );
         self.active.fetch_add(1, Ordering::AcqRel);
         let session = self.clone();
         let task_cancel = cancel.clone();
-        tokio::spawn(async move {
+        let stream_delivery = delivery.clone();
+        self.spawn(async move {
             let (mut reader, mut writer) = tokio::io::split(network);
+            let mut fin_queued = false;
             let outgoing = async {
                 let mut buf = vec![0; 16384];
+                let mut position = 0u64;
                 loop {
                     let n = reader.read(&mut buf).await?;
                     if n == 0 {
+                        let (delivered, confirmed) = tokio::sync::oneshot::channel();
+                        session
+                            .queue(QueuedFrame {
+                                frame: Frame::new(codec::FIN, id, Vec::new()),
+                                delivery: Some(FrameDelivery {
+                                    stream: stream_delivery.clone(),
+                                    mark: WriteMark::Fin(delivered),
+                                }),
+                            })
+                            .await?;
+                        fin_queued = true;
+                        confirmed
+                            .await
+                            .map_err(|_| Error::Protocol("AnyTLS FIN 未完成物理交付"))?;
                         return Ok::<_, Error>(());
                     }
+                    position = position.checked_add(n as u64).ok_or(Error::ResourceLimit)?;
                     session
-                        .send(Frame::new(codec::PSH, id, buf[..n].to_vec()))
+                        .queue(QueuedFrame {
+                            frame: Frame::new(codec::PSH, id, buf[..n].to_vec()),
+                            delivery: Some(FrameDelivery {
+                                stream: stream_delivery.clone(),
+                                mark: WriteMark::Bytes(position),
+                            }),
+                        })
                         .await?;
                 }
             };
@@ -228,15 +478,26 @@ impl Session {
                 writer.shutdown().await?;
                 Ok::<_, Error>(())
             };
-            tokio::select! {_ = session.closed.cancelled()=>{},_ = task_cancel.cancelled()=>{},_ = outgoing=>{},_ = incoming=>{}}
-            session.streams.lock().unwrap().remove(&id);
+            let reason = tokio::select! {
+                biased;
+                _ = session.closed.cancelled() => session.finish_reason(),
+                _ = task_cancel.cancelled() => kerlico_core::FlowOutcome::ClosedByCaller,
+                result = outgoing => crate::flow::reason(&result),
+                result = incoming => crate::flow::reason(&result),
+            };
+            if let Some(entry) = session.streams.lock().unwrap().remove(&id) {
+                entry.end(reason);
+            }
             session.active.fetch_sub(1, Ordering::AcqRel);
             *session.idle_since.lock().unwrap() = Instant::now();
-            let _ = session.send(Frame::new(codec::FIN, id, Vec::new())).await;
-        });
+            if !fin_queued {
+                let _ = session.send(Frame::new(codec::FIN, id, Vec::new())).await;
+            }
+        })?;
         Ok(Box::new(LogicalStream {
             io: app,
             cancel,
+            delivery,
             client: self.client,
             write_closed: false,
         }))
@@ -299,11 +560,20 @@ impl Session {
                             continue;
                         }
                     };
+                    let ending = self
+                        .streams
+                        .lock()
+                        .unwrap()
+                        .get(&frame.id)
+                        .ok_or(Error::Cancelled)?
+                        .ending
+                        .subscribe();
                     if let Some(tx) = &incoming
                         && tx
                             .try_send(Incoming {
                                 id: frame.id,
                                 stream,
+                                ending,
                             })
                             .is_err()
                     {
@@ -313,7 +583,10 @@ impl Session {
                     }
                 }
                 codec::FIN => {
-                    self.streams.lock().unwrap().remove(&frame.id);
+                    let entry = self.streams.lock().unwrap().remove(&frame.id);
+                    if let Some(entry) = entry {
+                        entry.end(kerlico_core::FlowOutcome::ProtocolEnd);
+                    }
                 }
                 codec::SETTINGS if !self.client => {
                     if settings || frame.id != 0 {
@@ -367,6 +640,7 @@ impl Session {
     fn finish(&self, id: u32) {
         if let Some(entry) = self.streams.lock().unwrap().remove(&id) {
             entry.cancel.cancel();
+            entry.end(kerlico_core::FlowOutcome::ClosedByCaller);
         }
     }
 }
@@ -387,12 +661,27 @@ mod tests {
             4,
             Duration::from_secs(2),
             Some(tx),
+            Owner::Node(kerlico_core::NodeTasks::new(
+                kerlico_core::NodeId::parse("test-node").unwrap(),
+                CancellationToken::new(),
+            )),
         )
         .await
         .unwrap();
-        let client = Session::start(Box::new(b), true, padding, 4, Duration::from_secs(2), None)
-            .await
-            .unwrap();
+        let client = Session::start(
+            Box::new(b),
+            true,
+            padding,
+            4,
+            Duration::from_secs(2),
+            None,
+            Owner::Node(kerlico_core::NodeTasks::new(
+                kerlico_core::NodeId::parse("test-node").unwrap(),
+                CancellationToken::new(),
+            )),
+        )
+        .await
+        .unwrap();
         let mut first = client.open().await.unwrap();
         let mut second = client.open().await.unwrap();
         first.write_all(b"one").await.unwrap();

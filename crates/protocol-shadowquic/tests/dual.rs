@@ -33,7 +33,8 @@ async fn tcp(f: &Fixture, target: &Destination) {
         .outbound
         .connect_tcp(target, &ConnectContext::new(Duration::from_secs(4)))
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     let bytes = vec![7; 25000];
     stream.write_all(&bytes).await.unwrap();
     let mut answer = vec![0; bytes.len()];
@@ -199,7 +200,9 @@ async fn wrong_credentials_and_server_name_never_open_target_access() {
         ] {
             let mut options = f.options.clone();
             options[key] = json!(value);
-            let outbound = ShadowQuicFactory.build(&options).unwrap();
+            let outbound = shared::outbound(&ShadowQuicFactory, &options)
+                .await
+                .unwrap();
             assert!(
                 outbound
                     .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(3)))
@@ -211,7 +214,12 @@ async fn wrong_credentials_and_server_name_never_open_target_access() {
         let context = ConnectContext::new(Duration::from_secs(3));
         context.cancel.cancel();
         assert!(matches!(
-            f.outbound.associate_udp(&context).await,
+            f.outbound
+                .associate_udp(
+                    &kerlico_core::ConnectContext::new(context.timeout)
+                        .with_cancel(context.cancel.clone())
+                )
+                .await,
             Err(kerlico_core::Error::Cancelled)
         ));
     }
@@ -310,7 +318,8 @@ async fn half_close_and_node_exit_release_same_port() {
             .outbound
             .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(4)))
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         stream.write_all(b"request").await.unwrap();
         stream.shutdown().await.unwrap();
         let mut response = Vec::new();
@@ -358,7 +367,8 @@ async fn multiplexed_tcp_and_udp_associations_keep_payloads_and_ports_separate()
                     let mut stream = outbound
                         .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(4)))
                         .await
-                        .unwrap();
+                        .unwrap()
+                        .stream;
                     let data = vec![index; 4096];
                     stream.write_all(&data).await.unwrap();
                     let mut answer = vec![0; data.len()];
@@ -395,8 +405,8 @@ async fn multiplexed_tcp_and_udp_associations_keep_payloads_and_ports_separate()
     }
     echo.abort();
 }
-#[test]
-fn rejects_unsupported_fields_duplicate_identity_and_non_association_egress() {
+#[tokio::test]
+async fn rejects_unsupported_fields_duplicate_identity_and_non_association_egress() {
     let base = json!({"server":{"host":"127.0.0.1","port":10443},"server_name":NAME,"username":"node-1","password":"synthetic-password"});
     for (key, value) in [
         ("quic_version", json!("v3")),
@@ -407,32 +417,59 @@ fn rejects_unsupported_fields_duplicate_identity_and_non_association_egress() {
     ] {
         let mut bad = base.clone();
         bad[key] = value;
-        assert!(ShadowQuicFactory.build(&bad).is_err());
+        assert!(ShadowQuicFactory.compile(&bad).is_err());
     }
     let options = json!({"server_name":NAME,"upstream":{"host":"127.0.0.1","port":443},"users":[{"username":"node-1","password":"first-password"},{"username":"node-1","password":"another-password"}]});
-    assert!(ShadowQuicNodeFactory.build(&options).is_err());
+    assert!(
+        ShadowQuicNodeFactory
+            .build(&shared::node_input("shadowquic", &options))
+            .is_err()
+    );
     let options = json!({"server_name":NAME,"upstream":{"host":"127.0.0.1","port":443},"username":"node-1","password":"synthetic-password"});
     let mut registry = kerlico_config::Registry::default();
     registry.register(kerlico_net::DirectFactory).unwrap();
     registry.register(kerlico_net::RejectFactory).unwrap();
     registry.register_node(ShadowQuicNodeFactory).unwrap();
-    let mut config = json!({"version":1,"outbounds":[{"tag":"access","type":"direct"}],"inbounds":[],"nodes":[{"tag":"node4","type":"shadowquic","listen":"127.0.0.1:10443","outbound":"access","options":options},{"tag":"node6","type":"shadowquic","listen":"[::1]:10443","outbound":"access","options":options}]});
+    let mut config = json!({"version":2,"outbounds":[{"tag":"access","type":"direct"}],"inbounds":[],"nodes":[{"tag":"node4","type":"shadowquic","listen":"127.0.0.1:10443","outbound":"access","options":options},{"tag":"node6","type":"shadowquic","listen":"[::1]:10443","outbound":"access","options":options}]});
     config["nodes"][1]["options"]["password"] = json!("independent-password");
     let error = registry
-        .prepare(kerlico_config::parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+        .prepare(
+            kerlico_config::parse(
+                &serde_json::to_vec(&shared::configuration(config.clone())).unwrap(),
+            )
+            .unwrap(),
+        )
         .err()
         .unwrap();
     assert!(error.to_string().contains("凭据重复"));
     config["nodes"][1]["options"]["username"] = json!("node-2");
     assert!(
         registry
-            .prepare(kerlico_config::parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .prepare(
+                kerlico_config::parse(
+                    &serde_json::to_vec(&shared::configuration(config.clone())).unwrap()
+                )
+                .unwrap()
+            )
             .is_ok()
     );
     config["outbounds"][0]["type"] = json!("reject");
     let error = registry
-        .prepare(kerlico_config::parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+        .prepare(
+            kerlico_config::parse(
+                &serde_json::to_vec(&shared::configuration(config.clone())).unwrap(),
+            )
+            .unwrap(),
+        )
         .err()
         .unwrap();
     assert!(error.to_string().contains("多目标 UDP 关联"));
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

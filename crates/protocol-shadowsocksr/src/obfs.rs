@@ -64,9 +64,9 @@ impl Layer {
                     return Ok(Vec::new());
                 }
                 self.sent = true;
-                let mut head = crypto::random(8 + usize::from(crypto::random(1)[0] % 32));
-                head.extend_from_slice(&(u32::MAX - crc32fast::hash(&head)).to_le_bytes());
-                Ok(head)
+                Ok(random_head(crypto::random(
+                    8 + usize::from(crypto::random(1)[0] % 32),
+                )))
             }
             Obfs::Tls | Obfs::TlsFast => {
                 if self.phase == 8 {
@@ -584,6 +584,16 @@ impl Layer {
         Ok(output)
     }
 }
+
+fn random_head(mut payload: Vec<u8>) -> Vec<u8> {
+    payload.extend_from_slice(&(u32::MAX - crc32fast::hash(&payload)).to_le_bytes());
+    // CRC残数后追加零仍有效；只发送解码器会选中的首个完整边界。
+    if let Some(end) = (8..payload.len()).find(|end| crc32fast::hash(&payload[..*end]) == u32::MAX)
+    {
+        payload.truncate(end);
+    }
+    payload
+}
 fn empty() -> Decoded {
     Decoded {
         cipher: Vec::new(),
@@ -607,6 +617,38 @@ fn records(data: &[u8]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn random_head_crc_zero_suffix_does_not_shift_the_cipher_prefix() {
+        let seed = vec![
+            0xc7, 0x6f, 0xe1, 0x73, 0x5f, 0x73, 0x89, 0x12, 0x85, 0xce, 0x46,
+        ];
+        let mut ambiguous = seed.clone();
+        ambiguous.extend_from_slice(&(u32::MAX - crc32fast::hash(&seed)).to_le_bytes());
+        assert_eq!(ambiguous.len(), 15);
+        assert_eq!(crc32fast::hash(&ambiguous[..14]), u32::MAX);
+        let encoded = random_head(seed);
+        assert_eq!(encoded.len(), 14);
+        let cfg = Shared::node(&json!({"method":"aes-128-cfb","password":"synthetic-boundary-secret","protocol":"auth_chain_b","obfs":"random_head","allow_insecure":true})).unwrap();
+        for chunk_size in 1..=encoded.len() {
+            let mut server = Layer::new(cfg.clone(), Role::Server, String::new(), 0);
+            let mut reply = Vec::new();
+            for chunk in encoded.chunks(chunk_size) {
+                let decoded = server.feed(chunk).unwrap();
+                assert!(decoded.cipher.is_empty());
+                reply.extend(decoded.reply);
+            }
+            assert_eq!(reply.len(), 4);
+            let cipher = [0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
+            let mut actual = Vec::new();
+            for chunk in cipher.chunks(3) {
+                let decoded = server.feed(chunk).unwrap();
+                actual.extend(decoded.cipher);
+                assert!(decoded.reply.is_empty());
+            }
+            assert_eq!(actual, cipher);
+            assert!(server.finished());
+        }
+    }
     #[test]
     fn captured_peer_record_corruption_is_rejected_after_valid_finished() {
         #[derive(serde::Deserialize)]

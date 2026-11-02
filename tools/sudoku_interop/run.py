@@ -16,6 +16,8 @@ import threading
 import time
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from config_v2 import bind_members
 SOURCE = json.loads((HERE / "SOURCE.json").read_text())
 MODES = ["raw", "legacy", "stream", "poll", "auto", "ws"]
 METHODS = ["aes-128-gcm", "chacha20-poly1305", "none"]
@@ -193,10 +195,13 @@ def kernel_node(case, host, port, tls):
         mask["tls"] = {"cert_pem": tls["cert"], "key_pem": tls["key"]}
     node = {"tag": "node", "type": "sudoku", "listen": endpoint(host, port), "outbound": "exit",
             "options": {"protocol": protocol(case), "http_mask": mask}}
-    return {"version": 1, "outbounds": [{"tag": "exit", "type": "direct"}], "inbounds": [],
+    config = {"version": 2, "outbounds": [{"tag": "exit", "type": "direct"}], "inbounds": [],
             "local_inbounds" if case["aead"] == "none" else "nodes": [node],
             "limits": {"max_sessions": 256, "connect_timeout_ms": 5000, "idle_timeout_ms": 30000,
                        "drain_timeout_ms": 1000, "max_datagram_size": 65507}}
+    if case["aead"] != "none":
+        bind_members(config, node, [{"key": node["options"]["protocol"].pop("key")}])
+    return config
 
 
 def kernel_client(case, host, port, tcp_targets, udp_targets, tls, key=KEY):
@@ -214,10 +219,9 @@ def kernel_client(case, host, port, tcp_targets, udp_targets, tls, key=KEY):
             entries.append({"tag": f"{kind}-{index}", "type": kind + "-forward", "listen": endpoint("127.0.0.1", listen),
                             "target": {"host": target.host, "port": target.port}, "outbound": "proxy"})
             ports[kind].append(listen)
-    return {"version": 1, "outbounds": [{"tag": "proxy", "type": "sudoku", "options": options}],
+    return {"version": 2, "outbounds": [{"tag": "proxy", "type": "sudoku", "options": options}],
             "inbounds": entries, "limits": {"max_sessions": 256, "connect_timeout_ms": 5000,
                                             "drain_timeout_ms": 1000, "max_datagram_size": 65507}}, ports
-
 
 def native_config(peer, case, server, host, port, socks_port):
     key = KEY if server or case["axis"] != "credentials" else "synthetic-wrong-sudoku-cli-secret"

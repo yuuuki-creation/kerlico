@@ -1,5 +1,18 @@
 # Sudoku 首轮接口记录
 
+2026-11-02共享运行迁移已编写，尚未编译、格式检查或测试。本文保留的历史通过记录只对应原输入，不代表当前整树已验收。
+
+配置模式为`version:2`。节点的`members`引用管理账户`user_id`，分别保存`credential_epoch`与`native_credential`。管理用户名、管理密码摘要和协议凭据互不代用。节点工厂接收`NodeBuildContext`，鉴权前只持`IngressBinding`，鉴权后使用`PeerSession`访问共享Dispatcher。
+
+每条成员凭据为`{"key":"synthetic-sudoku-seed-kept-secret"}`，认证节点options.protocol不再保存key。raw、legacy和split按候选表完成实际AEAD/KIP鉴别，WS先验证同一候选的MAC再验证KIP；候选失败不写入重放表。none仅用Local，options.protocol保留编码key，不能生成管理用户。
+
+出站工厂通过`compile`校验配置与资产，返回一次性`OutboundPlan`；`start(ServiceContext)`才创建命名运行实例。一个Engine内每条命名出站只有一个实例，池按`ConnectContext.resource_key()`的服务、成员和凭据代次分区。持久任务登记到ServiceContext，shutdown停止并等待自身资源；单个请求或节点不关闭共享出站。使用TLS的共享出站不跨成员复用恢复票据。
+
+成员池的外层表只在查找或取得 bucket 时短暂加锁。DNS、载体拨号和协议协商只持对应成员 bucket 的锁；其他成员可同时建立载体。关闭时先从表和 bucket 移出资源，再等待清理，不跨 await 持有全局池锁。bucket 只保存池状态，不创建第二个完整出站实例。
+
+本模块代理出站声明`TargetPolicy::Remote`，保留网站原目标、端口和负载。本机只解析代理接入端点，网站解析由远端负责；协议无法表达的目标明确拒绝。TCP连接与UDP关联建立后固定所选出站，不在失败后跨代理或直连重放。
+
+
 更新日期：2026-10-31。用户已要求停止修复、保存快照。根/app已接双工厂；r4库49/49、预算1/1、HTTP6/6、Mux4/6及协议11/12通过，仍有三项期限失败。r5补充诊断及Clippy/fmt通过范围见[测试](../testing/sudoku.md)。最后两个性能源码文件未验证，不将当前配置当作完整验收功能。
 
 ## 角色与选项结构
@@ -28,7 +41,7 @@
 }
 ```
 
-节点选项使用同一protocol；http_mask可包含mode、path_root及TLS的cert_pem/key_pem。节点另有max_mux_streams（默认32）、max_http_sessions（64）、http_session_ttl_ms（30000）和可选cover_fallback。所有结构拒绝未知字段，不兼容Mihomo整份配置或其平铺别名。
+认证节点protocol使用相同的公开参数，key取自外层members；http_mask可包含mode、path_root及TLS的cert_pem/key_pem。节点另有max_mux_streams（默认32）、max_http_sessions（64）、http_session_ttl_ms（30000）和可选cover_fallback。所有结构拒绝未知字段，不兼容Mihomo整份配置或其平铺别名。
 
 key按固定参考规则规范化，不能由名称“公钥”推断可公开：有效seed就是共享秘密。32字节hex先按压缩点解释，随后才尝试主标量；64字节拆分标量恢复共同点。实际seed的指纹用于跨节点隔离，客户端UserHash不获得独立鉴权或配额身份。
 
@@ -75,3 +88,17 @@ SudokuNodeFactory提供TCP及虚拟入口：Engine虚拟入口初始化一次全
 普通raw/legacy/split TCP声明独立EOF；未启用真实mux的WS受Close整连接语义限制，不声明独立EOF。UDP启用时要求出口支持多目标关联；没有该能力的配置不能静默改用多个固定通道。
 
 本接口记录描述源码结构，实际通过范围只见[测试记录](../testing/sudoku.md)，不得合计历史结果外推当前树。最后性能编码增量被中断，具体缓存结构与内存界限仍需恢复后审查/复验；没有继续构建或测试。来源与边界见[研究](../../reference/research_notes/sudoku.md)，后续须用户明确继续指令。
+
+## 完成权与绑定元数据
+
+本轮完成权迁移源码与回归已编写，尚未运行新输入。底层 `Outbound::connect_tcp` 返回 `OpenedTcp`，本协议没有可证实的目标连接绑定字段，明确返回 `TcpConnectInfo::unknown()`。代理端点和载体本地地址不代填业务绑定。底层 UDP 通道保持原接口，唯一业务计量仍由 Dispatcher 包装。
+
+入站从 `PeerSession` 取得 `TcpFlow`、`FixedUdpFlow` 或 `UdpAssociation`。自定义会话拆出 typed I/O 和唯一完成权，先报告正常协议结束、超时、取消或错误，再释放 I/O。TCP 的单向 EOF 不提前结束反向数据；零长度 UDP 包不作为 EOF。完成权只固定终因，最后计量 I/O 租约释放后才生成稳定终态，不重复累计流量。父级载体保留已建立流的完成权，关闭后拒绝新登记，旧代次结果不能关闭新流。
+
+WebSocket 升级沿用原 peer 取消域，实际升级任务持 `PeerLease` 到退出。物理 HTTP handler 返回不会提前归还仍由升级连接占用的配额，也不会取消已移交的字节流。单 peer 取消仅结束该连接；节点取消仍结束该节点全部升级连接。节点 Runtime 从节点上下文装配，不保存首个 peer 的租约、地址或取消信号。相关回归已编写，待海外执行。
+
+seed 候选选择验证完整 AEAD 与 KIP，不比较客户端 UserHash 和本地原始密钥字符串的摘要。规范化到同一 seed 的公钥形式、主标量和拆分材料继续服从同一认证与重放域；UserHash 不新增授权。此次移除了共享迁移中误加的 UserHash 相等条件，依据仍是既有固定参考探针与研究记录。
+
+子任务的完成权票据意外释放时，先从父表唯一移出，再在锁外报告终因：正在展开的 panic 为 Failed，已观察取消为 Cancelled，其余为 ClosedByCaller。显式完成或父级关闭已消费的票据不再次报告，后续正常父级 END 不能覆盖子流失败；已知计时器和协议错误仍显式报告。
+
+服务端虚拟 Runtime 的 Scope 将 HTTP 升级、split 后台任务、cover HTTP 驱动和 Mux 驱动的实际 future 登记到 NodeTasks；H2 服务端与客户端统一使用 ScopeExecutor，客户端 Scope 仍归命名出站 ServiceContext。裸 Mux 启动入口只编译进单元测试。登记拒绝关闭所属 Scope，不能另起未登记任务。Engine 的关闭确认仍要求外层 handler 和实际节点任务均已 join；本次 Scope、H2 执行器和真实 Mux socket 回归尚未运行。

@@ -1,27 +1,93 @@
 #!/usr/bin/env python3
-"""仅在 worker 检查 TrustTunnel 双向对端；受控 H1 wire peer 单独标识。"""
+from config_v2 import bind_members
 import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import ipaddress
 import itertools
 import json
 import os
 from pathlib import Path
-import signal
+import re
+import shutil
 import socket
 import socketserver
 import ssl
 import struct
 import subprocess
+import sys
 import time
 
 import interop_vless as h
 
 NAME = "tt.example.invalid"
 PASSWORDS = ("tt-node4-only-secret", "tt-node6-only-secret")
+ALLOCATED_PORTS = set()
+
+
+class SetupFailure(RuntimeError):
+    def __init__(self, phase, directory, error):
+        super().__init__("本任务独立夹具准备失败")
+        self.phase = phase
+        self.directory = directory
+        self.error_type = type(error).__name__
+        self.os_error = getattr(error, "winerror", None) or getattr(error, "errno", None)
+
+
+@contextmanager
+def setup(phase, directory):
+    try:
+        yield
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        raise SetupFailure(phase, directory, error) from error
+
+
+def write_json(path, value):
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def diagnostics(directory):
+    result = []
+    patterns = {
+        "certificate-path-rejected": ("safe_paths", "not subpath"),
+        "certificate-authority-rejected": ("unknown authority", "unknown ca", "unknownissuer"),
+        "certificate-pin-rejected": ("certificate fingerprints do not match",),
+        "certificate-name-rejected": ("certificate is valid for", "not valid for", "hostname mismatch"),
+        "certificate-client-rejected": ("certificate required", "bad certificate"),
+        "listen-address-unavailable": ("address already in use", "only one usage", "cannot assign requested address"),
+        "authentication-rejected": ("status code: 407", "authentication failed"),
+    }
+    for path in sorted(directory.glob("*.log")):
+        data = path.read_bytes()
+        lower = data.decode("utf-8", errors="replace").lower()
+        result.append({"log": path.name, "sha256": hashlib.sha256(data).hexdigest(),
+                       "categories": [name for name, fragments in patterns.items() if any(part in lower for part in fragments)]})
+    return result
+
+
+@contextmanager
+def process(command, directory, label):
+    environment = os.environ.copy()
+    environment["SAFE_PATHS"] = ""
+    flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    with (directory/(label+".log")).open("xb") as log:
+        child = subprocess.Popen(command, cwd=directory, env=environment, stdout=log,
+                                 stderr=subprocess.STDOUT, creationflags=flags)
+        try:
+            yield child
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=4)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=3)
 
 
 class Udp4(h.UdpServer):
@@ -53,10 +119,17 @@ def port(host="127.0.0.1"):
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     for _ in range(256):
         number = 16000 + int.from_bytes(os.urandom(2), "big") % 12000
+        key = (host, number)
+        if key in ALLOCATED_PORTS:
+            continue
         try:
             with socket.socket(family) as tcp, socket.socket(family, socket.SOCK_DGRAM) as udp:
+                if os.name == "nt":
+                    tcp.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                    udp.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
                 tcp.bind((host, number))
                 udp.bind((host, number))
+                ALLOCATED_PORTS.add(key)
                 return number
         except OSError:
             continue
@@ -79,10 +152,12 @@ def ready(child, host, number):
         if child.poll() is not None:
             raise RuntimeError("本任务进程在就绪前退出")
         try:
-            with socket.create_connection((host, number), timeout=0.2):
-                return
+            if socket_owned(child, host, number, "tcp"):
+                with socket.create_connection((host, number), timeout=0.2):
+                    return
         except OSError:
-            time.sleep(0.02)
+            pass
+        time.sleep(0.02)
     raise RuntimeError("本任务监听就绪超时")
 
 
@@ -92,23 +167,68 @@ def live(child):
         raise RuntimeError("本任务 QUIC 进程已退出")
 
 
-def ready_udp(child, number):
+def socket_owned(child, host, number, protocol):
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        library = ctypes.WinDLL("iphlpapi", use_last_error=True)
+        query = library.GetExtendedUdpTable if protocol == "udp" else library.GetExtendedTcpTable
+        query.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.ULONG), wintypes.BOOL,
+                          wintypes.ULONG, ctypes.c_int, wintypes.ULONG]
+        query.restype = wintypes.ULONG
+        size = wintypes.ULONG()
+        table_class = 1 if protocol == "udp" else 3
+        status = query(None, ctypes.byref(size), False, family, table_class, 0)
+        if status != 122:
+            raise RuntimeError("本任务监听所有者查询失败")
+        buffer = ctypes.create_string_buffer(size.value)
+        status = query(buffer, ctypes.byref(size), False, family, table_class, 0)
+        if status == 122:
+            return False
+        if status:
+            raise RuntimeError("本任务监听所有者查询失败")
+        rows = buffer.raw
+        count = struct.unpack_from("=I", rows)[0]
+        if protocol == "udp":
+            stride, address_offset, port_offset = (28, 0, 20) if family == socket.AF_INET6 else (12, 0, 4)
+        else:
+            stride, address_offset, port_offset = (56, 0, 20) if family == socket.AF_INET6 else (24, 4, 8)
+        if 4+count*stride > len(rows):
+            raise RuntimeError("本任务监听所有者表长度不合法")
+        packed = ipaddress.ip_address(host).packed
+        for index in range(count):
+            start = 4+index*stride
+            owner = struct.unpack_from("=I", rows, start+stride-4)[0]
+            local_port = socket.ntohs(struct.unpack_from("=I", rows, start+port_offset)[0] & 0xffff)
+            begin = start+address_offset
+            if owner == child.pid and local_port == number and rows[begin:begin+len(packed)] == packed:
+                return True
+        return False
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("当前平台尚无本任务监听所有者查询实现")
+    own = set()
+    for fd in Path(f"/proc/{child.pid}/fd").iterdir():
+        try:
+            link = os.readlink(fd)
+            if link.startswith("socket:["):
+                own.add(link[8:-1])
+        except OSError:
+            pass
+    for table in [f"/proc/net/{protocol}", f"/proc/net/{protocol}6"]:
+        for line in Path(table).read_text(encoding="ascii").splitlines()[1:]:
+            values = line.split()
+            if (protocol == "udp" or values[3] == "0A") and int(values[1].split(":")[1], 16) == number and values[9] in own:
+                return True
+    return False
+
+
+def ready_udp(child, host, number):
     deadline = time.monotonic()+8
     while time.monotonic() < deadline:
         live(child)
-        own = set()
-        for fd in Path(f"/proc/{child.pid}/fd").iterdir():
-            try:
-                link = os.readlink(fd)
-                if link.startswith("socket:["):
-                    own.add(link[8:-1])
-            except OSError:
-                pass
-        for table in ["/proc/net/udp", "/proc/net/udp6"]:
-            for line in Path(table).read_text().splitlines()[1:]:
-                values = line.split()
-                if int(values[1].split(":")[1], 16) == number and values[9] in own:
-                    return
+        if socket_owned(child, host, number, "udp"):
+            return
         time.sleep(0.02)
     raise RuntimeError("本任务 QUIC 监听未在预算内就绪")
 
@@ -123,9 +243,10 @@ def checked(path, expected):
     return str(Path(path).resolve())
 
 
-def material(root):
+def material(root, openssl):
     def run(*args):
-        result = subprocess.run(["openssl", *args], capture_output=True, timeout=30)
+        result = subprocess.run([openssl, *args], cwd=root, capture_output=True, timeout=30,
+                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         if result.returncode:
             raise RuntimeError("生成测试 CA/证书失败")
     ca, cakey = root/"ca.pem", root/"ca-key.pem"
@@ -134,9 +255,12 @@ def material(root):
     for role in ("server", "client"):
         key, csr, cert, ext = (root/(role+suffix) for suffix in ("-key.pem", ".csr", ".pem", ".ext"))
         run("req", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key), "-out", str(csr), "-subj", "/CN="+NAME)
-        ext.write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage="+("serverAuth" if role == "server" else "clientAuth")+"\nsubjectAltName=DNS:"+NAME+"\n")
+        ext.write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage="+("serverAuth" if role == "server" else "clientAuth")+"\nsubjectAltName=DNS:"+NAME+"\n", encoding="ascii")
         run("x509", "-req", "-in", str(csr), "-CA", str(ca), "-CAkey", str(cakey), "-CAcreateserial", "-out", str(cert), "-days", "1", "-extfile", str(ext))
         output[role], output[role+"_key"] = cert, key
+    chain = root/"server-chain.pem"
+    chain.write_text(output["server"].read_text(encoding="ascii")+ca.read_text(encoding="ascii"), encoding="ascii")
+    output["server_chain"] = chain
     return output
 
 
@@ -146,7 +270,7 @@ def own_options(host, number, password, transport, version, certs, server, mtls)
     if server:
         common["limits"].pop("max_connections")
         common["limits"].pop("health_check_ms")
-        tls = {"certificate_file": str(certs["server"]), "private_key_file": str(certs["server_key"]), "version": version}
+        tls = {"certificate_file": str(certs["server_chain"]), "private_key_file": str(certs["server_key"]), "version": version}
         if mtls:
             tls["client_ca_pem"] = certs["ca"].read_text()
         return {**common, "users": [{"username": "test", "password": password}], "tls": tls}
@@ -157,7 +281,10 @@ def own_options(host, number, password, transport, version, certs, server, mtls)
 
 
 def own_node(host, number, password, transport, version, certs, mtls):
-    return {"version": 1, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], "nodes": [{"tag": "node", "type": "trusttunnel", "listen": address(host, number), "outbound": "direct", "options": own_options(host, number, password, transport, version, certs, True, mtls)}], "limits": {"connect_timeout_ms": 3000, "idle_timeout_ms": 6000, "drain_timeout_ms": 500, "max_sessions": 128, "max_datagram_size": 65507}}
+    config = {"version": 2, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], "nodes": [{"tag": "node", "type": "trusttunnel", "listen": address(host, number), "outbound": "direct", "options": own_options(host, number, password, transport, version, certs, True, mtls)}], "limits": {"connect_timeout_ms": 3000, "idle_timeout_ms": 6000, "drain_timeout_ms": 500, "max_sessions": 128, "max_datagram_size": 65507}}
+    node = config["nodes"][0]
+    bind_members(config, node, node["options"].pop("users"))
+    return config
 
 
 def official_node(directory, host, number, password, transport, certs, log_level):
@@ -166,20 +293,19 @@ def official_node(directory, host, number, password, transport, certs, log_level
     # 未设置 icmp、反向站点、metrics、Sentry；默认无对应资源。
     kind = {"h1": "http1", "h2": "http2", "h3": "quic"}[transport]
     settings.write_text("listen_address = "+json.dumps(address(host, number))+"\nipv6_available = true\nallow_private_network_connections = true\ncredentials_file = "+json.dumps(str(clients))+"\nconnection_establishment_timeout_secs = 3\nclient_listener_timeout_secs = 6\ntcp_connections_timeout_secs = 6\nudp_connections_timeout_secs = 6\n[listen_protocols."+kind+"]\n")
-    tls.write_text('[[main_hosts]]\nhostname = '+json.dumps(NAME)+'\ncert_chain_path = '+json.dumps(str(certs["server"]))+'\nprivate_key_path = '+json.dumps(str(certs["server_key"]))+'\n')
+    tls.write_text('[[main_hosts]]\nhostname = '+json.dumps(NAME)+'\ncert_chain_path = '+json.dumps(str(certs["server_chain"]))+'\nprivate_key_path = '+json.dumps(str(certs["server_key"]))+'\n', encoding="utf-8")
     return [str(settings), str(tls), "--jobs", "1", "--loglvl", log_level]
 
 
-def mihomo_common(certs):
-    # 此固定 Mihomo 配置字段的上游拼写确实是 custom-certifactes。
-    return {"mode": "rule", "log-level": "warning", "allow-lan": False, "ipv6": True, "dns": {"enable": False}, "tun": {"enable": False}, "ntp": {"enable": False}, "profile": {"store-selected": False}, "tls": {"custom-certifactes": [certs["ca"].read_text()]}}
+def mihomo_common():
+    return {"mode": "rule", "log-level": "warning", "allow-lan": False, "ipv6": True, "dns": {"enable": False}, "tun": {"enable": False}, "ntp": {"enable": False}, "profile": {"store-selected": False}}
 
 
 def mihomo_node(host, number, password, transport, certs, mtls):
-    config = mihomo_common(certs)
-    listener = {"name": "node", "type": "trusttunnel", "listen": host, "port": str(number), "users": [{"username": "test", "password": password}], "certificate": str(certs["server"]), "private-key": str(certs["server_key"]), "network": ["udp" if transport == "h3" else "tcp"]}
+    config = mihomo_common()
+    listener = {"name": "node", "type": "trusttunnel", "listen": host, "port": str(number), "users": [{"username": "test", "password": password}], "certificate": certs["server_chain"].read_text(encoding="ascii"), "private-key": certs["server_key"].read_text(encoding="ascii"), "network": ["udp" if transport == "h3" else "tcp"]}
     if mtls:
-        listener.update({"client-auth-cert": str(certs["ca"])})
+        listener.update({"client-auth-cert": certs["ca"].read_text(encoding="ascii")})
     config.update({"listeners": [listener], "rules": ["MATCH,DIRECT"]})
     return config
 
@@ -191,10 +317,12 @@ def official_client(directory, host, number, password, transport, certs, socks, 
 
 
 def mihomo_client(host, number, password, transport, certs, socks, mtls):
-    config = mihomo_common(certs)
-    proxy = {"name": "proxy", "type": "trusttunnel", "server": host, "port": number, "username": "test", "password": password, "sni": NAME, "udp": True, "quic": transport == "h3", "max-connections": 4, "max-streams": 64}
+    config = mihomo_common()
+    # 非叶CA指纹分支仍验证证书链、名称和有效期，不依赖解析后重置的全局CA池。
+    ca_der = ssl.PEM_cert_to_DER_cert(certs["ca"].read_text(encoding="ascii"))
+    proxy = {"name": "proxy", "type": "trusttunnel", "server": host, "port": number, "username": "test", "password": password, "sni": NAME, "fingerprint": hashlib.sha256(ca_der).hexdigest(), "skip-cert-verify": False, "udp": True, "quic": transport == "h3", "max-connections": 4, "max-streams": 64}
     if mtls:
-        proxy.update(certificate=str(certs["client"]), **{"private-key": str(certs["client_key"])})
+        proxy.update(certificate=certs["client"].read_text(encoding="ascii"), **{"private-key": certs["client_key"].read_text(encoding="ascii")})
     config.update({"socks-port": socks, "proxies": [proxy], "rules": ["MATCH,proxy"]})
     return config
 
@@ -224,7 +352,7 @@ def socks_open(number, target, command=1):
         raise
 
 
-def socks_udp(number, target, payload):
+def socks_udp(number, target, payload, on_reply=None):
     control, bind = socks_open(number, ("0.0.0.0", 0), 3)
     with control, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
         udp.settimeout(3)
@@ -234,6 +362,8 @@ def socks_udp(number, target, payload):
             bind = ("127.0.0.1", bind[1])
         udp.sendto(head+payload, bind)
         result = udp.recv(65535)
+        if on_reply is not None:
+            on_reply()
         length = {1: 4, 4: 16}.get(result[3]) if len(result) > 3 else None
         if length is None or result[:3] != b"\0\0\0":
             raise RuntimeError("SOCKS UDP 回包不合法")
@@ -274,7 +404,7 @@ def padded(host):
 
 def wire_udp(host, number, password, version, certs, mtls, target, payload):
     with wire_open(host, number, "_udp2", password, version, certs, mtls) as stream:
-        record = padded("0.0.0.0")+struct.pack("!H", 4231)+padded(target[0])+struct.pack("!H", target[1])+b"\0"+payload
+        record = b"\0"*18+padded(target[0])+struct.pack("!H", target[1])+b"\0"+payload
         stream.sendall(struct.pack("!I", len(record))+record)
         length = struct.unpack("!I", exact(stream, 4))[0]
         if not 36 <= length <= 36+65507:
@@ -282,16 +412,20 @@ def wire_udp(host, number, password, version, certs, mtls, target, payload):
         record = exact(stream, length)
         if record[:18] != padded(target[0])+struct.pack("!H", target[1]):
             raise RuntimeError("H1 UDP 真实来源不符")
+        if record[18:36] != b"\0"*18:
+            raise RuntimeError("H1 UDP 未保留未知源关联标记")
         return record[36:]
 
 
-def record(records, case, action, boundary=False, rejected=False):
-    output = {"case": case, "boundary": boundary, "expected_rejection": rejected}
+def record(records, case, action, boundary=False, rejected=False, phase="business", directory=None):
+    output = {"case": case, "phase": phase, "boundary": boundary, "expected_rejection": rejected}
     try:
         action()
         output["outcome"] = "pass"
     except (OSError, RuntimeError, TimeoutError, AssertionError) as error:
         output.update(outcome="observed-limit" if boundary else "fail", error_type=type(error).__name__)
+    if directory is not None:
+        output["diagnostics"] = diagnostics(directory)
     records.append(output)
     return output["outcome"] != "fail"
 
@@ -299,6 +433,139 @@ def record(records, case, action, boundary=False, rejected=False):
 def check_equal(actual, expected):
     if actual != expected:
         raise RuntimeError("回包内容不符")
+
+
+class ProbeState(str, Enum):
+    REQUEST_FAILED = "request-failed"
+    TUNNEL_ESTABLISHED = "tunnel-established"
+    BUSINESS_SUCCESS = "business-success"
+    SETUP_FAILED = "setup-failed"
+
+
+class TlsNegativeState(str, Enum):
+    REJECTED = "tls-rejected"
+    ACCEPTED = "business-accepted"
+    UNRELATED_FAILURE = "unrelated-failure"
+    INSUFFICIENT_EVIDENCE = "insufficient-evidence"
+
+
+@dataclass(frozen=True)
+class TlsProbe:
+    state: ProbeState
+    client_running: bool
+    server_running: bool
+    listener_owned: bool
+    log: bytes = b""
+    log_start: int = 0
+    error_type: str | None = None
+
+    def summary(self, log_name="client.log"):
+        return {"state": self.state.value, "client_running": self.client_running,
+                "server_running": self.server_running, "listener_owned": self.listener_owned,
+                "log": log_name, "log_start": self.log_start,
+                "log_end": self.log_start+len(self.log),
+                "log_segment_sha256": hashlib.sha256(self.log).hexdigest(),
+                "error_type": self.error_type}
+
+
+def tls_negative_verdict(variant, network, target, positive, negative):
+    text = negative.log.decode("utf-8", errors="replace")
+    established = re.compile(r"\["+network.upper()+r"\] [^\r\n]* --> "+re.escape(address(*target))+r" (?:match [^\r\n]* )?using proxy(?:[\"\s]|$)")
+    if negative.state in (ProbeState.TUNNEL_ESTABLISHED, ProbeState.BUSINESS_SUCCESS) or established.search(text):
+        return TlsNegativeState.ACCEPTED, "负例已取得隧道或业务回包"
+    if not all((negative.client_running, negative.server_running, negative.listener_owned)) or negative.state == ProbeState.SETUP_FAILED:
+        return TlsNegativeState.UNRELATED_FAILURE, "负例进程、监听或准备失败"
+    if positive.state != ProbeState.BUSINESS_SUCCESS or not all((positive.client_running, positive.server_running, positive.listener_owned)):
+        return TlsNegativeState.INSUFFICIENT_EVIDENCE, "同目标同数据类型的正向对照无效"
+    prefix = re.compile(r"\["+network.upper()+r"\] dial proxy(?: \(match [^\r\n]*\))? [^\r\n]* --> "+re.escape(address(*target))+r" error: (.*)")
+    errors = [match.group(1).lower() for line in text.splitlines()
+              if (match := prefix.search(line))]
+    expected = {"wrong-ca": "certificate fingerprints do not match",
+                "wrong-name": "x509: certificate is valid for "+NAME+", not wrong.example.invalid"}[variant]
+    if errors and all(expected in error for error in errors):
+        return TlsNegativeState.REJECTED, "本次目标拨号明确因预期证书检查被拒绝"
+    if errors:
+        return TlsNegativeState.UNRELATED_FAILURE, "目标拨号错误不符合本用例预期类别"
+    return TlsNegativeState.INSUFFICIENT_EVIDENCE, "仅EOF、超时或无对应TLS拨号错误不足以证明拒绝"
+
+
+def wait_for_failed_request_log_window(client):
+    deadline = time.monotonic()+1
+    while time.monotonic() < deadline:
+        if client.poll() is not None:
+            return
+        time.sleep(0.02)
+
+
+def observe_tls_probe(args, directory, server, host, number, password, transport, certs, target, network, variant):
+    directory.mkdir(mode=0o700)
+    socks = port()
+    config = mihomo_client(host, number, password, transport, certs, socks, args.mtls)
+    config["log-level"] = "info"
+    if variant == "wrong-ca":
+        config["proxies"][0]["fingerprint"] = "00"*32
+    elif variant == "wrong-name":
+        config["proxies"][0]["sni"] = "wrong.example.invalid"
+    path = directory/"client.json"
+    write_json(path, config)
+    client = None
+    state = ProbeState.SETUP_FAILED
+    start = 0
+    error_type = None
+    log_path = directory/"client.log"
+    try:
+        with process([args.peer, "-d", str(directory/"reference-state"), "-f", str(path)], directory, "client") as client:
+            try:
+                ready(client, "127.0.0.1", socks)
+                start = log_path.stat().st_size
+                state = ProbeState.REQUEST_FAILED
+                if network == "tcp":
+                    stream, _ = socks_open(socks, target)
+                    # Mihomo先回复本地SOCKS成功；目标问候才证明远端隧道已建立。
+                    with stream:
+                        check_equal(exact(stream, 6), b"hello|")
+                        state = ProbeState.TUNNEL_ESTABLISHED
+                        payload = b"tls-control"
+                        stream.sendall(struct.pack("!I", len(payload))+payload)
+                        check_equal(exact(stream, len(payload)), payload)
+                else:
+                    def received():
+                        nonlocal state
+                        state = ProbeState.TUNNEL_ESTABLISHED
+                    check_equal(socks_udp(socks, target, b"tls-control", received), b"tls-control")
+                state = ProbeState.BUSINESS_SUCCESS
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                error_type = type(error).__name__
+            if state == ProbeState.REQUEST_FAILED:
+                wait_for_failed_request_log_window(client)
+            running = client.poll() is None
+            owned = running and socket_owned(client, "127.0.0.1", socks, "tcp")
+            return TlsProbe(state, running, server.poll() is None, owned,
+                            log_path.read_bytes()[start:], start, error_type)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        return TlsProbe(ProbeState.SETUP_FAILED, False, server.poll() is None, False,
+                        error_type=type(error).__name__)
+
+
+def record_tls_negative(records, case, variant, network, target, positive, negative):
+    state, reason = tls_negative_verdict(variant, network, target, positive, negative)
+    records.append({"case": case, "phase": "tls-control", "boundary": False,
+                    "expected_rejection": True, "outcome": "pass" if state == TlsNegativeState.REJECTED else "fail",
+                    "tls_negative_state": state.value, "reason": reason,
+                    "positive_control": positive.summary(network+"/positive/client.log"),
+                    "negative_probe": negative.summary(network+"/negative/client.log")})
+
+
+def save_result(args, root, records):
+    write_json(root/"result.json", {
+        "mode": args.mode,
+        "platform": sys.platform,
+        "mihomo_trust": "task-ca-chain-pin" if args.mode == "mihomo" else None,
+        "mihomo_h2_alpn_mode": {"kerlico_client": "explicit-allow-missing", "kerlico_node": "strict"} if args.mode == "mihomo" else None,
+        "kerlico_sha256": args.kerlico_sha256,
+        "peer_sha256": args.peer_hashes,
+        "records": records,
+    })
 
 
 def tcp_stream(stream, payload, greeting=False):
@@ -309,65 +576,91 @@ def tcp_stream(stream, payload, greeting=False):
         check_equal(exact(stream, len(payload)), payload)
 
 
-def verify(args, root, certs, direction, transport, version, host, index):
+def verify(args, root, certs, direction, transport, version, host, index, records):
     label = f"{args.mode}-{direction}-{transport}-{version}-node{'6' if index else '4'}"+("-mtls" if args.mtls else "")
     directory = root/label
-    directory.mkdir(mode=0o700)
-    records = []
-    number = port(host)
+    with setup("case-directory", directory):
+        directory.mkdir(mode=0o700)
+        number = port(host)
     password = PASSWORDS[index]
     with ExitStack() as stack:
-        dns = stack.enter_context(h.serve(Udp4(("127.0.0.1", 0), DnsReject)))
-        targets = []
-        for site, tcp_class, udp_class in [(args.target4, h.TcpServer, Udp4), (args.target6, h.TcpServer6, Udp6)]:
-            tcp = stack.enter_context(h.serve(tcp_class((site, 0), Greeting)))
-            udp = stack.enter_context(h.serve(udp_class((site, 0), h.UdpEcho)))
-            targets.append((site, tcp, udp))
+        with setup("target-prepare", directory):
+            dns = stack.enter_context(h.serve(Udp4(("127.0.0.1", 0), DnsReject)))
+            targets = []
+            for site, tcp_class, udp_class in [(args.target4, h.TcpServer, Udp4), (args.target6, h.TcpServer6, Udp6)]:
+                tcp = stack.enter_context(h.serve(tcp_class((site, 0), Greeting)))
+                udp = stack.enter_context(h.serve(udp_class((site, 0), h.UdpEcho)))
+                targets.append((site, tcp, udp))
         if direction == "client" and args.mode != "self":
             if args.mode == "official":
                 command = [args.peer_endpoint, *official_node(directory, host, number, password, transport, certs,args.reference_log_level)]
             else:
                 config = mihomo_node(host, number, password, transport, certs, args.mtls)
                 path = directory/"reference.json"
-                h.write_json(path, config)
+                write_json(path, config)
                 command = [args.peer, "-d", str(directory/"reference-state"), "-f", str(path)]
         else:
             path = directory/"node.json"
-            h.write_json(path, own_node(host, number, password, transport, version, certs, args.mtls))
+            write_json(path, own_node(host, number, password, transport, version, certs, args.mtls))
             command = [args.kerlico, "run", "-c", str(path)]
-        server = stack.enter_context(h.process(command, directory, "server"))
-        if transport != "h3":
-            ready(server, host, number)
-        else:
-            ready_udp(server, number)
-        for wrong in (True, False):
-            sub = directory/("wrong" if wrong else "valid")
+        with setup("server-launch", directory):
+            server = stack.enter_context(process(command, directory, "server"))
+        with setup("server-ready", directory):
+            if transport != "h3":
+                ready(server, host, number)
+            else:
+                ready_udp(server, host, number)
+        variants = ["wrong", "valid"]
+        if args.mode == "mihomo" and direction == "node":
+            variants += ["wrong-ca", "wrong-name"]
+        for variant in variants:
+            wrong = variant != "valid"
+            sub = directory/variant
             sub.mkdir(mode=0o700)
-            supplied = PASSWORDS[1-index] if wrong else password
+            if variant in ("wrong-ca", "wrong-name"):
+                for network, target_port in [("tcp", targets[0][1]), ("udp", targets[0][2])]:
+                    probe_directory = sub/network
+                    probe_directory.mkdir(mode=0o700)
+                    target = (targets[0][0], target_port)
+                    positive = observe_tls_probe(args, probe_directory/"positive", server, host, number,
+                                                 password, transport, certs, target, network, "valid")
+                    negative = observe_tls_probe(args, probe_directory/"negative", server, host, number,
+                                                 password, transport, certs, target, network, variant)
+                    suffix = "-auth" if network == "tcp" else "-udp-auth"
+                    record_tls_negative(records, label+"-"+variant+suffix, variant, network, target, positive, negative)
+                continue
+            supplied = PASSWORDS[1-index] if variant == "wrong" else password
             forwards = []
             socks = None
             udp_sockets = {}
             if direction == "client" or args.mode == "self":
                 options = own_options(host, number, supplied, transport, version, certs, False, args.mtls)
+                if args.mode == "mihomo" and transport == "h2":
+                    options["tls"]["h2_allow_missing_alpn"] = True
                 for i, (site, tcp, udp) in enumerate(targets):
                     for network, target in [("tcp", tcp), ("udp", udp)]:
                         local = port()
                         forwards.append({"tag": f"{network}{i}", "type": network+"-forward", "listen": address("127.0.0.1", local), "target": {"host": site, "port": target}, "outbound": "proxy"})
-                config = {"version": 1, "outbounds": [{"tag": "proxy", "type": "trusttunnel", "options": options}], "inbounds": forwards, "limits": {"connect_timeout_ms": 3000, "idle_timeout_ms": 6000, "drain_timeout_ms": 500, "max_datagram_size": 65507}}
+                config = {"version": 2, "outbounds": [{"tag": "proxy", "type": "trusttunnel", "options": options}], "inbounds": forwards, "limits": {"connect_timeout_ms": 3000, "idle_timeout_ms": 6000, "drain_timeout_ms": 500, "max_datagram_size": 65507}}
                 path = sub/"client.json"
-                h.write_json(path, config)
-                client = stack.enter_context(h.process([args.kerlico, "run", "-c", str(path)], sub, "client"))
-                ready(client, "127.0.0.1", int(forwards[0]["listen"].rsplit(":", 1)[1]))
+                write_json(path, config)
+                with setup("client-launch", sub):
+                    client = stack.enter_context(process([args.kerlico, "run", "-c", str(path)], sub, "client"))
+                with setup("client-ready", sub):
+                    ready(client, "127.0.0.1", int(forwards[0]["listen"].rsplit(":", 1)[1]))
             elif args.mode != "wire":
                 socks = port()
                 if args.mode == "official":
                     command = [args.peer_client, *official_client(sub, host, number, supplied, transport, certs, socks, dns)]
                 else:
                     path = sub/"client.json"
-                    h.write_json(path, mihomo_client(host, number, supplied, transport, certs, socks, args.mtls))
+                    config = mihomo_client(host, number, supplied, transport, certs, socks, args.mtls)
+                    write_json(path, config)
                     command = [args.peer, "-d", str(sub/"reference-state"), "-f", str(path)]
-                client = stack.enter_context(h.process(command, sub, "client"))
-                ready(client, "127.0.0.1", socks)
+                with setup("client-launch", sub):
+                    client = stack.enter_context(process(command, sub, "client"))
+                with setup("client-ready", sub):
+                    ready(client, "127.0.0.1", socks)
             def open_tcp(site_index):
                 target = (targets[site_index][0], targets[site_index][1])
                 if forwards:
@@ -391,6 +684,8 @@ def verify(args, root, certs, direction, transport, version, host, index):
                     return socks_udp(socks, target, payload)
                 return wire_udp(host, number, supplied, version, certs, args.mtls, target, payload)
             if wrong:
+                suffix = "-cross-node" if variant == "wrong" else "-"+variant
+                phase = "authentication" if variant == "wrong" else "tls-control"
                 def rejection():
                     try:
                         with open_tcp(0) as stream:
@@ -401,14 +696,14 @@ def verify(args, root, certs, direction, transport, version, host, index):
                                 raise AssertionError("跨节点凭据被接受")
                     except (OSError, RuntimeError):
                         return
-                record(records, label+"-cross-node-auth", rejection, rejected=True)
+                record(records, label+suffix+"-auth", rejection, rejected=True, phase=phase, directory=sub)
                 def udp_rejection():
                     try:
                         udp(0, b"must-not-pass")
                     except (OSError, RuntimeError):
                         return
                     raise AssertionError("跨节点凭据取得UDP业务回包")
-                record(records, label+"-cross-node-udp-auth", udp_rejection, rejected=True)
+                record(records, label+suffix+"-udp-auth", udp_rejection, rejected=True, phase=phase, directory=sub)
                 continue
             payloads = [bytes([i+1])*65537 for i in range(4)]
             def parallel():
@@ -431,27 +726,37 @@ def verify(args, root, certs, direction, transport, version, host, index):
                 for size in [17, 4096, 12000]+([65000] if args.mode=="official" else []):
                     payload = bytes([size % 251])*size
                     record(records, label+f"-udp-{site_label}-{size}", lambda i=i, p=payload: check_equal(udp(i, p), p))
+                if args.mode == "wire":
+                    def isolated_unknown_flows(i=i):
+                        target = (targets[i][0], targets[i][2])
+                        def exchange(payload):
+                            check_equal(wire_udp(host, number, supplied, version, certs, args.mtls, target, payload), payload)
+                        with ThreadPoolExecutor(max_workers=2) as pool:
+                            list(pool.map(exchange, [b"unknown-first", b"unknown-second"]))
+                    record(records, label+f"-udp-unknown-same-target-{site_label}", isolated_unknown_flows)
             # 边界探针放在正常数据/并发之后；旧官方端的超限丢弃器会损坏解析状态。
             if args.edges:
                 for i,site_label in udp_eligible:
                     for size in [0,65434,65507]:
                         payload=bytes([size%251])*size
                         record(records,label+f"-udp-boundary-{site_label}-{size}",lambda i=i,p=payload:check_equal(udp(i,p),p),boundary=args.mode in ("official","mihomo"))
-        server.terminate()
-        try:
+        with setup("server-stop", directory):
+            server.terminate()
             code = server.wait(timeout=4)
-            if (direction == "node" or args.mode == "self") and code != 0:
-                raise RuntimeError("本项目服务端退出状态异常")
-            records.append({"case": label+"-bounded-exit", "outcome": "pass", "exit_code": code})
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError("服务端有界退出失败") from error
-    return records
+            if os.name == "nt":
+                records.append({"case": label+"-bounded-cleanup", "phase": "cleanup", "outcome": "pass", "exit_code": code})
+                records.append({"case": label+"-bounded-exit", "phase": "shutdown", "outcome": "not-tested", "reason": "Windows无控制台子进程仅作定向清理，未验证优雅排空"})
+            else:
+                if (direction == "node" or args.mode == "self") and code != 0:
+                    raise RuntimeError("本项目服务端退出状态异常")
+                records.append({"case": label+"-bounded-exit", "phase": "shutdown", "outcome": "pass", "exit_code": code})
 
 
 def main():
-    parser = argparse.ArgumentParser(description="TrustTunnel 完整双向互通，仅在专用 worker 执行")
+    parser = argparse.ArgumentParser(description="TrustTunnel 独立双向互通，不修改系统网络或已有代理")
     parser.add_argument("--kerlico", required=True)
     parser.add_argument("--work-dir", required=True)
+    parser.add_argument("--openssl", default="openssl")
     parser.add_argument("--mode", choices=["official", "mihomo", "wire", "self"], required=True)
     parser.add_argument("--role", choices=["client", "node", "both"], default="both")
     parser.add_argument("--transport", choices=["h1", "h2", "h3", "all"], default="all")
@@ -474,6 +779,11 @@ def main():
         parser.error("官方客户端硬编码旁路回环；节点方向必须提供本任务既有私有IPv4目标")
     os.umask(0o077)
     args.kerlico = str(Path(args.kerlico).resolve())
+    args.kerlico_sha256 = digest(args.kerlico)
+    openssl = shutil.which(args.openssl)
+    if openssl is None:
+        parser.error("缺少本任务可调用的OpenSSL，使用--openssl指定独立可执行文件")
+    args.openssl = str(Path(openssl).resolve())
     if args.mode == "official":
         if args.mtls:
             parser.error("官方默认端不提供本轮mTLS对照条件")
@@ -485,10 +795,16 @@ def main():
         args.peer = checked(args.peer, args.peer_sha256)
     elif args.mode == "wire" and (args.role != "node" or args.transport != "h1"):
         parser.error("受控wire peer仅验证本项目H1节点，必须显式--role node --transport h1")
+    args.peer_hashes = {name: digest(value) for name, value in [
+        ("endpoint", args.peer_endpoint), ("client", args.peer_client), ("mihomo", args.peer)
+    ] if value}
     root = Path(args.work_dir).resolve()
+    if root.exists() and any(root.iterdir()):
+        parser.error("测试目录必须为空，不能覆盖已有配置、证书或记录")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    certs = material(root)
     records = []
+    with setup("certificate-material", root):
+        certs = material(root, args.openssl)
     directions = ["client", "node"] if args.role == "both" else [args.role]
     transports = ["h1", "h2", "h3"] if args.transport == "all" else [args.transport]
     versions = ["tls12", "tls13"] if args.tls == "all" else [args.tls]
@@ -500,14 +816,29 @@ def main():
             continue
         for index, host in enumerate(["127.0.0.1", "::1"]):
             try:
-                records.extend(verify(args, root, certs, direction, transport, version, host, index))
+                verify(args, root, certs, direction, transport, version, host, index, records)
+            except SetupFailure as error:
+                records.append({"case": f"{direction}-{transport}-{version}-node{index}", "outcome": "fail", "phase": error.phase, "error_type": error.error_type, "os_error": error.os_error, "diagnostics": diagnostics(error.directory)})
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-                records.append({"case": f"{direction}-{transport}-{version}-node{index}", "outcome": "fail", "error_type": type(error).__name__})
-            h.write_json(root/"result.json", {"mode": args.mode, "kerlico_sha256": digest(args.kerlico), "peer_sha256": {name: digest(value) for name, value in [("endpoint", args.peer_endpoint), ("client", args.peer_client), ("mihomo", args.peer)] if value}, "records": records})
+                records.append({"case": f"{direction}-{transport}-{version}-node{index}", "outcome": "fail", "phase": "case-setup", "error_type": type(error).__name__})
+            save_result(args, root, records)
+    save_result(args, root, records)
     counts = {name: sum(record["outcome"] == name for record in records) for name in ["pass", "fail", "observed-limit", "not-tested"]}
     print(json.dumps({"mode": args.mode, "counts": counts}, ensure_ascii=False))
     raise SystemExit(1 if counts["fail"] else 0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        output = {"outcome": "fail", "phase": getattr(error, "phase", "setup"), "error_type": getattr(error, "error_type", type(error).__name__)}
+        if isinstance(error, SetupFailure):
+            output["os_error"] = error.os_error
+            output["diagnostics"] = diagnostics(error.directory)
+            try:
+                write_json(error.directory/"setup-result.json", output)
+            except OSError:
+                output["result_write_failed"] = True
+        print(json.dumps(output, ensure_ascii=False))
+        raise SystemExit(1)

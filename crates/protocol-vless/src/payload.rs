@@ -14,8 +14,8 @@ use tokio::io::{
     AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf, ReadHalf, WriteHalf,
 };
 use xray_proxy::vless::{
-    VisionStream, VlessCommand, VlessRequest, VlessResponseStream,
-    encode_request_header, encode_xudp_keep_packet, encode_xudp_new_packet, read_xudp_packet,
+    VisionStream, VlessCommand, VlessRequest, VlessResponseStream, encode_request_header,
+    encode_xudp_keep_packet, encode_xudp_new_packet, read_xudp_packet,
 };
 use xray_transport::{BoxedTransportStream, TransportStream};
 use xray_vless_encryption::{Client, EncryptedStream};
@@ -70,7 +70,13 @@ impl TransportStream for EncryptionCarrier {
     }
 }
 
-pub(crate) fn server_vision(stream:BoxedTransportStream,user:UserId)->BoxStream {Box::new(VisionStream::new(crate::vision_io::VisionCarrier::new(stream,user,false),*user.as_bytes(),xray_proxy::vless::DEFAULT_VISION_SEED))}
+pub(crate) fn server_vision(stream: BoxedTransportStream, user: UserId) -> BoxStream {
+    Box::new(VisionStream::new(
+        crate::vision_io::VisionCarrier::new(stream, user, false),
+        *user.as_bytes(),
+        xray_proxy::vless::DEFAULT_VISION_SEED,
+    ))
+}
 
 /// 普通 VLESS 不提供目标 EOF 帧；逻辑写关闭后保留反向载体。
 struct LogicalStream {
@@ -147,8 +153,13 @@ pub(crate) async fn open(
         encode_request_header(&request).map_err(|_| Error::Protocol("VLESS 请求头编码失败"))?;
     stream.write_all(&bytes).await?;
     let inner: BoxStream = if vision {
-        let response = VlessResponseStream::new(crate::vision_io::VisionCarrier::new(stream,user,true));
-        let mut stream = VisionStream::new(response, *user.as_bytes(), xray_proxy::vless::DEFAULT_VISION_SEED);
+        let response =
+            VlessResponseStream::new(crate::vision_io::VisionCarrier::new(stream, user, true));
+        let mut stream = VisionStream::new(
+            response,
+            *user.as_bytes(),
+            xray_proxy::vless::DEFAULT_VISION_SEED,
+        );
         if !udp {
             stream.queue_empty_padding_frame()?;
         }

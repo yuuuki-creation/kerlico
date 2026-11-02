@@ -1,6 +1,7 @@
 //! ShadowsocksR 原生 Rust 双端；认证、混淆和密码分别实现并严格校验。
 
 mod config;
+mod credential_io;
 mod crypto;
 mod inbound;
 mod obfs;

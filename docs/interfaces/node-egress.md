@@ -1,27 +1,59 @@
-# 节点与统一目标访问接口
+# 节点与共享目标访问
 
-更新日期：2026-10-31。公共契约已实现并通过 worker 限定回归；完整装配按冻结快照和当前增量分别记录。
+更新日期为2026-11-02。以下为完整迁移首轮的已编写接口，尚未整树验证。历史三套指纹和逐节点Egress装配已经由本轮API替换，旧快照结果单独保留。
 
-`NodeFactory` 将协议私有选项构造为 `InboundProtocol`，注册表检查节点标签、监听冲突、能力和认证指纹。IPv4、IPv6 节点分别配置；同协议跨节点认证指纹重复时拒绝整份配置。每个节点单独构造出站实例，避免带身份的连接池混用。
+## 装配与信任边界
 
-包装协议使用 `scoped_credential_fingerprints(default_protocol)` 返回 `ScopedCredentialFingerprint {protocol, fingerprint}`。默认将旧指纹映射到工厂协议域；有真实内层协议的包装必须保留内层域，再加入实际外层鉴权域，不能用包装 type 或版本别名绕过原生/包装节点之间的凭据查重。摘要不写日志，空或未参与认证的字段不能充当指纹。跨包装域与真实流注入共 2 项、SS 9 项及 SS2022 8 项包级回归和相关包严格 Clippy 已在 worker 通过。原 SS 夹具的 TCP/UDP 端口碰撞修正后已复验，不把该历史失败归为密码或载体问题。
+NodeFactory::build接收NodeBuildContext。options包含协议共同载体、安全参数和限制；native_credentials按配置members顺序提供各成员原生材料；credentials(rows)要求候选数量与成员数一致，并绑定同一节点issuer。ShadowTLS等组合通过with_options保持同一issuer，外层保护材料不能替代内层用户认证。
 
-额外的秘密隔离使用 `credential_isolation_fingerprints(default_protocol)`，默认委托上述分域鉴权指纹。注册表只按鉴权集合判断 `nodes` 准入；查重则合并鉴权与隔离集合，在单条目内消除两类集合的重复，再拒绝跨条目复用。隔离集合为空不能隐藏真实鉴权指纹，只有隔离秘密也不能获得公网鉴权资格。Mieru本地不安全UDP可据此阻止与TCP入口共享秘密，且继续保持空鉴权指纹、强制回环及local_inbounds限制。该新增公共契约已在 perf-02 全新六包隔离快照通过 core 2项、配置3项与流连接器2项，共7项测试，格式及严格Clippy通过；见[本轮记录](../testing/credential-isolation-contract.md)。它不代表 Mieru 等 WIP 协议实际适配已验收。
+InboundProtocol只提供credential_manifest、监听能力和handle/handle_udp/handle_virtual。每个入口得到IngressBinding，鉴别前不能拨号。协议成功鉴别得到Verified，再调用authenticated获得PeerSession。异步库必须交接实际成功命中的CredentialSlot及同次解码状态。客户端声称的用户名、UUID、UID或提示不直接授信。
 
-本地动态代理入口单独配置在 `local_inbounds`，沿用标签、type、listen、outbound、options 与会话限额字段。工厂必须通过 `allows_local_inbound()` 明确允许，监听强制为回环；当前 SOCKS/HTTP 和 Shadowsocks 工厂允许，后者的 none/plain 必须使用此入口。它们与所有入口共享标签、监听冲突、限额、目标访问和退出管理，但可在本机信任边界内不使用线协议认证。`nodes` 的非空独立凭据要求保持有效，不能把未参与认证的字段或空 key 哈希伪装成凭据，也不能通过更换字段把无认证入口发布到外部地址。
+Local入口的local方法只创建Source::Local。它没有管理用户ID，也不作为远端节点无认证旁路。无鉴别的旧Shadowsocks、SSR等组合只保留明确允许的Local功能，不能用密码摘要伪造鉴别能力。
 
-`InboundProtocol` 声明 TCP、UDP 或虚拟监听能力，分别实现 `handle`、`handle_udp`、`handle_virtual`。引擎只按能力绑定和调度，不按协议名称分支；IPv6 socket 设置 v6only。声明 TCP/UDP 的同一节点使用相同端口，端口为 0 时先取得实际端口再绑定另一网络。
+CredentialManifest将Authentication{slot}和Protection分开。配置要求每个成员存在认证行；查重同时覆盖认证和保护域。跨包装协议仍保留真实原生域，不能通过更换type绕过秘密隔离。摘要、明文凭据与认证UUID均不进入PeerSession、ResourceKey或访问记录。
 
-`InboundContext` 提供取消、连接/空闲/排空预算、最大包长、最大流数、节点与全局共同约束的 `StreamBudget` 和 `NodeObserver`。新增可选的 `peer_addr`、`local_addr` 记录物理 TCP 地址，由引擎在接受连接时注入，虚拟载体和无连接入口为 None；SOCKS UDP 关联用它们校验来源，不把请求声明的地址当成真实对端。每个新增逻辑关联必须持有 lease；关闭预算后禁止新增，已有任务在排空期限内结束。节点事件同时汇总到节点统计和全局统计。
+## 三类数据路径
 
-协议鉴权和解码后通过 `AccessService::connect_tcp/connect_udp` 访问目标；两个方法接收 `Destination`、`ConnectContext`，返回流或数据报通道。实际 `Egress` 实现委托给配置选定的出站。域名通过系统解析器解析、去重并优先尝试 IPv4，最多保留 32 个候选；TCP 仅在未发送业务前的连接失败中尝试下一地址，并共享总期限。UDP 选定首个候选后不重放数据报。IP 字面量保持原地址族。
+所有入口的PeerSession都引用同一Dispatcher。节点不持有出站实例，Dispatcher唯一持有命名实例表。每条业务在建立时固定一个具体出站；现有流和UDP关联不改换代理、不向其他代理重放。不同新流可以引用不同命名配置，当前没有出站组算法或代理链。
 
-节点接入地址族、代理载体地址族和网站地址族互不绑定。客户端访问 IPv6 节点后可以访问 IPv4 网站，反之亦然。当前统一的是实际访问服务；尚未实现独立 DNS 服务、路由规则或 Fake-IP。
+Local路径才解析网站目标。单栈只保留同族字面目标，字面IP不兼容时拒绝；双栈默认IPv4优先。TCP在发送业务前按剩余总预算尝试本地候选，UDP固定第一个选定目标。Local多目标关联首次访问一个目标时解析并缓存绑定，后续包不重复解析；每关联最多256个目标，达到上限明确拒绝，不隐式淘汰后改换地址。
 
-流载体另用 `StreamConnector::connect_tcp(endpoint, context)`，endpoint 是内层配置的代理端点，网站 Destination 仍由实际代理协议编码。`tcp_eof()` 默认 false。SS/SS2022 提供 `from_options_with_connector(options, Arc<dyn StreamConnector>)`，注入后关闭原生 UDP，EOF 能力采用连接器明确声明；默认构造的行为保持。它不注册忽略网站地址的伪普通出站。协议组合在 ShadowTLS 新包内实际接线。公共回归覆盖 15 个方法/身份配置的真实载体注入、代理端点与网站目标区分、65537 字节和 EOF、UDP 不旁路及凭据域查重；ShadowTLS 外层真实对端另验。
+Remote路径把原目标交给所选代理编码，本地网站resolver调用为零。代理端点解析属于carrier连接器，与网站目标分开。任何Remote失败都结束当前尝试，不换网站地址族、代理、直连或WARP。未知远端网站IP保留未知。
 
-固定目标数据报接收器增加可选 `peer_addr() -> Option<Destination>`，默认 None。它表示业务目标，不能返回代理服务器或中继的物理地址。`Egress` 在统一解析并选定首个候选后，将该字面目标随接收器提供；`net` 直连也可报告已连接的业务 peer。需要 IP 回包头的协议使用此元数据，不在协议模块重新解析域名。它不代表未来多来源 UDP 的逐包来源字段；已有 `recv`、空包及会话结束语义不变。该契约已通过 worker 包级回归与严格 Clippy，整树按冻结快照另行登记。
+底层Outbound的DatagramChannel与DatagramAssociation保留原始发送、接收半部；业务PeerSession只返回FixedUdpFlow与UdpAssociation。拆分取得typed半部及唯一FlowCompletion，父级先报告真实终因再回收，最后租约释放才提交记录。固定UDP接收器的peer_addr描述业务目标，不能填代理端点。多目标回包携带真实业务来源；空负载保留完整包事件。
 
-多目标且需要保留同一出口 socket 的路径另用 `DatagramAssociation`，不通过多个固定目标通道伪装关联。发送器 `send_to(packet, target)` 接收逐包目标；接收器 `recv_from()` 返回 `Option<(Destination, Vec<u8>)>`，分别保留业务来源和包边界。`Outbound` 与 `AccessService` 的 `associate_udp(context)` 默认拒绝，`supports_udp_association()` 默认 false；节点通过 `requires_udp_association()` 明确要求，配置阶段检查所选出口的能力。无法提供的代理出口不回退直连或固定目标通道。
+## 配额、取消与记录
 
-`net` 直连在一个 IPv6 双栈 UDP socket 上发送两类地址，IPv4 回包地址规范化为 IPv4；不能建立该 socket 的系统在运行时返回错误。`Egress` 在每次发送前统一解析目标、优先 IPv4，共用该次发送的建立预算；只选择一个候选且不重放。单个关联的取消令牌覆盖发送和接收，完整包上限 65507 字节，空包合法。协议模块仍负责关联身份、节点 lease、关联数量、业务空闲和退出，不能在协议层绕开统一访问服务创建网站 socket。本轮公共关联与相关包级共 28 项测试和严格 Clippy 已通过；包含同端口跨目标/跨族、未联系来源、空包、取消与配置拒绝，最终整树另行登记。
+InboundContext提供真实peer_addr/local_addr、peer取消、连接/空闲/排空预算、最大包长、StreamBudget、NodeObserver及同节点共享NodeTasks。NodeTasks独立于peer取消，并由Engine在handler外持有；原生驱动及派生任务必须登记真实future。请求声明的地址不成为观测来源。附加逻辑流仍需取得全局和本节点共同预算。NodeEvent的Accepted、Completed、Failed、Dropped和ForcedCleanup只是事件累计，不是在线人数或业务字节；ForcedCleanup的公开计数须等实际节点资源join确认。
+
+每个TCP流、固定UDP通道或多目标关联由Dispatcher建立唯一FlowLease；复用carrier里的各逻辑流分别记账。可信用户、节点、命名出站、原目标及观测信息在同一账本保留。计量与运行查询见[核心接口](core.md)。
+
+PeerSession的三类建立方法返回可直接await的`FlowOpen`。准入与账本仍在首次poll发生；尚未开始的操作被结束时不生成记录。Pending期间唯一完成权由FlowOpen持有，协议owner可消费该操作先报告终因，再释放后端future及本请求资源。成功后同一完成权转入原typed flow；没有第二账本或跨peer结束句柄。该补充已编写，尚待统一海外验证。
+
+三类真实账本仍为Opening时，正常ProtocolEnd的归因同时检查请求、peer、节点和所选命名服务的生命周期。正常请求、peer或节点取消记Cancelled。命名服务的稳定失败原因单独保存，服务超时记Timeout，协议失效等错误记Failed；未再次poll的Pending操作也读取该事实。更早记录的失败或超时继续优先。后端已成功交付的正常ProtocolEnd仍记Completed，已固定终因不改写。本轮分类修订和回归已编写，待海外验证。
+
+请求和节点取消不能关闭ServiceContext。服务池和票据按ResourceKey的实际实例及成员/代次分区；后台任务由命名服务所有者跟踪。Engine排空节点后才关闭共享服务。DeviceLease没有关闭WARP服务的方法；真实WARP数据能力与部署准备继续列为未完成。
+
+## 命名服务终因与回收收据
+
+`ServiceContext`与`IngressBinding`提供`record_carrier(sent_bytes, received_bytes)`和`carrier_usage()`，分别按命名出站或节点累计实际确认的载体字节，克隆句柄共享同一计数器。`CarrierUsage`保留发送、接收及饱和状态，溢出不回绕。这不替代唯一业务账本，也不推算IP头、重传或设备网卡量。首个调用方是WireGuard；其他协议未提交此计量时，零值不能当成已测得的完整开销。当前新增接口待海外统一验证。
+
+`ServiceContext::fail(ServiceFailure)`先固定首个失败原因，再取消该命名服务。后来的失败或正常关闭不覆盖首因。`ServiceFailure`只包含可复制的公共类别、静态说明或`io::ErrorKind`，转换回已有`Error`和`FlowFailure`，不保存动态上游文本。`ServiceStatus::failure`提供只读查询，句柄不持有宿主或任务集合。`ConnectContext`和账本保存该只读句柄，不增加逐请求可写终因槽。
+
+真实Dispatcher的等待中及后续新请求都返回同一服务首因。请求、节点和peer正常取消优先于服务失败或服务正常取消，服务终因优先于本次建立期限。独立请求超时仍只结束本请求，不停止共享服务。没有可用服务或停止准入时拒绝建立，不新增业务账本。
+
+首次任务登记前，命名服务按需创建一个回收线程；零任务服务不创建线程。线程创建失败时直接拒绝登记，不执行用户future或闭包。任务注册表持有真实Tokio JoinSet，异步任务和`spawn_blocking_tracked`的实际阻塞任务都直接登记。回收线程只持独立注册表，不持`ServiceOwner`，也不使用进程全局注册表或固定的Tokio runtime。
+
+`retire(deadline)`同步固定首次关闭期限并停止登记，随后回收线程独立推进协作取消、强制中止和真实join。首次期限的80%处对未完成任务发出abort；已经开始的阻塞工作不能强杀，须自行返回。`shutdown(deadline)`只约束本次等待，丢弃等待不会取消回收，也不能通过重试延长首次期限。任务完成guard在用户future、闭包捕获及未交付输出析构后保存完成时间。期限前完成但晚查询不被记成迟到；实际晚完成保留超时事实。真实join之前不会把资源登记为已释放。
+
+`retirement()`返回独立`ServiceRetirement`。`wait()`等待实际任务以及回收线程的`join`，返回最终`ShutdownReport`，包括迟到panic。`is_finished()`也只在实际join后确认完成。正常执行只在全部任务已join后同步join回收线程，此时线程余下工作仅为退出自身循环。若用户保留已经交付的任务输出，该输出的资源归调用方，不属于服务待回收任务。
+
+任务的`JoinError`可能持有任意用户panic对象。注册表在锁内仅收集完成事实并移交该错误，随后在释放内部锁后析构对象及执行服务取消唤醒。对象析构和取消Waker可以重入宿主；正在执行的锁外回收批次结束前，收据保持未完成，不能从该回调中提前确认资源已释放或join自身线程。
+
+回收状态通知的Waker可同步调用`is_finished()`。该查询发生在回收线程自身时返回未完成，不取走或join当前线程的句柄；其它等待方仍接收同次状态通知，并在回收线程外确认实际join。本接口不为任意自定义executor承诺同步递归poll的调度保证。
+
+每个opaque错误对象的析构有两个受限unwind边界。原对象析构panic后，再尝试析构该次panic产生的对象。普通的一次析构panic不会终止回收线程，其它真实任务继续join；清理后果仍只计入原失败任务，保留已有首因。若第二次析构也panic，新对象由该服务注册表明确保留，不再自动执行其析构，注册表最终释放也不重新尝试。此时不能确认该对象持有的资源已释放，收据保持未完成，`shutdown`到期返回非clean报告；其它真实任务的回收仍继续。该边界不承诺释放持续递归panic的对象，也不改变Rust对进程abort的行为。
+
+Egress启动事务被丢弃或失败时主动退休已启动服务和当前启动宿主；EgressRuntime释放也主动退休全部服务。该规则不依赖后台任务内部的宿主克隆何时释放。`Engine::service_retirements()`和`EgressRuntime::service_retirements()`允许调用方在消费实例前取得命名收据，`Engine.run(self)`错误返回后仍可等待迟到清理。
+
+回收线程可在原Tokio runtime关闭后继续等待已开始的阻塞任务及join结果，但不会维持或重启原runtime。依赖原runtime继续推进的用户任务须由调用方保持运行环境；不返回的原生任务会持续占有其资源，收据不会伪报完成。上述源码、真实启动失败、Engine消费退出及跨runtime回归均已编写，尚未运行验证。

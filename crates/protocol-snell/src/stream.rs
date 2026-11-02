@@ -39,7 +39,8 @@ impl Session {
 pub(crate) struct Pool {
     entries: Mutex<VecDeque<(Instant, Session)>>,
     maximum: usize,
-    reaper: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    reaper: Mutex<Option<kerlico_core::ServiceTask<()>>>,
+    closed: std::sync::atomic::AtomicBool,
 }
 impl Pool {
     pub fn new(maximum: usize) -> Arc<Self> {
@@ -47,25 +48,52 @@ impl Pool {
             entries: Mutex::new(VecDeque::new()),
             maximum,
             reaper: Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
         })
     }
-    pub fn start(self: &Arc<Self>) {
+    pub fn start(
+        self: &Arc<Self>,
+        host: &kerlico_core::ServiceContext,
+    ) -> kerlico_core::Result<()> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) || host.cancel().is_cancelled() {
+            return Err(kerlico_core::Error::Cancelled);
+        }
         let Ok(mut running) = self.reaper.lock() else {
-            return;
+            return Err(kerlico_core::Error::Rejected);
         };
         if running.is_some() {
-            return;
+            return Ok(());
         }
         let weak = Arc::downgrade(self);
-        *running = Some(tokio::spawn(async move {
+        let cancel = host.cancel();
+        *running = Some(host.spawn_tracked(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(20)).await;
+                tokio::select! { _ = cancel.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(20)) => {} }
                 let Some(pool) = weak.upgrade() else {
                     break;
                 };
                 pool.expire();
             }
-        }));
+        })?);
+        Ok(())
+    }
+    pub async fn shutdown(&self) -> kerlico_core::Result<()> {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        let task = self
+            .reaper
+            .lock()
+            .map_err(|_| kerlico_core::Error::Rejected)?
+            .take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        self.entries
+            .lock()
+            .map_err(|_| kerlico_core::Error::Rejected)?
+            .clear();
+        Ok(())
     }
     fn expire(&self) {
         if let Ok(mut entries) = self.entries.lock() {
@@ -73,6 +101,9 @@ impl Pool {
         }
     }
     pub fn take(&self) -> Option<Session> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
         self.expire();
         self.entries
             .lock()
@@ -81,8 +112,12 @@ impl Pool {
             .map(|(_, session)| session)
     }
     pub fn put(&self, session: Session) {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
         self.expire();
         if let Ok(mut entries) = self.entries.lock()
+            && !self.closed.load(std::sync::atomic::Ordering::Acquire)
             && entries.len() < self.maximum
         {
             entries.push_back((Instant::now(), session));

@@ -27,7 +27,7 @@ async def main(args):
                 terminal_port, relay_port, forward_port = free_port(), free_port(), free_port()
                 relay, service, user = key(method, 21), key(method, 22), key(method, 23)
                 configs = [
-                    {"method": method, "key": service, "users": [user]},
+                    {"options": {"method": method, "identity_key": service}, "native_credentials": [{"key": user}]},
                     {"log": {"loglevel": "none"}, "inbounds": [{"listen": "127.0.0.1", "port": relay_port, "protocol": "shadowsocks", "settings": {"method": method, "password": relay, "network": "tcp,udp", "clients": [{"password": service, "address": "127.0.0.1", "port": terminal_port}]}}], "outbounds": [{"protocol": "freedom", "settings": {"finalRules": [{"action": "allow", "network": "tcp,udp", "ip": ["127.0.0.1/32"], "port": str(terminal_port)}]}}]},
                     {"server": "127.0.0.1", "port": relay_port, "method": method, "key": user, "identity_keys": [relay, service]},
                 ]

@@ -1,6 +1,7 @@
 //! 普通 Shadowsocks 的原生 TCP/UDP 双端；SS2022 使用独立模块。
 
 mod config;
+mod credential_io;
 mod inbound;
 mod outbound;
 mod replay;

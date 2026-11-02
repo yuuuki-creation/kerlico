@@ -2,19 +2,24 @@
 name = "kerlico-egress"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
 kerlico-core.workspace = true
+kerlico-config.workspace = true
+kerlico-net.workspace = true
 tokio.workspace = true
 
+[features]
+test-support = []
+
 [dev-dependencies]
+kerlico-egress = { path = ".", features = ["test-support"] }
 kerlico-shadowsocks.workspace = true
 kerlico-ss2022.workspace = true
 base64.workspace = true
-kerlico-net.workspace = true
-kerlico-config.workspace = true
 serde_json.workspace = true
 
 [lints]

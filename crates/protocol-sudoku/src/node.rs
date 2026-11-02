@@ -9,21 +9,22 @@ use crate::{
     classify::{self, Classified},
     codec::record::Method,
     config::{NodeConfig, NodeOptions},
-    handshake,
     io::{CancelIo, CancelOnDrop, SharedIo},
+    members::Members,
+    scope::ScopeExecutor,
     service::Runtime,
 };
 use hyper::{body::Incoming, service::service_fn};
 use hyper_util::{
-    rt::{TokioExecutor, TokioIo, TokioTimer},
+    rt::{TokioIo, TokioTimer},
     server::conn::auto::Builder,
 };
-use kerlico_config::NodeFactory;
+use kerlico_config::{NodeBuildContext, NodeFactory};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, ConnectContext, Error, InboundContext, InboundProtocol,
-    NodeEvent, Result, ScopedCredentialFingerprint,
+    BoxFuture, BoxStream, ConnectContext, CredentialManifest, Error, InboundContext,
+    InboundProtocol, IngressBinding, NodeEvent, Result,
 };
-use serde_json::Value;
+use serde::Deserialize;
 use std::{
     convert::Infallible,
     sync::{Arc, Mutex},
@@ -37,6 +38,7 @@ use tokio::{
 pub struct SudokuNodeFactory;
 struct Node {
     config: Arc<NodeConfig>,
+    members: Arc<Members>,
     tls: Option<tokio_rustls::TlsAcceptor>,
     ready: watch::Sender<Option<Arc<Runtime>>>,
     running: tokio::sync::Mutex<()>,
@@ -48,14 +50,61 @@ impl NodeFactory for SudokuNodeFactory {
     fn allows_local_inbound(&self) -> bool {
         true
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn InboundProtocol>> {
-        let options: NodeOptions = serde_json::from_value(options.clone())
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct NativeKey {
+            key: String,
+        }
+        let mut value = input.options().clone();
+        let mut protocols = Vec::new();
+        if !input.is_local() {
+            if !value
+                .get("protocol")
+                .is_some_and(serde_json::Value::is_object)
+            {
+                return Err(Error::Config("Sudoku节点protocol必须是对象".into()));
+            }
+            if value.get("protocol").and_then(|p| p.get("key")).is_some()
+                || input.native_credentials().is_empty()
+                || input.native_credentials().len() > 256
+            {
+                return Err(Error::Config("Sudoku节点密钥须来自成员凭据".into()));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for native in input.native_credentials() {
+                let native: NativeKey = serde_json::from_value(native.clone())
+                    .map_err(|_| Error::Config("Sudoku成员凭据不合法".into()))?;
+                value["protocol"]["key"] = serde_json::Value::String(native.key);
+                let protocol: crate::config::ProtocolOptions =
+                    serde_json::from_value(value["protocol"].clone())
+                        .map_err(|_| crate::invalid())?;
+                let protocol = protocol.prepare()?;
+                if protocol.method == Method::None || !seen.insert(protocol.material.fingerprint) {
+                    return Err(Error::Rejected);
+                }
+                protocols.push(protocol);
+            }
+        }
+        let options: NodeOptions = serde_json::from_value(value)
             .map_err(|_| Error::Config("Sudoku节点字段不合法".into()))?;
-        let config = Arc::new(options.prepare()?);
+        let mut config = options.prepare()?;
+        if let Some(protocol) = protocols.first() {
+            config.protocol = protocol.clone();
+        }
+        let config = Arc::new(config);
+        if input.is_local() && config.protocol.method != Method::None {
+            return Err(Error::Config("Sudoku Local只允许显式none编码".into()));
+        }
+        let members = Arc::new(Members {
+            credentials: input.credentials(protocols)?,
+            local: config.protocol.clone(),
+        });
         let tls = config.mask.tls.as_ref().map(tls::server).transpose()?;
         let (ready, _) = watch::channel(None);
         Ok(Arc::new(Node {
             config,
+            members,
             tls,
             ready,
             running: tokio::sync::Mutex::new(()),
@@ -75,10 +124,8 @@ impl Drop for ReadyGuard<'_> {
 impl Node {
     async fn runtime(&self, context: &InboundContext) -> Result<Arc<Runtime>> {
         let mut ready = self.ready.subscribe();
-        let connect = ConnectContext {
-            cancel: context.cancel.clone(),
-            timeout: context.connect_timeout,
-        };
+        let connect =
+            ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
         connect
             .run(async {
                 loop {
@@ -112,8 +159,7 @@ impl Node {
                 compat.accepted();
             }
             let runtime = upgraded_runtime.clone();
-            let mut context = upgraded_context.clone();
-            context.cancel = runtime.scope.cancel.child_token();
+            let context = upgraded_context.clone();
             Box::pin(async move {
                 let _lease = lease;
                 context.events.record(NodeEvent::Accepted);
@@ -162,7 +208,7 @@ impl Node {
                 Ok::<_, Infallible>(response)
             }
         });
-        let mut builder = Builder::new(TokioExecutor::new());
+        let mut builder = Builder::new(ScopeExecutor(runtime.scope.clone()));
         builder
             .http1()
             .timer(TokioTimer::new())
@@ -208,10 +254,8 @@ impl Node {
             return Err(Error::Rejected);
         }
         context.connect_timeout = deadline.saturating_duration_since(Instant::now());
-        let connect = ConnectContext {
-            cancel: context.cancel.clone(),
-            timeout: context.connect_timeout,
-        };
+        let connect =
+            ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
         let stream = Box::new(CancelIo::new(
             CancelIo::new(stream, &runtime.scope.cancel),
             &context.cancel,
@@ -227,19 +271,17 @@ impl Node {
                 }
             })
             .await?;
-        let classified = ConnectContext {
-            cancel: context.cancel.clone(),
-            timeout: deadline.saturating_duration_since(Instant::now()),
-        }
-        .run(classify::read(
-            stream,
-            &self.config.protocol,
-            self.config.mask.mode,
-                    &self.config.mask.path_root,
-            runtime.cover.is_some(),
-            h2,
-        ))
-        .await?;
+        let classified = ConnectContext::new(deadline.saturating_duration_since(Instant::now()))
+            .with_cancel(context.cancel.clone())
+            .run(classify::read(
+                stream,
+                &self.members.protocols(),
+                self.config.mask.mode,
+                &self.config.mask.path_root,
+                runtime.cover.is_some(),
+                h2,
+            ))
+            .await?;
         context.connect_timeout = deadline.saturating_duration_since(Instant::now());
         match classified {
             Classified::Http { stream, h2 }
@@ -255,32 +297,25 @@ impl Node {
             } => {
                 if let (Some(client), Some(method)) = (runtime.cover.as_ref(), cover_method) {
                     let shared = SharedIo::new(stream);
-                    let connect = ConnectContext {
-                        cancel: context.cancel.clone(),
-                        timeout: context.connect_timeout,
-                    };
+                    let connect = ConnectContext::new(context.connect_timeout)
+                        .with_cancel(context.cancel.clone());
                     let start = Instant::now();
                     let negotiated = connect
-                        .run(handshake::server(
-                            Box::new(shared.clone()),
-                            &self.config.protocol,
-                        ))
+                        .run(runtime.negotiate(Box::new(shared.clone()), None, &context))
                         .await;
                     match negotiated {
-                        Ok(negotiated) => {
+                        Ok((negotiated, peer)) => {
                             drop(shared);
                             context.connect_timeout =
                                 context.connect_timeout.saturating_sub(start.elapsed());
-                            runtime.process(negotiated, context).await
+                            runtime.process(negotiated, peer, context).await
                         }
                         Err(Error::Cancelled) => Err(Error::Cancelled),
                         Err(_) => {
-                            ConnectContext {
-                                cancel: context.cancel,
-                                timeout: Duration::from_secs(4),
-                            }
-                            .run(crate::cover::raw(client, method, shared))
-                            .await
+                            ConnectContext::new(Duration::from_secs(4))
+                                .with_cancel(context.cancel)
+                                .run(crate::cover::raw(client, method, shared))
+                                .await
                         }
                     }
                 } else {
@@ -294,21 +329,16 @@ impl InboundProtocol for Node {
     fn requires_udp_association(&self) -> bool {
         self.config.protocol.udp_enabled
     }
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
-        if self.config.protocol.method == Method::None {
-            Vec::new()
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = CredentialManifest::new();
+        if self.members.credentials.is_empty() {
+            manifest.protection("sudoku", self.config.protocol.material.fingerprint);
         } else {
-            vec![self.config.protocol.material.fingerprint]
+            for (index, (_, protocol)) in self.members.credentials.rows().enumerate() {
+                manifest.authentication("sudoku", index, protocol.material.fingerprint);
+            }
         }
-    }
-    fn credential_isolation_fingerprints(
-        &self,
-        _default: &str,
-    ) -> Vec<ScopedCredentialFingerprint> {
-        vec![ScopedCredentialFingerprint {
-            protocol: "sudoku".to_owned(),
-            fingerprint: self.config.protocol.material.fingerprint,
-        }]
+        manifest
     }
     fn requires_loopback(&self) -> bool {
         self.config.protocol.method == Method::None
@@ -319,14 +349,14 @@ impl InboundProtocol for Node {
     fn handle<'a>(
         &'a self,
         stream: BoxStream,
-        _access: Arc<dyn AccessService>,
+        _access: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(self.physical(stream, context))
     }
     fn handle_virtual<'a>(
         &'a self,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
@@ -334,8 +364,12 @@ impl InboundProtocol for Node {
                 .running
                 .try_lock()
                 .map_err(|_| Error::Config("Sudoku同一节点不能重复启动".into()))?;
-            let (runtime, mut backends) =
-                Runtime::start(self.config.clone(), access, context.clone())?;
+            let (runtime, mut backends) = Runtime::start(
+                self.config.clone(),
+                self.members.clone(),
+                access,
+                context.clone(),
+            )?;
             let _ready = ReadyGuard {
                 ready: &self.ready,
                 cancel: runtime.scope.cancel.clone(),

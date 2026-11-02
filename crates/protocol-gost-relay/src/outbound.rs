@@ -5,7 +5,7 @@ use crate::{
     smux::SingleStream,
     udp, wire,
 };
-use kerlico_config::OutboundFactory;
+use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel, Destination, Error,
     Outbound, Result,
@@ -20,10 +20,23 @@ impl OutboundFactory for GostRelayFactory {
     fn kind(&self) -> &'static str {
         "gost-relay"
     }
-    fn build(&self, value: &Value) -> Result<Arc<dyn Outbound>> {
+    fn compile(&self, value: &Value) -> Result<OutboundPlan> {
         let options: Options = serde_json::from_value(value.clone())
             .map_err(|_| Error::Config("Gost Relay 出站字段不合法".into()))?;
-        Ok(Arc::new(Relay(options.prepare()?)))
+        let prepared = options.prepare()?;
+        let tcp_eof = !prepared.mux && !prepared.connector.is_tls();
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof,
+                udp: true,
+            },
+            false,
+            kerlico_core::TargetPolicy::Remote,
+            move |_host| {
+                Box::pin(async move { Ok(Arc::new(Relay(prepared)) as Arc<dyn Outbound>) })
+            },
+        ))
     }
 }
 impl Relay {
@@ -89,8 +102,15 @@ impl Outbound for Relay {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
-        Box::pin(self.open(target, context, false))
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
+        Box::pin(async move {
+            self.open(target, context, false)
+                .await
+                .map(|stream| kerlico_core::OpenedTcp {
+                    stream,
+                    info: kerlico_core::TcpConnectInfo::unknown(),
+                })
+        })
     }
     fn connect_udp<'a>(
         &'a self,

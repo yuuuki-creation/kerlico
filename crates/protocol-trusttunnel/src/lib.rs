@@ -1,8 +1,10 @@
 //! TrustTunnel 的 H1/H2/H3 双端；UDP 保持固定目标语义，ICMP 明确不支持。
 mod client;
 mod config;
+mod flow;
 mod http1;
 mod io;
+mod runtime;
 mod server;
 mod socket;
 mod udp;

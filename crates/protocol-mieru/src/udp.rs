@@ -106,53 +106,52 @@ pub(crate) fn fixed(association: DatagramAssociation, target: Destination) -> Da
         }),
     }
 }
-pub(crate) async fn relay(
+pub(crate) async fn relay_io(
     stream: SessionIo,
-    association: DatagramAssociation,
+    sender: &mut kerlico_core::AssociationSender,
+    receiver: &mut kerlico_core::AssociationReceiver,
     max_packet: usize,
     idle: Duration,
     cancel: CancellationToken,
 ) -> Result<()> {
     let (mut input, mut output) = tokio::io::split(stream);
-    let DatagramAssociation {
-        mut sender,
-        mut receiver,
-    } = association;
-    let (activity, mut observed) = watch::channel(Instant::now());
-    let sending_activity = activity.clone();
-    let sending = async move {
-        while let Some((target, packet)) = codec::read_udp_packet(&mut input).await? {
-            if packet.len() > max_packet {
-                return Err(codec::bad());
+    {
+        let (activity, mut observed) = watch::channel(Instant::now());
+        let sending_activity = activity.clone();
+        let sending = async {
+            while let Some((target, packet)) = codec::read_udp_packet(&mut input).await? {
+                if packet.len() > max_packet {
+                    return Err(codec::bad());
+                }
+                sender.send_to(&packet, &target).await?;
+                sending_activity.send_replace(Instant::now());
             }
-            sender.send_to(&packet, &target).await?;
-            sending_activity.send_replace(Instant::now());
-        }
-        Ok(())
-    };
-    let receiving = async move {
-        while let Some((source, packet)) = receiver.recv_from().await? {
-            if packet.len() > max_packet {
-                return Err(codec::bad());
+            Ok(())
+        };
+        let receiving = async {
+            while let Some((source, packet)) = receiver.recv_from().await? {
+                if packet.len() > max_packet {
+                    return Err(codec::bad());
+                }
+                let frame = codec::udp_packet(&source, &packet)?;
+                output.write_all(&frame).await?;
+                output.flush().await?;
+                activity.send_replace(Instant::now());
             }
-            let frame = codec::udp_packet(&source, &packet)?;
-            output.write_all(&frame).await?;
-            output.flush().await?;
-            activity.send_replace(Instant::now());
-        }
-        Ok(())
-    };
-    tokio::pin!(sending);
-    tokio::pin!(receiving);
-    let timer = tokio::time::sleep(idle);
-    tokio::pin!(timer);
-    loop {
-        tokio::select! { biased;
-            _ = cancel.cancelled() => return Err(Error::Cancelled),
-            result = &mut sending => return result,
-            result = &mut receiving => return result,
-            _ = &mut timer => return Err(Error::Timeout),
-            changed = observed.changed() => if changed.is_ok() { timer.as_mut().reset(*observed.borrow_and_update() + idle); },
+            Ok(())
+        };
+        tokio::pin!(sending);
+        tokio::pin!(receiving);
+        let timer = tokio::time::sleep(idle);
+        tokio::pin!(timer);
+        loop {
+            tokio::select! { biased;
+                _ = cancel.cancelled() => break Err(Error::Cancelled),
+                result = &mut sending => break result,
+                result = &mut receiving => break result,
+                _ = &mut timer => break Err(Error::Timeout),
+                changed = observed.changed() => if changed.is_ok() { timer.as_mut().reset(*observed.borrow_and_update() + idle); },
+            }
         }
     }
 }

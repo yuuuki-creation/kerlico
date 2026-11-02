@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """专用 worker 的 TUIC 双端矩阵；参考二进制须由任务预先固定并核验来源。"""
+from config_v2 import bind_members
 import argparse
 from contextlib import ExitStack
 import hashlib
@@ -77,7 +78,7 @@ def verify(args, root, version, mode, node_host, congestion, direction, cert, ke
         target_udp=stack.enter_context(h.serve(UdpServer(("127.0.0.1",0),h.UdpEcho)))
         node_port,tcp_port,udp_port=h.free_port(),h.free_port(),h.free_port()
         target_address=("[::1]:" if ":" in node_host else "127.0.0.1:")+str(node_port)
-        own={"version":1,"limits":{"connect_timeout_ms":4000,"idle_timeout_ms":10000,"drain_timeout_ms":500},"outbounds":[],"inbounds":[]}
+        own={"version":2,"limits":{"connect_timeout_ms":4000,"idle_timeout_ms":10000,"drain_timeout_ms":500},"outbounds":[],"inbounds":[]}
         auth={"token":TOKEN} if version==4 else {"uuid":ID,"password":PASSWORD}
         if direction=="client":
             options={"version":version,"server":{"host":node_host,"port":node_port},"tls":{"server_name":"localhost","ca_pem":cert.read_text()},"udp_relay_mode":mode,"congestion_control":congestion,**auth}
@@ -86,6 +87,8 @@ def verify(args, root, version, mode, node_host, congestion, direction, cert, ke
         else:
             own["outbounds"]=[{"tag":"direct","type":"direct"}]
             own["nodes"]=[{"tag":"node","type":"tuic","listen":target_address,"outbound":"direct","options":{"version":version,"tls":{"certificate_file":str(cert),"private_key_file":str(key)},"congestion_control":congestion,**auth}}]
+        for node in own.get("nodes", []):
+            bind_members(own, node, [{field: node["options"].pop(field) for field in auth}])
         if args.backend=="mihomo":
             peer={"mode":"rule","log-level":"error","ipv6":True,"rules":["MATCH,DIRECT"],"geo-auto-update":False}
             if direction=="client":

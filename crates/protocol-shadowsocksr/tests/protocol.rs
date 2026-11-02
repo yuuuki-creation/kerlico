@@ -1,12 +1,10 @@
+mod support;
 use kerlico_core::{
-    AccessService, AddressedDatagram, BoxFuture, BoxStream, CancellationToken, ConnectContext,
+    AddressedDatagram, BoxFuture, BoxStream, CancellationToken, ConnectContext,
     DatagramAssociation, DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel,
-    Destination, Error, InboundContext, InboundProtocol, NodeEvent, NodeObserver, Outbound, Result,
-    StreamBudget,
+    Destination, Error, InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
-use kerlico_shadowsocksr::{
-    CIPHERS, OBFS, PROTOCOLS, ShadowsocksRNode, ShadowsocksRNodeFactory, ShadowsocksROutbound,
-};
+use kerlico_shadowsocksr::{CIPHERS, OBFS, PROTOCOLS, ShadowsocksRNodeFactory};
 use serde_json::{Value, json};
 use std::{
     sync::{
@@ -29,6 +27,11 @@ impl NodeObserver for Events {
 }
 fn context(global: Arc<Semaphore>) -> InboundContext {
     InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         cancel: CancellationToken::new(),
         connect_timeout: Duration::from_secs(10),
         idle_timeout: Duration::from_secs(30),
@@ -64,7 +67,14 @@ impl DatagramAssociationReceiver for Receiver {
         Box::pin(async move { Ok(self.0.recv().await) })
     }
 }
-impl AccessService for Echo {
+impl Outbound for Echo {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn supports_udp_association(&self) -> bool {
         true
     }
@@ -92,27 +102,34 @@ impl AccessService for Echo {
         &'a self,
         _: &'a Destination,
         _: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
-            self.0.fetch_add(1, Ordering::Relaxed);
-            let (public, mut server) = tokio::io::duplex(65536);
-            tokio::spawn(async move {
-                if server.write_all(b"B|").await.is_err() {
-                    return;
-                }
-                let mut buffer = vec![0; 8192];
-                while let Ok(count) = server.read(&mut buffer).await {
-                    if count == 0 {
-                        let _ = server.write_all(b"|EOF").await;
-                        let _ = server.shutdown().await;
-                        break;
+            let opening: kerlico_core::BoxFuture<'_, Result<BoxStream>> = Box::pin(async move {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                let (public, mut server) = tokio::io::duplex(65536);
+                tokio::spawn(async move {
+                    if server.write_all(b"B|").await.is_err() {
+                        return;
                     }
-                    if server.write_all(&buffer[..count]).await.is_err() {
-                        break;
+                    let mut buffer = vec![0; 8192];
+                    while let Ok(count) = server.read(&mut buffer).await {
+                        if count == 0 {
+                            let _ = server.write_all(b"|EOF").await;
+                            let _ = server.shutdown().await;
+                            break;
+                        }
+                        if server.write_all(&buffer[..count]).await.is_err() {
+                            break;
+                        }
                     }
-                }
+                });
+                Ok(Box::new(public) as BoxStream)
             });
-            Ok(Box::new(public) as BoxStream)
+            let stream = opening.await?;
+            Ok(kerlico_core::OpenedTcp {
+                stream,
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
 }
@@ -123,7 +140,7 @@ fn common(method: &str, protocol: &str, obfs: &str) -> Value {
     json!({"method":method,"password":"synthetic-ssr-secret","protocol":protocol,"obfs":obfs,"allow_insecure":true})
 }
 struct Fixture {
-    outbound: ShadowsocksROutbound,
+    outbound: Arc<dyn Outbound>,
     context: InboundContext,
     tcp: tokio::task::JoinHandle<()>,
     udp: tokio::task::JoinHandle<Result<()>>,
@@ -146,7 +163,13 @@ async fn endpoints_timeout(
     if multi {
         node_options["users"] = json!([{"id":7,"password":"synthetic-user-seven"},{"id":8,"password":"synthetic-user-eight"}]);
     }
-    let node = Arc::new(ShadowsocksRNode::from_options(&node_options).unwrap());
+    let node = Arc::new(
+        support::node(
+            &kerlico_shadowsocksr::ShadowsocksRNodeFactory,
+            &node_options,
+        )
+        .unwrap(),
+    );
     let host = if ipv6 { "::1" } else { "127.0.0.1" };
     let listener = TcpListener::bind((host, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -177,7 +200,8 @@ async fn endpoints_timeout(
     if multi {
         client_options["user"] = json!({"id":7,"password":"synthetic-user-seven"});
     }
-    let outbound = ShadowsocksROutbound::from_options(&client_options).unwrap();
+    let outbound =
+        support::outbound(&kerlico_shadowsocksr::ShadowsocksRFactory, &client_options).unwrap();
     Fixture {
         outbound,
         context,
@@ -201,11 +225,12 @@ async fn close(fixture: Fixture) {
         .unwrap();
     assert_eq!(fixture.global.available_permits(), 256);
 }
-async fn tcp(outbound: &ShadowsocksROutbound, target: &Destination, size: usize) {
+async fn tcp(outbound: &Arc<dyn Outbound>, target: &Destination, size: usize) {
     let mut stream = outbound
         .connect_tcp(target, &ConnectContext::new(Duration::from_secs(10)))
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     let mut banner = [0; 2];
     tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut banner))
         .await
@@ -326,14 +351,16 @@ async fn invalid_password_uid_and_user_key_never_open_a_target() {
         for (field, value) in mutations {
             let mut options = fixture.client_options.clone();
             options[field] = value;
-            let outbound = ShadowsocksROutbound::from_options(&options).unwrap();
-            if let Ok(mut stream) = outbound
+            let outbound =
+                support::outbound(&kerlico_shadowsocksr::ShadowsocksRFactory, &options).unwrap();
+            if let Ok(opened) = outbound
                 .connect_tcp(
                     &Destination::new("example.invalid", 443).unwrap(),
                     &ConnectContext::new(Duration::from_secs(2)),
                 )
                 .await
             {
+                let mut stream = opened.stream;
                 let mut data = [0; 1];
                 let result =
                     tokio::time::timeout(Duration::from_secs(2), stream.read(&mut data)).await;
@@ -357,25 +384,34 @@ fn missing_authentication_is_local_only_and_unknown_settings_are_rejected() {
             for udp in [false, true] {
                 let mut options = common("none", protocol, obfs);
                 options["udp"] = json!(udp);
-                let node = ShadowsocksRNode::from_options(&options).unwrap();
+                let node = support::node(&kerlico_shadowsocksr::ShadowsocksRNodeFactory, &options)
+                    .unwrap();
                 let authenticated = (*protocol != "origin" || obfs.starts_with("tls1.2"))
                     && (!udp || users(protocol));
-                assert_eq!(!node.credential_fingerprints().is_empty(), authenticated);
+                assert_eq!(!node.manifest().is_empty(), authenticated);
                 let spec = json!({"tag":"ssr","type":"shadowsocksr","listen":"127.0.0.1:0","outbound":"direct","options":options});
                 let config = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[spec]});
-                let parsed = parse(&serde_json::to_vec(&config).unwrap()).unwrap();
+                let mut public = support::configuration(config.clone());
+                if !authenticated {
+                    public["nodes"] = public["local_inbounds"].take();
+                    public["local_inbounds"] = json!([]);
+                }
+                let parsed = parse(&serde_json::to_vec(&public).unwrap()).unwrap();
                 assert_eq!(
                     registry.prepare(parsed).is_ok(),
                     authenticated,
                     "{protocol} {obfs} udp={udp}"
                 );
-                let mut local = config.clone();
-                local["nodes"] = json!([]);
-                local["local_inbounds"] = config["nodes"].clone();
+                let mut local = support::configuration(config);
+                if authenticated {
+                    local["local_inbounds"] = local["nodes"].take();
+                    local["nodes"] = json!([]);
+                }
                 assert!(
                     registry
                         .prepare(parse(&serde_json::to_vec(&local).unwrap()).unwrap())
-                        .is_ok()
+                        .is_ok(),
+                    "{protocol} {obfs} udp={udp}"
                 );
             }
         }
@@ -390,11 +426,11 @@ fn missing_authentication_is_local_only_and_unknown_settings_are_rejected() {
         for (key, value) in mutate.as_object().unwrap() {
             options[key] = value.clone();
         }
-        assert!(ShadowsocksRNode::from_options(&options).is_err());
+        assert!(support::node(&kerlico_shadowsocksr::ShadowsocksRNodeFactory, &options).is_err());
     }
     let mut options = common("aes-128-cfb", "auth_chain_a", "plain");
     options["allow_insecure"] = json!(false);
-    assert!(ShadowsocksRNode::from_options(&options).is_err());
+    assert!(support::node(&kerlico_shadowsocksr::ShadowsocksRNodeFactory, &options).is_err());
 }
 
 #[tokio::test]
@@ -410,7 +446,7 @@ async fn association_idle_limit_and_cancel_are_observable() {
     .await;
     let mut options = fixture.client_options.clone();
     options["limits"] = json!({"max_sessions":1});
-    let outbound = ShadowsocksROutbound::from_options(&options).unwrap();
+    let outbound = support::outbound(&kerlico_shadowsocksr::ShadowsocksRFactory, &options).unwrap();
     let establish = ConnectContext::new(Duration::from_secs(2));
     let target = Destination::new("127.0.0.1", 53).unwrap();
     let mut channel = outbound.associate_udp(&establish).await.unwrap();
@@ -445,16 +481,15 @@ async fn association_idle_limit_and_cancel_are_observable() {
 }
 #[tokio::test]
 async fn real_egress_keeps_full_cone_port_across_families_and_zero_packets() {
-    use kerlico_config::OutboundFactory;
     let mut options = common("none", "auth_chain_b", "tls1.2_ticket_auth");
     options["users"] = json!([{"id":7,"password":"synthetic-user-seven"}]);
-    let node = ShadowsocksRNode::from_options(&options).unwrap();
+    let node = support::node(&kerlico_shadowsocksr::ShadowsocksRNodeFactory, &options).unwrap();
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let proxy = socket.local_addr().unwrap();
     let global = Arc::new(Semaphore::new(128));
     let context = context(global.clone());
-    let direct = kerlico_net::DirectFactory.build(&json!({})).unwrap();
-    let access = Arc::new(kerlico_egress::Egress::new(direct));
+    let direct = support::outbound(&kerlico_net::DirectFactory, &json!({})).unwrap();
+    let access = direct;
     let task = {
         let context = context.clone();
         tokio::spawn(async move { node.serve_udp(socket, access, context).await })
@@ -462,7 +497,7 @@ async fn real_egress_keeps_full_cone_port_across_families_and_zero_packets() {
     options.as_object_mut().unwrap().remove("users");
     options["server"] = json!({"host":"127.0.0.1","port":proxy.port()});
     options["user"] = json!({"id":7,"password":"synthetic-user-seven"});
-    let outbound = ShadowsocksROutbound::from_options(&options).unwrap();
+    let outbound = support::outbound(&kerlico_shadowsocksr::ShadowsocksRFactory, &options).unwrap();
     let mut channel = outbound
         .associate_udp(&ConnectContext::new(Duration::from_secs(3)))
         .await
@@ -550,20 +585,30 @@ fn duplicate_effective_secrets_are_rejected_across_nodes_and_users() {
     let config = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[{"tag":"v4","type":"shadowsocksr","listen":"127.0.0.1:0","outbound":"direct","options":a},{"tag":"v6","type":"shadowsocksr","listen":"[::1]:0","outbound":"direct","options":b}]});
     assert!(
         registry
-            .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .prepare(
+                parse(&serde_json::to_vec(&support::configuration(config.clone())).unwrap())
+                    .unwrap()
+            )
             .is_err()
     );
     let mut config = config;
     config["nodes"][1]["options"]["users"][0]["password"] = json!("independent-user-key");
     assert!(
         registry
-            .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .prepare(
+                parse(&serde_json::to_vec(&support::configuration(config.clone())).unwrap())
+                    .unwrap()
+            )
             .is_ok()
     );
 }
 #[tokio::test]
 async fn untrusted_public_context_cannot_enable_unauthenticated_combinations() {
-    let node = ShadowsocksRNode::from_options(&common("none", "origin", "plain")).unwrap();
+    let node = support::node(
+        &kerlico_shadowsocksr::ShadowsocksRNodeFactory,
+        &common("none", "origin", "plain"),
+    )
+    .unwrap();
     let mut context = context(Arc::new(Semaphore::new(8)));
     context.local_addr = Some("0.0.0.0:1".parse().unwrap());
     let access = Arc::new(Echo::default());

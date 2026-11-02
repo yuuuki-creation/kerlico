@@ -22,7 +22,7 @@ use crate::{
         internal_error::InternalConnectionError,
         Code, ConnectionError, StreamError,
     },
-    frame::{FrameStream, FrameStreamError},
+    frame::{FrameProgress, FrameStream, FrameStreamError},
     proto::{
         frame::{self, Frame, PayloadLen},
         headers::Header,
@@ -79,6 +79,7 @@ where
     /// TODO: breaking encapsulation just to see if we can get this to work, will fix before merging
     pub conn: C,
     control_send: C::SendStream,
+    goaway_send: GoawaySend,
     control_recv: Option<FrameStream<C::RecvStream, B>>,
     qpack_streams: QpackStreams<C, B>,
     /// Buffers incoming uni/recv streams which have yet to be claimed.
@@ -137,6 +138,14 @@ where
     DataSent(S),
     /// Grease stream is finished
     Finished,
+}
+
+#[derive(Clone, Copy)]
+enum GoawaySend {
+    Idle,
+    Queued(VarInt),
+    Writing { next: Option<VarInt> },
+    Sent,
 }
 
 impl<B, C> ConnectionInner<C, B>
@@ -305,6 +314,7 @@ where
             shared,
             conn,
             control_send: control_send,
+            goaway_send: GoawaySend::Idle,
             control_recv: None,
             qpack_streams,
             handled_connection_error: None,
@@ -334,14 +344,17 @@ where
         T: From<VarInt> + PartialOrd<T> + Copy,
         VarInt: From<T>,
     {
-        if let Some(sent_id) = sent_closing {
-            if *sent_id <= max_id {
-                return Ok(());
-            }
+        if sent_closing.map_or(true, |sent_id| max_id < sent_id) {
+            *sent_closing = Some(max_id);
+            self.set_closing();
+            let id = max_id.into();
+            self.goaway_send = match self.goaway_send {
+                GoawaySend::Idle | GoawaySend::Sent | GoawaySend::Queued(_) => {
+                    GoawaySend::Queued(id)
+                }
+                GoawaySend::Writing { .. } => GoawaySend::Writing { next: Some(id) },
+            };
         }
-
-        *sent_closing = Some(max_id);
-        self.set_closing();
 
         //= https://www.rfc-editor.org/rfc/rfc9114#section-3.3
         //# When either endpoint chooses to close the HTTP/3
@@ -349,7 +362,12 @@ where
         //# (Section 5.2) so that both endpoints can reliably determine whether
         //# previously sent frames have been processed and gracefully complete or
         //# terminate any necessary remaining tasks.
-        match stream::write(&mut self.control_send, Frame::Goaway(max_id.into())).await {
+        future::poll_fn(|cx| self.poll_goaway(cx)).await
+    }
+
+    fn poll_goaway(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ConnectionError>> {
+        let _ = self.poll_connection_error(cx)?;
+        Poll::Ready(match ready!(self.poll_goaway_write(cx)) {
             Ok(()) => Ok(()),
             Err(StreamErrorIncoming::ConnectionErrorIncoming { connection_error }) => {
                 Err(self.handle_connection_error(connection_error))
@@ -371,6 +389,27 @@ where
                     Code::H3_CLOSED_CRITICAL_STREAM,
                     format!("an error occurred on the control stream {}", error),
                 )))
+            }
+        })
+    }
+
+    fn poll_goaway_write(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
+        loop {
+            match self.goaway_send {
+                GoawaySend::Idle | GoawaySend::Sent => return Poll::Ready(Ok(())),
+                GoawaySend::Queued(id) => {
+                    ready!(self.control_send.poll_ready(cx))?;
+                    self.control_send.send_data(Frame::Goaway(id))?;
+                    self.goaway_send = GoawaySend::Writing { next: None };
+                }
+                GoawaySend::Writing { next } => {
+                    // 已提交帧由发送流持有，取消后只续写，不能再次提交帧头。
+                    ready!(self.control_send.poll_ready(cx))?;
+                    self.goaway_send = match next {
+                        Some(next) => GoawaySend::Queued(next),
+                        None => GoawaySend::Sent,
+                    };
+                }
             }
         }
     }
@@ -510,8 +549,27 @@ where
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Frame<PayloadLen>, ConnectionError>> {
+        match ready!(self.poll_control_with_progress(cx))? {
+            FrameProgress::Frame(frame) => Poll::Ready(Ok(frame)),
+            FrameProgress::Yielded => Poll::Pending,
+        }
+    }
+
+    #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
+    pub(crate) fn poll_control_with_progress(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<FrameProgress<Frame<PayloadLen>>, ConnectionError>> {
         // check if a connection error occurred on a stream
         let _ = self.poll_connection_error(cx)?;
+        let _ = self.poll_goaway(cx)?;
+
+        if self.send_grease_stream_flag {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.3
+            //# They MAY also be
+            //# sent on connections where no data is currently being transferred.
+            let _ = self.poll_grease_stream(cx);
+        }
 
         let recv = {
             // TODO
@@ -524,7 +582,12 @@ where
             }
         };
 
-        let res = match ready!(recv.poll_next(cx)) {
+        let received = match ready!(recv.poll_next_with_progress(cx)) {
+            Ok(FrameProgress::Frame(frame)) => Ok(frame),
+            Ok(FrameProgress::Yielded) => return Poll::Ready(Ok(FrameProgress::Yielded)),
+            Err(error) => Err(error),
+        };
+        let res = match received {
             Err(FrameStreamError::Quic(StreamErrorIncoming::ConnectionErrorIncoming {
                 connection_error,
             })) => return Poll::Ready(Err(self.handle_connection_error(connection_error))),
@@ -649,14 +712,7 @@ where
             }
         };
 
-        if self.send_grease_stream_flag {
-            //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.3
-            //# They MAY also be
-            //# sent on connections where no data is currently being transferred.
-            ready!(self.poll_grease_stream(cx));
-        }
-
-        Poll::Ready(Ok(res))
+        Poll::Ready(Ok(FrameProgress::Frame(res)))
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]

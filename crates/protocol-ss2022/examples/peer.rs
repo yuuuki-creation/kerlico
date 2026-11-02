@@ -1,10 +1,11 @@
 //! 仅供 worker 互通的进程内适配器；不参与正式程序入口。
+use kerlico_config::{NodeBuildContext, NodeFactory, OutboundFactory};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, ConnectContext, DatagramChannel, DatagramReceiver,
-    DatagramSender, Destination, InboundContext, InboundProtocol, NodeEvent, NodeObserver,
-    Outbound, Result, StreamBudget,
+    BoxFuture, BoxStream, ConnectContext, DatagramChannel, DatagramReceiver, DatagramSender,
+    Destination, InboundContext, InboundProtocol, NodeEvent, NodeObserver, Outbound, Result,
+    StreamBudget,
 };
-use kerlico_ss2022::{Ss2022Node, Ss2022Outbound};
+use kerlico_ss2022::{Ss2022Factory, Ss2022NodeFactory};
 use std::{sync::Arc, time::Duration};
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
@@ -30,14 +31,28 @@ impl DatagramReceiver for Udp {
         })
     }
 }
-impl AccessService for Direct {
+impl Outbound for Direct {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn connect_tcp<'a>(
         &'a self,
         t: &'a Destination,
         _: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
-            Ok(Box::new(TcpStream::connect((t.host().as_str(), t.port())).await?) as BoxStream)
+            let opening: kerlico_core::BoxFuture<'_, Result<BoxStream>> = Box::pin(async move {
+                Ok(Box::new(TcpStream::connect((t.host().as_str(), t.port())).await?) as BoxStream)
+            });
+            let stream = opening.await?;
+            Ok(kerlico_core::OpenedTcp {
+                stream,
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
     fn connect_udp<'a>(
@@ -72,6 +87,11 @@ impl NodeObserver for Observer {
 }
 fn context() -> InboundContext {
     InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         peer_addr: None,
         local_addr: None,
         cancel: Default::default(),
@@ -93,23 +113,40 @@ async fn main() -> Result<()> {
     let options: serde_json::Value = serde_json::from_slice(&std::fs::read(&args[2])?).unwrap();
     let listen = &args[3];
     if args[1] == "server" {
-        let node = Arc::new(Ss2022Node::from_options(&options)?);
+        let input = NodeBuildContext::for_test(
+            options["options"].clone(),
+            options["native_credentials"]
+                .as_array()
+                .cloned()
+                .ok_or(kerlico_core::Error::Rejected)?,
+        );
+        let node = Ss2022NodeFactory.build(&input)?;
+        let ingress = kerlico_egress::testing::ingress(
+            &input,
+            Arc::new(Direct),
+            kerlico_core::TargetPolicy::Remote,
+        )?;
         let listener = TcpListener::bind(listen).await?;
         let socket = Arc::new(UdpSocket::bind(listen).await?);
         let ctx = context();
         {
             let node = node.clone();
             let ctx = ctx.clone();
-            tokio::spawn(async move { node.handle_udp(socket, Arc::new(Direct), ctx).await });
+            let ingress = ingress.clone();
+            tokio::spawn(async move { node.handle_udp(socket, ingress, ctx).await });
         }
         loop {
             let (stream, _) = listener.accept().await?;
             let node = node.clone();
             let ctx = ctx.clone();
-            tokio::spawn(async move { node.handle(Box::new(stream), Arc::new(Direct), ctx).await });
+            let ingress = ingress.clone();
+            tokio::spawn(async move { node.handle(Box::new(stream), ingress, ctx).await });
         }
     } else {
-        let outbound = Arc::new(Ss2022Outbound::from_options(&options)?);
+        let outbound = Ss2022Factory
+            .compile(&options)?
+            .start(kerlico_core::ServiceContext::for_test())
+            .await?;
         let target = Destination::new(&args[4], args[5].parse().unwrap())?;
         let listener = TcpListener::bind(listen).await?;
         let socket = Arc::new(UdpSocket::bind(listen).await?);
@@ -142,9 +179,9 @@ async fn main() -> Result<()> {
                     .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(3)))
                     .await
                 {
-                    let _ = kerlico_core::relay_tcp(
+                    let _ = kerlico_core::relay_streams(
                         Box::new(stream),
-                        remote,
+                        remote.stream,
                         Duration::from_secs(5),
                         Default::default(),
                     )

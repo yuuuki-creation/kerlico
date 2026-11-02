@@ -1,11 +1,13 @@
 mod common;
 
 use common::*;
-use kerlico_config::OutboundFactory;
 use kerlico_core::{ConnectContext, Destination, Error};
 use kerlico_sudoku::SudokuFactory;
 use serde_json::json;
-use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::{Duration, timeout},
@@ -18,9 +20,9 @@ async fn mux_exchange(
     target: &Destination,
     bytes: Vec<u8>,
     state: &Arc<State>,
+    context: ConnectContext,
 ) {
-    let context = ConnectContext::new(WAIT);
-    let mut stream = outbound.connect_tcp(target, &context).await.unwrap();
+    let mut stream = outbound.connect_tcp(target, &context).await.unwrap().stream;
     banner(&mut stream).await;
     let eof = outbound.capabilities().tcp_eof;
     let sent = Arc::new(AtomicUsize::new(0));
@@ -34,14 +36,25 @@ async fn mux_exchange(
     let sample_output = samples.clone();
     let port = target.port();
     struct SamplingTask(tokio::task::JoinHandle<()>);
-    impl Drop for SamplingTask { fn drop(&mut self) { self.0.abort(); } }
+    impl Drop for SamplingTask {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
     // 独立任务只读原子计数，既不poll传输future，也不给它添加定时唤醒。
     let sampler = SamplingTask(tokio::spawn(async move {
         let start = tokio::time::Instant::now();
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         for _ in 0..9 {
             tick.tick().await;
-            let sample = format!("t={}ms send={} received={} tail={} target={:?}",start.elapsed().as_millis(),sample_sent.load(Ordering::SeqCst),sample_received.load(Ordering::SeqCst),sample_tail.load(Ordering::SeqCst),sample_state.target_snapshot(port));
+            let sample = format!(
+                "t={}ms send={} received={} tail={} target={:?}",
+                start.elapsed().as_millis(),
+                sample_sent.load(Ordering::SeqCst),
+                sample_received.load(Ordering::SeqCst),
+                sample_tail.load(Ordering::SeqCst),
+                sample_state.target_snapshot(port)
+            );
             sample_output.lock().unwrap().push(sample);
         }
     }));
@@ -61,7 +74,10 @@ async fn mux_exchange(
         let mut used = 0;
         while used < data.len() {
             let count = read.read(&mut data[used..]).await.unwrap();
-            assert!(count != 0, "mux提前EOF: mode={mode} target={target} used={used}");
+            assert!(
+                count != 0,
+                "mux提前EOF: mode={mode} target={target} used={used}"
+            );
             used += count;
             received.store(used, Ordering::SeqCst);
         }
@@ -71,29 +87,44 @@ async fn mux_exchange(
             let mut piece = [0; 32];
             loop {
                 let count = read.read(&mut piece).await.unwrap();
-                if count == 0 { break; }
+                if count == 0 {
+                    break;
+                }
                 tail.extend_from_slice(&piece[..count]);
                 tail_bytes.store(tail.len(), Ordering::SeqCst);
             }
             assert_eq!(tail, TAIL);
         }
     };
-    let result = timeout(WAIT, async { tokio::join!(sending, receiving); }).await;
+    let result = timeout(WAIT, async {
+        tokio::join!(sending, receiving);
+    })
+    .await;
     drop(sampler);
-    assert!(result.is_ok(), "mux超时: mode={mode} target={target} bytes={} send_stage={} (0=write_all,1=flush,2=FIN,3=done) received={} tail={} target_progress={:?} samples={:?}", bytes.len(), sent.load(Ordering::SeqCst), received.load(Ordering::SeqCst), tail_bytes.load(Ordering::SeqCst),state.target_snapshot(target.port()),samples.lock().unwrap());
+    assert!(
+        result.is_ok(),
+        "mux超时: mode={mode} target={target} bytes={} send_stage={} (0=write_all,1=flush,2=FIN,3=done) received={} tail={} target_progress={:?} samples={:?}",
+        bytes.len(),
+        sent.load(Ordering::SeqCst),
+        received.load(Ordering::SeqCst),
+        tail_bytes.load(Ordering::SeqCst),
+        state.target_snapshot(target.port()),
+        samples.lock().unwrap()
+    );
 }
 
 #[tokio::test]
 async fn real_mux_uses_one_carrier_for_concurrent_distinct_targets_and_fin() {
     for mode in ["raw", "legacy", "stream", "poll", "auto", "ws"] {
         let fixture = Fixture::start(mode, "chacha20-poly1305", "on", false).await;
-        let context = ConnectContext::new(WAIT);
+        let context = fixture.context();
         let first = Destination::new("127.0.0.1", 10000).unwrap();
         let mut held = fixture
             .outbound
             .connect_tcp(&first, &context)
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         banner(&mut held).await;
         let physical = fixture.state.physical.load(Ordering::SeqCst);
         assert!(physical > 0);
@@ -101,6 +132,7 @@ async fn real_mux_uses_one_carrier_for_concurrent_distinct_targets_and_fin() {
         for index in 0..16 {
             let outbound = fixture.outbound.clone();
             let state = fixture.state.clone();
+            let context = fixture.context();
             jobs.spawn(async move {
                 let target = Destination::new(
                     if index % 2 == 0 { "127.0.0.1" } else { "::1" },
@@ -113,6 +145,7 @@ async fn real_mux_uses_one_carrier_for_concurrent_distinct_targets_and_fin() {
                     &target,
                     vec![index as u8; 65536 + usize::from(index)],
                     &state,
+                    context,
                 )
                 .await;
             });
@@ -145,20 +178,22 @@ async fn real_mux_uses_one_carrier_for_concurrent_distinct_targets_and_fin() {
 async fn logical_cancel_reset_and_target_rejection_leave_siblings_alive() {
     for mode in ["raw", "stream", "poll", "ws"] {
         let fixture = Fixture::start(mode, "aes-128-gcm", "on", false).await;
-        let cancel_context = ConnectContext::new(WAIT);
+        let cancel_context = fixture.context();
         let target = Destination::new("127.0.0.1", 443).unwrap();
         let mut victim = fixture
             .outbound
             .connect_tcp(&target, &cancel_context)
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         banner(&mut victim).await;
-        let context = ConnectContext::new(WAIT);
+        let context = fixture.context();
         let mut survivor = fixture
             .outbound
             .connect_tcp(&target, &context)
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         banner(&mut survivor).await;
         let physical = fixture.state.physical.load(Ordering::SeqCst);
         cancel_context.cancel.cancel();
@@ -170,7 +205,8 @@ async fn logical_cancel_reset_and_target_rejection_leave_siblings_alive() {
         drop(victim);
         let rejected = Destination::new("127.0.0.1", 1).unwrap();
         match fixture.outbound.connect_tcp(&rejected, &context).await {
-            Ok(mut stream) => {
+            Ok(opened) => {
+                let mut stream = opened.stream;
                 assert!(!matches!(
                     timeout(WAIT, stream.read(&mut byte)).await,
                     Ok(Ok(1))
@@ -187,7 +223,13 @@ async fn logical_cancel_reset_and_target_rejection_leave_siblings_alive() {
             .unwrap()
             .unwrap();
         assert_eq!(bytes, b"still-alivetail");
-        exchange(&fixture.outbound, &target, vec![8; 1024]).await;
+        exchange_scoped(
+            &fixture.outbound,
+            &fixture.context(),
+            &target,
+            vec![8; 1024],
+        )
+        .await;
         assert_eq!(fixture.state.physical.load(Ordering::SeqCst), physical);
         drop(survivor);
         fixture.close().await;
@@ -197,13 +239,14 @@ async fn logical_cancel_reset_and_target_rejection_leave_siblings_alive() {
 #[tokio::test]
 async fn slow_stream_backpressure_does_not_block_another_stream() {
     let fixture = Fixture::start("raw", "chacha20-poly1305", "on", false).await;
-    let context = ConnectContext::new(WAIT);
+    let context = fixture.context();
     let slow_target = Destination::new("127.0.0.1", 9).unwrap();
     let mut slow = fixture
         .outbound
         .connect_tcp(&slow_target, &context)
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     banner(&mut slow).await;
     let filling = tokio::spawn(async move {
         let data = vec![0x33; 6 * 1024 * 1024];
@@ -216,6 +259,7 @@ async fn slow_stream_backpressure_does_not_block_another_stream() {
         &Destination::new("127.0.0.1", 443).unwrap(),
         vec![0x91; 16384],
         &fixture.state,
+        fixture.context(),
     )
     .await;
     context.cancel.cancel();
@@ -228,6 +272,7 @@ async fn slow_stream_backpressure_does_not_block_another_stream() {
         &Destination::new("::1", 8443).unwrap(),
         vec![0x62; 16384],
         &fixture.state,
+        fixture.context(),
     )
     .await;
     fixture.close().await;
@@ -243,12 +288,20 @@ async fn mux_pool_limits_released_slots_and_idle_carrier_replacement() {
     options["max_mux_streams"] = json!(2);
     options["max_pool_sessions"] = json!(1);
     options["pool_idle_ms"] = json!(100);
-    let outbound = SudokuFactory.build(&options).unwrap();
+    let outbound = shared::outbound(&SudokuFactory, &options).await.unwrap();
     let context = ConnectContext::new(WAIT);
     let target = Destination::new("127.0.0.1", 443).unwrap();
-    let mut first = outbound.connect_tcp(&target, &context).await.unwrap();
+    let mut first = outbound
+        .connect_tcp(&target, &context)
+        .await
+        .unwrap()
+        .stream;
     banner(&mut first).await;
-    let mut second = outbound.connect_tcp(&target, &context).await.unwrap();
+    let mut second = outbound
+        .connect_tcp(&target, &context)
+        .await
+        .unwrap()
+        .stream;
     banner(&mut second).await;
     assert!(matches!(
         outbound.connect_tcp(&target, &context).await,
@@ -256,12 +309,24 @@ async fn mux_pool_limits_released_slots_and_idle_carrier_replacement() {
     ));
     drop(first);
     eventually(|| state.active_tcp.load(Ordering::SeqCst) == 1).await;
-    exchange(&outbound, &target, vec![0x21; 1024]).await;
+    exchange_scoped(
+        &outbound,
+        &context.new_operation(WAIT),
+        &target,
+        vec![0x21; 1024],
+    )
+    .await;
     drop(second);
     eventually(|| state.active_tcp.load(Ordering::SeqCst) == 0).await;
     // 显式等待所测的空闲预算，不以延迟掩盖握手或业务时序错误。
     tokio::time::sleep(Duration::from_millis(250)).await;
-    exchange(&outbound, &target, vec![0x22; 1024]).await;
+    exchange_scoped(
+        &outbound,
+        &context.new_operation(WAIT),
+        &target,
+        vec![0x22; 1024],
+    )
+    .await;
     assert_eq!(state.physical.load(Ordering::SeqCst), 2);
     drop(outbound);
     server.close().await;
@@ -274,20 +339,27 @@ async fn server_logical_budget_recovers_after_cancel_and_client_drop() {
     value["limits"]["max_sessions"] = json!(6);
     value["nodes"][0]["max_sessions"] = json!(6);
     let server = Running::start(value, state.clone()).await;
-    let outbound = SudokuFactory
-        .build(&client_options(
+    let outbound = shared::outbound(
+        &SudokuFactory,
+        &client_options(
             server.addresses["node"],
             "raw",
             KEY,
             "chacha20-poly1305",
             "on",
-        ))
-        .unwrap();
+        ),
+    )
+    .await
+    .unwrap();
     let context = ConnectContext::new(WAIT);
     let target = Destination::new("127.0.0.1", 443).unwrap();
     let mut streams = Vec::new();
     for _ in 0..5 {
-        let mut stream = outbound.connect_tcp(&target, &context).await.unwrap();
+        let mut stream = outbound
+            .connect_tcp(&target, &context)
+            .await
+            .unwrap()
+            .stream;
         banner(&mut stream).await;
         streams.push(stream);
     }
@@ -302,7 +374,11 @@ async fn server_logical_budget_recovers_after_cancel_and_client_drop() {
     })
     .await;
     let new_context = ConnectContext::new(WAIT);
-    let mut live = outbound.connect_tcp(&target, &new_context).await.unwrap();
+    let mut live = outbound
+        .connect_tcp(&target, &new_context)
+        .await
+        .unwrap()
+        .stream;
     banner(&mut live).await;
     drop(outbound);
     let mut byte = [0; 1];
@@ -330,7 +406,8 @@ async fn root_shutdown_terminates_mux_uot_and_releases_backend_tasks() {
             .outbound
             .connect_tcp(&target, &context)
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         banner(&mut tcp).await;
         let mut udp = fixture.outbound.associate_udp(&context).await.unwrap();
         udp.sender.send_to(b"before-stop", &target).await.unwrap();
@@ -350,4 +427,12 @@ async fn root_shutdown_terminates_mux_uot_and_releases_backend_tasks() {
         drop(udp);
         fixture.close().await;
     }
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

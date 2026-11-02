@@ -104,12 +104,6 @@ pub(crate) struct ClientOptions {
 #[serde(deny_unknown_fields)]
 pub(crate) struct NodeOptions {
     #[serde(default)]
-    pub auth_str: Option<String>,
-    #[serde(default)]
-    pub auth: Option<String>,
-    #[serde(default)]
-    pub users: Vec<Auth>,
-    #[serde(default)]
     pub up_bps: u64,
     #[serde(default)]
     pub down_bps: u64,
@@ -222,6 +216,7 @@ pub(crate) fn client_tls(
     .map_err(|_| invalid())?
     .with_root_certificates(roots)
     .with_no_client_auth();
+    tls.resumption = rustls::client::Resumption::disabled();
     tls.alpn_protocols = alpns(&options.alpn)?;
     rustls::pki_types::ServerName::try_from(options.server_name.clone()).map_err(|_| invalid())?;
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| invalid())?;

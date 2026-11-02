@@ -31,8 +31,8 @@ fn bytes(value: &Value, name: &str) -> Vec<u8> {
     key::unhex(value[name].as_str().unwrap()).unwrap()
 }
 
-#[test]
-fn independent_go_initial_session_hkdf_and_direction_separation() {
+#[tokio::test]
+async fn independent_go_initial_session_hkdf_and_direction_separation() {
     let value = fixture();
     let kdf = &value["control"]["kdf"];
     let seed = kdf["seed"].as_str().unwrap();
@@ -51,8 +51,8 @@ fn independent_go_initial_session_hkdf_and_direction_separation() {
     assert_ne!(session.c2s, initial.c2s);
 }
 
-#[test]
-fn independent_go_aead_epoch_sequence_replay_mac_and_direction_vectors() {
+#[tokio::test]
+async fn independent_go_aead_epoch_sequence_replay_mac_and_direction_vectors() {
     let fixture = fixture();
     for vector in fixture["records"].as_array().unwrap() {
         let method = match vector["method"].as_str().unwrap() {

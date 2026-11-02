@@ -546,6 +546,27 @@ mod tests {
         }
     }
     #[test]
+    fn user_hash_does_not_replace_authenticated_seed_selection() {
+        for method in ["aes-128-gcm", "chacha20-poly1305"] {
+            let protocol = config(method, "prefer_ascii", true);
+            let mut client = EarlyClient::new(protocol.clone()).unwrap();
+            client.hello.user_hash = [0xa7; 8];
+            client.request = encode_initial(
+                &protocol,
+                &client.pair,
+                true,
+                kip::CLIENT_HELLO,
+                &client.hello.encode(),
+            )
+            .unwrap();
+            assert!(starts(&protocol, &client.request));
+            let other = serde_json::from_value::<NodeOptions>(json!({"protocol":{"key":"synthetic-wrong-seed","aead":method,"table_type":"prefer_ascii"}})).unwrap().prepare().unwrap().protocol;
+            assert!(!starts(&other, &client.request));
+            assert!(EarlyServer::prepare(other, &client.request).is_err());
+            assert!(EarlyServer::prepare(protocol, &client.request).is_ok());
+        }
+    }
+    #[test]
     fn altered_early_bytes_do_not_create_a_session_or_mix_seeds() {
         let protocol = config("chacha20-poly1305", "prefer_ascii", true);
         let client = EarlyClient::new(protocol.clone()).unwrap();

@@ -620,7 +620,7 @@ impl Actor {
             .next_server
             .checked_add(1)
             .ok_or(Error::ResourceLimit)?;
-        let Ok(mut io) = crate::session::server_entry(&self.link, id, frame.id) else {
+        let Ok(mut io) = crate::session::server_entry(&self.link, id, frame.id, Some(peer)) else {
             return Ok(());
         };
         io.started = true;
@@ -748,10 +748,12 @@ impl Actor {
         if entry.io.peer_closed {
             return Ok(());
         }
-        if entry.io.life.abort_cancel.is_cancelled()
-            || entry.io.last_data.elapsed() >= self.link.idle
-        {
-            return Err(Error::Cancelled);
+        if entry.io.life.abort_cancel.is_cancelled() {
+            return Err(entry.io.life.error());
+        }
+        if entry.io.last_data.elapsed() >= self.link.idle {
+            entry.io.life.abort(crate::session::IDLE_TIMEOUT);
+            return Err(Error::Timeout);
         }
         Self::receive_ready_if_buffered(entry)?;
         let mut loss = false;

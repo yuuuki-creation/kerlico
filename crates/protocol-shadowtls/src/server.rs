@@ -34,6 +34,7 @@ pub(crate) async fn negotiate(
     settings: &config::Server,
     keys: &[Arc<[u8]>],
     cancel: CancellationToken,
+    owner: kerlico_core::NodeTasks,
 ) -> Result<Outcome> {
     let first = wire::read(&mut front).await?.ok_or_else(wire::error)?;
     let name = wire::server_name(&first).ok().flatten();
@@ -106,7 +107,7 @@ pub(crate) async fn negotiate(
                                 let random=seed.ok_or_else(wire::error)?;let key=selected.as_ref().ok_or_else(wire::error)?;
                                 (stream::ReadMode::V3{verify:Box::new(verify_hash.take().ok_or_else(wire::error)?),ignore:None},stream::WriteMode::V3(wire::directional(key,&random,b'S')))
                             };
-                            return Ok(Outcome::Ready(stream::wrap(raw,initial,read,write,cancel)));
+                            return Ok(Outcome::Ready(stream::wrap(raw,initial,read,write,cancel,stream::Owner::Node(owner))?));
                         }
                         // 尚未切换时的 TLS 密文不能改变累计业务 HMAC。
                         if settings.version==3 && let (Some(key),Some(random))=(&selected,&seed){verify_hash=Some(wire::directional(key,random,b'C'));}
@@ -167,10 +168,18 @@ pub(crate) async fn negotiate(
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+    use kerlico_core::{
+        BoxFuture, ConnectContext, CredentialManifest, DatagramChannel, InboundContext,
+        InboundProtocol, IngressBinding, NodeEvent, NodeObserver, Outbound, StreamBudget,
+    };
     use serde_json::json;
-    use tokio::{net::TcpListener,io::AsyncWriteExt};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
     #[tokio::test]
-    async fn recorded_hrr_seed_mac_never_authorizes_a_new_carrier(){
+    async fn recorded_hrr_seed_mac_never_authorizes_a_new_carrier() {
         tokio::time::timeout(std::time::Duration::from_secs(3),async{
             let key=b"hrr-replay-test";let hello=crate::tls::signed_hello_for_replay_test(key);assert!(wire::client_auth(&hello,key));
             let (_,_,sid)=wire::hello(&hello,1).unwrap();let sid=sid.to_vec();
@@ -181,10 +190,117 @@ mod replay_tests {
                 let forwarded=wire::read(&mut stream).await.unwrap();stream.shutdown().await.unwrap();forwarded.is_some()
             });
             let settings:config::Server=config::parse(&json!({"version":3,"password":"hrr-replay-test","handshake":{"host":"127.0.0.1","port":port},"inner":{"type":"shadowsocks","options":{"method":"aes-128-gcm","password":"inner-test"}}})).unwrap();let keys=settings.validate().unwrap();
-            let (raw,mut client)=tokio::io::duplex(4096);let server=tokio::spawn(async move{negotiate(Box::new(raw),&settings,&keys,CancellationToken::new()).await});
+            let (raw,mut client)=tokio::io::duplex(4096);let server=tokio::spawn(async move{negotiate(Box::new(raw),&settings,&keys,CancellationToken::new(),kerlico_core::NodeTasks::new(kerlico_core::NodeId::parse("shadowtls-test").unwrap(),CancellationToken::new())).await});
             client.write_all(&hello).await.unwrap();let retry=wire::read(&mut client).await.unwrap().unwrap();assert_eq!(wire::server_hello(&retry).unwrap().0,wire::HRR_RANDOM);
             let mut old=wire::directional(key,&wire::HRR_RANDOM,b'C');let payload=b"recorded-data";let mut body=wire::tag(&mut old,payload,true).to_vec();body.extend_from_slice(payload);client.write_all(&wire::frame(wire::APP,&body)).await.unwrap();
             let outcome=server.await.unwrap();assert!(!matches!(outcome,Ok(Outcome::Ready(_))),"HRR 常量 MAC 被错误当成当前连接认证");assert!(origin.await.unwrap());
         }).await.expect("HRR 重放拒绝边界超时");
+    }
+
+    struct ProbeInner(Arc<AtomicUsize>);
+    impl InboundProtocol for ProbeInner {
+        fn credential_manifest(&self) -> CredentialManifest {
+            CredentialManifest::new()
+        }
+        fn handle<'a>(
+            &'a self,
+            _stream: BoxStream,
+            access: IngressBinding,
+            context: InboundContext,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                let target = Destination::new("127.0.0.1", 9)?;
+                access
+                    .local(&context)?
+                    .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(1)))
+                    .await?;
+                Ok(())
+            })
+        }
+    }
+    struct ProbeAccess(Arc<AtomicUsize>);
+    impl Outbound for ProbeAccess {
+        fn capabilities(&self) -> kerlico_core::Capabilities {
+            kerlico_core::Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp: true,
+            }
+        }
+        fn connect_tcp<'a>(
+            &'a self,
+            _target: &'a Destination,
+            _context: &'a ConnectContext,
+        ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
+            Box::pin(async move {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(kerlico_core::Error::Unsupported("测试访问探针不拨号"))
+            })
+        }
+        fn connect_udp<'a>(
+            &'a self,
+            _target: &'a Destination,
+            _context: &'a ConnectContext,
+        ) -> BoxFuture<'a, Result<DatagramChannel>> {
+            Box::pin(async { Err(kerlico_core::Error::Unsupported("测试不使用 UDP")) })
+        }
+    }
+    struct Events;
+    impl NodeObserver for Events {
+        fn record(&self, _: NodeEvent) {}
+    }
+    #[tokio::test]
+    async fn hrr_only_old_mac_never_invokes_inner_or_target_access() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let key = b"hrr-replay-test";
+            let hello = crate::tls::signed_hello_for_replay_test(key);
+            let (_, _, sid) = wire::hello(&hello, 1).unwrap();
+            let mut retry = vec![2, 0, 0, 0, 3, 3];
+            retry.extend_from_slice(&wire::HRR_RANDOM);
+            retry.push(sid.len() as u8);
+            retry.extend_from_slice(sid);
+            retry.extend_from_slice(&[0x13, 1, 0, 0, 12, 0, 43, 0, 2, 3, 4, 0, 51, 0, 2, 0, 23]);
+            let length = retry.len()-4;
+            retry[1..4].copy_from_slice(&[(length >> 16) as u8, (length >> 8) as u8, length as u8]);
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let origin = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                wire::read(&mut stream).await.unwrap().unwrap();
+                stream.write_all(&wire::frame(wire::HANDSHAKE, &retry)).await.unwrap();
+                let _ = wire::read(&mut stream).await;
+                let _ = stream.shutdown().await;
+            });
+            let settings: config::Server = config::parse(&json!({"version":3,"password":"hrr-replay-test","handshake":{"host":"127.0.0.1","port":port},"inner":{"type":"shadowsocks","options":{"method":"aes-128-gcm","password":"inner-test"}}})).unwrap();
+            let keys = settings.validate().unwrap();
+            let inner_calls = Arc::new(AtomicUsize::new(0));
+            let access_calls = Arc::new(AtomicUsize::new(0));
+            let node = crate::ShadowTlsNode { settings, keys, inner: Arc::new(ProbeInner(inner_calls.clone())) };
+            let context = InboundContext {
+                peer_lease: None,
+    tasks: kerlico_core::NodeTasks::new(kerlico_core::NodeId::parse("test-node").unwrap(), kerlico_core::CancellationToken::new()),
+                peer_addr: None, local_addr: None, cancel: CancellationToken::new(),
+                connect_timeout: Duration::from_secs(2), idle_timeout: Duration::from_secs(2),
+                drain_timeout: Duration::from_millis(100), max_datagram_size: 65535, max_streams: 1,
+                stream_budget: StreamBudget::new(Arc::new(tokio::sync::Semaphore::new(1)), Arc::new(tokio::sync::Semaphore::new(1))),
+                events: Arc::new(Events),
+            };
+            let input = kerlico_config::NodeBuildContext::local_for_test(json!({}));
+            let access = kerlico_egress::testing::ingress(&input, Arc::new(ProbeAccess(access_calls.clone())), kerlico_core::TargetPolicy::Remote).unwrap();
+            let (raw, mut client) = tokio::io::duplex(4096);
+            let task = tokio::spawn(async move { node.handle(Box::new(raw), access, context).await });
+            client.write_all(&hello).await.unwrap();
+            let retry = wire::read(&mut client).await.unwrap().unwrap();
+            assert_eq!(wire::server_hello(&retry).unwrap().0, wire::HRR_RANDOM);
+            let mut old = wire::directional(key, &wire::HRR_RANDOM, b'C');
+            let mut body = wire::tag(&mut old, b"recorded-data", true).to_vec();
+            body.extend_from_slice(b"recorded-data");
+            client.write_all(&wire::frame(wire::APP, &body)).await.unwrap();
+            assert!(task.await.unwrap().is_err());
+            origin.await.unwrap();
+            assert_eq!(inner_calls.load(Ordering::SeqCst), 0, "HRR 旧 MAC 不得移交内层");
+            assert_eq!(access_calls.load(Ordering::SeqCst), 0, "HRR 旧 MAC 不得调用目标访问服务");
+        }).await.expect("HRR 拒绝路径与目标访问隔离超时");
     }
 }

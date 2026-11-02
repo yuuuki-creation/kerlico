@@ -31,7 +31,7 @@ def main():
     duplicate["nodes"].append(second)
     cases.append(("duplicate-seed",duplicate,False))
     independent=copy.deepcopy(duplicate)
-    independent["nodes"][1]["options"]["protocol"]["key"]="synthetic-sudoku-cli-node-b-secret"
+    independent["nodes"][1]["members"][0]["native_credential"]["key"]="synthetic-sudoku-cli-node-b-secret"
     cases.append(("independent-dual-stack",independent,True))
     unsafe=kernel_node(dict(base,aead="none"),"127.0.0.1",10443,{})
     unsafe["nodes"]=unsafe.pop("local_inbounds")

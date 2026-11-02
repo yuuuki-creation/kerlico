@@ -7,6 +7,7 @@ use std::{
     future::poll_fn,
     option::Option,
     result::Result,
+    sync::Arc,
     task::{ready, Context, Poll},
 };
 
@@ -18,7 +19,7 @@ use tokio::sync::mpsc;
 use crate::{
     connection::ConnectionInner,
     error::{internal_error::InternalConnectionError, Code, ConnectionError},
-    frame::FrameStream,
+    frame::{FrameProgress, FrameStream},
     proto::{
         frame::{Frame, PayloadLen},
         push::PushId,
@@ -59,6 +60,11 @@ where
     pub(super) recv_closing: Option<PushId>,
     // The id of the last stream received by this connection.
     pub(super) last_accepted_stream: Option<StreamId>,
+}
+
+enum ControlStatus {
+    WaitingForInput,
+    Yielded,
 }
 
 impl<C, B> ConnectionState for Connection<C, B>
@@ -144,9 +150,13 @@ where
         &self,
         stream: FrameStream<C::BidiStream, B>,
     ) -> RequestResolver<C, B> {
+        let request_end = Arc::new(RequestEnd {
+            request_end: self.request_end_send.clone(),
+            stream_id: stream.send_id(),
+        });
         RequestResolver {
             frame_stream: stream,
-            request_end_send: self.request_end_send.clone(),
+            request_end,
             send_grease_frame: self.inner.send_grease_frame,
             max_field_section_size: self.max_field_section_size,
             shared: self.inner.shared.clone(),
@@ -175,17 +185,15 @@ where
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<C::BidiStream>, ConnectionError>> {
-        let _ = self.poll_control(cx)?;
+        let control = self.poll_control(cx)?;
         let _ = self.poll_requests_completion(cx);
         loop {
             let conn = self.inner.poll_accept_bi(cx)?;
             return match conn {
                 Poll::Pending => {
-                    let done = if conn.is_pending() {
-                        self.recv_closing.is_some() && self.poll_requests_completion(cx).is_ready()
-                    } else {
-                        self.poll_requests_completion(cx).is_ready()
-                    };
+                    let done = matches!(control, ControlStatus::WaitingForInput)
+                        && self.recv_closing.is_some()
+                        && self.poll_requests_completion(cx).is_ready();
 
                     if done {
                         Poll::Ready(Ok(None))
@@ -203,7 +211,9 @@ where
                         if s.send_id() > max_id {
                             s.stop_sending(Code::H3_REQUEST_REJECTED.value());
                             s.reset(Code::H3_REQUEST_REJECTED.value());
-                            if self.poll_requests_completion(cx).is_ready() {
+                            if matches!(control, ControlStatus::WaitingForInput)
+                                && self.poll_requests_completion(cx).is_ready()
+                            {
                                 break Poll::Ready(Ok(None));
                             }
                             continue;
@@ -218,20 +228,28 @@ where
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
-    pub(crate) fn poll_control(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), ConnectionError>> {
-        while (self.poll_next_control(cx)?).is_ready() {}
-        Poll::Pending
+    fn poll_control(&mut self, cx: &mut Context<'_>) -> Result<ControlStatus, ConnectionError> {
+        // 控制帧持续就绪时仍须让外层取消、定时器和既有请求获得执行机会。
+        for _ in 0..64 {
+            match self.poll_next_control(cx)? {
+                Poll::Ready(FrameProgress::Frame(_)) => (),
+                Poll::Ready(FrameProgress::Yielded) => return Ok(ControlStatus::Yielded),
+                Poll::Pending => return Ok(ControlStatus::WaitingForInput),
+            }
+        }
+        cx.waker().wake_by_ref();
+        Ok(ControlStatus::Yielded)
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
-    pub(crate) fn poll_next_control(
+    fn poll_next_control(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<Frame<PayloadLen>, ConnectionError>> {
-        let frame = ready!(self.inner.poll_control(cx))?;
+    ) -> Poll<Result<FrameProgress<Frame<PayloadLen>>, ConnectionError>> {
+        let frame = match ready!(self.inner.poll_control_with_progress(cx))? {
+            FrameProgress::Frame(frame) => frame,
+            FrameProgress::Yielded => return Poll::Ready(Ok(FrameProgress::Yielded)),
+        };
 
         match &frame {
             Frame::Settings(_setting) => {
@@ -271,7 +289,7 @@ where
                 )));
             }
         }
-        Poll::Ready(Ok(frame))
+        Poll::Ready(Ok(FrameProgress::Frame(frame)))
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]

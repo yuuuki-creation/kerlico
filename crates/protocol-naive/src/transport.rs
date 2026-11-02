@@ -1,7 +1,7 @@
 //! HTTP流与内部双向字节流的适配；每次只缓存有界DATA并遵守窗口背压。
 use bytes::{Buf, Bytes};
 use futures_util::future::poll_fn;
-use kerlico_core::{BoxStream, CancellationToken};
+use kerlico_core::{BoxStream, CancellationToken, Result};
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub(crate) type H3Bidi = h3_quinn::BidiStream<Bytes>;
@@ -66,12 +66,13 @@ async fn h2_recv(
     writer.shutdown().await
 }
 pub(crate) fn h2(
+    owner: &crate::runtime::BridgeOwner,
     reader: h2::RecvStream,
     writer: h2::SendStream<Bytes>,
     cancel: CancellationToken,
     hold: Option<Box<dyn Send + Sync>>,
-) -> BoxStream {
-    crate::io::spawn(cancel, hold, move |peer, complete| async move {
+) -> Result<BoxStream> {
+    crate::io::spawn(owner, cancel, hold, move |peer, complete| async move {
         let (local_read, local_write) = tokio::io::split(peer);
         let incoming = async {
             let result = h2_recv(reader, local_write).await;
@@ -86,12 +87,13 @@ pub(crate) fn h2(
     })
 }
 pub(crate) fn h3_client(
+    owner: &crate::runtime::BridgeOwner,
     stream: h3::client::RequestStream<H3Bidi, Bytes>,
     cancel: CancellationToken,
     hold: Option<Box<dyn Send + Sync>>,
-) -> BoxStream {
+) -> Result<BoxStream> {
     let (mut writer, mut reader) = stream.split();
-    crate::io::spawn(cancel, hold, move |peer, complete| async move {
+    crate::io::spawn(owner, cancel, hold, move |peer, complete| async move {
         let (mut local_read, mut local_write) = tokio::io::split(peer);
         let incoming = async {
             let result = async {
@@ -140,11 +142,12 @@ pub(crate) fn h3_client(
     })
 }
 pub(crate) fn h3_server(
+    owner: &crate::runtime::BridgeOwner,
     stream: h3::server::RequestStream<H3Bidi, Bytes>,
     cancel: CancellationToken,
-) -> BoxStream {
+) -> Result<BoxStream> {
     let (mut writer, mut reader) = stream.split();
-    crate::io::spawn(cancel, None, move |peer, complete| async move {
+    crate::io::spawn(owner, cancel, None, move |peer, complete| async move {
         let (mut local_read, mut local_write) = tokio::io::split(peer);
         let incoming = async {
             let result = async {

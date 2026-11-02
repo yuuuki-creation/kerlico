@@ -4,14 +4,15 @@ use crate::{
 };
 use bytes::Bytes;
 use http::{HeaderValue, Request};
-use kerlico_config::OutboundFactory;
+use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
-    Destination, Error, Outbound, Result,
+    Destination, Error, Outbound, ResourceKey, Result, ServiceContext, ServiceTask, TargetPolicy,
 };
 use rand::Rng;
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     future::poll_fn,
     net::UdpSocket,
     sync::{Arc, Mutex as StdMutex},
@@ -23,22 +24,30 @@ struct Session {
     endpoint: quinn::Endpoint,
     connection: quinn::Connection,
     auth_sender: StdMutex<Option<AuthSender>>,
-    driver: tokio::task::JoinHandle<()>,
-    udp_driver: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    driver: StdMutex<Option<ServiceTask<()>>>,
+    udp_driver: StdMutex<Option<ServiceTask<()>>>,
     registry: Arc<udp::Registry>,
     tcp_slots: Arc<Semaphore>,
     udp_enabled: bool,
 }
 impl Session {
     fn alive(&self) -> bool {
-        self.connection.close_reason().is_none() && !self.driver.is_finished()
+        self.connection.close_reason().is_none()
+            && self
+                .driver
+                .lock()
+                .is_ok_and(|driver| driver.as_ref().is_some_and(|driver| !driver.is_finished()))
     }
 }
 impl Drop for Session {
     fn drop(&mut self) {
         self.connection.close(0x100u32.into(), b"");
         self.endpoint.close(0x100u32.into(), b"");
-        self.driver.abort();
+        if let Ok(driver) = self.driver.get_mut()
+            && let Some(driver) = driver.take()
+        {
+            driver.abort();
+        }
         if let Ok(driver) = self.udp_driver.get_mut()
             && let Some(driver) = driver.take()
         {
@@ -52,7 +61,7 @@ impl Drop for Session {
 struct Pending {
     endpoint: Option<quinn::Endpoint>,
     connection: Option<quinn::Connection>,
-    driver: Option<tokio::task::JoinHandle<()>>,
+    driver: Option<ServiceTask<()>>,
 }
 impl Drop for Pending {
     fn drop(&mut self) {
@@ -71,35 +80,70 @@ struct TcpOwner {
     _session: Arc<Session>,
     _permit: OwnedSemaphorePermit,
 }
+type MemberSession = Mutex<Option<Arc<Session>>>;
 pub struct Hysteria2Outbound {
     server: Destination,
     name: String,
-    tls: Arc<rustls::ClientConfig>,
+    tls: quinn::ClientConfig,
     auth: HeaderValue,
     salamander: Option<Arc<String>>,
     limits: Limits,
-    pool: Mutex<Option<Arc<Session>>>,
+    pool: Mutex<HashMap<ResourceKey, Arc<MemberSession>>>,
+    host: ServiceContext,
 }
 impl Hysteria2Outbound {
-    pub fn from_options(options: &Value) -> Result<Self> {
+    fn compile(options: &Value) -> Result<OutboundPlan> {
         let options: ClientOptions = serde_json::from_value(options.clone())
             .map_err(|_| Error::Config("Hysteria2 出站字段不合法".into()))?;
         config::auth(&options.auth)?;
         options.limits.validate()?;
         let mut auth = HeaderValue::from_str(&options.auth).map_err(|_| invalid())?;
         auth.set_sensitive(true);
-        Ok(Self {
-            server: Destination::new(&options.server.host, options.server.port)?,
-            name: options.tls.server_name.clone(),
-            tls: config::client_tls(&options.tls)?,
-            auth,
-            salamander: config::obfs(options.salamander_password)?,
-            limits: options.limits,
-            pool: Mutex::new(None),
-        })
+        let server = Destination::new(&options.server.host, options.server.port)?;
+        let name = options.tls.server_name.clone();
+        let salamander = config::obfs(options.salamander_password)?;
+        let tls = config::client_tls(&options.tls)?;
+        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from((*tls).clone())
+            .map_err(|_| invalid())?;
+        let mut tls = quinn::ClientConfig::new(Arc::new(crypto));
+        tls.transport_config(
+            options
+                .limits
+                .transport(options.limits.max_streams, salamander.is_some())?,
+        );
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp: true,
+            },
+            true,
+            TargetPolicy::Remote,
+            move |host| {
+                Box::pin(async move {
+                    Ok(Arc::new(Self {
+                        server,
+                        name,
+                        tls,
+                        auth,
+                        salamander,
+                        limits: options.limits,
+                        pool: Mutex::new(HashMap::new()),
+                        host,
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
-    async fn session(&self) -> Result<Arc<Session>> {
-        let mut pool = self.pool.lock().await;
+    async fn session(&self, context: &ConnectContext) -> Result<Arc<Session>> {
+        let bucket = {
+            let mut buckets = self.pool.lock().await;
+            buckets
+                .entry(context.resource_key().clone())
+                .or_insert_with(|| Arc::new(Mutex::new(None)))
+                .clone()
+        };
+        let mut pool = bucket.lock().await;
         if let Some(session) = pool.as_ref().filter(|session| session.alive()) {
             return Ok(session.clone());
         }
@@ -116,20 +160,15 @@ impl Hysteria2Outbound {
             "0.0.0.0:0"
         })?;
         socket.set_nonblocking(true)?;
-        let transport = self
-            .limits
-            .transport(self.limits.max_streams, self.salamander.is_some())?;
-        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from((*self.tls).clone())
-            .map_err(|_| invalid())?;
-        let mut client = quinn::ClientConfig::new(Arc::new(crypto));
-        client.transport_config(transport);
         let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
             None,
             crate::socket::wrap(socket, self.salamander.clone())?,
-            Arc::new(quinn::TokioRuntime),
+            crate::runtime::ServiceRuntime::new(self.host.clone()),
         )?;
-        endpoint.set_default_client_config(client);
+        let mut tls = self.tls.clone();
+        tls.token_store(Arc::new(quinn::TokenMemoryCache::default()));
+        endpoint.set_default_client_config(tls);
         let mut pending = Pending {
             endpoint: Some(endpoint),
             connection: None,
@@ -150,10 +189,10 @@ impl Hysteria2Outbound {
             .await
             .map_err(|_| invalid())?;
         let driver_connection = connection.clone();
-        pending.driver = Some(tokio::spawn(async move {
+        pending.driver = Some(self.host.spawn_tracked(async move {
             let _ = poll_fn(|cx| driver.poll_close(cx)).await;
             driver_connection.close(0x100u32.into(), b"");
-        }));
+        })?);
         let padding: String = rand::thread_rng()
             .sample_iter(rand::distributions::Alphanumeric)
             .take(256)
@@ -199,12 +238,16 @@ impl Hysteria2Outbound {
         stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
         drop(stream);
         let registry = udp::Registry::new(self.limits.clone());
-        let udp_driver = udp_enabled.then(|| registry.spawn(connection.clone()));
+        let udp_driver = if udp_enabled {
+            Some(registry.spawn(connection.clone(), &self.host)?)
+        } else {
+            None
+        };
         let session = Arc::new(Session {
             endpoint: pending.endpoint.take().expect("端点存在"),
             connection: pending.connection.take().expect("连接存在"),
             auth_sender: StdMutex::new(Some(sender)),
-            driver: pending.driver.take().expect("驱动已创建"),
+            driver: StdMutex::new(pending.driver.take()),
             udp_driver: StdMutex::new(udp_driver),
             registry,
             tcp_slots: Arc::new(Semaphore::new(self.limits.max_streams)),
@@ -215,6 +258,32 @@ impl Hysteria2Outbound {
     }
 }
 impl Outbound for Hysteria2Outbound {
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.host.cancel().cancel();
+            let buckets = { std::mem::take(&mut *self.pool.lock().await) };
+            for bucket in buckets.into_values() {
+                let session = { bucket.lock().await.take() };
+                let Some(session) = session else {
+                    continue;
+                };
+                session.connection.close(0x100u32.into(), b"");
+                session.endpoint.close(0x100u32.into(), b"");
+                let driver = session.driver.lock().ok().and_then(|mut task| task.take());
+                let udp = session
+                    .udp_driver
+                    .lock()
+                    .ok()
+                    .and_then(|mut task| task.take());
+                for task in [driver, udp].into_iter().flatten() {
+                    task.abort();
+                    let _ = task.await;
+                }
+                session.endpoint.wait_idle().await;
+            }
+            Ok(())
+        })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tcp: true,
@@ -229,11 +298,11 @@ impl Outbound for Hysteria2Outbound {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
             context
                 .run(async {
-                    let session = self.session().await?;
+                    let session = self.session(context).await?;
                     let permit = session
                         .tcp_slots
                         .clone()
@@ -256,6 +325,10 @@ impl Outbound for Hysteria2Outbound {
                     Ok(Box::new(stream) as BoxStream)
                 })
                 .await
+                .map(|stream| kerlico_core::OpenedTcp {
+                    stream,
+                    info: kerlico_core::TcpConnectInfo::unknown(),
+                })
         })
     }
     fn connect_udp<'a>(
@@ -266,7 +339,7 @@ impl Outbound for Hysteria2Outbound {
         Box::pin(async move {
             context
                 .run(async {
-                    let session = self.session().await?;
+                    let session = self.session(context).await?;
                     if !session.udp_enabled || session.connection.max_datagram_size().is_none() {
                         return Err(Error::Unsupported("Hysteria2 对端未启用 UDP"));
                     }
@@ -288,7 +361,7 @@ impl Outbound for Hysteria2Outbound {
         Box::pin(async move {
             context
                 .run(async {
-                    let session = self.session().await?;
+                    let session = self.session(context).await?;
                     if !session.udp_enabled || session.connection.max_datagram_size().is_none() {
                         return Err(Error::Unsupported("Hysteria2 对端未启用 UDP"));
                     }
@@ -308,7 +381,7 @@ impl OutboundFactory for Hysteria2Factory {
     fn kind(&self) -> &'static str {
         "hysteria2"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn Outbound>> {
-        Ok(Arc::new(Hysteria2Outbound::from_options(options)?))
+    fn compile(&self, options: &Value) -> Result<OutboundPlan> {
+        Hysteria2Outbound::compile(options)
     }
 }

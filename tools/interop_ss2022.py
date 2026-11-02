@@ -138,7 +138,9 @@ async def main(args):
                             if role == "client":
                                 rust.update(server="127.0.0.1", port=ss_port, identity_keys=[service] if multi else [])
                             else:
-                                rust["users"] = [user] if multi else []
+                                rust = {"options": {"method": method}, "native_credentials": [{"key": user}]}
+                                if multi:
+                                    rust["options"]["identity_key"] = service
                             upstream = upstream_config(core, "server" if role == "client" else "client", method, forward_port, ss_port, target_port, service, user, multi, target_host)
                             if args.debug_peers:
                                 upstream["log"] = {"loglevel": "debug"} if core == "xray" else {"level": "debug"}

@@ -1,4 +1,20 @@
 //! VMess 载体只传递字节；不处理 UUID 或网站出口。
+enum LayerPlan {
+    Raw,
+    WebSocket(WebSocketConfig),
+    HttpUpgrade(HttpUpgradeConfig),
+    Grpc(GrpcConfig),
+}
+impl LayerPlan {
+    fn start(&self) -> TransportLayer {
+        match self {
+            Self::Raw => TransportLayer::Raw,
+            Self::WebSocket(config) => TransportLayer::WebSocket(config.clone()),
+            Self::HttpUpgrade(config) => TransportLayer::HttpUpgrade(config.clone()),
+            Self::Grpc(config) => TransportLayer::Grpc(GrpcTransport::new(config.clone())),
+        }
+    }
+}
 use kerlico_core::{BoxStream, Destination, Error, Result};
 use serde::Deserialize;
 use std::{io::Cursor, sync::Arc};
@@ -80,17 +96,17 @@ impl Transport {
             Self::Tcp => Vec::new(),
         }
     }
-    fn layer(&self, default_host: String) -> Result<TransportLayer> {
+    fn layer(&self, default_host: String) -> Result<LayerPlan> {
         Ok(match self {
-            Self::Tcp => TransportLayer::Raw,
-            Self::Ws { path, host } => TransportLayer::WebSocket(WebSocketConfig {
+            Self::Tcp => LayerPlan::Raw,
+            Self::Ws { path, host } => LayerPlan::WebSocket(WebSocketConfig {
                 path: path.clone(),
                 host: host.clone().unwrap_or(default_host),
                 headers: Vec::new(),
                 early_data_bytes: 0,
                 heartbeat_period_secs: 0,
             }),
-            Self::Httpupgrade { path, host } => TransportLayer::HttpUpgrade(HttpUpgradeConfig {
+            Self::Httpupgrade { path, host } => LayerPlan::HttpUpgrade(HttpUpgradeConfig {
                 path: path.clone(),
                 host: host.clone().unwrap_or(default_host),
                 headers: Vec::new(),
@@ -99,7 +115,7 @@ impl Transport {
                 service_name,
                 authority,
                 multi_mode,
-            } => TransportLayer::Grpc(GrpcTransport::new(GrpcConfig {
+            } => LayerPlan::Grpc(GrpcConfig {
                 service_name: service_name.clone(),
                 authority: authority
                     .clone()
@@ -112,7 +128,7 @@ impl Transport {
                 health_check_timeout_secs: 10,
                 permit_without_stream: false,
                 initial_windows_size: 0,
-            })),
+            }),
         })
     }
 }
@@ -151,9 +167,27 @@ pub(crate) struct Client {
     server: Destination,
     dialer: TransportDialer,
     connector: ConnectorConfig,
-    layer: TransportLayer,
+    layer: LayerPlan,
+    resources:
+        std::sync::Mutex<std::collections::HashMap<kerlico_core::ResourceKey, TransportLayer>>,
+    owner: Option<xray_transport::lifecycle::TaskOwner>,
 }
 impl Client {
+    pub fn start(mut self, host: &kerlico_core::ServiceContext) -> Result<Self> {
+        let owner = xray_transport::lifecycle::TaskOwner::new();
+        let stop = host.cancel();
+        let waiting = owner.clone();
+        let guard = owner.abort_on_drop();
+        host.spawn(async move {
+            let _guard = guard;
+            tokio::select! {_=stop.cancelled()=>{},_=waiting.failed()=>{stop.cancel();}}
+            waiting.shutdown().await;
+        })?;
+        self.owner = Some(owner);
+
+        Ok(self)
+    }
+
     pub fn build(
         server: Destination,
         security: ClientSecurity,
@@ -189,6 +223,7 @@ impl Client {
                 .map_err(|_| invalid())?
                 .with_root_certificates(roots)
                 .with_no_client_auth();
+                tls.resumption = rustls::client::Resumption::disabled();
                 tls.alpn_protocols = transport.alpn();
                 dialer = TransportDialer::with_tls_connector(
                     TlsConnector::with_pinned_client_config(Arc::new(tls)),
@@ -214,9 +249,38 @@ impl Client {
             dialer,
             connector,
             layer,
+            resources: std::sync::Mutex::new(std::collections::HashMap::new()),
+            owner: None,
         })
     }
-    pub async fn open(&self) -> Result<BoxStream> {
+    pub async fn shutdown(&self) -> Result<()> {
+        let owner = self.owner.as_ref().ok_or_else(invalid)?;
+        owner.close_admission();
+        self.resources.lock().map_err(|_| invalid())?.clear();
+        owner.shutdown().await;
+        if owner.failed_tasks() > 0 {
+            return Err(Error::Protocol("载体后台任务异常退出"));
+        }
+        Ok(())
+    }
+    pub async fn open(&self, context: &kerlico_core::ConnectContext) -> Result<BoxStream> {
+        let owner = self.owner.as_ref().ok_or_else(invalid)?;
+        if owner.is_closed() {
+            return Err(Error::Cancelled);
+        }
+        if owner.is_closed() {
+            return Err(Error::Cancelled);
+        }
+        owner.scope(self.open_scoped(context)).await
+    }
+    async fn open_scoped(&self, context: &kerlico_core::ConnectContext) -> Result<BoxStream> {
+        let layer = {
+            let mut resources = self.resources.lock().map_err(|_| invalid())?;
+            resources
+                .entry(context.resource_key().clone())
+                .or_insert_with(|| self.layer.start())
+                .clone()
+        };
         let candidates = tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
             .await?
             .take(32)
@@ -233,10 +297,12 @@ impl Client {
         );
         let stream = self
             .dialer
-            .connect_stream(&self.connector, &self.layer, &target, &candidates, None)
+            .connect_stream(&self.connector, &layer, &target, &candidates, None)
             .await
             .map_err(|_| Error::Protocol("VMess 载体建立失败"))?;
-        Ok(Box::new(ClientIo(stream)))
+        Ok(Box::new(ClientIo(
+            self.owner.as_ref().ok_or_else(invalid)?.wrap(stream),
+        )))
     }
 }
 struct ClientIo(BoxedTransportStream);
@@ -311,6 +377,8 @@ pub(crate) fn server_tls(
     .with_no_client_auth()
     .with_single_cert(certs, key)
     .map_err(|_| invalid())?;
+    config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+    config.send_tls13_tickets = 0;
     config.alpn_protocols = transport.alpn();
     Ok(Some(tokio_rustls::TlsAcceptor::from(Arc::new(config))))
 }

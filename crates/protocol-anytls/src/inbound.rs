@@ -4,13 +4,12 @@ use crate::{
     session::{Incoming, Session},
     uot,
 };
-use kerlico_config::NodeFactory;
+use kerlico_config::{NodeBuildContext, NodeFactory};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, ConnectContext, Error, InboundContext, InboundProtocol,
-    Result,
+    BoxFuture, BoxStream, ConnectContext, CredentialManifest, CredentialSet, Error, InboundContext,
+    InboundProtocol, IngressBinding, PeerSession, Result,
 };
 use serde::Deserialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -24,7 +23,6 @@ pub struct AnyTlsNodeFactory;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Options {
-    passwords: Vec<String>,
     tls: Tls,
     #[serde(default)]
     padding_scheme: Option<String>,
@@ -42,7 +40,7 @@ struct Tls {
     private_key_file: Option<String>,
 }
 struct AnyTlsNode {
-    passwords: Vec<[u8; 32]>,
+    passwords: CredentialSet<[u8; 32]>,
     tls: TlsAcceptor,
     padding: Arc<RwLock<Padding>>,
 }
@@ -65,14 +63,26 @@ impl NodeFactory for AnyTlsNodeFactory {
     fn kind(&self) -> &'static str {
         "anytls"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn InboundProtocol>> {
-        let options: Options = serde_json::from_value(options.clone()).map_err(|_| invalid())?;
-        if options.passwords.is_empty() || options.passwords.len() > 256 {
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        let options: Options =
+            serde_json::from_value(input.options().clone()).map_err(|_| invalid())?;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Credential {
+            password: String,
+        }
+        let credentials = input
+            .native_credentials()
+            .iter()
+            .map(|value| serde_json::from_value::<Credential>(value.clone()).map_err(|_| invalid()))
+            .collect::<Result<Vec<_>>>()?;
+        if credentials.is_empty() || credentials.len() > 256 {
             return Err(invalid());
         }
         let mut seen = BTreeSet::new();
         let mut passwords = Vec::new();
-        for password in options.passwords {
+        for credential in credentials {
+            let password = credential.password;
             if password.is_empty() || password.len() > 4096 {
                 return Err(invalid());
             }
@@ -100,7 +110,7 @@ impl NodeFactory for AnyTlsNodeFactory {
         .map_err(|_| invalid())?;
         tls.send_tls13_tickets = 0;
         Ok(Arc::new(AnyTlsNode {
-            passwords,
+            passwords: input.credentials(passwords)?,
             tls: TlsAcceptor::from(Arc::new(tls)),
             padding: Arc::new(RwLock::new(Padding::parse(
                 options
@@ -112,16 +122,15 @@ impl NodeFactory for AnyTlsNodeFactory {
     }
 }
 impl InboundProtocol for AnyTlsNode {
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
-        self.passwords
-            .iter()
-            .map(|password| {
-                let mut digest = Sha256::new();
-                digest.update(b"kerlico/anytls/node-password/");
-                digest.update(password);
-                digest.finalize().into()
-            })
-            .collect()
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = CredentialManifest::new();
+        for (slot, (_, password)) in self.passwords.rows().enumerate() {
+            let mut digest = Sha256::new();
+            digest.update(b"kerlico/anytls/node-password/");
+            digest.update(password);
+            manifest.authentication("anytls", slot, digest.finalize().into());
+        }
+        manifest
     }
     fn requires_loopback(&self) -> bool {
         false
@@ -129,30 +138,25 @@ impl InboundProtocol for AnyTlsNode {
     fn handle<'a>(
         &'a self,
         stream: BoxStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let connection = ConnectContext {
-                cancel: context.cancel.clone(),
-                timeout: context.connect_timeout,
-            };
-            let stream = connection
+            let connection =
+                ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
+            let (stream, access) = connection
                 .run(async {
                     let mut stream = self.tls.accept(stream).await?;
                     let mut password = [0; 32];
                     stream.read_exact(&mut password).await?;
-                    let mut valid = subtle::Choice::from(0);
-                    for expected in &self.passwords {
-                        valid |= password.ct_eq(expected);
-                    }
-                    if !bool::from(valid) {
-                        return Err(Error::Rejected);
-                    }
+                    let verified = self.passwords.verify(&password, |expected, password| {
+                        Ok(bool::from(password.ct_eq(expected)).then_some(()))
+                    })?;
+                    let (access, ()) = access.authenticated(verified, &context)?;
                     let padding = stream.read_u16().await? as usize;
                     let mut bytes = vec![0; padding];
                     stream.read_exact(&mut bytes).await?;
-                    Ok(Box::new(stream) as BoxStream)
+                    Ok((Box::new(stream) as BoxStream, access))
                 })
                 .await?;
             let (tx, mut rx) = mpsc::channel::<Incoming>(context.max_streams.clamp(1, 64));
@@ -163,6 +167,7 @@ impl InboundProtocol for AnyTlsNode {
                 context.max_streams,
                 context.idle_timeout,
                 Some(tx),
+                crate::session::Owner::Node(context.tasks.clone()),
             )
             .await?;
             let mut workers = JoinSet::new();
@@ -171,34 +176,47 @@ impl InboundProtocol for AnyTlsNode {
                 tokio::select! {
                     biased;
                     _ = context.cancel.cancelled()=>break Err(Error::Cancelled),
-                    _ = session.closed.cancelled()=>break Ok(()),
+                    _ = session.closed.cancelled()=>break crate::flow::result(session.finish_reason()),
                     next=rx.recv()=>{
                         let Some(incoming)=next else {break Ok(())};
                         if context.stream_budget.is_closed(){drop(incoming);continue}
                         let lease=if first {first=false;None}else {match context.stream_budget.try_acquire(){Ok(lease)=>Some(lease),Err(_)=>{drop(incoming);continue}}};
                         let access=access.clone();let context=context.clone();let session=session.clone();
-                        workers.spawn(async move {let _lease=lease;let _=serve_stream(incoming,access,context,session).await;});
+                        let owner=context.tasks.clone();
+                    let task=owner.spawn_tracked(async move {let _lease=lease;let _=serve_stream(incoming,access,context,session).await;})?;
+                    workers.spawn(async move {let _=task.await;});
                     },
                     _ = workers.join_next(),if !workers.is_empty()=>{},
                 }
             };
-            session.close();
-            workers.abort_all();
+            session.close_with(if result.is_err() {
+                crate::flow::reason(&result)
+            } else {
+                session.finish_reason()
+            });
+            if tokio::time::timeout(context.drain_timeout, async {
+                while workers.join_next().await.is_some() {}
+            })
+            .await
+            .is_err()
+            {
+                workers.abort_all();
+            }
             while workers.join_next().await.is_some() {}
+            session.shutdown().await;
             result
         })
     }
 }
 async fn serve_stream(
     mut incoming: Incoming,
-    access: Arc<dyn AccessService>,
+    access: PeerSession,
     context: InboundContext,
     session: Arc<Session>,
 ) -> Result<()> {
-    let connection = ConnectContext {
-        cancel: context.cancel.clone(),
-        timeout: context.connect_timeout,
-    };
+    let ending = incoming.ending.clone();
+    let connection =
+        ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
     let target = connection
         .run(codec::read_address(&mut incoming.stream, false))
         .await?;
@@ -206,7 +224,7 @@ async fn serve_stream(
         session
             .send(codec::Frame::new(codec::SYNACK, incoming.id, Vec::new()))
             .await?;
-        return uot::serve(incoming.stream, access, context).await;
+        return uot::serve(incoming.stream, access, context, ending).await;
     }
     let target = kerlico_core::Destination::new(&target.0, target.1)?;
     let remote = match access.connect_tcp(&target, &connection).await {
@@ -222,14 +240,23 @@ async fn serve_stream(
             return Err(error);
         }
     };
-    session
-        .send(codec::Frame::new(codec::SYNACK, incoming.id, Vec::new()))
-        .await?;
-    kerlico_core::relay_tcp(
+    if let Err(error) = connection
+        .run(session.send(codec::Frame::new(codec::SYNACK, incoming.id, Vec::new())))
+        .await
+    {
+        remote.finish(
+            (*ending.borrow()).unwrap_or(kerlico_core::FlowOutcome::Failed(
+                kerlico_core::FlowFailure::from_error(&error),
+            )),
+        );
+        return Err(error);
+    }
+    crate::flow::relay(
         incoming.stream,
         remote,
         context.idle_timeout,
         context.cancel,
+        ending,
     )
     .await
 }

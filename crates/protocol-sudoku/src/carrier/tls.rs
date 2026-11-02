@@ -26,6 +26,7 @@ pub(crate) fn client(options: &ClientTls, alpn: &[&[u8]]) -> Result<ClientConfig
             .map_err(|_| invalid())?
             .with_root_certificates(roots)
             .with_no_client_auth();
+    config.resumption = rustls::client::Resumption::disabled();
     config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     Ok(config)
 }
@@ -49,17 +50,27 @@ pub(crate) fn server(options: &ServerTls) -> Result<tokio_rustls::TlsAcceptor> {
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
+#[derive(Clone)]
+pub(crate) struct PreparedTls {
+    name: ServerName<'static>,
+    config: Arc<ClientConfig>,
+}
+impl PreparedTls {
+    pub fn new(options: &ClientTls, alpn: &[&[u8]]) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            name: ServerName::try_from(options.server_name.clone()).map_err(|_| invalid())?,
+            config: Arc::new(client(options, alpn)?),
+        }))
+    }
+}
 pub(crate) async fn connect_meta(
     endpoint: &super::endpoint::Endpoint,
-    options: Option<&ClientTls>,
-    alpn: &[&[u8]],
+    options: Option<&PreparedTls>,
 ) -> Result<(BoxStream, bool)> {
     let stream = endpoint.connect().await?;
     if let Some(options) = options {
-        let config = client(options, alpn)?;
-        let name = ServerName::try_from(options.server_name.clone()).map_err(|_| invalid())?;
-        let stream = tokio_rustls::TlsConnector::from(Arc::new(config))
-            .connect(name, stream)
+        let stream = tokio_rustls::TlsConnector::from(options.config.clone())
+            .connect(options.name.clone(), stream)
             .await?;
         let h2 = stream.get_ref().1.alpn_protocol() == Some(b"h2");
         Ok((Box::new(stream), h2))
@@ -69,10 +80,9 @@ pub(crate) async fn connect_meta(
 }
 pub(crate) async fn connect(
     endpoint: &super::endpoint::Endpoint,
-    options: Option<&ClientTls>,
-    alpn: &[&[u8]],
+    options: Option<&PreparedTls>,
 ) -> Result<BoxStream> {
-    connect_meta(endpoint, options, alpn)
+    connect_meta(endpoint, options)
         .await
         .map(|(stream, _)| stream)
 }

@@ -1,12 +1,13 @@
 use crate::{stream, tls, wire};
 use kerlico_core::{BoxFuture, BoxStream, ConnectContext, Destination, Result, StreamConnector};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::net::TcpStream;
 pub(crate) struct Connector {
     pub version: u8,
     pub strict: bool,
     pub key: Arc<[u8]>,
     pub settings: tls::Settings,
+    pub host: OnceLock<kerlico_core::ServiceContext>,
 }
 impl StreamConnector for Connector {
     fn tcp_eof(&self) -> bool {
@@ -18,6 +19,11 @@ impl StreamConnector for Connector {
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<BoxStream>> {
         Box::pin(async move {
+            let owner = self
+                .host
+                .get()
+                .cloned()
+                .ok_or(kerlico_core::Error::Protocol("ShadowTLS 出站尚未启动"))?;
             context
                 .run(async {
                     let tcp =
@@ -55,13 +61,14 @@ impl StreamConnector for Connector {
                             stream::WriteMode::V3(wire::directional(&self.key, &seed, b'C')),
                         )
                     };
-                    Ok(stream::wrap(
+                    stream::wrap(
                         raw,
                         Vec::new(),
                         read,
                         write,
                         context.cancel.clone(),
-                    ))
+                        stream::Owner::Service(owner),
+                    )
                 })
                 .await
         })

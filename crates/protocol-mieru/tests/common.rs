@@ -1,9 +1,8 @@
 #![allow(dead_code)]
-use kerlico_config::{NodeFactory, OutboundFactory};
+use kerlico_config::NodeFactory;
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramAssociation,
-    DatagramChannel, Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result,
-    StreamBudget,
+    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramAssociation, DatagramChannel,
+    Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use kerlico_mieru::{MieruFactory, MieruNodeFactory};
 use serde_json::{Value, json};
@@ -26,27 +25,34 @@ impl NodeObserver for Observer {
     fn record(&self, _: NodeEvent) {}
 }
 struct Access {
-    egress: kerlico_egress::Egress,
+    egress: Arc<dyn Outbound>,
     count: Arc<AtomicUsize>,
 }
-impl AccessService for Access {
+impl Outbound for Access {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn supports_udp_association(&self) -> bool {
-        AccessService::supports_udp_association(&self.egress)
+        self.egress.supports_udp_association()
     }
     fn associate_udp<'a>(
         &'a self,
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramAssociation>> {
         self.count.fetch_add(1, Ordering::AcqRel);
-        AccessService::associate_udp(&self.egress, context)
+        self.egress.associate_udp(context)
     }
     fn connect_tcp<'a>(
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         self.count.fetch_add(1, Ordering::AcqRel);
-        AccessService::connect_tcp(&self.egress, target, context)
+        self.egress.connect_tcp(target, context)
     }
     fn connect_udp<'a>(
         &'a self,
@@ -54,7 +60,7 @@ impl AccessService for Access {
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramChannel>> {
         self.count.fetch_add(1, Ordering::AcqRel);
-        AccessService::connect_udp(&self.egress, target, context)
+        self.egress.connect_udp(target, context)
     }
 }
 pub struct Setup<'a> {
@@ -86,6 +92,7 @@ impl<'a> Setup<'a> {
     }
 }
 pub struct Fixture {
+    operation: ConnectContext,
     pub outbound: Arc<dyn Outbound>,
     pub options: Value,
     pub node_options: Value,
@@ -106,10 +113,9 @@ impl Drop for Fixture {
 }
 impl Fixture {
     pub fn context(&self) -> ConnectContext {
-        ConnectContext {
-            cancel: self.cancel.clone(),
-            timeout: Duration::from_secs(8),
-        }
+        self.operation
+            .new_operation(Duration::from_secs(8))
+            .with_cancel(self.cancel.clone())
     }
     pub async fn stop(&mut self) {
         self.cancel.cancel();
@@ -132,20 +138,29 @@ pub async fn fixture(setup: Setup<'_>) -> Fixture {
     let user = format!("node-{}", setup.identity);
     let password = format!("synthetic-password-{}", setup.identity);
     let node_options = json!({"username":user,"password":password,"transport":setup.transport,"unsafe_udp_compatibility":setup.transport=="udp","traffic":{"low_entropy_mode":setup.mode,"mask_rotation":setup.rotation,"max_padding":32}});
-    let node = MieruNodeFactory.build(&node_options).unwrap();
+    let input = shared::node_input("mieru", &node_options);
+    let node = MieruNodeFactory.build(&input).unwrap();
     let global = Arc::new(Semaphore::new(64));
     let cancel = CancellationToken::new();
     let count = Arc::new(AtomicUsize::new(0));
     let accepts = Arc::new(AtomicUsize::new(0));
     let access = Arc::new(Access {
-        egress: kerlico_egress::Egress::new(
-            setup
-                .outbound
-                .unwrap_or_else(|| kerlico_net::DirectFactory.build(&json!({})).unwrap()),
+        egress: setup.outbound.unwrap_or(
+            shared::outbound(&kerlico_net::DirectFactory, &json!({}))
+                .await
+                .unwrap(),
         ),
         count: count.clone(),
     });
+    let access =
+        kerlico_egress::testing::ingress(&input, access, kerlico_core::TargetPolicy::Local)
+            .unwrap();
     let mut context = InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         peer_addr: None,
         local_addr: None,
         cancel: cancel.clone(),
@@ -194,8 +209,9 @@ pub async fn fixture(setup: Setup<'_>) -> Fixture {
         )
     };
     let options = json!({"server":{"host":setup.host,"port":address.port()},"username":user,"password":password,"transport":setup.transport,"unsafe_udp_compatibility":setup.transport=="udp","multiplexing":setup.multiplex,"no_wait":setup.no_wait,"idle_timeout_secs":10,"traffic":{"low_entropy_mode":setup.mode,"mask_rotation":setup.rotation,"max_padding":32}});
-    let outbound = MieruFactory.build(&options).unwrap();
+    let outbound = shared::outbound(&MieruFactory, &options).await.unwrap();
     Fixture {
+        operation: ConnectContext::new(Duration::from_secs(8)),
         outbound,
         options,
         node_options,
@@ -233,7 +249,8 @@ pub async fn tcp(fixture: &Fixture, target: &Destination, size: usize) {
         .outbound
         .connect_tcp(target, &context)
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     let data = (0..size).map(|i| (i % 251) as u8).collect::<Vec<_>>();
     stream
         .write_all(&(size as u32).to_be_bytes())
@@ -275,4 +292,12 @@ pub async fn wait_count(counter: &AtomicUsize, value: usize) {
     })
     .await
     .unwrap();
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

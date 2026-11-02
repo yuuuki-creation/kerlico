@@ -5,7 +5,23 @@ use tokio::io::{AsyncRead, AsyncWrite};
 /// 可克隆的协作取消信号；克隆共享取消状态，子令牌用于限制取消传播范围。
 pub use tokio_util::sync::CancellationToken;
 mod relay;
-pub use relay::relay_tcp;
+pub use relay::{relay_streams, relay_tcp, relay_tcp_io};
+mod flow;
+pub use flow::*;
+mod identity;
+pub use identity::*;
+mod access;
+pub use access::*;
+mod lifecycle;
+pub use lifecycle::*;
+mod node_tasks;
+pub use node_tasks::*;
+mod peer_lease;
+pub use peer_lease::*;
+mod device;
+pub use device::*;
+mod carrier;
+pub use carrier::CarrierUsage;
 
 /// 可在线程间移动的装箱异步操作；丢弃操作不会撤回已经发送的数据。
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -40,6 +56,21 @@ pub enum Error {
     /// 底层网络或本地 I/O 错误。
     #[error("网络 I/O 失败：{0}")]
     Io(#[from] io::Error),
+    /// 启动失败及同一启动事务的资源回收事实。
+    #[error("启动失败：{primary}；回收超时={cleanup_timed_out}，回收失败数={cleanup_failures}")]
+    Startup {
+        primary: Box<Error>,
+        cleanup_timed_out: bool,
+        cleanup_failures: usize,
+    },
+    #[error(
+        "运行回收未完全完成；主要错误={primary:?}，回收超时={cleanup_timed_out}，回收失败数={cleanup_failures}"
+    )]
+    Shutdown {
+        primary: Option<Box<Error>>,
+        cleanup_timed_out: bool,
+        cleanup_failures: usize,
+    },
 }
 
 /// 使用公共错误分类的操作结果。
@@ -143,13 +174,19 @@ pub struct Capabilities {
     pub udp: bool,
 }
 
-/// 建立操作的取消信号和相对超时；返回后的数据 I/O 生命周期另行管理。
+/// 一条建立链的取消信号、绝对期限与可信资源作用域。
 #[derive(Clone)]
 pub struct ConnectContext {
     /// 建立期间的协作取消信号；克隆上下文共享此信号。
     pub cancel: CancellationToken,
-    /// 每次 [`Self::run`] 调用各自使用的相对时长，不是绝对截止时间。
+    /// 本次操作的时长上限；增加该值不能延长内部绝对期限。
     pub timeout: Duration,
+    deadline: Deadline,
+    resource: ResourceKey,
+    service: ServiceStatus,
+    node_cancel: CancellationToken,
+    peer_cancel: CancellationToken,
+    target_mode: FamilyMode,
 }
 
 /// 只建立代理端点的载体流；网站地址继续由上层代理协议编码。
@@ -166,33 +203,101 @@ pub trait StreamConnector: Send + Sync {
     ) -> BoxFuture<'a, Result<BoxStream>>;
 }
 
-/// 认证材料的逻辑协议域；摘要不能写入日志，也不能用配置别名绕过查重。
-#[derive(Clone)]
-pub struct ScopedCredentialFingerprint {
-    /// 实际认证或秘密隔离的协议域，不得按配置别名或载体另造命名空间。
-    pub protocol: String,
-    /// 仅供配置查重的固定长度摘要；不是认证凭据，不得写入日志。
-    pub fingerprint: [u8; 32],
-}
-
 impl ConnectContext {
-    /// 创建独立取消域，并设置每次操作的相对超时。
+    /// 创建独立请求取消域和建立链的绝对截止时间。
     pub fn new(timeout: Duration) -> Self {
         Self {
             cancel: CancellationToken::new(),
             timeout,
+            deadline: Deadline::after(timeout),
+            resource: ResourceKey::detached(),
+            service: ServiceStatus::default(),
+            node_cancel: CancellationToken::new(),
+            peer_cancel: CancellationToken::new(),
+            target_mode: FamilyMode::DualV4Preferred,
         }
     }
 
-    /// 运行一次操作；取消优先于同时就绪的结果，超时返回 [`Error::Timeout`]。
+    pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    pub fn with_timeout(&self, timeout: Duration) -> Self {
+        let mut next = self.clone();
+        next.timeout = timeout.min(self.remaining());
+        next
+    }
+
+    /// 多目标关联的新目标建立使用独立期限，保留已绑定服务、成员与取消域。
+    pub fn new_operation(&self, timeout: Duration) -> Self {
+        let mut next = self.clone();
+        next.timeout = timeout;
+        next.deadline = Deadline::after(timeout);
+        next
+    }
+
+    pub fn resource_key(&self) -> &ResourceKey {
+        &self.resource
+    }
+    pub fn service_cancel(&self) -> CancellationToken {
+        self.service.cancel()
+    }
+    /// 返回当前命名服务固定的失败原因，不改变请求或服务状态。
+    pub fn service_failure(&self) -> Option<ServiceFailure> {
+        self.service.failure()
+    }
+    /// 借用命名服务的只读生命周期事实，不拥有服务或任务集合。
+    pub fn service_status(&self) -> ServiceStatus {
+        self.service.clone()
+    }
+    pub fn node_cancel(&self) -> CancellationToken {
+        self.node_cancel.clone()
+    }
+    pub fn peer_cancel(&self) -> CancellationToken {
+        self.peer_cancel.clone()
+    }
+    pub fn target_mode(&self) -> FamilyMode {
+        self.target_mode
+    }
+    pub fn remaining(&self) -> Duration {
+        self.timeout.min(self.deadline.remaining())
+    }
+    pub fn deadline(&self) -> Deadline {
+        self.deadline
+    }
+
+    /// 仅由运行装配边界设置可信资源作用域，不接收协议凭据。
+    pub fn scoped(
+        &self,
+        host: &ServiceContext,
+        source: &Source,
+        node_cancel: CancellationToken,
+        peer_cancel: CancellationToken,
+        target_mode: FamilyMode,
+    ) -> Self {
+        let mut next = self.clone();
+        next.resource = host.resource_key(source);
+        next.service = host.status();
+        next.node_cancel = node_cancel;
+        next.peer_cancel = peer_cancel;
+        next.target_mode = target_mode;
+        next
+    }
+
+    /// 请求、节点与 peer 取消优先，其次返回服务的固定失败或正常取消，再判断建立期限。
     ///
-    /// 多次或嵌套调用不会自动扣减已耗时间，整条建立链的总预算由调用方维护。
+    /// 多次和嵌套调用共用同一个绝对期限。
     /// 取消或超时会丢弃当前 future，不能保证撤回已发送的帧或立即终止底层系统操作。
     pub async fn run<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
+        let service_cancel = self.service.cancel();
         tokio::select! {
             biased;
             _ = self.cancel.cancelled() => Err(Error::Cancelled),
-            result = tokio::time::timeout(self.timeout, future) => result.map_err(|_| Error::Timeout)?,
+            _ = self.node_cancel.cancelled() => Err(Error::Cancelled),
+            _ = self.peer_cancel.cancelled() => Err(Error::Cancelled),
+            _ = service_cancel.cancelled() => Err(self.service.error()),
+            result = tokio::time::timeout(self.remaining(), future) => result.map_err(|_| Error::Timeout)?,
         }
     }
 }
@@ -252,8 +357,12 @@ pub struct DatagramAssociation {
     pub receiver: Box<dyn DatagramAssociationReceiver>,
 }
 
-/// 已构造的出站对象；带节点身份的连接池、会话和认证状态不得跨节点隐式共享。
+/// 协议后端扩展边界。每条命名计划只有一个运行实例，池按可信ResourceKey分区。
 pub trait Outbound: Send + Sync {
+    /// 停止本实例拥有的池和后台资源。服务所有者随后等待登记任务退出。
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
     /// 报告当前组合的业务 TCP、目标 EOF 和固定目标 UDP 能力。
     fn capabilities(&self) -> Capabilities;
     /// 是否提供同一出口 socket 的多目标关联；独立于固定目标 UDP，默认不支持。
@@ -272,37 +381,8 @@ pub trait Outbound: Send + Sync {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>>;
+    ) -> BoxFuture<'a, Result<OpenedTcp>>;
     /// 建立固定业务目标的数据报通道；不得据此推定多目标关联能力。
-    fn connect_udp<'a>(
-        &'a self,
-        target: &'a Destination,
-        context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<DatagramChannel>>;
-}
-
-/// 所有接入协议使用的目标访问边界，提供方绑定节点身份与出口策略。
-pub trait AccessService: Send + Sync {
-    /// 节点所选出口是否提供多目标关联；默认不支持。
-    fn supports_udp_association(&self) -> bool {
-        false
-    }
-    /// 通过统一出口建立关联；默认返回 [`Error::Unsupported`]。
-    fn associate_udp<'a>(
-        &'a self,
-        _context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<DatagramAssociation>> {
-        Box::pin(async {
-            Err(Error::Unsupported("目标访问服务未提供多目标 UDP 关联"))
-        })
-    }
-    /// 按节点绑定的策略访问 TCP 业务目标，目标地址族不受节点接入地址族限制。
-    fn connect_tcp<'a>(
-        &'a self,
-        target: &'a Destination,
-        context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>>;
-    /// 按节点绑定的策略访问一个固定 UDP 业务目标。
     fn connect_udp<'a>(
         &'a self,
         target: &'a Destination,
@@ -313,11 +393,15 @@ pub trait AccessService: Send + Sync {
 /// 一次节点处理所需的取消、资源与观测上下文；不包含其他节点的认证材料。
 #[derive(Clone)]
 pub struct InboundContext {
+    /// 原物理 TCP peer 的资源租约；节点级、UDP 与虚拟入口上下文不携带它。
+    pub peer_lease: Option<PeerLease>,
+    /// Engine 持有的节点实际任务所有者；派生任务必须登记且不能从 peer 关闭它。
+    pub tasks: NodeTasks,
     /// 物理 TCP 连接地址；虚拟载体或无连接入口可以不提供。
     pub peer_addr: Option<std::net::SocketAddr>,
     /// 物理 TCP 连接的本地地址；无对应物理连接时可不提供。
     pub local_addr: Option<std::net::SocketAddr>,
-    /// 当前节点处理的取消域；实现须停止派生任务并释放会话资源。
+    /// 当前处理单元的取消域；TCP peer 使用节点子域，不能据此关闭同节点其他 peer。
     pub cancel: CancellationToken,
     /// 目标建立操作的时长配置；跨阶段总预算须由执行建立链的调用方维护。
     pub connect_timeout: Duration,
@@ -346,6 +430,8 @@ pub enum NodeEvent {
     Failed,
     /// 因预算、队列或其他边界丢弃了处理单元或数据报。
     Dropped,
+    /// 局部强制回收事实；Engine 在外层及全部真实节点任务 join 后才累计。
+    ForcedCleanup,
 }
 /// 注入节点的事件观察者，负责归入相应节点与全局统计。
 pub trait NodeObserver: Send + Sync {
@@ -395,38 +481,14 @@ impl StreamBudget {
     }
 }
 
-/// 协议节点只持有本节点凭据，目标连接必须交给注入的统一访问服务。
+/// 协议节点只持本节点凭据，真实鉴别后经注入绑定取得可信PeerSession。
 pub trait InboundProtocol: Send + Sync {
     /// 是否依赖多目标 UDP 关联；配置准备阶段据此校验统一出口能力。
     fn requires_udp_association(&self) -> bool {
         false
     }
-    /// 返回实际参与鉴权的材料摘要，供旧版单协议域接口兼容；不得写入日志。
-    /// 未参与认证的空字段或备用秘密不能赋予节点鉴权资格。
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]>;
-    /// 返回实际参与鉴权的协议域与摘要；包装协议应保留内层真实域。
-    ///
-    /// 默认将旧接口摘要归入 `default_protocol`；未使用的秘密不得伪造鉴权资格。
-    fn scoped_credential_fingerprints(
-        &self,
-        default_protocol: &str,
-    ) -> Vec<ScopedCredentialFingerprint> {
-        self.credential_fingerprints()
-            .into_iter()
-            .map(|fingerprint| ScopedCredentialFingerprint {
-                protocol: default_protocol.to_owned(),
-                fingerprint,
-            })
-            .collect()
-    }
-    /// 返回额外秘密隔离域，不授予鉴权资格；默认保留既有分域凭据行为。
-    /// 注册表合并鉴权和隔离集合后拒绝跨条目复用，空隔离集合不能隐藏真实鉴权摘要。
-    fn credential_isolation_fingerprints(
-        &self,
-        default_protocol: &str,
-    ) -> Vec<ScopedCredentialFingerprint> {
-        self.scoped_credential_fingerprints(default_protocol)
-    }
+    /// 配置查重清单，认证成员与保护材料分开；摘要不能用来重建运行身份。
+    fn credential_manifest(&self) -> CredentialManifest;
     /// 是否必须回环监听；默认 `true`，不能据此推定具体保密或鉴权能力。
     fn requires_loopback(&self) -> bool {
         true
@@ -443,20 +505,20 @@ pub trait InboundProtocol: Send + Sync {
     fn supports_virtual(&self) -> bool {
         false
     }
-    /// 处理一条入口字节流；鉴权后仅通过 `access` 访问业务目标。
+    /// 处理一条入口字节流；鉴别后仅通过 `ingress` 签发的PeerSession访问业务目标。
     ///
     /// 实现负责上下文取消、空闲与派生任务回收，不得回退到其他节点凭据。
     fn handle<'a>(
         &'a self,
         stream: BoxStream,
-        access: std::sync::Arc<dyn AccessService>,
+        ingress: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>>;
     /// 处理本节点的物理 UDP socket；默认返回 [`Error::Unsupported`]。
     fn handle_udp<'a>(
         &'a self,
         _socket: std::sync::Arc<tokio::net::UdpSocket>,
-        _access: std::sync::Arc<dyn AccessService>,
+        _ingress: IngressBinding,
         _context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Err(Error::Unsupported("节点未提供 UDP 监听")) })
@@ -464,7 +526,7 @@ pub trait InboundProtocol: Send + Sync {
     /// 运行本节点虚拟入口并遵守取消和资源预算；默认不支持。
     fn handle_virtual<'a>(
         &'a self,
-        _access: std::sync::Arc<dyn AccessService>,
+        _ingress: IngressBinding,
         _context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Err(Error::Unsupported("节点未提供虚拟载体监听")) })
@@ -504,5 +566,34 @@ mod tests {
             context.run(async { Ok(()) }).await,
             Err(Error::Cancelled)
         ));
+    }
+
+    #[tokio::test]
+    async fn public_budget_and_cancel_cannot_replace_trusted_scope() {
+        let node = CancellationToken::new();
+        let service = ServiceContext::for_test();
+        let source = Source::Local {
+            node: NodeId::parse("test-node").unwrap(),
+        };
+        let mut context = ConnectContext::new(Duration::from_millis(5)).scoped(
+            &service,
+            &source,
+            node.clone(),
+            CancellationToken::new(),
+            FamilyMode::V4Only,
+        );
+        context.timeout = Duration::from_secs(60);
+        assert!(matches!(
+            context.run(std::future::pending::<Result<()>>()).await,
+            Err(Error::Timeout)
+        ));
+        let mut next = context.new_operation(Duration::from_secs(1));
+        next.cancel = CancellationToken::new();
+        node.cancel();
+        assert!(matches!(
+            next.run(async { Ok(()) }).await,
+            Err(Error::Cancelled)
+        ));
+        assert!(!service.cancel().is_cancelled());
     }
 }

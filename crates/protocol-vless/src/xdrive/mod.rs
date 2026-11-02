@@ -1,12 +1,15 @@
-//! XDRIVE 分段与槽环承载；上层始终使用 VLESS Encryption 和 Mux。
+mod http;
 mod slots;
 mod storage;
+#[cfg(test)]
+mod tests;
 use kerlico_core::{
-    AccessService, CancellationToken, Error, InboundContext, NodeEvent, Result,
+    BoxFuture, CancellationToken, Error, InboundContext, IngressBinding, NodeEvent, Result,
 };
 use serde::Deserialize;
 use std::{
     collections::HashMap,
+    future::Future,
     io,
     pin::Pin,
     sync::{
@@ -19,7 +22,7 @@ use std::{
 use storage::Storage;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf},
-    task::{AbortHandle, JoinSet},
+    task::JoinSet,
 };
 use xray_transport::BoxedTransportStream;
 
@@ -71,12 +74,28 @@ pub(crate) struct S3 {
     #[serde(default)]
     pub path_style: bool,
 }
+#[derive(Clone)]
+pub(crate) struct Plan {
+    settings: Settings,
+    store: storage::Plan,
+}
+impl Plan {
+    pub fn start(&self) -> Result<Arc<Transport>> {
+        Ok(Arc::new(Transport {
+            settings: self.settings.clone(),
+            store: self.store.start()?,
+        }))
+    }
+}
 pub(crate) struct Transport {
     settings: Settings,
     store: Arc<dyn Storage>,
 }
 impl Transport {
     pub fn new(settings: Settings, ca: Option<&str>) -> Result<Arc<Self>> {
+        Self::compile(settings, ca)?.start()
+    }
+    pub fn compile(settings: Settings, ca: Option<&str>) -> Result<Plan> {
         if !(1024..=1024 * 1024).contains(&settings.segment_bytes)
             || !(1..=1000).contains(&settings.flush_interval_ms)
             || !(1..=5000).contains(&settings.poll_interval_ms)
@@ -89,10 +108,13 @@ impl Transport {
         {
             return Err(Error::Config("XDRIVE 资源或时间参数不合法".into()));
         }
-        let store = storage::create(&settings, settings.ca_pem.as_deref().or(ca))?;
-        Ok(Arc::new(Self { settings, store }))
+        let store = storage::compile(&settings, settings.ca_pem.as_deref().or(ca))?;
+        Ok(Plan { settings, store })
     }
-    pub async fn open(self: &Arc<Self>) -> Result<BoxedTransportStream> {
+    pub async fn open(
+        self: &Arc<Self>,
+        host: &kerlico_core::ServiceContext,
+    ) -> Result<BoxedTransportStream> {
         let id = rand::random::<[u8; 16]>()
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -104,15 +126,16 @@ impl Transport {
         self.store
             .put(&format!("sessions/{nanos}-{id}"), &[])
             .await?;
-        let io = self.connection(&id, false, None).await?;
+        let Connection { mut io, driving } = self.connection(&id, false, None);
+        io.task = Some(host.spawn_tracked(driving)?);
         Ok(Box::new(crate::server_io::Plain(Box::new(io))))
     }
-    async fn connection(
+    fn connection(
         self: &Arc<Self>,
         id: &str,
         server: bool,
         ring: Option<slots::Ring>,
-    ) -> Result<DriveIo> {
+    ) -> Connection {
         let (local, remote) = tokio::io::duplex(64 * 1024);
         let (reader, writer) = tokio::io::split(remote);
         let progress = Arc::new(Progress::default());
@@ -125,76 +148,178 @@ impl Transport {
         let writing_ring = ring
             .as_ref()
             .map(|r| if server { r.down.clone() } else { r.up.clone() });
-        let writing = tokio::spawn(async move {
+        let writing = async move {
             let result = tokio::select! {_=stop.cancelled()=>Ok(()),r=async {if let Some(table)=writing_ring {slots::write(this.store.clone(),reader,table,&this.settings,status.clone()).await}else{write_segments(this.store.clone(),reader,&write_prefix,&this.settings,status.clone()).await}}=>r};
-            if let Err(error)=result {
+            if let Err(error) = result {
                 eprintln!("XDRIVE 后台任务失败：{error}");
                 status.fail();
             } else {
                 status.finished.store(true, Ordering::Release);
                 status.wake();
             }
-        });
+        };
         let this = self.clone();
         let status = progress.clone();
         let stop = cancel.clone();
         let reading_ring = ring.map(|r| if server { r.up } else { r.down });
-        let reading = tokio::spawn(async move {
+        let reading = async move {
             let result = tokio::select! {_=stop.cancelled()=>Ok(()),r=async {if let Some(table)=reading_ring {slots::read(this.store.clone(),writer,table,&this.settings).await}else{read_segments(this.store.clone(),writer,&read_prefix,&this.settings).await}}=>r};
-            if let Err(error)=result {
+            if let Err(error) = result {
                 eprintln!("XDRIVE 后台任务失败：{error}");
                 status.fail();
             }
-        });
-        Ok(DriveIo {
-            io: local,
-            progress,
-            cancel,
-            tasks: vec![writing.abort_handle(), reading.abort_handle()],
-            closing: false,
-        })
+        };
+        Connection {
+            io: DriveIo {
+                io: local,
+                progress,
+                cancel,
+                task: None,
+                closing: false,
+            },
+            driving: Box::pin(async move {
+                tokio::join!(writing, reading);
+            }),
+        }
     }
     pub async fn serve(
         self: Arc<Self>,
         payload: Arc<crate::inbound::Payload>,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
         let mut handled = HashMap::<String, Instant>::new();
         let mut tasks = JoinSet::new();
-        loop {
-            tokio::select! {
-                _=context.cancel.cancelled()=>break,
-                result=tasks.join_next(),if !tasks.is_empty()=>{if result.is_some_and(|r|r.is_err()){context.events.record(NodeEvent::Failed);}},
-                _=tokio::time::sleep(Duration::from_millis(self.settings.poll_interval_ms))=>{
-                    if context.stream_budget.is_closed(){continue;}
-                    handled.retain(|_,time|time.elapsed()<Duration::from_secs(self.settings.session_ttl_seconds));
-                    let entries=self.store.list("sessions").await?;let now=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_|Error::Protocol("系统时间不可用"))?.as_nanos();
-                    for entry in entries.into_iter().take(context.max_streams.saturating_mul(4)) {
-                        let Some((stamp,id))=entry.name.split_once('-') else{continue};let Ok(stamp)=stamp.parse::<u128>() else{continue};if id.len()!=32||!id.bytes().all(|b|b.is_ascii_hexdigit()){continue;}
-                        let announce=format!("sessions/{}",entry.name);
-                        if now.abs_diff(stamp)>self.settings.session_ttl_seconds as u128*1_000_000_000 {let _=self.store.delete(&announce).await;continue;}
-                        if handled.contains_key(id){continue;}
-                        let Ok(lease)=context.stream_budget.try_acquire() else{context.events.record(NodeEvent::Dropped);continue;};
-                        let data=match entry.inline {Some(data)=>data,None=>self.store.get(&announce).await?.unwrap_or_default()};
-                        let ring=if data.is_empty(){None}else{Some(slots::Ring::parse(&data)?)};
-                        let io=self.connection(id,true,ring).await?;handled.insert(id.to_owned(),Instant::now());let _=self.store.delete(&announce).await;
-                        let payload=payload.clone();let access=access.clone();let context=context.clone();context.events.record(NodeEvent::Accepted);
-                        tasks.spawn(async move {let _lease=lease;let result=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),r=payload.serve(Box::new(crate::server_io::Plain(Box::new(io))),access,context.clone())=>r};if let Err(error)=&result{eprintln!("VLESS 存储会话失败：{error}");}context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});});
+        let sessions = context.cancel.child_token();
+        let polling = async {
+            loop {
+                tokio::select! {
+                    result = tasks.join_next(), if !tasks.is_empty() => {
+                        if result.is_some_and(|r| r.is_err()) {
+                            context.events.record(NodeEvent::Failed);
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(self.settings.poll_interval_ms)) => {
+                        if context.stream_budget.is_closed() {
+                            continue;
+                        }
+                        handled.retain(|_, time| {
+                            time.elapsed() < Duration::from_secs(self.settings.session_ttl_seconds)
+                        });
+                        let entries = self.store.list("sessions").await?;
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map_err(|_| Error::Protocol("系统时间不可用"))?
+                            .as_nanos();
+                        for entry in entries.into_iter().take(context.max_streams.saturating_mul(4)) {
+                            let Some((stamp, id)) = entry.name.split_once('-') else { continue };
+                            let Ok(stamp) = stamp.parse::<u128>() else { continue };
+                            if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                                continue;
+                            }
+                            let announce = format!("sessions/{}", entry.name);
+                            if now.abs_diff(stamp) > self.settings.session_ttl_seconds as u128 * 1_000_000_000 {
+                                let _ = self.store.delete(&announce).await;
+                                continue;
+                            }
+                            if handled.contains_key(id) {
+                                continue;
+                            }
+                            let Ok(lease) = context.stream_budget.try_acquire() else {
+                                context.events.record(NodeEvent::Dropped);
+                                continue;
+                            };
+                            let data = match entry.inline {
+                                Some(data) => data,
+                                None => self.store.get(&announce).await?.unwrap_or_default(),
+                            };
+                            let ring = if data.is_empty() { None } else { Some(slots::Ring::parse(&data)?) };
+                            let connection = self.connection(id, true, ring);
+                            handled.insert(id.to_owned(), Instant::now());
+                            let payload = payload.clone();
+                            let access = access.clone();
+                            let mut session = context.clone();
+                            session.cancel = sessions.child_token();
+                            context.events.record(NodeEvent::Accepted);
+                            let task = context.tasks.spawn_tracked(async move {
+                                let _lease = lease;
+                                let events = session.events.clone();
+                                let result = connection.serve(session.cancel.clone(), move |io| async move {
+                                    payload.serve(Box::new(crate::server_io::Plain(Box::new(io))), access, session).await
+                                }).await;
+                                if let Err(error) = &result {
+                                    eprintln!("VLESS 存储会话失败：{error}");
+                                }
+                                events.record(if result.is_ok() { NodeEvent::Completed } else { NodeEvent::Failed });
+                            })?;
+                            tasks.spawn(async move { let _ = task.await; });
+                            let _ = self.store.delete(&announce).await;
+                        }
                     }
                 }
             }
-        }
-        if tokio::time::timeout(context.drain_timeout, async {
-            while tasks.join_next().await.is_some() {}
-        })
-        .await
-        .is_err()
+        };
+        let result: Result<()> = tokio::select! {
+            _ = context.cancel.cancelled() => Ok(()),
+            result = polling => result,
+        };
+        sessions.cancel();
+        let cleanup = drain_sessions(&mut tasks, &context).await;
+        result.and(cleanup)
+    }
+}
+
+async fn drain_sessions(tasks: &mut JoinSet<()>, context: &InboundContext) -> Result<()> {
+    let now = tokio::time::Instant::now();
+    let deadline = now + context.drain_timeout;
+    let graceful = now + context.drain_timeout.mul_f32(0.8);
+    let mut forced = false;
+    loop {
+        match tokio::time::timeout_at(if forced { deadline } else { graceful }, tasks.join_next())
+            .await
         {
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
+            Ok(Some(result)) => {
+                if result.is_err_and(|error| !error.is_cancelled()) {
+                    context.events.record(NodeEvent::Failed);
+                }
+            }
+            Ok(None) => {
+                if forced {
+                    context.events.record(NodeEvent::ForcedCleanup);
+                }
+                return Ok(());
+            }
+            Err(_) if !forced => {
+                forced = true;
+                tasks.abort_all();
+            }
+            Err(_) => {
+                context.events.record(NodeEvent::Failed);
+                return Err(Error::Timeout);
+            }
         }
-        Ok(())
+    }
+}
+
+struct Connection {
+    io: DriveIo,
+    driving: BoxFuture<'static, ()>,
+}
+impl Connection {
+    async fn serve<F, Fut>(self, cancel: CancellationToken, serve: F) -> Result<()>
+    where
+        F: FnOnce(DriveIo) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let Self { io, driving } = self;
+        let serving = async move {
+            tokio::select! {
+                _ = cancel.cancelled() => Err(Error::Cancelled),
+                result = serve(io) => result,
+            }
+        };
+        let (result, ()) = tokio::join!(serving, driving);
+        result
     }
 }
 #[derive(Default)]
@@ -207,8 +332,39 @@ pub(crate) struct Progress {
 }
 impl Progress {
     // Encryption 的读路径也可能驱动 flush；两个方向都必须收到提交完成通知。
-    fn register(&self,waker:&Waker){let stale={let mut entries=self.wakers.lock().unwrap_or_else(|error|error.into_inner());if entries.iter().any(|entry|entry.will_wake(waker)){return;}let stale=if entries.len()>=4{std::mem::take(&mut *entries)}else{Vec::new()};entries.push(waker.clone());stale};for waker in stale{waker.wake();}}
-    fn wake(&self){let entries={let mut entries=self.wakers.lock().unwrap_or_else(|error|error.into_inner());std::mem::take(&mut *entries)};for waker in entries{waker.wake();}}
+    fn register(&self, waker: &Waker) {
+        let stale = {
+            let mut entries = self
+                .wakers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if entries.iter().any(|entry| entry.will_wake(waker)) {
+                return;
+            }
+            let stale = if entries.len() >= 4 {
+                std::mem::take(&mut *entries)
+            } else {
+                Vec::new()
+            };
+            entries.push(waker.clone());
+            stale
+        };
+        for waker in stale {
+            waker.wake();
+        }
+    }
+    fn wake(&self) {
+        let entries = {
+            let mut entries = self
+                .wakers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            std::mem::take(&mut *entries)
+        };
+        for waker in entries {
+            waker.wake();
+        }
+    }
     fn fail(&self) {
         self.failed.store(true, Ordering::Release);
         self.wake();
@@ -222,13 +378,13 @@ struct DriveIo {
     io: DuplexStream,
     progress: Arc<Progress>,
     cancel: CancellationToken,
-    tasks: Vec<AbortHandle>,
+    task: Option<kerlico_core::ServiceTask<()>>,
     closing: bool,
 }
 impl Drop for DriveIo {
     fn drop(&mut self) {
         self.cancel.cancel();
-        for task in &self.tasks {
+        if let Some(task) = &self.task {
             task.abort();
         }
     }

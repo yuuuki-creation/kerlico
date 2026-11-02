@@ -1,11 +1,10 @@
 //! 字段白名单、真实 Basic 认证与 TLS；构造阶段不监听或拨号。
 use crate::invalid;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use kerlico_core::{Result, ScopedCredentialFingerprint};
+use kerlico_core::{Error, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{io::Cursor, sync::Arc, time::Duration};
-use subtle::ConstantTimeEq;
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -107,11 +106,8 @@ impl Auth {
     pub fn http_hash(&self) -> [u8; 32] {
         hash(b"kerlico/http\0", self.header().as_bytes())
     }
-    pub fn isolation(&self) -> ScopedCredentialFingerprint {
-        ScopedCredentialFingerprint {
-            protocol: "trusttunnel-password".into(),
-            fingerprint: hash(b"kerlico/trusttunnel/password/", self.password.as_bytes()),
-        }
+    pub fn isolation(&self) -> [u8; 32] {
+        hash(b"kerlico/trusttunnel/password/", self.password.as_bytes())
     }
 }
 fn hash(scope: &[u8], bytes: &[u8]) -> [u8; 32] {
@@ -120,45 +116,40 @@ fn hash(scope: &[u8], bytes: &[u8]) -> [u8; 32] {
     h.update(bytes);
     h.finalize().into()
 }
-pub(crate) fn authenticate(headers: &http::HeaderMap, users: &[[u8; 32]]) -> bool {
+pub(crate) fn authentication_hash(headers: &http::HeaderMap) -> Result<[u8; 32]> {
     let mut values = headers.get_all("proxy-authorization").iter();
     let Some(value) = values.next() else {
-        return false;
+        return Err(Error::Rejected);
     };
     if values.next().is_some() {
-        return false;
+        return Err(Error::Rejected);
     }
     let Ok(value) = value.to_str() else {
-        return false;
+        return Err(Error::Rejected);
     };
     let Some((scheme, encoded)) = value.split_once(' ') else {
-        return false;
+        return Err(Error::Rejected);
     };
     if !scheme.eq_ignore_ascii_case("Basic") {
-        return false;
+        return Err(Error::Rejected);
     }
     let Ok(bytes) = STANDARD.decode(encoded) else {
-        return false;
+        return Err(Error::Rejected);
     };
     let Ok(value) = String::from_utf8(bytes) else {
-        return false;
+        return Err(Error::Rejected);
     };
     let Some((username, password)) = value.split_once(':') else {
-        return false;
+        return Err(Error::Rejected);
     };
     let auth = Auth {
         username: username.into(),
         password: password.into(),
     };
     if auth.validate().is_err() {
-        return false;
+        return Err(Error::Rejected);
     }
-    let current = auth.hash();
-    let mut yes = subtle::Choice::from(0);
-    for expected in users {
-        yes |= expected.ct_eq(&current);
-    }
-    bool::from(yes)
+    Ok(auth.hash())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -178,7 +169,6 @@ pub(crate) struct ClientOptions {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NodeOptions {
-    pub users: Vec<Auth>,
     pub tls: ServerTls,
     #[serde(default)]
     pub transport: Transport,
@@ -245,6 +235,8 @@ fn versions(
 pub(crate) struct ClientTls {
     pub server_name: String,
     #[serde(default)]
+    pub h2_allow_missing_alpn: bool,
+    #[serde(default)]
     pub ca_pem: Option<String>,
     #[serde(default)]
     pub certificate_pem: Option<String>,
@@ -300,6 +292,9 @@ pub(crate) fn client_tls(
     tls: ClientTls,
     transport: Transport,
 ) -> Result<(Arc<rustls::ClientConfig>, String)> {
+    if tls.h2_allow_missing_alpn && transport != Transport::H2 {
+        return Err(invalid());
+    }
     rustls::pki_types::ServerName::try_from(tls.server_name.clone()).map_err(|_| invalid())?;
     let trust = match tls.ca_pem {
         Some(pem) => roots(&pem)?,
@@ -320,6 +315,7 @@ pub(crate) fn client_tls(
     };
     config.alpn_protocols = transport.alpn();
     config.enable_early_data = false;
+    config.resumption = rustls::client::Resumption::disabled();
     Ok((Arc::new(config), tls.server_name))
 }
 fn pem(inline: Option<String>, file: Option<String>) -> Result<String> {
@@ -377,15 +373,15 @@ mod tests {
         a.validate().unwrap();
         let mut h = http::HeaderMap::new();
         h.insert("proxy-authorization", a.header().parse().unwrap());
-        assert!(authenticate(&h, &[a.hash()]));
+        assert_eq!(authentication_hash(&h).unwrap(), a.hash());
         h.append("proxy-authorization", a.header().parse().unwrap());
-        assert!(!authenticate(&h, &[a.hash()]));
+        assert!(authentication_hash(&h).is_err());
         let b = Auth {
             username: "bob".into(),
             password: a.password.clone(),
         };
         assert_ne!(a.hash(), b.hash());
-        assert_eq!(a.isolation().fingerprint, b.isolation().fingerprint);
+        assert_eq!(a.isolation(), b.isolation());
         for (u, p) in [("", "p"), ("a:b", "p"), ("a", ""), ("a", "\np")] {
             assert!(
                 Auth {

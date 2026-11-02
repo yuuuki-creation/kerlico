@@ -1,5 +1,6 @@
-use kerlico_config::{OutboundFactory, TargetSpec};
-use kerlico_core::{ConnectContext, Destination, Error, Outbound};
+mod support;
+use kerlico_config::TargetSpec;
+use kerlico_core::{ConnectContext, Destination, Error};
 use kerlico_net::TcpConnector;
 use kerlico_vless::{
     UserId, VlessFactory, VlessOutbound,
@@ -51,15 +52,22 @@ async fn tcp_tls_reads_response_after_first_application_write() {
         stream.write_all(b"reply").await.unwrap();
         stream.shutdown().await.unwrap();
     });
-    let outbound = VlessOutbound::new(
-        Destination::new("127.0.0.1", address.port()).unwrap(),
-        UserId::from_bytes([0; 16]),
-        TcpConnector::tls("localhost", Some(&pem)).unwrap(),
+    let outbound = support::start(
+        VlessOutbound::compile(
+            Destination::new("127.0.0.1", address.port()).unwrap(),
+            UserId::from_bytes([0; 16]),
+            TcpConnector::tls("localhost", Some(&pem)).unwrap(),
+        )
+        .unwrap(),
     )
     .unwrap();
     let context = ConnectContext::new(Duration::from_secs(2));
     let target = Destination::new("example.invalid", 443).unwrap();
-    let mut stream = outbound.connect_tcp(&target, &context).await.unwrap();
+    let mut stream = outbound
+        .connect_tcp(&target, &context)
+        .await
+        .unwrap()
+        .stream;
     stream.write_all(b"hello").await.unwrap();
     stream.flush().await.unwrap();
     let mut reply = Vec::new();
@@ -88,10 +96,13 @@ async fn udp_tls_halves_can_send_and_receive_concurrently() {
         }
         stream.shutdown().await.unwrap();
     });
-    let outbound = VlessOutbound::new(
-        Destination::new("127.0.0.1", port).unwrap(),
-        UserId::from_bytes([0; 16]),
-        TcpConnector::tls("localhost", Some(&pem)).unwrap(),
+    let outbound = support::start(
+        VlessOutbound::compile(
+            Destination::new("127.0.0.1", port).unwrap(),
+            UserId::from_bytes([0; 16]),
+            TcpConnector::tls("localhost", Some(&pem)).unwrap(),
+        )
+        .unwrap(),
     )
     .unwrap();
     let context = ConnectContext::new(Duration::from_secs(2));
@@ -139,10 +150,13 @@ async fn rejects_untrusted_or_wrong_name_certificates() {
             if trusted { Some(&pem) } else { None },
         )
         .unwrap();
-        let outbound = VlessOutbound::new(
-            Destination::new("127.0.0.1", port).unwrap(),
-            UserId::from_bytes([0; 16]),
-            connector,
+        let outbound = support::start(
+            VlessOutbound::compile(
+                Destination::new("127.0.0.1", port).unwrap(),
+                UserId::from_bytes([0; 16]),
+                connector,
+            )
+            .unwrap(),
         )
         .unwrap();
         let context = ConnectContext::new(Duration::from_secs(2));
@@ -164,10 +178,13 @@ async fn handshake_uses_one_timeout_and_cancellation_budget() {
         let (_stream, _) = listener.accept().await.unwrap();
         std::future::pending::<()>().await;
     });
-    let outbound = VlessOutbound::new(
-        Destination::new("127.0.0.1", port).unwrap(),
-        UserId::from_bytes([0; 16]),
-        TcpConnector::tls("localhost", None).unwrap(),
+    let outbound = support::start(
+        VlessOutbound::compile(
+            Destination::new("127.0.0.1", port).unwrap(),
+            UserId::from_bytes([0; 16]),
+            TcpConnector::tls("localhost", None).unwrap(),
+        )
+        .unwrap(),
     )
     .unwrap();
     let context = ConnectContext::new(Duration::from_millis(30));
@@ -191,7 +208,7 @@ async fn handshake_uses_one_timeout_and_cancellation_budget() {
 #[test]
 fn configuration_fails_closed_and_user_ids_are_redacted() {
     let base = json!({"server":{"host":"server.invalid","port":443},"uuid":"00000000-0000-0000-0000-000000000000"});
-    assert!(VlessFactory.build(&base).is_ok());
+    assert!(support::outbound(&VlessFactory, &base).is_ok());
     for (key, value) in [
         ("transport", json!("xhttp")),
         ("flow", json!("xtls-rprx-vision-future")),
@@ -202,14 +219,17 @@ fn configuration_fails_closed_and_user_ids_are_redacted() {
     ] {
         let mut options = base.clone();
         options[key] = value;
-        assert!(VlessFactory.build(&options).is_err());
+        assert!(support::outbound(&VlessFactory, &options).is_err());
     }
     let mut invalid = base;
     invalid["uuid"] = json!("synthetic-invalid-identifier");
-    let error = VlessFactory.build(&invalid).err().unwrap().to_string();
+    let error = support::outbound(&VlessFactory, &invalid)
+        .err()
+        .unwrap()
+        .to_string();
     assert!(!error.contains("synthetic-invalid-identifier"));
     assert!(
-        VlessOutbound::new(
+        VlessOutbound::compile(
             TargetSpec {
                 host: "server.invalid".into(),
                 port: 443
@@ -228,15 +248,23 @@ fn eof_dependent_forward_requires_a_compatible_outbound() {
     let mut registry = kerlico_config::Registry::default();
     registry.register(VlessFactory).unwrap();
     let config = json!({"version":1,"outbounds":[{"tag":"proxy","type":"vless","options":{"server":{"host":"server.invalid","port":443},"uuid":"00000000-0000-0000-0000-000000000000"}}],"inbounds":[{"tag":"entry","type":"tcp-forward","listen":"127.0.0.1:0","target":{"host":"target.invalid","port":443},"outbound":"proxy","require_remote_eof":true}]});
-    let prepared =
-        registry.prepare(kerlico_config::parse(&serde_json::to_vec(&config).unwrap()).unwrap());
+    let prepared = registry.prepare(
+        kerlico_config::parse(
+            &serde_json::to_vec(&support::configuration(config.clone())).unwrap(),
+        )
+        .unwrap(),
+    );
     assert!(matches!(prepared,Err(Error::Config(message)) if message.contains("EOF")));
 }
 
-
 #[test]
 fn xhttp_tcp_mux_rejected_and_udp_mux_kept_separate() {
-    let mut options=json!({"server":{"host":"127.0.0.1","port":443},"uuid":"00000000-0000-0000-0000-000000000045","security":{"type":"none"},"transport":{"type":"xhttp","settings":{"mode":"stream-one","http_version":"h1"}},"mux":{"enabled":true,"tcp":true,"udp":true}});
-    let error=VlessFactory.build(&options).err().unwrap().to_string();assert!(error.contains("XHTTP"));
-    options["mux"]["tcp"]=json!(false);assert!(VlessFactory.build(&options).is_ok());
+    let mut options = json!({"server":{"host":"127.0.0.1","port":443},"uuid":"00000000-0000-0000-0000-000000000045","security":{"type":"none"},"transport":{"type":"xhttp","settings":{"mode":"stream-one","http_version":"h1"}},"mux":{"enabled":true,"tcp":true,"udp":true}});
+    let error = support::outbound(&VlessFactory, &options)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("XHTTP"));
+    options["mux"]["tcp"] = json!(false);
+    assert!(support::outbound(&VlessFactory, &options).is_ok());
 }

@@ -3,7 +3,10 @@ use kerlico_core::{Error, Result};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashSet},
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 struct Entries {
@@ -13,6 +16,8 @@ struct Entries {
 pub(crate) struct Replay {
     entries: Mutex<Entries>,
     maximum: usize,
+    parent: Option<Arc<Replay>>,
+    committed: AtomicBool,
 }
 impl Replay {
     pub(crate) fn new(maximum: usize) -> Self {
@@ -22,9 +27,50 @@ impl Replay {
                 expiry: BTreeSet::new(),
             }),
             maximum,
+            parent: None,
+            committed: AtomicBool::new(false),
         }
     }
+    pub(crate) fn transaction(parent: Arc<Self>) -> Arc<Self> {
+        let mut replay = Self::new(parent.maximum);
+        replay.parent = Some(parent);
+        Arc::new(replay)
+    }
+    pub(crate) fn commit(&self) -> Result<()> {
+        let Some(parent) = &self.parent else {
+            return Ok(());
+        };
+        let pending = self.entries.lock().map_err(|_| invalid())?;
+        let mut target = parent.entries.lock().map_err(|_| invalid())?;
+        let now = Instant::now();
+        while target
+            .expiry
+            .first()
+            .is_some_and(|(expiry, _)| *expiry <= now)
+        {
+            if let Some((_, key)) = target.expiry.pop_first() {
+                target.keys.remove(&key);
+            }
+        }
+        if pending.keys.iter().any(|key| target.keys.contains(key)) {
+            return Err(invalid());
+        }
+        if target.keys.len() + pending.keys.len() > parent.maximum {
+            return Err(Error::ResourceLimit);
+        }
+        target.keys.extend(pending.keys.iter().copied());
+        target.expiry.extend(pending.expiry.iter().copied());
+        self.committed.store(true, Ordering::Release);
+        Ok(())
+    }
     pub(crate) fn insert(&self, tag: &[u8], data: &[u8], ttl: Duration) -> Result<()> {
+        if self.committed.load(Ordering::Acquire) {
+            return self
+                .parent
+                .as_ref()
+                .ok_or_else(invalid)?
+                .insert(tag, data, ttl);
+        }
         let mut digest = Sha256::new();
         digest.update(tag);
         digest.update(data);

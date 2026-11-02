@@ -118,7 +118,7 @@ async fn actual_tcp_multiplex_reuses_carrier_and_concurrent_sessions_stay_separa
         let target = target.target.clone();
         let context = f.context();
         work.spawn(async move {
-            let mut stream = out.connect_tcp(&target, &context).await.unwrap();
+            let mut stream = out.connect_tcp(&target, &context).await.unwrap().stream;
             let data = vec![index; 65536 + usize::from(index)];
             stream.write_u32(data.len() as u32).await.unwrap();
             stream.write_all(&data).await.unwrap();
@@ -220,18 +220,42 @@ async fn one_cancelled_context_does_not_break_another_stream_or_implicit_nonce_o
     let echo = tcp_echo("127.0.0.1").await;
     let mut f = fixture(Setup::new("tcp", "127.0.0.1")).await;
     let cancel = CancellationToken::new();
-    let context = ConnectContext {
-        cancel: cancel.clone(),
-        timeout: Duration::from_secs(4),
-    };
-    let mut first = f.outbound.connect_tcp(&target, &context).await.unwrap();
-    let survivor = f.outbound.connect_tcp(&target, &f.context()).await.unwrap();
+    let context = f
+        .context()
+        .new_operation(Duration::from_secs(4))
+        .with_cancel(cancel.clone());
+    let mut first = f
+        .outbound
+        .connect_tcp(&target, &context)
+        .await
+        .unwrap()
+        .stream;
+    let survivor = f
+        .outbound
+        .connect_tcp(&target, &f.context())
+        .await
+        .unwrap()
+        .stream;
     cancel.cancel();
     let mut byte = [0];
-    let end = tokio::time::timeout(Duration::from_secs(1), first.read(&mut byte))
+    let error = tokio::time::timeout(Duration::from_secs(1), first.read_exact(&mut byte))
         .await
-        .unwrap();
-    assert!(matches!(end, Ok(0) | Err(_)));
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+    assert_eq!(
+        kerlico_core::FlowFailure::from_error(&kerlico_core::Error::Io(error)),
+        kerlico_core::FlowFailure::Cancelled
+    );
+    let error = tokio::time::timeout(Duration::from_secs(1), first.write_all(b"after-cancel"))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+    assert_eq!(
+        kerlico_core::FlowFailure::from_error(&kerlico_core::Error::Io(error)),
+        kerlico_core::FlowFailure::Cancelled
+    );
     tcp(&f, &echo.target, 65536).await;
     assert_eq!(f.accepts.load(Ordering::Acquire), 1);
     drop(first);
@@ -248,22 +272,26 @@ fn registry() -> Registry {
 }
 fn config(node: Value, local: bool) -> Config {
     let mut value =
-        json!({"version":1,"inbounds":[],"outbounds":[{"tag":"direct","type":"direct"}]});
+        json!({"version":2,"inbounds":[],"outbounds":[{"tag":"direct","type":"direct"}]});
     value.as_object_mut().unwrap().insert(
         if local { "local_inbounds" } else { "nodes" }.into(),
         json!([node]),
     );
-    serde_json::from_value(value).unwrap()
+    serde_json::from_value(shared::configuration(value)).unwrap()
 }
-#[test]
-fn unsafe_udp_is_not_a_public_authenticated_node_and_unknown_options_are_rejected() {
+#[tokio::test]
+async fn unsafe_udp_is_not_a_public_authenticated_node_and_unknown_options_are_rejected() {
     let safe = json!({"username":"node-user","password":"synthetic-password"});
     let udp = json!({"username":"node-user","password":"synthetic-password","transport":"udp","unsafe_udp_compatibility":true});
-    let node = MieruNodeFactory.build(&safe).unwrap();
-    assert!(!node.credential_fingerprints().is_empty());
+    let node = MieruNodeFactory
+        .build(&shared::node_input("mieru", &safe))
+        .unwrap();
+    assert!(!shared::authentication(&node.credential_manifest()).is_empty());
     assert!(!node.requires_loopback());
-    let local = MieruNodeFactory.build(&udp).unwrap();
-    assert!(local.credential_fingerprints().is_empty());
+    let local = MieruNodeFactory
+        .build(&shared::node_input("mieru", &udp))
+        .unwrap();
+    assert!(shared::authentication(&local.credential_manifest()).is_empty());
     assert!(local.requires_loopback());
     let spec = json!({"tag":"node","type":"mieru","listen":"127.0.0.1:10443","outbound":"direct","options":udp});
     assert!(registry().prepare(config(spec.clone(), false)).is_err());
@@ -272,7 +300,7 @@ fn unsafe_udp_is_not_a_public_authenticated_node_and_unknown_options_are_rejecte
     public["listen"] = json!("0.0.0.0:10443");
     assert!(registry().prepare(config(public, true)).is_err());
     let secure_node = json!({"tag":"secure","type":"mieru","listen":"127.0.0.1:11443","outbound":"direct","options":safe});
-    let crossing: Config = serde_json::from_value(json!({"version":1,"inbounds":[],"outbounds":[{"tag":"direct","type":"direct"}],"nodes":[secure_node],"local_inbounds":[spec]})).unwrap();
+    let crossing: Config = serde_json::from_value(shared::configuration(json!({"version":2,"inbounds":[],"outbounds":[{"tag":"direct","type":"direct"}],"nodes":[secure_node],"local_inbounds":[spec]}))).unwrap();
     assert!(registry().prepare(crossing).is_err());
     for options in [
         json!({"username":"node-user","password":"synthetic-password","transport":"udp"}),
@@ -281,18 +309,22 @@ fn unsafe_udp_is_not_a_public_authenticated_node_and_unknown_options_are_rejecte
         json!({"username":"node-user","password":"synthetic-password","unknown":true}),
         json!({"username":"node-user","password":"synthetic-password","traffic":{"low_entropy_mode":1,"mask_rotation":17}}),
     ] {
-        assert!(MieruNodeFactory.build(&options).is_err());
+        assert!(
+            MieruNodeFactory
+                .build(&shared::node_input("mieru", &options))
+                .is_err()
+        );
     }
     for host in ["localhost", "192.0.2.1", "::ffff:127.0.0.1"] {
         let options = json!({"server":{"host":host,"port":10443},"username":"node-user","password":"synthetic-password","transport":"udp","unsafe_udp_compatibility":true});
-        assert!(MieruFactory.build(&options).is_err());
+        assert!(MieruFactory.compile(&options).is_err());
     }
     let a = json!({"tag":"a","type":"mieru","listen":"127.0.0.1:10443","outbound":"direct","options":safe});
     let mut b = a.clone();
     b["tag"] = json!("b");
     b["listen"] = json!("[::1]:10443");
     b["options"]["password"] = json!("other-synthetic-password");
-    let cfg: Config = serde_json::from_value(json!({"version":1,"inbounds":[],"outbounds":[{"tag":"direct","type":"direct"}],"nodes":[a,b]})).unwrap();
+    let cfg: Config = serde_json::from_value(shared::configuration(json!({"version":2,"inbounds":[],"outbounds":[{"tag":"direct","type":"direct"}],"nodes":[a,b]}))).unwrap();
     assert!(registry().prepare(cfg).is_err());
 }
 #[tokio::test]
@@ -305,14 +337,13 @@ async fn wrong_tcp_credentials_and_local_udp_decode_mismatch_open_no_target() {
                 let mut options = f.options.clone();
                 options[field] = json!("wrong-synthetic-value");
                 options["no_wait"] = json!(no_wait);
-                let out = MieruFactory.build(&options).unwrap();
-                let context = ConnectContext {
-                    cancel: f.cancel.clone(),
-                    timeout: Duration::from_millis(300),
-                };
+                let out = shared::outbound(&MieruFactory, &options).await.unwrap();
+                let context =
+                    ConnectContext::new(Duration::from_millis(300)).with_cancel(f.cancel.clone());
                 match out.connect_tcp(&echo.target, &context).await {
                     Err(_) => {}
-                    Ok(mut stream) => {
+                    Ok(opened) => {
+                        let mut stream = opened.stream;
                         assert!(no_wait);
                         let result = tokio::time::timeout(Duration::from_secs(2), async {
                             stream.write_all(b"synthetic").await?;
@@ -330,34 +361,41 @@ async fn wrong_tcp_credentials_and_local_udp_decode_mismatch_open_no_target() {
         }
     }
 }
-#[test]
-fn nodes_require_association_capability_and_eof_capability_is_not_invented() {
+#[tokio::test]
+async fn nodes_require_association_capability_and_eof_capability_is_not_invented() {
     let mut r = registry();
     r.register(kerlico_net::RejectFactory).unwrap();
-    let config: Config = serde_json::from_value(json!({"version":1,"inbounds":[],"outbounds":[{"tag":"reject","type":"reject"}],"nodes":[{"tag":"node","type":"mieru","listen":"127.0.0.1:10443","outbound":"reject","options":{"username":"node-user","password":"synthetic-password"}}]})).unwrap();
+    let config: Config = serde_json::from_value(shared::configuration(json!({"version":2,"inbounds":[],"outbounds":[{"tag":"reject","type":"reject"}],"nodes":[{"tag":"node","type":"mieru","listen":"127.0.0.1:10443","outbound":"reject","options":{"username":"node-user","password":"synthetic-password"}}]}))).unwrap();
     assert!(r.prepare(config).is_err());
-    let config: Config = serde_json::from_value(json!({"version":1,"inbounds":[{"tag":"input","type":"tcp-forward","listen":"127.0.0.1:12443","outbound":"proxy","target":{"host":"127.0.0.1","port":13443},"require_remote_eof":true}],"outbounds":[{"tag":"proxy","type":"mieru","options":{"server":{"host":"127.0.0.1","port":10443},"username":"node-user","password":"synthetic-password"}}]})).unwrap();
+    let config: Config = serde_json::from_value(shared::configuration(json!({"version":2,"inbounds":[{"tag":"input","type":"tcp-forward","listen":"127.0.0.1:12443","outbound":"proxy","target":{"host":"127.0.0.1","port":13443},"require_remote_eof":true}],"outbounds":[{"tag":"proxy","type":"mieru","options":{"server":{"host":"127.0.0.1","port":10443},"username":"node-user","password":"synthetic-password"}}]}))).unwrap();
     assert!(r.prepare(config).is_err());
 }
-#[test]
-fn identity_and_actual_secret_fingerprints_have_separate_domains() {
+#[tokio::test]
+async fn identity_and_actual_secret_fingerprints_have_separate_domains() {
     let one = MieruNodeFactory
-        .build(&json!({"username":"node-user","password":"synthetic-password"}))
+        .build(&shared::node_input(
+            "mieru",
+            &json!({"username":"node-user","password":"synthetic-password"}),
+        ))
         .unwrap();
     let changed = MieruNodeFactory
-        .build(&json!({"username":"node-user","password":"different-synthetic-password"}))
+        .build(&shared::node_input(
+            "mieru",
+            &json!({"username":"node-user","password":"different-synthetic-password"}),
+        ))
         .unwrap();
-    let local = MieruNodeFactory.build(&json!({"username":"node-user","password":"synthetic-password","transport":"udp","unsafe_udp_compatibility":true})).unwrap();
+    let local = MieruNodeFactory.build(&shared::node_input("mieru", &json!({"username":"node-user","password":"synthetic-password","transport":"udp","unsafe_udp_compatibility":true}))).unwrap();
     assert_ne!(
-        one.credential_fingerprints(),
-        changed.credential_fingerprints()
+        shared::authentication(&one.credential_manifest()),
+        shared::authentication(&changed.credential_manifest())
     );
-    assert!(local.credential_fingerprints().is_empty());
-    let a = one.credential_isolation_fingerprints("mieru");
-    let b = changed.credential_isolation_fingerprints("mieru");
-    let u = local.credential_isolation_fingerprints("mieru");
-    let fingerprint = |values: &[kerlico_core::ScopedCredentialFingerprint], domain: &str| {
+    assert!(shared::authentication(&local.credential_manifest()).is_empty());
+    let a = one.credential_manifest();
+    let b = changed.credential_manifest();
+    let u = local.credential_manifest();
+    let fingerprint = |values: &kerlico_core::CredentialManifest, domain: &str| {
         values
+            .entries()
             .iter()
             .find(|value| value.protocol == domain)
             .unwrap()
@@ -366,12 +404,20 @@ fn identity_and_actual_secret_fingerprints_have_separate_domains() {
     assert_eq!(fingerprint(&a, "mieru-user"), fingerprint(&b, "mieru-user"));
     assert_ne!(fingerprint(&a, "mieru"), fingerprint(&b, "mieru"));
     assert_eq!(fingerprint(&a, "mieru"), fingerprint(&u, "mieru"));
-    let different = MieruNodeFactory.build(&json!({"username":"local-user","password":"synthetic-password","transport":"udp","unsafe_udp_compatibility":true})).unwrap().credential_isolation_fingerprints("mieru");
+    let different = MieruNodeFactory.build(&shared::node_input("mieru", &json!({"username":"local-user","password":"synthetic-password","transport":"udp","unsafe_udp_compatibility":true}))).unwrap().credential_manifest();
     assert_ne!(fingerprint(&a, "mieru"), fingerprint(&different, "mieru"));
     assert_ne!(
         fingerprint(&a, "mieru-user"),
         fingerprint(&different, "mieru-user")
     );
-    let cfg: Config = serde_json::from_value(json!({"version":1,"inbounds":[],"outbounds":[{"tag":"direct","type":"direct"}],"nodes":[{"tag":"remote","type":"mieru","listen":"127.0.0.1:10443","outbound":"direct","options":{"username":"node-user","password":"synthetic-password"}}],"local_inbounds":[{"tag":"local","type":"mieru","listen":"127.0.0.1:11443","outbound":"direct","options":{"username":"local-user","password":"synthetic-password","transport":"udp","unsafe_udp_compatibility":true}}]})).unwrap();
+    let cfg: Config = serde_json::from_value(shared::configuration(json!({"version":2,"inbounds":[],"outbounds":[{"tag":"direct","type":"direct"}],"nodes":[{"tag":"remote","type":"mieru","listen":"127.0.0.1:10443","outbound":"direct","options":{"username":"node-user","password":"synthetic-password"}}],"local_inbounds":[{"tag":"local","type":"mieru","listen":"127.0.0.1:11443","outbound":"direct","options":{"username":"local-user","password":"synthetic-password","transport":"udp","unsafe_udp_compatibility":true}}]}))).unwrap();
     assert!(registry().prepare(cfg).is_ok());
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

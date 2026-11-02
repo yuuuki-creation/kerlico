@@ -4,7 +4,7 @@ use crate::{
     codec::{self, Account, RecordOptions},
     crypto::{Cipher, MAX_DATAGRAM},
 };
-use kerlico_config::{OutboundFactory, TargetSpec};
+use kerlico_config::{OutboundFactory, OutboundPlan, TargetSpec};
 use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel, DatagramReceiver,
     DatagramSender, Destination, Error, Outbound, Result,
@@ -52,7 +52,7 @@ impl OutboundFactory for VmessFactory {
     fn kind(&self) -> &'static str {
         "vmess"
     }
-    fn build(&self, value: &Value) -> Result<Arc<dyn Outbound>> {
+    fn compile(&self, value: &Value) -> Result<OutboundPlan> {
         let options: Options = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
         if options.global_padding && !options.chunk_masking {
             return Err(invalid());
@@ -65,19 +65,35 @@ impl OutboundFactory for VmessFactory {
             | if options.chunk_masking { 4 } else { 0 }
             | if options.global_padding { 8 } else { 0 }
             | if options.authenticated_length { 16 } else { 0 };
-        Ok(Arc::new(VmessOutbound {
-            carrier: Client::build(
-                options.server.destination()?,
-                options.tls,
-                options.transport,
-            )?,
-            account: Account::new(id),
-            options: RecordOptions {
-                cipher,
-                flags,
-                termination: !options.no_termination_signal,
+        let carrier = Client::build(
+            options.server.destination()?,
+            options.tls,
+            options.transport,
+        )?;
+        let account = Account::new(id);
+        let options = RecordOptions {
+            cipher,
+            flags,
+            termination: !options.no_termination_signal,
+        };
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: options.termination,
+                udp: true,
             },
-        }))
+            false,
+            kerlico_core::TargetPolicy::Remote,
+            move |host| {
+                Box::pin(async move {
+                    Ok(Arc::new(VmessOutbound {
+                        carrier: carrier.start(&host)?,
+                        account,
+                        options,
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
 }
 impl VmessOutbound {
@@ -89,7 +105,7 @@ impl VmessOutbound {
     ) -> Result<BoxStream> {
         context
             .run(async {
-                let inner = self.carrier.open().await?;
+                let inner = self.carrier.open(context).await?;
                 let stream =
                     codec::connect(inner, &self.account, target, udp, self.options).await?;
                 Ok(Box::new(stream) as BoxStream)
@@ -98,6 +114,9 @@ impl VmessOutbound {
     }
 }
 impl Outbound for VmessOutbound {
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { self.carrier.shutdown().await })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tcp: true,
@@ -109,8 +128,16 @@ impl Outbound for VmessOutbound {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
-        Box::pin(self.open(target, false, context))
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
+        Box::pin(async move {
+            let opening: kerlico_core::BoxFuture<'_, Result<BoxStream>> =
+                Box::pin(self.open(target, false, context));
+            let stream = opening.await?;
+            Ok(kerlico_core::OpenedTcp {
+                stream,
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
+        })
     }
     fn connect_udp<'a>(
         &'a self,

@@ -1,6 +1,7 @@
 //! Shadowsocks 2022 的 TCP 与原生 UDP 双端适配；目标访问统一交给核心服务。
 
 mod config;
+mod credential_io;
 mod inbound;
 mod outbound;
 mod replay;

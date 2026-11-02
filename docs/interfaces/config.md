@@ -1,62 +1,53 @@
-# 配置与命令行接口（开发快照）
+# 配置与命令行接口
 
-更新日期：2026-10-31。各冻结快照与公共增量分别复验，最新全部工作树尚未整树验收，见[状态](../../STATUS.md)。当前仅接受 JSON，结构版本为 `1`。这是 kerlico 自身格式，不兼容三个参考核心的完整配置。
+更新日期为2026-11-02。本轮源码只接受JSON v2，完整首轮尚未编译或测试。迁移步骤见[配置v2迁移](../config-v2-migration.md)。配置不是三个参考核心的兼容格式。
 
-## 根结构与工厂
+## 根配置
 
-| 字段 | 含义 |
+| 字段 | 约束 |
 | --- | --- |
-| `version` | 必填，当前只接受 1 |
-| `outbounds` | 必填数组；每项有 `tag`、`type` 与可选 `options` 对象 |
-| `inbounds` | 必填数组；`check` 可检查空数组，`run` 拒绝入口与节点均为空的配置 |
-| `nodes` | 可选数组；每项含 `tag/type/listen/outbound/options`，可设 `max_sessions`；见[节点接口](node-egress.md) |
-| `local_inbounds` | 可选的本地动态代理数组，字段与节点相同；强制回环监听，且工厂须明确允许，不取代远端节点认证 |
-| `limits` | 可选，未给出的字段取下表默认值 |
+| version | 必须为2，v1明确拒绝 |
+| epoch | 默认1，必须非零，标识配置代次 |
+| accounts | 管理账户数组，ID和用户名分别唯一 |
+| outbounds | 命名出站数组，tag/type/options；每条编译一次、运行期启动一次 |
+| inbounds | 回环固定目标入口，默认空 |
+| nodes | 需要真实鉴别成员的协议节点，默认空 |
+| local_inbounds | 工厂明确允许的回环本地入口，默认空 |
+| limits | 省略字段使用下述默认值 |
 
-标签限1至64个ASCII字母、数字、横线或下划线。出站标签有独立命名空间；固定转发、nodes及local_inbounds共用接入标签空间，同名拒绝。出站type必须在当前构建注册；每个工厂独立解释其options，外层不认识具体协议的字段。未知字段、失效引用和不兼容能力都报错，不静默忽略或改走直连；协议内有意开放的headers等映射按其自身规则处理。
+标签为1至64个ASCII字母、数字、横线或下划线。出站有独立标签空间，所有入口共用另一个空间。未知字段、缺失类型、失效引用和不兼容能力直接拒绝。
 
-具体协议工厂由独立 Cargo feature 注册，按 `modules` 输出和[接口导航](README.md)核对；新增模块仍在远端验证中，源码存在或已注册不代表所有组合验收完成。基础处理器 `direct`、`reject` 的 options 只能为空对象。`Registry::prepare` 只构造和校验本地对象，不创建监听器或业务连接。
+accounts每项包含user_id、username、password_hash和可选enabled。user_id是持久非零UUID；用户名为1至128个非空白、非控制字符，校验唯一。管理密码保存为Argon2id v19 PHC摘要，支持m为19456至262144、t为2至10、p为1至8。账户管理密码不自动成为协议凭据。
 
-## 固定目标入口
+节点包含tag/type/listen/outbound/options/members，可选mode和max_sessions。members每项包含user_id、native_credential，可选credential_epoch和enabled，每节点最多1024个原生候选，协议可有更严格边界。凭据代次默认1且非零；账户及成员都启用才允许新鉴别。每个成员必须对应真实认证清单，跨入口秘密复用被拒绝。IPv4和IPv6监听节点分别声明members。
 
-| 字段 | 含义 |
-| --- | --- |
-| `tag` | 入口标签 |
-| `type` | `tcp-forward` 或 `udp-forward` |
-| `listen` | SocketAddr 字符串，只允许回环地址；端口 0 可用于测试的系统分配 |
-| `target.host` / `target.port` | 固定业务目的地址与非零端口，不是代理服务器地址 |
-| `outbound` | 已定义出站标签 |
-| `require_remote_eof` | 默认 false；为 true 时要求 TCP 出站能传播目标写端 EOF 并继续读回包，否则在准备阶段报错 |
+mode取ipv4-only、ipv6-only或dual-stack，默认dual-stack。它只约束本节点负责目标选择的Local路径；双栈先IPv4。Remote代理保留网站域名或字面IP，不应用本地网站模式，不替远端解析或重试。模式不限制代理载体的端点地址族。当前WARP缺族自动准备仍未实现，不能据mode字段宣称设备双栈出网已验证。
 
-入口类型是固定转发模型，不是 SOCKS/HTTP 协议。UDP 的每个来源使用独立关联和固定目标，不宣称逐包多目标或 XUDP。不同传输可以使用相同数字端口；同一传输重复监听地址会被拒绝。
+## 固定目标与限制
 
-## 资源限制
+固定入口包含tag、type、listen、target.host/port、outbound，可选mode和require_remote_eof。type为tcp-forward或udp-forward，listen必须回环，端口0用于动态分配。require_remote_eof默认为false，为true时只接受具备目标写端EOF能力的TCP路径。没有动态目标解析协议混入此固定转发格式。
 
-| 字段 | 默认值 | 支持范围/含义 |
+| limits字段 | 默认值 | 范围 |
 | --- | --- | --- |
-| `connect_timeout_ms` | 10000 | 1–300000；本次建立共用预算，包括解析、TCP/TLS 和请求头发送 |
-| `idle_timeout_ms` | 60000 | 1–86400000；成功业务读写推进空闲时间 |
-| `drain_timeout_ms` | 5000 | 1–300000；停止新接入后允许已有任务排空的预算 |
-| `max_sessions` | 128 | 1–65536；物理会话、需要额外租约的逻辑流及UDP关联共用全局额度，另受节点额度约束 |
-| `udp_queue_packets` | 32 | 1–4096；每关联的入站包队列容量，满时整包丢弃 |
-| `max_datagram_size` | 65535 | 1–65535；超过上限整包拒绝，不截断后继续发送 |
+| connect_timeout_ms | 10000 | 1至300000，建立链总期限 |
+| idle_timeout_ms | 60000 | 1至86400000，业务空闲预算 |
+| drain_timeout_ms | 5000 | 1至300000，每个关闭阶段有限预算 |
+| max_sessions | 128 | 1至65536，全局会话与附加逻辑流配额 |
+| udp_queue_packets | 32 | 1至4096，每来源固定转发队列 |
+| max_datagram_size | 65535 | 1至65535，缓冲上限，不是线上包长承诺 |
+| max_flow_records | 65536 | 不小于max_sessions且不大于1048576，运行账本记录上限 |
 
-内存需求由容量和包大小共同决定，配置上限不代表目标机器一定能承担。建立取消会停止使用该次结果并释放当前连接；系统 DNS 等底层调用未必能被立即中止。UDP 会话的部分帧操作被取消后必须丢弃，不重新发送可能已交付的数据。
+运行记录满时优先淘汰已结束明细并将其用量归入本次运行累计；仍活跃的账本不被淘汰，全部占满时拒绝新的业务流。淘汰数量对查询可见。这不是持久历史保存策略。
 
-`max_datagram_size`是框架缓冲上限，不是线上承诺：协议、原生IP UDP、QUIC模式或参考端可能限制为更小值。零包在核心语义中合法，不代表所有独立对端都已经通过零包验收。当前Egress对普通域名使用系统解析并优先IPv4；没有远端匿名DNS或Tor/onion解析能力的承诺。
-
-VLESS 的建立预算截至载体建立与请求头发送；远端业务解析、拨号和首次响应不是这里能确认的建立结果，其等待由后续空闲预算约束。
-
-## 命令与构建能力
+## 命令
 
 | 命令 | 行为 |
 | --- | --- |
-| `kerlico modules` | 按 inbound/outbound 角色列出当前二进制真实注册类型 |
-| `kerlico check -c <文件>` | 检查文件大小、JSON、工厂和引用/能力；不监听、不拨号 |
-| `kerlico run -c <文件>` | 绑定全部入口，完成后运行；部分绑定失败会回收此前资源 |
+| kerlico modules | 按inbound/outbound列出本次构建真实注册角色 |
+| kerlico check -c 文件 | 限制1MiB，解析并纯编译计划，不启动服务、监听、拨号、创建状态目录或部署设备 |
+| kerlico run -c 文件 | 消费计划，启动唯一共享运行服务并绑定入口，失败按同一事务回收 |
+| kerlico account-new --prefix 名称 | 从标准输入读管理密码，输出一次生成的账户JSON；默认前缀user，用户名为前缀_UUID |
 
-配置文件上限为1MiB。check会调用真实工厂，可能读取配置指定的证书/私钥并校验密码材料；它不创建监听或业务连接，也不能证明目标可达或协议互通。
+account-new的输入密码要求12至1024字节，输出只包含管理ID、用户名、密码摘要和启用状态。将输出账户保存到accounts后重启保持同一ID。prepare不会随机改名。协议密码、UUID或key另写入对应成员native_credential。
 
-默认构建及可选项以`apps/kerlico/Cargo.toml`为准；当前默认清单含21个协议feature，SSH、Gost Relay只有出站工厂，其余分别注册两角色，另有direct/reject基础出站。实际产物仍须用modules核验，未启用协议的配置明确失败。Mieru和Naive等模块的限定快照结果见各自测试记录，不能外推当前发行树；SSR、ShadowTLS、TrustTunnel等未解决边界也不会因默认注册而消失。`--no-default-features`只注册基础处理器。
-
-Ctrl-C或SIGTERM（Unix）停止新接入，按预算排空，随后取消剩余任务。没有在线配置替换或自动远端重试。配置/引擎级失败为非零，正常停止为0；单会话鉴权、目标连接或数据错误可只累加failed并继续服务，退出0不表示所有会话成功。具体故障依据接口错误和受控诊断定位，不打印UUID或完整配置。
+当前默认仍注册21个协议模块，SSH及Gost Relay只有出站；各角色和组合是否验收以当前测试记录为准。关闭未实现模块不作为本轮验收办法。Ctrl-C和Unix SIGTERM停止入口并有限排空，退出0不代表每条业务会话成功。

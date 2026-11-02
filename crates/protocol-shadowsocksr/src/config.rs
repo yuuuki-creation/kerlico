@@ -286,6 +286,23 @@ pub(crate) struct Shared {
     fingerprints: Vec<[u8; 32]>,
 }
 impl Shared {
+    pub(crate) fn candidate(self: &Arc<Self>) -> Arc<Self> {
+        Arc::new(Self {
+            method: self.method,
+            key: self.key.clone(),
+            protocol: self.protocol,
+            obfs: self.obfs,
+            obfs_param: self.obfs_param.clone(),
+            users: self.users.clone(),
+            user: self.user.clone(),
+            udp: self.udp,
+            limits: self.limits.clone(),
+            replay: Replay::transaction(self.replay.clone()),
+            client_id: self.client_id,
+            counter: AtomicU32::new(self.counter.load(Ordering::Relaxed)),
+            fingerprints: self.fingerprints.clone(),
+        })
+    }
     #[allow(clippy::too_many_arguments)]
     fn build(
         method: &str,

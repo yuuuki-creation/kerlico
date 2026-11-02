@@ -2,7 +2,7 @@ use crate::{inbound::Payload, server_http::State};
 use bytes::{Buf, Bytes};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
-use kerlico_core::{AccessService, Error, InboundContext, NodeEvent, Result};
+use kerlico_core::{Error, InboundContext, IngressBinding, NodeEvent, Result};
 use std::sync::Arc;
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
@@ -12,7 +12,7 @@ pub(crate) async fn serve(
     config: Arc<rustls::ServerConfig>,
     state: Arc<State>,
     payload: Arc<Payload>,
-    access: Arc<dyn AccessService>,
+    access: IngressBinding,
     context: InboundContext,
 ) -> Result<()> {
     let mut tls = (*config).clone();
@@ -34,7 +34,7 @@ pub(crate) async fn serve(
         quinn::EndpointConfig::default(),
         Some(server),
         standard,
-        Arc::new(quinn::TokioRuntime),
+        Arc::new(NodeRuntime(context.tasks.clone())),
     )?;
     let mut connections = JoinSet::new();
     loop {
@@ -44,7 +44,9 @@ pub(crate) async fn serve(
             incoming=endpoint.accept()=>{
                 let Some(incoming)=incoming else{break};let Ok(lease)=context.stream_budget.try_acquire() else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};
                 let state=state.clone();let payload=payload.clone();let access=access.clone();let context=context.clone();
-                connections.spawn(async move {let _lease=lease;context.events.record(NodeEvent::Accepted);let result=async {let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|Error::Protocol("QUIC 握手失败"))?;connection_loop(connection,state,payload,access,context.clone()).await}.await;context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});});
+                let owner=context.tasks.clone();
+                    let task=owner.spawn_tracked(async move {let _lease=lease;context.events.record(NodeEvent::Accepted);let result=async {let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|Error::Protocol("QUIC 握手失败"))?;connection_loop(connection,state,payload,access,context.clone()).await}.await;context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});})?;
+                    connections.spawn(async move {let _=task.await;});
             }
         }
     }
@@ -58,7 +60,7 @@ async fn connection_loop(
     connection: quinn::Connection,
     state: Arc<State>,
     payload: Arc<Payload>,
-    access: Arc<dyn AccessService>,
+    access: IngressBinding,
     context: InboundContext,
 ) -> Result<()> {
     let mut server = h3::server::Connection::new(h3_quinn::Connection::new(connection))
@@ -72,7 +74,8 @@ async fn connection_loop(
         let payload = payload.clone();
         let access = access.clone();
         let context = context.clone();
-        tasks.spawn(async move {
+        let owner = context.tasks.clone();
+        let task=owner.spawn_tracked(async move {
             let Ok((request,stream))=resolver.resolve_request().await else{return};
             let (mut send,mut receive)=stream.split();let (body_tx,body_rx)=mpsc::channel::<std::io::Result<Frame<Bytes>>>(16);
             let request=request.map(|_|StreamBody::new(ReceiverStream::new(body_rx)));
@@ -84,6 +87,9 @@ async fn connection_loop(
                 send.finish().await.map_err(|_|Error::Protocol("HTTP/3 结束失败"))?;Ok::<_,Error>(())
             };
             let _=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),r=async{tokio::try_join!(upload,response).map(|_|())}=>r};
+        })?;
+        tasks.spawn(async move {
+            let _ = task.await;
         });
     }
     if tokio::time::timeout(context.drain_timeout, async {
@@ -96,4 +102,25 @@ async fn connection_loop(
         while tasks.join_next().await.is_some() {}
     }
     Ok(())
+}
+
+struct NodeRuntime(kerlico_core::NodeTasks);
+impl std::fmt::Debug for NodeRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VlessH3Runtime")
+    }
+}
+impl quinn::Runtime for NodeRuntime {
+    fn new_timer(&self, instant: std::time::Instant) -> std::pin::Pin<Box<dyn quinn::AsyncTimer>> {
+        quinn::Runtime::new_timer(&quinn::TokioRuntime, instant)
+    }
+    fn spawn(&self, future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>) {
+        let _ = self.0.spawn(future);
+    }
+    fn wrap_udp_socket(
+        &self,
+        socket: std::net::UdpSocket,
+    ) -> std::io::Result<Arc<dyn quinn::AsyncUdpSocket>> {
+        quinn::Runtime::wrap_udp_socket(&quinn::TokioRuntime, socket)
+    }
 }

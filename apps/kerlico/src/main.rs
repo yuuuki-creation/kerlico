@@ -14,6 +14,11 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 从标准输入读取管理密码，输出一次生成的持久账户 JSON。
+    AccountNew {
+        #[arg(long, default_value = "user")]
+        prefix: String,
+    },
     /// 按角色列出当前构建真实注册的模块。
     Modules,
     /// 校验配置和模块能力，不监听或拨号。
@@ -32,6 +37,13 @@ fn registry() -> Result<Registry> {
     let mut registry = Registry::default();
     registry.register(DirectFactory)?;
     registry.register(RejectFactory)?;
+    #[cfg(feature = "protocol-tor")]
+    registry.register(kerlico_tor::TorFactory)?;
+    #[cfg(feature = "protocol-wireguard")]
+    {
+        registry.register(kerlico_wireguard::WireGuardFactory)?;
+        registry.register_node(kerlico_wireguard::WireGuardNodeFactory)?;
+    }
     #[cfg(feature = "protocol-vless")]
     registry.register(kerlico_vless::VlessFactory)?;
     #[cfg(feature = "protocol-vless")]
@@ -145,6 +157,26 @@ async fn execute() -> Result<()> {
     let args = Args::parse();
     let registry = registry()?;
     let (config, run) = match args.command {
+        Command::AccountNew { prefix } => {
+            use std::io::Read;
+            let mut password = Vec::new();
+            std::io::stdin().take(1027).read_to_end(&mut password)?;
+            if password.ends_with(b"\n") {
+                password.pop();
+                if password.ends_with(b"\r") {
+                    password.pop();
+                }
+            }
+            let account = kerlico_config::AccountSpec::create(&prefix, &password);
+            password.fill(0);
+            let account = account?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&account)
+                    .map_err(|_| Error::Config("管理账户无法编码".into()))?
+            );
+            return Ok(());
+        }
         Command::Modules => {
             for kind in registry.kinds() {
                 println!("outbound/{kind}");

@@ -1,6 +1,6 @@
 use crate::{address, config::Shared, protocol::Role, stream, udp};
 use bytes::BytesMut;
-use kerlico_config::OutboundFactory;
+use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
     Destination, Error, Outbound, Result,
@@ -15,13 +15,27 @@ pub struct ShadowsocksROutbound {
     pub(crate) slots: Arc<Semaphore>,
 }
 impl ShadowsocksROutbound {
-    pub fn from_options(options: &Value) -> Result<Self> {
+    pub fn compile(options: &Value) -> Result<OutboundPlan> {
         let (cfg, server) = Shared::client(options)?;
-        Ok(Self {
-            slots: Arc::new(Semaphore::new(cfg.limits.max_sessions)),
-            cfg,
-            server,
-        })
+        let udp = cfg.udp;
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp,
+            },
+            udp,
+            kerlico_core::TargetPolicy::Remote,
+            move |_host| {
+                Box::pin(async move {
+                    Ok(Arc::new(Self {
+                        slots: Arc::new(Semaphore::new(cfg.limits.max_sessions)),
+                        cfg,
+                        server,
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
 }
 impl Outbound for ShadowsocksROutbound {
@@ -39,33 +53,41 @@ impl Outbound for ShadowsocksROutbound {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
-            context
-                .run(async {
-                    let permit = self
-                        .slots
-                        .clone()
-                        .try_acquire_owned()
-                        .map_err(|_| Error::ResourceLimit)?;
-                    let raw = TcpStream::connect((self.server.host().as_str(), self.server.port()))
-                        .await?;
-                    raw.set_nodelay(true)?;
-                    let mut plain = stream::Stream::new(
-                        Box::new(raw),
-                        self.cfg.clone(),
-                        Role::Client,
-                        context.cancel.clone(),
-                        self.server.host(),
-                        self.server.port(),
-                    )?;
-                    let mut header = BytesMut::new();
-                    address(target).write_to_buf(&mut header);
-                    plain.write_all(&header).await?;
-                    plain.flush().await?;
-                    Ok(Box::new(plain.with_permit(permit)) as BoxStream)
-                })
-                .await
+            let opening: kerlico_core::BoxFuture<'_, Result<BoxStream>> = Box::pin(async move {
+                context
+                    .run(async {
+                        let permit = self
+                            .slots
+                            .clone()
+                            .try_acquire_owned()
+                            .map_err(|_| Error::ResourceLimit)?;
+                        let raw =
+                            TcpStream::connect((self.server.host().as_str(), self.server.port()))
+                                .await?;
+                        raw.set_nodelay(true)?;
+                        let mut plain = stream::Stream::new(
+                            Box::new(raw),
+                            self.cfg.clone(),
+                            Role::Client,
+                            context.cancel.clone(),
+                            self.server.host(),
+                            self.server.port(),
+                        )?;
+                        let mut header = BytesMut::new();
+                        address(target).write_to_buf(&mut header);
+                        plain.write_all(&header).await?;
+                        plain.flush().await?;
+                        Ok(Box::new(plain.with_permit(permit)) as BoxStream)
+                    })
+                    .await
+            });
+            let stream = opening.await?;
+            Ok(kerlico_core::OpenedTcp {
+                stream,
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
     fn connect_udp<'a>(
@@ -95,7 +117,7 @@ impl OutboundFactory for ShadowsocksRFactory {
     fn kind(&self) -> &'static str {
         "shadowsocksr"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn Outbound>> {
-        Ok(Arc::new(ShadowsocksROutbound::from_options(options)?))
+    fn compile(&self, options: &Value) -> Result<OutboundPlan> {
+        ShadowsocksROutbound::compile(options)
     }
 }

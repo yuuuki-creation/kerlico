@@ -19,46 +19,68 @@ pub(crate) struct DuplexWake {
     waiters: Mutex<Waiters>,
 }
 impl DuplexWake {
-    pub fn new() -> Arc<Self> { Arc::new(Self::default()) }
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
     pub fn reader(self: &Arc<Self>, caller: &Waker) -> Waker {
         let mut waiters = self.waiters.lock().unwrap();
-        if waiters.reader.as_ref().is_none_or(|old|!old.will_wake(caller)) {
+        if waiters
+            .reader
+            .as_ref()
+            .is_none_or(|old| !old.will_wake(caller))
+        {
             waiters.reader = Some(caller.clone());
         }
         Waker::from(self.clone())
     }
     pub fn writer(self: &Arc<Self>, caller: &Waker) -> Waker {
         let mut waiters = self.waiters.lock().unwrap();
-        if waiters.writer.as_ref().is_none_or(|old|!old.will_wake(caller)) {
+        if waiters
+            .writer
+            .as_ref()
+            .is_none_or(|old| !old.will_wake(caller))
+        {
             waiters.writer = Some(caller.clone());
         }
         Waker::from(self.clone())
     }
     pub fn wake_writer(&self) {
         let writer = self.waiters.lock().unwrap().writer.clone();
-        if let Some(writer) = writer { writer.wake(); }
+        if let Some(writer) = writer {
+            writer.wake();
+        }
     }
     pub fn wake_reader(&self) {
         let reader = self.waiters.lock().unwrap().reader.clone();
-        if let Some(reader) = reader { reader.wake(); }
+        if let Some(reader) = reader {
+            reader.wake();
+        }
     }
     pub fn wake_both(&self) {
-        let (reader,writer) = {
+        let (reader, writer) = {
             let waiters = self.waiters.lock().unwrap();
-            (waiters.reader.clone(),waiters.writer.clone())
+            (waiters.reader.clone(), waiters.writer.clone())
         };
         // 不持锁唤醒，允许调用者的waker同步转发至另一个缓冲层。
-        if let Some(reader) = reader.as_ref() { reader.wake_by_ref(); }
+        if let Some(reader) = reader.as_ref() {
+            reader.wake_by_ref();
+        }
         if let Some(writer) = writer
-            && reader.as_ref().is_none_or(|reader|!reader.will_wake(&writer))
+            && reader
+                .as_ref()
+                .is_none_or(|reader| !reader.will_wake(&writer))
         {
             writer.wake();
         }
     }
 }
 impl Wake for DuplexWake {
-    fn wake(self: Arc<Self>) { self.wake_both(); }
-    fn wake_by_ref(self: &Arc<Self>) { self.wake_both(); }
+    fn wake(self: Arc<Self>) {
+        self.wake_both();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wake_both();
+    }
 }
 
 pub(crate) struct CancelIo<T> {

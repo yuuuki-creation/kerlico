@@ -244,9 +244,9 @@ impl AsyncWrite for HeldIo {
 mod tests {
     use super::*;
     use kerlico_config::OutboundFactory;
-    use kerlico_core::{ConnectContext,Destination};
-    use std::time::Duration;
+    use kerlico_core::{ConnectContext, Destination};
     use serde_json::json;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn h2_connection_credit_allows_atomic_large_udp_reply_after_small_replies() {
@@ -260,7 +260,7 @@ mod tests {
                 let(stream,_)=listener.accept().await.unwrap();let stream=tokio_rustls::TlsAcceptor::from(tls).accept(stream).await.unwrap();
                 let mut connection=h2::server::handshake(stream).await.unwrap();
                 let(request,mut response)=connection.accept().await.unwrap().unwrap();
-                let auth=crate::config::Auth{username:"credit-user".into(),password:"credit-test-secret".into()};assert!(crate::config::authenticate(request.headers(),&[auth.hash()]));assert_eq!(request.uri().authority().unwrap().as_str(),"_udp2");
+                let auth=crate::config::Auth{username:"credit-user".into(),password:"credit-test-secret".into()};assert_eq!(crate::config::authentication_hash(request.headers()).unwrap(),auth.hash());assert_eq!(request.uri().authority().unwrap().as_str(),"_udp2");
                 let send=response.send_response(http::Response::builder().status(200).body(()).unwrap(),false).unwrap();
                 let mut io=BodyIo{writer:Some(Writer::H2(send)),reader:Reader::H2(request.into_body()),pending:None,buffer:Bytes::new(),closing:false,closed:false};
                 let mut worker=tokio::spawn(async move{
@@ -275,9 +275,15 @@ mod tests {
                     }
                     let _=wait.await;
                 });
-                loop{tokio::select!{result=&mut worker=>{result.unwrap();break;},request=connection.accept()=>{if request.is_none(){break;}panic!("夹具只接受一个固定UDP HTTP流");}}}
+                tokio::select! {
+                    result = &mut worker => result.unwrap(),
+                    request = connection.accept() => {
+                        assert!(request.is_none(), "夹具只接受一个固定UDP HTTP流");
+                        worker.await.unwrap();
+                    }
+                }
             });
-            let outbound=crate::TrustTunnelFactory.build(&json!({"server":{"host":"127.0.0.1","port":address.port()},"auth":{"username":"credit-user","password":"credit-test-secret"},"transport":"h2","tls":{"server_name":"credit.example.invalid","ca_pem":cert,"version":"tls13"}})).unwrap();
+            let outbound=crate::TrustTunnelFactory.compile(&json!({"server":{"host":"127.0.0.1","port":address.port()},"auth":{"username":"credit-user","password":"credit-test-secret"},"transport":"h2","tls":{"server_name":"credit.example.invalid","ca_pem":cert,"version":"tls13"}})).unwrap().start(kerlico_core::ServiceContext::for_test()).await.unwrap();
             let context=ConnectContext::new(Duration::from_secs(3));let target=Destination::new("192.0.2.1",53).unwrap();let mut channel=outbound.connect_udp(&target,&context).await.unwrap();
             for size in [17,4096,12000,65000]{let bytes=vec![size as u8;size];channel.sender.send(&bytes).await.unwrap();assert_eq!(channel.receiver.recv().await.unwrap().unwrap(),bytes);}
             release.send(()).unwrap();drop(channel);drop(outbound);peer.await.unwrap();

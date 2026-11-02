@@ -36,10 +36,10 @@ def main():
     if args.archive is None:
         urllib.request.urlretrieve(entry["archive_url"], archive)
     actual = sha(archive)
-    expected = entry.get("archive_sha256") or args.archive_sha256
-    if not expected:
+    archive_expected = entry.get("archive_sha256") or args.archive_sha256
+    if not archive_expected:
         raise SystemExit("固定参考归档缺少预期SHA256，不构建")
-    if expected != actual:
+    if archive_expected != actual:
         raise SystemExit("固定参考归档摘要不符")
     unpacked = args.work / "unpacked"
     unpacked.mkdir()
@@ -49,8 +49,8 @@ def main():
     if len(roots) != 1:
         raise SystemExit("上游归档顶层不唯一")
     root = roots[0]
-    for name, expected in entry["files"].items():
-        if sha(root / name) != expected:
+    for name, file_expected in entry["files"].items():
+        if sha(root / name) != file_expected:
             raise SystemExit("固定参考文件摘要不符: " + name)
     source_manifest = {p.relative_to(root).as_posix(): sha(p) for p in sorted(root.rglob("*")) if p.is_file()}
     env = os.environ.copy()
@@ -65,7 +65,7 @@ def main():
     after_manifest = {p.relative_to(root).as_posix(): sha(p) for p in sorted(root.rglob("*")) if p.is_file()}
     changed = sorted(name for name in set(source_manifest) | set(after_manifest) if source_manifest.get(name) != after_manifest.get(name))
     record = {"peer": args.peer, "commit": entry["commit"], "archive_url": entry["archive_url"],
-              "archive_sha256": actual, "archive_expected_sha256": expected, "source_files": source_manifest,
+              "archive_sha256": actual, "archive_expected_sha256": archive_expected, "source_files": source_manifest,
               "production_source_changes": len(changed), "changed_source_files": changed, "source_unchanged_after_build": not changed, "returncode": result.returncode}
     if result.returncode == 0:
         record["binary_sha256"] = sha(binary)

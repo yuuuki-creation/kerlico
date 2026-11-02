@@ -111,6 +111,15 @@ pub(crate) struct Stream {
     _permit: Option<OwnedSemaphorePermit>,
 }
 impl Stream {
+    pub(crate) fn authenticated_user(&self) -> Result<Option<u32>> {
+        if !self.cfg.authenticated() {
+            return Err(kerlico_core::Error::Rejected);
+        }
+        if self.cfg.protocol != crate::config::Protocol::Origin && !self.codec.received_header {
+            return Err(kerlico_core::Error::Rejected);
+        }
+        Ok((!self.cfg.users.is_empty()).then_some(self.codec.uid))
+    }
     pub(crate) fn new(
         raw: BoxStream,
         cfg: Arc<Shared>,
@@ -415,6 +424,10 @@ impl AsyncWrite for Stream {
         result
     }
 }
+
+#[cfg(test)]
+#[path = "stream_scripted_tests.rs"]
+mod scripted_tests;
 
 #[cfg(test)]
 mod tests {

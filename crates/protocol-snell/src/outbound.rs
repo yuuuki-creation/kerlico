@@ -4,14 +4,17 @@ use crate::{
     stream::{Pool, Session, Stream},
     wire,
 };
-use kerlico_config::{OutboundFactory, TargetSpec};
+use kerlico_config::{OutboundFactory, OutboundPlan, TargetSpec};
 use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel, Destination, Outbound,
     Result,
 };
 use serde::Deserialize;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 pub struct SnellFactory;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,13 +40,14 @@ struct SnellOutbound {
     settings: Arc<Settings>,
     userkey: Vec<u8>,
     reuse: bool,
-    pool: Arc<Pool>,
+    pools: Mutex<HashMap<kerlico_core::ResourceKey, Arc<Pool>>>,
+    host: kerlico_core::ServiceContext,
 }
 impl OutboundFactory for SnellFactory {
     fn kind(&self) -> &'static str {
         "snell"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn Outbound>> {
+    fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         let options: Options = serde_json::from_value(options.clone()).map_err(|_| invalid())?;
         let settings = Arc::new(Settings::new(
             options.version,
@@ -59,20 +63,45 @@ impl OutboundFactory for SnellFactory {
         if settings.raw() && (!server.is_loopback() || userkey.is_empty()) {
             return Err(invalid());
         }
-        Ok(Arc::new(SnellOutbound {
-            server,
-            settings,
-            userkey,
-            reuse: options.reuse,
-            pool: Pool::new(10),
-        }))
+        let reuse = options.reuse;
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp: true,
+            },
+            false,
+            kerlico_core::TargetPolicy::Remote,
+            move |host| {
+                Box::pin(async move {
+                    Ok(Arc::new(SnellOutbound {
+                        server,
+                        settings,
+                        userkey,
+                        reuse,
+                        pools: Mutex::new(HashMap::new()),
+                        host,
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
 }
 impl SnellOutbound {
-    async fn session(&self, reuse: bool) -> Result<Session> {
+    fn pool(&self, context: &ConnectContext) -> Result<Arc<Pool>> {
+        if self.host.cancel().is_cancelled() {
+            return Err(kerlico_core::Error::Cancelled);
+        }
+        let mut pools = self.pools.lock().map_err(|_| invalid())?;
+        Ok(pools
+            .entry(context.resource_key().clone())
+            .or_insert_with(|| Pool::new(10))
+            .clone())
+    }
+    async fn session(&self, pool: &Arc<Pool>, reuse: bool) -> Result<Session> {
         if reuse {
-            self.pool.start();
-            if let Some(session) = self.pool.take() {
+            pool.start(&self.host)?;
+            if let Some(session) = pool.take() {
                 return Ok(session);
             }
         }
@@ -84,6 +113,15 @@ impl SnellOutbound {
     }
 }
 impl Outbound for SnellOutbound {
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let pools = std::mem::take(&mut *self.pools.lock().map_err(|_| invalid())?);
+            for pool in pools.into_values() {
+                pool.shutdown().await?;
+            }
+            Ok(())
+        })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tcp: true,
@@ -95,29 +133,33 @@ impl Outbound for SnellOutbound {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
-            context
-                .run(async {
-                    let mut session = self.session(self.reuse).await?;
-                    session
-                        .send(&wire::request(
-                            if self.reuse { 5 } else { 1 },
-                            &self.userkey,
-                            Some(target),
-                        ))
-                        .await?;
-                    let pool = if self.reuse {
-                        Some(self.pool.clone())
-                    } else {
-                        None
-                    };
-                    Ok(
-                        Box::new(Stream::new(session, true, Vec::new(), pool, self.reuse))
-                            as BoxStream,
-                    )
-                })
-                .await
+            let opening: kerlico_core::BoxFuture<'_, Result<BoxStream>> = Box::pin(async move {
+                context
+                    .run(async {
+                        let pool = self.pool(context)?;
+                        let mut session = self.session(&pool, self.reuse).await?;
+                        session
+                            .send(&wire::request(
+                                if self.reuse { 5 } else { 1 },
+                                &self.userkey,
+                                Some(target),
+                            ))
+                            .await?;
+                        let pool = if self.reuse { Some(pool) } else { None };
+                        Ok(
+                            Box::new(Stream::new(session, true, Vec::new(), pool, self.reuse))
+                                as BoxStream,
+                        )
+                    })
+                    .await
+            });
+            let stream = opening.await?;
+            Ok(kerlico_core::OpenedTcp {
+                stream,
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
     fn connect_udp<'a>(
@@ -128,7 +170,8 @@ impl Outbound for SnellOutbound {
         Box::pin(async move {
             context
                 .run(async {
-                    let mut session = self.session(false).await?;
+                    let pool = self.pool(context)?;
+                    let mut session = self.session(&pool, false).await?;
                     session.send(&wire::request(6, &self.userkey, None)).await?;
                     let reply = session.reader.next().await?.ok_or_else(crate::protocol)?;
                     if !wire::reply(reply)?.is_empty() {

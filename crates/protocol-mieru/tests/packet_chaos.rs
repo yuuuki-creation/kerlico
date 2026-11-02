@@ -4,7 +4,6 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 use common::*;
-use kerlico_config::OutboundFactory;
 use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
     Destination, Outbound, Result,
@@ -119,7 +118,7 @@ async fn local_udp_arq_recovers_loss_duplicates_reordering_and_uses_fresh_transm
         let proxy = lossy(f.address, true).await;
         let mut options = f.options.clone();
         options["server"] = json!({"host":host,"port":proxy.address.port()});
-        f.outbound = MieruFactory.build(&options).unwrap();
+        f.outbound = shared::outbound(&MieruFactory, &options).await.unwrap();
         tcp(&f, &echo.target, 257024).await;
         let mut association = f.outbound.associate_udp(&f.context()).await.unwrap();
         for size in [0, 17, 12000, 65507] {
@@ -190,7 +189,7 @@ impl Outbound for DelayedTarget {
         &'a self,
         target: &'a Destination,
         _: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
             assert!(target.is_loopback());
             let (stream, mut peer) = tokio::io::duplex(1024);
@@ -206,7 +205,10 @@ impl Outbound for DelayedTarget {
                     let _ = peer.shutdown().await;
                 }
             });
-            Ok(Box::new(stream) as BoxStream)
+            Ok(kerlico_core::OpenedTcp {
+                stream: Box::new(stream),
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
 }
@@ -214,7 +216,9 @@ impl Outbound for DelayedTarget {
 async fn local_udp_zero_window_is_observed_and_recovers_when_application_resumes() {
     // 延迟的内存目标制造背压；仅用于流控回归，不作为独立对端验收。
     let delayed = Arc::new(DelayedTarget {
-        direct: kerlico_net::DirectFactory.build(&json!({})).unwrap(),
+        direct: shared::outbound(&kerlico_net::DirectFactory, &json!({}))
+            .await
+            .unwrap(),
     });
     let mut setup = Setup::new("udp", "127.0.0.1");
     setup.outbound = Some(delayed);
@@ -223,7 +227,7 @@ async fn local_udp_zero_window_is_observed_and_recovers_when_application_resumes
     let proxy = lossy(f.address, false).await;
     let mut options = f.options.clone();
     options["server"] = json!({"host":"127.0.0.1","port":proxy.address.port()});
-    f.outbound = MieruFactory.build(&options).unwrap();
+    f.outbound = shared::outbound(&MieruFactory, &options).await.unwrap();
     tcp(&f, &Destination::new("127.0.0.1", 9).unwrap(), 1024 * 1024).await;
     assert!(proxy.zero_window.load(Ordering::Acquire) > 0);
     f.stop().await;
@@ -236,14 +240,18 @@ async fn local_udp_concurrent_logical_streams_share_one_carrier_and_keep_payload
     let proxy = lossy(f.address, false).await;
     let mut options = f.options.clone();
     options["server"] = json!({"host":"127.0.0.1","port":proxy.address.port()});
-    f.outbound = MieruFactory.build(&options).unwrap();
+    f.outbound = shared::outbound(&MieruFactory, &options).await.unwrap();
     let mut tasks = tokio::task::JoinSet::new();
     for index in 0..16u8 {
         let outbound = f.outbound.clone();
         let target = echo.target.clone();
         let context = f.context();
         tasks.spawn(async move {
-            let mut stream = outbound.connect_tcp(&target, &context).await.unwrap();
+            let mut stream = outbound
+                .connect_tcp(&target, &context)
+                .await
+                .unwrap()
+                .stream;
             let data = vec![index; 65536];
             stream.write_u32(data.len() as u32).await.unwrap();
             stream.write_all(&data).await.unwrap();
@@ -276,4 +284,12 @@ async fn local_udp_concurrent_logical_streams_share_one_carrier_and_keep_payload
     assert_eq!(proxy.client_peers.lock().unwrap().len(), 1);
     assert_eq!(proxy.reused.load(Ordering::Acquire), 0);
     f.stop().await;
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

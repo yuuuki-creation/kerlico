@@ -80,18 +80,17 @@ pub(crate) async fn write_request<W: AsyncWrite + Unpin>(
 }
 pub(crate) async fn request<R: AsyncRead + Unpin>(
     reader: &mut R,
-    users: &[[u8; 56]],
-) -> Result<(Destination, bool)> {
+    users: &kerlico_core::CredentialSet<[u8; 56]>,
+) -> Result<(kerlico_core::CredentialSlot, Destination, bool)> {
     use subtle::ConstantTimeEq;
     let mut key = [0; 56];
     reader.read_exact(&mut key).await?;
-    let mut valid = subtle::Choice::from(0);
-    for user in users {
-        valid |= user.ct_eq(&key);
-    }
-    if !bool::from(valid) {
-        return Err(protocol());
-    }
+    let slot = users
+        .rows()
+        .filter(|(_, user)| bool::from(user.ct_eq(&key)))
+        .map(|(slot, _)| slot)
+        .last()
+        .ok_or_else(protocol)?;
     crlf(reader).await?;
     let udp = match reader.read_u8().await? {
         1 => false,
@@ -101,7 +100,8 @@ pub(crate) async fn request<R: AsyncRead + Unpin>(
     let kind = reader.read_u8().await?;
     let target = read_address(reader, kind).await?;
     crlf(reader).await?;
-    Ok((target, udp))
+
+    Ok((slot, target, udp))
 }
 pub(crate) async fn packet<R: AsyncRead + Unpin>(
     reader: &mut R,
@@ -141,6 +141,13 @@ pub(crate) async fn write_packet<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn users(key: [u8; 56]) -> kerlico_core::CredentialSet<[u8; 56]> {
+        let input = kerlico_config::NodeBuildContext::for_test(
+            serde_json::json!({}),
+            vec![serde_json::json!({"password":"test"})],
+        );
+        input.credentials(vec![key]).unwrap()
+    }
     #[tokio::test]
     async fn request_and_udp_exact_boundaries() {
         let key = crate::key("test-only-password").unwrap();
@@ -153,7 +160,10 @@ mod tests {
             bytes.extend_from_slice(b"tail");
             let mut input = bytes.as_slice();
             assert_eq!(
-                request(&mut input, &[key]).await.unwrap(),
+                request(&mut input, &users(key))
+                    .await
+                    .map(|(_, target, udp)| (target, udp))
+                    .unwrap(),
                 (target.clone(), true)
             );
             assert_eq!(input, b"tail");
@@ -182,7 +192,7 @@ mod tests {
         for index in [0, 56, 58, 59, original.len() - 1] {
             let mut bad = original.clone();
             bad[index] ^= 255;
-            assert!(request(&mut bad.as_slice(), &[key]).await.is_err());
+            assert!(request(&mut bad.as_slice(), &users(key)).await.is_err());
         }
         let mut wire = Vec::new();
         write_packet(&mut wire, &target, b"packet", 65535)

@@ -19,7 +19,6 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf},
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
-    task::AbortHandle,
     time::Instant,
 };
 use xray_proxy::mux::{MAX_PAYLOAD, Status};
@@ -44,7 +43,7 @@ struct Connection {
     closed: AtomicBool,
     cancel: CancellationToken,
     activity: Mutex<Instant>,
-    tasks: Mutex<Vec<AbortHandle>>,
+    tasks: Mutex<Vec<kerlico_core::ServiceTask<()>>>,
     connection_permit: Mutex<Option<OwnedSemaphorePermit>>,
 }
 impl Connection {
@@ -71,7 +70,12 @@ impl Connection {
             permit.take();
         }
     }
-    fn create(stream: BoxStream, capacity: usize, permit: OwnedSemaphorePermit) -> Arc<Self> {
+    fn create(
+        stream: BoxStream,
+        capacity: usize,
+        permit: OwnedSemaphorePermit,
+        host: &kerlico_core::ServiceContext,
+    ) -> Result<Arc<Self>> {
         let (output, mut outgoing) = mpsc::channel::<Message>(32);
         let cancel = CancellationToken::new();
         let value = Arc::new(Self {
@@ -90,7 +94,7 @@ impl Connection {
         let (mut reader, mut writer) = tokio::io::split(stream);
         let weak = Arc::downgrade(&value);
         let stop = cancel.clone();
-        let writing = tokio::spawn(async move {
+        let writing = host.spawn_tracked(async move {
             loop {
                 let message = tokio::select! {_=stop.cancelled()=>break,message=outgoing.recv()=>match message{Some(v)=>v,None=>break}};
                 let ending=message.frame.status==Status::End;
@@ -108,10 +112,10 @@ impl Connection {
             if let Some(value) = weak.upgrade() {
                 value.accepting.store(false,Ordering::Release);
             }
-        });
+        })?;
         let weak = Arc::downgrade(&value);
         let stop = cancel.clone();
-        let reading = tokio::spawn(async move {
+        let reading = host.spawn_tracked(async move {
             loop {
                 let frame = tokio::select! {_=stop.cancelled()=>break,frame=frame::read(&mut reader)=>match frame{Ok(Some(v))=>v,Ok(None)=>break,Err(error)=>{eprintln!("VLESS Mux 载体读取失败：{error}");break}}};
                 let Some(value) = weak.upgrade() else { break };
@@ -134,10 +138,10 @@ impl Connection {
             if let Some(value) = weak.upgrade() {
                 value.close();
             }
-        });
+        })?;
         let weak = Arc::downgrade(&value);
         let stop = cancel;
-        let idle = tokio::spawn(async move {
+        let idle = host.spawn_tracked(async move {
             loop {
                 tokio::select! {_=stop.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(5))=>{}}
                 let Some(value) = weak.upgrade() else { break };
@@ -161,15 +165,11 @@ impl Connection {
                     break;
                 }
             }
-        });
+        })?;
         if let Ok(mut tasks) = value.tasks.lock() {
-            tasks.extend([
-                writing.abort_handle(),
-                reading.abort_handle(),
-                idle.abort_handle(),
-            ]);
+            tasks.extend([writing, reading, idle]);
         }
-        value
+        Ok(value)
     }
     fn reserve(self: &Arc<Self>) -> Option<(u16, OwnedSemaphorePermit)> {
         let _sessions = self.sessions.lock().ok()?;
@@ -242,41 +242,73 @@ impl Drop for Lease {
     }
 }
 
-type Reservation=(Arc<Connection>,u16,OwnedSemaphorePermit);
+type Reservation = (Arc<Connection>, u16, OwnedSemaphorePermit);
 pub(crate) struct Pool {
-    creating:tokio::sync::Mutex<()>,
+    creating: tokio::sync::Mutex<()>,
     connections: Mutex<Vec<Arc<Connection>>>,
     slots: Arc<Semaphore>,
     concurrency: usize,
+    host: kerlico_core::ServiceContext,
 }
 impl Pool {
-    pub fn new(concurrency: usize, max_connections: usize) -> Self {
+    pub fn new(
+        concurrency: usize,
+        max_connections: usize,
+        host: kerlico_core::ServiceContext,
+    ) -> Self {
         Self {
-            creating:tokio::sync::Mutex::new(()),
+            creating: tokio::sync::Mutex::new(()),
             connections: Mutex::new(Vec::new()),
             slots: Arc::new(Semaphore::new(max_connections)),
             concurrency,
+            host,
         }
     }
-    fn reusable(&self)->Result<Option<Reservation>> {
-        let mut connections=self.connections.lock().map_err(|_|Error::Protocol("Mux 连接池不可用"))?;
-        connections.retain(|connection|!connection.closed.load(Ordering::Acquire));
-        for connection in connections.iter(){if let Some((id,permit))=connection.reserve(){return Ok(Some((connection.clone(),id,permit)));}}
+    pub async fn shutdown(&self) -> Result<()> {
+        let connections =
+            std::mem::take(&mut *self.connections.lock().map_err(|_| Error::Rejected)?);
+        for connection in &connections {
+            connection.close();
+        }
+        for connection in connections {
+            let tasks = std::mem::take(&mut *connection.tasks.lock().map_err(|_| Error::Rejected)?);
+            for task in tasks {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+        Ok(())
+    }
+    fn reusable(&self) -> Result<Option<Reservation>> {
+        let mut connections = self
+            .connections
+            .lock()
+            .map_err(|_| Error::Protocol("Mux 连接池不可用"))?;
+        connections.retain(|connection| !connection.closed.load(Ordering::Acquire));
+        for connection in connections.iter() {
+            if let Some((id, permit)) = connection.reserve() {
+                return Ok(Some((connection.clone(), id, permit)));
+            }
+        }
         Ok(None)
     }
     async fn acquire<F: Future<Output = Result<BoxStream>> + Send>(
         &self,
         open: F,
     ) -> Result<Reservation> {
-        if let Some(reserved)=self.reusable()?{return Ok(reserved);}
-        let _creating=self.creating.lock().await;
-        if let Some(reserved)=self.reusable()?{return Ok(reserved);}
+        if let Some(reserved) = self.reusable()? {
+            return Ok(reserved);
+        }
+        let _creating = self.creating.lock().await;
+        if let Some(reserved) = self.reusable()? {
+            return Ok(reserved);
+        }
         let permit = self
             .slots
             .clone()
             .try_acquire_owned()
             .map_err(|_| Error::ResourceLimit)?;
-        let connection = Connection::create(open.await?, self.concurrency, permit);
+        let connection = Connection::create(open.await?, self.concurrency, permit, &self.host)?;
         let (id, permit) = connection.reserve().ok_or(Error::ResourceLimit)?;
         self.connections
             .lock()
@@ -290,7 +322,7 @@ impl Pool {
         udp: bool,
         xudp: bool,
         open: F,
-    ) -> Result<(Arc<Lease>, mpsc::Receiver<Frame>,Option<Frame>)> {
+    ) -> Result<(Arc<Lease>, mpsc::Receiver<Frame>, Option<Frame>)> {
         let (connection, id, permit) = self.acquire(open).await?;
         let (sender, receiver) = mpsc::channel(32);
         let failed = Arc::new(AtomicBool::new(false));
@@ -321,26 +353,42 @@ impl Pool {
                 },
             );
         }
-        let first=Frame {id,status:Status::New,error:false,target:Some(carrier::target(target,udp)),global_id:(udp&&xudp).then(rand::random),payload:None};
+        let first = Frame {
+            id,
+            status: Status::New,
+            error: false,
+            target: Some(carrier::target(target, udp)),
+            global_id: (udp && xudp).then(rand::random),
+            payload: None,
+        };
         // Xray 的非零 global ID 分支会直接读取首包；不能先发送没有数据的 NEW。
-        if udp&&xudp{return Ok((lease,receiver,Some(first)));}
-        let (ack,ready)=oneshot::channel();
-        connection.output.send(Message {frame:first,ack:Some(ack)}).await.map_err(|_|Error::Protocol("Mux 建立失败"))?;
+        if udp && xudp {
+            return Ok((lease, receiver, Some(first)));
+        }
+        let (ack, ready) = oneshot::channel();
+        connection
+            .output
+            .send(Message {
+                frame: first,
+                ack: Some(ack),
+            })
+            .await
+            .map_err(|_| Error::Protocol("Mux 建立失败"))?;
 
         ready
             .await
             .map_err(|_| Error::Protocol("Mux 载体写入失败"))?;
-        Ok((lease, receiver,None))
+        Ok((lease, receiver, None))
     }
     pub async fn tcp<F: Future<Output = Result<BoxStream>> + Send>(
         &self,
         target: &Destination,
         open: F,
     ) -> Result<BoxStream> {
-        let (lease, mut incoming,_) = self.session(target, false, false, open).await?;
+        let (lease, mut incoming, _) = self.session(target, false, false, open).await?;
         let (local, peer) = tokio::io::duplex(32 * 1024);
         let held = lease.clone();
-        let task = tokio::spawn(async move {
+        let task = self.host.spawn_tracked(async move {
             let (mut reader, mut writer) = tokio::io::split(peer);
             let uplink = async {
                 let mut bytes = vec![0; MAX_PAYLOAD];
@@ -373,11 +421,11 @@ impl Pool {
                 held.failed.store(true, Ordering::Release);
             }
             held.finish();
-        });
+        })?;
         Ok(Box::new(Tcp {
             io: local,
             lease,
-            task: task.abort_handle(),
+            task,
             write_closed: false,
         }))
     }
@@ -387,10 +435,12 @@ impl Pool {
         xudp: bool,
         open: F,
     ) -> Result<DatagramChannel> {
-        let (lease, incoming,first) = self.session(target, true, xudp, open).await?;
+        let (lease, incoming, first) = self.session(target, true, xudp, open).await?;
         Ok(DatagramChannel {
             sender: Box::new(Sender {
-                lease: lease.clone(),first,target:target.clone(),
+                lease: lease.clone(),
+                first,
+                target: target.clone(),
             }),
             receiver: Box::new(Receiver { lease, incoming }),
         })
@@ -400,7 +450,7 @@ impl Pool {
 struct Tcp {
     io: DuplexStream,
     lease: Arc<Lease>,
-    task: AbortHandle,
+    task: kerlico_core::ServiceTask<()>,
     write_closed: bool,
 }
 impl Drop for Tcp {
@@ -457,8 +507,8 @@ impl AsyncWrite for Tcp {
 }
 struct Sender {
     lease: Arc<Lease>,
-    first:Option<Frame>,
-    target:Destination,
+    first: Option<Frame>,
+    target: Destination,
 }
 impl DatagramSender for Sender {
     fn send<'a>(&'a mut self, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {
@@ -466,8 +516,22 @@ impl DatagramSender for Sender {
             if bytes.len() > MAX_PAYLOAD {
                 return Err(Error::ResourceLimit);
             }
-            let frame=if let Some(mut first)=self.first.take(){first.payload=Some(bytes.to_vec());first}else{Frame::data(self.lease.id,bytes.to_vec(),Some(carrier::target(&self.target,true)))};
-            let guard=self.lease.cancel.clone().drop_guard();let result=self.lease.send(frame).await;if result.is_ok(){guard.disarm();}result
+            let frame = if let Some(mut first) = self.first.take() {
+                first.payload = Some(bytes.to_vec());
+                first
+            } else {
+                Frame::data(
+                    self.lease.id,
+                    bytes.to_vec(),
+                    Some(carrier::target(&self.target, true)),
+                )
+            };
+            let guard = self.lease.cancel.clone().drop_guard();
+            let result = self.lease.send(frame).await;
+            if result.is_ok() {
+                guard.disarm();
+            }
+            result
         })
     }
 }
@@ -502,55 +566,161 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn concurrent_first_streams_share_the_connection_being_created() {
-        let pool=Arc::new(Pool::new(4,1));let barrier=Arc::new(tokio::sync::Barrier::new(4));let opened=Arc::new(std::sync::atomic::AtomicUsize::new(0));let mut tasks=tokio::task::JoinSet::new();
-        for _ in 0..4 {let pool=pool.clone();let barrier=barrier.clone();let opened=opened.clone();tasks.spawn(async move {
-            barrier.wait().await;let target=Destination::new("127.0.0.1",80).unwrap();
-            let mut stream=pool.tcp(&target,async move {opened.fetch_add(1,Ordering::SeqCst);tokio::time::sleep(Duration::from_millis(30)).await;let (client,mut peer)=tokio::io::duplex(4096);tokio::spawn(async move {let mut served=0;while served<4 {let Some(request)=frame::read(&mut peer).await.unwrap() else{return};if request.status!=Status::New{continue;}served+=1;frame::write(&mut peer,Frame::data(request.id,vec![request.id as u8],None)).await.unwrap();frame::write(&mut peer,Frame::end(request.id,false)).await.unwrap();}});Ok(Box::new(client) as BoxStream)}).await.unwrap();
-            let mut bytes=Vec::new();stream.read_to_end(&mut bytes).await.unwrap();assert_eq!(bytes.len(),1);bytes[0]
-        });}
-        let mut ids=Vec::new();while let Some(result)=tasks.join_next().await{ids.push(result.unwrap());}ids.sort_unstable();assert_eq!(ids,[1,2,3,4]);assert_eq!(opened.load(Ordering::SeqCst),1);
+        let pool = Arc::new(Pool::new(4, 1, kerlico_core::ServiceContext::for_test()));
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..4 {
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            let opened = opened.clone();
+            tasks.spawn(async move {
+                barrier.wait().await;
+                let target = Destination::new("127.0.0.1", 80).unwrap();
+                let mut stream = pool
+                    .tcp(&target, async move {
+                        opened.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        let (client, mut peer) = tokio::io::duplex(4096);
+                        tokio::spawn(async move {
+                            let mut served = 0;
+                            while served < 4 {
+                                let Some(request) = frame::read(&mut peer).await.unwrap() else {
+                                    return;
+                                };
+                                if request.status != Status::New {
+                                    continue;
+                                }
+                                served += 1;
+                                frame::write(
+                                    &mut peer,
+                                    Frame::data(request.id, vec![request.id as u8], None),
+                                )
+                                .await
+                                .unwrap();
+                                frame::write(&mut peer, Frame::end(request.id, false))
+                                    .await
+                                    .unwrap();
+                            }
+                        });
+                        Ok(Box::new(client) as BoxStream)
+                    })
+                    .await
+                    .unwrap();
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).await.unwrap();
+                assert_eq!(bytes.len(), 1);
+                bytes[0]
+            });
+        }
+        let mut ids = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            ids.push(result.unwrap());
+        }
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2, 3, 4]);
+        assert_eq!(opened.load(Ordering::SeqCst), 1);
     }
     #[tokio::test]
     async fn xudp_new_waits_for_first_packet_and_carries_it_atomically() {
-        let (client,mut peer)=tokio::io::duplex(4096);let (quiet,ready)=oneshot::channel();
-        let target=Destination::new("127.0.0.1",53).unwrap();let reply=target.clone();
-        let peer_task=tokio::spawn(async move {
-            assert!(tokio::time::timeout(Duration::from_millis(20),frame::read(&mut peer)).await.is_err());
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let (quiet, ready) = oneshot::channel();
+        let target = Destination::new("127.0.0.1", 53).unwrap();
+        let reply = target.clone();
+        let peer_task = tokio::spawn(async move {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), frame::read(&mut peer))
+                    .await
+                    .is_err()
+            );
             quiet.send(()).unwrap();
-            let first=frame::read(&mut peer).await.unwrap().unwrap();
-            assert_eq!(first.status,Status::New);assert!(first.global_id.is_some());assert_eq!(first.payload.as_deref(),Some(b"first-packet".as_slice()));
-            frame::write(&mut peer,Frame::data(first.id,b"reply".to_vec(),Some(carrier::target(&reply,true)))).await.unwrap();
-            frame::write(&mut peer,Frame::end(first.id,false)).await.unwrap();
+            let first = frame::read(&mut peer).await.unwrap().unwrap();
+            assert_eq!(first.status, Status::New);
+            assert!(first.global_id.is_some());
+            assert_eq!(first.payload.as_deref(), Some(b"first-packet".as_slice()));
+            frame::write(
+                &mut peer,
+                Frame::data(
+                    first.id,
+                    b"reply".to_vec(),
+                    Some(carrier::target(&reply, true)),
+                ),
+            )
+            .await
+            .unwrap();
+            frame::write(&mut peer, Frame::end(first.id, false))
+                .await
+                .unwrap();
         });
-        let pool=Pool::new(1,1);let mut channel=pool.udp(&target,true,async{Ok(Box::new(client) as BoxStream)}).await.unwrap();
-        ready.await.unwrap();channel.sender.send(b"first-packet").await.unwrap();
-        assert_eq!(channel.receiver.recv().await.unwrap(),Some(b"reply".to_vec()));
-        assert!(channel.receiver.recv().await.unwrap().is_none());peer_task.await.unwrap();
+        let pool = Pool::new(1, 1, kerlico_core::ServiceContext::for_test());
+        let mut channel = pool
+            .udp(&target, true, async { Ok(Box::new(client) as BoxStream) })
+            .await
+            .unwrap();
+        ready.await.unwrap();
+        channel.sender.send(b"first-packet").await.unwrap();
+        assert_eq!(
+            channel.receiver.recv().await.unwrap(),
+            Some(b"reply".to_vec())
+        );
+        assert!(channel.receiver.recv().await.unwrap().is_none());
+        peer_task.await.unwrap();
     }
     #[tokio::test]
-    async fn carrier_eof_delivers_complete_frames_before_reporting_reset(){
-        let (client,mut peer)=tokio::io::duplex(4096);let expected=vec![19u8;128*1024];let payload=expected.clone();
-        let sending=tokio::spawn(async move {let request=frame::read(&mut peer).await.unwrap().unwrap();for bytes in payload.chunks(1024){frame::write(&mut peer,Frame::data(request.id,bytes.to_vec(),None)).await.unwrap();}});
-        let pool=Pool::new(1,1);let target=Destination::new("127.0.0.1",80).unwrap();let mut stream=pool.tcp(&target,async{Ok(Box::new(client) as BoxStream)}).await.unwrap();let mut output=Vec::new();let error=stream.read_to_end(&mut output).await.unwrap_err();assert_eq!(error.kind(),io::ErrorKind::ConnectionReset);assert_eq!(output,expected);sending.await.unwrap();
+    async fn carrier_eof_delivers_complete_frames_before_reporting_reset() {
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let expected = vec![19u8; 128 * 1024];
+        let payload = expected.clone();
+        let sending = tokio::spawn(async move {
+            let request = frame::read(&mut peer).await.unwrap().unwrap();
+            for bytes in payload.chunks(1024) {
+                frame::write(&mut peer, Frame::data(request.id, bytes.to_vec(), None))
+                    .await
+                    .unwrap();
+            }
+        });
+        let pool = Pool::new(1, 1, kerlico_core::ServiceContext::for_test());
+        let target = Destination::new("127.0.0.1", 80).unwrap();
+        let mut stream = pool
+            .tcp(&target, async { Ok(Box::new(client) as BoxStream) })
+            .await
+            .unwrap();
+        let mut output = Vec::new();
+        let error = stream.read_to_end(&mut output).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(output, expected);
+        sending.await.unwrap();
     }
     #[tokio::test]
     async fn slow_reader_drains_bounded_queue_and_end_without_losing_data() {
-        let (client, mut peer)=tokio::io::duplex(4096);
-        let payload:Vec<u8>=(0..256*1024).map(|index|(index%251) as u8).collect();
-        let expected=payload.clone();
-        let sending=tokio::spawn(async move {
-            let request=frame::read(&mut peer).await.unwrap().unwrap();
-            assert_eq!(request.status,Status::New);
-            for bytes in payload.chunks(1024){frame::write(&mut peer,Frame::data(request.id,bytes.to_vec(),None)).await.unwrap();}
-            frame::write(&mut peer,Frame::end(request.id,false)).await.unwrap();
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let payload: Vec<u8> = (0..256 * 1024).map(|index| (index % 251) as u8).collect();
+        let expected = payload.clone();
+        let sending = tokio::spawn(async move {
+            let request = frame::read(&mut peer).await.unwrap().unwrap();
+            assert_eq!(request.status, Status::New);
+            for bytes in payload.chunks(1024) {
+                frame::write(&mut peer, Frame::data(request.id, bytes.to_vec(), None))
+                    .await
+                    .unwrap();
+            }
+            frame::write(&mut peer, Frame::end(request.id, false))
+                .await
+                .unwrap();
         });
-        let pool=Pool::new(1,1);
-        let target=Destination::new("127.0.0.1",80).unwrap();
-        let mut stream=pool.tcp(&target,async {Ok(Box::new(client) as BoxStream)}).await.unwrap();
+        let pool = Pool::new(1, 1, kerlico_core::ServiceContext::for_test());
+        let target = Destination::new("127.0.0.1", 80).unwrap();
+        let mut stream = pool
+            .tcp(&target, async { Ok(Box::new(client) as BoxStream) })
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let mut received=Vec::new();
-        tokio::time::timeout(Duration::from_secs(5),stream.read_to_end(&mut received)).await.unwrap().unwrap();
-        assert_eq!(received,expected);
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut received))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, expected);
         sending.await.unwrap();
     }
 }

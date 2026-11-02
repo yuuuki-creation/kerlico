@@ -1,5 +1,9 @@
 use super::codec::Mode;
-use crate::{config::Protocol, handshake::EarlyServer, key, scope::Scope};
+use crate::{
+    key,
+    members::{Members, Opening},
+    scope::Scope,
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use kerlico_core::{BoxStream, CancellationToken, Error, InboundContext, Result, StreamLease};
@@ -68,7 +72,7 @@ impl Token {
 }
 pub(crate) struct Backend {
     pub stream: BoxStream,
-    pub early: Option<EarlyServer>,
+    pub early: Option<Opening>,
     pub token: Arc<Token>,
 }
 pub(crate) struct Authorized {
@@ -76,7 +80,7 @@ pub(crate) struct Authorized {
     pub early_response: Option<Vec<u8>>,
 }
 pub(crate) struct Registry {
-    pub protocol: Arc<Protocol>,
+    pub members: Arc<Members>,
     pub scope: Arc<Scope>,
     pub context: InboundContext,
     entries: Mutex<HashMap<String, Arc<Token>>>,
@@ -94,7 +98,7 @@ impl Drop for Registry {
 }
 impl Registry {
     pub fn new(
-        protocol: Arc<Protocol>,
+        members: Arc<Members>,
         scope: Arc<Scope>,
         context: InboundContext,
         maximum: usize,
@@ -102,7 +106,7 @@ impl Registry {
     ) -> (Arc<Self>, mpsc::Receiver<Backend>) {
         let (accepted, receiver) = mpsc::channel(maximum.min(128));
         let registry = Arc::new(Self {
-            protocol,
+            members,
             scope: scope.clone(),
             context,
             entries: Mutex::new(HashMap::new()),
@@ -168,10 +172,8 @@ impl Registry {
             .try_acquire_owned()
             .map_err(|_| Error::ResourceLimit)?;
         let lease = self.context.stream_budget.try_acquire()?;
-        let prepared = early
-            .map(|bytes| EarlyServer::prepare(self.protocol.clone(), bytes))
-            .transpose()?;
-        let early_response = prepared.as_ref().map(|s| s.response.clone());
+        let prepared = early.map(|bytes| self.members.early(bytes)).transpose()?;
+        let early_response = prepared.as_ref().and_then(|s| s.response().cloned());
         let value = URL_SAFE_NO_PAD.encode(key::random::<16>()?);
         let (logical, transport) = tokio::io::duplex(64 * 1024);
         let (reader, writer) = tokio::io::split(transport);
@@ -263,9 +265,10 @@ async fn upload_loop(
                 }
                 let digest: [u8; 32] = Sha256::digest(&bytes).into();
                 if let Some(is_legacy) = legacy
-                    && is_legacy != (sequence == 0) {
-                        let _ = ack.send(Err(Error::Protocol("HTTP上传序号模式不能混用")));
-                        continue;
+                    && is_legacy != (sequence == 0)
+                {
+                    let _ = ack.send(Err(Error::Protocol("HTTP上传序号模式不能混用")));
+                    continue;
                 }
                 if sequence > 0 {
                     if sequence < next {

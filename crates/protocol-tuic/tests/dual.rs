@@ -1,6 +1,6 @@
 use kerlico_config::{NodeFactory, OutboundFactory};
 use kerlico_core::{
-    AccessService, AddressedDatagram, BoxFuture, BoxStream, CancellationToken, ConnectContext,
+    AddressedDatagram, BoxFuture, BoxStream, CancellationToken, ConnectContext,
     DatagramAssociation, DatagramChannel, Destination, InboundContext, NodeEvent, NodeObserver,
     Outbound, Result, StreamBudget,
 };
@@ -24,10 +24,17 @@ impl NodeObserver for Observer {
     fn record(&self, _: NodeEvent) {}
 }
 struct Access {
-    egress: kerlico_egress::Egress,
+    egress: Arc<dyn Outbound>,
     count: Arc<AtomicUsize>,
 }
-impl AccessService for Access {
+impl Outbound for Access {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn supports_udp_association(&self) -> bool {
         true
     }
@@ -36,15 +43,15 @@ impl AccessService for Access {
         c: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramAssociation>> {
         self.count.fetch_add(1, Ordering::AcqRel);
-        AccessService::associate_udp(&self.egress, c)
+        self.egress.associate_udp(c)
     }
     fn connect_tcp<'a>(
         &'a self,
         t: &'a Destination,
         c: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         self.count.fetch_add(1, Ordering::AcqRel);
-        AccessService::connect_tcp(&self.egress, t, c)
+        self.egress.connect_tcp(t, c)
     }
     fn connect_udp<'a>(
         &'a self,
@@ -52,7 +59,7 @@ impl AccessService for Access {
         c: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramChannel>> {
         self.count.fetch_add(1, Ordering::AcqRel);
-        AccessService::connect_udp(&self.egress, t, c)
+        self.egress.connect_udp(t, c)
     }
 }
 struct Fixture {
@@ -94,12 +101,18 @@ async fn fixture_egress(
         client["uuid"] = server["uuid"].clone();
         client["password"] = server["password"].clone();
     }
-    let node = TuicNodeFactory.build(&server).unwrap();
+    let input = shared::node_input("tuic", &server);
+    let node = TuicNodeFactory.build(&input).unwrap();
     let socket = Arc::new(UdpSocket::bind((host, 0)).await.unwrap());
     let address = socket.local_addr().unwrap();
     client["server"] = json!({"host":host,"port":address.port()});
     let cancel = CancellationToken::new();
     let context = InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         peer_addr: None,
         local_addr: Some(address),
         cancel: cancel.clone(),
@@ -116,15 +129,20 @@ async fn fixture_egress(
     };
     let count = Arc::new(AtomicUsize::new(0));
     let access = Arc::new(Access {
-        egress: kerlico_egress::Egress::new(
-            egress.unwrap_or_else(|| kerlico_net::DirectFactory.build(&json!({})).unwrap()),
+        egress: egress.unwrap_or(
+            shared::outbound(&kerlico_net::DirectFactory, &json!({}))
+                .await
+                .unwrap(),
         ),
         count: count.clone(),
     });
+    let access =
+        kerlico_egress::testing::ingress(&input, access, kerlico_core::TargetPolicy::Local)
+            .unwrap();
     let task = tokio::spawn(async move {
         let _ = node.handle_udp(socket, access, context).await;
     });
-    let outbound = TuicFactory.build(&client).unwrap();
+    let outbound = shared::outbound(&TuicFactory, &client).await.unwrap();
     Fixture {
         outbound,
         options: client,
@@ -157,7 +175,8 @@ async fn tcp(f: &Fixture, target: &Destination) {
         .outbound
         .connect_tcp(target, &ConnectContext::new(Duration::from_secs(3)))
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     let request = vec![6; 20000];
     stream.write_all(&request).await.unwrap();
     let mut response = vec![0; request.len()];
@@ -317,11 +336,12 @@ async fn authentication_certificate_and_cancellation_precede_target_access() {
         } else {
             wrong["password"] = json!("another-password");
         }
-        let outbound = TuicFactory.build(&wrong).unwrap();
-        if let Ok(mut stream) = outbound
+        let outbound = shared::outbound(&TuicFactory, &wrong).await.unwrap();
+        if let Ok(opened) = outbound
             .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(2)))
             .await
         {
+            let mut stream = opened.stream;
             let _ = stream.write_all(b"must-not-pass").await;
             let mut bytes = [0; 1];
             let result =
@@ -332,8 +352,8 @@ async fn authentication_certificate_and_cancellation_precede_target_access() {
         let mut wrong = f.options.clone();
         wrong["tls"]["server_name"] = json!("wrong.invalid");
         assert!(
-            TuicFactory
-                .build(&wrong)
+            shared::outbound(&TuicFactory, &wrong)
+                .await
                 .unwrap()
                 .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(2)))
                 .await
@@ -342,7 +362,12 @@ async fn authentication_certificate_and_cancellation_precede_target_access() {
         let context = ConnectContext::new(Duration::from_secs(2));
         context.cancel.cancel();
         assert!(matches!(
-            f.outbound.associate_udp(&context).await,
+            f.outbound
+                .associate_udp(
+                    &kerlico_core::ConnectContext::new(context.timeout)
+                        .with_cancel(context.cancel.clone())
+                )
+                .await,
             Err(kerlico_core::Error::Cancelled)
         ));
     }
@@ -366,7 +391,8 @@ async fn half_close_waits_for_target_response_and_port_is_reusable() {
             .outbound
             .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(3)))
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         stream.write_all(b"request").await.unwrap();
         stream.shutdown().await.unwrap();
         let mut bytes = Vec::new();
@@ -392,8 +418,8 @@ async fn half_close_waits_for_target_response_and_port_is_reusable() {
         assert!(rebound);
     }
 }
-#[test]
-fn rejects_mixed_versions_unknown_options_and_duplicate_users() {
+#[tokio::test]
+async fn rejects_mixed_versions_unknown_options_and_duplicate_users() {
     let tls = json!({"server_name":"localhost"});
     let base = json!({"server":{"host":"127.0.0.1","port":443},"uuid":"00000000-0000-4000-8000-000000000001","password":"test","tls":tls});
     for (key, value) in [
@@ -405,36 +431,60 @@ fn rejects_mixed_versions_unknown_options_and_duplicate_users() {
     ] {
         let mut bad = base.clone();
         bad[key] = value;
-        assert!(TuicFactory.build(&bad).is_err());
+        assert!(TuicFactory.compile(&bad).is_err());
     }
-    assert!(TuicFactory.build(&base).unwrap().supports_udp_association());
+    assert!(
+        shared::outbound(&TuicFactory, &base)
+            .await
+            .unwrap()
+            .supports_udp_association()
+    );
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let options = json!({"version":5,"uuid":"00000000-0000-4000-8000-000000000001","password":"first-password","tls":{"certificate_pem":cert.cert.pem(),"private_key_pem":cert.signing_key.serialize_pem()}});
     let mut duplicate = options.clone();
     duplicate.as_object_mut().unwrap().remove("uuid");
     duplicate.as_object_mut().unwrap().remove("password");
     duplicate["users"] = json!([{"uuid":"00000000-0000-4000-8000-000000000001","password":"first-password"},{"uuid":"00000000-0000-4000-8000-000000000001","password":"another-password"}]);
-    assert!(TuicNodeFactory.build(&duplicate).is_err());
+    assert!(
+        TuicNodeFactory
+            .build(&shared::node_input("tuic", &duplicate))
+            .is_err()
+    );
     let mut registry = kerlico_config::Registry::default();
     registry.register(kerlico_net::DirectFactory).unwrap();
     registry.register(kerlico_net::RejectFactory).unwrap();
     registry.register_node(TuicNodeFactory).unwrap();
-    let mut config = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[{"tag":"node4","type":"tuic","listen":"127.0.0.1:10443","outbound":"direct","options":options},{"tag":"node6","type":"tuic","listen":"[::1]:10443","outbound":"direct","options":options}]});
+    let mut config = json!({"version":2,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[{"tag":"node4","type":"tuic","listen":"127.0.0.1:10443","outbound":"direct","options":options},{"tag":"node6","type":"tuic","listen":"[::1]:10443","outbound":"direct","options":options}]});
     config["nodes"][1]["options"]["password"] = json!("independent-password");
     let error = registry
-        .prepare(kerlico_config::parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+        .prepare(
+            kerlico_config::parse(
+                &serde_json::to_vec(&shared::configuration(config.clone())).unwrap(),
+            )
+            .unwrap(),
+        )
         .err()
         .unwrap();
     assert!(error.to_string().contains("凭据重复"));
     config["nodes"][1]["options"]["uuid"] = json!("00000000-0000-4000-8000-000000000002");
     assert!(
         registry
-            .prepare(kerlico_config::parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .prepare(
+                kerlico_config::parse(
+                    &serde_json::to_vec(&shared::configuration(config.clone())).unwrap()
+                )
+                .unwrap()
+            )
             .is_ok()
     );
     config["outbounds"][0]["type"] = json!("reject");
     let error = registry
-        .prepare(kerlico_config::parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+        .prepare(
+            kerlico_config::parse(
+                &serde_json::to_vec(&shared::configuration(config.clone())).unwrap(),
+            )
+            .unwrap(),
+        )
         .err()
         .unwrap();
     assert!(error.to_string().contains("多目标 UDP 关联"));
@@ -526,7 +576,8 @@ async fn multiplexed_tcp_and_independent_udp_associations_do_not_mix_payloads() 
                     let mut stream = outbound
                         .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(3)))
                         .await
-                        .unwrap();
+                        .unwrap()
+                        .stream;
                     let data = vec![index; 4096 + index as usize];
                     stream.write_all(&data).await.unwrap();
                     let mut answer = vec![0; data.len()];
@@ -564,4 +615,12 @@ async fn multiplexed_tcp_and_independent_udp_associations_do_not_mix_payloads() 
         }
     }
     tcp_task.abort();
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

@@ -4,13 +4,17 @@ default-members = ["apps/kerlico"]
 exclude = [
     "third_party/ml-kem-legacy",
     "third_party/h3",
+    "third_party/xray-transport",
+    "crates/protocol-ssh/vendor/russh-util",
     "crates/protocol-shadowquic/vendor/quinn-jls",
     "crates/protocol-shadowquic/vendor/quinn-proto-jls",
+    "crates/protocol-tor/vendor/arti-client",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+license = "GPL-3.0-only"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.99.1"
 publish = false
@@ -42,6 +46,8 @@ kerlico-gost-relay = { path = "crates/protocol-gost-relay" }
 kerlico-trusttunnel = { path = "crates/protocol-trusttunnel" }
 kerlico-naive = { path = "crates/protocol-naive" }
 kerlico-sudoku = { path = "crates/protocol-sudoku" }
+kerlico-tor = { path = "crates/protocol-tor" }
+kerlico-wireguard = { path = "crates/protocol-wireguard" }
 tokio = { version = "1", features = ["io-util", "net", "fs", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
@@ -84,8 +90,10 @@ hmac = "0.12"
 time = {version="0.3",features=["formatting","macros"]}
 quick-xml = {version="0.38",features=["serialize"]}
 crc32fast = "1"
+argon2 = "0.5.3"
 
 [patch.crates-io]
+russh-util = { path = "crates/protocol-ssh/vendor/russh-util" }
 ml-kem = { path = "third_party/ml-kem-legacy" }
 h3 = { path = "third_party/h3" }
 rustls = { git = "https://github.com/aimalygin/shaped-rustls", rev = "3a131beaef0183b0cb61e5a9070a703b6be39ed3" }
@@ -93,6 +101,9 @@ quinn = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d3746649224
 quinn-proto = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d37466492242a1827f9a16aa91ca4c1b00be" }
 h3-quinn = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d37466492242a1827f9a16aa91ca4c1b00be" }
 blake3 = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d37466492242a1827f9a16aa91ca4c1b00be" }
+
+[patch."https://github.com/aimalygin/xray-rust"]
+xray-transport = { path = "third_party/xray-transport" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

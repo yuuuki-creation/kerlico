@@ -31,25 +31,9 @@ pub(crate) struct ClientOptions {
 pub(crate) struct ServerOptions {
     #[serde(default = "version")]
     pub version: u8,
-    #[serde(default)]
-    pub token: Option<String>,
-    #[serde(default)]
-    pub tokens: Vec<String>,
-    #[serde(default)]
-    pub uuid: Option<String>,
-    #[serde(default)]
-    pub password: Option<String>,
-    #[serde(default)]
-    pub users: Vec<UserOptions>,
     pub tls: ServerTls,
     #[serde(default = "cubic")]
     pub congestion_control: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct UserOptions {
-    pub uuid: String,
-    pub password: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -224,6 +208,7 @@ pub(crate) fn client_tls(
     .map_err(|_| invalid())?
     .with_root_certificates(roots)
     .with_no_client_auth();
+    tls.resumption = rustls::client::Resumption::disabled();
     tls.alpn_protocols = validate_alpn(&options.alpn)?;
     rustls::pki_types::ServerName::try_from(options.server_name.clone()).map_err(|_| invalid())?;
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| invalid())?;
@@ -262,4 +247,12 @@ pub(crate) fn server_tls(options: ServerTls) -> Result<Arc<dyn quinn::crypto::Se
     Ok(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(tls).map_err(|_| invalid())?,
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeCredential {
+    pub token: Option<String>,
+    pub uuid: Option<String>,
+    pub password: Option<String>,
 }

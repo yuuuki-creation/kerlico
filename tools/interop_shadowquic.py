@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """专用 worker 的 ShadowQUIC/JLS 双端与真实上游回退矩阵。"""
+from config_v2 import bind_members
 import argparse
 from contextlib import ExitStack
 import hashlib
@@ -86,7 +87,7 @@ def verify(args,root,version,mode,host,congestion,direction):
         cert=work/"cover.pem"
         cover=stack.enter_context(h.process([args.cover,cover_address,str(cert),version],work,"cover"))
         wait_udp(cover,cover_port,cover_host)
-        own={"version":1,"limits":{"connect_timeout_ms":4000,"idle_timeout_ms":10000,"drain_timeout_ms":500},"inbounds":[],"outbounds":[]}
+        own={"version":2,"limits":{"connect_timeout_ms":4000,"idle_timeout_ms":10000,"drain_timeout_ms":500},"inbounds":[],"outbounds":[]}
         peer={"mode":"rule","log-level":"error","ipv6":True,"rules":["MATCH,DIRECT"],"geo-auto-update":False}
         auth={"username":USERNAME,"password":PASSWORD}
         if direction=="client":
@@ -97,6 +98,7 @@ def verify(args,root,version,mode,host,congestion,direction):
         else:
             own["outbounds"]=[{"tag":"direct","type":"direct"}]
             own["nodes"]=[{"tag":"node","type":"shadowquic","listen":node_address,"outbound":"direct","options":{"upstream":{"host":cover_host,"port":cover_port},"server_name":"cover.invalid","quic_versions":[version],"congestion_control":congestion,**auth}}]
+            bind_members(own, own["nodes"][0], [{field: own["nodes"][0]["options"].pop(field) for field in ("username", "password")}])
             peer["proxies"]=[{"name":"relay","type":"shadowquic","server":host,"port":node_port,"sni":"cover.invalid","quic-versions":[version],"udp-over-stream":mode=="stream","congestion-controller":"cubic","alpn":["h3"],**auth}]
             peer["listeners"]=[{"name":"tcp","type":"tunnel","listen":"127.0.0.1","port":str(tcp_port),"network":["tcp"],"target":"127.0.0.1:"+str(tcp_target),"proxy":"relay"},{"name":"udp","type":"tunnel","listen":"127.0.0.1","port":str(udp_port),"network":["udp"],"target":"127.0.0.1:"+str(udp_target),"proxy":"relay"}]
         h.write_json(work/"own.json",own)

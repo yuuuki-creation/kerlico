@@ -1,4 +1,5 @@
 """仅在 worker 上验证 SOCKS/HTTP 正式 CLI 与固定 sing-box 对端。"""
+from config_v2 import bind_members
 import argparse
 import asyncio
 import json
@@ -52,7 +53,10 @@ def kernel_server(protocol, version, host, number, username, password, tls):
     if tls:
         options["tls"] = {"cert_pem": tls[0].read_text(), "key_pem": tls[1].read_text()}
     field = "local_inbounds" if protocol == "socks" and version != "5" else "nodes"
-    return {"version": 1, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], field: [{"tag": "proxy", "type": protocol, "listen": endpoint(host, number), "outbound": "direct", "options": options}], "limits": limits()}
+    config = {"version": 2, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], field: [{"tag": "proxy", "type": protocol, "listen": endpoint(host, number), "outbound": "direct", "options": options}], "limits": limits()}
+    if field == "nodes":
+        bind_members(config, config[field][0], [options.pop("auth")])
+    return config
 
 
 def peer_server(protocol, version, host, number, username, password, tls):
@@ -88,7 +92,7 @@ def client(protocol, version, host, number, forward, target_host, target_port, u
     options = client_options(protocol, version, host, number, username, password, tls, kernel)
     if kernel:
         networks = ["tcp", "udp"] if protocol == "socks" and version == "5" else ["tcp"]
-        return {"version": 1, "outbounds": [{"tag": "proxy", "type": protocol, "options": options}], "inbounds": [{"tag": network, "type": network + "-forward", "listen": endpoint("127.0.0.1", forward), "target": {"host": target_host, "port": target_port}, "outbound": "proxy"} for network in networks], "limits": limits()}
+        return {"version": 2, "outbounds": [{"tag": "proxy", "type": protocol, "options": options}], "inbounds": [{"tag": network, "type": network + "-forward", "listen": endpoint("127.0.0.1", forward), "target": {"host": target_host, "port": target_port}, "outbound": "proxy"} for network in networks], "limits": limits()}
     return {"log": {"disabled": True}, "inbounds": [{"type": "direct", "tag": "entry", "listen": "127.0.0.1", "listen_port": forward, "override_address": target_host, "override_port": target_port}], "outbounds": [options]}
 
 

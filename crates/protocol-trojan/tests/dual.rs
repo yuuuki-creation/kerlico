@@ -1,8 +1,8 @@
 //! 真实回环网络覆盖双端载体、鉴权和 UDP 多目标。
-use kerlico_config::{NodeFactory, OutboundFactory};
+mod support;
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel,
-    Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
+    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramChannel, Destination,
+    InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use kerlico_trojan::{TrojanFactory, TrojanNodeFactory};
 use serde_json::{Value, json};
@@ -14,12 +14,19 @@ use tokio::{
     task::JoinSet,
 };
 struct Access(Arc<dyn Outbound>);
-impl AccessService for Access {
+impl Outbound for Access {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn connect_tcp<'a>(
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         self.0.connect_tcp(target, context)
     }
     fn connect_udp<'a>(
@@ -36,6 +43,11 @@ impl NodeObserver for Observer {
 }
 fn context(cancel: CancellationToken) -> InboundContext {
     InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         cancel,
         connect_timeout: Duration::from_secs(3),
         idle_timeout: Duration::from_secs(5),
@@ -81,7 +93,7 @@ impl Harness {
         } else {
             json!({"type":"none"})
         };
-        let node=TrojanNodeFactory.build(&json!({"passwords":["primary-test-only","secondary-test-only"],"security":server_security,"transport":transport})).unwrap();
+        let node=support::node(&TrojanNodeFactory,&json!({"passwords":["primary-test-only","secondary-test-only"],"security":server_security,"transport":transport})).unwrap();
         let listener = TcpListener::bind((host, 0)).await.unwrap();
         let server = Destination::new(host, listener.local_addr().unwrap().port()).unwrap();
         let tcp = TcpListener::bind((host, 0)).await.unwrap();
@@ -90,11 +102,11 @@ impl Harness {
         let udp_destination = Destination::new(host, udp.local_addr().unwrap().port()).unwrap();
         let cancel = CancellationToken::new();
         let mut tasks = JoinSet::new();
-        let access: Arc<dyn AccessService> = Arc::new(Access(
-            kerlico_net::DirectFactory.build(&json!({})).unwrap(),
+        let access: Arc<dyn Outbound> = Arc::new(Access(
+            support::outbound(&kerlico_net::DirectFactory, &json!({})).unwrap(),
         ));
         let token = cancel.clone();
-        tasks.spawn(async move {let mut peers=JoinSet::new();loop {tokio::select! {_=token.cancelled()=>break,result=listener.accept()=>{let Ok((stream,peer))=result else {break;};let node=node.clone();let access=access.clone();let mut context=context(token.clone());context.peer_addr=Some(peer);context.local_addr=stream.local_addr().ok();peers.spawn(async move {let _=node.handle(Box::new(stream),access,context).await;});},_ = peers.join_next(),if !peers.is_empty()=>{}}}});
+        tasks.spawn(async move {let mut peers=JoinSet::new();loop {tokio::select! {_=token.cancelled()=>break,result=listener.accept()=>{let Ok((stream,peer))=result else {break;};let node=node.clone();let access=access.clone();let mut context=context(token.clone());context.peer_addr=Some(peer);context.local_addr=stream.local_addr().ok();peers.spawn(async move {let _=node.handle_local(Box::new(stream),access,context).await;});},_ = peers.join_next(),if !peers.is_empty()=>{}}}});
         let token = cancel.clone();
         tasks.spawn(async move {let mut peers=JoinSet::new();loop {tokio::select! {_=token.cancelled()=>break,result=tcp.accept()=>{let Ok((mut stream,_))=result else {break;};peers.spawn(async move {let mut bytes=vec![0;8192];loop {let Ok(n)=stream.read(&mut bytes).await else{return;};if n==0 {let _=stream.write_all(b"after-eof").await;let _=stream.shutdown().await;return;}
 if stream.write_all(&bytes[..n]).await.is_err(){return;}}});},_ = peers.join_next(),if !peers.is_empty()=>{}}}});
@@ -126,9 +138,13 @@ async fn all_carriers_dual_role_tcp_udp() {
             for tls in [false, true] {
                 eprintln!("正在验证载体 {transport} TLS={tls}");
                 let (harness, options) = Harness::new(transport.clone(), tls, false).await;
-                let outbound = TrojanFactory.build(&options).unwrap();
+                let outbound = support::outbound(&TrojanFactory, &options).unwrap();
                 let budget = ConnectContext::new(Duration::from_secs(4));
-                let mut stream = outbound.connect_tcp(&harness.tcp, &budget).await.unwrap();
+                let mut stream = outbound
+                    .connect_tcp(&harness.tcp, &budget)
+                    .await
+                    .unwrap()
+                    .stream;
                 let payload = vec![37; 65536];
                 stream.write_all(&payload).await.unwrap();
                 stream.flush().await.unwrap();
@@ -168,22 +184,30 @@ async fn all_carriers_dual_role_tcp_udp() {
 #[tokio::test]
 async fn ipv6_nodes_and_domain_targets() {
     let (harness, options) = Harness::new(json!("tcp"), true, true).await;
-    let outbound = TrojanFactory.build(&options).unwrap();
+    let outbound = support::outbound(&TrojanFactory, &options).unwrap();
     let budget = ConnectContext::new(Duration::from_secs(4));
-    let mut stream = outbound.connect_tcp(&harness.tcp, &budget).await.unwrap();
+    let mut stream = outbound
+        .connect_tcp(&harness.tcp, &budget)
+        .await
+        .unwrap()
+        .stream;
     stream.write_all(b"ipv6").await.unwrap();
     let mut received = [0; 4];
     stream.read_exact(&mut received).await.unwrap();
     assert_eq!(&received, b"ipv6");
     let (ipv4, options) = Harness::new(json!("tcp"), false, false).await;
-    let outbound = TrojanFactory.build(&options).unwrap();
+    let outbound = support::outbound(&TrojanFactory, &options).unwrap();
     let target = Destination::new("localhost", ipv4.tcp.port()).unwrap();
-    let mut stream = outbound.connect_tcp(&target, &budget).await.unwrap();
+    let mut stream = outbound.connect_tcp(&target, &budget).await.unwrap().stream;
     stream.write_all(b"domain").await.unwrap();
     let mut received = [0; 6];
     stream.read_exact(&mut received).await.unwrap();
     assert_eq!(&received, b"domain");
-    let mut cross = outbound.connect_tcp(&harness.tcp, &budget).await.unwrap();
+    let mut cross = outbound
+        .connect_tcp(&harness.tcp, &budget)
+        .await
+        .unwrap()
+        .stream;
     cross.write_all(b"cross").await.unwrap();
     let mut received = [0; 5];
     cross.read_exact(&mut received).await.unwrap();
@@ -193,22 +217,26 @@ async fn ipv6_nodes_and_domain_targets() {
 async fn bad_password_certificate_name_and_cancellation() {
     let (harness, mut options) = Harness::new(json!("tcp"), true, false).await;
     options["password"] = json!("wrong-test-only");
-    let outbound = TrojanFactory.build(&options).unwrap();
+    let outbound = support::outbound(&TrojanFactory, &options).unwrap();
     let budget = ConnectContext::new(Duration::from_secs(3));
-    let mut stream = outbound.connect_tcp(&harness.tcp, &budget).await.unwrap();
+    let mut stream = outbound
+        .connect_tcp(&harness.tcp, &budget)
+        .await
+        .unwrap()
+        .stream;
     let _ = stream.write_all(b"denied").await;
     let mut byte = [0];
     assert!(matches!(stream.read(&mut byte).await, Ok(0) | Err(_)));
     options["password"] = json!("primary-test-only");
     options["security"]["server_name"] = json!("wrong.example.invalid");
-    let outbound = TrojanFactory.build(&options).unwrap();
+    let outbound = support::outbound(&TrojanFactory, &options).unwrap();
     assert!(outbound.connect_tcp(&harness.tcp, &budget).await.is_err());
     options["security"]["server_name"] = json!("trojan.example.invalid");
     options["security"]
         .as_object_mut()
         .unwrap()
         .remove("ca_pem");
-    let outbound = TrojanFactory.build(&options).unwrap();
+    let outbound = support::outbound(&TrojanFactory, &options).unwrap();
     assert!(outbound.connect_tcp(&harness.tcp, &budget).await.is_err());
     let cancelled = ConnectContext::new(Duration::from_secs(3));
     cancelled.cancel.cancel();
@@ -272,26 +300,28 @@ async fn udp_multiple_targets_one_authenticated_stream() {
 #[test]
 fn credential_separation_and_config_rejections() {
     let node = |password: &str| {
-        TrojanNodeFactory
-            .build(&json!({"password":password,"security":{"type":"none"}}))
-            .unwrap()
+        support::node(
+            &TrojanNodeFactory,
+            &json!({"password":password,"security":{"type":"none"}}),
+        )
+        .unwrap()
     };
     assert_eq!(
-        node("test-only-a").credential_fingerprints(),
-        node("test-only-a").credential_fingerprints()
+        node("test-only-a").manifest(),
+        node("test-only-a").manifest()
     );
     assert_ne!(
-        node("test-only-a").credential_fingerprints(),
-        node("test-only-b").credential_fingerprints()
+        node("test-only-a").manifest(),
+        node("test-only-b").manifest()
     );
     for options in [
         json!({"passwords":["x","x"],"security":{"type":"none"}}),
         json!({"password":"x","passwords":["y"],"security":{"type":"none"}}),
         json!({"password":"x","security":{"type":"none"},"flow":"xtls-rprx-vision"}),
     ] {
-        assert!(TrojanNodeFactory.build(&options).is_err());
+        assert!(support::node(&TrojanNodeFactory, &options).is_err());
     }
-    assert!(TrojanFactory.build(&json!({"server":{"host":"example.invalid","port":443},"password":"x","security":{"type":"none"}})).is_err());
+    assert!(support::outbound(&TrojanFactory,&json!({"server":{"host":"example.invalid","port":443},"password":"x","security":{"type":"none"}})).is_err());
 }
 
 #[tokio::test]
@@ -303,14 +333,14 @@ async fn upgraded_streams_drain_and_release_the_listening_port() {
             registry.register(kerlico_net::DirectFactory).unwrap();
             registry.register_node(TrojanNodeFactory).unwrap();
             let value = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[{"tag":"drain","type":"trojan","listen":"127.0.0.1:0","outbound":"direct","options":{"password":"drain-test-only","security":{"type":"none"},"transport":transport}}],"limits":{"connect_timeout_ms":1000,"idle_timeout_ms":2000,"drain_timeout_ms":400,"max_sessions":32}});
-            let prepared = registry.prepare(kerlico_config::parse(&serde_json::to_vec(&value).unwrap()).unwrap()).unwrap();
+            let prepared = registry.prepare(kerlico_config::parse(&serde_json::to_vec(&support::configuration(value.clone())).unwrap()).unwrap()).unwrap();
             let engine = kerlico_engine::Engine::bind(prepared).await.unwrap();
             let address = engine.listeners().unwrap()[0].1;
             let cancel = CancellationToken::new();
             let running = tokio::spawn(engine.run(cancel.clone()));
-            let outbound = TrojanFactory.build(&json!({"server":{"host":"127.0.0.1","port":address.port()},"password":"drain-test-only","security":{"type":"none"},"transport":transport})).unwrap();
+            let outbound = support::outbound(&TrojanFactory,&json!({"server":{"host":"127.0.0.1","port":address.port()},"password":"drain-test-only","security":{"type":"none"},"transport":transport})).unwrap();
             let budget = ConnectContext::new(Duration::from_secs(2));
-            let mut stream = outbound.connect_tcp(&target.tcp, &budget).await.unwrap();
+            let mut stream = outbound.connect_tcp(&target.tcp, &budget).await.unwrap().stream;
             stream.write_all(b"before-stop").await.unwrap();
             stream.flush().await.unwrap();
             let mut reply = [0;11];
@@ -340,7 +370,12 @@ fn registry_rejects_cross_node_reused_credentials() {
     let value = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[{"tag":"node4","type":"trojan","listen":"127.0.0.1:0","outbound":"direct","options":{"password":"must-stay-node-local","security":{"type":"none"}}},{"tag":"node6","type":"trojan","listen":"[::1]:0","outbound":"direct","options":{"password":"must-stay-node-local","security":{"type":"none"}}}]});
     assert!(
         registry
-            .prepare(kerlico_config::parse(&serde_json::to_vec(&value).unwrap()).unwrap())
+            .prepare(
+                kerlico_config::parse(
+                    &serde_json::to_vec(&support::configuration(value.clone())).unwrap()
+                )
+                .unwrap()
+            )
             .is_err()
     );
 }

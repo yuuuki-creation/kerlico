@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """仅在专用 worker 验证独立 Hysteria v1，不使用 Hysteria2 对端冒充。"""
+from config_v2 import bind_members
 import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor
@@ -119,7 +120,10 @@ def verify(args, root, cert, key, carrier, obfs, congestion, direction):
         after_eof = stack.enter_context(h.serve(h.TcpServer(("127.0.0.1", 0), AfterEof)))
         servers = []
         if direction == "server":
-            server = {"version": 1, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], "nodes": [{"tag": "node"+str(index), "type": "hysteria1", "listen": hostport(hosts[index], ports[index]), "outbound": "direct", "options": node_options(credentials[index], index == 1, cert, key, carrier, obfs, congestion)} for index in range(2)], "limits": {"connect_timeout_ms": 5000, "idle_timeout_ms": 8000, "drain_timeout_ms": 400, "max_sessions": 128}}
+            server = {"version": 2, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], "nodes": [{"tag": "node"+str(index), "type": "hysteria1", "listen": hostport(hosts[index], ports[index]), "outbound": "direct", "options": node_options(credentials[index], index == 1, cert, key, carrier, obfs, congestion)} for index in range(2)], "limits": {"connect_timeout_ms": 5000, "idle_timeout_ms": 8000, "drain_timeout_ms": 400, "max_sessions": 128}}
+            for node in server["nodes"]:
+                native_credential = {field: node["options"].pop(field) for field in ("auth", "auth_str") if field in node["options"]}
+                bind_members(server, node, [native_credential])
             path = directory/"kerlico-server.json"
             h.write_json(path, server)
             servers.append(stack.enter_context(h.process(command(args.kerlico, "kerlico", path, "server"), directory, "server")))
@@ -145,7 +149,7 @@ def verify(args, root, cert, key, carrier, obfs, congestion, direction):
                 encoded = (1-index if bad else index) == 1
                 if direction == "client":
                     options = client_options(hosts[index], ports[index], auth, encoded, cert, carrier, obfs, congestion)
-                    client = {"version": 1, "outbounds": [{"tag": "proxy", "type": "hysteria1", "options": options}], "inbounds": [{"tag": tag, "type": network+"-forward", "listen": "127.0.0.1:"+str(local), "target": {"host": host, "port": port}, "outbound": "proxy"} for tag, network, local, host, port in rules], "limits": {"connect_timeout_ms": 5000, "idle_timeout_ms": 8000, "drain_timeout_ms": 400, "max_sessions": 128}}
+                    client = {"version": 2, "outbounds": [{"tag": "proxy", "type": "hysteria1", "options": options}], "inbounds": [{"tag": tag, "type": network+"-forward", "listen": "127.0.0.1:"+str(local), "target": {"host": host, "port": port}, "outbound": "proxy"} for tag, network, local, host, port in rules], "limits": {"connect_timeout_ms": 5000, "idle_timeout_ms": 8000, "drain_timeout_ms": 400, "max_sessions": 128}}
                     binary, kind = args.kerlico, "kerlico"
                 elif args.reference_kind == "sing-box":
                     client = {"log": {"level": "error"}, "inbounds": [{"type": "direct", "tag": tag, "listen": "127.0.0.1", "listen_port": local, "network": network, "override_address": host, "override_port": port} for tag, network, local, host, port in rules], "outbounds": [{"type": "hysteria", "server": hosts[index], "server_port": ports[index], "up_mbps": 80, "down_mbps": 80, "obfs": "xplus-test-only-key" if obfs else "", **auth_fields(auth, encoded), "tls": {"enabled": True, "server_name": "hy1.example.invalid", "certificate": [cert.read_text()], "alpn": ["hysteria"]}}]}

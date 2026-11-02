@@ -1,16 +1,16 @@
 //! VLESS 节点鉴权与业务适配；网站目标全部交给统一访问服务。
+use kerlico_core::{DatagramReceiver, DatagramSender};
 
 use crate::{
     UserId, codec, inbound_wire,
     server_io::{Plain, RecordAligned, ServerTls},
 };
-use kerlico_config::NodeFactory;
+use kerlico_config::{NodeBuildContext, NodeFactory};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, ConnectContext, DatagramChannel, Error, InboundContext,
-    InboundProtocol, Result,
+    BoxFuture, BoxStream, ConnectContext, CredentialManifest, CredentialSet, Error, InboundContext,
+    InboundProtocol, IngressBinding, Result,
 };
 use serde::Deserialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, io::Cursor, sync::Arc};
 use tokio::io::AsyncWriteExt;
@@ -24,12 +24,6 @@ pub struct VlessNodeFactory;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Options {
-    #[serde(default)]
-    uuid: Option<String>,
-    #[serde(default)]
-    flow: String,
-    #[serde(default)]
-    users: Vec<UserOptions>,
     security: Security,
     #[serde(default)]
     transport: crate::server_http::Input,
@@ -77,9 +71,9 @@ struct User {
     vision: bool,
 }
 pub(crate) struct Payload {
-    users: Vec<User>,
+    users: CredentialSet<User>,
     decryption: Option<crate::server_encryption::Decryption>,
-    mux_udp_only:bool,
+    mux_udp_only: bool,
 }
 struct VlessNode {
     payload: Arc<Payload>,
@@ -111,27 +105,23 @@ impl NodeFactory for VlessNodeFactory {
     fn kind(&self) -> &'static str {
         "vless"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn InboundProtocol>> {
-        let mut options: Options =
-            serde_json::from_value(options.clone()).map_err(|_| invalid())?;
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        let options: Options =
+            serde_json::from_value(input.options().clone()).map_err(|_| invalid())?;
         let transport = options.transport.normalize()?;
-        if let Some(uuid) = options.uuid {
-            if !options.users.is_empty() {
-                return Err(invalid());
-            }
-            options.users.push(UserOptions {
-                uuid,
-                flow: options.flow,
-            });
-        } else if !options.flow.is_empty() {
-            return Err(invalid());
-        }
-        if options.users.is_empty() || options.users.len() > 256 {
+        let credentials = input
+            .native_credentials()
+            .iter()
+            .map(|value| {
+                serde_json::from_value::<UserOptions>(value.clone()).map_err(|_| invalid())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if credentials.is_empty() || credentials.len() > 256 {
             return Err(invalid());
         }
         let mut seen = BTreeSet::new();
         let mut users = Vec::new();
-        for user in options.users {
+        for user in credentials {
             let id = UserId::parse(&user.uuid)?;
             if !seen.insert(*id.as_bytes()) {
                 return Err(invalid());
@@ -233,7 +223,11 @@ impl NodeFactory for VlessNodeFactory {
         }
         let http = crate::server_http::State::new(transport.clone());
         Ok(Arc::new(VlessNode {
-            payload: Arc::new(Payload { users, decryption, mux_udp_only:matches!(transport,crate::server_http::Transport::Xhttp{..}) }),
+            payload: Arc::new(Payload {
+                users: input.credentials(users)?,
+                decryption,
+                mux_udp_only: matches!(transport, crate::server_http::Transport::Xhttp { .. }),
+            }),
             tls,
             tls_config,
             reality,
@@ -245,17 +239,15 @@ impl NodeFactory for VlessNodeFactory {
 }
 
 impl InboundProtocol for VlessNode {
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
-        self.payload
-            .users
-            .iter()
-            .map(|user| {
-                let mut h = Sha256::new();
-                h.update(b"kerlico/vless/node-user/");
-                h.update(user.id.as_bytes());
-                h.finalize().into()
-            })
-            .collect()
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = CredentialManifest::new();
+        for (slot, (_, user)) in self.payload.users.rows().enumerate() {
+            let mut hash = Sha256::new();
+            hash.update(b"kerlico/vless/node-user/");
+            hash.update(user.id.as_bytes());
+            manifest.authentication("vless", slot, hash.finalize().into());
+        }
+        manifest
     }
     fn supports_virtual(&self) -> bool {
         self.storage.is_some()
@@ -272,7 +264,7 @@ impl InboundProtocol for VlessNode {
     fn handle<'a>(
         &'a self,
         stream: BoxStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         mut context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
@@ -312,7 +304,7 @@ impl InboundProtocol for VlessNode {
                     client.write_all(&server_prefix).await?;
                     cover.flush().await?;
                     client.flush().await?;
-                    kerlico_core::relay_tcp(client, cover, context.idle_timeout, context.cancel)
+                    kerlico_core::relay_streams(client, cover, context.idle_timeout, context.cancel)
                         .await
                 }
             }
@@ -320,7 +312,7 @@ impl InboundProtocol for VlessNode {
     }
     fn handle_virtual<'a>(
         &'a self,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
@@ -334,7 +326,7 @@ impl InboundProtocol for VlessNode {
     fn handle_udp<'a>(
         &'a self,
         socket: Arc<tokio::net::UdpSocket>,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
@@ -358,39 +350,51 @@ impl Payload {
     pub(crate) async fn serve(
         &self,
         mut stream: BoxedTransportStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
         let deadline = Instant::now() + context.connect_timeout;
-        let (mut stream, request, vision) = tokio::time::timeout(context.connect_timeout, async {
-            if let Some(decryption) = &self.decryption {
-                stream = decryption.accept(stream).await?;
-            }
-            let request = inbound_wire::read(&mut stream).await?;
-            let user = self
-                .users
-                .iter()
-                .find(|user| request.user.matches(&user.id))
-                .ok_or(Error::Rejected)?;
-            if user.vision != (request.flow == "xtls-rprx-vision")
-                || user.vision && request.command == 2
-            {
-                return Err(Error::Rejected);
-            }
-            Ok::<_, Error>((stream, request, user.vision))
-        })
-        .await
-        .map_err(|_| Error::Timeout)??;
-        let budget = ConnectContext {
-            cancel: context.cancel.clone(),
-            timeout: deadline.saturating_duration_since(Instant::now()),
-        };
+        let (mut stream, request, vision, access) =
+            tokio::time::timeout(context.connect_timeout, async {
+                if let Some(decryption) = &self.decryption {
+                    stream = decryption.accept(stream).await?;
+                }
+                let request = inbound_wire::read(&mut stream).await?;
+                let verified = self.users.verify(&request, |user, request| {
+                    if !request.user.matches(&user.id) {
+                        return Ok(None);
+                    }
+                    if user.vision != (request.flow == "xtls-rprx-vision")
+                        || user.vision && request.command == 2
+                    {
+                        return Err(Error::Rejected);
+                    }
+                    Ok(Some(user.vision))
+                })?;
+                let (access, vision) = access.authenticated(verified, &context)?;
+                Ok::<_, Error>((stream, request, vision, access))
+            })
+            .await
+            .map_err(|_| Error::Timeout)??;
+        let budget = ConnectContext::new(deadline.saturating_duration_since(Instant::now()))
+            .with_cancel(context.cancel.clone());
         match request.command {
             1 => {
                 let target = request.target.ok_or(Error::InvalidAddress)?;
                 let remote = access.connect_tcp(&target, &budget).await?;
-                codec::write_response(&mut stream).await?;
-                stream.flush().await?;
+                if let Err(error) = budget
+                    .run(async {
+                        codec::write_response(&mut stream).await?;
+                        stream.flush().await?;
+                        Ok(())
+                    })
+                    .await
+                {
+                    remote.finish(kerlico_core::FlowOutcome::Failed(
+                        kerlico_core::FlowFailure::from_error(&error),
+                    ));
+                    return Err(error);
+                }
                 let local = if vision {
                     crate::payload::server_vision(stream, request.user)
                 } else {
@@ -406,8 +410,19 @@ impl Payload {
                     return crate::mux::serve_packetaddr(Box::new(stream), access, context).await;
                 }
                 let channel = access.connect_udp(&target, &budget).await?;
-                codec::write_response(&mut stream).await?;
-                stream.flush().await?;
+                if let Err(error) = budget
+                    .run(async {
+                        codec::write_response(&mut stream).await?;
+                        stream.flush().await?;
+                        Ok(())
+                    })
+                    .await
+                {
+                    channel.finish(kerlico_core::FlowOutcome::Failed(
+                        kerlico_core::FlowFailure::from_error(&error),
+                    ));
+                    return Err(error);
+                }
                 relay_udp(Box::new(stream), channel, &context).await
             }
             3 => {
@@ -418,7 +433,7 @@ impl Payload {
                 } else {
                     Box::new(stream) as BoxStream
                 };
-                crate::mux::serve(local, access, context, vision||self.mux_udp_only).await
+                crate::mux::serve(local, access, context, vision || self.mux_udp_only).await
             }
             _ => Err(Error::Unsupported("VLESS 指令")),
         }
@@ -427,12 +442,12 @@ impl Payload {
 
 async fn relay_udp(
     stream: BoxStream,
-    channel: DatagramChannel,
+    channel: kerlico_core::FixedUdpFlow,
     context: &InboundContext,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let mut sender = channel.sender;
-    let mut receiver = channel.receiver;
+    let (mut sender, mut receiver, completion) = channel.into_parts();
+    let result = async {
     let (activity, mut changes) = watch::channel(Instant::now());
     let incoming = async {
         while let Some(packet) =
@@ -466,4 +481,12 @@ async fn relay_udp(
             changed=changes.changed()=>{if changed.is_ok(){timer.as_mut().reset(*changes.borrow_and_update()+context.idle_timeout);}},
         }
     }
+    }.await;
+    completion.finish(match &result {
+        Ok(()) => kerlico_core::FlowOutcome::ProtocolEnd,
+        Err(error) => {
+            kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::from_error(error))
+        }
+    });
+    result
 }

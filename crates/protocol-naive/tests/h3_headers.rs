@@ -2,7 +2,6 @@
 mod common;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::*;
-use kerlico_config::OutboundFactory;
 use kerlico_core::Destination;
 use kerlico_naive::NaiveFactory;
 use serde_json::json;
@@ -192,7 +191,7 @@ async fn duplicate_status_is_rejected_by_real_naive_client_with_valid_tls_contro
             tokio::time::sleep(Duration::from_millis(200)).await;
             connection.close(0u32.into(), b"test complete");
         });
-        let outbound=NaiveFactory.build(&json!({"server":{"host":"127.0.0.1","port":address.port()},"username":"test-user","password":"synthetic-secret","tls":{"server_name":"proxy.invalid","ca_pem":cert},"transport":"h3"})).unwrap();
+        let outbound=shared::outbound(&NaiveFactory, &json!({"server":{"host":"127.0.0.1","port":address.port()},"username":"test-user","password":"synthetic-secret","tls":{"server_name":"proxy.invalid","ca_pem":cert},"transport":"h3"})).await.unwrap();
         let result = outbound
             .connect_tcp(
                 &Destination::new("example.invalid", 443).unwrap(),
@@ -209,4 +208,12 @@ async fn duplicate_status_is_rejected_by_real_naive_client_with_valid_tls_contro
         task.await.unwrap();
         endpoint.close(0u32.into(), b"test complete");
     }
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

@@ -1,10 +1,10 @@
 use kerlico_core::{
-    AccessService, AddressedDatagram, BoxFuture, BoxStream, CancellationToken, ConnectContext,
+    AddressedDatagram, BoxFuture, BoxStream, CancellationToken, ConnectContext,
     DatagramAssociation, DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel,
     Destination, Error, InboundContext, InboundProtocol, NodeEvent, NodeObserver, Outbound, Result,
     StreamBudget,
 };
-use kerlico_hysteria2::{Hysteria2Node, Hysteria2Outbound};
+use kerlico_hysteria2::Hysteria2Node;
 use serde_json::{Value, json};
 use std::{
     sync::{
@@ -26,6 +26,11 @@ impl NodeObserver for Events {
 }
 fn context(global: Arc<Semaphore>) -> InboundContext {
     InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         cancel: CancellationToken::new(),
         connect_timeout: Duration::from_secs(3),
         idle_timeout: Duration::from_secs(3),
@@ -61,7 +66,14 @@ impl DatagramAssociationReceiver for Receiver {
         Box::pin(async move { Ok(self.0.recv().await) })
     }
 }
-impl AccessService for Echo {
+impl Outbound for Echo {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn supports_udp_association(&self) -> bool {
         true
     }
@@ -89,7 +101,7 @@ impl AccessService for Echo {
         &'a self,
         _: &'a Destination,
         _: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
             self.0.fetch_add(1, Ordering::Relaxed);
             let (client, mut server) = tokio::io::duplex(256 * 1024);
@@ -108,12 +120,16 @@ impl AccessService for Echo {
                     }
                 }
             });
-            Ok(Box::new(client) as BoxStream)
+            Ok(kerlico_core::OpenedTcp {
+                stream: Box::new(client),
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
 }
 struct Fixture {
-    outbound: Hysteria2Outbound,
+    telemetry: kerlico_egress::Telemetry,
+    outbound: Arc<dyn Outbound>,
     options: Value,
     context: InboundContext,
     task: tokio::task::JoinHandle<Result<()>>,
@@ -139,18 +155,39 @@ async fn start_fixture(
     } else {
         None
     };
-    let node=Hysteria2Node::from_options(&json!({"auth":"synthetic-node-password","tls":{"certificate_pem":certificate,"private_key_pem":key},"salamander_password":obfs,"udp":udp,"limits":{"congestion":congestion}})).unwrap();
+    let input = shared::node_input(
+        "hysteria2",
+        &json!({"auth":"synthetic-node-password","tls":{"certificate_pem":certificate,"private_key_pem":key},"salamander_password":obfs,"udp":udp,"limits":{"congestion":congestion}}),
+    );
+    let node = Hysteria2Node::from_options(&input).unwrap();
     let options = json!({"server":{"host":host,"port":port},"auth":"synthetic-node-password","tls":{"server_name":"localhost","ca_pem":certificate},"salamander_password":obfs,"limits":{"congestion":congestion}});
-    let outbound = Hysteria2Outbound::from_options(&options).unwrap();
+    let outbound = shared::outbound(&kerlico_hysteria2::Hysteria2Factory, &options)
+        .await
+        .unwrap();
     let global = Arc::new(Semaphore::new(permits));
     let context = context(global.clone());
     let access = Arc::new(Echo::default());
+    struct NoDns;
+    impl kerlico_egress::Resolver for NoDns {
+        fn resolve<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Vec<std::net::IpAddr>>> {
+            Box::pin(async { panic!("远端目标不得本地解析") })
+        }
+    }
+    let (ingress, telemetry) = kerlico_egress::testing::ingress_with_resolver(
+        &input,
+        access.clone(),
+        kerlico_core::TargetPolicy::Remote,
+        kerlico_core::FamilyMode::DualV4Preferred,
+        Arc::new(NoDns),
+    )
+    .unwrap();
     let task = {
-        let access = access.clone();
+        let access = ingress;
         let context = context.clone();
         tokio::spawn(async move { node.serve_udp(socket, access, context).await })
     };
     Fixture {
+        telemetry,
         outbound,
         options,
         context,
@@ -179,9 +216,14 @@ async fn complete_native_and_salamander_dual_stack_matrix() {
                     let target = Destination::new(host, 443).unwrap();
                     let mut stream = fixture
                         .outbound
-                        .connect_tcp(&target, &establish)
+                        .connect_tcp(
+                            &target,
+                            &kerlico_core::ConnectContext::new(establish.timeout)
+                                .with_cancel(establish.cancel.clone()),
+                        )
                         .await
-                        .unwrap();
+                        .unwrap()
+                        .stream;
                     let mut banner = [0; 12];
                     stream.read_exact(&mut banner).await.unwrap();
                     assert_eq!(&banner, b"server-first");
@@ -196,7 +238,11 @@ async fn complete_native_and_salamander_dual_stack_matrix() {
                     assert_eq!(received, data);
                     let mut channel = fixture
                         .outbound
-                        .connect_udp(&target, &establish)
+                        .connect_udp(
+                            &target,
+                            &kerlico_core::ConnectContext::new(establish.timeout)
+                                .with_cancel(establish.cancel.clone()),
+                        )
                         .await
                         .unwrap();
                     for data in [vec![], vec![1], vec![2; 4096], vec![3; 64000]] {
@@ -213,7 +259,14 @@ async fn complete_native_and_salamander_dual_stack_matrix() {
                         );
                     }
                 }
-                let mut channel = fixture.outbound.associate_udp(&establish).await.unwrap();
+                let mut channel = fixture
+                    .outbound
+                    .associate_udp(
+                        &kerlico_core::ConnectContext::new(establish.timeout)
+                            .with_cancel(establish.cancel.clone()),
+                    )
+                    .await
+                    .unwrap();
                 for host in ["127.0.0.1", "::1", "example.invalid"] {
                     let target = Destination::new(host, 53).unwrap();
                     channel
@@ -251,7 +304,9 @@ async fn authentication_tls_and_obfuscation_fail_without_target_access() {
     ] {
         let mut options = fixture.options.clone();
         options[field] = value;
-        let outbound = Hysteria2Outbound::from_options(&options).unwrap();
+        let outbound = shared::outbound(&kerlico_hysteria2::Hysteria2Factory, &options)
+            .await
+            .unwrap();
         assert!(
             outbound
                 .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(2)))
@@ -264,7 +319,9 @@ async fn authentication_tls_and_obfuscation_fail_without_target_access() {
     let fixture = start_fixture(false, true, "bbr", true, 128).await;
     let mut options = fixture.options.clone();
     options["salamander_password"] = json!("wrong-salamander-password");
-    let outbound = Hysteria2Outbound::from_options(&options).unwrap();
+    let outbound = shared::outbound(&kerlico_hysteria2::Hysteria2Factory, &options)
+        .await
+        .unwrap();
     assert!(
         outbound
             .connect_tcp(&target, &ConnectContext::new(Duration::from_millis(300)))
@@ -282,7 +339,11 @@ async fn udp_disabled_tcp_concurrency_and_cancel() {
     assert!(
         fixture
             .outbound
-            .connect_udp(&target, &establish)
+            .connect_udp(
+                &target,
+                &kerlico_core::ConnectContext::new(establish.timeout)
+                    .with_cancel(establish.cancel.clone())
+            )
             .await
             .is_err()
     );
@@ -291,9 +352,14 @@ async fn udp_disabled_tcp_concurrency_and_cancel() {
         streams.push(
             fixture
                 .outbound
-                .connect_tcp(&target, &establish)
+                .connect_tcp(
+                    &target,
+                    &kerlico_core::ConnectContext::new(establish.timeout)
+                        .with_cancel(establish.cancel.clone()),
+                )
                 .await
-                .unwrap(),
+                .unwrap()
+                .stream,
         );
     }
     for stream in &mut streams {
@@ -315,21 +381,20 @@ async fn udp_disabled_tcp_concurrency_and_cancel() {
     }
     assert_eq!(fixture.global.available_permits(), 128);
 }
-#[test]
-fn rejects_invalid_configuration_and_preserves_node_credentials() {
+#[tokio::test]
+async fn rejects_invalid_configuration_and_preserves_node_credentials() {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let node = json!({"auth":"first-node-secret","tls":{"certificate_pem":cert.cert.pem(),"private_key_pem":cert.signing_key.serialize_pem()}});
-    let first = Hysteria2Node::from_options(&node).unwrap();
+    let first = Hysteria2Node::from_options(&shared::node_input("hysteria2", &node)).unwrap();
     assert!(first.requires_udp_association());
     assert!(!first.supports_tcp());
     assert!(first.supports_udp());
     let mut second = node.clone();
     second["auth"] = json!("second-node-secret");
+    let second = Hysteria2Node::from_options(&shared::node_input("hysteria2", &second)).unwrap();
     assert_ne!(
-        first.credential_fingerprints(),
-        Hysteria2Node::from_options(&second)
-            .unwrap()
-            .credential_fingerprints()
+        shared::authentication(&first.credential_manifest()),
+        shared::authentication(&second.credential_manifest())
     );
     for (field, value) in [
         ("auth", json!("")),
@@ -340,7 +405,7 @@ fn rejects_invalid_configuration_and_preserves_node_credentials() {
     ] {
         let mut options = node.clone();
         options[field] = value;
-        assert!(Hysteria2Node::from_options(&options).is_err());
+        assert!(Hysteria2Node::from_options(&shared::node_input("hysteria2", &options)).is_err());
     }
 }
 
@@ -477,7 +542,8 @@ async fn shared_budget_rejects_new_streams_and_existing_streams_drain() {
             .outbound
             .connect_tcp(&target, &establish)
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         let mut banner = [0; 12];
         stream.read_exact(&mut banner).await.unwrap();
         streams.push(stream);
@@ -504,14 +570,21 @@ async fn shared_budget_rejects_new_streams_and_existing_streams_drain() {
 
 #[tokio::test]
 async fn real_unified_egress_preserves_full_cone_source_port_and_zero_packets() {
-    use kerlico_config::OutboundFactory;
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let node=Hysteria2Node::from_options(&json!({"auth":"real-egress-secret","tls":{"certificate_pem":cert.cert.pem(),"private_key_pem":cert.signing_key.serialize_pem()}})).unwrap();
+    let input = shared::node_input(
+        "hysteria2",
+        &json!({"auth":"real-egress-secret","tls":{"certificate_pem":cert.cert.pem(),"private_key_pem":cert.signing_key.serialize_pem()}}),
+    );
+    let node = Hysteria2Node::from_options(&input).unwrap();
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let proxy = socket.local_addr().unwrap();
-    let outbound=Hysteria2Outbound::from_options(&json!({"server":{"host":"127.0.0.1","port":proxy.port()},"auth":"real-egress-secret","tls":{"server_name":"localhost","ca_pem":cert.cert.pem()}})).unwrap();
-    let direct = kerlico_net::DirectFactory.build(&json!({})).unwrap();
-    let access = Arc::new(kerlico_egress::Egress::new(direct));
+    let outbound=shared::outbound(&kerlico_hysteria2::Hysteria2Factory, &json!({"server":{"host":"127.0.0.1","port":proxy.port()},"auth":"real-egress-secret","tls":{"server_name":"localhost","ca_pem":cert.cert.pem()}})).await.unwrap();
+    let direct = shared::outbound(&kerlico_net::DirectFactory, &json!({}))
+        .await
+        .unwrap();
+    let access =
+        kerlico_egress::testing::ingress(&input, direct, kerlico_core::TargetPolicy::Local)
+            .unwrap();
     let context = context(Arc::new(Semaphore::new(128)));
     let task = {
         let context = context.clone();
@@ -600,4 +673,47 @@ async fn real_unified_egress_preserves_full_cone_source_port_and_zero_packets() 
     );
     context.cancel.cancel();
     task.await.unwrap().unwrap();
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
+}
+
+#[tokio::test]
+async fn real_hysteria2_idle_association_records_timeout_after_zero_packet() {
+    let fixture = start_fixture(false, false, "bbr", true, 16).await;
+    let mut channel = fixture
+        .outbound
+        .associate_udp(&ConnectContext::new(Duration::from_secs(3)))
+        .await
+        .unwrap();
+    let target = Destination::new("192.0.2.10", 53).unwrap();
+    channel.sender.send_to(b"", &target).await.unwrap();
+    assert_eq!(
+        channel.receiver.recv_from().await.unwrap(),
+        Some((target, Vec::new()))
+    );
+    let records = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let records = fixture.telemetry.records(0, 16).unwrap();
+            if records.iter().any(|record| record.end.is_some()) {
+                break records;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].end, Some(kerlico_egress::FlowEnd::Timeout));
+    assert_eq!(records[0].usage.upload_bytes, 0);
+    assert_eq!(records[0].usage.download_bytes, 0);
+    assert_eq!(records[0].usage.upload_packets, 1);
+    assert_eq!(records[0].usage.download_packets, 1);
+    drop(channel);
+    close(fixture).await;
 }

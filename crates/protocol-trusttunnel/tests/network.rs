@@ -33,9 +33,14 @@ impl Drop for Engine {
 impl Engine {
     async fn start(nodes: Value, idle: u64) -> Self {
         let registry = registry();
-        let value = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":nodes,"limits":{"connect_timeout_ms":2000,"idle_timeout_ms":idle,"drain_timeout_ms":300,"max_sessions":256,"max_datagram_size":65507}});
+        let value = json!({"version":2,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":nodes,"limits":{"connect_timeout_ms":2000,"idle_timeout_ms":idle,"drain_timeout_ms":300,"max_sessions":256,"max_datagram_size":65507}});
         let prepared = registry
-            .prepare(kerlico_config::parse(&serde_json::to_vec(&value).unwrap()).unwrap())
+            .prepare(
+                kerlico_config::parse(
+                    &serde_json::to_vec(&shared::configuration(value.clone())).unwrap(),
+                )
+                .unwrap(),
+            )
             .unwrap();
         let engine = kerlico_engine::Engine::bind(prepared).await.unwrap();
         let addresses = engine.listeners().unwrap();
@@ -145,8 +150,21 @@ if stream.write_all(&bytes[..n]).await.is_err(){return;}}});},_=peers.join_next(
     }
 }
 async fn tcp(outbound: &dyn Outbound, target: &Destination, size: usize) {
-    let context = ConnectContext::new(Duration::from_secs(3));
-    let mut io = outbound.connect_tcp(target, &context).await.unwrap();
+    tcp_scoped(
+        outbound,
+        &ConnectContext::new(Duration::from_secs(3)),
+        target,
+        size,
+    )
+    .await;
+}
+async fn tcp_scoped(
+    outbound: &dyn Outbound,
+    context: &ConnectContext,
+    target: &Destination,
+    size: usize,
+) {
+    let mut io = outbound.connect_tcp(target, &context).await.unwrap().stream;
     let mut hi = [0; 2];
     io.read_exact(&mut hi).await.unwrap();
     assert_eq!(&hi, b"hi");
@@ -218,7 +236,9 @@ async fn all_five_tls_paths_both_node_families_and_both_business_families() {
                     transport,
                     version,
                 );
-                let outbound = TrustTunnelFactory.build(&options).unwrap();
+                let outbound = shared::outbound(&TrustTunnelFactory, &options)
+                    .await
+                    .unwrap();
                 assert!(!outbound.capabilities().tcp_eof);
                 assert!(!outbound.supports_udp_association());
                 for target in &targets.tcp {
@@ -272,15 +292,18 @@ async fn same_target_udp_channels_keep_distinct_fixed_flows_and_domain_uses_egre
                 4000,
             )
             .await;
-            let outbound = TrustTunnelFactory
-                .build(&client(
+            let outbound = shared::outbound(
+                &TrustTunnelFactory,
+                &client(
                     engine.addresses[0].1,
                     "flow-secret",
                     &cert,
                     transport,
                     "tls13",
-                ))
-                .unwrap();
+                ),
+            )
+            .await
+            .unwrap();
             let context = ConnectContext::new(Duration::from_secs(3));
             let mut a = outbound
                 .connect_udp(&targets.udp[0], &context)
@@ -300,14 +323,43 @@ async fn same_target_udp_channels_keep_distinct_fixed_flows_and_domain_uses_egre
             }
             let domain = Destination::new("localhost", targets.udp[0].port()).unwrap();
             assert!(outbound.connect_udp(&domain, &context).await.is_err());
-            let egress = kerlico_egress::Egress::new(outbound);
-            let mut channel = egress.connect_udp(&domain, &context).await.unwrap();
-            channel.sender.send(b"domain").await.unwrap();
-            assert_eq!(channel.receiver.recv().await.unwrap().unwrap(), b"domain");
-            drop(channel);
+            let input = kerlico_config::NodeBuildContext::local_for_test(json!({}));
+            let ingress = kerlico_egress::testing::ingress(
+                &input,
+                outbound,
+                kerlico_core::TargetPolicy::Remote,
+            )
+            .unwrap();
+            let inbound = kerlico_core::InboundContext {
+                peer_lease: None,
+                tasks: kerlico_core::NodeTasks::new(
+                    kerlico_core::NodeId::parse("test-node").unwrap(),
+                    kerlico_core::CancellationToken::new(),
+                ),
+                peer_addr: None,
+                local_addr: None,
+                cancel: context.cancel.clone(),
+                connect_timeout: context.timeout,
+                idle_timeout: context.timeout,
+                drain_timeout: context.timeout,
+                max_datagram_size: 65507,
+                max_streams: 8,
+                stream_budget: kerlico_core::StreamBudget::new(
+                    Arc::new(tokio::sync::Semaphore::new(8)),
+                    Arc::new(tokio::sync::Semaphore::new(8)),
+                ),
+                events: Arc::new(TestObserver),
+            };
+            assert!(
+                ingress
+                    .local(&inbound)
+                    .unwrap()
+                    .connect_udp(&domain, &context)
+                    .await
+                    .is_err()
+            );
             drop(a);
             drop(b);
-            drop(egress);
             engine.stop().await;
         }
     })
@@ -348,7 +400,9 @@ async fn authentication_and_tls_failure_never_reach_business_target() {
                     "name" => options["tls"]["server_name"] = json!("wrong.example.invalid"),
                     _ => options["tls"]["ca_pem"] = json!(certificate().0),
                 }
-                let outbound = TrustTunnelFactory.build(&options).unwrap();
+                let outbound = shared::outbound(&TrustTunnelFactory, &options)
+                    .await
+                    .unwrap();
                 assert!(
                     outbound
                         .connect_tcp(&targets.tcp[0], &context)
@@ -370,8 +424,8 @@ async fn authentication_and_tls_failure_never_reach_business_target() {
     .unwrap();
 }
 
-#[test]
-fn real_credentials_and_additional_secret_domain_both_reject_cross_node_reuse() {
+#[tokio::test]
+async fn real_credentials_and_additional_secret_domain_both_reject_cross_node_reuse() {
     let (cert, key) = certificate();
     let first = node(
         "one",
@@ -392,54 +446,69 @@ fn real_credentials_and_additional_secret_domain_both_reject_cross_node_reuse() 
         "tls13",
     );
     second["options"]["users"][0]["username"] = json!("another-name");
-    let value = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[first,second]});
+    let value = json!({"version":2,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[first,second]});
     assert!(
         registry()
-            .prepare(kerlico_config::parse(&serde_json::to_vec(&value).unwrap()).unwrap())
+            .prepare(
+                kerlico_config::parse(
+                    &serde_json::to_vec(&shared::configuration(value.clone())).unwrap()
+                )
+                .unwrap()
+            )
             .is_err()
     );
     let protocol = TrustTunnelNodeFactory
-        .build(&value["nodes"][0]["options"])
+        .build(&shared::node_input(
+            "trusttunnel",
+            &value["nodes"][0]["options"],
+        ))
         .unwrap();
     assert_eq!(
-        protocol.scoped_credential_fingerprints("trusttunnel").len(),
+        shared::authentication(&protocol.credential_manifest()).len(),
         2
     );
-    assert_eq!(
-        protocol
-            .credential_isolation_fingerprints("trusttunnel")
-            .len(),
-        3
-    );
+    assert_eq!(protocol.credential_manifest().entries().len(), 3);
     let mut http = value.clone();
     http["nodes"][1] = json!({"tag":"native-http","type":"http","listen":"[::1]:0","outbound":"direct","options":{"auth":{"username":"test","password":"same-password"}}});
     assert!(
         registry()
-            .prepare(kerlico_config::parse(&serde_json::to_vec(&http).unwrap()).unwrap())
+            .prepare(
+                kerlico_config::parse(
+                    &serde_json::to_vec(&shared::configuration(http.clone())).unwrap()
+                )
+                .unwrap()
+            )
             .is_err()
     );
     http["nodes"][1]["options"]["auth"]["password"] = json!("independent-http-secret");
     assert!(
         registry()
-            .prepare(kerlico_config::parse(&serde_json::to_vec(&http).unwrap()).unwrap())
+            .prepare(
+                kerlico_config::parse(
+                    &serde_json::to_vec(&shared::configuration(http.clone())).unwrap()
+                )
+                .unwrap()
+            )
             .is_ok()
     );
 }
 
-#[test]
-fn invalid_options_are_rejected_and_capabilities_match_physical_carrier() {
+#[tokio::test]
+async fn invalid_options_are_rejected_and_capabilities_match_physical_carrier() {
     let (cert, key) = certificate();
     let address = "127.0.0.1:443".parse().unwrap();
     for field in ["icmp", "skip_verification", "auto", "auth_key"] {
         let mut value = client(address, "secret", &cert, "h2", "tls13");
         value[field] = json!(true);
-        assert!(TrustTunnelFactory.build(&value).is_err());
+        assert!(TrustTunnelFactory.compile(&value).is_err());
     }
     let mut options = client(address, "secret", &cert, "h3", "tls12");
-    assert!(TrustTunnelFactory.build(&options).is_err());
+    assert!(TrustTunnelFactory.compile(&options).is_err());
     options["transport"] = json!("h1");
     options["udp"] = json!(false);
-    let outbound = TrustTunnelFactory.build(&options).unwrap();
+    let outbound = shared::outbound(&TrustTunnelFactory, &options)
+        .await
+        .unwrap();
     assert!(!outbound.capabilities().udp);
     for transport in ["h1", "h2", "h3"] {
         let value = node(
@@ -451,7 +520,9 @@ fn invalid_options_are_rejected_and_capabilities_match_physical_carrier() {
             transport,
             "tls13",
         );
-        let protocol = TrustTunnelNodeFactory.build(&value["options"]).unwrap();
+        let protocol = TrustTunnelNodeFactory
+            .build(&shared::node_input("trusttunnel", &value["options"]))
+            .unwrap();
         assert_eq!(protocol.supports_tcp(), transport != "h3");
         assert_eq!(protocol.supports_udp(), transport == "h3");
         assert!(!protocol.requires_udp_association());
@@ -487,7 +558,9 @@ async fn bounded_pool_rejects_excess_streams_and_releases_cancelled_udp() {
             options["limits"]["max_connections"] = json!(2);
             options["limits"]["max_streams"] = json!(2);
             options["limits"]["max_udp_flows"] = json!(1);
-            let outbound = TrustTunnelFactory.build(&options).unwrap();
+            let outbound = shared::outbound(&TrustTunnelFactory, &options)
+                .await
+                .unwrap();
             let context = ConnectContext::new(Duration::from_secs(3));
             let mut streams = Vec::new();
             for _ in 0..2 {
@@ -495,7 +568,8 @@ async fn bounded_pool_rejects_excess_streams_and_releases_cancelled_udp() {
                     outbound
                         .connect_tcp(&targets.tcp[0], &context)
                         .await
-                        .unwrap(),
+                        .unwrap()
+                        .stream,
                 );
             }
             assert!(matches!(
@@ -518,7 +592,9 @@ async fn bounded_pool_rejects_excess_streams_and_releases_cancelled_udp() {
                 channel.sender.send(b"cancelled").await,
                 Err(Error::Cancelled)
             ));
-            let fresh_context = ConnectContext::new(Duration::from_secs(3));
+            let fresh_context = context
+                .new_operation(Duration::from_secs(3))
+                .with_cancel(CancellationToken::new());
             let kerlico_core::DatagramChannel { sender, receiver } = channel;
             drop(sender);
             assert!(matches!(
@@ -585,7 +661,9 @@ async fn multiuser_basic_remains_required_with_optional_mtls() {
                 transport,
                 version,
             );
-            let no_cert = TrustTunnelFactory.build(&options).unwrap();
+            let no_cert = shared::outbound(&TrustTunnelFactory, &options)
+                .await
+                .unwrap();
             assert!(
                 no_cert
                     .connect_tcp(&targets.tcp[0], &context)
@@ -594,7 +672,9 @@ async fn multiuser_basic_remains_required_with_optional_mtls() {
             );
             options["tls"]["certificate_pem"] = json!(client_cert);
             options["tls"]["private_key_pem"] = json!(client_key);
-            let outbound = TrustTunnelFactory.build(&options).unwrap();
+            let outbound = shared::outbound(&TrustTunnelFactory, &options)
+                .await
+                .unwrap();
             tcp(outbound.as_ref(), &targets.tcp[0], 65536).await;
             let mut channel = outbound
                 .connect_udp(&targets.udp[0], &context)
@@ -603,12 +683,14 @@ async fn multiuser_basic_remains_required_with_optional_mtls() {
             channel.sender.send(b"mtls-udp").await.unwrap();
             assert_eq!(channel.receiver.recv().await.unwrap().unwrap(), b"mtls-udp");
             options["auth"] = json!({"username":"second","password":"second-user"});
-            let other = TrustTunnelFactory.build(&options).unwrap();
+            let other = shared::outbound(&TrustTunnelFactory, &options)
+                .await
+                .unwrap();
             tcp(other.as_ref(), &targets.tcp[1], 17).await;
             options["auth"]["password"] = json!("wrong");
             assert!(
-                TrustTunnelFactory
-                    .build(&options)
+                shared::outbound(&TrustTunnelFactory, &options)
+                    .await
                     .unwrap()
                     .connect_tcp(&targets.tcp[0], &context)
                     .await
@@ -649,15 +731,12 @@ async fn immediate_target_eof_keeps_all_queued_data_across_http_flow_control() {
                 4000,
             )
             .await;
-            let outbound = TrustTunnelFactory
-                .build(&client(
-                    engine.addresses[0].1,
-                    "eof",
-                    &cert,
-                    transport,
-                    "tls13",
-                ))
-                .unwrap();
+            let outbound = shared::outbound(
+                &TrustTunnelFactory,
+                &client(engine.addresses[0].1, "eof", &cert, transport, "tls13"),
+            )
+            .await
+            .unwrap();
             let context = ConnectContext::new(Duration::from_secs(3));
             let mut io = outbound
                 .connect_tcp(
@@ -665,7 +744,8 @@ async fn immediate_target_eof_keeps_all_queued_data_across_http_flow_control() {
                     &context,
                 )
                 .await
-                .unwrap();
+                .unwrap()
+                .stream;
             let mut bytes = Vec::new();
             io.read_to_end(&mut bytes).await.unwrap();
             assert_eq!(bytes, vec![61; 262144]);
@@ -708,21 +788,43 @@ async fn idle_pool_is_reaped_health_uses_no_business_target_and_active_shutdown_
             );
             options["limits"]["health_check_ms"] = json!(100);
             options["limits"]["idle_timeout_ms"] = json!(1000);
-            let outbound = TrustTunnelFactory.build(&options).unwrap();
-            tcp(outbound.as_ref(), &targets.tcp[0], 17).await;
+            let outbound = shared::outbound(&TrustTunnelFactory, &options)
+                .await
+                .unwrap();
+            let peer_context = ConnectContext::new(Duration::from_secs(3));
+            tcp_scoped(
+                outbound.as_ref(),
+                &peer_context.new_operation(Duration::from_secs(3)),
+                &targets.tcp[0],
+                17,
+            )
+            .await;
             let before = targets.accepted.load(Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(150)).await;
-            tcp(outbound.as_ref(), &targets.tcp[0], 17).await;
+            tcp_scoped(
+                outbound.as_ref(),
+                &peer_context.new_operation(Duration::from_secs(3)),
+                &targets.tcp[0],
+                17,
+            )
+            .await;
             assert_eq!(targets.accepted.load(Ordering::SeqCst), before + 1);
             assert_eq!(engine.stats["node"].accepted.load(Ordering::Relaxed), 1);
             tokio::time::sleep(Duration::from_millis(1300)).await;
-            tcp(outbound.as_ref(), &targets.tcp[0], 17).await;
+            tcp_scoped(
+                outbound.as_ref(),
+                &peer_context.new_operation(Duration::from_secs(3)),
+                &targets.tcp[0],
+                17,
+            )
+            .await;
             assert_eq!(engine.stats["node"].accepted.load(Ordering::Relaxed), 2);
             let context = ConnectContext::new(Duration::from_secs(2));
             let mut io = outbound
                 .connect_tcp(&targets.tcp[0], &context)
                 .await
-                .unwrap();
+                .unwrap()
+                .stream;
             let mut greeting = [0; 2];
             io.read_exact(&mut greeting).await.unwrap();
             let mut channel = outbound
@@ -768,7 +870,9 @@ async fn disabled_udp_and_connect_deadline_are_explicit() {
             "tls13",
         );
         options["udp"] = json!(false);
-        let outbound = TrustTunnelFactory.build(&options).unwrap();
+        let outbound = shared::outbound(&TrustTunnelFactory, &options)
+            .await
+            .unwrap();
         let target = Destination::new("192.0.2.1", 443).unwrap();
         let cancelled = ConnectContext::new(Duration::from_secs(1));
         cancelled.cancel.cancel();
@@ -781,7 +885,8 @@ async fn disabled_udp_and_connect_deadline_are_explicit() {
             outbound.connect_udp(&target, &context).await,
             Err(Error::Unsupported(_))
         ));
-        let connecting = outbound.connect_tcp(&target, &context);
+        let attempt = ConnectContext::new(context.timeout).with_cancel(context.cancel.clone());
+        let connecting = outbound.connect_tcp(&target, &attempt);
         let incoming = listener.accept();
         let (result, accepted) = tokio::join!(connecting, incoming);
         assert!(accepted.is_ok());
@@ -789,4 +894,17 @@ async fn disabled_udp_and_connect_deadline_are_explicit() {
     })
     .await
     .unwrap();
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
+}
+
+struct TestObserver;
+impl kerlico_core::NodeObserver for TestObserver {
+    fn record(&self, _: kerlico_core::NodeEvent) {}
 }

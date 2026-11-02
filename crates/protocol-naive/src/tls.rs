@@ -103,6 +103,7 @@ pub(crate) fn client(
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Verifier { inner: verifier }))
         .with_no_client_auth();
+    config.resumption = rustls::client::Resumption::disabled();
     config.alpn_protocols = vec![match transport {
         Transport::H1 => b"http/1.1".to_vec(),
         Transport::H2 => b"h2".to_vec(),

@@ -96,7 +96,6 @@ pub(crate) struct ClientTls {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NodeOptions {
-    pub auth: String,
     pub tls: ServerTls,
     #[serde(default)]
     pub salamander_password: Option<String>,
@@ -164,6 +163,7 @@ pub(crate) fn client_tls(options: &ClientTls) -> Result<Arc<rustls::ClientConfig
     .map_err(|_| invalid())?
     .with_root_certificates(roots)
     .with_no_client_auth();
+    tls.resumption = rustls::client::Resumption::disabled();
     tls.alpn_protocols = vec![b"h3".to_vec()];
     tls.enable_early_data = false;
     Ok(Arc::new(tls))
@@ -200,4 +200,10 @@ pub(crate) fn server_tls(options: ServerTls) -> Result<Arc<rustls::ServerConfig>
     tls.alpn_protocols = vec![b"h3".to_vec()];
     tls.max_early_data_size = 0;
     Ok(Arc::new(tls))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Auth {
+    pub auth: String,
 }

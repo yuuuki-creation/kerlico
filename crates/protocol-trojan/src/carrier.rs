@@ -1,4 +1,20 @@
 //! 客户端载体不解释 Trojan 认证或数据帧。
+enum LayerPlan {
+    Raw,
+    WebSocket(WebSocketConfig),
+    HttpUpgrade(HttpUpgradeConfig),
+    Grpc(GrpcConfig),
+}
+impl LayerPlan {
+    fn start(&self) -> TransportLayer {
+        match self {
+            Self::Raw => TransportLayer::Raw,
+            Self::WebSocket(config) => TransportLayer::WebSocket(config.clone()),
+            Self::HttpUpgrade(config) => TransportLayer::HttpUpgrade(config.clone()),
+            Self::Grpc(config) => TransportLayer::Grpc(GrpcTransport::new(config.clone())),
+        }
+    }
+}
 
 use crate::{
     config::{ClientSecurity, Transport},
@@ -15,10 +31,28 @@ use xray_transport::{ConnectorConfig, TlsClientConfig, TlsConnector, TransportDi
 pub(crate) struct Carrier {
     server: Destination,
     connector: ConnectorConfig,
-    layer: TransportLayer,
+    layer: LayerPlan,
+    resources:
+        std::sync::Mutex<std::collections::HashMap<kerlico_core::ResourceKey, TransportLayer>>,
+    owner: Option<xray_transport::lifecycle::TaskOwner>,
     dialer: TransportDialer,
 }
 impl Carrier {
+    pub fn start(mut self, host: &kerlico_core::ServiceContext) -> Result<Self> {
+        let owner = xray_transport::lifecycle::TaskOwner::new();
+        let stop = host.cancel();
+        let waiting = owner.clone();
+        let guard = owner.abort_on_drop();
+        host.spawn(async move {
+            let _guard = guard;
+            tokio::select! {_=stop.cancelled()=>{},_=waiting.failed()=>{stop.cancel();}}
+            waiting.shutdown().await;
+        })?;
+        self.owner = Some(owner);
+
+        Ok(self)
+    }
+
     pub fn build(
         server: Destination,
         security: ClientSecurity,
@@ -64,6 +98,7 @@ impl Carrier {
                 .map_err(|_| invalid())?
                 .with_root_certificates(roots)
                 .with_no_client_auth();
+                config.resumption = rustls::client::Resumption::disabled();
                 config.alpn_protocols = transport.alpn();
                 dialer = TransportDialer::with_tls_connector(
                     TlsConnector::with_pinned_client_config(Arc::new(config)),
@@ -90,13 +125,13 @@ impl Carrier {
             },
         };
         let layer = match transport {
-            Transport::Tcp => TransportLayer::Raw,
+            Transport::Tcp => LayerPlan::Raw,
             Transport::Ws {
                 path,
                 host,
                 headers,
                 early_data_bytes,
-            } => TransportLayer::WebSocket(WebSocketConfig {
+            } => LayerPlan::WebSocket(WebSocketConfig {
                 path,
                 host: host.unwrap_or(authority),
                 headers,
@@ -107,7 +142,7 @@ impl Carrier {
                 path,
                 host,
                 headers,
-            } => TransportLayer::HttpUpgrade(HttpUpgradeConfig {
+            } => LayerPlan::HttpUpgrade(HttpUpgradeConfig {
                 path,
                 host: host.unwrap_or(authority),
                 headers,
@@ -116,7 +151,7 @@ impl Carrier {
                 service_name,
                 authority: host,
                 multi_mode,
-            } => TransportLayer::Grpc(GrpcTransport::new(GrpcConfig {
+            } => LayerPlan::Grpc(GrpcConfig {
                 service_name,
                 authority: host.unwrap_or(authority).parse().map_err(|_| invalid())?,
                 multi_mode,
@@ -125,16 +160,45 @@ impl Carrier {
                 health_check_timeout_secs: 0,
                 permit_without_stream: false,
                 initial_windows_size: 0,
-            })),
+            }),
         };
         Ok(Self {
             server,
             connector,
             layer,
+            resources: std::sync::Mutex::new(std::collections::HashMap::new()),
+            owner: None,
             dialer,
         })
     }
-    pub async fn open(&self) -> Result<BoxStream> {
+    pub async fn shutdown(&self) -> Result<()> {
+        let owner = self.owner.as_ref().ok_or_else(invalid)?;
+        owner.close_admission();
+        self.resources.lock().map_err(|_| invalid())?.clear();
+        owner.shutdown().await;
+        if owner.failed_tasks() > 0 {
+            return Err(Error::Protocol("载体后台任务异常退出"));
+        }
+        Ok(())
+    }
+    pub async fn open(&self, context: &kerlico_core::ConnectContext) -> Result<BoxStream> {
+        let owner = self.owner.as_ref().ok_or_else(invalid)?;
+        if owner.is_closed() {
+            return Err(Error::Cancelled);
+        }
+        if owner.is_closed() {
+            return Err(Error::Cancelled);
+        }
+        owner.scope(self.open_scoped(context)).await
+    }
+    async fn open_scoped(&self, context: &kerlico_core::ConnectContext) -> Result<BoxStream> {
+        let layer = {
+            let mut resources = self.resources.lock().map_err(|_| invalid())?;
+            resources
+                .entry(context.resource_key().clone())
+                .or_insert_with(|| self.layer.start())
+                .clone()
+        };
         let target = Target::new(
             match self.server.address() {
                 Address::Ip(ip) => TargetAddr::Ip(*ip),
@@ -152,9 +216,11 @@ impl Carrier {
         candidates.truncate(32);
         let stream = self
             .dialer
-            .connect_stream(&self.connector, &self.layer, &target, &candidates, None)
+            .connect_stream(&self.connector, &layer, &target, &candidates, None)
             .await
             .map_err(|_| Error::Protocol("Trojan 载体建立失败"))?;
-        Ok(Box::new(stream))
+        Ok(Box::new(
+            self.owner.as_ref().ok_or_else(invalid)?.wrap(stream),
+        ))
     }
 }

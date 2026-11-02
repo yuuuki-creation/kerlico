@@ -1,5 +1,4 @@
-//! VLESS version=0、普通 flow 的编解码与 TCP/固定目标 UDP 出站。
-//! REALITY、Vision、XHTTP、Mux/XUDP 和 VLESS Encryption 尚未实现。
+//! VLESS 双端及扩展载体；可信成员身份交给共享目标调度器。
 
 mod carrier;
 pub mod codec;
@@ -9,7 +8,6 @@ mod mux;
 mod outbound;
 mod packetaddr;
 mod payload;
-mod vision_io;
 mod profile;
 mod reality_io;
 mod server_encryption;
@@ -18,6 +16,7 @@ mod server_http;
 mod server_io;
 mod server_reality;
 mod stream;
+mod vision_io;
 mod xdrive;
 
 pub use inbound::VlessNodeFactory;

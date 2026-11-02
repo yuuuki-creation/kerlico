@@ -1,5 +1,6 @@
 //! Mux.Cool 帧与有界的客户端/服务端会话管理。
 mod client;
+mod completion;
 mod frame;
 mod server;
 pub(crate) use client::Pool;

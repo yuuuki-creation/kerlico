@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """受控 Go 参照的 v2 缺失/伪造版本信息，双角色独立负回归。"""
+from config_v2 import bind_members
 import argparse
 from contextlib import ExitStack
 import hashlib
@@ -25,7 +26,8 @@ def main():
       h.h.write_json(work/'client.json',peer)
       server={'listeners':[{'type':'shadowquic','listen':host,'port':str(np),'users':[{'username':h.USERNAME,'password':h.PASSWORD}],'jls-upstream':{'addr':cover,'sni':'cover.invalid'},'quic-versions':['v2']}]}
       h.h.write_json(work/'server.json',server)
-      own={'version':1,'inbounds':[],'limits':{'connect_timeout_ms':4000,'idle_timeout_ms':10000,'drain_timeout_ms':500},'outbounds':[{'tag':'direct','type':'direct'}],'nodes':[{'tag':'node','type':'shadowquic','listen':node,'outbound':'direct','options':{'username':h.USERNAME,'password':h.PASSWORD,'server_name':'cover.invalid','upstream':{'host':cover_host,'port':cp},'quic_versions':['v2']}}]}
+      own={'version':2,'inbounds':[],'limits':{'connect_timeout_ms':4000,'idle_timeout_ms':10000,'drain_timeout_ms':500},'outbounds':[{'tag':'direct','type':'direct'}],'nodes':[{'tag':'node','type':'shadowquic','listen':node,'outbound':'direct','options':{'username':h.USERNAME,'password':h.PASSWORD,'server_name':'cover.invalid','upstream':{'host':cover_host,'port':cp},'quic_versions':['v2']}}]}
+      bind_members(own,own['nodes'][0],[{field:own['nodes'][0]['options'].pop(field) for field in ('username','password')}])
       h.h.write_json(work/'own.json',own)
       faulty=str(bins/('shadowquic-reference-'+fault));normal=str(bins/'shadowquic-reference')
       command=[a.cover,'probe-jls',node,str(cert),'v2']

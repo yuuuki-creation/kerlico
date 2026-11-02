@@ -102,7 +102,7 @@ pub(crate) async fn connect(
         http::header::AUTHORIZATION,
         http::HeaderValue::from_str(&format!("Bearer {auth}")).map_err(|_| crate::invalid())?,
     );
-    let carrier = tls::connect(endpoint, options.mask.tls.as_ref(), &[b"http/1.1"]).await?;
+    let carrier = tls::connect(endpoint, options.tls.as_deref()).await?;
     let (stream, response) = client_async_with_config(request, carrier, Some(config()))
         .await
         .map_err(|_| Error::Protocol("Sudoku WS升级失败"))?;

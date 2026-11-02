@@ -19,6 +19,11 @@ use crate::{
     quic::{BidiStream, RecvStream, SendStream},
 };
 
+pub(crate) enum FrameProgress<T> {
+    Frame(T),
+    Yielded,
+}
+
 /// Decodes Frames from the underlying QUIC stream
 pub struct FrameStream<S, B> {
     pub stream: BufRecvStream<S, B>,
@@ -54,39 +59,54 @@ where
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<Frame<PayloadLen>>, FrameStreamError>> {
+        match std::task::ready!(self.poll_next_with_progress(cx))? {
+            FrameProgress::Frame(frame) => Poll::Ready(Ok(frame)),
+            FrameProgress::Yielded => Poll::Pending,
+        }
+    }
+
+    pub(crate) fn poll_next_with_progress(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<FrameProgress<Option<Frame<PayloadLen>>>, FrameStreamError>> {
         assert!(
             self.remaining_data == 0,
             "There is still data to read, please call poll_data() until it returns None."
         );
 
+        let mut budget = 64;
         loop {
-            let end = self.try_recv(cx)?;
-
-            return match self.decoder.decode(self.stream.buf_mut())? {
+            match self.decoder.decode(self.stream.buf_mut(), &mut budget)? {
                 Some(Frame::Data(PayloadLen(len))) => {
                     self.remaining_data = len;
-                    Poll::Ready(Ok(Some(Frame::Data(PayloadLen(len)))))
+                    let frame = Some(Frame::Data(PayloadLen(len)));
+                    return Poll::Ready(Ok(FrameProgress::Frame(frame)));
                 }
                 frame @ Some(Frame::WebTransportStream(_)) => {
                     self.remaining_data = usize::MAX;
-                    Poll::Ready(Ok(frame))
+                    return Poll::Ready(Ok(FrameProgress::Frame(frame)));
                 }
-                Some(frame) => Poll::Ready(Ok(Some(frame))),
-                None => match end {
-                    // Received a chunk but frame is incomplete, poll until we get `Pending`.
-                    Poll::Ready(false) => continue,
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(true) => {
-                        if self.stream.buf_mut().has_remaining() {
-                            // Reached the end of receive stream, but there is still some data:
-                            // The frame is incomplete.
-                            Poll::Ready(Err(FrameStreamError::UnexpectedEnd))
-                        } else {
-                            Poll::Ready(Ok(None))
-                        }
+                Some(frame) => return Poll::Ready(Ok(FrameProgress::Frame(Some(frame)))),
+                None => (),
+            }
+            if budget == 0 {
+                cx.waker().wake_by_ref();
+                return Poll::Ready(Ok(FrameProgress::Yielded));
+            }
+            budget -= 1;
+            match self.try_recv(cx)? {
+                Poll::Ready(false) => continue,
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(true) => {
+                    if self.stream.buf_mut().has_remaining() {
+                        // Reached the end of receive stream, but there is still some data:
+                        // The frame is incomplete.
+                        return Poll::Ready(Err(FrameStreamError::UnexpectedEnd));
+                    } else {
+                        return Poll::Ready(Ok(FrameProgress::Frame(None)));
                     }
-                },
-            };
+                }
+            }
         }
     }
 
@@ -211,10 +231,15 @@ impl FrameDecoder {
     fn decode<B: Buf>(
         &mut self,
         src: &mut BufList<B>,
+        budget: &mut usize,
     ) -> Result<Option<Frame<PayloadLen>>, FrameStreamError> {
         // Decode in a loop since we ignore unknown frames, and there may be
         // other frames already in our BufList.
         loop {
+            if *budget == 0 {
+                return Ok(None);
+            }
+            *budget -= 1;
             if !src.has_remaining() {
                 return Ok(None);
             }
@@ -323,7 +348,11 @@ mod tests {
         let mut buf = BufList::from(buf);
 
         let mut decoder = FrameDecoder::default();
-        assert_matches!(decoder.decode(&mut buf), Ok(Some(Frame::Headers(_))));
+        let mut budget = 64;
+        assert_matches!(
+            decoder.decode(&mut buf, &mut budget),
+            Ok(Some(Frame::Headers(_)))
+        );
     }
 
     #[test]
@@ -336,7 +365,8 @@ mod tests {
         let mut buf = BufList::from(buf);
 
         let mut decoder = FrameDecoder::default();
-        assert_matches!(decoder.decode(&mut buf), Ok(None));
+        let mut budget = 64;
+        assert_matches!(decoder.decode(&mut buf, &mut budget), Ok(None));
     }
 
     #[test]
@@ -349,7 +379,11 @@ mod tests {
         buf_list.push(&buf[1..]);
 
         let mut decoder = FrameDecoder::default();
-        assert_matches!(decoder.decode(&mut buf_list), Ok(Some(Frame::Headers(_))));
+        let mut budget = 64;
+        assert_matches!(
+            decoder.decode(&mut buf_list, &mut budget),
+            Ok(Some(Frame::Headers(_)))
+        );
     }
 
     #[test]
@@ -363,7 +397,11 @@ mod tests {
         buf_list.push(&buf[2..]);
 
         let mut decoder = FrameDecoder::default();
-        assert_matches!(decoder.decode(&mut buf_list), Ok(Some(Frame::Headers(_))));
+        let mut budget = 64;
+        assert_matches!(
+            decoder.decode(&mut buf_list, &mut budget),
+            Ok(Some(Frame::Headers(_)))
+        );
     }
 
     #[test]
@@ -377,12 +415,16 @@ mod tests {
         let mut buf = BufList::from(buf);
 
         let mut decoder = FrameDecoder::default();
-        assert_matches!(decoder.decode(&mut buf), Ok(Some(Frame::Headers(_))));
+        let mut budget = 64;
         assert_matches!(
-            decoder.decode(&mut buf),
+            decoder.decode(&mut buf, &mut budget),
+            Ok(Some(Frame::Headers(_)))
+        );
+        assert_matches!(
+            decoder.decode(&mut buf, &mut budget),
             Ok(Some(Frame::Data(PayloadLen(4))))
         );
-        assert_matches!(decoder.decode(&mut buf), Ok(None));
+        assert_matches!(decoder.decode(&mut buf, &mut budget), Ok(None));
     }
 
     // FrameStream

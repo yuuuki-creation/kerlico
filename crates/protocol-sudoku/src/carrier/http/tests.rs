@@ -30,9 +30,13 @@ fn registry(
     .unwrap()
     .protocol;
     let parent = CancellationToken::new();
-    let scope = Scope::new(&parent);
     let slots = Arc::new(Semaphore::new(8));
     let context = InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         peer_addr: None,
         local_addr: None,
         cancel: parent,
@@ -44,7 +48,16 @@ fn registry(
         stream_budget: StreamBudget::new(slots.clone(), Arc::new(Semaphore::new(8))),
         events: Arc::new(Observer),
     };
-    let (registry, backends) = Registry::new(protocol, scope.clone(), context, 8, ttl);
+    let scope = Scope::node(&context.cancel, context.tasks.clone());
+    let input = kerlico_config::NodeBuildContext::for_test(
+        json!({}),
+        vec![json!({"key":"synthetic-sudoku-http-state-seed"})],
+    );
+    let members = Arc::new(crate::members::Members {
+        credentials: input.credentials(vec![protocol.clone()]).unwrap(),
+        local: protocol,
+    });
+    let (registry, backends) = Registry::new(members, scope.clone(), context, 8, ttl);
     (registry, backends, scope, slots)
 }
 

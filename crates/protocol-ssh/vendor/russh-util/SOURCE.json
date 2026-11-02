@@ -1,0 +1,43 @@
+{
+  "package": "russh-util",
+  "version": "0.52.0",
+  "archive_url": "https://static.crates.io/crates/russh-util/russh-util-0.52.0.crate",
+  "archive_sha256": "668424a5dde0bcb45b55ba7de8476b93831b4aa2fa6947e145f3b053e22c60b6",
+  "vcs": {
+    "sha1": "3d09c20c52a542ffa327723d3a44cb1edd9b0ca4",
+    "dirty": true,
+    "path_in_vcs": "russh-util"
+  },
+  "original_files": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "6db855f526024b4a7384bbdc3d35515dbc4e6597c3f47189657683e26a777c54"
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "sha256": "4bb59fc5468939da7a73e8c7356da3632b7686d08b08d43eb5d0a3c63447849f"
+    },
+    {
+      "path": ".cargo_vcs_info.json",
+      "sha256": "9bbeb373423fbca22bfa4967ae8c327bc0567a5934ffcf2e4c07716d85ecc17f"
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "8d05218bce51a6f9c4b2e7fd591cd08f98e2f00b4cca6e072021d99d46590f5f"
+    },
+    {
+      "path": "src/runtime.rs",
+      "sha256": "3a2c2b9fb87991ca9c373f295c67380b945bb3f6c6043e127f035b70b572130c"
+    },
+    {
+      "path": "src/time.rs",
+      "sha256": "7d88b9dbaf789b1e85dac9e96a1a8177584aa816d82a24424f475701b9404ae0"
+    }
+  ],
+  "license": {
+    "spdx": "Apache-2.0",
+    "url": "https://raw.githubusercontent.com/warp-tech/russh/3d09c20c52a542ffa327723d3a44cb1edd9b0ca4/LICENSE-2.0.txt",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "source": "许可全文取自固定上游提交，不属于该发布归档"
+  }
+}

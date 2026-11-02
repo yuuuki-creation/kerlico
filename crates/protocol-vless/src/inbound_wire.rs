@@ -27,7 +27,7 @@ pub(crate) async fn read<R: AsyncRead + Unpin + ?Sized>(reader: &mut R) -> Resul
     let target = match command {
         1 | 2 => {
             let port = reader.read_u16().await?;
-            Some(address(reader, port,command==2).await?)
+            Some(address(reader, port, command == 2).await?)
         }
         3 => None,
         _ => return Err(Error::Unsupported("VLESS 指令")),
@@ -43,7 +43,7 @@ pub(crate) async fn read<R: AsyncRead + Unpin + ?Sized>(reader: &mut R) -> Resul
 pub(crate) async fn address<R: AsyncRead + Unpin + ?Sized>(
     reader: &mut R,
     port: u16,
-    packetaddr:bool,
+    packetaddr: bool,
 ) -> Result<Destination> {
     let host = match reader.read_u8().await? {
         1 => {
@@ -64,18 +64,42 @@ pub(crate) async fn address<R: AsyncRead + Unpin + ?Sized>(
         }
         _ => return Err(Error::Protocol("VLESS 地址类型不支持")),
     };
-    Destination::new(&host,if packetaddr&&port==0&&host=="sp.packet-addr.v2fly.arpa"{1}else{port})
+    Destination::new(
+        &host,
+        if packetaddr && port == 0 && host == "sp.packet-addr.v2fly.arpa" {
+            1
+        } else {
+            port
+        },
+    )
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn request(command:u8,host:&str)->Vec<u8>{let mut bytes=vec![0];bytes.extend_from_slice(&[0;16]);bytes.extend_from_slice(&[0,command,0,0,2,host.len() as u8]);bytes.extend_from_slice(host.as_bytes());bytes}
+    fn request(command: u8, host: &str) -> Vec<u8> {
+        let mut bytes = vec![0];
+        bytes.extend_from_slice(&[0; 16]);
+        bytes.extend_from_slice(&[0, command, 0, 0, 2, host.len() as u8]);
+        bytes.extend_from_slice(host.as_bytes());
+        bytes
+    }
     #[tokio::test]
-    async fn packetaddr_zero_port_marker_does_not_open_general_zero_port_targets(){
-        let magic="sp.packet-addr.v2fly.arpa";
-        let parsed=read(&mut std::io::Cursor::new(request(2,magic))).await.unwrap();assert_eq!(parsed.target.unwrap().host(),magic);
-        assert!(read(&mut std::io::Cursor::new(request(1,magic))).await.is_err());assert!(read(&mut std::io::Cursor::new(request(2,"example.invalid"))).await.is_err());
+    async fn packetaddr_zero_port_marker_does_not_open_general_zero_port_targets() {
+        let magic = "sp.packet-addr.v2fly.arpa";
+        let parsed = read(&mut std::io::Cursor::new(request(2, magic)))
+            .await
+            .unwrap();
+        assert_eq!(parsed.target.unwrap().host(), magic);
+        assert!(
+            read(&mut std::io::Cursor::new(request(1, magic)))
+                .await
+                .is_err()
+        );
+        assert!(
+            read(&mut std::io::Cursor::new(request(2, "example.invalid")))
+                .await
+                .is_err()
+        );
     }
 }

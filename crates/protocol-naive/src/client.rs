@@ -4,11 +4,14 @@ use crate::{
     http, padding, tls, transport, uot,
 };
 use bytes::Bytes;
+use kerlico_config::OutboundPlan;
 use kerlico_core::{
     BoxFuture, BoxStream, CancellationToken, Capabilities, ConnectContext, DatagramAssociation,
-    DatagramChannel, Destination, Error, Outbound, Result, StreamConnector,
+    DatagramChannel, Destination, Error, Outbound, ResourceKey, Result, ServiceContext,
+    ServiceTask, StreamConnector, TargetPolicy,
 };
 use std::{
+    collections::HashMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -30,7 +33,8 @@ struct Session {
     cancel: CancellationToken,
     closed: AtomicBool,
     last: Mutex<Instant>,
-    _endpoint: Option<quinn::Endpoint>,
+    endpoint: Mutex<Option<quinn::Endpoint>>,
+    driver: Mutex<Option<ServiceTask<()>>>,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -59,13 +63,19 @@ impl Session {
                 _permit: permit,
             })
     }
-    fn start<F>(self: &Arc<Self>, driver: F, idle: Duration, quic: Option<quinn::Connection>)
+    fn start<F>(
+        self: &Arc<Self>,
+        host: &ServiceContext,
+        driver: F,
+        idle: Duration,
+        quic: Option<quinn::Connection>,
+    ) -> Result<()>
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
         let weak = Arc::downgrade(self);
         let cancel = self.cancel.clone();
-        tokio::spawn(async move {
+        let task = host.spawn_tracked(async move {
             let watch = async {
                 loop {
                     tokio::time::sleep(idle.min(Duration::from_secs(1))).await;
@@ -83,16 +93,31 @@ impl Session {
                 }
             };
             tokio::select! {biased;_=cancel.cancelled()=>{},_=driver=>{},_=watch=>{}}
-            if let Some(session) = weak.upgrade() {
+            let endpoint = if let Some(session) = weak.upgrade() {
                 session.closed.store(true, Ordering::Release);
                 session.cancel.cancel();
-            }
+                let endpoint = session
+                    .endpoint
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                endpoint
+            } else {
+                None
+            };
             if let Some(connection) = quic {
                 connection.close(0u32.into(), b"session closed");
             }
-        });
+            if let Some(endpoint) = endpoint {
+                endpoint.close(0u32.into(), b"");
+                endpoint.wait_idle().await;
+            }
+        })?;
+        *self.driver.lock().map_err(|_| config::malformed())? = Some(task);
+        Ok(())
     }
 }
+type MemberPool = AsyncMutex<Vec<Arc<Session>>>;
 pub(crate) struct Client {
     server: Destination,
     user: Arc<User>,
@@ -105,9 +130,12 @@ pub(crate) struct Client {
     idle: Duration,
     congestion: String,
     connector: Arc<dyn StreamConnector>,
-    sessions: AsyncMutex<Vec<Arc<Session>>>,
+    sessions: AsyncMutex<HashMap<ResourceKey, Arc<MemberPool>>>,
     h1: Arc<Semaphore>,
     cancel: CancellationToken,
+    host: ServiceContext,
+    bridges: Arc<crate::runtime::ServiceBridges>,
+    drained: AsyncMutex<Option<bool>>,
 }
 impl Drop for Client {
     fn drop(&mut self) {
@@ -115,10 +143,10 @@ impl Drop for Client {
     }
 }
 impl Client {
-    pub(crate) fn new(
+    pub(crate) fn compile(
         options: ClientOptions,
         connector: Option<Arc<dyn StreamConnector>>,
-    ) -> Result<Self> {
+    ) -> Result<OutboundPlan> {
         options.udp_over_tcp.validate()?;
         let idle = config::limits(
             options.max_sessions,
@@ -132,22 +160,43 @@ impl Client {
             return Err(config::invalid());
         }
         let config = tls::client(&options.tls, options.transport)?;
-        Ok(Self {
-            server: options.server.destination()?,
-            user: Arc::new(User::new(options.username, options.password)?),
-            transport: options.transport,
-            tls: config,
-            server_name: options.tls.server_name,
-            uot: options.udp_over_tcp,
-            max_sessions: options.max_sessions,
-            max_streams: options.max_streams,
-            idle,
-            congestion: options.congestion_control,
-            connector: connector.unwrap_or_else(|| Arc::new(kerlico_net::TcpConnector::plain())),
-            sessions: AsyncMutex::new(Vec::new()),
-            h1: Arc::new(Semaphore::new(options.max_sessions)),
-            cancel: CancellationToken::new(),
-        })
+        let server = options.server.destination()?;
+        let user = Arc::new(User::new(options.username, options.password)?);
+        let capabilities = Capabilities {
+            tcp: true,
+            tcp_eof: false,
+            udp: options.udp_over_tcp.enabled,
+        };
+        Ok(OutboundPlan::new(
+            capabilities,
+            options.udp_over_tcp.enabled,
+            TargetPolicy::Remote,
+            move |host| {
+                Box::pin(async move {
+                    let bridges = crate::runtime::ServiceBridges::new(host.clone());
+                    Ok(Arc::new(Self {
+                        server,
+                        user,
+                        transport: options.transport,
+                        tls: config,
+                        server_name: options.tls.server_name,
+                        uot: options.udp_over_tcp,
+                        max_sessions: options.max_sessions,
+                        max_streams: options.max_streams,
+                        idle,
+                        congestion: options.congestion_control,
+                        connector: connector
+                            .unwrap_or_else(|| Arc::new(kerlico_net::TcpConnector::plain())),
+                        sessions: AsyncMutex::new(HashMap::new()),
+                        h1: Arc::new(Semaphore::new(options.max_sessions)),
+                        cancel: bridges.cancel(),
+                        host,
+                        bridges,
+                        drained: AsyncMutex::new(None),
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
     async fn tcp(&self, context: &ConnectContext) -> Result<BoxStream> {
         let carrier = self.connector.connect_tcp(&self.server, context).await?;
@@ -188,15 +237,17 @@ impl Client {
                 cancel,
                 closed: AtomicBool::new(false),
                 last,
-                _endpoint: None,
+                endpoint: Mutex::new(None),
+                driver: Mutex::new(None),
             });
             session.start(
+                &self.host,
                 async move {
                     let _ = connection.await;
                 },
                 self.idle,
                 None,
-            );
+            )?;
             Ok(session)
         } else {
             let mut addresses = tokio::net::lookup_host((self.server.host(), self.server.port()))
@@ -213,8 +264,12 @@ impl Client {
             endpoint_config.supported_versions(vec![1]);
             let socket = std::net::UdpSocket::bind(bind)?;
             socket.set_nonblocking(true)?;
-            let mut endpoint =
-                quinn::Endpoint::new(endpoint_config, None, socket, Arc::new(quinn::TokioRuntime))?;
+            let mut endpoint = quinn::Endpoint::new(
+                endpoint_config,
+                None,
+                socket,
+                crate::runtime::ServiceRuntime::new(self.host.clone()),
+            )?;
             endpoint.set_default_client_config(tls::quic_client(
                 self.tls.clone(),
                 tls::quic_transport(self.idle, self.max_streams, &self.congestion)?,
@@ -236,20 +291,29 @@ impl Client {
                 cancel,
                 closed: AtomicBool::new(false),
                 last,
-                _endpoint: Some(endpoint),
+                endpoint: Mutex::new(Some(endpoint)),
+                driver: Mutex::new(None),
             });
             session.start(
+                &self.host,
                 async move {
                     let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
                 },
                 self.idle,
                 Some(connection),
-            );
+            )?;
             Ok(session)
         }
     }
     async fn lease(&self, context: &ConnectContext) -> Result<Lease> {
-        let mut pool = self.sessions.lock().await;
+        let bucket = {
+            let mut pools = self.sessions.lock().await;
+            pools
+                .entry(context.resource_key().clone())
+                .or_insert_with(|| Arc::new(AsyncMutex::new(Vec::new())))
+                .clone()
+        };
+        let mut pool = bucket.lock().await;
         pool.retain(|session| !session.closed.load(Ordering::Acquire));
         for session in pool.iter() {
             if let Some(lease) = session.permit() {
@@ -286,6 +350,10 @@ impl Client {
         waits.next().await.ok_or(Error::ResourceLimit)?
     }
     async fn raw(&self, target: &Destination, context: &ConnectContext) -> Result<BoxStream> {
+        if self.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let owner = crate::runtime::BridgeOwner::Service(self.bridges.clone());
         let request = http::request(target, &self.user)?;
         let raw = if self.transport == Transport::H1 {
             let permit = self
@@ -299,6 +367,7 @@ impl Client {
             let response = http::read_response(&mut stream).await?;
             http::check_response(&response)?;
             crate::io::spawn(
+                &owner,
                 context.cancel.clone(),
                 Some(Box::new(permit)),
                 move |mut peer, complete| async move {
@@ -344,6 +413,7 @@ impl Client {
                     let response = response.await.map_err(|_| config::malformed())?;
                     http::check_response(&response)?;
                     transport::h2(
+                        &owner,
                         response.into_body(),
                         writer,
                         context.cancel.clone(),
@@ -362,14 +432,71 @@ impl Client {
                         .await
                         .map_err(|_| config::malformed())?;
                     http::check_response(&response)?;
-                    transport::h3_client(stream, context.cancel.clone(), Some(Box::new(lease)))
+                    transport::h3_client(
+                        &owner,
+                        stream,
+                        context.cancel.clone(),
+                        Some(Box::new(lease)),
+                    )
                 }
             }
-        };
-        Ok(padding::wrap(raw, context.cancel.clone()))
+        }?;
+        padding::wrap(&owner, raw, context.cancel.clone())
+    }
+    async fn run<T>(
+        &self,
+        context: &ConnectContext,
+        operation: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(Error::Cancelled),
+            result = context.run(operation) => result,
+        }
     }
 }
 impl Outbound for Client {
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let mut drained = self.drained.lock().await;
+            if let Some(failed) = *drained {
+                return if failed {
+                    Err(Error::Protocol("Naive任务清理失败"))
+                } else {
+                    Ok(())
+                };
+            }
+            self.cancel.cancel();
+            let mut failed = false;
+            let buckets = { std::mem::take(&mut *self.sessions.lock().await) };
+            for bucket in buckets.into_values() {
+                let sessions = { std::mem::take(&mut *bucket.lock().await) };
+                for session in sessions {
+                    session.cancel.cancel();
+                    let driver = session.driver.lock().ok().and_then(|mut task| task.take());
+                    if let Some(driver) = driver {
+                        failed |= driver.await.is_err();
+                    }
+                    let endpoint = session
+                        .endpoint
+                        .lock()
+                        .map_err(|_| config::malformed())?
+                        .take();
+                    if let Some(endpoint) = endpoint {
+                        endpoint.close(0u32.into(), b"");
+                        endpoint.wait_idle().await;
+                    }
+                }
+            }
+            failed |= self.bridges.shutdown().await.is_err();
+            *drained = Some(failed);
+            if failed {
+                Err(Error::Protocol("Naive任务清理失败"))
+            } else {
+                Ok(())
+            }
+        })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tcp: true,
@@ -384,12 +511,17 @@ impl Outbound for Client {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
             if uot::version(target).is_some() {
                 return Err(Error::Rejected);
             }
-            context.run(self.raw(target, context)).await
+            self.run(context, self.raw(target, context))
+                .await
+                .map(|stream| kerlico_core::OpenedTcp {
+                    stream,
+                    info: kerlico_core::TcpConnectInfo::unknown(),
+                })
         })
     }
     fn connect_udp<'a>(
@@ -401,18 +533,17 @@ impl Outbound for Client {
             if !self.uot.enabled {
                 return Err(Error::Unsupported("Naive UDP 需要显式启用 UoT"));
             }
-            context
-                .run(async {
-                    let mut stream = self.raw(&uot::magic(self.uot.version)?, context).await?;
-                    uot::request(&mut stream, self.uot, Some(target)).await?;
-                    Ok(uot::channel(
-                        stream,
-                        self.uot,
-                        target,
-                        context.cancel.clone(),
-                    ))
-                })
-                .await
+            self.run(context, async {
+                let mut stream = self.raw(&uot::magic(self.uot.version)?, context).await?;
+                uot::request(&mut stream, self.uot, Some(target)).await?;
+                Ok(uot::channel(
+                    stream,
+                    self.uot,
+                    target,
+                    context.cancel.clone(),
+                ))
+            })
+            .await
         })
     }
     fn associate_udp<'a>(
@@ -423,13 +554,12 @@ impl Outbound for Client {
             if !self.uot.enabled {
                 return Err(Error::Unsupported("Naive UDP 需要显式启用 UoT"));
             }
-            context
-                .run(async {
-                    let mut stream = self.raw(&uot::magic(self.uot.version)?, context).await?;
-                    uot::request(&mut stream, self.uot, None).await?;
-                    Ok(uot::association(stream, context.cancel.clone()))
-                })
-                .await
+            self.run(context, async {
+                let mut stream = self.raw(&uot::magic(self.uot.version)?, context).await?;
+                uot::request(&mut stream, self.uot, None).await?;
+                Ok(uot::association(stream, context.cancel.clone()))
+            })
+            .await
         })
     }
 }

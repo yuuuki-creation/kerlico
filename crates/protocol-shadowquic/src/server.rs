@@ -1,18 +1,19 @@
 //! JLS 上游回退与已鉴权网站访问分开；前者持有同一节点/全局资源许可。
 use crate::{
     config::{self, ServerOptions, User},
-    runtime::{RuntimeGuard, ScopedRuntime},
+    runtime::NodeRuntime,
     session::Connection,
 };
 use jls_quinn::Runtime;
+use kerlico_config::NodeBuildContext;
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, ConnectContext, Destination, Error, InboundContext,
-    InboundProtocol, NodeEvent, Result,
+    BoxFuture, BoxStream, ConnectContext, CredentialManifest, CredentialSet, Destination, Error,
+    InboundContext, InboundProtocol, IngressBinding, NodeEvent, Result,
 };
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use tokio::task::JoinSet;
 pub(crate) struct Node {
-    users: Vec<User>,
+    users: CredentialSet<User>,
     upstream: Destination,
     name: String,
     alpn: Vec<Vec<u8>>,
@@ -21,27 +22,21 @@ pub(crate) struct Node {
     rate: u64,
 }
 impl Node {
-    pub fn build(mut options: ServerOptions) -> Result<Self> {
-        if options.username.is_some() || options.password.is_some() {
-            if !options.users.is_empty() {
-                return Err(config::invalid());
-            }
-            options.users.push(config::UserOptions {
-                username: options.username.ok_or_else(config::invalid)?,
-                password: options.password.ok_or_else(config::invalid)?,
-            });
-        }
-        if options.users.is_empty()
-            || options.users.len() > 256
-            || options.upstream_rate_bps < 8000
-            || options.upstream_rate_bps > 8_000_000_000
+    pub fn build(input: &NodeBuildContext) -> Result<Self> {
+        let options: ServerOptions =
+            serde_json::from_value(input.options().clone()).map_err(|_| config::invalid())?;
+        if input.native_credentials().is_empty()
+            || input.native_credentials().len() > 256
+            || !(8000..=8_000_000_000).contains(&options.upstream_rate_bps)
         {
             return Err(config::invalid());
         }
         config::validate_name(&options.server_name)?;
         let mut users = Vec::new();
         let mut seen = BTreeSet::new();
-        for user in options.users {
+        for value in input.native_credentials() {
+            let user: config::UserOptions =
+                serde_json::from_value(value.clone()).map_err(|_| config::invalid())?;
             let user = User::parse(user.username, user.password)?;
             if !seen.insert(user.fingerprint()) {
                 return Err(config::invalid());
@@ -65,7 +60,7 @@ impl Node {
             false,
         )?;
         Ok(Self {
-            users,
+            users: input.credentials(users)?,
             upstream: options.upstream.destination()?,
             name: options.server_name,
             alpn: config::alpn_bytes(options.alpn)?,
@@ -77,7 +72,7 @@ impl Node {
     async fn serve(
         &self,
         socket: Arc<tokio::net::UdpSocket>,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
         if !access.supports_udp_association() {
@@ -85,20 +80,18 @@ impl Node {
                 "ShadowQUIC 节点需要 Full Cone UDP 关联出口",
             ));
         }
-        let upstream = ConnectContext {
-            cancel: context.cancel.clone(),
-            timeout: context.connect_timeout,
-        }
-        .run(async {
-            let mut addresses =
-                tokio::net::lookup_host((self.upstream.host().as_str(), self.upstream.port()))
-                    .await?
-                    .take(32)
-                    .collect::<Vec<_>>();
-            addresses.sort_by_key(|address| address.is_ipv6());
-            addresses.first().copied().ok_or(Error::InvalidAddress)
-        })
-        .await?;
+        let upstream = ConnectContext::new(context.connect_timeout)
+            .with_cancel(context.cancel.clone())
+            .run(async {
+                let mut addresses =
+                    tokio::net::lookup_host((self.upstream.host().as_str(), self.upstream.port()))
+                        .await?
+                        .take(32)
+                        .collect::<Vec<_>>();
+                addresses.sort_by_key(|address| address.is_ipv6());
+                addresses.first().copied().ok_or(Error::InvalidAddress)
+            })
+            .await?;
         if upstream == socket.local_addr()? {
             return Err(Error::Config("JLS 上游不能指向当前节点".into()));
         }
@@ -118,8 +111,10 @@ impl Node {
         server.max_incoming(context.max_streams.min(128));
         server.incoming_buffer_size(32 * 1024);
         server.incoming_buffer_size_total(2 * 1024 * 1024);
-        let runtime = ScopedRuntime::new();
-        let _guard = RuntimeGuard::new(runtime.clone());
+        let runtime = NodeRuntime::new(&context.cancel, context.tasks.clone());
+        let _runtime_guard = runtime.guard();
+        let mut context = context;
+        context.cancel = runtime.cancel();
         let fd = socket2::SockRef::from(socket.as_ref()).try_clone()?;
         let standard: std::net::UdpSocket = fd.into();
         standard.set_nonblocking(true)?;
@@ -146,24 +141,33 @@ impl Node {
         let mut gc = tokio::time::interval(Duration::from_millis(200));
         loop {
             tokio::select! {biased;
-                _=context.cancel.cancelled()=>break,
-                _=gc.tick()=>{endpoint.prune_jls_forwarding();},
-                _=tasks.join_next(),if !tasks.is_empty()=>{},
-                incoming=endpoint.accept()=>{let Some(incoming)=incoming else{break;};let Ok(lease)=context.stream_budget.try_acquire()else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};let access=access.clone();let context=context.clone();let allowed=self.users.iter().map(|user|user.username.clone()).collect::<Vec<_>>();tasks.spawn(async move{let _lease=lease;context.events.record(NodeEvent::Accepted);let result=async{let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|Error::Rejected)?;if connection.is_jls()!=Some(true)||connection.jls_chosen_user().is_none_or(|user|!allowed.contains(&user)){connection.close(0u32.into(),b"");return Err(Error::Rejected);}Connection::new(connection,None,Some(context.clone()),Some(access)).serve().await}.await;context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});});}
-            }
+                            _=context.cancel.cancelled()=>break,
+                            _=gc.tick()=>{endpoint.prune_jls_forwarding();},
+                            result=tasks.join_next(),if !tasks.is_empty()=>{runtime.observe(&result);},
+                            incoming=endpoint.accept()=>{let Some(incoming)=incoming else{break;};let Ok(lease)=context.stream_budget.try_acquire()else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};let access=access.clone();let mut context=context.clone();let users=self.users.clone();crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move{let _lease=lease;context.events.record(NodeEvent::Accepted);let result=async{let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|Error::Rejected)?;context.peer_addr=Some(connection.remote_address());if connection.is_jls()!=Some(true){connection.close(0u32.into(),b"");return Err(Error::Rejected);}
+            let chosen=connection.jls_chosen_user().ok_or(Error::Rejected)?;
+            let (slot,_)=users.rows().find(|(_,user)|user.username==chosen).ok_or(Error::Rejected)?;
+            let peer=access.authenticated(users.verified(&slot,())?,&context)?.0;
+            Connection::new(connection,None,Some(context.clone()),Some(peer),None).serve().await}.await;context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});}, |_| ())?;}
+                        }
         }
-        endpoint.close(0u32.into(), b"");
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
-        let _ = tokio::time::timeout(context.drain_timeout, endpoint.wait_idle()).await;
-        drop(endpoint);
-        runtime.shutdown().await;
+        if runtime
+            .shutdown(endpoint, &mut tasks, context.drain_timeout)
+            .await?
+            == crate::runtime::NodeDrain::Forced
+        {
+            context.events.record(NodeEvent::ForcedCleanup);
+        }
         Ok(())
     }
 }
 impl InboundProtocol for Node {
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
-        self.users.iter().map(User::fingerprint).collect()
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = CredentialManifest::new();
+        for (index, (_, user)) in self.users.rows().enumerate() {
+            manifest.authentication("shadowquic", index, user.fingerprint());
+        }
+        manifest
     }
     fn requires_loopback(&self) -> bool {
         false
@@ -180,7 +184,7 @@ impl InboundProtocol for Node {
     fn handle<'a>(
         &'a self,
         _: BoxStream,
-        _: Arc<dyn AccessService>,
+        _: IngressBinding,
         _: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Err(Error::Unsupported("ShadowQUIC 仅监听 QUIC UDP 载体")) })
@@ -188,7 +192,7 @@ impl InboundProtocol for Node {
     fn handle_udp<'a>(
         &'a self,
         socket: Arc<tokio::net::UdpSocket>,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(self.serve(socket, access, context))

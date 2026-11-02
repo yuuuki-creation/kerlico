@@ -103,7 +103,7 @@ async fn table_directions_pure_packed_padding_and_rotated_layouts() {
                     "off",
                 );
                 client["protocol"] = options["protocol"].clone();
-                let outbound = SudokuFactory.build(&client).unwrap();
+                let outbound = shared::outbound(&SudokuFactory, &client).await.unwrap();
                 for port in [443, 8443, 9443] {
                     exchange(
                         &outbound,
@@ -140,7 +140,7 @@ async fn tls_h1_h2_split_and_h1_websocket_validate_chain_and_name() {
             let mut options =
                 client_options(server.addresses["node"], mode, KEY, "aes-128-gcm", "off");
             options["http_mask"] = json!({"mode":mode,"tls":{"server_name":"localhost","ca_pem":cert},"host":"localhost","http_version":version,"path_root":"secret-segment"});
-            let outbound = SudokuFactory.build(&options).unwrap();
+            let outbound = shared::outbound(&SudokuFactory, &options).await.unwrap();
             exchange(
                 &outbound,
                 &Destination::new("localhost", 443).unwrap(),
@@ -166,7 +166,7 @@ async fn tls_h1_h2_split_and_h1_websocket_validate_chain_and_name() {
                 ("localhost", certificates().0),
             ] {
                 options["http_mask"]["tls"] = json!({"server_name":name,"ca_pem":ca});
-                let bad = SudokuFactory.build(&options).unwrap();
+                let bad = shared::outbound(&SudokuFactory, &options).await.unwrap();
                 assert!(
                     bad.connect_tcp(&target, &context).await.is_err(),
                     "mode={mode} version={version} name={name}"
@@ -191,28 +191,29 @@ async fn two_node_credentials_never_cross_accept_or_fallback() {
         for mode in ["raw", "legacy", "stream", "poll", "auto", "ws"] {
             eprintln!("验证独立节点正向接入: 节点={tag} 载体={mode}");
             let target = Destination::new("127.0.0.1", 443).unwrap();
-            let good = SudokuFactory
-                .build(&client_options(
-                    server.addresses[tag],
-                    mode,
-                    key,
-                    "chacha20-poly1305",
-                    "off",
-                ))
-                .unwrap();
+            let good = shared::outbound(
+                &SudokuFactory,
+                &client_options(server.addresses[tag], mode, key, "chacha20-poly1305", "off"),
+            )
+            .await
+            .unwrap();
             exchange(&good, &target, vec![1; 1024]).await;
             let before = state.decoded.lock().unwrap().len();
-            let bad = SudokuFactory
-                .build(&client_options(
+            let bad = shared::outbound(
+                &SudokuFactory,
+                &client_options(
                     server.addresses[tag],
                     mode,
                     wrong,
                     "chacha20-poly1305",
                     "off",
-                ))
-                .unwrap();
+                ),
+            )
+            .await
+            .unwrap();
             let result = bad.connect_tcp(&target, &ConnectContext::new(WAIT)).await;
-            if let Ok(mut stream) = result {
+            if let Ok(opened) = result {
+                let mut stream = opened.stream;
                 let mut byte = [0; 1];
                 assert!(
                     !matches!(timeout(WAIT, stream.read(&mut byte)).await, Ok(Ok(1))),
@@ -227,8 +228,8 @@ async fn two_node_credentials_never_cross_accept_or_fallback() {
     server.close().await;
 }
 
-#[test]
-fn normalized_seed_aliases_and_none_obey_registry_gates() {
+#[tokio::test]
+async fn normalized_seed_aliases_and_none_obey_registry_gates() {
     let scalar = (1u64..64)
         .map(Scalar::from)
         .find(|s| CompressedEdwardsY(s.to_bytes()).decompress().is_none())
@@ -281,7 +282,7 @@ fn normalized_seed_aliases_and_none_obey_registry_gates() {
         "off",
     );
     unsafe_out["server"]["host"] = json!("localhost");
-    assert!(SudokuFactory.build(&unsafe_out).is_err());
+    assert!(SudokuFactory.compile(&unsafe_out).is_err());
 }
 
 #[tokio::test]
@@ -300,15 +301,12 @@ async fn public_looking_and_split_key_aliases_use_the_same_real_secret() {
     let mut split = Vec::from(r.to_bytes());
     split.extend_from_slice(&(scalar - r).to_bytes());
     for key in [public, hex(&scalar.to_bytes()), hex(&split)] {
-        let outbound = SudokuFactory
-            .build(&client_options(
-                server.addresses["node"],
-                "raw",
-                &key,
-                "aes-128-gcm",
-                "off",
-            ))
-            .unwrap();
+        let outbound = shared::outbound(
+            &SudokuFactory,
+            &client_options(server.addresses["node"], "raw", &key, "aes-128-gcm", "off"),
+        )
+        .await
+        .unwrap();
         exchange(
             &outbound,
             &Destination::new("127.0.0.1", 443).unwrap(),
@@ -374,15 +372,18 @@ async fn real_direct_egress_preserves_source_port_and_full_cone_unsolicited_sour
     let mut config = configuration(node_options("stream", KEY, "aes-128-gcm"), false, false);
     config["outbounds"][0]["type"] = json!("direct");
     let server = Running::start(config, Arc::new(State::default())).await;
-    let outbound = SudokuFactory
-        .build(&client_options(
+    let outbound = shared::outbound(
+        &SudokuFactory,
+        &client_options(
             server.addresses["node"],
             "stream",
             KEY,
             "aes-128-gcm",
             "off",
-        ))
-        .unwrap();
+        ),
+    )
+    .await
+    .unwrap();
     let context = ConnectContext::new(WAIT);
     let mut channel = outbound.associate_udp(&context).await.unwrap();
     let mut port = None;
@@ -443,14 +444,17 @@ async fn tcp_rekey_crosses_32_mib_in_both_directions_without_tail_loss() {
         .outbound
         .connect_tcp(&target, &context)
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     banner(&mut stream).await;
     let (mut read, mut write) = tokio::io::split(stream);
     let send = async {
         let chunk = vec![0x7c; 32768];
         for index in 0..1025usize {
             write.write_all(&chunk).await.unwrap();
-            if index.is_multiple_of(128) {eprintln!("重钥发送进度: 已接纳{}个32768字节块", index+1);}
+            if index.is_multiple_of(128) {
+                eprintln!("重钥发送进度: 已接纳{}个32768字节块", index + 1);
+            }
         }
         write.shutdown().await.unwrap();
     };
@@ -459,7 +463,9 @@ async fn tcp_rekey_crosses_32_mib_in_both_directions_without_tail_loss() {
         for index in 0..1025usize {
             read.read_exact(&mut bytes).await.unwrap();
             assert!(bytes.iter().all(|b| *b == 0x7c));
-            if index.is_multiple_of(128) {eprintln!("重钥接收进度: 已校验{}个32768字节块", index+1);}
+            if index.is_multiple_of(128) {
+                eprintln!("重钥接收进度: 已校验{}个32768字节块", index + 1);
+            }
         }
         let mut tail = Vec::new();
         read.read_to_end(&mut tail).await.unwrap();
@@ -484,7 +490,7 @@ async fn both_engines_forward_tcp_udp_and_validate_websocket_eof_capability() {
             "chacha20-poly1305",
             "off",
         );
-        let mut value = json!({"version":1,"outbounds":[{"tag":"proxy","type":"sudoku","options":options}],"inbounds":[{"tag":"tcp","type":"tcp-forward","listen":"127.0.0.1:0","target":{"host":"localhost","port":443},"outbound":"proxy","require_remote_eof":mode!="ws"},{"tag":"udp","type":"udp-forward","listen":"127.0.0.1:0","target":{"host":"::1","port":53},"outbound":"proxy"}],"limits":{"connect_timeout_ms":3000,"drain_timeout_ms":300,"max_datagram_size":65507}});
+        let mut value = json!({"version":2,"outbounds":[{"tag":"proxy","type":"sudoku","options":options}],"inbounds":[{"tag":"tcp","type":"tcp-forward","listen":"127.0.0.1:0","target":{"host":"localhost","port":443},"outbound":"proxy","require_remote_eof":mode!="ws"},{"tag":"udp","type":"udp-forward","listen":"127.0.0.1:0","target":{"host":"::1","port":53},"outbound":"proxy"}],"limits":{"connect_timeout_ms":3000,"drain_timeout_ms":300,"max_datagram_size":65507}});
         let client = Running::start(value.clone(), Arc::new(State::default())).await;
         let mut stream = TcpStream::connect(client.addresses["tcp"]).await.unwrap();
         let mut banner_bytes = [0; 5];
@@ -539,7 +545,7 @@ async fn disabled_udp_and_rejected_target_do_not_create_association() {
         "chacha20-poly1305",
         "off",
     );
-    let outbound = SudokuFactory.build(&options).unwrap();
+    let outbound = shared::outbound(&SudokuFactory, &options).await.unwrap();
     assert!(
         outbound
             .associate_udp(&ConnectContext::new(WAIT))
@@ -549,7 +555,7 @@ async fn disabled_udp_and_rejected_target_do_not_create_association() {
     assert_eq!(state.associations.load(Ordering::SeqCst), 0);
     let mut disabled = options;
     disabled["protocol"]["udp_enabled"] = json!(false);
-    let no_udp = SudokuFactory.build(&disabled).unwrap();
+    let no_udp = shared::outbound(&SudokuFactory, &disabled).await.unwrap();
     assert!(!no_udp.capabilities().udp);
     assert!(!no_udp.supports_udp_association());
     assert!(
@@ -559,10 +565,11 @@ async fn disabled_udp_and_rejected_target_do_not_create_association() {
             .is_err()
     );
     let target = Destination::new("127.0.0.1", 1).unwrap();
-    if let Ok(mut stream) = outbound
+    if let Ok(opened) = outbound
         .connect_tcp(&target, &ConnectContext::new(WAIT))
         .await
     {
+        let mut stream = opened.stream;
         let mut byte = [0; 1];
         assert!(!matches!(
             timeout(WAIT, stream.read(&mut byte)).await,
@@ -596,22 +603,23 @@ async fn tls_h2_mux_concurrent_streams_share_transport_and_independent_fin() {
             "on",
         );
         options["http_mask"] = json!({"mode":"stream","tls":{"server_name":"localhost","ca_pem":cert},"http_version":version});
-        let outbound = SudokuFactory.build(&options).unwrap();
+        let outbound = shared::outbound(&SudokuFactory, &options).await.unwrap();
+        let context = ConnectContext::new(WAIT);
         let mut held = outbound
-            .connect_tcp(
-                &Destination::new("127.0.0.1", 443).unwrap(),
-                &ConnectContext::new(WAIT),
-            )
+            .connect_tcp(&Destination::new("127.0.0.1", 443).unwrap(), &context)
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         banner(&mut held).await;
         let count = state.physical.load(Ordering::SeqCst);
         let mut jobs = tokio::task::JoinSet::new();
         for index in 0..8 {
             let outbound = outbound.clone();
+            let context = context.new_operation(WAIT);
             jobs.spawn(async move {
-                exchange(
+                exchange_scoped(
                     &outbound,
+                    &context,
                     &Destination::new("::1", 10000 + index).unwrap(),
                     vec![index as u8; 32768],
                 )
@@ -633,4 +641,83 @@ async fn tls_h2_mux_concurrent_streams_share_transport_and_independent_fin() {
         drop(outbound);
     }
     server.close().await;
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
+}
+
+#[tokio::test]
+async fn websocket_upgrade_keeps_peer_budget_until_real_release_and_isolates_cancellation() {
+    fn available(budget: &kerlico_core::StreamBudget) -> usize {
+        let mut held = Vec::new();
+        while let Ok(lease) = budget.try_acquire() {
+            held.push(lease);
+        }
+        held.len()
+    }
+    let fixture = Fixture::start("ws", "aes-128-gcm", "off", false).await;
+    eventually(|| !fixture.state.budgets.lock().unwrap().is_empty()).await;
+    let budget = fixture.state.budgets.lock().unwrap()[0].clone();
+    let before = available(&budget);
+    let target = Destination::new("127.0.0.1", 443).unwrap();
+    let mut first = fixture
+        .outbound
+        .connect_tcp(&target, &fixture.context())
+        .await
+        .unwrap()
+        .stream;
+    banner(&mut first).await;
+    eventually(|| {
+        fixture.server.node_stats["node"]
+            .completed
+            .load(Ordering::SeqCst)
+            > 0
+    })
+    .await;
+    assert_eq!(available(&budget), before - 2);
+    let mut sibling = fixture
+        .outbound
+        .connect_tcp(&target, &fixture.context())
+        .await
+        .unwrap()
+        .stream;
+    banner(&mut sibling).await;
+    eventually(|| fixture.state.peers.lock().unwrap().len() == 2).await;
+    fixture.state.peers.lock().unwrap()[0].cancel();
+    let mut byte = [0];
+    assert!(!matches!(
+        timeout(WAIT, first.read(&mut byte)).await,
+        Ok(Ok(1))
+    ));
+    drop(first);
+    eventually(|| available(&budget) == before - 2).await;
+    sibling.write_all(b"after-upgrade").await.unwrap();
+    sibling.flush().await.unwrap();
+    let mut bytes = [0; 13];
+    timeout(WAIT, sibling.read_exact(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&bytes, b"after-upgrade");
+    drop(sibling);
+    eventually(|| available(&budget) == before).await;
+    let mut final_stream = fixture
+        .outbound
+        .connect_tcp(&target, &fixture.context())
+        .await
+        .unwrap()
+        .stream;
+    banner(&mut final_stream).await;
+    fixture.server.stop.cancel();
+    assert!(!matches!(
+        timeout(WAIT, final_stream.read(&mut byte)).await,
+        Ok(Ok(1))
+    ));
+    drop(final_stream);
+    fixture.close().await;
 }

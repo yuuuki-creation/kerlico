@@ -4,23 +4,19 @@ use crate::{
     codec::{self, Account, Replay},
     crypto::MAX_DATAGRAM,
 };
-use kerlico_config::NodeFactory;
+use kerlico_config::{NodeBuildContext, NodeFactory};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, ConnectContext, Error, InboundContext, InboundProtocol,
-    Result,
+    BoxFuture, BoxStream, ConnectContext, CredentialManifest, CredentialSet, Error, InboundContext,
+    InboundProtocol, IngressBinding, Result,
 };
+use kerlico_core::{DatagramReceiver, DatagramSender};
 use serde::Deserialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Options {
-    #[serde(default)]
-    uuid: Option<String>,
-    #[serde(default)]
-    users: Vec<User>,
     #[serde(default)]
     security: ServerSecurity,
     #[serde(default)]
@@ -38,7 +34,7 @@ struct Node {
     tls: Option<tokio_rustls::TlsAcceptor>,
 }
 pub(crate) struct Payload {
-    accounts: Vec<Account>,
+    accounts: CredentialSet<Account>,
     replay: Replay,
 }
 fn invalid() -> Error {
@@ -48,21 +44,21 @@ impl NodeFactory for VmessNodeFactory {
     fn kind(&self) -> &'static str {
         "vmess"
     }
-    fn build(&self, value: &Value) -> Result<Arc<dyn InboundProtocol>> {
-        let mut options: Options = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
-        if let Some(uuid) = options.uuid {
-            if !options.users.is_empty() {
-                return Err(invalid());
-            }
-            options.users.push(User { uuid });
-        }
-        if options.users.is_empty() || options.users.len() > 256 {
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        let options: Options =
+            serde_json::from_value(input.options().clone()).map_err(|_| invalid())?;
+        let credentials = input
+            .native_credentials()
+            .iter()
+            .map(|value| serde_json::from_value::<User>(value.clone()).map_err(|_| invalid()))
+            .collect::<Result<Vec<_>>>()?;
+        if credentials.is_empty() || credentials.len() > 256 {
             return Err(invalid());
         }
         options.transport.validate()?;
         let mut seen = BTreeSet::new();
         let mut accounts = Vec::new();
-        for user in options.users {
+        for user in credentials {
             let id = *uuid::Uuid::parse_str(&user.uuid)
                 .map_err(|_| invalid())?
                 .as_bytes();
@@ -74,7 +70,7 @@ impl NodeFactory for VmessNodeFactory {
         let tls = carrier::server_tls(options.security, &options.transport)?;
         Ok(Arc::new(Node {
             payload: Arc::new(Payload {
-                accounts,
+                accounts: input.credentials(accounts)?,
                 replay: Replay::new(),
             }),
             transport: options.transport,
@@ -86,27 +82,25 @@ impl InboundProtocol for Node {
     fn requires_loopback(&self) -> bool {
         false
     }
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
-        self.payload
-            .accounts
-            .iter()
-            .map(|a| Sha256::digest(a.id).into())
-            .collect()
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = CredentialManifest::new();
+        for (slot, (_, account)) in self.payload.accounts.rows().enumerate() {
+            manifest.authentication("vmess", slot, Sha256::digest(account.id).into());
+        }
+        manifest
     }
     fn handle<'a>(
         &'a self,
         mut inner: BoxStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             if let Some(tls) = &self.tls {
-                inner = ConnectContext {
-                    cancel: context.cancel.clone(),
-                    timeout: context.connect_timeout,
-                }
-                .run(async { Ok(Box::new(tls.accept(inner).await?) as BoxStream) })
-                .await?;
+                inner = ConnectContext::new(context.connect_timeout)
+                    .with_cancel(context.cancel.clone())
+                    .run(async { Ok(Box::new(tls.accept(inner).await?) as BoxStream) })
+                    .await?;
             }
             if self.transport.raw() {
                 self.payload.serve(inner, access, context).await
@@ -127,20 +121,19 @@ impl Payload {
     pub async fn serve(
         &self,
         inner: BoxStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
-        let connect = ConnectContext {
-            cancel: context.cancel.clone(),
-            timeout: context.connect_timeout,
-        };
+        let connect =
+            ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
         let session = connect
             .run(async {
-                codec::accept(inner, &self.accounts, &self.replay)
+                codec::accept_verified(inner, &self.accounts, &self.replay)
                     .await
                     .map_err(Error::Io)
             })
             .await?;
+        let (access, session) = access.authenticated(session, &context)?;
         if !session.udp {
             let target = access.connect_tcp(&session.target, &connect).await?;
             return kerlico_core::relay_tcp(
@@ -151,7 +144,9 @@ impl Payload {
             )
             .await;
         }
-        let mut remote = access.connect_udp(&session.target, &connect).await?;
+        let remote = access.connect_udp(&session.target, &connect).await?;
+        let (mut sender, mut receiver, completion) = remote.into_parts();
+        let result = async {
         let (mut reader, mut writer) = tokio::io::split(session.stream);
         let (activity, mut changed) = tokio::sync::watch::channel(tokio::time::Instant::now());
         let up = async {
@@ -164,13 +159,13 @@ impl Payload {
                 if n > context.max_datagram_size || n > MAX_DATAGRAM {
                     return Err(Error::ResourceLimit);
                 }
-                remote.sender.send(&bytes[..n]).await?;
+                sender.send(&bytes[..n]).await?;
                 activity.send_replace(tokio::time::Instant::now());
             }
         };
         let down = async {
             loop {
-                let Some(bytes) = remote.receiver.recv().await? else {
+                let Some(bytes) = receiver.recv().await? else {
                     return Ok::<_, Error>(());
                 };
                 if bytes.is_empty()
@@ -190,5 +185,13 @@ impl Payload {
         loop {
             tokio::select! {biased;_=context.cancel.cancelled()=>return Err(Error::Cancelled),result=&mut up=>return result,result=&mut down=>return result,_=&mut timer=>return Err(Error::Timeout),result=changed.changed()=>{if result.is_ok(){timer.as_mut().reset(*changed.borrow_and_update()+context.idle_timeout);}}}
         }
+        }.await;
+        completion.finish(match &result {
+            Ok(()) => kerlico_core::FlowOutcome::ProtocolEnd,
+            Err(error) => {
+                kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::from_error(error))
+            }
+        });
+        result
     }
 }

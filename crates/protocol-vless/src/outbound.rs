@@ -2,7 +2,7 @@ use crate::{
     UserId, VlessStream,
     codec::{self, Command, RequestHeader},
 };
-use kerlico_config::OutboundFactory;
+use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel, DatagramReceiver,
     DatagramSender, Destination, Error, Outbound, Result,
@@ -19,17 +19,34 @@ pub struct VlessOutbound {
 }
 
 impl VlessOutbound {
-    pub fn new(server: Destination, user: UserId, connector: TcpConnector) -> Result<Self> {
+    pub fn compile(
+        server: Destination,
+        user: UserId,
+        connector: TcpConnector,
+    ) -> Result<OutboundPlan> {
         if !connector.is_tls() && !server.is_loopback() {
             return Err(Error::Config(
                 "无传输安全的 VLESS 只允许回环测试地址".into(),
             ));
         }
-        Ok(Self {
-            server,
-            user,
-            connector,
-        })
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: false,
+                udp: true,
+            },
+            false,
+            kerlico_core::TargetPolicy::Remote,
+            move |_host| {
+                Box::pin(async move {
+                    Ok(Arc::new(Self {
+                        server,
+                        user,
+                        connector,
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
     async fn open(&self, target: &Destination, command: Command) -> Result<VlessStream<BoxStream>> {
         let mut stream = self.connector.connect(&self.server).await?;
@@ -73,11 +90,20 @@ impl Outbound for VlessOutbound {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
-            context
-                .run(async { Ok(Box::new(self.open(target, Command::Tcp).await?) as BoxStream) })
-                .await
+            let opening: kerlico_core::BoxFuture<'_, Result<BoxStream>> = Box::pin(async move {
+                context
+                    .run(async {
+                        Ok(Box::new(self.open(target, Command::Tcp).await?) as BoxStream)
+                    })
+                    .await
+            });
+            let stream = opening.await?;
+            Ok(kerlico_core::OpenedTcp {
+                stream,
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
     fn connect_udp<'a>(
@@ -106,7 +132,7 @@ impl OutboundFactory for VlessFactory {
     fn kind(&self) -> &'static str {
         "vless"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn Outbound>> {
-        crate::profile::build(options)
+    fn compile(&self, options: &Value) -> Result<OutboundPlan> {
+        crate::profile::compile(options)
     }
 }

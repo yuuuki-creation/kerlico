@@ -229,6 +229,7 @@ impl Replay {
         Ok(())
     }
 }
+#[cfg(test)]
 pub(crate) async fn accept(
     mut inner: BoxStream,
     accounts: &[Account],
@@ -244,6 +245,34 @@ pub(crate) async fn accept(
                 .is_ok_and(|timestamp| timestamp.abs_diff(current) <= 120)
         })
         .ok_or_else(invalid)?;
+    accept_account(inner, account, auth, replay).await
+}
+
+pub(crate) async fn accept_verified(
+    mut inner: BoxStream,
+    accounts: &kerlico_core::CredentialSet<Account>,
+    replay: &Replay,
+) -> io::Result<kerlico_core::Verified<Handshake>> {
+    let mut auth = [0; 16];
+    inner.read_exact(&mut auth).await?;
+    let current = now()?;
+    let (slot, account) = accounts
+        .rows()
+        .find(|(_, account)| {
+            crypto::decode_auth(&account.key, &auth)
+                .is_ok_and(|stamp| stamp.abs_diff(current) <= 120)
+        })
+        .ok_or_else(invalid)?;
+    let session = accept_account(inner, account, auth, replay).await?;
+    accounts.verified(&slot, session).map_err(|_| invalid())
+}
+
+async fn accept_account(
+    mut inner: BoxStream,
+    account: &Account,
+    auth: [u8; 16],
+    replay: &Replay,
+) -> io::Result<Handshake> {
     let mut stamp = Vec::with_capacity(32);
     stamp.extend(account.id);
     stamp.extend(auth);

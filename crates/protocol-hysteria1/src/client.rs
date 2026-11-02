@@ -1,22 +1,23 @@
-//! v1 鉴权完成后才打开业务流；每个工厂维护本节点独立的 QUIC 连接缓存。
+//! v1 鉴权完成后才打开业务流；命名出站按可信成员作用域分区 QUIC 连接缓存。
 use crate::{
     config::{self, ClientOptions, Limits},
     dispatch::{Hub, Sender},
     io::QuicIo,
     protocol, wire,
 };
-use kerlico_config::OutboundFactory;
+use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
-    Destination, Error, Outbound, Result,
+    Destination, Error, Outbound, ResourceKey, Result, ServiceContext, ServiceTask, TargetPolicy,
 };
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
-use tokio::{sync::Semaphore, task::JoinSet};
+use tokio::sync::Semaphore;
 pub struct Hysteria1Factory;
 type Cache = tokio::sync::Mutex<Option<Arc<Connection>>>;
 pub(crate) struct Connection {
@@ -30,14 +31,18 @@ pub(crate) struct Connection {
     pub limits: Limits,
     _socket: crate::socket::Close,
     control: Mutex<Option<QuicIo>>,
-    tasks: Mutex<JoinSet<()>>,
+    tasks: Mutex<Vec<ServiceTask<()>>>,
+    host: ServiceContext,
     last: Mutex<Instant>,
 }
 impl Connection {
     pub fn spawn(&self, future: impl std::future::Future<Output = ()> + Send + 'static) {
         if let Ok(mut tasks) = self.tasks.lock() {
-            while tasks.try_join_next().is_some() {}
-            tasks.spawn(future);
+            tasks.retain(|task| !task.is_finished());
+            match self.host.spawn_tracked(future) {
+                Ok(task) => tasks.push(task),
+                Err(_) => self.cancel.cancel(),
+            }
         }
     }
     pub fn touch(&self) {
@@ -86,7 +91,9 @@ impl Drop for Connection {
         self.connection.close(0u32.into(), b"");
         self.endpoint.close(0u32.into(), b"");
         if let Ok(tasks) = self.tasks.get_mut() {
-            tasks.abort_all();
+            for task in tasks.iter() {
+                task.abort();
+            }
         }
         if let Ok(control) = self.control.get_mut() {
             control.take();
@@ -104,13 +111,14 @@ struct Client {
     limits: Limits,
     udp: bool,
     slots: Arc<Semaphore>,
-    connected: Arc<Cache>,
+    connected: tokio::sync::Mutex<HashMap<ResourceKey, Arc<Cache>>>,
+    host: ServiceContext,
 }
 impl OutboundFactory for Hysteria1Factory {
     fn kind(&self) -> &'static str {
         "hysteria1"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn Outbound>> {
+    fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         let options: ClientOptions =
             serde_json::from_value(options.clone()).map_err(|_| crate::invalid())?;
         options.limits.validate()?;
@@ -123,25 +131,49 @@ impl OutboundFactory for Hysteria1Factory {
             carrier: options.transport,
             key: config::obfs(options.obfs)?,
         });
-        let slots = Arc::new(Semaphore::new(options.limits.max_streams));
-        Ok(Arc::new(Client {
-            server: options.server.destination()?,
-            auth,
-            up: options.up_bps,
-            down: options.down_bps,
-            tls,
-            name,
-            socket,
-            limits: options.limits,
+        let server = options.server.destination()?;
+        let capabilities = Capabilities {
+            tcp: true,
+            tcp_eof: false,
             udp: options.udp,
-            slots,
-            connected: Arc::new(tokio::sync::Mutex::new(None)),
-        }))
+        };
+        Ok(OutboundPlan::new(
+            capabilities,
+            options.udp,
+            TargetPolicy::Remote,
+            move |host| {
+                Box::pin(async move {
+                    let slots = Arc::new(Semaphore::new(options.limits.max_streams));
+                    Ok(Arc::new(Client {
+                        server,
+                        auth,
+                        up: options.up_bps,
+                        down: options.down_bps,
+                        tls,
+                        name,
+                        socket,
+                        limits: options.limits,
+                        udp: options.udp,
+                        slots,
+                        connected: tokio::sync::Mutex::new(HashMap::new()),
+                        host,
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
 }
 impl Client {
-    async fn offer(&self) -> Result<Arc<Connection>> {
-        let mut cached = self.connected.lock().await;
+    async fn offer(&self, context: &ConnectContext) -> Result<Arc<Connection>> {
+        let cache = {
+            self.connected
+                .lock()
+                .await
+                .entry(context.resource_key().clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+                .clone()
+        };
+        let mut cached = cache.lock().await;
         if let Some(state) = cached.as_ref()
             && state.connection.close_reason().is_none()
             && !state.cancel.is_cancelled()
@@ -169,9 +201,11 @@ impl Client {
             endpoint_config,
             None,
             socket,
-            Arc::new(quinn::TokioRuntime),
+            crate::runtime::ServiceRuntime::new(self.host.clone()),
         )?;
-        endpoint.set_default_client_config(self.tls.clone());
+        let mut tls = self.tls.clone();
+        tls.token_store(Arc::new(quinn::TokenMemoryCache::default()));
+        endpoint.set_default_client_config(tls);
         let connection = endpoint
             .connect(remote, &self.name)
             .map_err(|_| protocol())?
@@ -192,24 +226,25 @@ impl Client {
                 wire::MAX_PACKET,
             ),
             sender: Sender::new(),
-            cancel: kerlico_core::CancellationToken::new(),
+            cancel: self.host.cancel().child_token(),
             slots: self.slots.clone(),
             udp,
             limits: self.limits.clone(),
             _socket: socket_close,
             control: Mutex::new(Some(control)),
-            tasks: Mutex::new(JoinSet::new()),
+            tasks: Mutex::new(Vec::new()),
+            host: self.host.clone(),
             last: Mutex::new(Instant::now()),
         });
-        state.start(Arc::downgrade(&self.connected));
+        state.start(Arc::downgrade(&cache));
         *cached = Some(state.clone());
         Ok(state)
     }
-    async fn association(&self) -> Result<DatagramAssociation> {
+    async fn association(&self, context: &ConnectContext) -> Result<DatagramAssociation> {
         if !self.udp {
             return Err(Error::Unsupported("Hysteria v1 出站已禁用 UDP"));
         }
-        let state = self.offer().await?;
+        let state = self.offer(context).await?;
         if !state.udp {
             return Err(Error::Unsupported("Hysteria v1 对端未启用 UDP"));
         }
@@ -226,6 +261,34 @@ impl Client {
     }
 }
 impl Outbound for Client {
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.host.cancel().cancel();
+            let caches = { std::mem::take(&mut *self.connected.lock().await) };
+            for cache in caches.into_values() {
+                let state = { cache.lock().await.take() };
+                if let Some(state) = state {
+                    state.cancel.cancel();
+                    state.hub.close();
+                    state.connection.close(0u32.into(), b"");
+                    state.endpoint.close(0u32.into(), b"");
+                    let tasks = state
+                        .tasks
+                        .lock()
+                        .map(|mut tasks| std::mem::take(&mut *tasks))
+                        .unwrap_or_default();
+                    for task in &tasks {
+                        task.abort();
+                    }
+                    for task in tasks {
+                        let _ = task.await;
+                    }
+                    state.endpoint.wait_idle().await;
+                }
+            }
+            Ok(())
+        })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tcp: true,
@@ -240,17 +303,17 @@ impl Outbound for Client {
         &'a self,
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramAssociation>> {
-        Box::pin(async move { context.run(self.association()).await })
+        Box::pin(async move { context.run(self.association(context)).await })
     }
     fn connect_tcp<'a>(
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
             context
                 .run(async {
-                    let state = self.offer().await?;
+                    let state = self.offer(context).await?;
                     let permit = state
                         .slots
                         .clone()
@@ -263,6 +326,10 @@ impl Outbound for Client {
                     Ok(Box::new(stream) as BoxStream)
                 })
                 .await
+                .map(|stream| kerlico_core::OpenedTcp {
+                    stream,
+                    info: kerlico_core::TcpConnectInfo::unknown(),
+                })
         })
     }
     fn connect_udp<'a>(
@@ -273,7 +340,7 @@ impl Outbound for Client {
         Box::pin(async move {
             context
                 .run(async {
-                    let association = self.association().await?;
+                    let association = self.association(context).await?;
                     Ok(crate::udp::fixed(association, target.clone()))
                 })
                 .await

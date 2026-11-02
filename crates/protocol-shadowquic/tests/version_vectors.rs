@@ -32,8 +32,8 @@ fn crypto() -> jls_proto::crypto::rustls::QuicServerConfig {
         .into();
     jls_proto::crypto::rustls::QuicServerConfig::try_from(tls).unwrap()
 }
-#[test]
-fn rfc9369_initial_keys_header_protection_and_retry_match_fixed_vectors() {
+#[tokio::test]
+async fn rfc9369_initial_keys_header_protection_and_retry_match_fixed_vectors() {
     let crypto = crypto();
     let cid = ConnectionId::new(&unhex("8394c8f03e515708"));
     let keys = crypto.initial_keys(0x6b3343cf, cid).unwrap();
@@ -89,8 +89,8 @@ fn rfc9369_initial_keys_header_protection_and_retry_match_fixed_vectors() {
         &retry[retry.len() - 16..]
     );
 }
-#[test]
-fn version_information_rejects_zero_duplicate_truncation_and_missing_client_choice() {
+#[tokio::test]
+async fn version_information_rejects_zero_duplicate_truncation_and_missing_client_choice() {
     use jls_proto::transport_parameters::TransportParameters;
     for bytes in [
         unhex("11080000000000000001"),
@@ -110,8 +110,8 @@ fn version_information_rejects_zero_duplicate_truncation_and_missing_client_choi
     let bytes = unhex("11046b3343cf");
     assert!(TransportParameters::read(Side::Client, &mut bytes.as_slice()).is_ok());
 }
-#[test]
-fn v2_long_header_is_decoded_as_initial_before_any_tls_session_acceptance() {
+#[tokio::test]
+async fn v2_long_header_is_decoded_as_initial_before_any_tls_session_acceptance() {
     let mut endpoint_config = jls_proto::EndpointConfig::default();
     endpoint_config.supported_versions(vec![0x6b3343cf]);
     let server = jls_proto::ServerConfig::with_crypto(Arc::new(crypto()));
@@ -136,8 +136,8 @@ fn v2_long_header_is_decoded_as_initial_before_any_tls_session_acceptance() {
     }
 }
 
-#[test]
-fn client_initial_encoder_uses_version_specific_fixed_header_type() {
+#[tokio::test]
+async fn client_initial_encoder_uses_version_specific_fixed_header_type() {
     for version in [1, 0x6b3343cf] {
         let roots = rustls_jls::RootCertStore::empty();
         let mut tls = rustls_jls::ClientConfig::builder_with_provider(Arc::new(

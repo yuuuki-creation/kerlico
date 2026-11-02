@@ -2,6 +2,7 @@
 name = "kerlico-trusttunnel"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
@@ -31,7 +32,7 @@ subtle = "2"
 kerlico-http.workspace = true
 kerlico-net.workspace = true
 kerlico-engine.workspace = true
-kerlico-egress.workspace = true
+kerlico-egress = { workspace = true, features = ["test-support"] }
 rcgen.workspace = true
 
 [lints]

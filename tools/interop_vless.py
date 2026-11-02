@@ -132,7 +132,66 @@ def udp_request(port, payload):
         return sock.recv(65_535)
 
 
+def configuration_v2(value):
+    if not isinstance(value, dict) or "outbounds" not in value or value.get("version") not in (1, 2):
+        return value
+    import copy
+    from config_v2 import bind_members
+    config = copy.deepcopy(value)
+    config["version"] = 2
+    nodes, local = [], list(config.get("local_inbounds", []))
+    for node in config.get("nodes", []):
+        if "members" in node:
+            nodes.append(node)
+            continue
+        kind, options = node["type"], node["options"]
+        owner = options
+        if kind == "shadowtls":
+            kind, options = options["inner"]["type"], options["inner"]["options"]
+        rows = None
+        if kind in ("vless", "vmess"):
+            rows = options.pop("users", [])
+            if "uuid" in options:
+                row = {"uuid": options.pop("uuid")}
+                if "flow" in options:
+                    row["flow"] = options.pop("flow")
+                rows = [row]
+        elif kind in ("trojan", "anytls"):
+            passwords = options.pop("passwords", [])
+            if "password" in options:
+                passwords = [options.pop("password")]
+            rows = [{"password": password} for password in passwords]
+        elif kind == "ss2022":
+            key = options.pop("key")
+            users = options.pop("users", [])
+            if users:
+                options["identity_key"] = key
+            rows = [{"key": key} for key in (users or [key])]
+        elif kind == "shadowsocks":
+            method = options["method"]
+            if not any(marker in method for marker in ("gcm", "poly1305", "ccm")):
+                local.append(node)
+                continue
+            rows = [{"password": options.pop("password")}]
+        elif kind == "snell":
+            psk, users = options.pop("psk"), options.pop("users", [])
+            rows = [{"psk": psk, "userkey": user["userkey"]} for user in users] if users else [{"psk": psk}]
+        elif kind == "shadowsocksr":
+            password, users = options.pop("password"), options.pop("users", [])
+            rows = [{"password": password, "user": user} for user in users] if users else [{"password": password}]
+        elif kind in ("http", "socks") and "auth" in options:
+            rows = [options.pop("auth")]
+        if rows is not None:
+            node["options"] = owner
+            bind_members(config, node, rows)
+        nodes.append(node)
+    config["nodes"] = nodes
+    config["local_inbounds"] = local
+    return config
+
+
 def write_json(path, value):
+    value = configuration_v2(value)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
     path.chmod(0o600)
 

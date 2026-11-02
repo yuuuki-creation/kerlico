@@ -1,20 +1,22 @@
-//! 仅在 worker 回环验证真实内层目标语义、所有方法及生命周期。
+mod support;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use kerlico_config::{NodeFactory, OutboundFactory, Registry};
+use kerlico_config::Registry;
 use kerlico_core::{CancellationToken, ConnectContext, Destination, Outbound, Result};
 use kerlico_shadowtls::{ShadowTlsFactory, ShadowTlsNodeFactory};
 use serde_json::{Value, json};
 use std::{
     io::Cursor,
     net::SocketAddr,
+    pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream},
     task::{JoinHandle, JoinSet},
 };
@@ -41,7 +43,12 @@ impl Engine {
             .unwrap();
         let value = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":nodes,"limits":{"connect_timeout_ms":3000,"idle_timeout_ms":1500,"drain_timeout_ms":300,"max_sessions":128}});
         let prepared = registry
-            .prepare(kerlico_config::parse(&serde_json::to_vec(&value).unwrap()).unwrap())
+            .prepare(
+                kerlico_config::parse(
+                    &serde_json::to_vec(&support::configuration(value.clone())).unwrap(),
+                )
+                .unwrap(),
+            )
             .unwrap();
         let engine = kerlico_engine::Engine::bind(prepared).await.unwrap();
         let addresses = engine.listeners().unwrap();
@@ -68,6 +75,69 @@ struct Origin {
     task: JoinHandle<()>,
     accepted: Arc<AtomicUsize>,
     requests: Arc<AtomicUsize>,
+    hello: Arc<Mutex<ServerHellos>>,
+}
+
+#[derive(Default)]
+struct ServerHellos {
+    retry: usize,
+    fresh: usize,
+}
+struct ObservedOriginIo {
+    socket: TcpStream,
+    pending: Vec<u8>,
+    hello: Arc<Mutex<ServerHellos>>,
+}
+impl AsyncRead for ObservedOriginIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.socket).poll_read(cx, out)
+    }
+}
+impl AsyncWrite for ObservedOriginIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match Pin::new(&mut self.socket).poll_write(cx, bytes) {
+            Poll::Ready(Ok(n)) => {
+                self.pending.extend_from_slice(&bytes[..n]);
+                while self.pending.len() >= 5 {
+                    let total = 5 + u16::from_be_bytes([self.pending[3], self.pending[4]]) as usize;
+                    if self.pending.len() < total {
+                        break;
+                    }
+                    if total >= 43 && self.pending[0] == 22 && self.pending[5] == 2 {
+                        let retry = self.pending[11..43]
+                            == [
+                                0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c,
+                                0x02, 0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb,
+                                0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
+                            ];
+                        let mut hello = self.hello.lock().unwrap();
+                        if retry {
+                            hello.retry += 1;
+                        } else {
+                            hello.fresh += 1;
+                        }
+                    }
+                    self.pending.drain(..total);
+                }
+                Poll::Ready(Ok(n))
+            }
+            other => other,
+        }
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.socket).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.socket).poll_shutdown(cx)
+    }
 }
 impl Drop for Origin {
     fn drop(&mut self) {
@@ -116,11 +186,14 @@ impl Origin {
         let count = accepted.clone();
         let requests = Arc::new(AtomicUsize::new(0));
         let seen = requests.clone();
+        let hello = Arc::new(Mutex::new(ServerHellos::default()));
+        let observed = hello.clone();
         let task = tokio::spawn(async move {
             let mut children = JoinSet::new();
             loop {
                 tokio::select! {
-                    incoming=listener.accept()=>{let Ok((socket,_))=incoming else{break};count.fetch_add(1,Ordering::SeqCst);let acceptor=acceptor.clone();let seen=seen.clone();children.spawn(async move{
+                    incoming=listener.accept()=>{let Ok((socket,_))=incoming else{break};count.fetch_add(1,Ordering::SeqCst);let acceptor=acceptor.clone();let seen=seen.clone();let hello=observed.clone();children.spawn(async move{
+                        let socket=ObservedOriginIo{socket,pending:Vec::new(),hello};
                         let Ok(mut stream)=acceptor.accept(socket).await else{return};let mut bytes=[0;4096];
                         if let Ok(Ok(n))=tokio::time::timeout(Duration::from_secs(5),stream.read(&mut bytes)).await && bytes[..n].starts_with(b"GET "){seen.fetch_add(1,Ordering::SeqCst);let _=stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\norigin").await;}
                         let _=stream.shutdown().await;
@@ -135,8 +208,53 @@ impl Origin {
             task,
             accepted,
             requests,
+            hello,
         }
     }
+}
+
+#[tokio::test]
+async fn actual_hrr_then_fresh_server_hello_still_reaches_the_authenticated_inner_target() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let origin = Origin::new(true, true).await;
+        let targets = Targets::new().await;
+        let engine = Engine::start(json!([node(
+            &origin,
+            3,
+            true,
+            "aes-128-gcm",
+            111,
+            "127.0.0.1:0"
+        )]))
+        .await;
+        let options = client(
+            &origin,
+            engine.addresses[0].1,
+            3,
+            true,
+            true,
+            "aes-128-gcm",
+            111,
+        );
+        tcp(
+            support::outbound(&ShadowTlsFactory, &options)
+                .unwrap()
+                .as_ref(),
+            &targets.addresses[0],
+            b"x",
+            false,
+        )
+        .await;
+        {
+            let hello = origin.hello.lock().unwrap();
+            assert_eq!(hello.retry, 1, "正例必须实际观察到 HRR");
+            assert_eq!(hello.fresh, 1, "HRR 后必须观察到真正 ServerHello");
+        }
+        assert_eq!(targets.accepted.load(Ordering::SeqCst), 1);
+        engine.stop().await;
+    })
+    .await
+    .expect("真实 HRR 与新鲜 ServerHello 正例超时");
 }
 struct Targets {
     addresses: Vec<Destination>,
@@ -224,7 +342,8 @@ async fn tcp(outbound: &dyn Outbound, target: &Destination, payload: &[u8], fin:
     let mut stream = outbound
         .connect_tcp(target, &ConnectContext::new(Duration::from_secs(3)))
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     let mut hi = [0; 2];
     stream.read_exact(&mut hi).await.unwrap();
     assert_eq!(&hi, b"hi");
@@ -271,8 +390,9 @@ async fn every_inner_aead_and_all_six_tls_version_paths_are_real_dual_role() {
                     "127.0.0.1:0"
                 )]))
                 .await;
-                let outbound = ShadowTlsFactory
-                    .build(&client(
+                let outbound = support::outbound(
+                    &ShadowTlsFactory,
+                    &client(
                         origin,
                         engine.addresses[0].1,
                         version,
@@ -280,8 +400,9 @@ async fn every_inner_aead_and_all_six_tls_version_paths_are_real_dual_role() {
                         tls13,
                         method,
                         11,
-                    ))
-                    .unwrap();
+                    ),
+                )
+                .unwrap();
                 assert!(!outbound.capabilities().udp);
                 assert!(!outbound.capabilities().tcp_eof);
                 assert!(
@@ -310,17 +431,77 @@ async fn every_inner_aead_and_all_six_tls_version_paths_are_real_dual_role() {
 }
 
 async fn rejected(options: &Value, target: &Destination) {
-    let outbound = ShadowTlsFactory.build(options).unwrap();
-    if let Ok(mut stream) = outbound
+    let outbound = support::outbound(&ShadowTlsFactory, options).unwrap();
+    if let Ok(opened) = outbound
         .connect_tcp(target, &ConnectContext::new(Duration::from_secs(2)))
         .await
     {
+        let mut stream = opened.stream;
         let mut bytes = [0; 2];
         let result =
             tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut bytes)).await;
         assert!(!matches!(result, Ok(Ok(_))), "错误凭据路径收到业务应答");
     }
 }
+
+#[tokio::test]
+async fn cancelled_raw_outbound_write_all_and_read_exact_terminate() {
+    let origin = Origin::new(true, false).await;
+    let targets = Targets::new().await;
+    for version in [2, 3] {
+        let engine = Engine::start(json!([node(
+            &origin,
+            version,
+            true,
+            "aes-128-gcm",
+            71,
+            "127.0.0.1:0"
+        )]))
+        .await;
+        let options = client(
+            &origin,
+            engine.addresses[0].1,
+            version,
+            true,
+            true,
+            "aes-128-gcm",
+            71,
+        );
+        let outbound = support::outbound(&ShadowTlsFactory, &options).unwrap();
+        let context = ConnectContext::new(Duration::from_secs(3));
+        let mut stream = outbound
+            .connect_tcp(&targets.addresses[0], &context)
+            .await
+            .unwrap()
+            .stream;
+        let mut hello = [0; 2];
+        stream.read_exact(&mut hello).await.unwrap();
+        assert_eq!(&hello, b"hi");
+        context.cancel.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut [0; 1]))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(
+            kerlico_core::FlowFailure::from_error(&kerlico_core::Error::Io(error)),
+            kerlico_core::FlowFailure::Cancelled
+        );
+        let error = tokio::time::timeout(Duration::from_secs(1), stream.write_all(b"after-cancel"))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(
+            kerlico_core::FlowFailure::from_error(&kerlico_core::Error::Io(error)),
+            kerlico_core::FlowFailure::Cancelled
+        );
+        drop(stream);
+        outbound.shutdown().await.unwrap();
+        engine.stop().await;
+    }
+}
+
 #[tokio::test]
 async fn independent_ipv6_nodes_and_each_layer_credentials_gate_site_access() {
     tokio::time::timeout(Duration::from_secs(40), async {
@@ -335,14 +516,18 @@ async fn independent_ipv6_nodes_and_each_layer_credentials_gate_site_access() {
             let index = if tag == "node-21" { 21 } else { 22 };
             let options = client(&origin, *address, 3, true, true, "aes-128-gcm", index);
             tcp(
-                ShadowTlsFactory.build(&options).unwrap().as_ref(),
+                support::outbound(&ShadowTlsFactory, &options)
+                    .unwrap()
+                    .as_ref(),
                 &targets.addresses[0],
                 b"independent-node",
                 true,
             )
             .await;
             tcp(
-                ShadowTlsFactory.build(&options).unwrap().as_ref(),
+                support::outbound(&ShadowTlsFactory, &options)
+                    .unwrap()
+                    .as_ref(),
                 &targets.addresses[1],
                 b"other-target-family",
                 false,
@@ -369,7 +554,7 @@ async fn independent_ipv6_nodes_and_each_layer_credentials_gate_site_access() {
                     "失败层={field}"
                 );
             }
-            let outbound = ShadowTlsFactory.build(&options).unwrap();
+            let outbound = support::outbound(&ShadowTlsFactory, &options).unwrap();
             let context = ConnectContext::new(Duration::from_secs(1));
             context.cancel.cancel();
             assert!(
@@ -402,7 +587,9 @@ async fn v3_multi_user_and_ss2022_eih_are_both_real_authentication() {
         options["password"] = json!(password);
         options["inner"]["options"]["identity_keys"] = json!([service]);
         tcp(
-            ShadowTlsFactory.build(&options).unwrap().as_ref(),
+            support::outbound(&ShadowTlsFactory, &options)
+                .unwrap()
+                .as_ref(),
             &targets.addresses[0],
             b"both-layers",
             true,
@@ -438,7 +625,9 @@ async fn sni_mapping_retry_and_unauthed_browser_fallback_never_choose_site_targe
         );
         options["tls"]["server_name"] = json!("mapped.example.invalid");
         tcp(
-            ShadowTlsFactory.build(&options).unwrap().as_ref(),
+            support::outbound(&ShadowTlsFactory, &options)
+                .unwrap()
+                .as_ref(),
             &targets.addresses[0],
             b"retry-and-map",
             false,
@@ -495,8 +684,9 @@ async fn active_streams_drain_and_transport_cannot_bypass_into_native_udp() {
             "127.0.0.1:0"
         )]))
         .await;
-        let outbound = ShadowTlsFactory
-            .build(&client(
+        let outbound = support::outbound(
+            &ShadowTlsFactory,
+            &client(
                 &origin,
                 engine.addresses[0].1,
                 3,
@@ -504,8 +694,9 @@ async fn active_streams_drain_and_transport_cannot_bypass_into_native_udp() {
                 true,
                 "chacha20-ietf-poly1305",
                 51,
-            ))
-            .unwrap();
+            ),
+        )
+        .unwrap();
         let mut flows = JoinSet::new();
         for n in 0..4 {
             let outbound = outbound.clone();
@@ -523,7 +714,8 @@ async fn active_streams_drain_and_transport_cannot_bypass_into_native_udp() {
                 &ConnectContext::new(Duration::from_secs(3)),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         let mut hi = [0; 2];
         stream.read_exact(&mut hi).await.unwrap();
         engine.cancel.cancel();
@@ -549,27 +741,26 @@ async fn active_streams_drain_and_transport_cannot_bypass_into_native_udp() {
 #[test]
 fn unsupported_inner_and_alias_credentials_do_not_create_fake_node_identity() {
     let base = json!({"version":3,"password":"outer-test","handshake":{"host":"127.0.0.1","port":14443},"inner":inner("aes-128-gcm",61,None)});
-    let wrapped = ShadowTlsNodeFactory.build(&base).unwrap();
+    let wrapped = support::node(&ShadowTlsNodeFactory, &base).unwrap();
     assert!(!wrapped.supports_udp());
-    let scopes = wrapped.scoped_credential_fingerprints("shadowtls");
+    let scopes = wrapped.scoped_manifest("shadowtls");
     assert!(scopes.iter().any(|v| v.protocol == "shadowsocks"));
     assert!(scopes.iter().any(|v| v.protocol == "shadowtls"));
-    let native = kerlico_shadowsocks::ShadowsocksNodeFactory
-        .build(&base["inner"]["options"])
-        .unwrap();
-    assert!(
-        native
-            .scoped_credential_fingerprints("shadowsocks")
+    let native = support::node(
+        &kerlico_shadowsocks::ShadowsocksNodeFactory,
+        &base["inner"]["options"],
+    )
+    .unwrap();
+    assert!(native.scoped_manifest("shadowsocks").iter().all(|v| {
+        scopes
             .iter()
-            .all(|v| scopes
-                .iter()
-                .any(|w| w.protocol == v.protocol && w.fingerprint == v.fingerprint))
-    );
+            .any(|w| w.protocol == v.protocol && w.fingerprint == v.fingerprint)
+    }));
     for method in ["none", "plain", "aes-128-cfb128"] {
         let mut invalid = base.clone();
         invalid["inner"]["options"]["method"] = json!(method);
         invalid["inner"]["options"]["allow_insecure"] = json!(true);
-        assert!(ShadowTlsNodeFactory.build(&invalid).is_err());
+        assert!(support::node(&ShadowTlsNodeFactory, &invalid).is_err());
     }
     for mutation in [
         "empty",
@@ -591,15 +782,17 @@ fn unsupported_inner_and_alias_credentials_do_not_create_fake_node_identity() {
             "unused-v1-password" => invalid["version"] = json!(1),
             _ => invalid["inner"]["type"] = json!("vless"),
         };
-        assert!(ShadowTlsNodeFactory.build(&invalid).is_err(), "{mutation}");
+        assert!(
+            support::node(&ShadowTlsNodeFactory, &invalid).is_err(),
+            "{mutation}"
+        );
     }
     let mut v1 = base.clone();
     v1["version"] = json!(1);
     v1.as_object_mut().unwrap().remove("password");
-    let scopes = ShadowTlsNodeFactory
-        .build(&v1)
+    let scopes = support::node(&ShadowTlsNodeFactory, &v1)
         .unwrap()
-        .scoped_credential_fingerprints("shadowtls");
+        .scoped_manifest("shadowtls");
     assert!(scopes.iter().all(|v| v.protocol == "shadowsocks"));
     let mut registry = Registry::default();
     registry.register(kerlico_net::DirectFactory).unwrap();
@@ -610,7 +803,12 @@ fn unsupported_inner_and_alias_credentials_do_not_create_fake_node_identity() {
     let config = json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[{"tag":"native","type":"shadowsocks","listen":"127.0.0.1:14444","outbound":"direct","options":base["inner"]["options"]},{"tag":"wrapped","type":"shadowtls","listen":"[::1]:14445","outbound":"direct","options":base}]});
     assert!(
         registry
-            .prepare(kerlico_config::parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .prepare(
+                kerlico_config::parse(
+                    &serde_json::to_vec(&support::configuration(config.clone())).unwrap()
+                )
+                .unwrap()
+            )
             .is_err()
     );
 }
@@ -680,7 +878,7 @@ async fn v1_v2_wrong_keys_and_strict_tls12_never_reach_the_site() {
         assert_eq!(targets.accepted.load(Ordering::SeqCst), before);
         let mut invalid = options;
         invalid["strict"] = json!(true);
-        assert!(ShadowTlsFactory.build(&invalid).is_err());
+        assert!(support::outbound(&ShadowTlsFactory, &invalid).is_err());
         engine.stop().await;
     })
     .await
@@ -727,13 +925,13 @@ async fn immediate_target_eof_preserves_large_ss2022_replies_with_and_without_wr
                     let echo=tokio::spawn(async move{let(mut peer,_)=listener.accept().await.unwrap();let mut data=vec![0;65536];peer.read_exact(&mut data).await.unwrap();peer.write_all(&data).await.unwrap();peer.shutdown().await.unwrap();});
                     let outbound:Arc<dyn Outbound>=if wrapped{
                         let address=engine.addresses.iter().find(|(tag,_)|tag=="node-91").unwrap().1;
-                        ShadowTlsFactory.build(&client(origin,address,version,true,tls13,method,91)).unwrap()
+                        support::outbound(&ShadowTlsFactory,&client(origin,address,version,true,tls13,method,91)).unwrap()
                     }else{
                         let address=engine.addresses.iter().find(|(tag,_)|tag=="native").unwrap().1;
-                        Arc::new(kerlico_ss2022::Ss2022Outbound::from_options(&ss(method,92,Some(address))).unwrap())
+                        support::outbound(&kerlico_ss2022::Ss2022Factory,&ss(method,92,Some(address))).unwrap()
                     };
                     let started=std::time::Instant::now();eprintln!("开始立即EOF inner={method} v{version} wrapped={wrapped}");
-                    let mut stream=outbound.connect_tcp(&target,&ConnectContext::new(Duration::from_secs(3))).await.unwrap_or_else(|e|panic!("立即EOF建连失败 {method} v{version} wrapped={wrapped} elapsed={:?} {e:?}",started.elapsed()));
+                    let mut stream=outbound.connect_tcp(&target,&ConnectContext::new(Duration::from_secs(3))).await.unwrap_or_else(|e|panic!("立即EOF建连失败 {method} v{version} wrapped={wrapped} elapsed={:?} {e:?}",started.elapsed())).stream;
                     stream.write_all(&vec![79;65536]).await.unwrap_or_else(|e|panic!("立即EOF发送失败 {method} v{version} wrapped={wrapped} elapsed={:?} {e:?}",started.elapsed()));
                     stream.flush().await.unwrap_or_else(|e|panic!("立即EOF排空失败 {method} v{version} wrapped={wrapped} elapsed={:?} {e:?}",started.elapsed()));
                     let mut reply=Vec::new();let result=tokio::time::timeout(Duration::from_secs(3),stream.read_to_end(&mut reply)).await;
@@ -818,7 +1016,9 @@ async fn v2_late_tickets_are_gated_until_switch_and_normal_browser_fallback_is_p
                 101,
             );
             tcp(
-                ShadowTlsFactory.build(&options).unwrap().as_ref(),
+                support::outbound(&ShadowTlsFactory, &options)
+                    .unwrap()
+                    .as_ref(),
                 &targets.addresses[0],
                 b"after-browser",
                 true,

@@ -8,8 +8,8 @@ mod packet;
 mod server;
 mod session;
 mod udp;
-use kerlico_config::{NodeFactory, OutboundFactory};
-use kerlico_core::{InboundProtocol, Outbound, Result};
+use kerlico_config::{NodeBuildContext, NodeFactory, OutboundFactory, OutboundPlan};
+use kerlico_core::{InboundProtocol, Result};
 use serde_json::Value;
 use std::sync::Arc;
 pub struct MieruFactory;
@@ -18,9 +18,9 @@ impl OutboundFactory for MieruFactory {
     fn kind(&self) -> &'static str {
         "mieru"
     }
-    fn build(&self, value: &Value) -> Result<Arc<dyn Outbound>> {
+    fn compile(&self, value: &Value) -> Result<OutboundPlan> {
         let options = serde_json::from_value(value.clone()).map_err(|_| config::invalid())?;
-        Ok(Arc::new(client::Client::build(options)?))
+        client::Client::compile(options)
     }
 }
 impl NodeFactory for MieruNodeFactory {
@@ -30,8 +30,7 @@ impl NodeFactory for MieruNodeFactory {
     fn allows_local_inbound(&self) -> bool {
         true
     }
-    fn build(&self, value: &Value) -> Result<Arc<dyn InboundProtocol>> {
-        let options = serde_json::from_value(value.clone()).map_err(|_| config::invalid())?;
-        Ok(Arc::new(server::Node::build(options)?))
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        Ok(Arc::new(server::Node::build(input)?))
     }
 }

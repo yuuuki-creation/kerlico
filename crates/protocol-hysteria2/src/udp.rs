@@ -5,10 +5,10 @@ use crate::{
 };
 use bytes::Bytes;
 use kerlico_core::{
-    AccessService, AddressedDatagram, BoxFuture, CancellationToken, ConnectContext,
-    DatagramAssociation, DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel,
-    DatagramReceiver, DatagramSender, Destination, Error, InboundContext, NodeEvent, NodeObserver,
-    Result,
+    AddressedDatagram, BoxFuture, CancellationToken, ConnectContext, DatagramAssociation,
+    DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel, DatagramReceiver,
+    DatagramSender, Destination, Error, InboundContext, NodeEvent, NodeObserver, PeerSession,
+    Result, ServiceContext, ServiceTask,
 };
 use std::{
     collections::HashMap,
@@ -73,9 +73,10 @@ impl Registry {
     pub(crate) fn spawn(
         self: &Arc<Self>,
         connection: quinn::Connection,
-    ) -> tokio::task::JoinHandle<()> {
+        host: &ServiceContext,
+    ) -> Result<ServiceTask<()>> {
         let registry = self.clone();
-        tokio::spawn(async move {
+        host.spawn_tracked(async move {
             let mut timer = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 tokio::select! {
@@ -261,7 +262,6 @@ struct ServerPacket {
 struct ServerSink {
     sender: mpsc::Sender<ServerPacket>,
     reassembly: Reassembly,
-    seen: Instant,
 }
 struct Events(Arc<dyn NodeObserver>);
 impl Drop for Events {
@@ -271,70 +271,115 @@ impl Drop for Events {
 }
 pub(crate) async fn server(
     connection: quinn::Connection,
-    access: Arc<dyn AccessService>,
+    peer: Arc<std::sync::Mutex<Option<([u8; 32], PeerSession)>>>,
     context: InboundContext,
     limits: Limits,
     ready: Arc<Notify>,
+    flows: Arc<crate::flow::FlowSet>,
 ) -> Result<()> {
-    tokio::select! {_ = context.cancel.cancelled()=>return Ok(()),_ = connection.closed()=>return Ok(()),_ = ready.notified()=>{}}
+    tokio::select! {
+        biased;
+        _ = context.cancel.cancelled()=>return Err(Error::Cancelled),
+        _ = connection.closed()=>return Err(invalid()),
+        _ = flows.admission_stopped()=>return Ok(()),
+        _ = ready.notified()=>{},
+    }
+    let access = peer
+        .lock()
+        .map_err(|_| invalid())?
+        .as_ref()
+        .map(|(_, peer)| peer.clone())
+        .ok_or(Error::Rejected)?;
     let mut sessions: HashMap<u32, ServerSink> = HashMap::new();
     let mut tasks = JoinSet::new();
     let queue_bytes = Arc::new(Semaphore::new(limits.udp_queue_bytes));
     let mut timer = tokio::time::interval(std::time::Duration::from_secs(1));
+    let result = async {
     loop {
+        if !flows.is_accepting() && sessions.is_empty() && tasks.is_empty() {
+            return Ok(());
+        }
         tokio::select! {
             biased;
-            _ = context.cancel.cancelled()=>break,
-            _ = connection.closed()=>break,
+            _ = context.cancel.cancelled()=>return Err(Error::Cancelled),
+            _ = connection.closed()=>return Err(invalid()),
+            _ = flows.admission_stopped(),if flows.is_accepting()=>{},
             _ = tasks.join_next(),if !tasks.is_empty()=>{sessions.retain(|_,entry|!entry.sender.is_closed());},
-            _ = timer.tick()=>{let now=Instant::now();sessions.retain(|_,entry|!entry.sender.is_closed()&&now.duration_since(entry.seen)<context.idle_timeout);for entry in sessions.values_mut(){entry.reassembly.expire(now);}},
+            _ = timer.tick()=>{let now=Instant::now();sessions.retain(|_,entry|!entry.sender.is_closed());for entry in sessions.values_mut(){entry.reassembly.expire(now);}},
             bytes=connection.read_datagram()=> {
-                let Ok(bytes)=bytes else{break};let Ok(packet)=Packet::decode(&bytes) else{continue};let id=packet.session;sessions.retain(|_,entry|!entry.sender.is_closed());
+                let bytes=bytes.map_err(|_|invalid())?;let Ok(packet)=Packet::decode(&bytes) else{continue};let id=packet.session;sessions.retain(|_,entry|!entry.sender.is_closed());
                 if !sessions.contains_key(&id) {
-                    if sessions.len()>=limits.max_streams.min(context.max_streams)||context.stream_budget.is_closed(){context.events.record(NodeEvent::Dropped);continue;}
+                    if !flows.is_accepting()||sessions.len()>=limits.max_streams.min(context.max_streams)||context.stream_budget.is_closed(){context.events.record(NodeEvent::Dropped);continue;}
                     let Ok(lease)=context.stream_budget.try_acquire() else{context.events.record(NodeEvent::Dropped);continue;};
-                    let (sender,receiver)=mpsc::channel(limits.udp_queue_packets);sessions.insert(id,ServerSink{sender,reassembly:Reassembly::new(context.max_datagram_size.min(MAX_PAYLOAD)),seen:Instant::now()});
-                    let connection=connection.clone();let access=access.clone();let context=context.clone();context.events.record(NodeEvent::Accepted);
-                    tasks.spawn(async move{let _lease=lease;let _events=Events(context.events.clone());if server_session(connection,access,context.clone(),id,receiver).await.is_err(){context.events.record(NodeEvent::Failed);}});
+                    let (sender,receiver)=mpsc::channel(limits.udp_queue_packets);sessions.insert(id,ServerSink{sender,reassembly:Reassembly::new(context.max_datagram_size.min(MAX_PAYLOAD))});
+                    let connection=connection.clone();let access=access.clone();let context=context.clone();let flows=flows.clone();context.events.record(NodeEvent::Accepted);
+                    crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move{let _lease=lease;let _events=Events(context.events.clone());if server_session(connection,access,context.clone(),id,receiver,flows).await.is_err(){context.events.record(NodeEvent::Failed);}}, |_| ())?;
                 }
                 let Some(entry)=sessions.get_mut(&id) else{continue};
-                let Ok(Some((address,payload)))=entry.reassembly.feed(packet) else{continue};let Ok(target)=crate::target(&address) else{continue};entry.seen=Instant::now();
+                let Ok(Some((address,payload)))=entry.reassembly.feed(packet) else{continue};let Ok(target)=crate::target(&address) else{continue};
                 let Ok(permit)=queue_bytes.clone().try_acquire_many_owned(payload.len() as u32) else{context.events.record(NodeEvent::Dropped);continue;};
                 if entry.sender.try_send(ServerPacket{packet:(target,payload),_bytes:permit}).is_err(){context.events.record(NodeEvent::Dropped);}
             }
         }
     }
+    }.await;
+    if result.is_err() {
+        flows.close(crate::flow::outcome(&result));
+    }
     drop(sessions);
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
-    Ok(())
+    result
 }
 async fn server_session(
     connection: quinn::Connection,
-    access: Arc<dyn AccessService>,
+    access: PeerSession,
     context: InboundContext,
     id: u32,
     mut packets: mpsc::Receiver<ServerPacket>,
+    flows: Arc<crate::flow::FlowSet>,
 ) -> Result<()> {
-    let establish = ConnectContext {
-        cancel: context.cancel.clone(),
-        timeout: context.connect_timeout,
-    };
-    let mut channel = establish.run(access.associate_udp(&establish)).await?;
+    let establish =
+        ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
+    let (mut sender, mut receiver, completion) = establish
+        .run(access.associate_udp(&establish))
+        .await?
+        .into_parts();
+    let completion = flows.register(completion)?;
     let mut sequence = 0u16;
-    let timer = tokio::time::sleep(context.idle_timeout);
-    tokio::pin!(timer);
-    loop {
-        tokio::select! {
-            biased;
-            _ = context.cancel.cancelled()=>return Ok(()),_ = connection.closed()=>return Ok(()),_ = &mut timer=>return Ok(()),
-            packet=packets.recv()=>{let Some(ServerPacket{packet:(target,payload),..})=packet else{return Ok(())};tokio::select!{_ = context.cancel.cancelled()=>return Ok(()),result=tokio::time::timeout(context.idle_timeout,channel.sender.send_to(&payload,&target))=>result.map_err(|_|Error::Timeout)??}timer.as_mut().reset(tokio::time::Instant::now()+context.idle_timeout);},
-            packet=channel.receiver.recv_from()=>{
-                let Some((source,payload))=packet? else{return Ok(())};if payload.len()>context.max_datagram_size.min(MAX_PAYLOAD){return Err(Error::ResourceLimit);}
-                let packet=Packet{session:id,id:sequence,index:0,count:1,address:source.to_string(),payload};sequence=sequence.wrapping_add(1);
-                tokio::time::timeout(context.idle_timeout,send_packet(&connection,&packet,&context.cancel)).await.map_err(|_|Error::Timeout)??;
-                timer.as_mut().reset(tokio::time::Instant::now()+context.idle_timeout);
+    let result = async {
+        let timer = tokio::time::sleep(context.idle_timeout);
+        tokio::pin!(timer);
+        loop {
+            tokio::select! {
+                biased;
+                _ = context.cancel.cancelled() => return Err(Error::Cancelled),
+                _ = connection.closed() => return Err(Error::Protocol("Hysteria2 UDP 载体已关闭")),
+                _ = &mut timer => return Err(Error::Timeout),
+                packet = packets.recv() => {
+                    let Some(ServerPacket { packet: (target, payload), .. }) = packet else { return Err(Error::Timeout); };
+                    tokio::select! { biased;
+                        _ = context.cancel.cancelled() => return Err(Error::Cancelled),
+                        result = tokio::time::timeout(context.idle_timeout, sender.send_to(&payload, &target)) => result.map_err(|_| Error::Timeout)??,
+                    }
+                    timer.as_mut().reset(tokio::time::Instant::now() + context.idle_timeout);
+                }
+                packet = receiver.recv_from() => {
+                    let Some((source, payload)) = packet? else { return Ok(()); };
+                    if payload.len() > context.max_datagram_size.min(MAX_PAYLOAD) { return Err(Error::ResourceLimit); }
+                    let packet = Packet { session: id, id: sequence, index: 0, count: 1, address: source.to_string(), payload };
+                    sequence = sequence.wrapping_add(1);
+                    tokio::time::timeout(context.idle_timeout, send_packet(&connection, &packet, &context.cancel)).await.map_err(|_| Error::Timeout)??;
+                    timer.as_mut().reset(tokio::time::Instant::now() + context.idle_timeout);
+                }
             }
         }
-    }
+    }.await;
+    completion.finish(match &result {
+        Ok(()) => kerlico_core::FlowOutcome::ProtocolEnd,
+        Err(error) => {
+            kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::from_error(error))
+        }
+    });
+    result
 }

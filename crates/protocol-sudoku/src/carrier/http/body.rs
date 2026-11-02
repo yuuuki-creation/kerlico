@@ -71,12 +71,13 @@ impl Body {
 impl Drop for Body {
     fn drop(&mut self) {
         if let Some(pull) = self.pull.as_ref()
-            && !self.finished {
-                pull.cancel.cancel();
-                if pull.sent.load(Ordering::Acquire) {
-                    pull.token.failed.store(true, Ordering::Release);
-                    pull.token.cancel.cancel();
-                }
+            && !self.finished
+        {
+            pull.cancel.cancel();
+            if pull.sent.load(Ordering::Acquire) {
+                pull.token.failed.store(true, Ordering::Release);
+                pull.token.cancel.cancel();
+            }
         }
     }
 }

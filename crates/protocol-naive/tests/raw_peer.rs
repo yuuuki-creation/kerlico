@@ -106,7 +106,8 @@ async fn header_and_uot_preamble_have_timeout_and_cancel_reclaims_leases() {
         .outbound
         .connect_tcp(&echo.target, &fixture.context())
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     fixture.stop().await;
     assert!(
         tokio::time::timeout(Duration::from_secs(2), active.read_u8())
@@ -140,10 +141,13 @@ async fn connector_injection_is_used_for_h2_and_does_not_change_target() {
     }
     let mut fixture = fixture("h2", "127.0.0.1", 2).await;
     let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let outbound = NaiveFactory::build_with_connector(
+    let outbound = NaiveFactory::compile_with_connector(
         &fixture.options,
         std::sync::Arc::new(Count(count.clone())),
     )
+    .unwrap()
+    .start(kerlico_core::ServiceContext::for_test())
+    .await
     .unwrap();
     let echo = tcp_echo("127.0.0.1").await;
     tcp(&outbound, &fixture.context(), &echo.target, 12000).await;
@@ -160,12 +164,21 @@ async fn real_registry_separates_http_basic_secrets_and_requires_full_cone_egres
         .register_node(kerlico_http::HttpNodeFactory)
         .unwrap();
     registry.register_node(NaiveNodeFactory).unwrap();
-    let config = |password: &str, outbound: &str| json!({"version":1,"outbounds":[{"tag":"direct","type":"direct"},{"tag":"reject","type":"reject"}],"inbounds":[],"nodes":[{"tag":"http-node","type":"http","listen":"127.0.0.1:32001","outbound":"direct","options":{"auth":{"username":"test-user","password":password},"tls":{"cert_pem":fixture.node_options["tls"]["certificate_pem"],"key_pem":fixture.node_options["tls"]["private_key_pem"]}}},{"tag":"naive-node","type":"naive","listen":"[::1]:32002","outbound":outbound,"options":fixture.node_options}]});
-    let same = serde_json::from_value(config("synthetic-secret", "direct")).unwrap();
+    let config = |password: &str, outbound: &str| json!({"version":2,"outbounds":[{"tag":"direct","type":"direct"},{"tag":"reject","type":"reject"}],"inbounds":[],"nodes":[{"tag":"http-node","type":"http","listen":"127.0.0.1:32001","outbound":"direct","options":{"auth":{"username":"test-user","password":password},"tls":{"cert_pem":fixture.node_options["tls"]["certificate_pem"],"key_pem":fixture.node_options["tls"]["private_key_pem"]}}},{"tag":"naive-node","type":"naive","listen":"[::1]:32002","outbound":outbound,"options":fixture.node_options}]});
+    let same = serde_json::from_value(shared::configuration(config("synthetic-secret", "direct")))
+        .unwrap();
     assert!(registry.prepare(same).is_err());
-    let distinct = serde_json::from_value(config("independent-secret", "direct")).unwrap();
+    let distinct = serde_json::from_value(shared::configuration(config(
+        "independent-secret",
+        "direct",
+    )))
+    .unwrap();
     assert!(registry.prepare(distinct).is_ok());
-    let unsupported = serde_json::from_value(config("independent-secret", "reject")).unwrap();
+    let unsupported = serde_json::from_value(shared::configuration(config(
+        "independent-secret",
+        "reject",
+    )))
+    .unwrap();
     assert!(registry.prepare(unsupported).is_err());
     fixture.stop().await;
 }

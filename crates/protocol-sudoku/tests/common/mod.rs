@@ -1,11 +1,13 @@
 #![allow(dead_code)]
 
-use kerlico_config::{NodeFactory, OutboundFactory, PreparedConfig, Registry, parse};
+use kerlico_config::{
+    NodeBuildContext, NodeFactory, OutboundFactory, OutboundPlan, PreparedConfig, Registry, parse,
+};
 use kerlico_core::{
-    AccessService, AddressedDatagram, BoxFuture, BoxStream, CancellationToken, Capabilities,
-    ConnectContext, DatagramAssociation, DatagramAssociationReceiver, DatagramAssociationSender,
-    DatagramChannel, Destination, Error, InboundContext, InboundProtocol, Outbound, Result,
-    ScopedCredentialFingerprint, StreamBudget,
+    AddressedDatagram, BoxFuture, BoxStream, CancellationToken, Capabilities, ConnectContext,
+    CredentialManifest, DatagramAssociation, DatagramAssociationReceiver,
+    DatagramAssociationSender, DatagramChannel, Destination, Error, InboundContext,
+    InboundProtocol, IngressBinding, Outbound, Result, StreamBudget,
 };
 use kerlico_engine::{Engine, Stats};
 use kerlico_net::DirectFactory;
@@ -60,6 +62,7 @@ impl TargetCounters {
 }
 #[derive(Default)]
 pub struct State {
+    pub peers: Mutex<Vec<CancellationToken>>,
     pub physical: AtomicUsize,
     pub active_tcp: AtomicUsize,
     pub associations: AtomicUsize,
@@ -71,7 +74,11 @@ pub struct State {
 }
 impl State {
     pub fn target_snapshot(&self, port: u16) -> TargetSnapshot {
-        self.targets.lock().unwrap().get(&port).map_or_else(TargetSnapshot::default, |target|target.snapshot())
+        self.targets
+            .lock()
+            .unwrap()
+            .get(&port)
+            .map_or_else(TargetSnapshot::default, |target| target.snapshot())
     }
 }
 struct Active(Arc<State>);
@@ -124,8 +131,14 @@ impl DatagramAssociationSender for Sender {
         target: &'a Destination,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            let source = match target.address() {
+                kerlico_core::Address::Domain(name) if name == "localhost" => {
+                    Destination::new("127.0.0.1", target.port())?
+                }
+                _ => target.clone(),
+            };
             self.0
-                .send((target.clone(), packet.to_vec()))
+                .send((source, packet.to_vec()))
                 .await
                 .map_err(|_| Error::Cancelled)
         })
@@ -140,8 +153,18 @@ impl OutboundFactory for EchoFactory {
     fn kind(&self) -> &'static str {
         "sudoku-test-echo"
     }
-    fn build(&self, _: &Value) -> Result<Arc<dyn Outbound>> {
-        Ok(Arc::new(Echo(self.0.clone())))
+    fn compile(&self, _: &Value) -> Result<OutboundPlan> {
+        let state = self.0.clone();
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp: true,
+            },
+            true,
+            kerlico_core::TargetPolicy::Remote,
+            move |_host| Box::pin(async move { Ok(Arc::new(Echo(state)) as Arc<dyn Outbound>) }),
+        ))
     }
 }
 impl Outbound for Echo {
@@ -179,15 +202,22 @@ impl Outbound for Echo {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
+            self.0.decoded.lock().unwrap().push(target.clone());
             self.0.resolved.lock().unwrap().push(target.clone());
             if target.port() == 1 {
                 return Err(Error::Rejected);
             }
             let slow = target.port() == 9;
             let state = self.0.clone();
-            let progress = state.targets.lock().unwrap().entry(target.port()).or_default().clone();
+            let progress = state
+                .targets
+                .lock()
+                .unwrap()
+                .entry(target.port())
+                .or_default()
+                .clone();
             state.active_tcp.fetch_add(1, Ordering::SeqCst);
             let active = Active(state.clone());
             let cancel = context.cancel.child_token();
@@ -217,10 +247,13 @@ impl Outbound for Echo {
                 };
                 tokio::select! { biased; _ = stopped.cancelled() => {}, _ = work => {} }
             });
-            Ok(Box::new(OwnedIo {
-                inner: client,
-                cancel,
-            }) as BoxStream)
+            Ok(kerlico_core::OpenedTcp {
+                stream: Box::new(OwnedIo {
+                    inner: client,
+                    cancel,
+                }),
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
 }
@@ -230,36 +263,6 @@ struct Observed {
     inner: Arc<dyn InboundProtocol>,
     state: Arc<State>,
 }
-struct Tapped {
-    inner: Arc<dyn AccessService>,
-    state: Arc<State>,
-}
-impl AccessService for Tapped {
-    fn supports_udp_association(&self) -> bool {
-        self.inner.supports_udp_association()
-    }
-    fn associate_udp<'a>(
-        &'a self,
-        ctx: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<DatagramAssociation>> {
-        self.inner.associate_udp(ctx)
-    }
-    fn connect_tcp<'a>(
-        &'a self,
-        target: &'a Destination,
-        ctx: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
-        self.state.decoded.lock().unwrap().push(target.clone());
-        self.inner.connect_tcp(target, ctx)
-    }
-    fn connect_udp<'a>(
-        &'a self,
-        target: &'a Destination,
-        ctx: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<DatagramChannel>> {
-        self.inner.connect_udp(target, ctx)
-    }
-}
 impl NodeFactory for ObservedFactory {
     fn kind(&self) -> &'static str {
         "sudoku"
@@ -267,22 +270,16 @@ impl NodeFactory for ObservedFactory {
     fn allows_local_inbound(&self) -> bool {
         true
     }
-    fn build(&self, value: &Value) -> Result<Arc<dyn InboundProtocol>> {
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
         Ok(Arc::new(Observed {
-            inner: SudokuNodeFactory.build(value)?,
+            inner: SudokuNodeFactory.build(input)?,
             state: self.0.clone(),
         }))
     }
 }
 impl InboundProtocol for Observed {
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
-        self.inner.credential_fingerprints()
-    }
-    fn scoped_credential_fingerprints(&self, kind: &str) -> Vec<ScopedCredentialFingerprint> {
-        self.inner.scoped_credential_fingerprints(kind)
-    }
-    fn credential_isolation_fingerprints(&self, kind: &str) -> Vec<ScopedCredentialFingerprint> {
-        self.inner.credential_isolation_fingerprints(kind)
+    fn credential_manifest(&self) -> CredentialManifest {
+        self.inner.credential_manifest()
     }
     fn requires_loopback(&self) -> bool {
         self.inner.requires_loopback()
@@ -302,15 +299,16 @@ impl InboundProtocol for Observed {
     fn handle<'a>(
         &'a self,
         io: BoxStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         ctx: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         self.state.physical.fetch_add(1, Ordering::SeqCst);
+        self.state.peers.lock().unwrap().push(ctx.cancel.clone());
         self.inner.handle(io, access, ctx)
     }
     fn handle_virtual<'a>(
         &'a self,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         ctx: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         self.state
@@ -318,13 +316,7 @@ impl InboundProtocol for Observed {
             .lock()
             .unwrap()
             .push(ctx.stream_budget.clone());
-        self.inner.handle_virtual(
-            Arc::new(Tapped {
-                inner: access,
-                state: self.state.clone(),
-            }),
-            ctx,
-        )
+        self.inner.handle_virtual(access, ctx)
     }
 }
 
@@ -334,7 +326,9 @@ pub fn prepare(value: Value, state: Arc<State>) -> Result<PreparedConfig> {
     registry.register(DirectFactory)?;
     registry.register(EchoFactory(state.clone()))?;
     registry.register_node(ObservedFactory(state))?;
-    registry.prepare(parse(&serde_json::to_vec(&value).unwrap())?)
+    registry.prepare(parse(
+        &serde_json::to_vec(&shared::configuration(value.clone())).unwrap(),
+    )?)
 }
 pub fn protocol(key: &str, aead: &str) -> Value {
     json!({"key":key,"aead":aead,"padding_min":0,"padding_max":0,"allow_insecure":aead=="none"})
@@ -346,7 +340,7 @@ pub fn client_options(addr: SocketAddr, mode: &str, key: &str, aead: &str, mux: 
     json!({"server":{"host":addr.ip().to_string(),"port":addr.port()},"protocol":protocol(key,aead),"http_mask":{"mode":mode},"multiplex":mux,"pool_idle_ms":1000})
 }
 pub fn configuration(options: Value, ipv6: bool, local: bool) -> Value {
-    let mut value = json!({"version":1,"outbounds":[{"tag":"exit","type":"sudoku-test-echo"}],"inbounds":[],"nodes":[],"local_inbounds":[],"limits":{"connect_timeout_ms":2000,"idle_timeout_ms":15000,"drain_timeout_ms":300,"max_sessions":128,"max_datagram_size":65507}});
+    let mut value = json!({"version":2,"outbounds":[{"tag":"exit","type":"sudoku-test-echo"}],"inbounds":[],"nodes":[],"local_inbounds":[],"limits":{"connect_timeout_ms":2000,"idle_timeout_ms":15000,"drain_timeout_ms":300,"max_sessions":128,"max_datagram_size":65507}});
     value[if local { "local_inbounds" } else { "nodes" }] = json!([{"tag":"node","type":"sudoku","listen":if ipv6 {"[::1]:0"}else{"127.0.0.1:0"},"outbound":"exit","options":options}]);
     value
 }
@@ -391,11 +385,17 @@ impl Running {
     }
 }
 pub struct Fixture {
+    operation: ConnectContext,
     pub server: Running,
     pub outbound: Arc<dyn Outbound>,
     pub state: Arc<State>,
 }
 impl Fixture {
+    pub fn context(&self) -> ConnectContext {
+        self.operation
+            .new_operation(WAIT)
+            .with_cancel(CancellationToken::new())
+    }
     pub async fn start(mode: &str, aead: &str, mux: &str, ipv6: bool) -> Self {
         let state = Arc::new(State::default());
         let server = Running::start(
@@ -403,16 +403,14 @@ impl Fixture {
             state.clone(),
         )
         .await;
-        let outbound = SudokuFactory
-            .build(&client_options(
-                server.addresses["node"],
-                mode,
-                KEY,
-                aead,
-                mux,
-            ))
-            .unwrap();
+        let outbound = shared::outbound(
+            &SudokuFactory,
+            &client_options(server.addresses["node"], mode, KEY, aead, mux),
+        )
+        .await
+        .unwrap();
         Self {
+            operation: ConnectContext::new(WAIT),
             server,
             outbound,
             state,
@@ -442,8 +440,15 @@ pub async fn banner(stream: &mut BoxStream) {
     assert_eq!(&bytes, BANNER);
 }
 pub async fn exchange(outbound: &Arc<dyn Outbound>, target: &Destination, bytes: Vec<u8>) {
-    let context = ConnectContext::new(WAIT);
-    let mut stream = outbound.connect_tcp(target, &context).await.unwrap();
+    exchange_scoped(outbound, &ConnectContext::new(WAIT), target, bytes).await;
+}
+pub async fn exchange_scoped(
+    outbound: &Arc<dyn Outbound>,
+    context: &ConnectContext,
+    target: &Destination,
+    bytes: Vec<u8>,
+) {
+    let mut stream = outbound.connect_tcp(target, &context).await.unwrap().stream;
     banner(&mut stream).await;
     let eof = outbound.capabilities().tcp_eof;
     let (mut read, mut write) = tokio::io::split(stream);
@@ -476,4 +481,12 @@ pub fn certificates() -> (String, String) {
 }
 pub fn hex(data: &[u8]) -> String {
     data.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[allow(dead_code)]
+mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

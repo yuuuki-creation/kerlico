@@ -1,9 +1,8 @@
 #![allow(dead_code)]
-use kerlico_config::{NodeFactory, OutboundFactory};
+use kerlico_config::NodeFactory;
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramAssociation,
-    DatagramChannel, Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result,
-    StreamBudget,
+    BoxFuture, BoxStream, CancellationToken, ConnectContext, DatagramAssociation, DatagramChannel,
+    Destination, InboundContext, NodeEvent, NodeObserver, Outbound, Result, StreamBudget,
 };
 use kerlico_naive::{NaiveFactory, NaiveNodeFactory};
 use serde_json::{Value, json};
@@ -30,11 +29,18 @@ impl NodeObserver for Observer {
     }
 }
 struct Access {
-    egress: kerlico_egress::Egress,
+    egress: Arc<dyn Outbound>,
     pub accesses: Arc<AtomicUsize>,
     pub associations: Arc<AtomicUsize>,
 }
-impl AccessService for Access {
+impl Outbound for Access {
+    fn capabilities(&self) -> kerlico_core::Capabilities {
+        kerlico_core::Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
     fn supports_udp_association(&self) -> bool {
         true
     }
@@ -43,15 +49,15 @@ impl AccessService for Access {
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramAssociation>> {
         self.associations.fetch_add(1, Ordering::AcqRel);
-        AccessService::associate_udp(&self.egress, context)
+        self.egress.associate_udp(context)
     }
     fn connect_tcp<'a>(
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         self.accesses.fetch_add(1, Ordering::AcqRel);
-        AccessService::connect_tcp(&self.egress, target, context)
+        self.egress.connect_tcp(target, context)
     }
     fn connect_udp<'a>(
         &'a self,
@@ -59,10 +65,11 @@ impl AccessService for Access {
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramChannel>> {
         self.accesses.fetch_add(1, Ordering::AcqRel);
-        AccessService::connect_udp(&self.egress, target, context)
+        self.egress.connect_udp(target, context)
     }
 }
 pub struct Fixture {
+    operation: ConnectContext,
     pub outbound: Arc<dyn Outbound>,
     pub options: Value,
     pub node_options: Value,
@@ -84,10 +91,9 @@ impl Drop for Fixture {
 }
 impl Fixture {
     pub fn context(&self) -> ConnectContext {
-        ConnectContext {
-            cancel: self.cancel.clone(),
-            timeout: Duration::from_secs(8),
-        }
+        self.operation
+            .new_operation(Duration::from_secs(8))
+            .with_cancel(self.cancel.clone())
     }
     pub async fn stop(&mut self) {
         self.cancel.cancel();
@@ -140,18 +146,29 @@ pub async fn fixture_named(
     let cert = certificate.cert.pem();
     let key = certificate.signing_key.serialize_pem();
     let node_options = json!({"users":[{"username":username,"password":password}],"tls":{"certificate_pem":cert,"private_key_pem":key},"transports":[transport],"udp_over_tcp":true});
-    let node = NaiveNodeFactory.build(&node_options).unwrap();
+    let input = shared::node_input("naive", &node_options);
+    let node = NaiveNodeFactory.build(&input).unwrap();
     let cancel = CancellationToken::new();
     let global = Arc::new(Semaphore::new(128));
     let accesses = Arc::new(AtomicUsize::new(0));
     let associations = Arc::new(AtomicUsize::new(0));
     let accepts = Arc::new(AtomicUsize::new(0));
     let access = Arc::new(Access {
-        egress: kerlico_egress::Egress::new(kerlico_net::DirectFactory.build(&json!({})).unwrap()),
+        egress: shared::outbound(&kerlico_net::DirectFactory, &json!({}))
+            .await
+            .unwrap(),
         accesses: accesses.clone(),
         associations: associations.clone(),
     });
+    let access =
+        kerlico_egress::testing::ingress(&input, access, kerlico_core::TargetPolicy::Local)
+            .unwrap();
     let mut context = InboundContext {
+        peer_lease: None,
+        tasks: kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("test-node").unwrap(),
+            kerlico_core::CancellationToken::new(),
+        ),
         peer_addr: None,
         local_addr: None,
         cancel: cancel.clone(),
@@ -195,8 +212,9 @@ pub async fn fixture_named(
         (address, task)
     };
     let options = json!({"server":{"host":host,"port":address.port()},"username":username,"password":password,"tls":{"server_name":"proxy.invalid","ca_pem":cert},"transport":transport,"udp_over_tcp":{"enabled":true,"version":version},"max_sessions":max_sessions,"max_streams":64,"idle_session_timeout_ms":1000});
-    let outbound = NaiveFactory.build(&options).unwrap();
+    let outbound = shared::outbound(&NaiveFactory, &options).await.unwrap();
     Fixture {
+        operation: ConnectContext::new(Duration::from_secs(8)),
         outbound,
         options,
         node_options,
@@ -251,7 +269,7 @@ pub async fn tcp(
     target: &Destination,
     size: usize,
 ) {
-    let mut stream = outbound.connect_tcp(target, context).await.unwrap();
+    let mut stream = outbound.connect_tcp(target, context).await.unwrap().stream;
     let bytes = (0..size).map(|i| (i % 251) as u8).collect::<Vec<_>>();
     stream.write_u32(size as u32).await.unwrap();
     stream.write_all(&bytes).await.unwrap();
@@ -278,4 +296,12 @@ pub async fn udp(
         .unwrap()
         .unwrap();
     assert_eq!(packet, bytes);
+}
+
+#[allow(dead_code)]
+pub(crate) mod shared {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/protocol_b_test_support.rs"
+    ));
 }

@@ -8,10 +8,10 @@ mod tls;
 mod v2;
 mod wire;
 
-use kerlico_config::{NodeFactory, OutboundFactory};
+use kerlico_config::{NodeBuildContext, NodeFactory, OutboundFactory, OutboundPlan};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, ConnectContext, InboundContext, InboundProtocol, Outbound,
-    Result, ScopedCredentialFingerprint, StreamConnector,
+    BoxFuture, BoxStream, ConnectContext, CredentialManifest, InboundContext, InboundProtocol,
+    IngressBinding, Result,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -22,30 +22,41 @@ impl OutboundFactory for ShadowTlsFactory {
     fn kind(&self) -> &'static str {
         "shadowtls"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn Outbound>> {
+    fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         let value: config::Client = config::parse(options)?;
         let key = value.validate()?;
-        let connector: Arc<dyn StreamConnector> = Arc::new(client::Connector {
+        let connector = Arc::new(client::Connector {
             version: value.version,
             strict: value.strict(),
             key,
             settings: tls::settings(&value.tls, value.version, value.strict())?,
+            host: std::sync::OnceLock::new(),
         });
-        match value.inner.kind.as_str() {
-            "shadowsocks" => Ok(Arc::new(
-                kerlico_shadowsocks::ShadowsocksOutbound::from_options_with_connector(
-                    &value.inner.options,
-                    connector,
-                )?,
-            )),
-            "ss2022" => Ok(Arc::new(
-                kerlico_ss2022::Ss2022Outbound::from_options_with_connector(
-                    &value.inner.options,
-                    connector,
-                )?,
-            )),
+        let plan = match value.inner.kind.as_str() {
+            "shadowsocks" => kerlico_shadowsocks::ShadowsocksOutbound::compile_with_connector(
+                &value.inner.options,
+                Some(connector.clone()),
+            ),
+            "ss2022" => kerlico_ss2022::Ss2022Outbound::compile_with_connector(
+                &value.inner.options,
+                Some(connector.clone()),
+            ),
             _ => Err(config::invalid()),
-        }
+        }?;
+        Ok(OutboundPlan::new(
+            plan.capabilities(),
+            plan.supports_udp_association(),
+            plan.target_policy(),
+            move |host| {
+                Box::pin(async move {
+                    connector
+                        .host
+                        .set(host.clone())
+                        .map_err(|_| kerlico_core::Error::Protocol("ShadowTLS 出站重复启动"))?;
+                    plan.start(host).await
+                })
+            },
+        ))
     }
 }
 pub struct ShadowTlsNodeFactory;
@@ -58,19 +69,24 @@ impl NodeFactory for ShadowTlsNodeFactory {
     fn kind(&self) -> &'static str {
         "shadowtls"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn InboundProtocol>> {
-        let settings: config::Server = config::parse(options)?;
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        let settings: config::Server = config::parse(input.options())?;
         let keys = settings.validate()?;
         let inner: Arc<dyn InboundProtocol> = match settings.inner.kind.as_str() {
-            "shadowsocks" => Arc::new(kerlico_shadowsocks::ShadowsocksNode::from_options(
-                &settings.inner.options,
+            "shadowsocks" => Arc::new(kerlico_shadowsocks::ShadowsocksNode::from_context(
+                &input.with_options(settings.inner.options.clone()),
             )?),
-            "ss2022" => Arc::new(kerlico_ss2022::Ss2022Node::from_options(
-                &settings.inner.options,
+            "ss2022" => Arc::new(kerlico_ss2022::Ss2022Node::from_context(
+                &input.with_options(settings.inner.options.clone()),
             )?),
             _ => return Err(config::invalid()),
         };
-        if inner.credential_fingerprints().is_empty() {
+        if !inner.credential_manifest().entries().iter().any(|entry| {
+            matches!(
+                entry.purpose,
+                kerlico_core::CredentialPurpose::Authentication { .. }
+            )
+        }) {
             return Err(config::invalid());
         }
         Ok(Arc::new(ShadowTlsNode {
@@ -87,23 +103,14 @@ fn fingerprint(key: &[u8]) -> [u8; 32] {
     hash.finalize().into()
 }
 impl InboundProtocol for ShadowTlsNode {
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
-        let mut keys = self.inner.credential_fingerprints();
-        keys.extend(self.keys.iter().map(|key| fingerprint(key)));
-        keys
-    }
-    fn scoped_credential_fingerprints(
-        &self,
-        _default_protocol: &str,
-    ) -> Vec<ScopedCredentialFingerprint> {
-        let mut keys = self
-            .inner
-            .scoped_credential_fingerprints(&self.settings.inner.kind);
-        keys.extend(self.keys.iter().map(|key| ScopedCredentialFingerprint {
-            protocol: "shadowtls".into(),
-            fingerprint: fingerprint(key),
-        }));
-        keys
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = self.inner.credential_manifest();
+        for key in &self.keys {
+            if !key.is_empty() {
+                manifest.protection("shadowtls", fingerprint(key));
+            }
+        }
+        manifest
     }
     fn requires_loopback(&self) -> bool {
         false
@@ -114,26 +121,25 @@ impl InboundProtocol for ShadowTlsNode {
     fn handle<'a>(
         &'a self,
         stream: BoxStream,
-        access: Arc<dyn AccessService>,
+        access: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let handshake = ConnectContext {
-                cancel: context.cancel.clone(),
-                timeout: context.connect_timeout,
-            };
+            let handshake =
+                ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
             let outcome = handshake
                 .run(server::negotiate(
                     stream,
                     &self.settings,
                     &self.keys,
                     context.cancel.clone(),
+                    context.tasks.clone(),
                 ))
                 .await?;
             match outcome {
                 server::Outcome::Ready(stream) => self.inner.handle(stream, access, context).await,
                 server::Outcome::Fallback(front, origin) => {
-                    kerlico_core::relay_tcp(front, origin, context.idle_timeout, context.cancel)
+                    kerlico_core::relay_streams(front, origin, context.idle_timeout, context.cancel)
                         .await
                 }
             }

@@ -9,6 +9,7 @@
 mod h3_quinn;
 
 mod connection;
+mod control;
 mod request;
 
 use std::{
@@ -18,7 +19,7 @@ use std::{
     time::Duration,
 };
 
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use http::Request;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -91,7 +92,7 @@ impl Pair {
         ));
         server_config.transport = self.config.clone();
         let endpoint =
-            h3_quinn::quinn::Endpoint::server(server_config, "[::]:0".parse().unwrap()).unwrap();
+            h3_quinn::quinn::Endpoint::server(server_config, "[::1]:0".parse().unwrap()).unwrap();
 
         self.port = endpoint.local_addr().unwrap().port();
 
@@ -127,7 +128,7 @@ impl Pair {
         ));
 
         let mut client_endpoint =
-            h3_quinn::quinn::Endpoint::client("[::]:0".parse().unwrap()).unwrap();
+            h3_quinn::quinn::Endpoint::client("[::1]:0".parse().unwrap()).unwrap();
         client_endpoint.set_default_client_config(client_config);
         client_endpoint
             .connect(addr, "localhost")
@@ -146,7 +147,9 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn next(&mut self) -> impl quic::Connection<Bytes> {
+    pub async fn next(
+        &mut self,
+    ) -> impl quic::Connection<bytes::Bytes, BidiStream = h3_quinn::BidiStream<bytes::Bytes>> {
         Connection::new(self.endpoint.accept().await.unwrap().await.unwrap())
     }
 }

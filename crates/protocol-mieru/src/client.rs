@@ -7,19 +7,23 @@ use crate::{
     session::{self, Link, Scope, SessionIo, TcpSettings},
     udp,
 };
+use kerlico_config::OutboundPlan;
 use kerlico_core::{
     Address, BoxFuture, BoxStream, CancellationToken, Capabilities, ConnectContext,
-    DatagramAssociation, DatagramChannel, Destination, Error, Outbound, Result,
+    DatagramAssociation, DatagramChannel, Destination, Error, Outbound, ResourceKey, Result,
+    ServiceContext, TargetPolicy,
 };
 use std::{
+    collections::HashMap,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, atomic::Ordering},
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
     net::{TcpStream, UdpSocket},
     sync::{Mutex, Semaphore},
 };
+type MemberPool = Mutex<Vec<Arc<Link>>>;
 pub(crate) struct Client {
     server: Destination,
     user: Arc<User>,
@@ -31,10 +35,11 @@ pub(crate) struct Client {
     mtu: usize,
     cancel: CancellationToken,
     slots: Arc<Semaphore>,
-    pool: Mutex<Vec<Arc<Link>>>,
+    pool: Mutex<HashMap<ResourceKey, Arc<MemberPool>>>,
+    host: ServiceContext,
 }
 impl Client {
-    pub fn build(options: ClientOptions) -> Result<Self> {
+    pub fn compile(options: ClientOptions) -> Result<OutboundPlan> {
         let transport = Transport::parse(&options.transport, options.unsafe_udp_compatibility)?;
         let server = options.server.destination()?;
         if transport == Transport::LocalUnsafeUdp {
@@ -43,22 +48,44 @@ impl Client {
         options.traffic.validate()?;
         let idle =
             config::validate_limits(options.max_sessions, options.idle_timeout_secs, options.mtu)?;
-        Ok(Self {
-            server,
-            user: User::new(options.username, options.password)?,
-            transport,
-            traffic: options.traffic,
-            multiplexing: options.multiplexing,
-            no_wait: options.no_wait,
-            idle,
-            mtu: options.mtu,
-            cancel: CancellationToken::new(),
-            slots: Arc::new(Semaphore::new(options.max_sessions)),
-            pool: Mutex::new(Vec::new()),
-        })
+        let user = User::new(options.username, options.password)?;
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: false,
+                udp: true,
+            },
+            true,
+            TargetPolicy::Remote,
+            move |host| {
+                Box::pin(async move {
+                    Ok(Arc::new(Self {
+                        server,
+                        user,
+                        transport,
+                        traffic: options.traffic,
+                        multiplexing: options.multiplexing,
+                        no_wait: options.no_wait,
+                        idle,
+                        mtu: options.mtu,
+                        cancel: host.cancel().child_token(),
+                        slots: Arc::new(Semaphore::new(options.max_sessions)),
+                        pool: Mutex::new(HashMap::new()),
+                        host,
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
     async fn connection(&self, context: &ConnectContext) -> Result<Arc<Link>> {
-        let mut pool = self.pool.lock().await;
+        let bucket = {
+            let mut pools = self.pool.lock().await;
+            pools
+                .entry(context.resource_key().clone())
+                .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+                .clone()
+        };
+        let mut pool = bucket.lock().await;
         pool.retain(|link| !link.scope.cancel.is_cancelled());
         if let Some(link) = pool.iter().find(|link| link.reusable()) {
             return Ok(link.clone());
@@ -77,7 +104,7 @@ impl Client {
                 *addresses.first().ok_or(Error::InvalidAddress)?
             }
         };
-        let scope = Scope::new(&self.cancel);
+        let scope = Scope::shared(&self.host);
         let key = Key::new(self.user.clone(), crypto::epoch(crypto::now()?));
         let settings = TcpSettings {
             traffic: self.traffic.clone(),
@@ -123,16 +150,6 @@ impl Client {
                 )?
             }
         };
-        let weak = Arc::downgrade(&link);
-        let request_cancel = context.cancel.clone();
-        link.scope.spawn(async move {
-            request_cancel.cancelled().await;
-            if let Some(link) = weak.upgrade()
-                && link.active.load(Ordering::Acquire) == 0
-            {
-                link.scope.cancel.cancel();
-            }
-        });
         pool.push(link.clone());
         Ok(link)
     }
@@ -165,13 +182,30 @@ impl Drop for Client {
     fn drop(&mut self) {
         self.cancel.cancel();
         if let Ok(pool) = self.pool.try_lock() {
-            for link in pool.iter() {
-                link.stop();
+            for bucket in pool.values() {
+                if let Ok(links) = bucket.try_lock() {
+                    for link in links.iter() {
+                        link.stop();
+                    }
+                }
             }
         }
     }
 }
 impl Outbound for Client {
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.cancel.cancel();
+            let buckets = { std::mem::take(&mut *self.pool.lock().await) };
+            for bucket in buckets.into_values() {
+                let links = { std::mem::take(&mut *bucket.lock().await) };
+                for link in links {
+                    link.scope.shutdown().await;
+                }
+            }
+            Ok(())
+        })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tcp: true,
@@ -186,10 +220,13 @@ impl Outbound for Client {
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
-        Box::pin(
-            async move { Ok(Box::new(self.stream(Some(target), context).await?) as BoxStream) },
-        )
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
+        Box::pin(async move {
+            Ok(kerlico_core::OpenedTcp {
+                stream: Box::new(self.stream(Some(target), context).await?),
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
+        })
     }
     fn associate_udp<'a>(
         &'a self,
@@ -205,7 +242,7 @@ impl Outbound for Client {
         Box::pin(async move {
             if matches!(target.address(), Address::Domain(_)) {
                 return Err(Error::Unsupported(
-                    "固定 Mieru UDP 通道须先由统一出口解析目标；多目标使用 UDP 关联",
+                    "固定 Mieru UDP 通道不支持远端域名目标；多目标使用 UDP 关联",
                 ));
             }
             Ok(udp::fixed(

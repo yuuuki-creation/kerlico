@@ -1,10 +1,10 @@
-use crate::{config, destination};
-use kerlico_config::NodeFactory;
+use crate::{config, credential_io::Candidates, destination};
+use kerlico_config::{NodeBuildContext, NodeFactory};
 use kerlico_core::{
-    AccessService, BoxFuture, BoxStream, ConnectContext, Error, InboundContext, InboundProtocol,
-    Result,
+    BoxFuture, BoxStream, ConnectContext, CredentialManifest, CredentialSet, Error, InboundContext,
+    InboundProtocol, IngressBinding, Result,
 };
-use serde_json::Value;
+use serde::Deserialize;
 use shadowsocks::{
     ServerConfig,
     config::ServerType,
@@ -12,30 +12,111 @@ use shadowsocks::{
     relay::tcprelay::ProxyServerStream,
 };
 use std::sync::Arc;
+use tokio::task::JoinSet;
 
+pub(crate) struct Credential {
+    pub config: Arc<ServerConfig>,
+    pub key: Vec<u8>,
+    pub fingerprints: Vec<[u8; 32]>,
+}
 pub struct Ss2022Node {
     pub(crate) config: Arc<ServerConfig>,
     pub(crate) crypto: SharedContext,
-    fingerprints: Vec<[u8; 32]>,
+    pub(crate) credentials: CredentialSet<Credential>,
+    local: bool,
 }
 impl Ss2022Node {
-    pub fn from_options(options: &Value) -> Result<Self> {
-        let parsed = serde_json::from_value(options.clone())
-            .map_err(|_| Error::Config("SS2022 节点字段不合法".into()))?;
-        let (config, fingerprints) = config::node(parsed)?;
+    pub fn from_context(input: &NodeBuildContext) -> Result<Self> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Options {
+            method: String,
+            #[serde(default)]
+            identity_key: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Native {
+            key: String,
+        }
+        let options: Options = serde_json::from_value(input.options().clone())
+            .map_err(|_| Error::Config("Ss2022 节点字段不合法".into()))?;
+        let mut rows = Vec::new();
+        if input.is_local() {
+            return Err(Error::Config("SS2022 必须配置认证成员".into()));
+        }
+        let mut texts = Vec::new();
+        for value in input.native_credentials() {
+            let native: Native = serde_json::from_value(value.clone())
+                .map_err(|_| Error::Config("SS2022 成员凭据不合法".into()))?;
+            texts.push(native.key);
+        }
+        if texts.is_empty() || texts.len() > 1024 {
+            return Err(Error::Config("SS2022 成员数量不合法".into()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let (config, _) = if let Some(identity) = options.identity_key {
+            config::node(config::NodeOptions {
+                method: options.method.clone(),
+                key: identity,
+                users: texts.clone(),
+            })?
+        } else {
+            config::node(config::NodeOptions {
+                method: options.method.clone(),
+                key: texts[0].clone(),
+                users: Vec::new(),
+            })?
+        };
+        let config = Arc::new(config);
+        let eih = config.user_manager().is_some();
+        for text in texts {
+            let key = config::key(&text, config.method())?;
+            if !seen.insert(key.clone()) {
+                return Err(Error::Config("SS2022 成员密钥重复".into()));
+            }
+            let row_config = if eih {
+                config.clone()
+            } else {
+                Arc::new(
+                    config::node(config::NodeOptions {
+                        method: options.method.clone(),
+                        key: text,
+                        users: Vec::new(),
+                    })?
+                    .0,
+                )
+            };
+            rows.push(Credential {
+                config: row_config,
+                fingerprints: vec![config::fingerprint(&key)],
+                key,
+            });
+        }
+        let local = false;
         Ok(Self {
-            config: Arc::new(config),
+            config,
             crypto: Context::new_shared(ServerType::Server),
-            fingerprints,
+            credentials: input.credentials(rows)?,
+            local,
         })
     }
 }
 impl InboundProtocol for Ss2022Node {
-    fn credential_fingerprints(&self) -> Vec<[u8; 32]> {
-        self.fingerprints.clone()
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = CredentialManifest::new();
+        for (slot, (_, row)) in self.credentials.rows().enumerate() {
+            for fingerprint in &row.fingerprints {
+                manifest.authentication("ss2022", slot, *fingerprint);
+            }
+        }
+        if self.config.user_manager().is_some() {
+            manifest.protection("ss2022", config::fingerprint(self.config.key()));
+        }
+        manifest
     }
     fn requires_loopback(&self) -> bool {
-        false
+        self.local
     }
     fn supports_udp(&self) -> bool {
         true
@@ -43,47 +124,102 @@ impl InboundProtocol for Ss2022Node {
     fn handle_udp<'a>(
         &'a self,
         socket: Arc<tokio::net::UdpSocket>,
-        access: Arc<dyn AccessService>,
+        ingress: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(self.serve_udp(socket, access, context))
+        Box::pin(self.serve_udp(socket, ingress, context))
     }
     fn handle<'a>(
         &'a self,
         stream: BoxStream,
-        access: Arc<dyn AccessService>,
+        ingress: IngressBinding,
         context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let handshake = ConnectContext {
-                cancel: context.cancel.clone(),
-                timeout: context.connect_timeout,
-            };
-            let (local, remote) = handshake
-                .run(async {
-                    let mut local = ProxyServerStream::from_stream_with_user_manager(
-                        self.crypto.clone(),
+            let handshake =
+                ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
+            let candidates = Candidates::new(stream);
+            let mut tasks = JoinSet::new();
+            let mut configurations = Vec::new();
+            for (_, row) in self.credentials.rows() {
+                if !configurations
+                    .iter()
+                    .any(|config: &Arc<ServerConfig>| Arc::ptr_eq(config, &row.config))
+                {
+                    configurations.push(row.config.clone());
+                }
+            }
+            for config in configurations {
+                let stream = candidates.reader();
+                let crypto = Context::new_shared(ServerType::Server);
+                let owner = context.tasks.clone();
+                let task = owner.spawn_tracked(async move {
+                    let mut stream = ProxyServerStream::from_stream_with_user_manager(
+                        crypto,
                         stream,
-                        self.config.method(),
-                        self.config.key(),
-                        self.config.clone_user_manager(),
+                        config.method(),
+                        config.key(),
+                        config.clone_user_manager(),
                     );
-                    let target = destination(&local.handshake().await?)?;
-                    let remote = access.connect_tcp(&target, &handshake).await?;
-                    Ok((Box::new(local) as BoxStream, remote))
+                    let target = destination(&stream.handshake().await?)?;
+                    let key = stream.user_key().unwrap_or(config.key()).to_vec();
+                    Ok::<_, Error>((key, Box::new(stream) as BoxStream, target))
+                })?;
+                tasks.spawn(async move {
+                    task.await
+                        .unwrap_or(Err(Error::Protocol("认证任务异常退出")))
+                });
+            }
+            let selected = handshake
+                .run(async {
+                    while let Some(result) = tasks.join_next().await {
+                        if let Ok(Ok(result)) = result {
+                            return Ok(result);
+                        }
+                    }
+                    Err(Error::Rejected)
                 })
-                .await?;
-            kerlico_core::relay_tcp(local, remote, context.idle_timeout, context.cancel).await
+                .await;
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+            let (key, stream, target) = selected?;
+            let nonce = candidates.prefix(
+                if self.config.method().is_aead() || self.config.method().is_aead_2022() {
+                    self.config.method().salt_len()
+                } else {
+                    self.config.method().iv_len()
+                },
+            )?;
+            self.crypto
+                .check_nonce_replay(self.config.method(), &nonce)?;
+            candidates.accept();
+            let access = if self.local {
+                ingress.local(&context)?
+            } else {
+                let slot = self
+                    .credentials
+                    .rows()
+                    .find(|(_, row)| row.key == key)
+                    .map(|(slot, _)| slot)
+                    .ok_or(Error::Rejected)?;
+                ingress
+                    .authenticated(self.credentials.verified(&slot, ())?, &context)?
+                    .0
+            };
+            let remote = access.connect_tcp(&target, &handshake).await?;
+            kerlico_core::relay_tcp(stream, remote, context.idle_timeout, context.cancel).await
         })
     }
 }
-
 pub struct Ss2022NodeFactory;
 impl NodeFactory for Ss2022NodeFactory {
     fn kind(&self) -> &'static str {
         "ss2022"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn InboundProtocol>> {
-        Ok(Arc::new(Ss2022Node::from_options(options)?))
+    fn allows_local_inbound(&self) -> bool {
+        false
+    }
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        Ok(Arc::new(Ss2022Node::from_context(input)?))
     }
 }

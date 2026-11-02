@@ -36,18 +36,21 @@ pub(super) async fn read_loop(
 ) -> Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     let mut frames = 0usize;
+    let mut bytes = 0usize;
     loop {
-        if frames == 8 {
+        if frames == 8 || bytes >= super::SEND_CHUNK {
             // 载体读取可能连续命中内存缓冲；给同一driver中的写/控制方向机会。
             tokio::task::yield_now().await;
             frames = 0;
+            bytes = 0;
         }
         let reading = frame(&mut reader);
         tokio::pin!(reading);
         let frame = loop {
-            tokio::select! {biased;_=shared.cancel.cancelled()=>return Err(Error::Cancelled),result=&mut reading=>break result?,_=ticker.tick()=>shared.gc()}
+            tokio::select! {biased;_=shared.cancel.cancelled()=>return Err(Error::Cancelled),_=ticker.tick()=>shared.gc(),result=&mut reading=>break result?}
         };
         frames += 1;
+        bytes = bytes.saturating_add(frame.payload.len());
         if frame.id == 0
             && !matches!(frame.kind, PING | PONG)
             && !(frame.kind == DATA && frame.payload.is_empty())
@@ -231,10 +234,11 @@ pub(super) async fn write_loop(
                 // 一旦开始，不因其他逻辑流事件取消半个帧或加密记录。
                 let result = tokio::select! {biased;_=shared.cancel.cancelled()=>return Err(Error::Cancelled),result=send(&mut writer,&frame)=>result};
                 let failed = result.is_err();
-                if !failed && frame.kind == FIN
+                if !failed
+                    && frame.kind == FIN
                     && let Some(state) = frame.owner.as_ref().and_then(std::sync::Weak::upgrade)
                 {
-                        shared.committed_fin(frame.id, &state);
+                    shared.committed_fin(frame.id, &state);
                 }
                 if let Some(ack) = frame.ack.take() {
                     let _ = ack.send(result);

@@ -4,8 +4,9 @@ use crate::{
 };
 use bytes::BytesMut;
 use kerlico_core::{
-    AccessService, BoxFuture, CancellationToken, ConnectContext, DatagramChannel, DatagramReceiver,
-    DatagramSender, Destination, Error, InboundContext, NodeEvent, NodeObserver, Result,
+    BoxFuture, CancellationToken, ConnectContext, DatagramChannel, DatagramReceiver,
+    DatagramSender, Destination, Error, InboundContext, IngressBinding, NodeEvent, NodeObserver,
+    PeerSession, Result,
 };
 use shadowsocks::{
     ServerConfig,
@@ -143,6 +144,7 @@ impl DatagramReceiver for ClientReceiver {
 struct Association {
     peer: SocketAddr,
     target: Destination,
+    credential: Vec<u8>,
 }
 struct Events(Arc<dyn NodeObserver>);
 impl Drop for Events {
@@ -156,7 +158,7 @@ impl ShadowsocksNode {
     pub async fn serve_udp(
         &self,
         socket: Arc<UdpSocket>,
-        access: Arc<dyn AccessService>,
+        ingress: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
         let mut sessions: HashMap<Association, mpsc::Sender<Vec<u8>>> = HashMap::new();
@@ -172,32 +174,42 @@ impl ShadowsocksNode {
                 _ = maintenance.tick() => { sessions.retain(|_, sender| !sender.is_closed()); },
                 received = socket.recv_from(&mut wire) => {
                     let (len, peer) = match received { Ok(value) => value, Err(error) => break Err(error.into()) };
-                    let salt_len = nonce_len(self.config.method());
-                    if len < salt_len { continue; }
-                    let nonce = wire[..salt_len].to_vec();
-                    let Ok((count, target, None)) = crypto_io::decrypt_client_payload(&self.crypto, self.config.method(), self.config.key(), &mut wire[..len], None) else { continue; };
-                    if count > context.max_datagram_size.min(MAX_PACKET) { continue; }
-                    let Ok(target) = destination(&target) else { continue; };
-                    if !replay.accept(&nonce) { context.events.record(NodeEvent::Dropped); continue; }
-                    let key = Association { peer, target: target.clone() };
+                    let configurations: Vec<_> = if self.credentials.is_empty() { vec![(None, self.config.clone())] } else { self.credentials.rows().map(|(slot, row)| (Some(slot), row.config.clone())).collect() };
+                    let mut decoded = None;
+                    for (slot, config) in configurations {
+                        let salt_len = nonce_len(config.method()); if len < salt_len { continue; }
+                        let nonce = wire[..salt_len].to_vec(); let mut bytes = wire[..len].to_vec();
+                        if let Ok((count, target, None)) = crypto_io::decrypt_client_payload(&self.crypto, config.method(), config.key(), &mut bytes, None) {
+                            if count > context.max_datagram_size.min(MAX_PACKET) { continue; }
+                            let Ok(target) = destination(&target) else { continue; };
+                            let access = match slot { Some(slot) => ingress.authenticated(self.credentials.verified(&slot, ())?, &{ let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer); peer_context })?.0, None => ingress.local(&{ let mut peer_context = context.clone(); peer_context.peer_addr = Some(peer); peer_context })? };
+                            bytes.truncate(count); decoded = Some((config, nonce, target, bytes, access)); break;
+                        }
+                    }
+                    let Some((config, nonce, target, packet, access)) = decoded else { continue; };
+                    let scoped_nonce = if nonce.is_empty() { nonce } else { let mut scoped = config.key().to_vec(); scoped.extend_from_slice(&nonce); scoped };
+                    if !replay.accept(&scoped_nonce) { context.events.record(NodeEvent::Dropped); continue; }
+                    let key = Association { peer, target: target.clone(), credential: config.key().to_vec() };
                     if let Some(sender) = sessions.get(&key) {
-                        if sender.try_send(wire[..count].to_vec()).is_err() { context.events.record(NodeEvent::Dropped); }
+                        if sender.try_send(packet.clone()).is_err() { context.events.record(NodeEvent::Dropped); }
                         continue;
                     }
                     sessions.retain(|_, sender| !sender.is_closed());
                     if sessions.len() >= context.max_streams { context.events.record(NodeEvent::Dropped); continue; }
                     let Ok(lease) = context.stream_budget.try_acquire() else { context.events.record(NodeEvent::Dropped); continue; };
                     let (sender, receiver) = mpsc::channel(32);
-                    if sender.try_send(wire[..count].to_vec()).is_err() { continue; }
+                    if sender.try_send(packet.clone()).is_err() { continue; }
                     sessions.insert(key, sender);
                     context.events.record(NodeEvent::Accepted);
-                    let config = self.config.clone(); let crypto = self.crypto.clone();
+                    let crypto = self.crypto.clone();
                     let socket = socket.clone(); let access = access.clone(); let context = context.clone();
-                    tasks.spawn(async move {
+                    let owner=context.tasks.clone();
+                    let task=owner.spawn_tracked(async move {
                         let _lease = lease; let _events = Events(context.events.clone());
                         let events = context.events.clone();
                         if target_session(socket, access, context, config, crypto, peer, target, receiver).await.is_err() { events.record(NodeEvent::Failed); }
-                    });
+                    })?;
+                    tasks.spawn(async move {let _=task.await;});
                 },
             }
         };
@@ -217,7 +229,7 @@ impl ShadowsocksNode {
 #[allow(clippy::too_many_arguments)]
 async fn target_session(
     socket: Arc<UdpSocket>,
-    access: Arc<dyn AccessService>,
+    access: PeerSession,
     context: InboundContext,
     config: Arc<ServerConfig>,
     crypto: SharedContext,
@@ -225,37 +237,48 @@ async fn target_session(
     target: Destination,
     mut packets: mpsc::Receiver<Vec<u8>>,
 ) -> Result<()> {
-    let budget = ConnectContext {
-        cancel: context.cancel.clone(),
-        timeout: context.connect_timeout,
-    };
+    let budget = ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
     let channel = budget.run(access.connect_udp(&target, &budget)).await?;
-    let mut sender = channel.sender;
-    let mut receiver = channel.receiver;
+    let (mut sender, mut receiver, completion) = channel.into_parts();
     let target = address(&target);
+    let mut accepting_packets = true;
+    let result = async {
     let timer = tokio::time::sleep(context.idle_timeout);
     tokio::pin!(timer);
     loop {
+        let received={let receiving=receiver.recv();tokio::pin!(receiving);loop {
         tokio::select! {
             biased;
-            _ = context.cancel.cancelled() => return Ok(()),
-            _ = &mut timer => return Ok(()),
-            packet = packets.recv() => {
-                let Some(packet) = packet else { return Ok(()); };
-                tokio::select! { biased; _ = context.cancel.cancelled() => return Ok(()), result = tokio::time::timeout(context.idle_timeout, sender.send(&packet)) => result.map_err(|_| Error::Timeout)?? }
+            _ = context.cancel.cancelled() => return Err(Error::Cancelled),
+            _ = &mut timer => return Err(Error::Timeout),
+            packet = packets.recv(), if accepting_packets => {
+                let Some(packet) = packet else { accepting_packets = false; continue; };
+                tokio::select! { biased; _ = context.cancel.cancelled() => return Err(Error::Cancelled), result = tokio::time::timeout(context.idle_timeout, sender.send(&packet)) => result.map_err(|_| Error::Timeout)?? }
                 timer.as_mut().reset(Instant::now() + context.idle_timeout);
             },
-            packet = receiver.recv() => {
-                let Some(packet) = packet? else { return Ok(()); };
+            packet = &mut receiving => break packet?,
+        }
+        }};
+                let Some(packet) = received else { return Ok(()); };
                 if packet.len() > context.max_datagram_size.min(MAX_PACKET) { return Err(Error::ResourceLimit); }
                 let mut wire = BytesMut::new();
                 crypto_io::encrypt_server_payload(&crypto, config.method(), config.key(), &target, &UdpSocketControlData::default(), &packet, &mut wire);
                 if wire.len() > MAX_WIRE { return Err(Error::ResourceLimit); }
-                tokio::select! { biased; _ = context.cancel.cancelled() => return Ok(()), sent = tokio::time::timeout(context.idle_timeout, socket.send_to(&wire, peer)) => {
+                tokio::select! { biased; _ = context.cancel.cancelled() => return Err(Error::Cancelled), sent = tokio::time::timeout(context.idle_timeout, socket.send_to(&wire, peer)) => {
                     if sent.map_err(|_| Error::Timeout)?? != wire.len() { return Err(protocol_error()); }
                 } }
                 timer.as_mut().reset(Instant::now() + context.idle_timeout);
-            },
-        }
     }
+}.await;
+    completion.finish(match &result {
+        Ok(()) => kerlico_core::FlowOutcome::ProtocolEnd,
+        Err(error) => {
+            kerlico_core::FlowOutcome::Failed(kerlico_core::FlowFailure::from_error(error))
+        }
+    });
+    result
 }
+
+#[cfg(test)]
+#[path = "udp_flow_tests.rs"]
+mod flow_tests;

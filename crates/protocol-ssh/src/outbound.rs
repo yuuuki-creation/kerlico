@@ -2,10 +2,10 @@ use crate::{
     config::{Authentication, Options, Prepared},
     transport::{ConnectionGuard, Transport},
 };
-use kerlico_config::OutboundFactory;
+use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
-    BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel, Destination, Error,
-    Outbound, Result,
+    BoxFuture, BoxStream, CancellationToken, Capabilities, ConnectContext, DatagramChannel,
+    Destination, Error, Outbound, Result,
 };
 use russh::{
     ChannelStream, client,
@@ -56,12 +56,18 @@ fn failure(error: russh::Error) -> Error {
     }
 }
 
-struct SshOutbound(Prepared);
+struct SshOutbound {
+    prepared: Arc<Prepared>,
+    drivers: Arc<crate::runtime::Drivers>,
+}
+impl Drop for SshOutbound {
+    fn drop(&mut self) {
+        self.drivers.cancel().cancel();
+    }
+}
 struct SshStream {
-    // 先取消底层连接，再释放通道和库句柄，避免后台 SSH actor 脱离所属流。
     _guard: ConnectionGuard,
     channel: ChannelStream<client::Msg>,
-    _session: client::Handle<VerifyHost>,
 }
 impl AsyncRead for SshStream {
     fn poll_read(
@@ -96,77 +102,52 @@ impl Outbound for SshOutbound {
             udp: false,
         }
     }
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.drivers.shutdown())
+    }
     fn connect_tcp<'a>(
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
+    ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
-            context
-                .run(async {
-                    let stream =
-                        TcpStream::connect((self.0.server.host().as_str(), self.0.server.port()))
-                            .await?;
-                    stream.set_nodelay(true)?;
-                    let guard = ConnectionGuard(context.cancel.child_token());
-                    let transport = Transport::new(stream, &guard.0);
-                    let mut session = client::connect_stream(
-                        self.0.ssh.clone(),
-                        transport,
-                        VerifyHost {
-                            pins: self.0.pins.clone(),
-                        },
-                    )
-                    .await
-                    .map_err(failure)?;
-                    let authenticated = match &self.0.auth {
-                        Authentication::Password(password) => session
-                            .authenticate_password(&self.0.username, password)
-                            .await
-                            .map_err(failure)?,
-                        Authentication::Key(key) => {
-                            let hash = if key.algorithm().is_rsa() {
-                                Some(
-                                    session
-                                        .best_supported_rsa_hash()
-                                        .await
-                                        .map_err(failure)?
-                                        .flatten()
-                                        .ok_or(Error::Unsupported(
-                                            "SSH 对端未提供 RSA SHA-2 签名",
-                                        ))?,
-                                )
-                            } else {
-                                None
-                            };
-                            session
-                                .authenticate_publickey(
-                                    &self.0.username,
-                                    PrivateKeyWithHashAlg::new(key.clone(), hash),
-                                )
-                                .await
-                                .map_err(failure)?
-                        }
-                    };
-                    if !authenticated.success() {
-                        return Err(Error::Rejected);
-                    }
-                    let channel = session
-                        .channel_open_direct_tcpip(
-                            target.host(),
-                            u32::from(target.port()),
-                            "0.0.0.0",
-                            0,
-                        )
-                        .await
-                        .map_err(failure)?;
-                    Ok(Box::new(SshStream {
-                        _guard: guard,
-                        channel: channel.into_stream(),
-                        _session: session,
-                    }) as BoxStream)
-                })
-                .await
+            let guard = ConnectionGuard(context.cancel.child_token());
+            let cancel = guard.0.clone();
+            let service = self.drivers.cancel();
+            let (send, receive) = tokio::sync::oneshot::channel();
+            let prepared = self.prepared.clone();
+            let target = target.clone();
+            let operation = context.clone();
+            let owner = self.drivers.clone();
+            let service_for_driver = service.clone();
+            self.drivers.spawn(async move {
+                russh_util::runtime::scope(
+                    owner,
+                    drive(
+                        prepared,
+                        target,
+                        operation,
+                        cancel,
+                        service_for_driver,
+                        send,
+                    ),
+                )
+                .await;
+            })?;
+            let channel = context.run(async {
+                tokio::select! {
+                    biased;
+                    _ = service.cancelled() => Err(Error::Cancelled),
+                    result = receive => result.map_err(|_| Error::Protocol("SSH驱动未交付通道"))?,
+                }
+            }).await?;
+            Ok(kerlico_core::OpenedTcp {
+                stream: Box::new(SshStream {
+                    _guard: guard,
+                    channel,
+                }),
+                info: kerlico_core::TcpConnectInfo::unknown(),
+            })
         })
     }
     fn connect_udp<'a>(
@@ -178,14 +159,151 @@ impl Outbound for SshOutbound {
     }
 }
 
+async fn interrupted(
+    context: &ConnectContext,
+    service: &CancellationToken,
+    cancel: &CancellationToken,
+) -> Error {
+    tokio::select! {
+        biased;
+        _ = service.cancelled() => Error::Cancelled,
+        _ = cancel.cancelled() => Error::Cancelled,
+        result = context.run(std::future::pending::<Result<()>>()) => result.err().unwrap_or(Error::Cancelled),
+    }
+}
+
+async fn channel(
+    session: &mut client::Handle<VerifyHost>,
+    prepared: &Prepared,
+    target: &Destination,
+) -> Result<ChannelStream<client::Msg>> {
+    let authenticated = match &prepared.auth {
+        Authentication::Password(password) => session
+            .authenticate_password(&prepared.username, password)
+            .await
+            .map_err(failure)?,
+        Authentication::Key(key) => {
+            let hash = if key.algorithm().is_rsa() {
+                Some(
+                    session
+                        .best_supported_rsa_hash()
+                        .await
+                        .map_err(failure)?
+                        .flatten()
+                        .ok_or(Error::Unsupported("SSH 对端未提供 RSA SHA-2 签名"))?,
+                )
+            } else {
+                None
+            };
+            session
+                .authenticate_publickey(
+                    &prepared.username,
+                    PrivateKeyWithHashAlg::new(key.clone(), hash),
+                )
+                .await
+                .map_err(failure)?
+        }
+    };
+    if !authenticated.success() {
+        return Err(Error::Rejected);
+    }
+    session
+        .channel_open_direct_tcpip(target.host(), u32::from(target.port()), "0.0.0.0", 0)
+        .await
+        .map(|channel| channel.into_stream())
+        .map_err(failure)
+}
+
+async fn drive(
+    prepared: Arc<Prepared>,
+    target: Destination,
+    context: ConnectContext,
+    cancel: CancellationToken,
+    service: CancellationToken,
+    ready: tokio::sync::oneshot::Sender<Result<ChannelStream<client::Msg>>>,
+) {
+    let server_host = prepared.server.host();
+    let socket = tokio::select! {
+        biased;
+        error = interrupted(&context, &service, &cancel) => Err(error),
+        result = TcpStream::connect((server_host.as_str(), prepared.server.port())) => result.map_err(Error::Io),
+    };
+    let stream = match socket {
+        Ok(stream) => stream,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
+    if let Err(error) = stream.set_nodelay(true) {
+        let _ = ready.send(Err(Error::Io(error)));
+        return;
+    }
+    let mut handshake = Box::pin(client::connect_stream(
+        prepared.ssh.clone(),
+        Transport::new(stream, &cancel),
+        VerifyHost {
+            pins: prepared.pins.clone(),
+        },
+    ));
+    let connected = tokio::select! {
+        biased;
+        error = interrupted(&context, &service, &cancel) => {
+            cancel.cancel();
+            let _ = handshake.await;
+            Err(error)
+        },
+        result = &mut handshake => result.map_err(failure),
+    };
+    let mut session = match connected {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
+    let opened = tokio::select! {
+        biased;
+        error = interrupted(&context, &service, &cancel) => Err(error),
+        result = channel(&mut session, &prepared, &target) => result,
+    };
+    let failed = opened.is_err();
+    if ready.send(opened).is_err() || failed {
+        cancel.cancel();
+    }
+    tokio::select! {
+        biased;
+        _ = service.cancelled() => { cancel.cancel(); let _ = session.await; },
+        _ = cancel.cancelled() => { let _ = session.await; },
+        _ = &mut session => {},
+    }
+}
+
 pub struct SshFactory;
 impl OutboundFactory for SshFactory {
     fn kind(&self) -> &'static str {
         "ssh"
     }
-    fn build(&self, options: &Value) -> Result<Arc<dyn Outbound>> {
+    fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         let options: Options = serde_json::from_value(options.clone())
             .map_err(|_| Error::Config("SSH 出站字段不合法".into()))?;
-        Ok(Arc::new(SshOutbound(options.prepare()?)))
+        let prepared = options.prepare()?;
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp: false,
+            },
+            false,
+            kerlico_core::TargetPolicy::Remote,
+            move |host| {
+                Box::pin(async move {
+                    Ok(Arc::new(SshOutbound {
+                        prepared: Arc::new(prepared),
+                        drivers: crate::runtime::Drivers::new(host),
+                    }) as Arc<dyn Outbound>)
+                })
+            },
+        ))
     }
 }

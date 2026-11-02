@@ -2,6 +2,7 @@
 name = "kerlico"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
@@ -28,6 +29,8 @@ default = [
     "protocol-trusttunnel",
     "protocol-naive",
     "protocol-sudoku",
+    "protocol-tor",
+    "protocol-wireguard",
 ]
 protocol-vless = ["dep:kerlico-vless"]
 protocol-anytls = ["dep:kerlico-anytls"]
@@ -50,6 +53,8 @@ protocol-gost-relay = ["dep:kerlico-gost-relay"]
 protocol-trusttunnel = ["dep:kerlico-trusttunnel"]
 protocol-naive = ["dep:kerlico-naive"]
 protocol-sudoku = ["dep:kerlico-sudoku"]
+protocol-tor = ["dep:kerlico-tor"]
+protocol-wireguard = ["dep:kerlico-wireguard"]
 anytls = ["protocol-anytls"]
 ss2022 = ["protocol-ss2022"]
 
@@ -79,8 +84,11 @@ kerlico-gost-relay = { workspace = true, optional = true }
 kerlico-trusttunnel = { workspace = true, optional = true }
 kerlico-naive = { workspace = true, optional = true }
 kerlico-sudoku = { workspace = true, optional = true }
+kerlico-tor = { workspace = true, optional = true }
+kerlico-wireguard = { workspace = true, optional = true }
 tokio.workspace = true
 clap.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

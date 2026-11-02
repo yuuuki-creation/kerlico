@@ -1,6 +1,5 @@
-use kerlico_config::OutboundFactory;
-use kerlico_core::{CancellationToken, ConnectContext, Destination, Error, Outbound};
-use kerlico_egress::Egress;
+mod support;
+use kerlico_core::{CancellationToken, ConnectContext, Destination, Error};
 use kerlico_ssh::SshFactory;
 use russh::{
     keys::{Algorithm, EcdsaCurve, HashAlg, PrivateKey, PublicKey, ssh_key::LineEnding},
@@ -186,11 +185,11 @@ async fn echo(host: &str) -> (SocketAddr, tokio::task::JoinHandle<()>) {
 async fn password_all_families_domain_and_half_close() {
     for node_host in ["127.0.0.1", "::1"] {
         let fixture = Fixture::new(node_host, "fixture-password", vec![]).await;
-        let out = Arc::new(Egress::new(
-            SshFactory
-                .build(&fixture.options(json!({"type":"password","password":"fixture-password"})))
-                .unwrap(),
-        ));
+        let out = support::outbound(
+            &SshFactory,
+            &fixture.options(json!({"type":"password","password":"fixture-password"})),
+        )
+        .unwrap();
         for (host, target_host) in [
             ("127.0.0.1", "127.0.0.1"),
             ("::1", "::1"),
@@ -204,7 +203,8 @@ async fn password_all_families_domain_and_half_close() {
                     &context,
                 )
                 .await
-                .unwrap();
+                .unwrap()
+                .stream;
             let payload = vec![0x51; 262_145];
             stream.write_all(&payload).await.unwrap();
             stream.shutdown().await.unwrap();
@@ -250,7 +250,7 @@ async fn public_key_algorithms_and_encrypted_private_key() {
             if encrypted {
                 auth["passphrase"] = json!("synthetic-passphrase");
             }
-            let out = SshFactory.build(&fixture.options(auth)).unwrap();
+            let out = support::outbound(&SshFactory, &fixture.options(auth)).unwrap();
             let (address, peer) = echo("127.0.0.1").await;
             let mut stream = out
                 .connect_tcp(
@@ -258,7 +258,8 @@ async fn public_key_algorithms_and_encrypted_private_key() {
                     &ConnectContext::new(Duration::from_secs(5)),
                 )
                 .await
-                .unwrap();
+                .unwrap()
+                .stream;
             stream.write_all(b"key-auth").await.unwrap();
             stream.shutdown().await.unwrap();
             let mut bytes = Vec::new();
@@ -289,7 +290,7 @@ async fn rejects_wrong_identity_and_host_without_target_access() {
         fixture.options(json!({"type":"publickey","private_key_pem":wrong_key.to_openssh(LineEnding::LF).unwrap().to_string()})),
     ].into_iter().enumerate() {
         let passwords_before=fixture.counts.passwords.load(Ordering::SeqCst);
-        assert!(SshFactory.build(&options).unwrap().connect_tcp(&target,&ConnectContext::new(Duration::from_secs(2))).await.is_err());fixture.drained().await;assert_eq!(fixture.counts.requests.load(Ordering::SeqCst),0);
+        assert!(support::outbound(&SshFactory,&options).unwrap().connect_tcp(&target,&ConnectContext::new(Duration::from_secs(2))).await.is_err());fixture.drained().await;assert_eq!(fixture.counts.requests.load(Ordering::SeqCst),0);
         if index>=2 {assert_eq!(fixture.counts.passwords.load(Ordering::SeqCst),passwords_before);}
     }
     let before = fixture.counts.passwords.load(Ordering::SeqCst);
@@ -301,7 +302,7 @@ async fn rejects_wrong_identity_and_host_without_target_access() {
             .to_string(),
         fixture.pin
     ]);
-    let out = SshFactory.build(&pins).unwrap();
+    let out = support::outbound(&SshFactory, &pins).unwrap();
     assert!(matches!(
         out.connect_tcp(&target, &ConnectContext::new(Duration::from_secs(2)))
             .await,
@@ -324,7 +325,7 @@ async fn timeout_and_drop_close_actual_transport() {
             .unwrap();
     });
     let options = json!({"server":{"host":"127.0.0.1","port":port},"username":"proxy-test","host_key_sha256":["SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"auth":{"type":"password","password":"synthetic"}});
-    let out = SshFactory.build(&options).unwrap();
+    let out = support::outbound(&SshFactory, &options).unwrap();
     let target = Destination::new("127.0.0.1", 9).unwrap();
     assert!(matches!(
         out.connect_tcp(&target, &ConnectContext::new(Duration::from_millis(60)))
@@ -339,9 +340,11 @@ async fn timeout_and_drop_close_actual_transport() {
         Err(Error::Cancelled)
     ));
     let fixture = Fixture::new("127.0.0.1", "password", vec![]).await;
-    let out = SshFactory
-        .build(&fixture.options(json!({"type":"password","password":"password"})))
-        .unwrap();
+    let out = support::outbound(
+        &SshFactory,
+        &fixture.options(json!({"type":"password","password":"password"})),
+    )
+    .unwrap();
     let (address, peer) = echo("127.0.0.1").await;
     let context = ConnectContext::new(Duration::from_secs(2));
     let stream = out
@@ -350,7 +353,8 @@ async fn timeout_and_drop_close_actual_transport() {
             &context,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     drop(stream);
     fixture.drained().await;
     peer.await.unwrap();
@@ -367,9 +371,11 @@ async fn cancellation_and_parallel_credentials_stay_scoped() {
         } else {
             "second-password"
         };
-        let out = SshFactory
-            .build(&fixture.options(json!({"type":"password","password":password})))
-            .unwrap();
+        let out = support::outbound(
+            &SshFactory,
+            &fixture.options(json!({"type":"password","password":password})),
+        )
+        .unwrap();
         for index in 0..4 {
             let out = out.clone();
             tasks.spawn(async move {
@@ -381,7 +387,8 @@ async fn cancellation_and_parallel_credentials_stay_scoped() {
                         &context,
                     )
                     .await
-                    .unwrap();
+                    .unwrap()
+                    .stream;
                 let payload = vec![index; 16_385];
                 stream.write_all(&payload).await.unwrap();
                 stream.shutdown().await.unwrap();
@@ -398,9 +405,11 @@ async fn cancellation_and_parallel_credentials_stay_scoped() {
     }
     first.drained().await;
     second.drained().await;
-    let out = SshFactory
-        .build(&first.options(json!({"type":"password","password":"first-password"})))
-        .unwrap();
+    let out = support::outbound(
+        &SshFactory,
+        &first.options(json!({"type":"password","password":"first-password"})),
+    )
+    .unwrap();
     let (address, peer) = echo("127.0.0.1").await;
     let context = ConnectContext::new(Duration::from_secs(2));
     let mut stream = out
@@ -409,7 +418,8 @@ async fn cancellation_and_parallel_credentials_stay_scoped() {
             &context,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .stream;
     context.cancel.cancel();
     let mut bytes = Vec::new();
     let _ = timeout(Duration::from_secs(1), stream.read_to_end(&mut bytes))
@@ -455,9 +465,9 @@ fn config_unknown_fields_key_permissions_and_missing_capabilities() {
             value
         },
     ] {
-        assert!(SshFactory.build(&value).is_err());
+        assert!(support::outbound(&SshFactory, &value).is_err());
     }
-    let out = SshFactory.build(&base).unwrap();
+    let out = support::outbound(&SshFactory, &base).unwrap();
     assert!(out.capabilities().tcp_eof);
     assert!(!out.capabilities().udp);
     assert!(!out.supports_udp_association());
@@ -471,8 +481,8 @@ fn config_unknown_fields_key_permissions_and_missing_capabilities() {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(SshFactory.build(&value).is_err());
+        assert!(support::outbound(&SshFactory, &value).is_err());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    assert!(SshFactory.build(&value).is_ok());
+    assert!(support::outbound(&SshFactory, &value).is_ok());
 }

@@ -91,9 +91,11 @@ REF-001–008 保留首轮**设计草案**，后续条目单独标明实现与�
 
 ## REF-009 双端节点与统一出口
 
-**依据：**用户对独立 IPv4/IPv6 节点、独立凭据和统一目标访问的明确确认，见 [0005](../docs/decisions/0005-separate-nodes-unified-egress.md)、[0006](../docs/decisions/0006-unified-client-server-core.md)。注册与角色分离继续参考 REF-003。
+**依据：**用户对独立IPv4/IPv6节点、独立凭据及双端一体的确认见[0005](../docs/decisions/0005-separate-nodes-unified-egress.md)、[0006](../docs/decisions/0006-unified-client-server-core.md)。2026-11-01进一步明确[0009唯一共享出站调度器](../docs/decisions/0009-global-egress-dispatcher.md)和[0010节点模式、设备WARP及远端透传](../docs/decisions/0010-node-egress-modes-and-warp.md)。注册与角色分离继续参考REF-003。
 
-**实现：**`core-api` 的 `InboundProtocol`/`AccessService`、配置层独立节点工厂、引擎按能力绑定 TCP/UDP/虚拟入口、`egress` 的系统解析与 IPv4 优先；[接口](../docs/interfaces/node-egress.md)。节点凭据、身份池和配额按实例隔离，网站地址族不跟随接入地址族。
+**现有实现：**`core-api`的`InboundProtocol`/`AccessService`、独立节点工厂及按能力绑定入口见[接口](../docs/interfaces/node-egress.md)。现有Egress逐节点装配，对代理网站域名本地解析并IPv4优先；节点凭据、身份池和配额按实例隔离。这些源码事实不等于已满足新共享所有权。
+
+**目标及待验：**共享调度器先区分本地和远端。本地按节点IPv4 only、IPv6 only或双栈模式出网，双栈缺族由设备共享WARP补齐；远端保留网站原目标，自行决定DNS和地址族，失败不在本机换出口。一个命名出站只构造一次，多目标UDP关联固定出站；相关[目标流程](../docs/node-egress.md)、设备生命周期及透传迁移尚未实现或验证。
 
 **验证：**AnyTLS 与 SS2022 的正式 CLI 集成已覆盖单进程双角色、独立双栈节点和两类业务目标；VLESS 扩展仍按其测试快照登记。尚未据此实现 DNS/Fake-IP 或完整路由语言。
 
@@ -202,3 +204,11 @@ REF-001–008 保留首轮**设计草案**，后续条目单独标明实现与�
 **固定证据与实现：**P-21、固定sing-box/官方Naive/forwardproxy/Cronet，见[研究](research_notes/naive.md)。双端H1/H2/H3、应用padding、UoT和实际HTTP凭据域已写；应用协议和Chrome网络栈行为分开，不宣称根证书/CT/CRLSet/ECH/指纹等价。
 
 **验证状态：**26项Rust/严格检查、156配置900常规及同进程28检查通过；证书资产迁移后26项/6资产控制复验通过，原资产0/65507/EOF边界单列，见[测试](../docs/testing/naive.md)。不外推整树或正式发行。
+
+## REF-027 多用户、流量带宽与访问记录
+
+**固定证据：**Xray-core v26.10.31，SHA为`a4a3dff5b20c2faae567b742c172c7b95e75c083`。AccessMessage、日志输出、Dispatcher用户计数、入出站载体包装、内存计数、在线引用和查询导出见[研究](research_notes/xray-statistics-and-access.md)。该新增基线不覆盖原v26.10.29研究。
+
+**已确认需求与适配建议：**用户确认单节点多用户、用户名默认UUID后缀、独立账户及逐用户流量/带宽、域名/IP访问记录，并要求相关Xray能力适配本结构。采用范围见[0011](../docs/decisions/0011-users-statistics-and-access-records.md)，[主设计](../docs/statistics-and-users.md)建议可信身份贯穿共享Dispatcher，业务量唯一计量后按用户/节点/出站归集，带宽采样与持久历史独立，原目标、业务IP与代理端点不混淆。
+
+**待验证：**多用户与复用归属、TCP/UDP单次计量、各维度合计、时间及峰值、在线引用、持久化水位去重、重启及存储故障、清零不删除历史和远端未知IP不补DNS。当前仅设计，没有新统计实现或通过结果。

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """专用worker的Naive双角色互通；独立保存原资产、固定源码导出参照与包长结果。"""
+from config_v2 import bind_members
 import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor
@@ -261,7 +262,7 @@ def run_case(args, root, cert, key, ca, xdg, kind, direction, transport, host, t
             stack.enter_context(h.serve(UdpServer6(("::1", udp_port), h.UdpEcho)))
             stack.enter_context(h.serve(h.TcpServer6(("::1", eof_port), EofEcho)))
         node_port, tcp_local, udp_local, eof_local = free(), free(), free(), free()
-        own = {"version": 1, "limits": {"connect_timeout_ms": 4000, "idle_timeout_ms": 10000, "drain_timeout_ms": 500, "max_sessions": 128}, "outbounds": [], "inbounds": []}
+        own = {"version": 2, "limits": {"connect_timeout_ms": 4000, "idle_timeout_ms": 10000, "drain_timeout_ms": 500, "max_sessions": 128}, "outbounds": [], "inbounds": []}
         auth = {"username": USERNAME, "password": PASSWORD}
         if direction == "client":
             options = {"server": {"host": host, "port": node_port}, "tls": {"server_name": "proxy.invalid", "ca_pem": ca.read_text()}, "transport": transport, "udp_over_tcp": {"enabled": kind != "caddy", "version": version}, "max_sessions": 16 if transport == "h1" else 1, **auth}
@@ -273,6 +274,8 @@ def run_case(args, root, cert, key, ca, xdg, kind, direction, transport, host, t
         else:
             own["outbounds"] = [{"tag": "direct", "type": "direct"}]
             own["nodes"] = [{"tag": "node", "type": "naive", "listen": address(host, node_port), "outbound": "direct", "options": {"users": [auth], "tls": {"certificate_file": str(cert), "private_key_file": str(key)}, "transports": [transport], "udp_over_tcp": True}}]
+        for node in own.get("nodes", []):
+            bind_members(own, node, node["options"].pop("users"))
         h.write_json(work / "own.json", own)
         own_command = [args.kerlico, "run", "-c", str(work / "own.json")]
         probe_process = None

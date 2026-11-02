@@ -30,8 +30,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     let path = std::env::args().nth(1).ok_or("缺少探针配置")?;
     let options: Value = serde_json::from_slice(&std::fs::read(path)?)?;
-    let outbound = NaiveFactory.build(&options)?;
-    let context = ConnectContext::new(Duration::from_secs(8));
+    let outbound = NaiveFactory
+        .compile(&options)?
+        .start(kerlico_core::ServiceContext::for_test())
+        .await?;
     let mut associations = HashMap::<String, DatagramAssociation>::new();
     let mut input = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     let mut output = tokio::io::stdout();
@@ -39,9 +41,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         if line.len() > 4 * 1024 * 1024 {
             return Err("探针命令超限".into());
         }
+        let context = ConnectContext::new(Duration::from_secs(8));
         let result:Result<Value>=async {
             let command:Command=serde_json::from_str(&line).map_err(|_|Error::Protocol("探针命令不合法"))?;let payload=STANDARD.decode(command.payload).map_err(|_|Error::Protocol("探针字节编码不合法"))?;
-            if command.network=="tcp"{if command.read_len>2*1024*1024{return Err(Error::ResourceLimit);}let target=Destination::new(&command.host,command.port)?;let mut stream=outbound.connect_tcp(&target,&context).await?;stream.write_all(&payload).await?;if command.shutdown{stream.shutdown().await?;}else{stream.flush().await?;}let mut bytes=vec![0;command.read_len];context.run(async {stream.read_exact(&mut bytes).await?;Ok(())}).await?;return Ok(json!({"ok":true,"payload":STANDARD.encode(bytes)}));}
+            if command.network=="tcp"{if command.read_len>2*1024*1024{return Err(Error::ResourceLimit);}let target=Destination::new(&command.host,command.port)?;let mut stream=outbound.connect_tcp(&target,&context).await?.stream;stream.write_all(&payload).await?;if command.shutdown{stream.shutdown().await?;}else{stream.flush().await?;}let mut bytes=vec![0;command.read_len];context.run(async {stream.read_exact(&mut bytes).await?;Ok(())}).await?;return Ok(json!({"ok":true,"payload":STANDARD.encode(bytes)}));}
             if !matches!(command.network.as_str(),"udp"|"udp-receive"){return Err(Error::Protocol("探针业务类型不合法"));}
             let key=if command.association.is_empty(){"default".into()}else{command.association};
             if !associations.contains_key(&key){associations.insert(key.clone(),outbound.associate_udp(&context).await?);}

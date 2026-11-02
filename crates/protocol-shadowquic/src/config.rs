@@ -27,12 +27,6 @@ pub(crate) struct ClientOptions {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ServerOptions {
-    #[serde(default)]
-    pub username: Option<String>,
-    #[serde(default)]
-    pub password: Option<String>,
-    #[serde(default)]
-    pub users: Vec<UserOptions>,
     pub upstream: kerlico_config::TargetSpec,
     pub server_name: String,
     #[serde(default = "alpn")]
@@ -186,9 +180,9 @@ pub(crate) fn client_crypto(
     .map_err(|_| invalid())?
     .with_root_certificates(roots)
     .with_no_client_auth();
+    tls.resumption = rustls_jls::client::Resumption::disabled();
     tls.alpn_protocols = alpn;
     tls.enable_early_data = false;
-    tls.resumption = rustls_jls::client::Resumption::disabled();
     tls.jls_config = rustls_jls::jls::JlsClientConfig::new(&user.password, &user.username);
     let mut config = jls_quinn::ClientConfig::new(Arc::new(
         jls_quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| invalid())?,
@@ -198,7 +192,7 @@ pub(crate) fn client_crypto(
     Ok(config)
 }
 pub(crate) fn server_crypto(
-    users: &[User],
+    users: &kerlico_core::CredentialSet<User>,
     name: &str,
     alpn: Vec<Vec<u8>>,
     upstream: std::net::SocketAddr,
@@ -222,7 +216,7 @@ pub(crate) fn server_crypto(
     tls.send_tls13_tickets = 0;
     tls.session_storage = Arc::new(rustls_jls::server::NoServerSessionStorage {});
     let mut jls = rustls_jls::jls::JlsServerConfig::default();
-    for user in users {
+    for (_, user) in users.rows() {
         jls = jls.add_user(user.password.to_string(), user.username.clone());
     }
     tls.jls_config = jls
