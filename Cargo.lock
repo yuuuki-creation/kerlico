@@ -3255,6 +3255,7 @@ dependencies = [
  "kerlico-mieru",
  "kerlico-naive",
  "kerlico-net",
+ "kerlico-openconnect",
  "kerlico-shadowquic",
  "kerlico-shadowsocks",
  "kerlico-shadowsocksr",
@@ -3588,6 +3589,22 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "webpki-roots",
+]
+
+[[package]]
+name = "kerlico-openconnect"
+version = "1.2.0"
+dependencies = [
+ "bytes",
+ "httparse",
+ "kerlico-config",
+ "kerlico-core",
+ "kerlico-net",
+ "kerlico-wireguard",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
