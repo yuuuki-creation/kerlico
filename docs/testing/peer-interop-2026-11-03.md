@@ -1,6 +1,6 @@
 # 第三方真实对端互通（2026-11-03）
 
-结论：30 个协议模块都在海外 worker 上对接了第三方对端或真实系统。发现并修复 2 个 kerlico 缺陷（Shadowsocks 与 SS2022 的 TCP 截断、Snell 出站丢弃官方服务端的 IPv4 UDP 回包），其余失败归为对端差异、脚本漂移或下面列出的未解决项。
+结论：30 个协议模块都在海外 worker 上对接了第三方对端或真实系统。发现并修复 3 个 kerlico 缺陷（Shadowsocks 与 SS2022 的 TCP 截断、Snell 出站丢弃官方服务端的 IPv4 UDP 回包、Sudoku 分离传输复用已关闭的下载连接），其余失败归为对端差异、脚本问题或下面列出的未解决项。
 
 被测二进制：`v1.3.1`（提交 `ad48e8f`，SHA-256 `1c9ab279…35c9`），标注“修复后”的行用本分支构建。运行入口是 `tools/peer_interop_matrix.py`，对端路径放在 worker 私有的 `peers.json`。
 
@@ -17,7 +17,7 @@
 | SS2022 | Xray 中继链 | perf-01 | 4 | 4 | 0 | |
 | SS2022 | 正式 CLI（仅 SS2022 构建，修复后） | perf-01 | 17 | 17 | 0 | |
 | ShadowsocksR | 固定 Python 参考 | perf-01 | 384 | 384 | 0 | |
-| ShadowsocksR | Mihomo v1.19.33，仅服务端方向 | perf-01 | 192 | 163 | 29 | 见未解决项 |
+| ShadowsocksR | Mihomo v1.19.33，仅服务端方向 | perf-01 | 192 | 163 | 29 | 见失败定位 |
 | Snell | sing-box 1.14.4 | perf-03 | 36 | 36 | 0 | 客户端方向不测域名 UDP，见对端差异 |
 | Snell | 官方 snell-server v4.1.1、v5.0.1、v6.0.0（修复后） | perf-03 | 5 | 5 | 0 | 只测出站，官方没有 Linux 客户端。`v1.3.1` 上 5 个配置的 IPv4 UDP 全部无回包 |
 | Hysteria1 | 官方 v1.3.5 | perf-03 | 24 | 24 | 0 | |
@@ -41,9 +41,9 @@
 | VLESS | packetaddr、上下行分离、XDrive | perf-01 | 43 | 43 | 0 | 分离的 4 个 H3 配置对 kerlico 自端，见观察项 |
 | Trojan | Xray 26.10.29 | perf-01 | 20 | 20 | 0 | |
 | Naive | 官方 naive 154.0.8037.49、sing-box 1.14.4、Caddy 插件、Go 参照 | perf-01 | 156 | 156 | 0 | 另有共存检查 1 项通过 |
-| Sudoku | 官方 v0.5.2.0 | perf-01 | 11001 | 9312 | 2 | 494 配置。2 项失败是 mux 流提前 EOF，见下。另有 985 项进程观察、663 项入口上限、11 项参考边界。28 项 TLS 配置缺证书未跑，由下一行补测 |
+| Sudoku | 官方 v0.5.2.0 | perf-01 | 11001 | 9312 | 2 | 494 配置。2 项失败：1 项大流提前 EOF 见未解决项，1 项并发小流截断见失败定位。另有 985 项进程观察、663 项入口上限、11 项参考边界。28 项 TLS 配置缺证书未跑，由下一行补测 |
 | Sudoku | 官方 v0.5.2.0，TLS 套件 | perf-01 | 343 | 247 | 1 | 1 项对端启动退出（setup），未定位。另有 39 项入口上限、28 项进程观察、28 项参考边界 |
-| Sudoku | Mihomo 1.10.0 固定构建 | perf-01 | 10895 | 7185 | 2057 | 见未解决项。另有 980 项进程观察、645 项入口上限，28 项 TLS 配置缺证书未跑 |
+| Sudoku | Mihomo 1.10.0 固定构建 | perf-01 | 10895 | 7185 | 2057 | 见失败定位。另有 980 项进程观察、645 项入口上限，28 项 TLS 配置缺证书未跑 |
 | Sudoku | Mihomo 1.10.0，TLS 套件 | perf-01 | 364 | 224 | 42 | 42 项都是 UDP 64000、65507 字节。另有 42 项入口上限、28 项进程观察、28 项参考边界 |
 | WireGuard | wireguard-go 固定提交 | perf-01 | 1194 | 1194 | 0 | 入站与出站，含损伤与轮换 |
 | TUN | Linux 内核（独立 netns） | perf-01 | 3 | 3 | 0 | 对端是内核，`crates/protocol-tun/tests/netns.rs` |
@@ -56,8 +56,8 @@
 | Tailscale | 官方客户端 v1.92.3、Headscale 0.27.1 | perf-02 | 10 | 10 | 0 | DERP、直连与出口节点 |
 | EasyTier | easytier-core 2.6.4 | perf-02 | 16 | 16 | 0 | |
 | ZeroTier | zerotier 1.14.2 容器 | perf-02 | 1 | 1 | 0 | 脚本只给整体结论，含拒绝、根节点、洪泛三阶段 |
-| TrustTunnel | 官方 endpoint v1.1.0、client v1.1.11 | perf-02 | 232 | 230 | 2 | 另 18 项未测；见未解决项 |
-| TrustTunnel | Mihomo v1.19.33 | perf-02 | 258 | 251 | 7 | 另 54 项观察到上限、4 项未测；见未解决项 |
+| TrustTunnel | 官方 endpoint v1.1.0、client v1.1.11 | perf-02 | 232 | 230 | 2 | 另 18 项未测；见失败定位 |
+| TrustTunnel | Mihomo v1.19.33 | perf-02 | 258 | 251 | 7 | 另 54 项观察到上限、4 项未测；见失败定位 |
 
 官方下载的对端没有发布摘要，这里记录实测值：snell-server v4.1.1 `8e029749…`、v5.0.1 `5b2e221f…`、v6.0.0 `27d8bead…`；hysteria v1.3.5 `41dc8bc3…`；shadow-tls 0.2.25 `a173f5f2…`。其余对端沿用既有测试记录核验过的二进制或按固定来源构建：sing-box `1264361b…`，Xray `e783b9d2…`，GOST `19b5d859…`，Mihomo v1.19.33 `817f50b3…`，wireguard-go 参照 `54c58b72…`。
 
@@ -89,12 +89,37 @@
 - **sing-box HTTPUpgrade 入站**：拒绝带 `Sec-WebSocket-Key` 的请求（`real websocket request received`）。Xray 与 kerlico 都发这个头，Xray 对照同样被拒。
 - **sing-box gRPC**：没有 multi 模式（`bad path: /proxy/TunMulti`）。
 
+## 失败定位
+
+上面结果表是首轮数字。下表是对其中未定位失败的结论。
+
+| 失败 | 结论 | 依据 | 处理 |
+| --- | --- | --- | --- |
+| Sudoku 接 Mihomo：61 项小负载 TCP 提前 EOF、1 项 UDP 0 字节超时 | 脚本竞态，对端启动窗口 | Mihomo 的 `ApplyConfig` 先开监听，`tunnel.OnRunning` 在其后；`handleTCPConn` 在这之前直接关闭连接，UDP 被丢弃，都不写日志。不经过 kerlico 时，100 次启动有 63 次出现早期关闭，共 128 条，首次成功后 0 条失败 | 脚本等运行状态，见下 |
+| TrustTunnel 接 Mihomo：6 项 TLS 负例、1 项 H2 并发 | 同一竞态 | 负例或正向对照的请求落在窗口里，日志没有拨号错误，脚本判 `insufficient-evidence`；并发项是启动后的第一批连接 | 加门后两轮 258 通过、0 失败（首轮 251、7） |
+| Sudoku 接 Mihomo：12 项停服重启 | 对端行为 | 同一 Mihomo 客户端接 Mihomo 节点与接 kerlico 节点，各 12 轮：活动流都 12 秒内不关闭（12/12、12/12）；重启后首个请求 EOF（7/12、11/12），后续 3 个请求全部通过（36/36、36/36）。`poll` 模式重启后等 2 秒再发，首个请求 8/8 通过。两个比例的差异原因未验证 | 与官方一样记 `reference_boundary`，换新客户端再测 |
+| Sudoku 接 Mihomo：1971 项 UDP 大包 | 对端上限 | Mihomo 把数据报截断到 16384 字节（SOCKS 入口含 10 字节头），回包内容在截断处之前一致，16000 字节通过、32000 字节截断。Mihomo 双端同样截断，kerlico 双端到 65507 字节通过。截断位置的源码未读 | 超过 16384 字节记 `reference_boundary` |
+| Sudoku 接官方：1 项并发小流截断（`mux=auto`） | **kerlico 缺陷，已修** | 官方的下载响应声明 `Connection: keep-alive`，写完 EOF 尾部就关闭。kerlico 把连接放回连接池，下一个请求约 100 微秒内复用它并收到 RST。抓包里失败流的 FIN 两次都发在刚结束的下载连接上，都收到 RST，上传任务失败后拆除整条流；新流的下载请求撞上时表现为 0 字节 EOF。kerlico 到官方 2/400 失败，官方双端、官方到 kerlico、kerlico 双端都是 0/400 | 下载请求带 `Connection: close`；回归测试 `finished_pull_connection_is_not_reused_for_next_request` 修复前失败。修复后 `poll`、`stream`、`auto` 各 400 条并发流全部通过，`poll` 专注 60 轮 960 条没有失败（修复前同样轮数 3 条） |
+| TrustTunnel 接官方：2 项 H3 UDP 65000 字节 | 对端行为 | 首轮把方向写反了，实际是 kerlico 客户端接官方 endpoint。trace 日志显示 endpoint 收到目标回包后打出 `Datagram dropped`。官方双端同样 12000 字节通过、16000 字节起超时；官方客户端接 kerlico 节点到 65000 字节通过。丢弃条件的源码未读，官方 H1、H2 的 65000 字节通过 | 记 `observed-limit` |
+| ShadowsocksR 接 Mihomo：25 至 29 项，都在 `random_head` 与 `tls1.2_ticket_*` | 对端发坏流 | 抓包比较上行原始字节。`random_head` 40 例失败 33 例，都含 10KB 以上的重复密文片段，上行字节数也偏离通过时的约 60KB；通过的 7 例没有重复。`tls1.2_ticket_*` 40 例失败 21 例，TLS 记录头都在流中途被破坏；通过的 19 例记录头完整。抓包时失败比例高于矩阵。Mihomo 内部根因未定位，kerlico 的拒绝是正确行为 | 不改 |
+| VLESS 客户端矩阵 1 项偶发 | 未定位 | 本轮未查，复跑 5/5 | 无 |
+
+`tools/mihomo_ready.py` 是这个竞态的修复：给 Mihomo 加一个走 DIRECT 的 SOCKS 入口，目标收到探测连接才算运行。探针不经过被测协议，不会掩盖被测路径上的失败。`interop_shadowsocksr.py` 早有同类探测。`interop_tuic.py`、`interop_mieru.py` 也用 Mihomo，尚未接入，本轮它们没有失败。
+
+复跑结果（Sudoku 都不含 `rekey`）：
+
+| 被测 | 对端 | 套件 | 结果 |
+| --- | --- | --- | --- |
+| `v1.3.1` | Mihomo 1.10.0 | lifecycle、carriers、tables、mux、credentials | 全部退出 0，失败 0 |
+| `v1.3.1` | TrustTunnel Mihomo，官方 H3 客户端方向 | 全量、仅 H3 | Mihomo 两轮 258 通过、0 失败；官方 30 通过、0 失败、2 项观察到上限 |
+| 修复后 | 官方 v0.5.2.0 | carriers、tables | 2880、4800 通过，失败 0 |
+| 修复后 | Mihomo 1.10.0 | carriers、tables | carriers 失败 0；tables 收尾前跑完 5625 条记录，7 项失败都来自同一用例：端口分配把同一端口同时发给节点和 SOCKS 入口，日志是 `address already in use`。分配器已去重，这个套件没有重跑 |
+
+修复后的 `rekey`、`lifecycle`、`mux` 全量没有跑完，这几项对修复后二进制未验证。TLS 下的 H1、H2 回环由 crate 测试和一次 kerlico 双端往返覆盖。`tools/sudoku_interop/README.md` 给的自签 CA 证书当叶子时，kerlico 客户端拒绝，`--peer self --suite tls` 全部失败，`v1.3.1` 相同；改用 CA 加叶子证书后 H1、H2 通过。
+
 ## 未解决项
 
-- **ShadowsocksR 接 Mihomo**：192 项失败 25 至 29 项，`v1.3.0`、`v1.3.1`、修复后构建都在这个范围，失败主要是客户端先发 59392 字节时的 `IncompleteReadError`，集中在 `random_head` 与 `tls1.2_ticket_*`。已知 Mihomo 这些混淆会发出坏 MAC 流（`docs/testing/shadowsocksr.md`），但既有记录是 191/192，这次的比例更高，没有抓包确认。Python 参考 384/384。
-- **Sudoku 接 Mihomo**：1971 项是 UDP 64000、65507 字节内容不符，17 和 4096 字节全部通过，官方对端同样大小通过，推断是 Mihomo 的 UoT 上限，未单独验证。另有 61 项小负载 TCP 提前 EOF（`tables`、`carriers` 轴为主）、12 项停服重启和 1 项 UDP 0 字节超时，没有定位；12 条 33MiB 流见下条。
-- **TrustTunnel 官方**：官方客户端到本节点方向的 H3 UDP 65000 字节失败 2 项（两个节点族），未定位。
-- **TrustTunnel Mihomo**：6 项 TLS 负例缺少足够的拒绝证据（脚本判定 `insufficient-evidence`），1 项 H2 并发业务失败，首轮 9 项里的具体用例与复跑不同，未定位。
+- **Sudoku 互通 README 的测试证书**：见上段，示例命令还没有改成 CA 加叶子证书。
 - **Sudoku mux 流提前 EOF**：`kerlico` 作客户端、`mux=on` 的 33MiB 流在约 18MiB 处结束，`rekey` 套件单独复跑 38 条大流失败 3 条，全量矩阵里官方 1 条、Mihomo 12 条（4 条提前 EOF、8 条连接重置）。Sudoku mux 没有流控，接收方队列超过每流 4MiB 就重置该流；官方源码 `muxMaxQueuedBytesPerStream` 同样是 4MiB 且同样重置，所以这是协议性质，读得慢的本地客户端会遇到（根因由读代码推断，未在失败现场抓到重置帧）。用户侧表现是流提前结束，没有明确错误。下一步可以考虑把重置报告为错误。
 - **映射地址同类风险**：Snell 的 IPv4 映射来源问题只在 Snell 上修了。`protocol-hysteria2/src/udp.rs`、`protocol-shadowsocksr/src/udp.rs` 也按字面比较来源与目标，本次对端都没有触发，未验证双栈对端。
 

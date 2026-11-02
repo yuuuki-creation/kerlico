@@ -308,7 +308,7 @@ def mihomo_node(host, number, password, transport, certs, mtls):
     if mtls:
         listener.update({"client-auth-cert": certs["ca"].read_text(encoding="ascii")})
     config.update({"listeners": [listener], "rules": ["MATCH,DIRECT"]})
-    return add_probe(config)
+    return add_probe(config, port())
 
 
 def official_client(directory, host, number, password, transport, certs, socks, dns):
@@ -325,7 +325,7 @@ def mihomo_client(host, number, password, transport, certs, socks, mtls):
     if mtls:
         proxy.update(certificate=certs["client"].read_text(encoding="ascii"), **{"private-key": certs["client_key"].read_text(encoding="ascii")})
     config.update({"socks-port": socks, "proxies": [proxy], "rules": ["MATCH,proxy"]})
-    return add_probe(config)
+    return add_probe(config, port())
 
 
 def socks_open(number, target, command=1):

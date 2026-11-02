@@ -10,11 +10,8 @@ import time
 PROBE = "tunnel-probe"
 
 
-def add_probe(config):
-    """在 listeners 与 rules 都写好后调用。"""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
+def add_probe(config, port):
+    """在 listeners 与 rules 都写好后调用。port 由脚本的端口分配器给出，避免与它分配的其他端口相撞。"""
     config.setdefault("listeners", []).append({"name": PROBE, "type": "socks", "listen": "127.0.0.1", "port": port, "udp": False})
     config["rules"].insert(0, f"IN-NAME,{PROBE},DIRECT")
     return config

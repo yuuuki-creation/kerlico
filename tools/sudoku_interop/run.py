@@ -24,6 +24,7 @@ MODES = ["raw", "legacy", "stream", "poll", "auto", "ws"]
 METHODS = ["aes-128-gcm", "chacha20-poly1305", "none"]
 KEY = "synthetic-sudoku-cli-node-a-secret"
 TIMEOUT = 12
+ALLOCATED_PORTS = set()
 
 
 class StreamEof(EOFError):
@@ -45,9 +46,14 @@ def family(host):
 
 
 def free_port(host, kind=socket.SOCK_STREAM):
-    with socket.socket(family(host), kind) as sock:
-        sock.bind((host, 0))
-        return sock.getsockname()[1]
+    # 端口绑定后立刻释放，内核可能把同一个端口再发一次；节点与 SOCKS 入口撞过。
+    while True:
+        with socket.socket(family(host), kind) as sock:
+            sock.bind((host, 0))
+            port = sock.getsockname()[1]
+        if port not in ALLOCATED_PORTS:
+            ALLOCATED_PORTS.add(port)
+            return port
 
 
 def exact(stream, length):
@@ -256,7 +262,7 @@ def native_config(peer, case, server, host, port, socks_port):
                        "http-mask": not raw, "http-mask-tls": case["tls"], "http-mask-host": "localhost" if case["tls"] else "",
                        "multiplex": case["mux"]})
         config.update({"socks-port": socks_port, "bind-address": "127.0.0.1", "proxies": [fields], "rules": ["MATCH,proxy"]})
-    return add_probe(config)
+    return add_probe(config, free_port("127.0.0.1"))
 
 
 def start(binary, peer, config, directory, env):
