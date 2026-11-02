@@ -978,7 +978,9 @@ async fn udp_session(
     limits: &Limits,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let context = ConnectContext::new(limits.connect_timeout()).with_cancel(cancel.clone());
+    let context = ConnectContext::new(limits.connect_timeout())
+        .with_cancel(cancel.clone())
+        .with_udp_source(peer);
     let channel = outbound.connect_udp(target, &context).await?;
     let (mut sender, mut receiver, completion) = channel.into_parts();
     let result = {

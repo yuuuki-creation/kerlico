@@ -131,6 +131,49 @@ def verify(args, root, materials=None):
     return checks
 
 
+def migration(args, root):
+    """真实 Xray 客户端经可切断中继连接节点：XUDP 应保留出口端口，普通 UDP 作为对照应改变端口。"""
+    user = USERS[0]
+    results = []
+    with h.serve(h.UdpServer(("127.0.0.1", 0), h.UdpPortEcho)) as target:
+        # Xray 的 VLESS UDP 默认即 XUDP（proxy/vless/outbound/outbound.go）；关闭 cone 才是普通 UDP 对照。
+        for label, mux, vision, cone, expected in (("mux-xudp", True, False, True, True), ("vision-xudp", False, True, True, True), ("default-xudp", False, False, True, True), ("cone-off-control", False, False, False, False)):
+            directory = root / label
+            directory.mkdir(mode=0o700)
+            port, local = h.free_port(), h.free_port()
+            flow = "xtls-rprx-vision" if vision else ""
+            encryption = material(directory, args.reference, "x25519")[4] if vision else None
+            method = "mlkem768x25519plus.native."
+            decryption = method+"600s."+encryption[0] if vision else "none"
+            node = {"tag": "node", "type": "vless", "listen": "127.0.0.1:"+str(port), "outbound": "direct", "max_sessions": 16, "options": {"uuid": user, "flow": flow, "security": {"type": "none"}, "transport": {"type": "tcp"}, "decryption": decryption}}
+            server_config = {"version": 1, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], "nodes": [node], "limits": {"connect_timeout_ms": 4000, "idle_timeout_ms": 20000, "drain_timeout_ms": 300, "max_sessions": 32}}
+            server_args = [args.kerlico, "run", "-c", str(directory / "node.json")]
+            if args.control_server:
+                server_config = {"log": {"loglevel": "warning"}, "inbounds": [{"listen": "127.0.0.1", "port": port, "protocol": "vless", "settings": {"clients": [{"id": user, "flow": flow}], "decryption": decryption}, "streamSettings": {"network": "raw", "security": "none"}}], "outbounds": [{"protocol": "freedom", "settings": {"finalRules": [{"action": "allow", "ip": ["127.0.0.1/32"], "port": str(target)}]}}]}
+                server_args = [args.reference, "run", "-config", str(directory / "node.json")]
+            h.write_json(directory / "node.json", server_config)
+            with h.process(server_args, directory, "server") as server:
+                h.wait_ready(server, port)
+                relay = h.Relay(port)
+                outbound = {"protocol": "vless", "settings": {"vnext": [{"address": "127.0.0.1", "port": relay.port, "users": [{"id": user, "flow": flow, "encryption": method+"1rtt."+encryption[1] if vision else "none"}]}]}, "streamSettings": {"network": "raw", "security": "none"}}
+                if mux:
+                    outbound["mux"] = {"enabled": True, "concurrency": -1, "xudpConcurrency": 4}
+                # Xray 只在缓冲区带逐包目标时写 Global ID（common/mux/frame.go WriteTo），tunnel 入站不带，必须走 SOCKS UDP。
+                client = {"log": {"loglevel": "warning"}, "inbounds": [{"listen": "127.0.0.1", "port": local, "protocol": "socks", "settings": {"auth": "noauth", "udp": True, "ip": "127.0.0.1"}}], "outbounds": [outbound]}
+                h.write_json(directory / "client.json", client)
+                if not cone:
+                    os.environ["XRAY_CONE_DISABLED"] = "true"
+                with h.process([args.reference, "run", "-config", str(directory / "client.json")], directory, "client"):
+                    os.environ.pop("XRAY_CONE_DISABLED", None)
+                    time.sleep(0.5)
+                    before, after, moved = h.carrier_migration(local, relay, target)
+                relay.close()
+            ok = moved and (before == after) == expected
+            results.append({"case": label, "ok": ok, "before": before, "after": after, "new_carrier": moved})
+            print(json.dumps(results[-1], ensure_ascii=False), flush=True)
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description="真实参考客户端到 VLESS 独立节点的互通")
     parser.add_argument("--kerlico", required=True)
@@ -141,8 +184,9 @@ def main():
     parser.add_argument("--encryption", choices=["none", "native", "xorpub", "random"], default="none")
     parser.add_argument("--rtt", choices=["1rtt", "0rtt"], default="1rtt")
     parser.add_argument("--mux", action="store_true")
-    parser.add_argument("--key-kind",choices=["x25519","mlkem","hybrid"],default="x25519")
+    parser.add_argument("--key-kind",choices=["x25519","mlkem","hybrid","chain"],default="x25519")
     parser.add_argument("--xudp", action="store_true")
+    parser.add_argument("--xudp-migration", action="store_true", help="切断载体后验证 XUDP 出口端口不变")
     parser.add_argument("--transport", choices=["tcp", "ws", "httpupgrade", "grpc", "xhttp"], default="tcp")
     parser.add_argument("--security", choices=["none", "tls", "reality"], default="tls")
     parser.add_argument("--http", choices=["h1", "h2", "h3"], default="h2")
@@ -159,6 +203,10 @@ def main():
     args.reference = str(Path(args.reference).resolve())
     root = Path(args.work_dir).resolve()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if args.xudp_migration:
+        if not all(result["ok"] for result in migration(args, root)):
+            raise SystemExit(1)
+        return
     if args.matrix:
         materials = material(root,args.reference,args.key_kind)
         selected = [case for case in cases(args.full) if args.only is None or args.only in case.label()]

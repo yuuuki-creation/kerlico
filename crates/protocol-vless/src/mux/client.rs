@@ -322,7 +322,7 @@ impl Pool {
         &self,
         target: &Destination,
         udp: bool,
-        xudp: bool,
+        global_id: Option<[u8; 8]>,
         open: F,
     ) -> Result<(Arc<Lease>, mpsc::Receiver<Frame>, Option<Frame>)> {
         let (connection, id, permit) = self.acquire(open).await?;
@@ -360,11 +360,11 @@ impl Pool {
             status: Status::New,
             error: false,
             target: Some(carrier::target(target, udp)),
-            global_id: (udp && xudp).then(rand::random),
+            global_id,
             payload: None,
         };
         // Xray 的非零 global ID 分支会直接读取首包；不能先发送没有数据的 NEW。
-        if udp && xudp {
+        if global_id.is_some() {
             return Ok((lease, receiver, Some(first)));
         }
         let (ack, ready) = oneshot::channel();
@@ -387,7 +387,7 @@ impl Pool {
         target: &Destination,
         open: F,
     ) -> Result<BoxStream> {
-        let (lease, mut incoming, _) = self.session(target, false, false, open).await?;
+        let (lease, mut incoming, _) = self.session(target, false, None, open).await?;
         let (local, peer) = tokio::io::duplex(32 * 1024);
         let held = lease.clone();
         let task = self.host.spawn_tracked(async move {
@@ -434,10 +434,10 @@ impl Pool {
     pub async fn udp<F: Future<Output = Result<BoxStream>> + Send>(
         &self,
         target: &Destination,
-        xudp: bool,
+        global_id: Option<[u8; 8]>,
         open: F,
     ) -> Result<DatagramChannel> {
-        let (lease, incoming, first) = self.session(target, true, xudp, open).await?;
+        let (lease, incoming, first) = self.session(target, true, global_id, open).await?;
         Ok(DatagramChannel {
             sender: Box::new(Sender {
                 lease: lease.clone(),
@@ -638,7 +638,7 @@ mod tests {
             quiet.send(()).unwrap();
             let first = frame::read(&mut peer).await.unwrap().unwrap();
             assert_eq!(first.status, Status::New);
-            assert!(first.global_id.is_some());
+            assert_eq!(first.global_id, Some([7; 8]));
             assert_eq!(first.payload.as_deref(), Some(b"first-packet".as_slice()));
             frame::write(
                 &mut peer,
@@ -656,7 +656,9 @@ mod tests {
         });
         let pool = Pool::new(1, 1, kerlico_core::ServiceContext::for_test());
         let mut channel = pool
-            .udp(&target, true, async { Ok(Box::new(client) as BoxStream) })
+            .udp(&target, Some([7; 8]), async {
+                Ok(Box::new(client) as BoxStream)
+            })
             .await
             .unwrap();
         ready.await.unwrap();

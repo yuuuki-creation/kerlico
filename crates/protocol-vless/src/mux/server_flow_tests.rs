@@ -12,6 +12,14 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+fn test_migration(peer: &PeerSession, context: &InboundContext) -> Migration {
+    Migration {
+        table: Arc::new(crate::mux::Table::new(Duration::from_secs(1))),
+        user: [0; 16],
+        access: peer.clone(),
+        context: context.clone(),
+    }
+}
 struct Observer;
 impl NodeObserver for Observer {
     fn record(&self, _: kerlico_core::NodeEvent) {}
@@ -125,7 +133,8 @@ async fn target_eof(fail_end: bool) {
     } else {
         Box::new(server)
     };
-    let serving = tokio::spawn(serve(server, peer, context, false));
+    let migration = test_migration(&peer, &context);
+    let serving = tokio::spawn(serve(server, peer, context, false, migration));
     let mut request = Frame::data(
         1,
         b"head".to_vec(),
@@ -231,7 +240,8 @@ async fn carrier_eof_without_logical_end_records_closed_by_caller() {
         };
         let peer = ingress.local(&context).unwrap();
         let (server, mut client) = tokio::io::duplex(8192);
-        let serving = tokio::spawn(serve(Box::new(server), peer, context, false));
+        let migration = test_migration(&peer, &context);
+        let serving = tokio::spawn(serve(Box::new(server), peer, context, false, migration));
         let mut request = Frame::data(
             1,
             b"head".to_vec(),

@@ -51,6 +51,112 @@ class UdpEcho(socketserver.BaseRequestHandler):
         sock.sendto(data, self.client_address)
 
 
+class UdpPortEcho(socketserver.BaseRequestHandler):
+    """回复观察到的来源端口；同一出口映射跨载体保留时端口不变。"""
+
+    def handle(self):
+        _, sock = self.request
+        sock.sendto(str(self.client_address[1]).encode(), self.client_address)
+
+
+class Relay:
+    """可整体切断的 TCP 中继，模拟物理载体中断。"""
+
+    def __init__(self, target_port):
+        self.target_port = target_port
+        self.accepted = 0
+        self.lock = threading.Lock()
+        self.sockets = []
+        self.listener = socket.create_server(("127.0.0.1", 0))
+        self.port = self.listener.getsockname()[1]
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def accept(self):
+        while True:
+            try:
+                client, _ = self.listener.accept()
+                upstream = socket.create_connection(("127.0.0.1", self.target_port), timeout=4)
+            except OSError:
+                return
+            upstream.settimeout(None)
+            with self.lock:
+                self.accepted += 1
+                self.sockets += [client, upstream]
+            for source, sink in ((client, upstream), (upstream, client)):
+                threading.Thread(target=self.pump, args=(source, sink), daemon=True).start()
+
+    @staticmethod
+    def pump(source, sink):
+        try:
+            while True:
+                data = source.recv(65_536)
+                if not data:
+                    break
+                sink.sendall(data)
+        except OSError:
+            pass
+        try:
+            sink.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def cut(self):
+        with self.lock:
+            sockets, self.sockets = self.sockets, []
+        for item in sockets:
+            try:
+                item.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            item.close()
+
+    def close(self):
+        self.listener.close()
+        self.cut()
+
+
+def observed_port(sock, local_port, socks_target=None, tries=20):
+    """载体切换期间首包可能丢失，按数据报语义重发；回包是目标看到的来源端口。"""
+    sock.settimeout(1)
+    header = b"\0\0\0\1\x7f\0\0\1"+socks_target.to_bytes(2, "big") if socks_target else b""
+    for _ in range(tries):
+        sock.sendto(header+b"which-port", ("127.0.0.1", local_port))
+        try:
+            return int(sock.recv(64)[len(header):])
+        except (OSError, TimeoutError, ValueError):
+            continue
+    raise RuntimeError("UDP 回包超时")
+
+
+def socks_associate(port):
+    """建立 SOCKS5 UDP 关联，返回控制连接与 UDP 中继端口。"""
+    control = socket.create_connection(("127.0.0.1", port), timeout=4)
+    control.sendall(b"\5\1\0")
+    control.recv(2)
+    control.sendall(b"\5\3\0\1\0\0\0\0\0\0")
+    reply = control.recv(10)
+    if len(reply) != 10 or reply[1] != 0:
+        raise RuntimeError("SOCKS UDP 关联被拒绝")
+    return control, int.from_bytes(reply[8:10], "big")
+
+
+def carrier_migration(local_port, relay, socks_target=None):
+    """返回 (切断前端口, 切断后端口, 切断后是否走了新载体)。"""
+    control = None
+    if socks_target:
+        control, local_port = socks_associate(local_port)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        before = observed_port(sock, local_port, socks_target)
+        carriers = relay.accepted
+        relay.cut()
+        time.sleep(1)
+        after = observed_port(sock, local_port, socks_target)
+        if control:
+            control.close()
+        return before, after, relay.accepted > carriers
+
+
 class TcpServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True

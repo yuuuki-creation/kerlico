@@ -3,6 +3,8 @@ mod client;
 mod completion;
 mod frame;
 mod server;
+mod xudp;
 pub(crate) use client::Pool;
 pub(crate) use server::serve;
 pub(crate) use server::serve_packetaddr;
+pub(crate) use xudp::{Migration, Table};

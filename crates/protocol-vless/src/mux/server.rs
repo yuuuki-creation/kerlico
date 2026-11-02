@@ -1,11 +1,12 @@
 use super::completion::{Completions, Key, Scope, outcome};
 use super::frame::{self, Frame};
+use super::xudp::{Attachment, Migration};
 use crate::carrier;
 use kerlico_core::{
     BoxStream, CancellationToken, ConnectContext, Destination, Error, InboundContext, PeerSession,
     Result,
 };
-use kerlico_core::{DatagramReceiver, DatagramSender, FlowFailure, FlowOutcome};
+use kerlico_core::{DatagramReceiver, DatagramSender, FlowFailure, FlowOutcome, NodeEvent};
 use std::collections::HashMap;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -16,12 +17,12 @@ use tokio::{
 use xray_proxy::mux::{MAX_PAYLOAD, Status};
 use xray_routing::{Network, Target};
 
-struct Delivery {
-    frame: Frame,
-    receipt: Option<oneshot::Sender<Result<()>>>,
+pub(super) struct Delivery {
+    pub frame: Frame,
+    pub receipt: Option<oneshot::Sender<Result<()>>>,
 }
 impl Delivery {
-    fn signal(frame: Frame) -> Self {
+    pub(super) fn signal(frame: Frame) -> Self {
         Self {
             frame,
             receipt: None,
@@ -43,13 +44,15 @@ struct Session {
     generation: u64,
     sender: mpsc::Sender<Frame>,
     cancel: CancellationToken,
+    /// 接回的 XUDP 会话以本载体 NEW 的目标作为无地址 Keep 帧的目标。
+    default_target: Option<Target>,
 }
-struct SessionContext {
-    scope_key: Scope,
-    output: mpsc::Sender<Delivery>,
-    access: PeerSession,
-    context: InboundContext,
-    completions: Completions,
+pub(super) struct SessionContext {
+    pub scope_key: Scope,
+    pub output: mpsc::Sender<Delivery>,
+    pub access: PeerSession,
+    pub context: InboundContext,
+    pub completions: Completions,
 }
 
 pub(crate) async fn serve(
@@ -57,6 +60,7 @@ pub(crate) async fn serve(
     access: PeerSession,
     context: InboundContext,
     udp_only: bool,
+    migration: Migration,
 ) -> Result<()> {
     let scope = context.cancel.child_token();
     let _guard = scope.clone().drop_guard();
@@ -111,13 +115,25 @@ pub(crate) async fn serve(
                     let target=frame.target.as_ref().ok_or(Error::InvalidAddress)?;
                     if udp_only && target.network!=Network::Udp {return Err(Error::Protocol("当前载体的 Mux 通道只允许 UDP"));}
                     if sessions.len()>=context.max_streams {output.try_send(Delivery::signal(Frame::end(frame.id,true))).map_err(|_|Error::ResourceLimit)?;continue;}
+                    if target.network==Network::Udp&&let Some(global_id)=frame.global_id.filter(|id|*id!=[0;8]) {
+                        // 对应 Xray common/mux/server.go handleStatusNew：非零 Global ID 的 UDP 会话不属于单个载体。
+                        let released=scope.child_token();let id=frame.id;let default_target=Some(target.clone());
+                        let attachment=Attachment {id,output:output.clone(),released:released.clone()};
+                        let Ok(uplink)=migration.attach(global_id,attachment,target) else {output.try_send(Delivery::signal(Frame::end(id,true))).map_err(|_|Error::ResourceLimit)?;continue;};
+                        generation=generation.checked_add(1).ok_or(Error::ResourceLimit)?;let gen_id=generation;
+                        // 接回时旧队列可能已满；数据报可丢，首包不能阻塞读帧循环。
+                        let _=uplink.try_send(frame);
+                        sessions.insert(id,Session {generation:gen_id,sender:uplink,cancel:released.clone(),default_target});
+                        tasks.spawn(async move {released.cancelled().await;(id,gen_id,Ok(()))});
+                        continue;
+                    }
                     let permit=if sessions.is_empty(){None}else{match context.stream_budget.try_acquire(){Ok(v)=>Some(v),Err(_)=>{output.try_send(Delivery::signal(Frame::end(frame.id,true))).map_err(|_|Error::ResourceLimit)?;continue;}}};
                     generation=generation.checked_add(1).ok_or(Error::ResourceLimit)?;
                     let gen_id=generation;let id=frame.id;let udp=target.network==Network::Udp;let target=target.clone();
                     let (sender,receiver)=mpsc::channel(32);let cancel=scope.child_token();
                     sender.try_send(frame).map_err(|_|Error::ResourceLimit)?;
                     completions.scope(Scope(id,gen_id))?;
-                    sessions.insert(id,Session {generation:gen_id,sender,cancel:cancel.clone()});
+                    sessions.insert(id,Session {generation:gen_id,sender,cancel:cancel.clone(),default_target:None});
                     let mut context=context.clone();context.cancel=cancel.clone();let output=output.clone();let access=access.clone();
                     let owner = context.tasks.clone(); let completions = completions.clone();
                     let task = owner.spawn_tracked(async move {
@@ -132,7 +148,7 @@ pub(crate) async fn serve(
                 },
                 Status::Keep=>{
                     let id=frame.id;
-                    if let Some(session)=sessions.get(&id) {let sender=session.sender.clone();let delivered=tokio::select! {_=scope.cancelled()=>return Err(Error::Cancelled),r=&mut writing=>return r,r=sender.send(frame)=>r.is_ok()};if delivered{continue;}}
+                    if let Some(session)=sessions.get(&id) {let mut frame=frame;if frame.target.is_none(){frame.target=session.default_target.clone();}let sender=session.sender.clone();let delivered=tokio::select! {_=scope.cancelled()=>return Err(Error::Cancelled),r=&mut writing=>return r,r=sender.send(frame)=>r.is_ok()};if delivered{continue;}}
                     if let Some(session)=sessions.remove(&id){completions.close_scope(Scope(id,session.generation),FlowOutcome::Failed(FlowFailure::Failed));session.cancel.cancel();}
                     output.try_send(Delivery::signal(Frame::end(id,true))).map_err(|_|Error::ResourceLimit)?;
                 },
@@ -225,7 +241,7 @@ async fn tcp_session(
     result
 }
 
-async fn udp_session(
+pub(super) async fn udp_session(
     initial: Target,
     mut incoming: mpsc::Receiver<Frame>,
     session: SessionContext,
@@ -268,7 +284,9 @@ async fn udp_session(
                 let done_target=frame::destination(frame.target.as_ref().unwrap_or(&initial))?;
                 tasks.spawn(async move {(done_target,gen_id,task.await.unwrap_or(Err(Error::Protocol("Mux UDP 任务异常退出"))))});
             }
-            targets.get(&target).ok_or(Error::Cancelled)?.1.try_send(packet).map_err(|_|Error::ResourceLimit)?;activity.send_replace(Instant::now());
+            // 目标队列已满时按数据报语义丢包，保留会话及其出口映射。
+            if targets.get(&target).ok_or(Error::Cancelled)?.1.try_send(packet).is_err() {context.events.record(NodeEvent::Dropped);}
+            activity.send_replace(Instant::now());
         }
     }}}.await;
     while let Some(Ok((_, generation, child))) = tasks.try_join_next() {
