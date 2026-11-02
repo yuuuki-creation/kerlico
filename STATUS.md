@@ -4,18 +4,18 @@
 
 ## 版本
 
-已发布 [v1.0.0](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.0.0) 源码版。`main` 之后合入了统计持久化、设备所有者库、双语接口和协议修订，下一版本为 `v1.0.1`。
+最新发布：[v1.0.1](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.0.1)，带 Linux `x86_64` 二进制。`main` 正在准备 `v1.1.0`。
 
 构建基线：Rust `1.99.1`，Linux `x86_64`。
 
 ## 完成计划
 
-| 版本 | 交付 | 完成标志 |
+| 版本 | 交付 | 状态 |
 | --- | --- | --- |
-| `v1.0.1` | `tools/worker_gate.sh` 通过；补齐第三方许可通知；上传二进制 | Release 带 Linux `x86_64` 二进制与 SHA-256 |
-| `v1.1` | CLI 接入 `kerlico-device`（同进程 WARP 补齐）；规则路由 `routing`；DNS 与错误事件历史；中英使用文档 | 配置 `dual-stack` 缺族时经 WARP 出网；同一节点可按规则选出站 |
-| `v1.2` | `dns`、`tun`、`control` 模块 | TUN 客户端可用；控制接口可查询在线与用量 |
-| `v1.3` | MASQUE，随后 OpenVPN、OpenConnect、Tailscale、ZeroTier、EasyTier；VLESS 混合 NFS 链、ML-DSA 验签、XUDP 跨载体迁移 | 每个端点通过一次真实对端互通 |
+| `v1.0.1` | 门禁通过；第三方许可通知；Linux 二进制 | 已发布 |
+| `v1.1` | CLI 接入 WARP；规则路由；DNS 与错误事件历史；中英使用指南 | 代码完成，门禁中 |
+| `v1.2` | `dns`、`tun`、`control` 模块 | 待开始 |
+| `v1.3` | MASQUE，随后 OpenVPN、OpenConnect、Tailscale、ZeroTier、EasyTier；VLESS 混合 NFS 链、ML-DSA 验签、XUDP 跨载体迁移 | 待开始 |
 
 验证规则见 [0012](docs/decisions/0012-simplified-delivery-and-verification.md)。跨进程设备 daemon/IPC 不在计划内，出现多进程部署需求时再排。
 
@@ -25,17 +25,15 @@
 | --- | --- |
 | 协议模块 | 23 个进入默认构建：20 个双端，SSH、Gost Relay、Tor 仅出站 |
 | 节点与出站 | 独立节点；单一 `EgressRuntime`/`Dispatcher`；`Local`/`Remote` 分支；`FamilyMode` |
-| 路由 | 每个节点固定绑定一个命名出站，暂无规则路由 |
-| 用户与统计 | 管理账户与原生凭据分离；唯一计量边界；SQLite 用量/带宽/访问历史；`history` 查询。DNS 与错误事件未实现 |
-| WARP | `kerlico-device` 库已实现并有真实双族验证；CLI 未接入，发行二进制不含 WARP |
-| 双语 | CLI 帮助、错误和诊断完成；使用文档未完成 |
-| 第三方合规 | `GPL-3.0-only` 已声明；统一第三方通知未完成 |
+| 路由 | `routes` 按域名、CIDR、端口、网络、节点和用户选择出站；多目标 UDP 关联走节点绑定的出站 |
+| 用户与统计 | 管理账户与原生凭据分离；唯一计量边界；SQLite 用量、带宽、访问记录、DNS 与错误事件；`history` 查询 |
+| WARP | `device` 配置启用；数据面用已保存身份在双栈机器上验证过，CLI 在真实单栈机器上的自动补齐未实测 |
+| 双语 | CLI 帮助、错误和诊断完成；使用指南中英齐全；接口文档为中文 |
+| 第三方合规 | `GPL-3.0-only` 已声明；发行附 `THIRD_PARTY_NOTICES.txt` |
 
 ## 最新门禁
 
-提交 `6a9661d`：门禁运行中，结果完成后写入此处。
-
-此前最后一次全工作区测试为 `r116`：745 通过、0 失败、3 忽略。
+`v1.0.1`（提交 `c7d0ef1`，`perf-01`）：fmt、严格 Clippy、release 通过；全量测试 745 通过、0 失败、3 忽略。
 
 ## 已知互通差异
 
@@ -47,4 +45,4 @@
 
 ## 资料导航
 
-[设计导航](docs/README.md) · [实现接口](docs/interfaces/README.md) · [历史测试记录](docs/testing/) · [协议与组合总表](reference/reports/三核心%20协议%20组合支持.md) · [借鉴映射](reference/design-map.md) · [仓库约定](docs/repository-workflow.md) · [匿名规则](docs/anonymity.md)
+[使用指南](docs/usage.md) · [设计导航](docs/README.md) · [实现接口](docs/interfaces/README.md) · [历史测试记录](docs/testing/) · [协议与组合总表](reference/reports/三核心%20协议%20组合支持.md) · [借鉴映射](reference/design-map.md) · [仓库约定](docs/repository-workflow.md) · [匿名规则](docs/anonymity.md)

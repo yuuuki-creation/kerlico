@@ -101,8 +101,8 @@ pub(super) fn command(language: Language) -> Command {
                 ),
                 (
                     "kind",
-                    "查询类型（usage/flows/bandwidth；默认 usage）",
-                    "Query type (usage/flows/bandwidth; default: usage)",
+                    "查询类型（usage/flows/bandwidth/events；默认 usage）",
+                    "Query type (usage/flows/bandwidth/events; default: usage)",
                 ),
                 ("user", "用户 UUID 筛选", "Filter by user UUID"),
                 ("node", "节点标识筛选", "Filter by node ID"),

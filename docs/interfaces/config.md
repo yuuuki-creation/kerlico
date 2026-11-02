@@ -16,12 +16,53 @@
 | `nodes` | 服务端协议节点（需配置真实鉴别成员 `members`），默认空 |
 | `local_inbounds` | 协议工厂显式允许的本地回环入口，默认空 |
 | `limits` | 全局超时、会话与账本记录上限，省略字段使用默认值 |
+| `routes` | 路由规则数组，默认空，见下文 |
+| `device` | 设备级 WARP 补齐，默认关闭，见下文 |
+| `telemetry` | SQLite 统计历史，默认关闭，见[统计历史](history.md) |
 
 - **标签与校验**：`tag` 为 1–64 个 ASCII 字母、数字、`-` 或 `_`；出站拥有独立标签命名空间，所有入站（`inbounds` / `nodes` / `local_inbounds`）共用另一命名空间。未知字段、缺失类型、无效引用或能力不匹配在编译期直接拒绝。
 - **管理账户（`accounts`）**：包含持久非零 UUID `user_id`、1–128 字符唯一 `username`、Argon2id v19 PHC 摘要 `password_hash`（参数范围：`m` 19456–262144，`t` 2–10，`p` 1–8）与可选 `enabled`。
 - **协议节点（`nodes`）**：包含 `tag`、`type`、`listen`、`outbound`、`options`、`members` 及可选 `mode`、`max_sessions`：
   - `members` 每项包含 `user_id`、`native_credential` 及可选 `credential_epoch`（默认 `1`）、`enabled`；单节点最多 1024 个成员。跨节点复用认证或保护秘密在编译期拒绝。
   - `mode` 取 `ipv4-only`、`ipv6-only` 或 `dual-stack`（默认），仅约束本节点负责目标选择的 `Local` 出站路径（双栈默认 IPv4 优先）；`Remote` 代理出站保留原始目标域名或 IP 透传。
+
+## 路由规则（`routes`）
+
+每条规则含 `outbound` 与至少一个条件，按配置顺序匹配，首条命中生效。未命中时使用节点或入口绑定的 `outbound`。
+
+| 字段 | 匹配 |
+| --- | --- |
+| `domain` | 目标域名完全相同 |
+| `domain_suffix` | 目标域名等于该后缀，或是它的子域名 |
+| `domain_keyword` | 目标域名包含该文本 |
+| `ip_cidr` | 目标是字面 IP 且落在网段内 |
+| `port` | 目标端口 |
+| `network` | `tcp` 或 `udp` |
+| `node` | 入站标签 |
+| `user` | 管理账户 `user_id` |
+
+同一字段内任一值命中即可；`domain*` 与 `ip_cidr` 都描述目标地址，任一命中即满足；其余字段须同时满足。
+
+路由不查询 DNS，域名目标不会匹配 `ip_cidr`。多目标 UDP 关联建立时没有单一目标，固定走节点绑定的出站；TCP 与固定目标 UDP 按规则选择。规则选中的出站缺少对应能力时，该连接返回不支持错误。
+
+```json
+"routes": [
+  {"outbound": "block", "domain_suffix": ["ads.example"]},
+  {"outbound": "direct", "ip_cidr": ["10.0.0.0/8"]},
+  {"outbound": "direct", "user": ["00000000-0000-4000-8000-000000000001"], "port": [443]}
+]
+```
+
+## 设备 WARP（`device`）
+
+配置后，`dual-stack` 节点走 `direct` 出站且本机缺原生 IPv4 或 IPv6 时，缺失的地址族经 Cloudflare WARP 出网。单栈节点和 `Remote` 出站不受影响。未配置时只用原生地址族。
+
+| 字段 | 约束说明 |
+| --- | --- |
+| `state_directory` | 必填，绝对路径。最终目录 `0700`，祖先目录不可被其他账户写入 |
+| `registration` | `create-once`（默认）：状态为空时向 Cloudflare 注册一次。`existing-only`：只用已有身份，缺失或不匹配时启动失败 |
+
+同一 `state_directory` 只能被一个进程使用。需要 `warp` feature（默认启用）。详见[设备所有者](device-runtime.md)。
 
 ## 固定目标入口与全局限制（`limits`）
 

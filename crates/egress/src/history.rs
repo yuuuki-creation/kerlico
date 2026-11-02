@@ -1,6 +1,6 @@
 //! 按运行绝对水位提交历史；数据库只保存结构化元数据，不保存协议凭据或业务载荷。
 
-use crate::{FlowEnd, FlowRecord, Telemetry, Usage, UsageSnapshot};
+use crate::{EventRecord, FlowEnd, FlowRecord, Telemetry, Usage, UsageSnapshot};
 use kerlico_core::{Error, NodeId, OutId, Result, Source, TargetBind, UserId};
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
@@ -288,7 +288,9 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS flows_started ON flows(started_ms)",
         "CREATE TABLE IF NOT EXISTS bandwidth(cursor INTEGER PRIMARY KEY AUTOINCREMENT, run TEXT NOT NULL, sequence INTEGER NOT NULL, sampled_ms INTEGER NOT NULL, dimension TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(run,sequence,dimension,key))",
         "CREATE INDEX IF NOT EXISTS bandwidth_sampled ON bandwidth(sampled_ms)",
-        "PRAGMA user_version=1",
+        "CREATE TABLE IF NOT EXISTS events(cursor INTEGER PRIMARY KEY AUTOINCREMENT, run TEXT NOT NULL, sequence INTEGER NOT NULL, ts_ms INTEGER NOT NULL, kind TEXT NOT NULL, user TEXT, node TEXT NOT NULL, outbound TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(run,sequence))",
+        "CREATE INDEX IF NOT EXISTS events_time ON events(ts_ms)",
+        "PRAGMA user_version=2",
     ].iter().enumerate() {
         transaction.execute_batch(statement).map_err(storage_error)?;
         schema_statement_done(step);
@@ -337,7 +339,7 @@ impl HistoryWriter {
                 return Err(Error::Config("统计目录包含其他应用数据库".into()));
             }
         }
-        if version > 1 {
+        if version > 2 {
             return Err(Error::Config("统计历史版本高于当前程序".into()));
         }
         initialize_schema(&mut connection)?;
@@ -357,9 +359,14 @@ impl HistoryWriter {
             retention,
         })
     }
+    /// 打开 DNS 与错误事件记录，默认都关闭。
+    pub fn record_events(&self, dns: bool, errors: bool) -> Result<()> {
+        self.telemetry.enable_events(dns, errors)
+    }
     /// 同一次快照的累计用量和访问记录在一个事务内替换；失败后可安全重试。
     pub fn checkpoint(&mut self) -> Result<()> {
         let (snapshot, records, saved) = self.telemetry.history_snapshot()?;
+        let events = self.telemetry.pending_events()?;
         let now = Instant::now();
         let wall = now_ms();
         let elapsed = now.duration_since(self.sampled).as_secs_f64().max(0.001);
@@ -407,7 +414,13 @@ impl HistoryWriter {
                 transaction.execute("INSERT INTO flows(run,sequence,started_ms,ended_ms,user,node,outbound,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(run,sequence) DO UPDATE SET ended_ms=excluded.ended_ms,payload=excluded.payload", params![run, number(flow.sequence)?, number(flow.started_ms)?, flow.ended_ms.map(number).transpose()?, flow.user, flow.node, flow.outbound, encoded(&flow)?]).map_err(storage_error)?;
             }
         }
+        for event in &events {
+            transaction.execute("INSERT INTO events(run,sequence,ts_ms,kind,user,node,outbound,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(run,sequence) DO NOTHING", params![event.run, number(event.sequence)?, number(event.ts_ms)?, event.kind, event.user, event.node, event.outbound, encoded(event)?]).map_err(storage_error)?;
+        }
         let cutoff = wall.saturating_sub(self.retention.as_millis().min(u64::MAX as u128) as u64);
+        transaction
+            .execute("DELETE FROM events WHERE ts_ms < ?1", [number(cutoff)?])
+            .map_err(storage_error)?;
         transaction.execute("DELETE FROM flows WHERE ended_ms < ?1 OR (ended_ms IS NULL AND started_ms < ?1 AND run != ?2)", params![number(cutoff)?, run]).map_err(storage_error)?;
         transaction
             .execute(
@@ -417,6 +430,7 @@ impl HistoryWriter {
             .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
         self.telemetry.acknowledge_history(&saved)?;
+        self.telemetry.acknowledge_events(events.len())?;
         self.previous = rows
             .into_iter()
             .map(|row| ((row.dimension, row.key), row.usage))
@@ -484,7 +498,7 @@ impl HistoryReader {
         if application != APPLICATION_ID {
             return Err(Error::Config("数据库不属于统计历史".into()));
         }
-        if version != 1 {
+        if !(1..=2).contains(&version) {
             return Err(Error::Config("统计历史版本不支持".into()));
         }
         Ok(Self(connection))
@@ -537,6 +551,50 @@ impl HistoryReader {
             return Err(Error::ResourceLimit);
         }
         let mut statement = self.0.prepare("SELECT rowid,payload FROM flows WHERE rowid>?1 AND started_ms>=?2 AND started_ms<=?3 AND (?4 IS NULL OR user=?4) AND (?5 IS NULL OR node=?5) AND (?6 IS NULL OR outbound=?6) ORDER BY rowid LIMIT ?7").map_err(storage_error)?;
+        let rows = statement
+            .query_map(
+                params![
+                    query.after,
+                    number(query.since_ms)?,
+                    number(query.until_ms)?,
+                    query.user,
+                    query.node,
+                    query.outbound,
+                    query.limit as i64
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(storage_error)?;
+        rows.map(|row| {
+            let (cursor, payload) = row.map_err(storage_error)?;
+            Ok((
+                cursor,
+                serde_json::from_str(&payload).map_err(storage_error)?,
+            ))
+        })
+        .collect()
+    }
+    /// 版本 1 的数据库没有事件表，返回空结果。
+    pub fn events(&self, query: &HistoryQuery) -> Result<Vec<(i64, EventRecord)>> {
+        if query.limit == 0
+            || query.limit > 4096
+            || query.after < 0
+            || query.since_ms > query.until_ms
+        {
+            return Err(Error::ResourceLimit);
+        }
+        let tables: i64 = self
+            .0
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='events'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if tables == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.0.prepare("SELECT rowid,payload FROM events WHERE rowid>?1 AND ts_ms>=?2 AND ts_ms<=?3 AND (?4 IS NULL OR user=?4) AND (?5 IS NULL OR node=?5) AND (?6 IS NULL OR outbound=?6) ORDER BY rowid LIMIT ?7").map_err(storage_error)?;
         let rows = statement
             .query_map(
                 params![
@@ -622,7 +680,7 @@ mod tests {
 
     #[test]
     fn initialization_survives_process_exit_between_schema_statements() {
-        for step in 0..6 {
+        for step in 0..8 {
             let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
             let result = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "history::tests::initialization_crash_child"])

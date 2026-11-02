@@ -44,10 +44,10 @@ kerlico/
 │   ├── engine/                   # 监听绑定、会话接纳、配额与优雅排空调度
 │   ├── egress/                   # 全局共享 Dispatcher、Local/Remote 分流与 Telemetry 计量
 │   ├── net/                      # Direct/Reject 出站、TcpConnector、NativeDevice
-│   ├── device/                   # 同进程 WARP 设备所有者 (CLI 未接入)
+│   ├── device/                   # 同进程 WARP 设备所有者
 │   ├── http-carrier/             # H2/H3 DATA 流与 QUIC 运行时 (TrustTunnel 使用)
 │   ├── protocol-*/               # 23 个独立协议 crate (vless, trojan, vmess, hy2, wg, tor 等)
-│   ├── routing/                  # (规划) 规则匹配与路由动作
+│   ├── routing/                  # 规则匹配，由 egress 的 Dispatcher 调用
 │   ├── dns/                      # (规划) 独立 DNS 解析、缓存与 Fake-IP
 │   ├── tun/                      # (规划) 系统 TUN 入站适配
 │   ├── platform/                 # (规划) 宿主/OS 网络与防回环操作
@@ -67,12 +67,13 @@ kerlico/
 | `core-api` | 地址、会话身份、流/数据报通道、`Outbound`/`InboundProtocol`、错误与取消/回收契约 | 不依赖 `engine`、具体协议或配置文件格式 |
 | `config` | JSON v2 外层解析、管理账户与凭据隔离校验、`Registry` 与工厂 trait、生成 `PreparedConfig` | 协议私有选项交由对应工厂编译，不维护包含所有协议的中央配置枚举 |
 | `engine` | 监听绑定、会话配额、节点取消域管理、协调 `EgressRuntime` 启停排空 | 不按协议名称分支，不按节点重复构造出站实例 |
-| `egress` | 唯一 `Dispatcher` 与命名出站表、`Local`/`Remote` 目标策略、业务流量计量（`Telemetry`）与 SQLite 历史 | 每个节点固定绑定一个命名出站；`Local` 按节点地址族模式解析并拨号，`Remote` 保留原始目标透传 |
+| `egress` | 唯一 `Dispatcher` 与命名出站表、规则路由、`Local`/`Remote` 目标策略、业务流量计量（`Telemetry`）与 SQLite 历史 | 规则未命中时用节点绑定的命名出站；`Local` 按节点地址族模式解析并拨号，`Remote` 保留原始目标透传 |
 | `net` | `direct`/`reject` 基础出站、`TcpConnector`、原生设备 | 不决定业务路由策略 |
-| `device` | 同进程 WARP 所有者，实现 `DeviceNetwork` | 发行二进制未依赖，当前只有自身测试调用 |
+| `device` | 同进程 WARP 所有者，实现 `DeviceNetwork` | 由 CLI 按 `device` 配置创建；`warp` feature 控制 |
 | `http-carrier` | H2/H3 DATA 流与 QUIC 运行时 | 不含鉴权、路由与计量 |
 | `protocol-*` | 协议专属配置解码、握手鉴权、报文编解码、入站节点与出站连接实现 | 依赖 `core-api` 与 `config`，8 个还依赖 `net`；不依赖 `engine` 或 `egress` |
-| `routing` / `dns` / `tun` / `platform` / `policy` / `control` | 规划中的规则路由、独立 DNS/Fake-IP、系统 TUN、宿主适配、策略组与控制 API | 按后续阶段逐步拆分建立 |
+| `routing` | 按目标、网络、节点和用户匹配规则 | 纯逻辑；不查询 DNS |
+| `dns` / `tun` / `platform` / `policy` / `control` | 规划中的独立 DNS/Fake-IP、系统 TUN、宿主适配、策略组与控制 API | 按后续阶段逐步拆分建立 |
 
 ## 编译依赖关系
 
@@ -100,7 +101,10 @@ flowchart TD
     P -->|"8 个协议"| N
     P -->|"TrustTunnel"| HC["kerlico-http-carrier"]
     HC --> I
-    D["kerlico-device (未接入 CLI)"] --> N
+    A --> D["kerlico-device"]
+    A --> R["kerlico-routing"]
+    CFG --> R
+    D --> N
     D --> CFG
     D --> I
     D -->|"WARP 后端"| P

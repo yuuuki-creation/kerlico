@@ -77,6 +77,7 @@ enum HistoryKind {
     Usage,
     Flows,
     Bandwidth,
+    Events,
 }
 
 fn registry() -> Result<Registry> {
@@ -247,7 +248,7 @@ async fn execute(args: Args, language: Language) -> Result<()> {
             let outbound = outbound
                 .map(|value| kerlico_core::OutId::parse(&value).map(|id| id.to_string()))
                 .transpose()?;
-            let scope = if matches!(kind, HistoryKind::Flows) {
+            let scope = if matches!(kind, HistoryKind::Flows | HistoryKind::Events) {
                 None
             } else {
                 match (&user, &node, &outbound) {
@@ -277,6 +278,17 @@ async fn execute(args: Args, language: Language) -> Result<()> {
                 HistoryKind::Usage => serde_json::to_value(history.usage_in(scope.as_ref())?),
                 HistoryKind::Flows => {
                     serde_json::to_value(history.flows(&kerlico_egress::HistoryQuery {
+                        user,
+                        node,
+                        outbound,
+                        since_ms,
+                        after,
+                        limit,
+                        ..Default::default()
+                    })?)
+                }
+                HistoryKind::Events => {
+                    serde_json::to_value(history.events(&kerlico_egress::HistoryQuery {
                         user,
                         node,
                         outbound,
@@ -346,14 +358,23 @@ async fn execute(args: Args, language: Language) -> Result<()> {
         );
         return Ok(());
     }
-    let engine = Engine::bind_with_options(
-        prepared,
-        kerlico_core::RuntimeOptions {
-            device: kerlico_net::native_device(),
-            language,
-        },
-    )
-    .await?;
+    let device = Device::start(&prepared)?;
+    let result = match device.lease(&prepared).await {
+        Ok(lease) => serve(prepared, lease, language).await,
+        Err(error) => Err(error),
+    };
+    let retired = device.shutdown().await;
+    result.and(retired)
+}
+
+async fn serve(
+    prepared: kerlico_config::PreparedConfig,
+    device: kerlico_core::DeviceLease,
+    language: Language,
+) -> Result<()> {
+    let engine =
+        Engine::bind_with_options(prepared, kerlico_core::RuntimeOptions { device, language })
+            .await?;
     for (tag, address) in engine.listeners()? {
         match language {
             Language::ZhCn => println!("入口 {tag} 已监听 {address}"),
@@ -366,6 +387,66 @@ async fn execute(args: Args, language: Language) -> Result<()> {
     tokio::select! {
         result=&mut running=>result,
         signal=shutdown_signal()=>{signal?;token.cancel();running.await},
+    }
+}
+
+/// 配置了 `device` 且有 `dual-stack` 本地出网时才持有 WARP 所有者，其余情况用原生设备。
+struct Device {
+    #[cfg(feature = "warp")]
+    runtime: Option<kerlico_device::DeviceRuntime>,
+}
+
+impl Device {
+    #[cfg(feature = "warp")]
+    fn start(prepared: &kerlico_config::PreparedConfig) -> Result<Self> {
+        let runtime = match prepared.device() {
+            Some(spec) if prepared.device_requirements().auto_warp => {
+                let directory = spec.state_directory.clone();
+                let options = match spec.registration {
+                    kerlico_config::DeviceRegistration::CreateOnce => {
+                        kerlico_device::DeviceOptions::new(directory)
+                    }
+                    kerlico_config::DeviceRegistration::ExistingOnly => {
+                        kerlico_device::DeviceOptions::existing(directory)
+                    }
+                };
+                Some(kerlico_device::DeviceRuntime::start(options)?)
+            }
+            _ => None,
+        };
+        Ok(Self { runtime })
+    }
+
+    #[cfg(not(feature = "warp"))]
+    fn start(prepared: &kerlico_config::PreparedConfig) -> Result<Self> {
+        if prepared.device().is_some() {
+            return Err(Error::Config("此构建未启用 warp".into()));
+        }
+        Ok(Self {})
+    }
+
+    async fn lease(
+        &self,
+        prepared: &kerlico_config::PreparedConfig,
+    ) -> Result<kerlico_core::DeviceLease> {
+        #[cfg(feature = "warp")]
+        if let Some(runtime) = &self.runtime {
+            return runtime.prepare(prepared.device_requirements()).await;
+        }
+        let _ = prepared;
+        Ok(kerlico_net::native_device())
+    }
+
+    async fn shutdown(self) -> Result<()> {
+        #[cfg(feature = "warp")]
+        if let Some(runtime) = self.runtime {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            let report = runtime.shutdown_at(deadline).await;
+            if !report.is_clean() {
+                return Err(Error::Protocol("设备回收未干净完成"));
+            }
+        }
+        Ok(())
     }
 }
 

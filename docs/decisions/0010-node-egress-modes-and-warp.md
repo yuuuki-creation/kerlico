@@ -1,6 +1,6 @@
 # 0010 节点出站模式、设备共享 WARP 与远端透传
 
-- **状态**：已确认（`Local`/`Remote` 分支与节点三种模式已合入主工作树；`kerlico-device` 库已合入，CLI 未接入）
+- **状态**：已确认（`Local`/`Remote` 分支与节点三种模式已合入主工作树；`kerlico-device` 已由 CLI 按 `device` 配置接入）
 - **日期**：2026-11-01（2026-11-02 更新状态）
 
 ## 背景与确认要求
@@ -36,4 +36,4 @@
 ## 落地状态
 
 - **已实现**：配置 v2 节点 `mode` 字段（`ipv4-only` / `ipv6-only` / `dual-stack`）、`TargetPolicy::Local` 与 `TargetPolicy::Remote` 分流、本地多目标 UDP 关联解析缓存（上限 256 目标）及远端原目标透传（见 [节点与共享目标访问接口](../interfaces/node-egress.md)）。
-- **待实现**：CLI 接入 `kerlico-device`，发行二进制启用 `Warp4` / `Warp6`。
+- **待实现**：跨进程共享设备（有多进程部署需求时再做）。

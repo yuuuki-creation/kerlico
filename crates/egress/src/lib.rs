@@ -1,6 +1,6 @@
 //! 一个 Engine 的唯一命名出站所有者、可信目标调度与业务计量边界。
 
-use kerlico_config::{EgressPlan, IngressPlan};
+use kerlico_config::{EgressPlan, IngressPlan, Network, RouteTable};
 use kerlico_core::{
     Address, BoxFuture, Capabilities, ConnectContext, DatagramAssociationSender, DatagramReceiver,
     Destination, Error, FamilyMode, FixedUdpFlow, FlowOpen, IngressBinding, NodeId, OpenedTcp,
@@ -25,8 +25,8 @@ pub use history::{
     StoredFlow, StoredUsage,
 };
 pub use telemetry::{
-    DatagramTargetRecord, FlowEnd, FlowId, FlowKind, FlowRecord, FlowStage, Telemetry, Usage,
-    UsageSnapshot,
+    DatagramTargetRecord, EventRecord, FlowEnd, FlowId, FlowKind, FlowRecord, FlowStage, Telemetry,
+    Usage, UsageSnapshot,
 };
 use telemetry::{FlowKind as Kind, FlowLease};
 
@@ -84,6 +84,7 @@ struct Dispatcher {
     services: BTreeMap<OutId, RunningService>,
     service_order: Vec<OutId>,
     bindings: BTreeMap<NodeId, Binding>,
+    routes: RouteTable,
     resolver: Arc<dyn Resolver>,
     telemetry: Telemetry,
     closed: AtomicBool,
@@ -142,7 +143,7 @@ impl EgressRuntime {
         budget: Duration,
         resolver: Arc<dyn Resolver>,
     ) -> Result<Self> {
-        let (plans, bindings, max_flows) = plan.into_parts();
+        let (plans, bindings, routes_table, max_flows) = plan.into_parts();
         let RuntimeOptions { device, language } = options;
         let run = NEXT_RUN
             .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -221,6 +222,7 @@ impl EgressRuntime {
             services,
             service_order,
             bindings: routes,
+            routes: routes_table,
             resolver,
             telemetry: Telemetry::new(max_flows),
             closed: AtomicBool::new(false),
@@ -374,7 +376,12 @@ async fn shutdown_services<'a>(
 }
 
 impl Dispatcher {
-    fn route(&self, identity: &SessionIdentity) -> Result<(&RunningService, FamilyMode)> {
+    /// 多目标 UDP 关联建立时没有单一目标，固定使用节点绑定的出站。
+    fn route(
+        &self,
+        identity: &SessionIdentity,
+        request: Option<(&Destination, Network)>,
+    ) -> Result<(&RunningService, FamilyMode)> {
         if self.closed.load(Ordering::Acquire)
             || !identity.is_accepting()
             || identity.cancel().is_cancelled()
@@ -386,12 +393,23 @@ impl Dispatcher {
             .bindings
             .get(identity.source().node())
             .ok_or(Error::Rejected)?;
-        let service = self
-            .services
-            .get(&binding.outbound)
-            .ok_or(Error::Rejected)?;
+        let outbound = request
+            .and_then(|(target, network)| self.routes.select(target, network, identity.source()))
+            .unwrap_or(&binding.outbound);
+        let service = self.services.get(outbound).ok_or(Error::Rejected)?;
         service.host.check()?;
         Ok((service, binding.mode))
+    }
+    async fn resolve(
+        &self,
+        source: &kerlico_core::Source,
+        outbound: &OutId,
+        target: &Destination,
+        mode: FamilyMode,
+    ) -> Result<Vec<Destination>> {
+        let result = candidates(self.resolver.as_ref(), target, mode).await;
+        self.telemetry.dns_event(source, outbound, target, &result);
+        result
     }
     fn tcp<'a>(
         &'a self,
@@ -402,7 +420,7 @@ impl Dispatcher {
         if context.cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let (service, mode) = self.route(identity)?;
+        let (service, mode) = self.route(identity, Some((original.target(), Network::Tcp)))?;
         if !service.capabilities.tcp {
             return Err(Error::Unsupported("所选命名出站没有 TCP 能力"));
         }
@@ -416,7 +434,7 @@ impl Dispatcher {
         let ledger =
             self.telemetry
                 .open(identity, &service.id, Some(original.clone()), Kind::Tcp)?;
-        let lease = FlowLease::new(ledger.clone(), &scoped, identity);
+        let lease = FlowLease::new(&self.telemetry, ledger.clone(), &scoped, identity);
         let completion = lease.clone();
         Ok(FlowOpen::tcp(
             Box::pin(async move {
@@ -428,9 +446,14 @@ impl Dispatcher {
                     TargetPolicy::Local => {
                         scoped
                             .run(async {
-                                let candidates =
-                                    candidates(self.resolver.as_ref(), original.target(), mode)
-                                        .await?;
+                                let candidates = self
+                                    .resolve(
+                                        identity.source(),
+                                        &service.id,
+                                        original.target(),
+                                        mode,
+                                    )
+                                    .await?;
                                 let mut last = Error::InvalidAddress;
                                 for (index, target) in candidates.iter().enumerate() {
                                     let remaining = scoped.remaining();
@@ -486,7 +509,7 @@ impl Dispatcher {
         if context.cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let (service, mode) = self.route(identity)?;
+        let (service, mode) = self.route(identity, Some((original.target(), Network::Udp)))?;
         if !service.capabilities.udp {
             return Err(Error::Unsupported("所选命名出站没有固定 UDP 能力"));
         }
@@ -503,7 +526,7 @@ impl Dispatcher {
             Some(original.clone()),
             Kind::FixedUdp,
         )?;
-        let lease = FlowLease::new(ledger.clone(), &scoped, identity);
+        let lease = FlowLease::new(&self.telemetry, ledger.clone(), &scoped, identity);
         let completion = lease.clone();
         Ok(FlowOpen::fixed_udp(
             Box::pin(async move {
@@ -511,11 +534,10 @@ impl Dispatcher {
                     .run(async {
                         let target = match service.policy {
                             TargetPolicy::Remote => original.target().clone(),
-                            TargetPolicy::Local => {
-                                candidates(self.resolver.as_ref(), original.target(), mode)
-                                    .await?
-                                    .remove(0)
-                            }
+                            TargetPolicy::Local => self
+                                .resolve(identity.source(), &service.id, original.target(), mode)
+                                .await?
+                                .remove(0),
                         };
                         let mut channel = service.backend.connect_udp(&target, &scoped).await?;
                         let observed = if service.policy == TargetPolicy::Local {
@@ -552,7 +574,7 @@ impl Dispatcher {
         if context.cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let (service, mode) = self.route(identity)?;
+        let (service, mode) = self.route(identity, None)?;
         if !service.association {
             return Err(Error::Unsupported("所选命名出站没有多目标 UDP 关联能力"));
         }
@@ -566,7 +588,7 @@ impl Dispatcher {
         let ledger = self
             .telemetry
             .open(identity, &service.id, None, Kind::UdpAssociation)?;
-        let lease = FlowLease::new(ledger.clone(), &scoped, identity);
+        let lease = FlowLease::new(&self.telemetry, ledger.clone(), &scoped, identity);
         let completion = lease.clone();
         Ok(FlowOpen::association(
             Box::pin(async move {
@@ -576,6 +598,9 @@ impl Dispatcher {
                             channel.sender = Box::new(LocalAssociationSender {
                                 inner: channel.sender,
                                 resolver: self.resolver.clone(),
+                                telemetry: self.telemetry.clone(),
+                                source: identity.source().clone(),
+                                outbound: service.id.clone(),
                                 mode,
                                 context: scoped.clone(),
                                 targets: HashMap::new(),
@@ -597,7 +622,7 @@ impl Dispatcher {
 }
 impl SessionDispatcher for Dispatcher {
     fn supports_udp_association(&self, identity: &SessionIdentity) -> bool {
-        self.route(identity)
+        self.route(identity, None)
             .is_ok_and(|(service, _)| service.association)
     }
     fn connect_tcp<'a>(
@@ -682,6 +707,9 @@ impl DatagramReceiver for ResolvedReceiver {
 struct LocalAssociationSender {
     inner: Box<dyn DatagramAssociationSender>,
     resolver: Arc<dyn Resolver>,
+    telemetry: Telemetry,
+    source: kerlico_core::Source,
+    outbound: OutId,
     mode: FamilyMode,
     context: ConnectContext,
     targets: HashMap<Destination, Destination>,
@@ -699,10 +727,12 @@ impl DatagramAssociationSender for LocalAssociationSender {
                     return Err(Error::ResourceLimit);
                 }
                 let operation = self.context.new_operation(self.context.timeout);
-                let resolved = operation
+                let result = operation
                     .run(candidates(self.resolver.as_ref(), target, self.mode))
-                    .await?
-                    .remove(0);
+                    .await;
+                self.telemetry
+                    .dns_event(&self.source, &self.outbound, target, &result);
+                let resolved = result?.remove(0);
                 self.ledger.bind_datagram_target(target, resolved.clone());
                 self.targets.insert(target.clone(), resolved);
             }
@@ -765,6 +795,7 @@ pub mod testing {
             services: BTreeMap::from([(id.clone(), service)]),
             service_order: vec![id.clone()],
             bindings: BTreeMap::from([(issuer.node().clone(), Binding { outbound: id, mode })]),
+            routes: RouteTable::default(),
             resolver,
             telemetry: telemetry.clone(),
             closed: AtomicBool::new(false),

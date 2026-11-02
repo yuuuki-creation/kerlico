@@ -45,3 +45,7 @@ tools/worker_gate.sh perf-01 HEAD
 ```
 
 它把提交同步到 worker 的独立工作区，依次执行 `cargo fmt --check`、严格 Clippy、全工作区测试和 release 构建，结束后打印每步退出码、失败项和二进制 SHA-256。结果写入 [STATUS.md](../STATUS.md)。
+
+日常修改用 `tools/worker_run.sh perf-01 '<命令>'` 在 worker 上运行未提交的工作树，`--pull` 把 fmt、lockfile 等改动拉回本机。
+
+发行二进制用 `tools/worker_release.sh <版本> <提交> <输出目录>` 在 glibc 较低的 `perf-02` 上构建。

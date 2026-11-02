@@ -17,8 +17,8 @@
 | [0007 协议开发固定顺序](0007-protocol-development-cycle.md) | 已确认（验证范围由 `0012` 更新） | 固定执行“调研 → 完整首轮编写 → 远端测试 → 修改” |
 | [0008 本地动态代理与 UDP 关联](0008-local-proxy-and-udp-association.md) | 已采用 | 本地代理入口、来源元数据与同 Socket 多目标 UDP 关联语义（目标解析分支以 `0010` 为准） |
 | [0009 全局共享出站调度器](0009-global-egress-dispatcher.md) | 已确认（已合入主树） | 单个 `Engine` 只装配一个 `EgressRuntime` / `Dispatcher`，统一持有多个并列命名出站实例 |
-| [0010 节点出站模式、设备共享 WARP 与远端透传](0010-node-egress-modes-and-warp.md) | 已确认（Local/Remote 已合入；WARP 库已合入，CLI 未接入） | `Local` 路径按节点单栈/双栈模式出网并由设备共享 WARP 补齐缺族；`Remote` 路径透传原始目标 |
-| [0011 多用户、流量带宽与访问记录](0011-users-statistics-and-access-records.md) | 已确认（账户、账本与 SQLite 历史已合入，DNS/错误事件待实现） | 单节点多用户、管理账户与协议凭据分离、唯一业务计量、带宽采样、在线来源与访问记录持久化 |
+| [0010 节点出站模式、设备共享 WARP 与远端透传](0010-node-egress-modes-and-warp.md) | 已确认（Local/Remote 与 WARP 已合入） | `Local` 路径按节点单栈/双栈模式出网并由设备共享 WARP 补齐缺族；`Remote` 路径透传原始目标 |
+| [0011 多用户、流量带宽与访问记录](0011-users-statistics-and-access-records.md) | 已确认（账户、账本、SQLite 历史与事件已合入） | 单节点多用户、管理账户与协议凭据分离、唯一业务计量、带宽采样、在线来源与访问记录持久化 |
 | [0012 精简交付与验证](0012-simplified-delivery-and-verification.md) | 已确认 | 单一发行门禁、按改动范围验证、全矩阵不作发版条件 |
 
 ## 记录规范与状态定义

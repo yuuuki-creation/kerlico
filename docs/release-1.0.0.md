@@ -20,4 +20,4 @@
 1. `tools/worker_gate.sh` 四步通过（见 [0012](decisions/0012-simplified-delivery-and-verification.md)）。
 2. 第三方许可证与署名通知齐全（见 [许可说明](licensing.md)）。
 3. `.githooks/privacy-check` 通过。
-4. 标签提交的 release 二进制和 SHA-256 上传到 Release，`check -c examples/config-v2-minimal.json` 可运行。
+4. 标签提交由 `tools/worker_release.sh` 构建的二进制、许可通知和 `SHA256SUMS` 上传到 Release。

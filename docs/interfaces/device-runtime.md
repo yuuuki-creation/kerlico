@@ -1,5 +1,7 @@
 # 应用设备所有者接口
 
+CLI 在配置 `device` 段且存在 `dual-stack` 本地出网时创建 `DeviceRuntime`，配置见[配置接口](config.md)。
+
 `kerlico-device::DeviceRuntime` 由应用拥有专用执行线程、Tokio runtime、单写者状态锁与唯一 WireGuard 后端。`prepare(DeviceRequirements)` 返回可以交给多个 `Engine::bind_with_device` 的 `DeviceLease`。同一所有者并发准备共用一次有界注册/启动；Engine、节点或等待者退出不退役设备。应用调用 `shutdown_at` 固定首次绝对期限，`DeviceRetirement` 保存原生线程真实 join 收据，超时不声称线程已经回收。
 
 `DeviceNetwork` 原有 socket 方法继续仅用于载体，target 三个方法返回现有业务通道。Direct 声明 `OutboundPlan::with_native_targets`，计划只有该标记绑定的双栈入口才声明 `auto_warp`。WireGuard 等自带目标隧道保持 `TargetPolicy::Local`，不触发设备准备。Remote 仍由 Dispatcher 原目标透传，不调用设备 target 能力。

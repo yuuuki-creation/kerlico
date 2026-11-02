@@ -1,8 +1,9 @@
-use crate::{ForwardSpec, HistorySpec, Limits};
+use crate::{DeviceSpec, ForwardSpec, HistorySpec, Limits};
 use kerlico_core::{
     BoxFuture, Capabilities, CredentialIssuer, FamilyMode, InboundProtocol, NodeId, OutId,
     Outbound, Result, ServiceContext, TargetPolicy,
 };
+use kerlico_routing::RouteTable;
 use std::{net::SocketAddr, sync::Arc};
 
 type ServiceStarter =
@@ -79,16 +80,18 @@ pub struct PreparedNode {
 pub struct EgressPlan {
     pub(crate) services: Vec<NamedServicePlan>,
     pub(crate) bindings: Vec<IngressPlan>,
+    pub(crate) routes: RouteTable,
     pub(crate) max_flows: usize,
 }
 impl EgressPlan {
-    pub fn into_parts(self) -> (Vec<NamedServicePlan>, Vec<IngressPlan>, usize) {
-        (self.services, self.bindings, self.max_flows)
+    pub fn into_parts(self) -> (Vec<NamedServicePlan>, Vec<IngressPlan>, RouteTable, usize) {
+        (self.services, self.bindings, self.routes, self.max_flows)
     }
 }
 
 pub struct PreparedConfig {
     pub(crate) history: Option<HistorySpec>,
+    pub(crate) device: Option<DeviceSpec>,
     pub(crate) egress: EgressPlan,
     pub(crate) inbounds: Vec<ForwardSpec>,
     pub(crate) limits: Limits,
@@ -109,6 +112,9 @@ pub struct DeviceRequirements {
     pub auto_warp: bool,
 }
 impl PreparedConfig {
+    pub fn device(&self) -> Option<&DeviceSpec> {
+        self.device.as_ref()
+    }
     pub fn into_parts(self) -> EnginePlanParts {
         EnginePlanParts {
             history: self.history,
@@ -135,7 +141,9 @@ impl PreparedConfig {
         let mut requirements = DeviceRequirements::default();
         for binding in &self.egress.bindings {
             let local = self.egress.services.iter().any(|service| {
-                service.id == binding.outbound && service.plan.needs_native_targets()
+                service.plan.needs_native_targets()
+                    && (service.id == binding.outbound
+                        || self.egress.routes.outbounds().any(|id| *id == service.id))
             });
             if local {
                 requirements.auto_warp |= binding.mode == FamilyMode::DualV4Preferred;

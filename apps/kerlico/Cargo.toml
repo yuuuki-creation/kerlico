@@ -31,7 +31,9 @@ default = [
     "protocol-sudoku",
     "protocol-tor",
     "protocol-wireguard",
+    "warp",
 ]
+warp = ["dep:kerlico-device"]
 protocol-vless = ["dep:kerlico-vless"]
 protocol-anytls = ["dep:kerlico-anytls"]
 protocol-ss2022 = ["dep:kerlico-ss2022"]
@@ -64,6 +66,7 @@ kerlico-config.workspace = true
 kerlico-engine.workspace = true
 kerlico-egress.workspace = true
 kerlico-net.workspace = true
+kerlico-device = { workspace = true, optional = true }
 kerlico-vless = { workspace = true, optional = true }
 kerlico-anytls = { workspace = true, optional = true }
 kerlico-ss2022 = { workspace = true, optional = true }
@@ -90,6 +93,9 @@ kerlico-wireguard = { workspace = true, optional = true }
 tokio.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

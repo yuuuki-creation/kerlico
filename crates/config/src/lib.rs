@@ -15,6 +15,7 @@ use std::{
 mod plan;
 pub use plan::*;
 mod users;
+pub use kerlico_routing::{Network, RouteTable, RuleSpec};
 pub use users::AccountSpec;
 
 #[derive(Deserialize)]
@@ -36,6 +37,25 @@ pub struct Config {
     pub limits: Limits,
     #[serde(default)]
     pub telemetry: Option<HistorySpec>,
+    #[serde(default)]
+    pub device: Option<DeviceSpec>,
+    #[serde(default)]
+    pub routes: Vec<RuleSpec>,
+}
+/// 配置后，`dual-stack` 节点缺原生地址族时经 WARP 补齐；未配置则只用原生地址族。
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceSpec {
+    pub state_directory: std::path::PathBuf,
+    #[serde(default)]
+    pub registration: DeviceRegistration,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceRegistration {
+    #[default]
+    CreateOnce,
+    ExistingOnly,
 }
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -46,6 +66,8 @@ pub struct HistorySpec {
     pub retention_days: u32,
     pub mask_source: bool,
     pub access_records: bool,
+    pub dns_records: bool,
+    pub error_records: bool,
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -63,6 +85,8 @@ impl Default for HistorySpec {
             retention_days: 30,
             mask_source: true,
             access_records: true,
+            dns_records: true,
+            error_records: true,
         }
     }
 }
@@ -345,6 +369,11 @@ impl Registry {
         if let Some(history) = &config.telemetry {
             history.validate()?;
         }
+        if let Some(device) = &config.device
+            && !device.state_directory.is_absolute()
+        {
+            return Err(Error::Config("设备状态目录必须是绝对路径".into()));
+        }
         let mut accounts = BTreeMap::new();
         let mut usernames = BTreeSet::new();
         for account in config.accounts {
@@ -371,6 +400,10 @@ impl Registry {
                 (plan.capabilities(), plan.supports_udp_association()),
             );
             services.push(NamedServicePlan { id, plan });
+        }
+        let routes = RouteTable::compile(&config.routes)?;
+        if routes.outbounds().any(|id| !profiles.contains_key(id)) {
+            return Err(Error::Config("路由规则引用的出站不存在".into()));
         }
         let mut tags = BTreeSet::new();
         let mut listeners = BTreeSet::new();
@@ -535,9 +568,11 @@ impl Registry {
         }
         Ok(PreparedConfig {
             history: config.telemetry,
+            device: config.device,
             egress: EgressPlan {
                 services,
                 bindings,
+                routes,
                 max_flows: config.limits.max_flow_records,
             },
             inbounds: config.inbounds,

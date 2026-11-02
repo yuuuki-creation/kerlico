@@ -116,6 +116,18 @@ fn config(nodes: Vec<Value>, locals: Vec<Value>) -> Config {
 }
 
 #[test]
+fn routes_and_device_are_validated_when_preparing() {
+    let mut missing = config(Vec::new(), Vec::new());
+    missing.routes = serde_json::from_value(json!([{"outbound":"absent","port":[443]}])).unwrap();
+    assert!(registry().prepare(missing).is_err());
+    let mut relative = config(Vec::new(), Vec::new());
+    relative.device = serde_json::from_value(json!({"state_directory":"state/device"})).unwrap();
+    assert!(registry().prepare(relative).is_err());
+    let mut valid = config(Vec::new(), Vec::new());
+    valid.routes = serde_json::from_value(json!([{"outbound":"exit","port":[443]}])).unwrap();
+    assert!(registry().prepare(valid).is_ok());
+}
+#[test]
 fn isolation_secret_does_not_grant_public_authentication() {
     let local = entry("local", "127.0.0.1:10443", false, 1);
     assert!(

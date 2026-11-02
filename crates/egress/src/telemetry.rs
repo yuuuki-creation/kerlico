@@ -1,8 +1,8 @@
 //! 运行期唯一业务账本与持久快照边界。
 
 use kerlico_core::{
-    Destination, Error, FlowFailure, FlowOutcome, NodeId, OriginalTarget, OutId, Result, RunId,
-    SessionIdentity, Source, TargetBind, UserId,
+    Address, Destination, Error, FlowFailure, FlowOutcome, NodeId, OriginalTarget, OutId, Result,
+    RunId, SessionIdentity, Source, TargetBind, UserId,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -13,6 +13,25 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+
+const MAX_PENDING_EVENTS: usize = 4096;
+
+/// DNS 查询或建立、转发失败事件。不含来源地址与业务载荷。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct EventRecord {
+    pub run: String,
+    pub sequence: u64,
+    pub kind: String,
+    pub ts_ms: u64,
+    pub node: String,
+    pub user: Option<String>,
+    pub outbound: String,
+    pub target: Option<String>,
+    pub code: String,
+    pub addresses: Vec<String>,
+    /// 待写队列已满时，此事件之前被丢弃的事件数。
+    pub dropped_before: u64,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FlowId {
@@ -283,6 +302,7 @@ impl FlowLedger {
 }
 
 struct LeaseInner {
+    telemetry: Telemetry,
     ledger: Arc<FlowLedger>,
     cancelled: Vec<kerlico_core::CancellationToken>,
     service: kerlico_core::ServiceStatus,
@@ -344,11 +364,13 @@ impl Drop for LeaseInner {
 pub(crate) struct FlowLease(Arc<LeaseInner>);
 impl FlowLease {
     pub(crate) fn new(
+        telemetry: &Telemetry,
         ledger: Arc<FlowLedger>,
         context: &kerlico_core::ConnectContext,
         identity: &SessionIdentity,
     ) -> Self {
         Self(Arc::new(LeaseInner {
+            telemetry: telemetry.clone(),
             ledger,
             cancelled: vec![
                 context.cancel.clone(),
@@ -372,20 +394,47 @@ impl FlowLease {
         self.0.cancellation_error().unwrap_or(Error::Cancelled)
     }
     pub(crate) fn failed(&self, error: &Error) {
-        self.observe_failure(FlowFailure::from_error(error));
+        self.report(FlowFailure::from_error(error), error.code());
     }
     pub(crate) fn io_failed(&self, error: &std::io::Error) {
-        self.observe_failure(FlowFailure::from_io_error(error));
+        let failure = FlowFailure::from_io_error(error);
+        let code = match failure {
+            FlowFailure::Timeout => "operation.timeout",
+            _ => "io.failed",
+        };
+        self.report(failure, code);
     }
-    pub(crate) fn observe_failure(&self, failure: FlowFailure) {
+    /// 每条流只记录首个非取消失败。
+    fn report(&self, failure: FlowFailure, code: &str) {
+        if self.observe_failure(failure) && !matches!(failure, FlowFailure::Cancelled) {
+            let ledger = &self.0.ledger;
+            let target = ledger
+                .original
+                .as_ref()
+                .map(|original| original.target().to_string());
+            self.0.telemetry.push_event(
+                "error",
+                &ledger.source,
+                &ledger.outbound,
+                target,
+                code,
+                Vec::new(),
+            );
+        }
+    }
+    pub(crate) fn observe_failure(&self, failure: FlowFailure) -> bool {
         let mut state = self
             .0
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let CompletionState::Running { first_failure, .. } = &mut *state {
-            first_failure.get_or_insert(failure);
+        if let CompletionState::Running { first_failure, .. } = &mut *state
+            && first_failure.is_none()
+        {
+            *first_failure = Some(failure);
+            return true;
         }
+        false
     }
     pub(crate) fn upload_closed(&self) {
         let mut state = self
@@ -483,6 +532,11 @@ struct Registry {
     archived: UsageSnapshot,
     pending: BTreeMap<u64, FlowRecord>,
     persistent: bool,
+    events: VecDeque<EventRecord>,
+    next_event: u64,
+    dropped_events: u64,
+    dns_events: bool,
+    error_events: bool,
 }
 struct TelemetryInner {
     run: RunId,
@@ -505,6 +559,11 @@ impl Telemetry {
                 archived: UsageSnapshot::default(),
                 pending: BTreeMap::new(),
                 persistent: false,
+                events: VecDeque::new(),
+                next_event: 1,
+                dropped_events: 0,
+                dns_events: false,
+                error_events: false,
             }),
         }))
     }
@@ -638,6 +697,98 @@ impl Telemetry {
         for id in saved {
             registry.pending.remove(id);
         }
+        Ok(())
+    }
+    pub(crate) fn enable_events(&self, dns: bool, errors: bool) -> Result<()> {
+        let mut registry = self
+            .0
+            .registry
+            .lock()
+            .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
+        registry.dns_events = dns;
+        registry.error_events = errors;
+        Ok(())
+    }
+    fn push_event(
+        &self,
+        kind: &'static str,
+        source: &Source,
+        outbound: &OutId,
+        target: Option<String>,
+        code: &str,
+        addresses: Vec<String>,
+    ) {
+        let Ok(mut registry) = self.0.registry.lock() else {
+            return;
+        };
+        let enabled = match kind {
+            "dns" => registry.dns_events,
+            _ => registry.error_events,
+        };
+        if !enabled {
+            return;
+        }
+        if registry.events.len() >= MAX_PENDING_EVENTS {
+            registry.dropped_events = registry.dropped_events.saturating_add(1);
+            return;
+        }
+        let sequence = registry.next_event;
+        registry.next_event = sequence.saturating_add(1);
+        let dropped_before = std::mem::take(&mut registry.dropped_events);
+        registry.events.push_back(EventRecord {
+            run: self.0.run.to_string(),
+            sequence,
+            kind: kind.into(),
+            ts_ms: timestamp(),
+            node: source.node().to_string(),
+            user: source.user().map(|user| user.to_string()),
+            outbound: outbound.to_string(),
+            target,
+            code: code.into(),
+            addresses,
+            dropped_before,
+        });
+    }
+    /// 只记录域名查询；字面 IP 目标不经过解析器。
+    pub(crate) fn dns_event(
+        &self,
+        source: &Source,
+        outbound: &OutId,
+        target: &Destination,
+        result: &Result<Vec<Destination>>,
+    ) {
+        if !matches!(target.address(), Address::Domain(_)) {
+            return;
+        }
+        let (code, addresses) = match result {
+            Ok(addresses) => ("ok", addresses.iter().map(Destination::host).collect()),
+            Err(error) => (error.code(), Vec::new()),
+        };
+        self.push_event(
+            "dns",
+            source,
+            outbound,
+            Some(target.host()),
+            code,
+            addresses,
+        );
+    }
+    pub(crate) fn pending_events(&self) -> Result<Vec<EventRecord>> {
+        let registry = self
+            .0
+            .registry
+            .lock()
+            .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
+        Ok(registry.events.iter().cloned().collect())
+    }
+    pub(crate) fn acknowledge_events(&self, count: usize) -> Result<()> {
+        let mut registry = self
+            .0
+            .registry
+            .lock()
+            .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
+        let count = count.min(registry.events.len());
+        registry.events.drain(..count);
         Ok(())
     }
     /// 仅统计仍持有业务流的可信归属；同一来源按活跃逻辑流计数。

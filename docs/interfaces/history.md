@@ -1,7 +1,5 @@
 # 统计持久化与只读查询
 
-更新日期：2026-11-02（Asia/Shanghai）。本接口已通过海外分包回归及真实 CLI 重启、查询验证，整树结果见 [项目状态](../../STATUS.md)。
-
 配置 v2 可增加 `telemetry`。省略时不创建数据库。
 
 ```json
@@ -11,7 +9,9 @@
     "sample_interval_ms": 1000,
     "retention_days": 30,
     "mask_source": true,
-    "access_records": true
+    "access_records": true,
+    "dns_records": true,
+    "error_records": true
   }
 }
 ```
@@ -38,6 +38,22 @@ kerlico history --directory state/telemetry --kind flows --node entry --after 0 
 kerlico history --directory state/telemetry --kind bandwidth --since-ms 0 --after 0
 ```
 
-输出为 JSON。访问和带宽结果每项为 `[cursor, record]`，用最后游标继续分页，单页最多 4096 项；游标不会因保留清理而复用。访问可按 `--user`、`--node`、`--outbound` 和开始时间 `--since-ms` 筛选。持续活动的同一访问会原位更新，此游标是记录分页游标，不是变更订阅。原始 DNS 查询及分类错误事件的独立日志开关尚未接入本接口，不能从访问记录外推完整 DNS 历史。
+输出为 JSON。访问和带宽结果每项为 `[cursor, record]`，用最后游标继续分页，单页最多 4096 项；游标不会因保留清理而复用。访问可按 `--user`、`--node`、`--outbound` 和开始时间 `--since-ms` 筛选。持续活动的同一访问会原位更新，此游标是记录分页游标，不是变更订阅。
+
+## 事件
+
+`kerlico history --kind events` 返回 DNS 与错误事件，每项为 `[cursor, record]`，筛选和分页参数与 `flows` 相同。
+
+| 字段 | 含义 |
+| --- | --- |
+| `kind` | `dns` 或 `error` |
+| `ts_ms` | 墙钟时间 |
+| `node` / `user` / `outbound` | 可信归属与所选出站 |
+| `target` | `dns` 为查询的域名，`error` 为业务目标；多目标 UDP 关联的错误没有目标 |
+| `code` | `dns` 成功为 `ok`，其余为稳定错误码，如 `io.failed`、`operation.timeout` |
+| `addresses` | `dns` 成功时按选用顺序排列的地址 |
+| `dropped_before` | 待写队列已满时，此事件之前被丢弃的事件数 |
+
+`dns` 只记录本机为 `Local` 路径做的域名解析；`Remote` 出站由远端解析，不产生此事件。`error` 记录每条流首个非取消失败。`dns_records` 与 `error_records` 分别控制两类事件，默认开启。事件不含来源地址和业务载荷，按 `retention_days` 清理，待写队列上限 4096 条。
 
 实现使用锁文件单写者和 SQLite 事务；查询通过只读连接，可与写者并存。[SQLite UPSERT](https://www.sqlite.org/lang_upsert.html)规定冲突键覆盖行为，[rusqlite 0.40.2](https://docs.rs/rusqlite/0.40.2/rusqlite/struct.Connection.html)提供事务与只读打开接口。

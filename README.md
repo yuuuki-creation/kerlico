@@ -4,7 +4,7 @@
 
 `kerlico` 是使用 Rust 开发的客户端与服务端一体代理内核，参考 mihomo、sing-box 与 Xray-core 设计，编译为单一可执行程序。
 
-当前已发布 **[1.0.0 源码版](docs/releases/1.0.0.md)**，下一版本和完成计划见 [STATUS.md](STATUS.md)。
+最新版本见 [Releases](https://github.com/yuuuki-creation/kerlico/releases)，[使用指南](docs/usage.md)说明安装和配置，完成计划见 [STATUS.md](STATUS.md)。
 
 ## 核心特性与当前范围
 
@@ -12,7 +12,8 @@
 - **独立节点与全局共享出站**：IPv4 与 IPv6 节点独立监听与鉴权，共用同一个出站调度器（`EgressRuntime`）。本地出网按节点 `ipv4-only`、`ipv6-only` 或 `dual-stack`（默认 IPv4 优先）选择目标地址；远端代理分流保留原始域名/IP 与端口透传。
 - **多用户账户与业务计量**：管理账户（`AccountSpec`）与协议原生凭据（`native_credential`）映射分离，提供唯一业务流量计量、内存态会话记录（`Telemetry`）、可选 SQLite 用量/带宽/访问历史与只读 `history` 查询。
 - **显式双语接口**：CLI 帮助、参数错误和运行诊断支持 `--lang zh-CN` / `--lang en`；模块标识与 JSON 字段保持稳定，见[语言接口](docs/interfaces/localization.md)。
-- **待完成能力**：CF WARP 的 CLI 接入、规则路由、`dns`/`tun`/`control` 模块、DNS 与错误事件历史、完整双语使用文档，以及 6 个隧道/覆盖网络端点。
+- **规则路由与 WARP 补齐**：`routes` 按域名、CIDR、端口、网络、节点和用户选择出站；`device` 让 `dual-stack` 节点经 WARP 访问缺失的地址族。
+- **待完成能力**：`dns`/`tun`/`control` 模块，以及 6 个隧道/覆盖网络端点。
 
 ## 快速开始（配置 v2）
 

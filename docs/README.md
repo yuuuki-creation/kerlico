@@ -8,6 +8,7 @@
 
 | 文档 | 内容范围 |
 | --- | --- |
+| [使用指南](usage.md) | 安装、命令、客户端与服务端配置、路由、WARP 与统计 |
 | [实现接口](interfaces/README.md) | 当前核心 API、JSON v2 配置、各协议模块与 CLI 的实际契约 |
 | [总体结构](architecture.md) | 单可执行文件交付、Cargo workspace 划分与编译依赖关系 |
 | [双端与统一目标访问](node-egress.md) | 全局共享调度器、多远端出站、节点地址族模式、设备共享 WARP 与远端透传 |

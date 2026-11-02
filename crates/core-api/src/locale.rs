@@ -500,6 +500,23 @@ const DIAGNOSTICS: &[(&str, &str)] = &[
         "统计路径权限或硬链接数量不安全",
         "Unsafe statistics path permissions, ownership, or hard-link count",
     ),
+    ("路由规则不合法", "Invalid routing rule"),
+    (
+        "路由规则引用的出站不存在",
+        "A routing rule references an outbound that does not exist",
+    ),
+    (
+        "设备状态目录必须是绝对路径",
+        "The device state directory must be an absolute path",
+    ),
+    (
+        "此构建未启用 warp",
+        "This build does not include the warp feature",
+    ),
+    (
+        "设备回收未干净完成",
+        "The device owner did not shut down cleanly",
+    ),
     (
         "统计目录、采样间隔或保留天数不合法",
         "Invalid statistics directory, sampling interval, or retention period",

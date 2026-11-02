@@ -389,3 +389,60 @@ fn history_query_does_not_create_missing_storage() {
     assert!(HistoryReader::open(&directory.path().join("missing")).is_err());
     assert!(!directory.path().join("missing").exists());
 }
+
+#[tokio::test]
+async fn dns_and_connect_failures_are_persisted_as_events() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let mut registry = Registry::default();
+    registry.register(DirectFactory).unwrap();
+    let config = json!({
+        "version": 2,
+        "outbounds": [{"tag":"exit","type":"direct"}],
+        "inbounds": [{"tag":"entry","type":"tcp-forward","listen":"127.0.0.1:0",
+            "target":{"host":"localhost","port":port},"outbound":"exit"}],
+        "telemetry": {"directory": directory.path(), "sample_interval_ms":60000},
+        "limits": {"drain_timeout_ms":1000}
+    });
+    let engine = Engine::bind(
+        registry
+            .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let (_, address) = engine.listeners().unwrap().remove(0);
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(engine.run(stop.clone()));
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let mut bytes = Vec::new();
+    let _ = timeout(Duration::from_secs(5), stream.read_to_end(&mut bytes))
+        .await
+        .expect("目标拒绝连接后入口应结束");
+    stop.cancel();
+    running.await.unwrap().unwrap();
+    let events = HistoryReader::open(directory.path())
+        .unwrap()
+        .events(&HistoryQuery::default())
+        .unwrap();
+    let dns = events
+        .iter()
+        .find(|(_, event)| event.kind == "dns")
+        .expect("应记录域名解析")
+        .1
+        .clone();
+    assert_eq!(dns.target.as_deref(), Some("localhost"));
+    assert_eq!(dns.code, "ok");
+    assert!(!dns.addresses.is_empty());
+    let error = events
+        .iter()
+        .find(|(_, event)| event.kind == "error")
+        .expect("应记录建立失败")
+        .1
+        .clone();
+    assert_eq!(error.code, "io.failed");
+    assert_eq!(error.outbound, "exit");
+    assert_eq!(error.node, "entry");
+}

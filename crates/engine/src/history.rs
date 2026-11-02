@@ -122,6 +122,10 @@ fn worker(
             return;
         }
     };
+    if let Err(error) = writer.record_events(spec.dns_records, spec.error_records) {
+        let _ = ready.send(Err(error));
+        return;
+    }
     if ready.send(Ok(())).is_err() {
         return;
     }
