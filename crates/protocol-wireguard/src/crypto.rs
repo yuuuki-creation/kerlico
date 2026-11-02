@@ -1,7 +1,7 @@
 use crate::config::{PeerConfig, Prepared};
 use boringtun::{
     noise::{Packet, Tunn, TunnResult, handshake::parse_handshake_anon, rate_limiter::RateLimiter},
-    x25519::PublicKey,
+    x25519::{PublicKey, StaticSecret},
 };
 use kerlico_core::{Error, Result};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
@@ -34,6 +34,14 @@ impl CryptoPeer {
                 Some(limiter),
             ),
             endpoint,
+            ready: false,
+        }
+    }
+    /// 不共享限速器的独立会话；对端路径由调用方维护。
+    pub fn standalone(private: StaticSecret, public: PublicKey, index: u32) -> Self {
+        Self {
+            tunnel: Tunn::new(private, public, None, None, index, None),
+            endpoint: None,
             ready: false,
         }
     }
@@ -89,6 +97,10 @@ impl CryptoPeer {
         if !self.ready {
             return Err(Error::Protocol("WireGuard会话尚未确认"));
         }
+        self.encapsulate(packet)
+    }
+    /// 无有效会话时 boringtun 缓存明文并返回握手发起。
+    pub fn encapsulate(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
         let mut output = vec![0; packet.len().saturating_add(32).max(148)];
         match self.tunnel.encapsulate(packet, &mut output) {
             TunnResult::WriteToNetwork(bytes) => Ok(Some(bytes.to_vec())),

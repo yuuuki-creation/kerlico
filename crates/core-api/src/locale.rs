@@ -10,6 +10,7 @@ mod protocol_messages_batch3;
 mod protocol_messages_masque;
 mod protocol_messages_openvpn;
 mod protocol_messages_sudoku;
+mod protocol_messages_tailscale;
 mod protocol_messages_vless;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -181,6 +182,7 @@ fn diagnostics() -> impl Iterator<Item = &'static (&'static str, &'static str)> 
         .chain(protocol_messages_openvpn::DIAGNOSTICS)
         .chain(protocol_messages_vless::DIAGNOSTICS)
         .chain(protocol_messages_sudoku::DIAGNOSTICS)
+        .chain(protocol_messages_tailscale::DIAGNOSTICS)
 }
 const DIAGNOSTICS: &[(&str, &str)] = &[
     (

@@ -51,12 +51,21 @@ impl Limits {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct Network {
+#[derive(Clone, Debug)]
+pub struct Network {
     address: IpAddr,
     prefix: u8,
 }
 impl Network {
+    pub fn address(&self) -> IpAddr {
+        self.address
+    }
+    pub fn prefix(&self) -> u8 {
+        self.prefix
+    }
+    pub fn is_host(&self) -> bool {
+        self.prefix == if self.address.is_ipv4() { 32 } else { 128 }
+    }
     pub fn parse(value: &str) -> Result<Self> {
         let (address, prefix) = value.split_once('/').ok_or_else(invalid)?;
         let address: IpAddr = address.parse().map_err(|_| invalid())?;

@@ -34,6 +34,7 @@ default = [
     "protocol-masque",
     "protocol-openvpn",
     "protocol-openconnect",
+    "protocol-tailscale",
     "protocol-tun",
     "warp",
 ]
@@ -65,6 +66,7 @@ protocol-wireguard = ["dep:kerlico-wireguard"]
 protocol-masque = ["dep:kerlico-masque"]
 protocol-openvpn = ["dep:kerlico-openvpn"]
 protocol-openconnect = ["dep:kerlico-openconnect"]
+protocol-tailscale = ["dep:kerlico-tailscale"]
 anytls = ["protocol-anytls"]
 ss2022 = ["protocol-ss2022"]
 
@@ -103,6 +105,7 @@ kerlico-wireguard = { workspace = true, optional = true }
 kerlico-masque = { workspace = true, optional = true }
 kerlico-openvpn = { workspace = true, optional = true }
 kerlico-openconnect = { workspace = true, optional = true }
+kerlico-tailscale = { workspace = true, optional = true }
 tokio.workspace = true
 clap.workspace = true
 serde_json.workspace = true

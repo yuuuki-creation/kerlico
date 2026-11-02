@@ -88,6 +88,8 @@ fn registry() -> Result<Registry> {
     registry.register(kerlico_tor::TorFactory)?;
     #[cfg(feature = "protocol-openconnect")]
     registry.register(kerlico_openconnect::OpenConnectFactory)?;
+    #[cfg(feature = "protocol-tailscale")]
+    registry.register(kerlico_tailscale::TailscaleFactory)?;
     #[cfg(feature = "protocol-wireguard")]
     {
         registry.register(kerlico_wireguard::WireGuardFactory)?;
