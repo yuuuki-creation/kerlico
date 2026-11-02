@@ -217,12 +217,21 @@ impl NodeBuildContext {
         self.issuer.clone()
     }
     pub fn for_test(options: Value, native_credentials: Vec<Value>) -> Self {
+        Self::for_test_with_disabled(options, native_credentials, &[])
+    }
+    /// 与 `for_test` 相同，但 `disabled` 列出的下标对应已停用成员。
+    pub fn for_test_with_disabled(
+        options: Value,
+        native_credentials: Vec<Value>,
+        disabled: &[usize],
+    ) -> Self {
         let members = native_credentials
             .iter()
-            .map(|_| Membership {
+            .enumerate()
+            .map(|(index, _)| Membership {
                 user: UserId::generate(),
                 credential_epoch: 1,
-                enabled: true,
+                enabled: !disabled.contains(&index),
             })
             .collect();
         Self {

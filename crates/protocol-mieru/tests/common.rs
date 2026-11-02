@@ -74,6 +74,7 @@ pub struct Setup<'a> {
     pub idle: Duration,
     pub timeout: Duration,
     pub outbound: Option<Arc<dyn Outbound>>,
+    pub udp_socket: Option<Arc<UdpSocket>>,
 }
 impl<'a> Setup<'a> {
     pub fn new(transport: &'a str, host: &'a str) -> Self {
@@ -88,6 +89,7 @@ impl<'a> Setup<'a> {
             idle: Duration::from_secs(10),
             timeout: Duration::from_secs(4),
             outbound: None,
+            udp_socket: None,
         }
     }
 }
@@ -112,6 +114,9 @@ impl Drop for Fixture {
     }
 }
 impl Fixture {
+    pub fn node_running(&self) -> bool {
+        self.task.as_ref().is_some_and(|task| !task.is_finished())
+    }
     pub fn context(&self) -> ConnectContext {
         self.operation
             .new_operation(Duration::from_secs(8))
@@ -198,7 +203,10 @@ pub async fn fixture(setup: Setup<'_>) -> Fixture {
         });
         (address, task)
     } else {
-        let socket = Arc::new(UdpSocket::bind((setup.host, 0)).await.unwrap());
+        let socket = match setup.udp_socket {
+            Some(socket) => socket,
+            None => Arc::new(UdpSocket::bind((setup.host, 0)).await.unwrap()),
+        };
         let address = socket.local_addr().unwrap();
         context.local_addr = Some(address);
         (

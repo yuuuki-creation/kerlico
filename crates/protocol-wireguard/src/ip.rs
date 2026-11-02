@@ -321,6 +321,7 @@ async fn next_packet(stack: &SharedStack) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boringtun::noise::Tunn;
 
     const SOURCE: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
 
@@ -347,6 +348,69 @@ mod tests {
         let mac1 = forged.len() - 32;
         forged[mac1] ^= 1;
         assert!(classifier.classify(SOURCE, &forged).is_none());
+    }
+
+    fn initiator_towards(responder_public: [u8; 32], index: u32) -> Tunn {
+        Tunn::new(
+            StaticSecret::from([2; 32]),
+            PublicKey::from(responder_public),
+            None,
+            None,
+            index,
+            None,
+        )
+    }
+
+    /// 限速和来源形式都只在第二次握手暴露：cookie 由分类器签发，隧道必须认同。
+    #[test]
+    fn cookie_retry_is_answered_under_load_whichever_way_the_source_is_written() {
+        let responder = [1; 32];
+        let responder_public = *PublicKey::from(&StaticSecret::from(responder)).as_bytes();
+        let initiator_public = *PublicKey::from(&StaticSecret::from([2; 32])).as_bytes();
+        let classifier = PacketClassifier::new(responder);
+        let mut session = PeerCrypto::new(responder, initiator_public, 1);
+        let mapped = IpAddr::V6(std::net::Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped());
+        let canonical: SocketAddr = "192.0.2.1:5000".parse().unwrap();
+
+        let mut output = vec![0; 2048];
+        let mut sender = 0;
+        let (mut initiator, cookie) = loop {
+            sender += 1;
+            let mut initiator = initiator_towards(responder_public, sender);
+            let TunnResult::WriteToNetwork(init) =
+                initiator.format_handshake_initiation(&mut output, true)
+            else {
+                panic!("expected a handshake initiation");
+            };
+            match classifier.classify(mapped, init) {
+                Some(PacketRoute::CookieReply(cookie)) => break (initiator, cookie),
+                Some(PacketRoute::Initiator(_)) => {
+                    let _ = session.receive(canonical, init);
+                }
+                _ => panic!("unexpected classification"),
+            }
+            assert!(u64::from(sender) <= 2 * HANDSHAKE_LIMIT, "no cookie reply");
+        };
+
+        assert!(matches!(
+            initiator.decapsulate(Some(canonical.ip()), &cookie, &mut output),
+            TunnResult::Done
+        ));
+        let TunnResult::WriteToNetwork(retry) =
+            initiator.format_handshake_initiation(&mut output, true)
+        else {
+            panic!("expected the retried handshake initiation");
+        };
+        assert!(matches!(
+            classifier.classify(mapped, retry),
+            Some(PacketRoute::Initiator(_))
+        ));
+        let answer = session.receive(canonical, retry).unwrap();
+        assert_eq!(
+            answer.network.first().map(|packet| packet[0]),
+            Some(2),
+            "cookie 重试应得到握手响应（类型 2），而不是另一个 cookie（类型 3）"
+        );
     }
 
     #[test]

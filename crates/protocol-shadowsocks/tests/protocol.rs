@@ -517,6 +517,94 @@ async fn udp_replay_and_invalid_authentication_are_rejected() {
         task.await.unwrap().unwrap();
     }
 }
+#[derive(Default)]
+struct Drops(AtomicUsize);
+impl NodeObserver for Drops {
+    fn record(&self, event: NodeEvent) {
+        if matches!(event, NodeEvent::Dropped) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+fn request(config: &ServerConfig, payload: &[u8]) -> BytesMut {
+    let mut wire = BytesMut::new();
+    crypto_io::encrypt_client_payload(
+        &Context::new(ServerType::Local),
+        config.method(),
+        config.key(),
+        &Address::DomainNameAddress("example.invalid".into(), 53),
+        &UdpSocketControlData::default(),
+        &[],
+        payload,
+        &mut wire,
+    );
+    wire
+}
+#[tokio::test]
+async fn disabled_member_datagram_costs_only_itself() {
+    let method = "aes-256-gcm";
+    let input = kerlico_config::NodeBuildContext::for_test_with_disabled(
+        json!({"method":method}),
+        vec![
+            json!({"password":"synthetic-enabled-member"}),
+            json!({"password":"synthetic-disabled-member"}),
+        ],
+        &[1],
+    );
+    let node =
+        kerlico_config::NodeFactory::build(&kerlico_shadowsocks::ShadowsocksNodeFactory, &input)
+            .unwrap();
+    let ingress = kerlico_egress::testing::ingress(
+        &input,
+        Arc::new(Echo::default()),
+        kerlico_core::TargetPolicy::Remote,
+    )
+    .unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let peer = socket.local_addr().unwrap();
+    let drops = Arc::new(Drops::default());
+    let mut ctx = context();
+    ctx.events = drops.clone();
+    let task = {
+        let ctx = ctx.clone();
+        tokio::spawn(async move { node.handle_udp(socket, ingress, ctx).await })
+    };
+    let kind: CipherKind = method.parse().unwrap();
+    let disabled = ServerConfig::new(peer, "synthetic-disabled-member", kind).unwrap();
+    let enabled = ServerConfig::new(peer, "synthetic-enabled-member", kind).unwrap();
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client
+        .send_to(&request(&disabled, b"from-disabled"), peer)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while drops.0.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("停用成员的数据报应记为 Dropped");
+    assert!(!task.is_finished(), "一个数据报不应结束节点接收循环");
+    client
+        .send_to(&request(&enabled, b"still-serving"), peer)
+        .await
+        .unwrap();
+    let mut response = vec![0; 65_536];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut response))
+        .await
+        .expect("启用成员应继续收到回包")
+        .unwrap();
+    let (len, _, _) = crypto_io::decrypt_server_payload(
+        &Context::new(ServerType::Local),
+        kind,
+        enabled.key(),
+        &mut response[..len],
+    )
+    .unwrap();
+    assert_eq!(&response[..len], b"still-serving");
+    ctx.cancel.cancel();
+    task.await.unwrap().unwrap();
+}
 #[tokio::test]
 async fn udp_budget_idle_cleanup_and_cancel() {
     let node = Arc::new(

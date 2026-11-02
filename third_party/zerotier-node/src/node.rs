@@ -2423,6 +2423,35 @@ mod tests {
     }
 
     #[test]
+    fn stranger_claiming_a_wanted_address_does_not_discard_the_whois_answer() {
+        let alice = Identity::parse(ALICE).unwrap();
+        let wanted = public(&Identity::parse(BOB).unwrap());
+        let mut a = node(ALICE, &[]);
+        a.pending_entry(1000, wanted.address());
+
+        let stranger = unproven(wanted.address().value(), 1);
+        a.on_datagram(1000, other_network(1), &hello_from(&stranger, &alice, 1000));
+        a.on_whois_identity(1000, wanted.clone());
+
+        let checks = identity_checks(&mut a);
+        assert_eq!(checks.len(), 2, "the forged claim must not take the check");
+        for check in &checks {
+            a.on_identity_verdict(1000, check.run());
+        }
+        assert!(a.peers[&wanted.address()].identity == wanted);
+    }
+
+    #[test]
+    fn repeated_whois_answer_with_the_same_identity_runs_one_check() {
+        let wanted = public(&Identity::parse(BOB).unwrap());
+        let mut a = node(ALICE, &[]);
+        a.pending_entry(1000, wanted.address());
+        a.on_whois_identity(1000, wanted.clone());
+        a.on_whois_identity(1000, wanted);
+        assert_eq!(identity_checks(&mut a).len(), 1);
+    }
+
+    #[test]
     fn saturated_checks_drop_strangers_but_keep_a_slot_for_our_own_lookups() {
         let alice = Identity::parse(ALICE).unwrap();
         let mut a = node(ALICE, &[]);

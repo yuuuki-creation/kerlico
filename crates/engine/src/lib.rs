@@ -1184,6 +1184,63 @@ impl tokio::io::AsyncWrite for PeerIo {
 }
 
 #[cfg(test)]
+mod forward_udp_tests {
+    use super::*;
+    use kerlico_config::{NodeBuildContext, OutboundFactory};
+    use serde_json::json;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn icmp_error_on_the_forward_socket_costs_only_itself() {
+        let input = NodeBuildContext::local_for_test(json!({}));
+        let plan = kerlico_net::DirectFactory.compile(&json!({})).unwrap();
+        let direct = plan
+            .start(kerlico_core::ServiceContext::for_test())
+            .await
+            .unwrap();
+        let ingress =
+            kerlico_egress::testing::ingress(&input, direct, kerlico_core::TargetPolicy::Local)
+                .unwrap();
+        let stats = Arc::new(Stats::default());
+        let cleanup = NodeCleanup::new(
+            NodeId::parse("forward").unwrap(),
+            ingress.clone(),
+            stats.clone(),
+            None,
+        );
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(serve_udp(
+            socket.clone(),
+            Destination::new("127.0.0.1", 9).unwrap(),
+            ingress,
+            Limits {
+                drain_timeout_ms: 100,
+                ..Limits::default()
+            },
+            stop.clone(),
+            Arc::new(Semaphore::new(4)),
+            cleanup,
+        ));
+        let closed = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let closed_address = closed.local_addr().unwrap();
+        drop(closed);
+        socket.connect(closed_address).await.unwrap();
+        socket.send(b"provoke-icmp").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while stats.dropped.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("ICMP 错误应记为 dropped，转发入口继续运行");
+        assert!(!task.is_finished());
+        stop.cancel();
+        task.await.unwrap().unwrap();
+    }
+}
+
+#[cfg(test)]
 mod peer_io_tests {
     use super::*;
     use std::{future::poll_fn, io, pin::Pin, task::Poll, time::Duration};

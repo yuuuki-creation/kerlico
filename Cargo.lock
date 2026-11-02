@@ -4795,6 +4795,8 @@ dependencies = [
  "kerlico-config",
  "kerlico-core",
  "kerlico-egress",
+ "kerlico-engine",
+ "kerlico-net",
  "rand 0.8.8",
  "serde",
  "serde_json",
@@ -5125,6 +5127,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smoltcp",
+ "socket2 0.6.5",
  "tokio",
  "zeroize",
 ]

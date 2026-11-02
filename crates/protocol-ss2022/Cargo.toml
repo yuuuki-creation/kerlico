@@ -23,3 +23,5 @@ workspace = true
 
 [dev-dependencies]
 kerlico-egress = { workspace = true, features = ["test-support"] }
+kerlico-engine.workspace = true
+kerlico-net.workspace = true

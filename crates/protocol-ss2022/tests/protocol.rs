@@ -46,6 +46,8 @@ fn key(method: &str, value: u8) -> String {
 struct Events {
     accepted: AtomicUsize,
     completed: AtomicUsize,
+    dropped: AtomicUsize,
+    failed: AtomicUsize,
 }
 impl NodeObserver for Events {
     fn record(&self, event: NodeEvent) {
@@ -56,12 +58,22 @@ impl NodeObserver for Events {
             NodeEvent::Completed => {
                 self.completed.fetch_add(1, Ordering::Relaxed);
             }
+            NodeEvent::Dropped => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            NodeEvent::Failed => {
+                self.failed.fetch_add(1, Ordering::Relaxed);
+            }
             _ => {}
         }
     }
 }
 fn context() -> InboundContext {
-    InboundContext {
+    counted_context().0
+}
+fn counted_context() -> (InboundContext, Arc<Events>) {
+    let events = Arc::new(Events::default());
+    let context = InboundContext {
         peer_lease: None,
         tasks: kerlico_core::NodeTasks::new(
             kerlico_core::NodeId::parse("test-node").unwrap(),
@@ -75,12 +87,13 @@ fn context() -> InboundContext {
         drain_timeout: Duration::from_secs(1),
         max_datagram_size: 65_000,
         max_streams: 32,
-        events: Arc::new(Events::default()),
+        events: events.clone(),
         stream_budget: StreamBudget::new(
             Arc::new(Semaphore::new(64)),
             Arc::new(Semaphore::new(64)),
         ),
-    }
+    };
+    (context, events)
 }
 #[derive(Default)]
 struct Echo(AtomicUsize);
@@ -439,37 +452,27 @@ async fn eih_users_with_identical_session_ids_remain_independent() {
         .unwrap();
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let peer = socket.local_addr().unwrap();
-        let ctx = context();
+        let (ctx, events) = counted_context();
         let access = Arc::new(Echo::default());
         let task = {
             let ctx = ctx.clone();
             let access = access.clone();
             tokio::spawn(async move { node.serve_udp(socket, access, ctx).await })
         };
-        let crypto = Context::new(ServerType::Local);
         let method_kind: CipherKind = method.parse().unwrap();
         let source = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut resends = 0;
         for user in users {
             let config = ServerConfig::new(peer, format!("{service}:{user}"), method_kind).unwrap();
-            let target = Address::DomainNameAddress("example.invalid".into(), 53);
             let mut response = vec![0; 65_536];
+            let crypto = Context::new(ServerType::Local);
             // UDP 可能丢包：重发用新包序号，逻辑缺陷仍会让全部尝试失败。
             let mut answer = None;
             for packet_id in 0..5 {
-                let mut control = UdpSocketControlData::default();
-                control.client_session_id = 123;
-                control.packet_id = packet_id;
-                let mut wire = BytesMut::new();
-                crypto_io::encrypt_client_payload(
-                    &crypto,
-                    method_kind,
-                    config.key(),
-                    &target,
-                    &control,
-                    config.identity_keys(),
-                    user.as_bytes(),
-                    &mut wire,
-                );
+                let wire = udp_request(&config, 123, packet_id, user.as_bytes());
+                if packet_id > 0 {
+                    resends += 1;
+                }
                 source.send_to(&wire, peer).await.unwrap();
                 let Ok(received) =
                     tokio::time::timeout(Duration::from_secs(2), source.recv_from(&mut response))
@@ -493,9 +496,237 @@ async fn eih_users_with_identical_session_ids_remain_independent() {
             assert_eq!(&response[..len], user.as_bytes());
         }
         assert_eq!(access.0.load(Ordering::Relaxed), 2);
+        // 取消前读取：取消本身会让活动目标会话记 Failed。计数为零时重发只能来自回环丢包。
+        eprintln!("{method}: EIH 回包共需重发 {resends} 次");
+        assert_eq!(
+            events.dropped.load(Ordering::Relaxed),
+            0,
+            "serve_udp 内部丢弃了数据报"
+        );
+        assert_eq!(
+            events.failed.load(Ordering::Relaxed),
+            0,
+            "serve_udp 的目标会话失败"
+        );
         ctx.cancel.cancel();
         let _ = task.await.unwrap();
     }
+}
+
+fn udp_request(config: &ServerConfig, session: u64, packet_id: u64, payload: &[u8]) -> BytesMut {
+    let mut control = UdpSocketControlData::default();
+    control.client_session_id = session;
+    control.packet_id = packet_id;
+    let mut wire = BytesMut::new();
+    crypto_io::encrypt_client_payload(
+        &Context::new(ServerType::Local),
+        config.method(),
+        config.key(),
+        &Address::DomainNameAddress("example.invalid".into(), 53),
+        &control,
+        config.identity_keys(),
+        payload,
+        &mut wire,
+    );
+    wire
+}
+
+async fn wait_for(what: &str, ready: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !ready() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("等待超时：{what}"));
+}
+
+async fn round_trip(
+    source: &UdpSocket,
+    wire: &[u8],
+    peer: std::net::SocketAddr,
+    config: &ServerConfig,
+    expected: &[u8],
+) {
+    source.send_to(wire, peer).await.unwrap();
+    let mut response = vec![0; 65_536];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), source.recv_from(&mut response))
+        .await
+        .expect("节点没有回包")
+        .unwrap();
+    let (len, _, _) = crypto_io::decrypt_server_payload(
+        &Context::new(ServerType::Local),
+        config.method(),
+        config.key(),
+        &mut response[..len],
+    )
+    .unwrap();
+    assert_eq!(&response[..len], expected);
+}
+
+/// 两名 EIH 成员中第二名已停用的节点，经真实 `handle_udp` 入口运行。
+struct DisabledMemberNode {
+    socket: Arc<UdpSocket>,
+    peer: std::net::SocketAddr,
+    enabled: ServerConfig,
+    disabled: ServerConfig,
+    context: InboundContext,
+    events: Arc<Events>,
+    task: tokio::task::JoinHandle<Result<()>>,
+}
+async fn disabled_member_node() -> DisabledMemberNode {
+    let method = METHODS[0];
+    let (service, enabled, disabled) = (key(method, 22), key(method, 11), key(method, 33));
+    let input = kerlico_config::NodeBuildContext::for_test_with_disabled(
+        json!({"method":method,"identity_key":service}),
+        vec![json!({"key":enabled}), json!({"key":disabled})],
+        &[1],
+    );
+    let node =
+        kerlico_config::NodeFactory::build(&kerlico_ss2022::Ss2022NodeFactory, &input).unwrap();
+    let ingress = kerlico_egress::testing::ingress(
+        &input,
+        Arc::new(Echo::default()),
+        kerlico_core::TargetPolicy::Remote,
+    )
+    .unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let peer = socket.local_addr().unwrap();
+    let (context, events) = counted_context();
+    let task = {
+        let (socket, context) = (socket.clone(), context.clone());
+        tokio::spawn(async move { node.handle_udp(socket, ingress, context).await })
+    };
+    let kind: CipherKind = method.parse().unwrap();
+    DisabledMemberNode {
+        socket,
+        peer,
+        enabled: ServerConfig::new(peer, format!("{service}:{enabled}"), kind).unwrap(),
+        disabled: ServerConfig::new(peer, format!("{service}:{disabled}"), kind).unwrap(),
+        context,
+        events,
+        task,
+    }
+}
+impl DisabledMemberNode {
+    async fn assert_still_serves_after_one_drop(self, source: &UdpSocket) {
+        let events = self.events.clone();
+        wait_for("Dropped 计数", move || {
+            events.dropped.load(Ordering::Relaxed) >= 1
+        })
+        .await;
+        assert!(!self.task.is_finished(), "一个数据报不应结束节点接收循环");
+        let wire = udp_request(&self.enabled, 77, 0, b"still-serving");
+        round_trip(source, &wire, self.peer, &self.enabled, b"still-serving").await;
+        self.context.cancel.cancel();
+        let result = self.task.await.unwrap();
+        assert!(matches!(result, Err(kerlico_core::Error::Cancelled)));
+    }
+}
+
+#[tokio::test]
+async fn disabled_member_datagram_costs_only_itself() {
+    let node = disabled_member_node().await;
+    let source = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let wire = udp_request(&node.disabled, 55, 0, b"from-disabled");
+    source.send_to(&wire, node.peer).await.unwrap();
+    node.assert_still_serves_after_one_drop(&source).await;
+}
+
+#[tokio::test]
+async fn icmp_error_on_the_node_socket_costs_only_itself() {
+    let node = disabled_member_node().await;
+    let closed = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let closed_address = closed.local_addr().unwrap();
+    drop(closed);
+    node.socket.connect(closed_address).await.unwrap();
+    node.socket.send(b"provoke-icmp").await.unwrap();
+    let events = node.events.clone();
+    wait_for("ICMP 错误被记为 Dropped", move || {
+        events.dropped.load(Ordering::Relaxed) >= 1
+    })
+    .await;
+    let source = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    node.socket
+        .connect(source.local_addr().unwrap())
+        .await
+        .unwrap();
+    node.assert_still_serves_after_one_drop(&source).await;
+}
+
+#[tokio::test]
+async fn silent_losses_inside_serve_udp_are_counted() {
+    let node = disabled_member_node().await;
+    let source = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    source.send_to(b"not-a-datagram", node.peer).await.unwrap();
+    let events = node.events.clone();
+    wait_for("无法解密的数据报被计数", move || {
+        events.dropped.load(Ordering::Relaxed) == 1
+    })
+    .await;
+    let wire = udp_request(&node.enabled, 88, 0, b"first");
+    round_trip(&source, &wire, node.peer, &node.enabled, b"first").await;
+    source.send_to(&wire, node.peer).await.unwrap();
+    let events = node.events.clone();
+    wait_for("重放的数据报被计数", move || {
+        events.dropped.load(Ordering::Relaxed) == 2
+    })
+    .await;
+    node.context.cancel.cancel();
+    let _ = node.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn engine_keeps_tcp_after_a_disabled_member_datagram() {
+    let method = METHODS[0];
+    let (service, enabled, disabled) = (key(method, 22), key(method, 11), key(method, 33));
+    let account = |id: &str| json!({"user_id":id,"username":format!("fixture_{id}"),"password_hash":"$argon2id$v=19$m=19456,t=2,p=1$c3ludGhldGljLXRlc3Qtc2FsdA$c3ludGhldGljLXRlc3QtZGlnZXN0LWNvbnRlbnQ"});
+    let (first, second) = (
+        "10000000-0000-4000-8000-000000000001",
+        "10000000-0000-4000-8000-000000000002",
+    );
+    let config = json!({
+        "version": 2,
+        "accounts": [account(first), account(second)],
+        "outbounds": [{"tag":"direct","type":"direct"}],
+        "nodes": [{"tag":"node","type":"ss2022","listen":"127.0.0.1:0","outbound":"direct",
+            "options":{"method":method,"identity_key":service},
+            "members":[
+                {"user_id":first,"credential_epoch":1,"native_credential":{"key":enabled}},
+                {"user_id":second,"credential_epoch":1,"enabled":false,"native_credential":{"key":disabled}}
+            ]}],
+        "limits": {"drain_timeout_ms":200}
+    });
+    let mut registry = kerlico_config::Registry::default();
+    registry.register(kerlico_net::DirectFactory).unwrap();
+    registry
+        .register_node(kerlico_ss2022::Ss2022NodeFactory)
+        .unwrap();
+    let prepared = registry
+        .prepare(kerlico_config::parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+        .unwrap();
+    let engine = kerlico_engine::Engine::bind(prepared).await.unwrap();
+    let address = engine.listeners().unwrap()[0].1;
+    let cancel = CancellationToken::new();
+    let running = tokio::spawn(engine.run(cancel.clone()));
+
+    let kind: CipherKind = method.parse().unwrap();
+    let member = ServerConfig::new(address, format!("{service}:{disabled}"), kind).unwrap();
+    let source = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let wire = udp_request(&member, 55, 0, b"from-disabled");
+    source.send_to(&wire, address).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(!running.is_finished(), "停用成员的数据报结束了 Engine");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    .unwrap()
+    .expect("节点 TCP 入口应继续接受连接");
+    cancel.cancel();
+    running.await.unwrap().unwrap();
 }
 
 struct FailsOnce(AtomicUsize);

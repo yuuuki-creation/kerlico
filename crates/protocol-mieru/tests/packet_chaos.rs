@@ -158,6 +158,21 @@ async fn malformed_unassociated_datagrams_do_not_allocate_target_or_keep_node_po
     let socket = UdpSocket::bind(f.address).await.unwrap();
     drop(socket);
 }
+#[tokio::test]
+async fn icmp_error_on_the_node_socket_does_not_stop_the_node() {
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let mut setup = Setup::new("udp", "127.0.0.1");
+    setup.udp_socket = Some(socket.clone());
+    let mut f = fixture(setup).await;
+    let closed = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let closed_address = closed.local_addr().unwrap();
+    drop(closed);
+    socket.connect(closed_address).await.unwrap();
+    socket.send(b"provoke-icmp").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(f.node_running(), "ICMP 错误不应结束节点");
+    f.stop().await;
+}
 struct DelayedTarget {
     direct: Arc<dyn Outbound>,
 }

@@ -212,6 +212,45 @@ fn remote_eof_requirement_covers_routes_that_can_reach_the_forward() {
 }
 
 #[test]
+fn remote_eof_requirement_uses_the_route_this_forward_actually_selects() {
+    let strict = |outbound: &str| {
+        let mut entry = forward("entry", "127.0.0.1:7000", "tcp-forward");
+        entry["outbound"] = json!(outbound);
+        entry["require_remote_eof"] = json!(true);
+        with(base(), "inbounds", json!([entry]))
+    };
+    for rule in [
+        json!({"outbound":"lossy","domain_suffix":["onion"]}),
+        json!({"outbound":"lossy","ip_cidr":["192.0.2.0/24"]}),
+        json!({"outbound":"lossy","port":[10]}),
+    ] {
+        assert!(
+            prepare(with(strict("exit"), "routes", json!([rule]))).is_ok(),
+            "目标不命中的规则到不了该入口：{rule}"
+        );
+    }
+    assert!(
+        prepare(with(
+            strict("exit"),
+            "routes",
+            json!([{"outbound":"exit","port":[9]},{"outbound":"lossy","port":[9]}])
+        ))
+        .is_ok(),
+        "首条命中生效，后面的规则到不了该入口"
+    );
+    assert!(
+        prepare(with(
+            strict("lossy"),
+            "routes",
+            json!([{"outbound":"exit","port":[9]}])
+        ))
+        .is_ok(),
+        "固定目标总被路由到具备 tcp_eof 的出站时，绑定的出站不参与转发"
+    );
+    assert!(prepare(strict("lossy")).is_err(), "无路由时走绑定的出站");
+}
+
+#[test]
 fn control_listener_must_not_collide_with_a_tcp_listener() {
     for listen in ["127.0.0.1:7000", "127.0.0.1:7001"] {
         assert!(

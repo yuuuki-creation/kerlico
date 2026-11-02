@@ -24,6 +24,7 @@ tokio = { workspace = true, features = ["io-std"] }
 kerlico-egress = { workspace = true, features = ["test-support"] }
 kerlico-net.workspace = true
 kerlico-engine.workspace = true
+socket2.workspace = true
 
 [lints]
 workspace = true

@@ -572,6 +572,70 @@ async fn real_egress_keeps_full_cone_port_across_families_and_zero_packets() {
     assert_eq!(global.available_permits(), 128);
 }
 
+#[derive(Default)]
+struct Drops(AtomicUsize);
+impl NodeObserver for Drops {
+    fn record(&self, event: NodeEvent) {
+        if matches!(event, NodeEvent::Dropped) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+#[tokio::test]
+async fn disabled_member_datagram_costs_only_itself() {
+    let protocol = "auth_aes128_md5";
+    let mut options = common("aes-128-cfb", protocol, "plain");
+    options["users"] = json!([{"id":7,"password":"synthetic-user-seven"},{"id":8,"password":"synthetic-user-eight"}]);
+    let (node_options, rows, _) = support::credentials("shadowsocksr", &options);
+    let input = kerlico_config::NodeBuildContext::for_test_with_disabled(node_options, rows, &[1]);
+    let node = kerlico_config::NodeFactory::build(&ShadowsocksRNodeFactory, &input).unwrap();
+    let ingress = kerlico_egress::testing::ingress(
+        &input,
+        Arc::new(Echo::default()),
+        kerlico_core::TargetPolicy::Remote,
+    )
+    .unwrap();
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let port = socket.local_addr().unwrap().port();
+    let drops = Arc::new(Drops::default());
+    let mut node_context = context(Arc::new(Semaphore::new(64)));
+    node_context.events = drops.clone();
+    let task = {
+        let node_context = node_context.clone();
+        tokio::spawn(async move { node.handle_udp(socket, ingress, node_context).await })
+    };
+    let client = |id: u32, password: &str| {
+        let mut client = common("aes-128-cfb", protocol, "plain");
+        client["server"] = json!({"host":"127.0.0.1","port":port});
+        client["user"] = json!({"id":id,"password":password});
+        support::outbound(&kerlico_shadowsocksr::ShadowsocksRFactory, &client).unwrap()
+    };
+    let target = Destination::new("example.invalid", 53).unwrap();
+    let establish = ConnectContext::new(Duration::from_secs(3));
+    let disabled = client(8, "synthetic-user-eight");
+    let mut channel = disabled.associate_udp(&establish).await.unwrap();
+    channel.sender.send_to(b"disabled", &target).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while drops.0.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("停用成员的数据报应记为 Dropped");
+    assert!(!task.is_finished(), "一个数据报不应结束节点接收循环");
+    let enabled = client(7, "synthetic-user-seven");
+    let mut channel = enabled.associate_udp(&establish).await.unwrap();
+    channel.sender.send_to(b"enabled", &target).await.unwrap();
+    let (_, payload) = tokio::time::timeout(Duration::from_secs(2), channel.receiver.recv_from())
+        .await
+        .expect("启用成员应继续收到回包")
+        .unwrap()
+        .unwrap();
+    assert_eq!(payload, b"enabled");
+    drop(channel);
+    node_context.cancel.cancel();
+    task.await.unwrap().unwrap();
+}
 #[test]
 fn duplicate_effective_secrets_are_rejected_across_nodes_and_users() {
     use kerlico_config::{Registry, parse};

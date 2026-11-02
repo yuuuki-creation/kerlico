@@ -249,7 +249,7 @@ pub(crate) async fn send(
     Ok(())
 }
 
-async fn run(
+pub(crate) async fn run(
     socket: UdpSocket,
     prepared: Prepared,
     peer: PeerConfig,

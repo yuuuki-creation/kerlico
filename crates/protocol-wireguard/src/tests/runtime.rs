@@ -230,6 +230,218 @@ impl Rig {
     }
 }
 
+#[derive(Default)]
+struct Drops(AtomicUsize);
+impl NodeObserver for Drops {
+    fn record(&self, event: kerlico_core::NodeEvent) {
+        if matches!(event, kerlico_core::NodeEvent::Dropped) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+struct DropCountingNode {
+    socket: Arc<tokio::net::UdpSocket>,
+    drops: Arc<Drops>,
+    context: InboundContext,
+    serving: tokio::task::JoinHandle<Result<()>>,
+}
+impl DropCountingNode {
+    async fn start() -> Self {
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let cancel = kerlico_core::CancellationToken::new();
+        let drops = Arc::new(Drops::default());
+        let context = InboundContext {
+            peer_lease: None,
+            peer_addr: None,
+            local_addr: socket.local_addr().ok(),
+            tasks: NodeTasks::new(NodeId::parse("test-node").unwrap(), cancel.clone()),
+            cancel,
+            connect_timeout: Duration::from_secs(4),
+            idle_timeout: Duration::from_secs(5),
+            drain_timeout: Duration::from_secs(1),
+            max_datagram_size: 65535,
+            max_streams: 64,
+            stream_budget: StreamBudget::new(
+                Arc::new(Semaphore::new(64)),
+                Arc::new(Semaphore::new(64)),
+            ),
+            events: drops.clone(),
+        };
+        let input = NodeBuildContext::for_test(
+            json!({"tunnel": tunnel(2, 1)}),
+            vec![peer(1, Some(2), None)],
+        );
+        let node = crate::WireGuardNodeFactory.build(&input).unwrap();
+        let echo = Arc::new(EchoOutbound {
+            tasks: context.tasks.clone(),
+            associations: AtomicUsize::new(0),
+        });
+        let (ingress, _) = kerlico_egress::testing::ingress_with_resolver(
+            &input,
+            echo,
+            TargetPolicy::Local,
+            FamilyMode::DualV4Preferred,
+            Arc::new(NoDns),
+        )
+        .unwrap();
+        let serving = {
+            let (socket, context) = (socket.clone(), context.clone());
+            tokio::spawn(async move { node.handle_udp(socket, ingress, context).await })
+        };
+        Self {
+            socket,
+            drops,
+            context,
+            serving,
+        }
+    }
+    async fn wait_for_drops(&self, count: usize) {
+        timeout(Duration::from_secs(2), async {
+            while self.drops.0.load(Ordering::SeqCst) < count {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("数据报没有记为 Dropped");
+        assert!(
+            !self.serving.is_finished(),
+            "一个数据报不应结束节点接收循环"
+        );
+    }
+    async fn stop(self) {
+        self.context.cancel.cancel();
+        let result = timeout(Duration::from_secs(2), self.serving)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(Error::Cancelled)));
+    }
+}
+/// 对端发往节点的握手发起包：每次新建会话，所以每个包都会得到一次回复。
+fn handshake_init_for_node() -> Vec<u8> {
+    let tunnel = serde_json::from_value::<crate::config::CommonOptions>(tunnel(1, 2))
+        .unwrap()
+        .prepare()
+        .unwrap();
+    let peer = serde_json::from_value::<crate::config::PeerOptions>(peer(2, None, None))
+        .unwrap()
+        .prepare()
+        .unwrap();
+    let index = crate::crypto::PeerIndex::new(&tunnel, std::slice::from_ref(&peer));
+    crate::crypto::CryptoPeer::new(&tunnel, &peer, 1, None, index.limiter)
+        .initiate()
+        .unwrap()
+}
+#[tokio::test]
+async fn reply_send_failure_costs_only_that_datagram() {
+    let node = DropCountingNode::start().await;
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = node.socket.local_addr().unwrap();
+    // 已连接且关闭写方向的 socket 仍能接收，发送必定 EPIPE。
+    node.socket
+        .connect(client.local_addr().unwrap())
+        .await
+        .unwrap();
+    socket2::SockRef::from(node.socket.as_ref())
+        .shutdown(std::net::Shutdown::Write)
+        .unwrap();
+    client
+        .send_to(&handshake_init_for_node(), endpoint)
+        .await
+        .unwrap();
+    node.wait_for_drops(1).await;
+    client
+        .send_to(&handshake_init_for_node(), endpoint)
+        .await
+        .unwrap();
+    node.wait_for_drops(2).await;
+    node.stop().await;
+}
+#[tokio::test]
+async fn icmp_error_on_the_node_socket_costs_only_itself() {
+    let node = DropCountingNode::start().await;
+    let closed = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let closed_address = closed.local_addr().unwrap();
+    drop(closed);
+    node.socket.connect(closed_address).await.unwrap();
+    node.socket.send(b"provoke-icmp").await.unwrap();
+    node.wait_for_drops(1).await;
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    node.socket
+        .connect(client.local_addr().unwrap())
+        .await
+        .unwrap();
+    client
+        .send_to(
+            &handshake_init_for_node(),
+            node.socket.local_addr().unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut response = [0; 256];
+    let count = timeout(Duration::from_secs(2), client.recv(&mut response))
+        .await
+        .expect("节点没有回应握手")
+        .unwrap();
+    assert_eq!(response[0], 2, "握手响应，共 {count} 字节");
+    node.stop().await;
+}
+#[tokio::test]
+async fn outbound_reply_send_failure_keeps_the_tunnel_running() {
+    use crate::{
+        carrier::Carrier,
+        client::run,
+        config::{CommonOptions, PeerOptions},
+        crypto::{CryptoPeer, PeerIndex},
+        queue::PacketBudget,
+        stack::SharedStack,
+    };
+    let prepared = serde_json::from_value::<CommonOptions>(tunnel(2, 1))
+        .unwrap()
+        .prepare()
+        .unwrap();
+    let remote = serde_json::from_value::<PeerOptions>(peer(1, Some(2), None))
+        .unwrap()
+        .prepare()
+        .unwrap();
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let local = client.local_addr().unwrap();
+    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(sender.local_addr().unwrap()).await.unwrap();
+    socket2::SockRef::from(&client)
+        .shutdown(std::net::Shutdown::Write)
+        .unwrap();
+    let cancel = kerlico_core::CancellationToken::new();
+    let stack = SharedStack::new(
+        &prepared,
+        cancel.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        remote.allowed.clone(),
+        PacketBudget::new(prepared.limits.queue_packets, prepared.limits.queue_bytes),
+    )
+    .unwrap();
+    let index = PeerIndex::new(&prepared, std::slice::from_ref(&remote));
+    let crypto = CryptoPeer::new(&prepared, &remote, 1, None, index.limiter.clone());
+    let host = ServiceContext::for_test();
+    let running = tokio::spawn(run(
+        client,
+        prepared,
+        remote,
+        index,
+        crypto,
+        stack,
+        Carrier::Outbound(host),
+    ));
+    sender
+        .send_to(&handshake_init_for_node(), local)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!running.is_finished(), "回复发送失败不应结束隧道");
+    cancel.cancel();
+    assert!(running.await.unwrap().is_ok());
+}
+
 async fn tcp_echo(outbound: &dyn Outbound, ip: &str, port: u16, length: usize) {
     let target = Destination::new(ip, port).unwrap();
     let context = ConnectContext::new(Duration::from_secs(4));
