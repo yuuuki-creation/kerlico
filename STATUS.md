@@ -4,7 +4,7 @@
 
 ## 版本
 
-最新发布：[v1.2.0](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.2.0)。`main` 正在准备 `v1.3.0`。
+最新发布：[v1.3.0](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.3.0)，带 Linux `x86_64` 二进制。完成计划已全部发布。
 
 构建基线：Rust `1.99.1`，Linux `x86_64`。
 
@@ -15,7 +15,7 @@
 | `v1.0.1` | 门禁通过；第三方许可通知；Linux 二进制 | 已发布 |
 | `v1.1.0` | CLI 接入 WARP；规则路由；DNS 与错误事件历史；中英使用指南 | 已发布 |
 | `v1.2.0` | `dns`、`tun`、`control` 模块 | 已发布 |
-| `v1.3.0` | MASQUE、OpenVPN、OpenConnect、Tailscale、ZeroTier、EasyTier；VLESS XUDP 迁移 | 门禁中 |
+| `v1.3.0` | MASQUE、OpenVPN、OpenConnect、Tailscale、ZeroTier、EasyTier；VLESS XUDP 迁移 | 已发布 |
 
 验证规则见 [0012](docs/decisions/0012-simplified-delivery-and-verification.md)。跨进程设备 daemon/IPC 不在计划内，出现多进程部署需求时再排。
 
@@ -36,7 +36,7 @@
 
 ## 最新门禁
 
-`v1.2.0`（提交 `666d18a`，`perf-01`）：fmt、严格 Clippy、release 通过；全量测试 766 通过、0 失败、4 忽略。
+`v1.3.0`（提交 `6632436`，`perf-01`）：fmt、严格 Clippy、zerotier-node 测试、release、许可通知通过；全量测试 956 通过、0 失败、7 忽略。门禁只含回环与单元测试，真实对端互通由 `tools/interop_*.py` 单独运行。MASQUE、OpenVPN、OpenConnect、Tailscale、EasyTier、ZeroTier、Tor 在门禁里只有单元测试。
 
 ## 已知问题
 

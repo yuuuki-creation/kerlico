@@ -6,7 +6,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/yuuuki-creation/kerlico/releases) 下载 Linux `x86_64` 的 `kerlico`，用 `SHA256SUMS` 校验。运行需要 glibc 2.34 或更高版本，以及 `liblzma`。
+从 [Releases](https://github.com/yuuuki-creation/kerlico/releases) 下载 Linux `x86_64` 的 `kerlico`，用 `SHA256SUMS` 校验。运行需要 glibc 2.34 或更高版本。
 
 从源码构建需要 Rust `1.99.1`：
 
