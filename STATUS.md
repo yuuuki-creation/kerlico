@@ -42,7 +42,7 @@
 
 - **VLESS**：`xhttp-tls-h3-stream-one` 加 Mux 时 UDP 超时，基线同样存在，未定位。出站没有多目标 UDP 关联，不能作为 TUN 或 SOCKS5 UDP 的出站。
 - **SS2022 EIH UDP 测试**：整树门禁中无回包失败过 2 次，单独压测 1000 轮与整树 5 轮都未复现，原因未定位。测试现在带新包序号重发，并断言节点的 `Dropped` 与 `Failed` 为零，重发次数打印到标准错误。
-- **SS2022 TCP 互通**：`tools/interop_ss2022.py` 中 Rust 示例对端作服务端时，131072 字节回显偶发差约 20 至 100 字节后超时，每轮 40 个用例里有 4 至 7 个。`v1.3.0` 同样出现，根因未定位，尚未确认缺陷在示例对端、脚本还是节点。
+- **Shadowsocks 与 SS2022 TCP 截断（已修复，待发布）**：`v1.3.1` 及之前的节点和出站在写 Pending 后可能丢弃数据末尾，连接随后停滞。根因与补丁见 `third_party/shadowsocks/PATCHES.md`。
 - **`kerlico-core`**：`interrupted_node_force_keeps_count_until_actual_socket_join` 全量运行失败过 1 次，单跑 10 次通过，疑似不稳定，未定位。
 - **WireGuard 出站**：定时发送和业务发送失败时隧道服务退出，本地网络短暂不可达会触发。
 - **ZeroTier**：伪造流量持续时，首次主动联系我们的成员学习变慢；本节点发起的查询不受影响。
