@@ -48,11 +48,11 @@ kerlico/
 │   ├── http-carrier/             # H2/H3 DATA 流与 QUIC 运行时 (TrustTunnel 使用)
 │   ├── protocol-*/               # 23 个独立协议 crate (vless, trojan, vmess, hy2, wg, tor 等)
 │   ├── routing/                  # 规则匹配，由 egress 的 Dispatcher 调用
-│   ├── dns/                      # (规划) 独立 DNS 解析、缓存与 Fake-IP
-│   ├── tun/                      # (规划) 系统 TUN 入站适配
+│   ├── dns/                      # 上游解析、缓存与静态 hosts
+│   ├── protocol-tun/             # 系统 TUN 入站
 │   ├── platform/                 # (规划) 宿主/OS 网络与防回环操作
 │   ├── policy/                   # (规划) 出站选择组与健康观测
-│   └── control/                  # (规划) 外部控制与查询接口适配
+│   └── control/                  # 只读 HTTP 控制接口
 ├── third_party/                  # 局部补丁依赖 (h3, shaped-rustls, xray-transport, ml-kem-legacy)
 ├── tools/                        # 对端互通与基准测试辅助工具
 ├── docs/                         # 架构设计、决策记录、接口文档与测试报告
@@ -73,7 +73,10 @@ kerlico/
 | `http-carrier` | H2/H3 DATA 流与 QUIC 运行时 | 不含鉴权、路由与计量 |
 | `protocol-*` | 协议专属配置解码、握手鉴权、报文编解码、入站节点与出站连接实现 | 依赖 `core-api` 与 `config`，8 个还依赖 `net`；不依赖 `engine` 或 `egress` |
 | `routing` | 按目标、网络、节点和用户匹配规则 | 纯逻辑；不查询 DNS |
-| `dns` / `tun` / `platform` / `policy` / `control` | 规划中的独立 DNS/Fake-IP、系统 TUN、宿主适配、策略组与控制 API | 按后续阶段逐步拆分建立 |
+| `dns` | 上游解析、缓存与静态 hosts，由 `egress` 的 `Local` 路径调用 | 上游只接受字面 IP |
+| `protocol-tun` | 系统 TUN 入站，复用 WireGuard 的用户态 IP 栈 | 不修改系统路由 |
+| `control` | 只读 HTTP 控制接口 | 读内存账本，不查询 SQLite |
+| `platform` / `policy` | 规划中的宿主适配与策略组 | 按后续阶段逐步拆分建立 |
 
 ## 编译依赖关系
 

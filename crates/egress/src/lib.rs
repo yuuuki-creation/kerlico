@@ -50,6 +50,12 @@ impl Resolver for SystemResolver {
 pub use kerlico_core::DeviceLease;
 pub use kerlico_net::native_device;
 
+impl Resolver for kerlico_dns::DnsResolver {
+    fn resolve<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Vec<IpAddr>>> {
+        Box::pin(kerlico_dns::DnsResolver::resolve(self, host))
+    }
+}
+
 struct RunningService {
     id: OutId,
     backend: Arc<dyn Outbound>,
@@ -135,7 +141,11 @@ impl EgressRuntime {
         options: RuntimeOptions,
         budget: Duration,
     ) -> Result<Self> {
-        Self::start_with_resolver(plan, options, budget, Arc::new(SystemResolver)).await
+        let resolver: Arc<dyn Resolver> = match plan.dns() {
+            Some(spec) => Arc::new(kerlico_dns::DnsResolver::new(spec)?),
+            None => Arc::new(SystemResolver),
+        };
+        Self::start_with_resolver(plan, options, budget, resolver).await
     }
     async fn start_with_resolver(
         plan: EgressPlan,

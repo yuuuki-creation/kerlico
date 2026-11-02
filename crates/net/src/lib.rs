@@ -90,15 +90,38 @@ struct Direct {
     device: kerlico_core::DeviceLease,
 }
 
-struct NativeDevice;
+#[derive(Default)]
+struct NativeDevice {
+    interface: Option<String>,
+}
+impl NativeDevice {
+    fn bind_udp(&self, socket: &socket2::Socket) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(name) = &self.interface {
+            socket.bind_device(Some(name.as_bytes()))?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = socket;
+        Ok(())
+    }
+}
 /// 借用操作系统原生socket提供方，不探测互联网，也不安装或关闭设备服务。
 pub fn native_device() -> kerlico_core::DeviceLease {
-    kerlico_core::DeviceLease::borrow(Arc::new(NativeDevice))
+    kerlico_core::DeviceLease::borrow(Arc::new(NativeDevice::default()))
 }
 impl kerlico_core::DeviceNetwork for NativeDevice {
     fn connect_tcp(&self, target: std::net::SocketAddr) -> BoxFuture<'_, Result<OpenedTcp>> {
         Box::pin(async move {
-            let stream = TcpStream::connect(target).await?;
+            let socket = if target.is_ipv4() {
+                tokio::net::TcpSocket::new_v4()?
+            } else {
+                tokio::net::TcpSocket::new_v6()?
+            };
+            #[cfg(target_os = "linux")]
+            if let Some(name) = &self.interface {
+                socket.bind_device(Some(name.as_bytes()))?;
+            }
+            let stream = socket.connect(target).await?;
             stream.set_nodelay(true)?;
             let info = TcpConnectInfo::local_bound(stream.local_addr()?);
             Ok(OpenedTcp {
@@ -109,12 +132,23 @@ impl kerlico_core::DeviceNetwork for NativeDevice {
     }
     fn connect_udp(&self, target: std::net::SocketAddr) -> BoxFuture<'_, Result<Arc<UdpSocket>>> {
         Box::pin(async move {
-            let socket = UdpSocket::bind(if target.is_ipv6() {
-                "[::]:0"
+            let (domain, bind) = if target.is_ipv6() {
+                (
+                    socket2::Domain::IPV6,
+                    std::net::SocketAddr::from(([0u16; 8], 0)),
+                )
             } else {
-                "0.0.0.0:0"
-            })
-            .await?;
+                (
+                    socket2::Domain::IPV4,
+                    std::net::SocketAddr::from(([0u8; 4], 0)),
+                )
+            };
+            let socket =
+                socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+            self.bind_udp(&socket)?;
+            socket.set_nonblocking(true)?;
+            socket.bind(&bind.into())?;
+            let socket = UdpSocket::from_std(socket.into())?;
             socket.connect(target).await?;
             Ok(Arc::new(socket))
         })
@@ -137,6 +171,7 @@ impl kerlico_core::DeviceNetwork for NativeDevice {
             if ipv6 {
                 socket.set_only_v6(mode == kerlico_core::FamilyMode::V6Only)?;
             }
+            self.bind_udp(&socket)?;
             socket.set_nonblocking(true)?;
             let bind = if ipv6 {
                 std::net::SocketAddr::from(([0u16; 8], 0))
@@ -237,13 +272,26 @@ fn empty(options: &Value) -> Result<()> {
     Ok(())
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectOptions {
+    interface: Option<String>,
+}
 impl OutboundFactory for DirectFactory {
     fn kind(&self) -> &'static str {
         "direct"
     }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
-        empty(options)?;
-        Ok(OutboundPlan::new(
+        let options: DirectOptions = serde_json::from_value(options.clone())
+            .map_err(|_| Error::Config("直连出站字段不合法".into()))?;
+        let interface = options.interface;
+        if let Some(name) = &interface
+            && (name.is_empty() || name.len() > 15 || cfg!(not(target_os = "linux")))
+        {
+            return Err(Error::Config("直连出站接口名不合法或平台不支持".into()));
+        }
+        let bound = interface.is_some();
+        let plan = OutboundPlan::new(
             Capabilities {
                 tcp: true,
                 tcp_eof: true,
@@ -251,15 +299,25 @@ impl OutboundFactory for DirectFactory {
             },
             true,
             TargetPolicy::Local,
-            |host| {
+            move |host| {
                 Box::pin(async move {
-                    Ok(Arc::new(Direct {
-                        device: host.device().unwrap_or_else(native_device),
-                    }) as Arc<dyn Outbound>)
+                    let device = match interface {
+                        Some(interface) => {
+                            kerlico_core::DeviceLease::borrow(Arc::new(NativeDevice {
+                                interface: Some(interface),
+                            }))
+                        }
+                        None => host.device().unwrap_or_else(native_device),
+                    };
+                    Ok(Arc::new(Direct { device }) as Arc<dyn Outbound>)
                 })
             },
-        )
-        .with_native_targets())
+        );
+        Ok(if bound {
+            plan
+        } else {
+            plan.with_native_targets()
+        })
     }
 }
 impl OutboundFactory for RejectFactory {

@@ -35,7 +35,7 @@ cargo build --locked --release -p kerlico
 - `local_inbounds`：只监听回环地址的协议入口，如本机 SOCKS。
 - `inbounds`：只监听回环地址的固定目标转发。
 - `routes`：按规则选择出站。
-- `accounts`、`telemetry`、`device`、`limits`：账户、统计、WARP 和限额。
+- `accounts`、`telemetry`、`device`、`dns`、`control`、`limits`：账户、统计、WARP、DNS、控制接口和限额。
 
 字段细节见[配置接口](interfaces/config.md)，各协议的 `options` 见[接口文档](interfaces/README.md)。
 
@@ -86,6 +86,24 @@ printf '%s' 'your-admin-password' | kerlico account-new --prefix alice
 ```
 
 首次需要时向 Cloudflare 注册一次，身份保存在此目录。目录必须是绝对路径，权限 `0700`。
+
+## TUN
+
+[examples/tun-v2.json](../examples/tun-v2.json) 创建 `kerlico0` 接口，把进入接口的 TCP 和 UDP 交给出站。kerlico 不修改系统路由，需要自己添加路由，并避免回环。TUN 看到的目标都是 IP，域名规则不生效。详见 [TUN 入站](interfaces/tun.md)。
+
+## DNS
+
+`dns` 段为 `direct` 路径配置上游和静态 hosts，支持 UDP、TCP 和 TLS。未配置时使用系统解析器。详见 [DNS](interfaces/dns.md)。
+
+## 控制接口
+
+`control` 段开启只读 HTTP 接口：
+
+```sh
+curl -H 'Authorization: Bearer <secret>' http://127.0.0.1:9090/v1/usage
+```
+
+详见[控制接口](interfaces/control.md)。
 
 ## 统计
 

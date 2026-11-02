@@ -501,6 +501,21 @@ const DIAGNOSTICS: &[(&str, &str)] = &[
         "Unsafe statistics path permissions, ownership, or hard-link count",
     ),
     ("路由规则不合法", "Invalid routing rule"),
+    ("DNS 配置不合法", "Invalid DNS configuration"),
+    ("TUN 选项不合法", "Invalid TUN options"),
+    (
+        "TUN 节点没有物理 TCP 入口",
+        "A TUN node has no physical TCP entry",
+    ),
+    (
+        "非回环控制接口必须配置非空密钥",
+        "A non-loopback control interface requires a non-empty secret",
+    ),
+    ("直连出站字段不合法", "Invalid direct outbound fields"),
+    (
+        "直连出站接口名不合法或平台不支持",
+        "Invalid direct outbound interface name, or unsupported on this platform",
+    ),
     (
         "路由规则引用的出站不存在",
         "A routing rule references an outbound that does not exist",

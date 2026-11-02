@@ -18,6 +18,8 @@
 | `limits` | 全局超时、会话与账本记录上限，省略字段使用默认值 |
 | `routes` | 路由规则数组，默认空，见下文 |
 | `device` | 设备级 WARP 补齐，默认关闭，见下文 |
+| `dns` | 网站域名解析的上游与 hosts，默认用系统解析器，见 [DNS](dns.md) |
+| `control` | 只读 HTTP 控制接口，默认关闭，见[控制接口](control.md) |
 | `telemetry` | SQLite 统计历史，默认关闭，见[统计历史](history.md) |
 
 - **标签与校验**：`tag` 为 1–64 个 ASCII 字母、数字、`-` 或 `_`；出站拥有独立标签命名空间，所有入站（`inbounds` / `nodes` / `local_inbounds`）共用另一命名空间。未知字段、缺失类型、无效引用或能力不匹配在编译期直接拒绝。
@@ -61,6 +63,8 @@
 | --- | --- |
 | `state_directory` | 必填，绝对路径。最终目录 `0700`，祖先目录不可被其他账户写入 |
 | `registration` | `create-once`（默认）：状态为空时向 Cloudflare 注册一次。`existing-only`：只用已有身份，缺失或不匹配时启动失败 |
+
+`direct` 出站可设 `"options": {"interface": "eth0"}` 绑定接口（仅 Linux）。绑定后该出站不使用 WARP。
 
 同一 `state_directory` 只能被一个进程使用。需要 `warp` feature（默认启用）。详见[设备所有者](device-runtime.md)。
 

@@ -11,6 +11,7 @@ kerlico-core.workspace = true
 kerlico-config.workspace = true
 kerlico-net.workspace = true
 kerlico-routing.workspace = true
+kerlico-dns.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

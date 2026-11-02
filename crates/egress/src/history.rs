@@ -69,7 +69,7 @@ pub struct StoredFlow {
     pub omitted_target_events: u64,
 }
 impl StoredFlow {
-    fn from_record(record: &FlowRecord, mask_source: bool) -> Self {
+    pub fn from_record(record: &FlowRecord, mask_source: bool) -> Self {
         let observed_source = record.observed_source.map(|address| {
             if !mask_source {
                 return address.to_string();

@@ -15,6 +15,7 @@ use std::{
 mod plan;
 pub use plan::*;
 mod users;
+pub use kerlico_dns::DnsSpec;
 pub use kerlico_routing::{Network, RouteTable, RuleSpec};
 pub use users::AccountSpec;
 
@@ -41,6 +42,18 @@ pub struct Config {
     pub device: Option<DeviceSpec>,
     #[serde(default)]
     pub routes: Vec<RuleSpec>,
+    #[serde(default)]
+    pub dns: Option<DnsSpec>,
+    #[serde(default)]
+    pub control: Option<ControlSpec>,
+}
+/// 只读控制接口。非回环地址必须配置 `secret`。
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlSpec {
+    pub listen: SocketAddr,
+    #[serde(default)]
+    pub secret: Option<String>,
 }
 /// 配置后，`dual-stack` 节点缺原生地址族时经 WARP 补齐；未配置则只用原生地址族。
 #[derive(Clone, Deserialize)]
@@ -374,6 +387,15 @@ impl Registry {
         {
             return Err(Error::Config("设备状态目录必须是绝对路径".into()));
         }
+        if let Some(dns) = &config.dns {
+            dns.validate()?;
+        }
+        if let Some(control) = &config.control
+            && (control.secret.as_ref().is_some_and(String::is_empty)
+                || (control.secret.is_none() && !control.listen.ip().is_loopback()))
+        {
+            return Err(Error::Config("非回环控制接口必须配置非空密钥".into()));
+        }
         let mut accounts = BTreeMap::new();
         let mut usernames = BTreeSet::new();
         for account in config.accounts {
@@ -569,10 +591,12 @@ impl Registry {
         Ok(PreparedConfig {
             history: config.telemetry,
             device: config.device,
+            control: config.control,
             egress: EgressPlan {
                 services,
                 bindings,
                 routes,
+                dns: config.dns,
                 max_flows: config.limits.max_flow_records,
             },
             inbounds: config.inbounds,

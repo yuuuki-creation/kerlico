@@ -1,4 +1,4 @@
-use crate::{DeviceSpec, ForwardSpec, HistorySpec, Limits};
+use crate::{ControlSpec, DeviceSpec, DnsSpec, ForwardSpec, HistorySpec, Limits};
 use kerlico_core::{
     BoxFuture, Capabilities, CredentialIssuer, FamilyMode, InboundProtocol, NodeId, OutId,
     Outbound, Result, ServiceContext, TargetPolicy,
@@ -81,9 +81,13 @@ pub struct EgressPlan {
     pub(crate) services: Vec<NamedServicePlan>,
     pub(crate) bindings: Vec<IngressPlan>,
     pub(crate) routes: RouteTable,
+    pub(crate) dns: Option<DnsSpec>,
     pub(crate) max_flows: usize,
 }
 impl EgressPlan {
+    pub fn dns(&self) -> Option<&DnsSpec> {
+        self.dns.as_ref()
+    }
     pub fn into_parts(self) -> (Vec<NamedServicePlan>, Vec<IngressPlan>, RouteTable, usize) {
         (self.services, self.bindings, self.routes, self.max_flows)
     }
@@ -92,6 +96,7 @@ impl EgressPlan {
 pub struct PreparedConfig {
     pub(crate) history: Option<HistorySpec>,
     pub(crate) device: Option<DeviceSpec>,
+    pub(crate) control: Option<ControlSpec>,
     pub(crate) egress: EgressPlan,
     pub(crate) inbounds: Vec<ForwardSpec>,
     pub(crate) limits: Limits,
@@ -114,6 +119,9 @@ pub struct DeviceRequirements {
 impl PreparedConfig {
     pub fn device(&self) -> Option<&DeviceSpec> {
         self.device.as_ref()
+    }
+    pub fn control(&self) -> Option<&ControlSpec> {
+        self.control.as_ref()
     }
     pub fn into_parts(self) -> EnginePlanParts {
         EnginePlanParts {

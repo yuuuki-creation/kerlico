@@ -12,6 +12,9 @@
 | [配置与命令行 (config.md)](config.md) | JSON v2 根结构、管理账户、节点成员、资源限制与 CLI 子命令 |
 | [节点与共享目标访问 (node-egress.md)](node-egress.md) | 凭据隔离清单、`Local`/`Remote` 目标路径、载体计量与服务退休收据（`ServiceRetirement`） |
 | [统计历史 (history.md)](history.md) | SQLite 用量、访问与带宽记录，关闭收据和只读 CLI 查询 |
+| [TUN 入站 (tun.md)](tun.md) | 系统 TUN 接口、路由配置与限制 |
+| [DNS (dns.md)](dns.md) | 上游与静态 hosts |
+| [控制接口 (control.md)](control.md) | 只读 HTTP 端点 |
 | [设备所有者 (device-runtime.md)](device-runtime.md) | 同进程共享 WARP、原生载体与业务路径、私有状态和生命周期 |
 | [语言与诊断 (localization.md)](localization.md) | 显式语种、双语 CLI、稳定诊断码及目录覆盖边界 |
 | [IP 隧道 (ip-tunnel.md)](ip-tunnel.md) · [HTTP 载体 (http-carrier.md)](http-carrier.md) | WireGuard 共用 IP 数据面与受管 HTTP DATA/QUIC 载体 |

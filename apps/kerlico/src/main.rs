@@ -91,6 +91,8 @@ fn registry() -> Result<Registry> {
         registry.register(kerlico_wireguard::WireGuardFactory)?;
         registry.register_node(kerlico_wireguard::WireGuardNodeFactory)?;
     }
+    #[cfg(feature = "protocol-tun")]
+    registry.register_node(kerlico_tun::TunNodeFactory)?;
     #[cfg(feature = "protocol-vless")]
     registry.register(kerlico_vless::VlessFactory)?;
     #[cfg(feature = "protocol-vless")]
@@ -372,6 +374,7 @@ async fn serve(
     device: kerlico_core::DeviceLease,
     language: Language,
 ) -> Result<()> {
+    let control = prepared.control().cloned();
     let engine =
         Engine::bind_with_options(prepared, kerlico_core::RuntimeOptions { device, language })
             .await?;
@@ -381,13 +384,31 @@ async fn serve(
             Language::En => println!("Inbound {tag} is listening on {address}"),
         }
     }
+    let stop_control = CancellationToken::new();
+    let control = match control {
+        Some(spec) => {
+            let server = kerlico_control::ControlServer::bind(&spec, &engine).await?;
+            let address = server.local_addr()?;
+            match language {
+                Language::ZhCn => println!("控制接口已监听 {address}"),
+                Language::En => println!("Control interface is listening on {address}"),
+            }
+            Some(tokio::spawn(server.serve(stop_control.clone())))
+        }
+        None => None,
+    };
     let token = CancellationToken::new();
     let running = engine.run(token.clone());
     tokio::pin!(running);
-    tokio::select! {
+    let result = tokio::select! {
         result=&mut running=>result,
         signal=shutdown_signal()=>{signal?;token.cancel();running.await},
+    };
+    stop_control.cancel();
+    if let Some(control) = control {
+        let _ = control.await;
     }
+    result
 }
 
 /// 配置了 `device` 且有 `dual-stack` 本地出网时才持有 WARP 所有者，其余情况用原生设备。

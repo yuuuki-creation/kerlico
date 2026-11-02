@@ -35,7 +35,7 @@ The configuration is JSON v2 with these parts:
 - `local_inbounds`: protocol entries bound to loopback, such as a local SOCKS port.
 - `inbounds`: fixed-target forwards bound to loopback.
 - `routes`: rules that choose an outbound.
-- `accounts`, `telemetry`, `device`, `limits`: accounts, statistics, WARP and limits.
+- `accounts`, `telemetry`, `device`, `dns`, `control`, `limits`: accounts, statistics, WARP, DNS, control interface and limits.
 
 Field details are in the [configuration interface](interfaces/config.md) (Chinese). Protocol `options` are in the [interface documents](interfaces/README.md).
 
@@ -86,6 +86,24 @@ On an IPv4-only or IPv6-only machine, configure `device` so `direct` traffic fro
 ```
 
 It registers with Cloudflare once when first needed and keeps the identity in this directory. The path must be absolute with mode `0700`.
+
+## TUN
+
+[examples/tun-v2.json](../examples/tun-v2.json) creates a `kerlico0` interface and hands its TCP and UDP to an outbound. kerlico does not change system routes, so add routes yourself and avoid loops: bind `direct` with `"options": {"interface": "eth0"}` and give the proxy server and DNS upstreams explicit routes through the physical gateway. TUN sees IP targets only, so domain rules do not match. It needs `CAP_NET_ADMIN` and has only been verified on Linux.
+
+## DNS
+
+The `dns` section sets upstreams (`udp://IP`, `tcp://IP`, `tls://IP#name`) and static `hosts` for the `direct` path. Without it, the system resolver is used.
+
+## Control interface
+
+The `control` section enables a read-only HTTP API (`/v1/health`, `/v1/usage`, `/v1/online`, `/v1/flows`, `/v1/stats`):
+
+```sh
+curl -H 'Authorization: Bearer <secret>' http://127.0.0.1:9090/v1/usage
+```
+
+A non-loopback `listen` address requires `secret`.
 
 ## Statistics
 

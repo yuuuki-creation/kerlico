@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "outbounds": [
+    { "tag": "direct", "type": "direct", "options": { "interface": "eth0" } }
+  ],
+  "local_inbounds": [
+    {
+      "tag": "tun",
+      "type": "tun",
+      "listen": "127.0.0.1:0",
+      "outbound": "direct",
+      "options": { "name": "kerlico0", "addresses": ["198.18.0.1/16"], "mtu": 1500 }
+    }
+  ],
+  "dns": { "servers": ["udp://1.1.1.1", "udp://8.8.8.8"] },
+  "control": { "listen": "127.0.0.1:9090" }
+}

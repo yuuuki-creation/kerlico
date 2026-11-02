@@ -48,6 +48,7 @@ fn shipped_examples_pass_check() {
         "config-v2-minimal.json",
         "local-forward-v2.json",
         "vless-tls.json",
+        "tun-v2.json",
     ] {
         let result = Command::new(env!("CARGO_BIN_EXE_kerlico"))
             .args(["--lang", "en", "check", "--config"])

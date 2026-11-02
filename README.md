@@ -13,7 +13,8 @@
 - **多用户账户与业务计量**：管理账户（`AccountSpec`）与协议原生凭据（`native_credential`）映射分离，提供唯一业务流量计量、内存态会话记录（`Telemetry`）、可选 SQLite 用量/带宽/访问历史与只读 `history` 查询。
 - **显式双语接口**：CLI 帮助、参数错误和运行诊断支持 `--lang zh-CN` / `--lang en`；模块标识与 JSON 字段保持稳定，见[语言接口](docs/interfaces/localization.md)。
 - **规则路由与 WARP 补齐**：`routes` 按域名、CIDR、端口、网络、节点和用户选择出站；`device` 让 `dual-stack` 节点经 WARP 访问缺失的地址族。
-- **待完成能力**：`dns`/`tun`/`control` 模块，以及 6 个隧道/覆盖网络端点。
+- **TUN、DNS 与控制接口**：`tun` 入站接管内核 IP 包；`dns` 配置 UDP/TCP/TLS 上游；`control` 提供只读 HTTP 接口。
+- **待完成能力**：6 个隧道/覆盖网络端点。
 
 ## 快速开始（配置 v2）
 

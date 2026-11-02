@@ -61,8 +61,8 @@ UDP 区分三层状态，保持完整数据报边界（空包作为 0 字节有�
 
 ## DNS 与 TUN 扩展路径（规划设计）
 
-- **独立 DNS 模块（规划）**：区分本地网站目标解析、代理载体端点解析与未来路由规则匹配辅助解析；代理端点拨号与 DNS 引导查询使用独立连接路径，防止递归死循环。Fake-IP 映射由独立租约管理。
-- **系统 TUN 入站（规划）**：通过用户态网络栈（如 `smoltcp`）将三层 IP 包还原为 TCP 流与 UDP 数据报接入 `Dispatcher`；目前用户态栈能力已在 `protocol-wireguard` 内部用于端到端隧道封装与解封装。
+- **DNS 模块**：`dns` 段配置 `Local` 路径的网站目标解析，见 [DNS](interfaces/dns.md)。代理载体端点仍用系统解析。Fake-IP 未实现。
+- **系统 TUN 入站**：`protocol-tun` 复用 `kerlico_wireguard::ip` 的用户态栈，把三层 IP 包还原为 TCP 流与 UDP 数据报接入 `Dispatcher`，见 [TUN 入站](interfaces/tun.md)。
 
 ## 关联文档与借鉴依据
 

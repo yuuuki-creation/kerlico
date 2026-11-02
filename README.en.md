@@ -12,7 +12,8 @@ See [Releases](https://github.com/yuuuki-creation/kerlico/releases) for the late
 - **Independent Nodes & Shared Outbound Dispatcher**: IPv4 and IPv6 inbound nodes maintain separate listeners, authentication scopes, and quotas while sharing a single runtime outbound dispatcher (`EgressRuntime`). Local egress follows per-node `ipv4-only`, `ipv6-only`, or `dual-stack` (IPv4-preferred) policy, while remote proxy outbounds pass original targets through without local website DNS resolution.
 - **Multi-User Accounts & Telemetry**: Separates management accounts (`AccountSpec`) from protocol-native credentials (`native_credential`) and provides single-boundary payload accounting, bounded in-memory flow records (`Telemetry`), optional SQLite usage/bandwidth/access history, and read-only `history` queries.
 - **Rule Routing & WARP Fill-in**: `routes` chooses an outbound by domain, CIDR, port, network, node and user. `device` lets `dual-stack` nodes reach a missing address family through WARP.
-- **Remaining Work**: `dns`/`tun`/`control` modules and six tunnel/overlay endpoints.
+- **TUN, DNS & Control**: the `tun` inbound handles kernel IP packets, `dns` configures UDP/TCP/TLS upstreams, and `control` provides a read-only HTTP API.
+- **Remaining Work**: six tunnel/overlay endpoints.
 
 ## Quick Start (Configuration Schema v2)
 
