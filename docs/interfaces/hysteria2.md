@@ -42,7 +42,7 @@
 
 同一节点的客户端与服务端 auth 必须一致，IPv4/IPv6 不同节点分别设置独立 auth。节点 TLS 每种材料分别选择 `_pem` 或 `_file`，不得同时填写；单份材料最多 1 MiB。客户端不设 ca_pem 时信任内置公共根；不接受 insecure 跳过验证。auth 必须为非空、至多 4096 字节的合法 HTTP 字段值，拒绝首尾空白。Salamander 密码为可选的 4–4096 字节字符串，必须双端一致，它不替代 auth。
 
-`limits` 默认值：max_streams=64、udp_queue_packets=16、udp_queue_bytes=4194304、idle_timeout_ms=30000、congestion=bbr。允许 max_streams 1–1024、UDP 队列 1–64 包、队列字节 65536–16777216、空闲时间 100–86400000 毫秒。congestion 仅接受 bbr 或 reno；实际使用 Quinn 对应控制器，不宣称与官方 BBR/Brutal 实现性能相同。
+`limits` 默认值：max_streams=64、udp_queue_packets=16、udp_queue_bytes=4194304、idle_timeout_ms=30000、congestion=bbr。允许 max_streams 1–1024、UDP 队列 1–64 包、队列字节 65536–16777216、空闲时间 100–86400000 毫秒。congestion 仅接受 bbr 或 reno；实际使用 Quinn 对应控制器，不是官方 BBR/Brutal 实现。
 
 客户端 auth 请求通告接收速率 0；服务端返回 auto，采用自适应控制。客户端接收对端的 0/auto；收到非零固定速率会明确拒绝，避免接受但忽略尚未实现的协商限制。
 

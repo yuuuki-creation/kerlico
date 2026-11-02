@@ -7,7 +7,7 @@
 - **出站必填**：`server: {host, port}`、`version`、`psk`；可选 `userkey`、`reuse`（默认 `false`）、`obfs_mode`（`none` / `http`，默认 `none`）、`obfs_host`、`obfs_uri`。
 - **节点配置**：`options` 必填 `version`，可选同名 `mode` / `obfs` 选项；成员凭据 `members[].native_credential` 格式为 `{"psk": "协议 PSK", "userkey": "可选原生 userkey"}`（`unsafe-raw` 必须提供非空 `userkey`）。节点 `userkey` 不允许空或重复，最多 256 个，每个最多 255 UTF-8 字节。单 PSK 节点不将 `client-id` 当成额外身份凭据。
 
-v6 专用 `mode` 为 default（默认）、unshaped、unsafe-raw；v6 拒绝 HTTP obfs 及其参数，PSK 必须为 12–255 字节。v4/v5 拒绝 mode。HTTP obfs 默认 host 为 `bing.com`、URI 为 `/`；它不是 WebSocket 或 TLS，不宣称与原始发行程序有完全相同的 HTTP 指纹。
+v6 专用 `mode` 为 default（默认）、unshaped、unsafe-raw；v6 拒绝 HTTP obfs 及其参数，PSK 必须为 12–255 字节。v4/v5 拒绝 mode。HTTP obfs 默认 host 为 `bing.com`、URI 为 `/`；它不是 WebSocket 或 TLS，HTTP 指纹未与原始发行程序比对。
 
 unsafe-raw 没有加密或 PSK 鉴权，因此本项目要求显式 userkey，并限制回环 IP 字面量节点与代理服务器。其跨节点认证指纹只取实际 userkey，不以不同 PSK 伪造隔离。普通加密节点都登记 PSK 指纹，跨节点重复 PSK 即拒绝，防止单 PSK 节点接受另一个多用户节点的 client-id。userkey 列表仍按本节点鉴权。
 
