@@ -105,7 +105,7 @@ class Client:
                 response = urllib.request.urlopen(request, timeout=300)
             except urllib.error.HTTPError as error:
                 response = error
-            if response.status not in (429, 503):
+            if response.status not in (429, 502, 503, 504):
                 break
             response.read()
             time.sleep(10)  # 入口按客户端限流，刚启动时依赖服务也可能还没就绪。
@@ -357,36 +357,50 @@ def pace(client, manifest_path):
     with open(manifest_path, encoding="utf-8") as handle:
         manifest = {node["title"]: node for node in flatten(json.load(handle))}
     ensure_language(client, "en", True)
-    last_report, retried = 0, {}
-    while True:
-        tree = client.call("GET", "/v1/tree")["documents"]
-        progress, tally = language_progress(client)
-        active = len(progress.get("active", []))
-        unpublished = [item for item in tree if not item.get("publishedReference")]
-        references = {item["documentId"]: item["publishedReference"] for item in tree if item.get("publishedReference")}
-        now = time.time()
-        if now - last_report > 300:
-            print(time.strftime("%H:%M:%S"), "未发布", len(unpublished), "在途", active, json.dumps(tally, ensure_ascii=False), flush=True)
-            last_report = now
-        if unpublished:
-            # 文档树是前序，父文档先发布。基准语言不等翻译；英文译文在翻译服务里排队，队列自己按并发消化。
-            node = unpublished[0]
-            publish(client, node, manifest[node["title"]])
-        elif active < IN_FLIGHT:
-            target = next((tag for tag in LANGUAGES if tag not in tally or set(tally[tag]) != {"translated"}), None)
-            if target is None:
-                for tag in LANGUAGES:
-                    ensure_language(client, tag, True)
-                print("全部语言翻译完成", json.dumps(tally, ensure_ascii=False), flush=True)
-                return
-            ensure_language(client, target, target == "en")
-            for row in progress["documents"]:
-                key = (row["documentId"], row["language"])
-                if row["language"] == target and (row["state"] == "waiting" or (row["state"] == "stopped" and now - retried.get(key, 0) > RETRY_STOPPED_AFTER)):
-                    retried[key] = now
-                    client.put("/v1/translations", {"document": references[row["documentId"]], "targetLanguage": target}, "POST")
-                    break
+    state = {"last_report": 0, "retried": {}}
+    while not pace_step(client, manifest, state):
         time.sleep(20)
+
+
+def pace_step(client, manifest, state):
+    """走一轮；全部完成返回 True。这是要跑几天的循环，单次接口失败下一轮再试。"""
+    try:
+        return pace_once(client, manifest, state)
+    except (ApiError, OSError) as error:
+        print(time.strftime("%H:%M:%S"), "本轮失败", str(error)[:200], flush=True)
+        return False
+
+
+def pace_once(client, manifest, state):
+    retried = state["retried"]
+    tree = client.call("GET", "/v1/tree")["documents"]
+    progress, tally = language_progress(client)
+    active = len(progress.get("active", []))
+    unpublished = [item for item in tree if not item.get("publishedReference")]
+    references = {item["documentId"]: item["publishedReference"] for item in tree if item.get("publishedReference")}
+    now = time.time()
+    if now - state["last_report"] > 300:
+        print(time.strftime("%H:%M:%S"), "未发布", len(unpublished), "在途", active, json.dumps(tally, ensure_ascii=False), flush=True)
+        state["last_report"] = now
+    if unpublished:
+        # 文档树是前序，父文档先发布。基准语言不等翻译；英文译文在翻译服务里排队，队列自己按并发消化。
+        node = unpublished[0]
+        publish(client, node, manifest[node["title"]])
+    elif active < IN_FLIGHT:
+        target = next((tag for tag in LANGUAGES if tag not in tally or set(tally[tag]) != {"translated"}), None)
+        if target is None:
+            for tag in LANGUAGES:
+                ensure_language(client, tag, True)
+            print("全部语言翻译完成", json.dumps(tally, ensure_ascii=False), flush=True)
+            return True
+        ensure_language(client, target, target == "en")
+        for row in progress["documents"]:
+            key = (row["documentId"], row["language"])
+            if row["language"] == target and (row["state"] == "waiting" or (row["state"] == "stopped" and now - retried.get(key, 0) > RETRY_STOPPED_AFTER)):
+                retried[key] = now
+                client.put("/v1/translations", {"document": references[row["documentId"]], "targetLanguage": target}, "POST")
+                break
+    return False
 
 
 def language_progress(client):
