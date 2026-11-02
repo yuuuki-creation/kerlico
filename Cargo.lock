@@ -4533,7 +4533,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "webpki-roots",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -4615,7 +4615,7 @@ dependencies = [
  "kerlico-core",
  "kerlico-net",
  "kerlico-wireguard",
- "quick-xml",
+ "quick-xml 0.38.4",
  "serde",
  "serde_json",
  "tokio",
