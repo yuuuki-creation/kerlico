@@ -14,6 +14,7 @@ use shadowsocks::{
     crypto::CipherKind,
     relay::{
         socks5::Address,
+        tcprelay::{ProxyClientStream, ProxyServerStream},
         udprelay::{crypto_io, options::UdpSocketControlData},
     },
 };
@@ -662,4 +663,36 @@ async fn native_second_member_keeps_tcp_udp_identity_and_original_domain() {
         cancel.cancel();
         while tasks.join_next().await.is_some() {}
     }).await.expect("多成员真实鉴别或回收超时");
+}
+
+/// 出站先空写首部以允许目标先发数据，服务端拒绝“无负载且填充为 0”的首块。
+#[tokio::test]
+async fn empty_first_write_is_never_rejected_for_zero_padding() {
+    let method = METHODS[2];
+    let kind: CipherKind = method.parse().unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:1".parse::<std::net::SocketAddr>().unwrap(),
+        key(method, 7),
+        kind,
+    )
+    .unwrap();
+    let client_crypto = Context::new_shared(ServerType::Local);
+    let server_crypto = Context::new_shared(ServerType::Server);
+    for round in 0..5000 {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = ProxyClientStream::from_stream(
+            client_crypto.clone(),
+            client,
+            &config,
+            Address::DomainNameAddress("example.invalid".into(), 443),
+        );
+        assert_eq!(client.write(&[]).await.unwrap(), 0);
+        client.flush().await.unwrap();
+        let mut server =
+            ProxyServerStream::from_stream(server_crypto.clone(), server, kind, config.key());
+        server
+            .handshake()
+            .await
+            .unwrap_or_else(|error| panic!("第 {round} 次首部被拒绝：{error}"));
+    }
 }

@@ -53,6 +53,7 @@ UPSTREAM_NOTICES = {
     b"third_party/shaped-rustls/LICENSE-ISC": "7cfafc877eccc46c0e346ccbaa5c51bb6b894d2b818e617d970211e232785ad4",
     b"third_party/shaped-rustls/LICENSE-MIT": "709e3175b4212f7b13aa93971c9f62ff8c69ec45ad8c6532a7e0c41d7a7d6f8c",
     b"third_party/shaped-rustls/README.md": "41143f33a439ac0b138b33eb6e8681cc7f56c1ecca95578a68323f4f95f20279",
+    b"third_party/shadowsocks/LICENSE": "b453481258ecf6dbe1ec0fb2efa621de6035fcddbee0868cb71b8ffc4c0c4782",
 }
 
 

@@ -6,6 +6,7 @@ exclude = [
     "third_party/h3",
     "third_party/shaped-rustls/rustls",
     "third_party/xray-transport",
+    "third_party/shadowsocks",
     "crates/protocol-ssh/vendor/russh-util",
     "crates/protocol-shadowquic/vendor/quinn-jls",
     "crates/protocol-shadowquic/vendor/quinn-proto-jls",
@@ -101,6 +102,7 @@ argon2 = "0.5.3"
 [patch.crates-io]
 russh-util = { path = "crates/protocol-ssh/vendor/russh-util" }
 ml-kem = { path = "third_party/ml-kem-legacy" }
+shadowsocks = { path = "third_party/shadowsocks" }
 h3 = { path = "third_party/h3" }
 rustls = { path = "third_party/shaped-rustls/rustls" }
 quinn = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d37466492242a1827f9a16aa91ca4c1b00be" }

@@ -15,6 +15,7 @@
 
 - `third_party/`（如 `h3`、`xray-transport`、`ml-kem-legacy`）与各协议 crate 下的 `vendor/` 目录（如 `russh-util`、`quinn-jls`、`quinn-proto-jls`、`arti-client`）均保留其上游许可证文本、版权声明及修改记录（`PATCHES.md` / `MODIFICATIONS.md`）。
 - 项目的匿名提交规则仅针对本项目提交者身份，不删除上游开源项目要求保留的作者署名与许可证通知。
+- `third_party/shadowsocks` 保留 MIT 许可证，补丁见该目录 `PATCHES.md`。
 - `third_party/shaped-rustls` 保留固定上游版本的 Apache-2.0 / ISC / MIT 许可证与源码；TLS 1.2 显式扩展省略的补丁和独立清单调整见该目录 `PATCHES.md`。
 
 ## 二进制发行合规要求
