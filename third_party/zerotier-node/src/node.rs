@@ -1560,6 +1560,12 @@ impl Node {
             return None;
         }
         let update_id = assembled.update_id;
+        // 已签名的旧配置可被重放，修订号和时间戳都更旧时不回退。
+        if self.config.as_deref().is_some_and(|current| {
+            config.timestamp < current.timestamp && config.revision <= current.revision
+        }) {
+            return None;
+        }
         if self.config.as_deref() != Some(&config) {
             let config = Arc::new(config);
             self.config = Some(config.clone());
@@ -2145,6 +2151,22 @@ mod tests {
         assert_eq!(delivered[0].to, group.mac);
         assert_eq!(delivered[0].from, a.mac);
         assert_eq!(delivered[0].payload, b"who-has");
+    }
+
+    #[test]
+    fn replayed_older_config_does_not_roll_the_network_back() {
+        let controller = Identity::parse(CONTROLLER).unwrap();
+        let mut a = node(ALICE, &[(&controller, 3)]);
+        give_config(&mut a, &controller, "10.9.0.1", 2000);
+        let older = dictionary_for(&controller, &public(&a.identity), "10.9.0.9", 1000);
+        let chunk = signed_chunk(&controller, &older, 11, 0..older.len());
+        assert!(
+            a.accept_config(10, 2, controller.address(), &chunk)
+                .is_none()
+        );
+        assert_eq!(a.config().unwrap().timestamp, 2000);
+        give_config(&mut a, &controller, "10.9.0.2", 3000);
+        assert_eq!(a.config().unwrap().timestamp, 3000);
     }
 
     #[test]

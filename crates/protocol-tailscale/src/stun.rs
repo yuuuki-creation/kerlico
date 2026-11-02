@@ -63,7 +63,7 @@ fn xor_address(value: &[u8], tx: &[u8; 12]) -> Option<SocketAddr> {
         }
         _ => return None,
     };
-    Some(SocketAddr::new(ip, port))
+    Some(SocketAddr::new(ip.to_canonical(), port))
 }
 
 #[cfg(test)]

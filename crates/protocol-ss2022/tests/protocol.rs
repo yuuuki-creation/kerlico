@@ -451,34 +451,45 @@ async fn eih_users_with_identical_session_ids_remain_independent() {
         let source = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         for user in users {
             let config = ServerConfig::new(peer, format!("{service}:{user}"), method_kind).unwrap();
-            let mut control = UdpSocketControlData::default();
-            control.client_session_id = 123;
             let target = Address::DomainNameAddress("example.invalid".into(), 53);
-            let mut wire = BytesMut::new();
-            crypto_io::encrypt_client_payload(
-                &crypto,
-                method_kind,
-                config.key(),
-                &target,
-                &control,
-                config.identity_keys(),
-                user.as_bytes(),
-                &mut wire,
-            );
-            source.send_to(&wire, peer).await.unwrap();
             let mut response = vec![0; 65_536];
-            let (len, _) =
-                tokio::time::timeout(Duration::from_secs(10), source.recv_from(&mut response))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            let (len, _, _) = crypto_io::decrypt_server_payload(
-                &crypto,
-                method_kind,
-                config.key(),
-                &mut response[..len],
-            )
-            .unwrap();
+            // UDP 可能丢包：重发用新包序号，逻辑缺陷仍会让全部尝试失败。
+            let mut answer = None;
+            for packet_id in 0..5 {
+                let mut control = UdpSocketControlData::default();
+                control.client_session_id = 123;
+                control.packet_id = packet_id;
+                let mut wire = BytesMut::new();
+                crypto_io::encrypt_client_payload(
+                    &crypto,
+                    method_kind,
+                    config.key(),
+                    &target,
+                    &control,
+                    config.identity_keys(),
+                    user.as_bytes(),
+                    &mut wire,
+                );
+                source.send_to(&wire, peer).await.unwrap();
+                let Ok(received) =
+                    tokio::time::timeout(Duration::from_secs(2), source.recv_from(&mut response))
+                        .await
+                else {
+                    continue;
+                };
+                let (len, _) = received.unwrap();
+                // 上一位用户迟到的回包用不同密钥加密，这里跳过。
+                if let Ok((len, _, _)) = crypto_io::decrypt_server_payload(
+                    &crypto,
+                    method_kind,
+                    config.key(),
+                    &mut response[..len],
+                ) {
+                    answer = Some(len);
+                    break;
+                }
+            }
+            let len = answer.expect("多次重发都没有收到回包");
             assert_eq!(&response[..len], user.as_bytes());
         }
         assert_eq!(access.0.load(Ordering::Relaxed), 2);
