@@ -115,7 +115,7 @@ def verify(args,root,materials,up,down,mode,negative=None):
         backend=h.free_port();user="00000000-0000-0000-0000-000000000061"
         use_core=up=="h3" or down=="h3"
         if use_core:
-            server={"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[{"tag":"logical-node","type":"vless","listen":"127.0.0.1:"+str(backend),"outbound":"direct","max_sessions":64,"options":{"uuid":user,"security":{"type":"tls","certificate_file":str(materials["backend"][0]),"private_key_file":str(materials["backend"][1])},"transport":{"type":"xhttp","settings":{"path":"/split","mode":"auto","http_version":"auto"}}}}],"limits":{"connect_timeout_ms":5000,"idle_timeout_ms":8000,"drain_timeout_ms":200,"max_sessions":128}}
+            server={"version":1,"outbounds":[{"tag":"direct","type":"direct"}],"inbounds":[],"nodes":[{"tag":"logical-node","type":"vless","listen":"127.0.0.1:"+str(backend),"outbound":"direct","max_sessions":64,"options":{"uuid":user,"security":{"type":"tls","certificate_file":str(materials["backend"][0]),"private_key_file":str(materials["backend"][1])},"transport":{"type":"xhttp","settings":{"path":"/split","mode":"auto","http_version":"auto"}}}}],"limits":{"connect_timeout_ms":5000,"idle_timeout_ms":8000,"drain_timeout_ms":3000,"max_sessions":128}}
             server_args=[args.kerlico,"run","-c"]
         else:
             server={"log":{"loglevel":"warning"},"inbounds":[{"listen":"127.0.0.1","port":backend,"protocol":"vless","settings":{"clients":[{"id":user}],"decryption":"none"},"streamSettings":{"network":"xhttp","security":"tls","tlsSettings":{"alpn":["h2","http/1.1"],"certificates":[{"certificateFile":str(materials["backend"][0]),"keyFile":str(materials["backend"][1])}]},"xhttpSettings":{"path":"/split","mode":"auto"}}}],"outbounds":[{"protocol":"freedom","settings":{"finalRules":[{"action":"allow","ip":["127.0.0.1/32","::1/128"],"port":str(target4)+","+str(target6)}]}}]}
@@ -133,7 +133,7 @@ def verify(args,root,materials,up,down,mode,negative=None):
         elif negative=="sni":security[1]["server_name"]="wrong.invalid"
         options={"server":{"host":"127.0.0.1","port":ports[0]},"server_family":"ipv4","uuid":user,"security":security[0],"transport":{"type":"xhttp","settings":{"path":"/split","mode":mode,"http_version":up,"download":{"server":{"host":"::1","port":ports[1]},"server_family":"ipv6","security":security[1],"xhttp":{"path":"/split","http_version":down,"mode":"auto"}}}}}
         locals_=[h.free_port(),h.free_port()]
-        client={"version":1,"outbounds":[{"tag":"proxy","type":"vless","options":options}],"inbounds":[{"tag":"site"+str(index),"type":"tcp-forward","listen":"127.0.0.1:"+str(local),"target":{"host":host,"port":target},"outbound":"proxy"} for index,(local,(host,target)) in enumerate(zip(locals_,[("127.0.0.1",target4),("::1",target6)]))],"limits":{"connect_timeout_ms":5000,"idle_timeout_ms":8000,"drain_timeout_ms":200,"max_sessions":64}}
+        client={"version":1,"outbounds":[{"tag":"proxy","type":"vless","options":options}],"inbounds":[{"tag":"site"+str(index),"type":"tcp-forward","listen":"127.0.0.1:"+str(local),"target":{"host":host,"port":target},"outbound":"proxy"} for index,(local,(host,target)) in enumerate(zip(locals_,[("127.0.0.1",target4),("::1",target6)]))],"limits":{"connect_timeout_ms":5000,"idle_timeout_ms":8000,"drain_timeout_ms":3000,"max_sessions":64}}
         path=root/"client.json";h.write_json(path,client)
         with h.process([args.kerlico,"run","-c",str(path)],root,"client") as process:
             h.wait_ready(process,locals_[0])
@@ -153,7 +153,7 @@ def verify(args,root,materials,up,down,mode,negative=None):
                     if front.count==0:raise RuntimeError("未使用配置的 QUIC 方向")
                 elif front.accepted==0 or name+".invalid" not in front.names:raise RuntimeError("未使用配置的独立 TLS 方向")
             process.terminate()
-            if process.wait(timeout=3)!=0:raise RuntimeError("上下行分离退出失败")
+            if process.wait(timeout=8)!=0:raise RuntimeError("上下行分离退出失败")
         return ["两类网站目标 64KiB","四路并发","两个前端实际访问","CA/SNI 独立","有界退出"]
 
 

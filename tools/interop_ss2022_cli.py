@@ -184,7 +184,7 @@ def base(nodes, global_sessions=128):
 
 
 def check(binary, file, expected=True, fragment=None):
-    result = subprocess.run([binary, "check", "-c", str(file)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+    result = subprocess.run([binary, "check", "-c", str(file)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5, env={**os.environ, "LC_ALL": "zh_CN.UTF-8"})
     if (result.returncode == 0) != expected:
         raise RuntimeError("CLI 配置验收状态不符")
     if fragment and fragment not in result.stdout + result.stderr:
@@ -237,8 +237,8 @@ async def main(args):
         records.append({"case": "minimal-config-crop", "pass": True})
 
         for name, mutate, fragment in [
-            ("duplicate-service-key", lambda c: c["nodes"][1]["options"].update(key=a), "节点认证凭据重复"),
-            ("duplicate-user-key", lambda c: [n["options"].update(users=[key_shared]) for n in c["nodes"]], "节点认证凭据重复"),
+            ("duplicate-service-key", lambda c: c["nodes"][1]["options"].update(key=a), "入口凭据重复"),
+            ("duplicate-user-key", lambda c: [n["options"].update(users=[key_shared]) for n in c["nodes"]], "入口凭据重复"),
             ("mapped-listen", lambda c: c["nodes"][1].update(listen="[::ffff:127.0.0.1]:" + str(node_port)), "IPv4-mapped"),
             ("udp-listen-collision", lambda c: c["inbounds"].append({"tag": "collision", "type": "udp-forward", "listen": "127.0.0.1:" + str(node_port), "target": {"host": "127.0.0.1", "port": port}, "outbound": "direct"}), "监听地址重复"),
         ]:

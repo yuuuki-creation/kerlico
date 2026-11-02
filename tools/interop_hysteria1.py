@@ -76,14 +76,17 @@ def wait_udp_process(child):
     if child.poll() is not None:
         raise RuntimeError("QUIC 对端就绪前退出")
 
+def obfs_key(obfs, index):
+    return "xplus-test-only-key-"+str(index) if obfs else ""
+
 def auth_fields(value, encoded=False):
     return {"auth": base64.b64encode(value).decode()} if encoded else {"auth_str": value.decode()}
 
 def node_options(auth, encoded, cert, key, carrier, obfs, congestion):
-    return {**auth_fields(auth, encoded), "up_bps": 10000000, "down_bps": 10000000, "transport": carrier, "obfs": "xplus-test-only-key" if obfs else None, "tls": {"certificate_file": str(cert), "private_key_file": str(key)}, "limits": {"congestion_control": congestion, "idle_timeout_ms": 8000}}
+    return {**auth_fields(auth, encoded), "up_bps": 10000000, "down_bps": 10000000, "transport": carrier, "obfs": obfs or None, "tls": {"certificate_file": str(cert), "private_key_file": str(key)}, "limits": {"congestion_control": congestion, "idle_timeout_ms": 8000}}
 
 def client_options(host, port, auth, encoded, cert, carrier, obfs, congestion):
-    return {**auth_fields(auth, encoded), "server": {"host": host, "port": port}, "up_bps": 10000000, "down_bps": 10000000, "transport": carrier, "obfs": "xplus-test-only-key" if obfs else None, "tls": {"server_name": "hy1.example.invalid", "ca_pem": cert.read_text()}, "limits": {"congestion_control": congestion, "idle_timeout_ms": 8000}}
+    return {**auth_fields(auth, encoded), "server": {"host": host, "port": port}, "up_bps": 10000000, "down_bps": 10000000, "transport": carrier, "obfs": obfs or None, "tls": {"server_name": "hy1.example.invalid", "ca_pem": cert.read_text()}, "limits": {"congestion_control": congestion, "idle_timeout_ms": 8000}}
 
 def hostport(host, port):
     return ("["+host+"]" if ":" in host else host) + ":" + str(port)
@@ -120,7 +123,7 @@ def verify(args, root, cert, key, carrier, obfs, congestion, direction):
         after_eof = stack.enter_context(h.serve(h.TcpServer(("127.0.0.1", 0), AfterEof)))
         servers = []
         if direction == "server":
-            server = {"version": 2, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], "nodes": [{"tag": "node"+str(index), "type": "hysteria1", "listen": hostport(hosts[index], ports[index]), "outbound": "direct", "options": node_options(credentials[index], index == 1, cert, key, carrier, obfs, congestion)} for index in range(2)], "limits": {"connect_timeout_ms": 5000, "idle_timeout_ms": 8000, "drain_timeout_ms": 400, "max_sessions": 128}}
+            server = {"version": 2, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], "nodes": [{"tag": "node"+str(index), "type": "hysteria1", "listen": hostport(hosts[index], ports[index]), "outbound": "direct", "options": node_options(credentials[index], index == 1, cert, key, carrier, obfs_key(obfs, index), congestion)} for index in range(2)], "limits": {"connect_timeout_ms": 5000, "idle_timeout_ms": 8000, "drain_timeout_ms": 400, "max_sessions": 128}}
             for node in server["nodes"]:
                 native_credential = {field: node["options"].pop(field) for field in ("auth", "auth_str") if field in node["options"]}
                 bind_members(server, node, [native_credential])
@@ -128,13 +131,13 @@ def verify(args, root, cert, key, carrier, obfs, congestion, direction):
             h.write_json(path, server)
             servers.append(stack.enter_context(h.process(command(args.kerlico, "kerlico", path, "server"), directory, "server")))
         elif args.reference_kind == "sing-box":
-            server = {"log": {"level": "error"}, "dns": {"servers": [{"type": "local", "tag": "local"}], "final": "local"}, "inbounds": [{"type": "hysteria", "tag": "node"+str(index), "listen": hosts[index], "listen_port": ports[index], "up_mbps": 80, "down_mbps": 80, "obfs": "xplus-test-only-key" if obfs else "", "users": [{"name": "test", **auth_fields(credentials[index], index == 1)}], "tls": {"enabled": True, "alpn": ["hysteria"], "certificate_path": str(cert), "key_path": str(key)}} for index in range(2)], "outbounds": [{"type": "direct", "domain_resolver": {"server": "local", "strategy": "ipv4_only"}}]}
+            server = {"log": {"level": "error"}, "dns": {"servers": [{"type": "local", "tag": "local"}], "final": "local"}, "inbounds": [{"type": "hysteria", "tag": "node"+str(index), "listen": hosts[index], "listen_port": ports[index], "up_mbps": 80, "down_mbps": 80, "obfs": obfs_key(obfs, index), "users": [{"name": "test", **auth_fields(credentials[index], index == 1)}], "tls": {"enabled": True, "alpn": ["hysteria"], "certificate_path": str(cert), "key_path": str(key)}} for index in range(2)], "outbounds": [{"type": "direct", "domain_resolver": {"server": "local", "strategy": "ipv4_only"}}]}
             path = directory/"reference-server.json"
             h.write_json(path, server)
             servers.append(stack.enter_context(h.process(command(args.reference, "sing-box", path, "server"), directory, "server")))
         else:
             for index in range(2):
-                server = {"listen": hostport(hosts[index], ports[index]), "protocol": carrier, "up_mbps": 80, "down_mbps": 80, "obfs": "xplus-test-only-key" if obfs else "", "cert": str(cert), "key": str(key), "alpn": "hysteria", "auth": {"mode": "passwords", "config": [credentials[index].decode()]}, "resolve_preference": "46", "disable_mtu_discovery": True, "max_conn_client": 128}
+                server = {"listen": hostport(hosts[index], ports[index]), "protocol": carrier, "up_mbps": 80, "down_mbps": 80, "obfs": obfs_key(obfs, index), "cert": str(cert), "key": str(key), "alpn": "hysteria", "auth": {"mode": "passwords", "config": [credentials[index].decode()]}, "resolve_preference": "46", "disable_mtu_discovery": True, "max_conn_client": 128}
                 path = directory/("reference-server-"+str(index)+".json")
                 h.write_json(path, server)
                 servers.append(stack.enter_context(h.process(command(args.reference, "official", path, "server"), directory, "server-"+str(index))))
@@ -148,14 +151,14 @@ def verify(args, root, cert, key, carrier, obfs, congestion, direction):
                 auth = credentials[1-index] if bad else credentials[index]
                 encoded = (1-index if bad else index) == 1
                 if direction == "client":
-                    options = client_options(hosts[index], ports[index], auth, encoded, cert, carrier, obfs, congestion)
+                    options = client_options(hosts[index], ports[index], auth, encoded, cert, carrier, obfs_key(obfs, index), congestion)
                     client = {"version": 2, "outbounds": [{"tag": "proxy", "type": "hysteria1", "options": options}], "inbounds": [{"tag": tag, "type": network+"-forward", "listen": "127.0.0.1:"+str(local), "target": {"host": host, "port": port}, "outbound": "proxy"} for tag, network, local, host, port in rules], "limits": {"connect_timeout_ms": 5000, "idle_timeout_ms": 8000, "drain_timeout_ms": 400, "max_sessions": 128}}
                     binary, kind = args.kerlico, "kerlico"
                 elif args.reference_kind == "sing-box":
-                    client = {"log": {"level": "error"}, "inbounds": [{"type": "direct", "tag": tag, "listen": "127.0.0.1", "listen_port": local, "network": network, "override_address": host, "override_port": port} for tag, network, local, host, port in rules], "outbounds": [{"type": "hysteria", "server": hosts[index], "server_port": ports[index], "up_mbps": 80, "down_mbps": 80, "obfs": "xplus-test-only-key" if obfs else "", **auth_fields(auth, encoded), "tls": {"enabled": True, "server_name": "hy1.example.invalid", "certificate": [cert.read_text()], "alpn": ["hysteria"]}}]}
+                    client = {"log": {"level": "error"}, "inbounds": [{"type": "direct", "tag": tag, "listen": "127.0.0.1", "listen_port": local, "network": network, "override_address": host, "override_port": port} for tag, network, local, host, port in rules], "outbounds": [{"type": "hysteria", "server": hosts[index], "server_port": ports[index], "up_mbps": 80, "down_mbps": 80, "obfs": obfs_key(obfs, index), **auth_fields(auth, encoded), "tls": {"enabled": True, "server_name": "hy1.example.invalid", "certificate": [cert.read_text()], "alpn": ["hysteria"]}}]}
                     binary, kind = args.reference, "sing-box"
                 else:
-                    client = {"server": hostport(hosts[index], ports[index]), "protocol": carrier, "up_mbps": 80, "down_mbps": 80, "obfs": "xplus-test-only-key" if obfs else "", **auth_fields(auth, encoded), "server_name": "hy1.example.invalid", "ca": str(cert), "alpn": "hysteria", "resolve_preference": "46", "handshake_timeout": 5, "idle_timeout": 10, "retry": 0, "quit_on_disconnect": True, "disable_mtu_discovery": True, "relay_tcps": [{"listen": "127.0.0.1:"+str(local), "remote": hostport(host, port), "timeout": 5} for _, network, local, host, port in rules if network == "tcp"], "relay_udps": [{"listen": "127.0.0.1:"+str(local), "remote": hostport(host, port), "timeout": 5} for _, network, local, host, port in rules if network == "udp"]}
+                    client = {"server": hostport(hosts[index], ports[index]), "protocol": carrier, "up_mbps": 80, "down_mbps": 80, "obfs": obfs_key(obfs, index), **auth_fields(auth, encoded), "server_name": "hy1.example.invalid", "ca": str(cert), "alpn": "hysteria", "resolve_preference": "46", "handshake_timeout": 5, "idle_timeout": 10, "retry": 0, "quit_on_disconnect": True, "disable_mtu_discovery": True, "relay_tcps": [{"listen": "127.0.0.1:"+str(local), "remote": hostport(host, port), "timeout": 5} for _, network, local, host, port in rules if network == "tcp"], "relay_udps": [{"listen": "127.0.0.1:"+str(local), "remote": hostport(host, port), "timeout": 5} for _, network, local, host, port in rules if network == "udp"]}
                     binary, kind = args.reference, "official"
                 path = case_root/"client.json"
                 h.write_json(path, client)
@@ -186,7 +189,8 @@ def verify(args, root, cert, key, carrier, obfs, congestion, direction):
                     if tcp(rules[5][2], b"after-server-greeting", True) != b"after-server-greeting":
                         raise RuntimeError("目标先发数据后回写不一致")
                     checks.append("节点"+str(index)+"目标先发数据")
-                    for rule in rules[2:5]:
+                    # 官方客户端与 kerlico 的 UDP 会话请求都不带目标；sing-box 1.14.4 入站在这种会话上丢弃域名目标的数据报（官方客户端对照同样超时）。
+                    for rule in rules[2:5] if direction == "server" or args.reference_kind == "official" else rules[2:4]:
                         limit = 4096 if args.reference_kind == "official" else 8192
                         sizes = (17, 512, limit) if args.reference_kind == "official" else (17, 4096, limit)
                         probe = carrier == "udp" and not obfs and congestion == "cubic" and index == 0

@@ -127,7 +127,11 @@ fn read_ip(input: &mut &[u8]) -> io::Result<Destination> {
         }
         6 => {
             let bytes: [u8; 16] = take(input, 16)?.try_into().map_err(|_| io_protocol())?;
-            Ipv6Addr::from(bytes).to_string()
+            // 官方 snell-server 开启 ipv6 后用双栈套接字，IPv4 目标的回包来源是映射地址。
+            let address = Ipv6Addr::from(bytes);
+            address
+                .to_ipv4_mapped()
+                .map_or_else(|| address.to_string(), |mapped| mapped.to_string())
         }
         _ => return Err(io_protocol()),
     };
@@ -187,5 +191,15 @@ mod tests {
         assert!(parse_udp(&[2, 0, 4, 127, 0, 0, 1, 0, 53], false).is_err());
         assert!(parse_udp(&[3, 0, 0, 53], true).is_err());
         assert!(reply(vec![2, 1, 0]).is_err());
+    }
+    #[test]
+    fn ipv4_mapped_response_source_is_the_ipv4_address() {
+        let mut wire = vec![6];
+        wire.extend_from_slice(&Ipv4Addr::LOCALHOST.to_ipv6_mapped().octets());
+        wire.extend_from_slice(&53u16.to_be_bytes());
+        wire.extend_from_slice(b"x");
+        let (source, payload) = parse_udp(&wire, true).unwrap();
+        assert_eq!(source, target("127.0.0.1", 53).unwrap());
+        assert_eq!(payload, b"x");
     }
 }

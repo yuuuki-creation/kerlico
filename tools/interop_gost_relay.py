@@ -195,13 +195,20 @@ def create_targets(stack, host, greeting):
     for _ in range(32):
         tcp_server = tcp_class((host, 0), Greeting if greeting else h.TcpEcho)
         number = tcp_server.server_address[1]
+        udp_servers = []
         try:
-            udp_server = udp_class((host, number), h.UdpEcho)
+            udp_servers.append(udp_class((host, number), h.UdpEcho))
+            # localhost 目标由 GOST 解析，UDP 可能选中 ::1，两族都要有回显。
+            if ":" not in host:
+                udp_servers.append(Udp6(("::1", number), h.UdpEcho))
         except OSError:
             tcp_server.server_close()
+            for server in udp_servers:
+                server.server_close()
             continue
         stack.enter_context(h.serve(tcp_server))
-        stack.enter_context(h.serve(udp_server))
+        for server in udp_servers:
+            stack.enter_context(h.serve(server))
         return number
     raise RuntimeError("目标 TCP/UDP 隔离端口分配失败")
 
@@ -261,9 +268,10 @@ def main(args):
                 if secure:
                     option["tls"] = {"server_name": "relay.test.invalid", "ca_pem": cert.read_text()}
                 if forward:
-                    literal = "127.0.0.1" if target_host == "localhost" else target_host
-                    service["forwarder"] = {"nodes": [{"name": "fixed", "addr": address(literal, target_port)}]}
-                    option["forward_target"] = {"host": literal, "port": target_port}
+                    # forward_target 要求目标完全匹配，kerlico 不替远端解析域名，域名目标在拨号前被拒绝。
+                    target_host = "127.0.0.1" if target_host == "localhost" else target_host
+                    service["forwarder"] = {"nodes": [{"name": "fixed", "addr": address(target_host, target_port)}]}
+                    option["forward_target"] = {"host": target_host, "port": target_port}
                 services.append(service)
                 outbounds.append({"tag": tag, "type": "gost-relay", "options": option})
                 for network in ["tcp", "udp"]:

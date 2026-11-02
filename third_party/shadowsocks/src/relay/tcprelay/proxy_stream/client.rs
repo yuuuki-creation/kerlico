@@ -33,7 +33,7 @@ use crate::{
 #[derive(Debug)]
 enum ProxyClientStreamWriteState {
     Connect(Address),
-    Connecting(BytesMut),
+    Connecting { packet: BytesMut, accepted: usize },
     Connected,
 }
 
@@ -303,13 +303,16 @@ where
                     //
                     // Proactor APIs like IOCP on Windows, pointers of buffers have to be kept alive
                     // before IO completion.
-                    *(this.writer_state) = ProxyClientStreamWriteState::Connecting(buffer);
+                    *(this.writer_state) = ProxyClientStreamWriteState::Connecting {
+                        packet: buffer,
+                        accepted: buf.len(),
+                    };
                 }
-                &mut ProxyClientStreamWriteState::Connecting(ref buffer) => {
-                    let n = ready!(this.stream.poll_write_encrypted(cx, buffer))?;
+                &mut ProxyClientStreamWriteState::Connecting { ref packet, accepted } => {
+                    let n = ready!(this.stream.poll_write_encrypted(cx, packet))?;
 
                     // In general, poll_write_encrypted should perform like write_all.
-                    debug_assert!(n == buffer.len());
+                    debug_assert!(n == packet.len());
 
                     *(this.writer_state) = ProxyClientStreamWriteState::Connected;
 
@@ -321,7 +324,7 @@ where
                     //
                     // For protocols that requires *Server Hello* message, like FTP, clients won't send anything to the server until server sends handshake messages.
                     // This could be achieved by calling poll_write with an empty input buffer.
-                    return Ok(buf.len()).into();
+                    return Ok(accepted).into();
                 }
                 ProxyClientStreamWriteState::Connected => {
                     return this.stream.poll_write_encrypted(cx, buf).map_err(Into::into);
