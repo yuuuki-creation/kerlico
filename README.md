@@ -8,19 +8,20 @@
 
 ## 核心特性与当前范围
 
-- **双端一体与模块化协议**：包含 23 个独立协议 crate（VLESS、VMess、Trojan、Shadowsocks、SS2022、SSR、AnyTLS、ShadowTLS、Snell、TUIC、Hysteria v1、Hysteria2、ShadowQUIC、Mieru、Naive、TrustTunnel、Sudoku、SOCKS、HTTP、SSH、Gost Relay、Tor、WireGuard），支持通过 Cargo features 按需编译。
+- **双端一体与模块化协议**：包含 30 个独立协议 crate（VLESS、VMess、Trojan、Shadowsocks、SS2022、SSR、AnyTLS、ShadowTLS、Snell、TUIC、Hysteria v1、Hysteria2、ShadowQUIC、Mieru、Naive、TrustTunnel、Sudoku、SOCKS、HTTP、SSH、Gost Relay、Tor、WireGuard、TUN、MASQUE、OpenVPN、OpenConnect、Tailscale、EasyTier、ZeroTier），支持通过 Cargo features 按需编译。
 - **独立节点与全局共享出站**：IPv4 与 IPv6 节点独立监听与鉴权，共用同一个出站调度器（`EgressRuntime`）。本地出网按节点 `ipv4-only`、`ipv6-only` 或 `dual-stack`（默认 IPv4 优先）选择目标地址；远端代理分流保留原始域名/IP 与端口透传。
 - **多用户账户与业务计量**：管理账户（`AccountSpec`）与协议原生凭据（`native_credential`）映射分离，提供唯一业务流量计量、内存态会话记录（`Telemetry`）、可选 SQLite 用量/带宽/访问历史与只读 `history` 查询。
 - **显式双语接口**：CLI 帮助、参数错误和运行诊断支持 `--lang zh-CN` / `--lang en`；模块标识与 JSON 字段保持稳定，见[语言接口](docs/interfaces/localization.md)。
 - **规则路由与 WARP 补齐**：`routes` 按域名、CIDR、端口、网络、节点和用户选择出站；`device` 让 `dual-stack` 节点经 WARP 访问缺失的地址族。
 - **TUN、DNS 与控制接口**：`tun` 入站接管内核 IP 包；`dns` 配置 UDP/TCP/TLS 上游；`control` 提供只读 HTTP 接口。
-- **待完成能力**：6 个隧道/覆盖网络端点。
+- **隧道与覆盖网络出站**：MASQUE、OpenVPN、OpenConnect、Tailscale、EasyTier、ZeroTier，均为原生 Rust 客户端。
 
 ## 快速开始（配置 v2）
 
 构建基线为 **Rust 1.99.1（Linux x86_64）**：
 
 ```sh
+export PROTOC="$(tools/fetch_protoc.sh ~/.cache/kerlico)"
 cargo build --locked --release -p kerlico
 cargo run --locked -p kerlico -- modules
 cargo run --locked -p kerlico -- check -c examples/config-v2-minimal.json

@@ -21,7 +21,7 @@
 | 2. F0 核心框架与共享出站 | 装配入口、流/包契约、凭据隔离、全局共享 `Dispatcher`、多用户账本与优雅排空 | `K-F0` | 已实现 |
 | 3. 本地接入协议 | 本地固定转发、SOCKS 4/4a/5 双端与 HTTP 代理双端 | `K-L` 系列 | 已完成并验证 |
 | 4. 主力代理协议 | VLESS、VMess、Trojan、Shadowsocks、SS2022、SSR、AnyTLS、ShadowTLS、Snell、TUIC、Hysteria v1/v2、ShadowQUIC、Mieru、Naive、TrustTunnel、Sudoku、SSH、Gost Relay | `K-S` / `K-T` / `K-V` / `K-R` / `K-A` 系列 | 19 个协议模块已合入 |
-| 5. 匿名网络与 IP 隧道端点 | Tor（TCP 出站）、WireGuard（原生双端），以及后续 OpenVPN、OpenConnect、EasyTier、Tailscale、ZeroTier、MASQUE | `K-E` / `K-B` 系列 | Tor 与 WireGuard 已合入；其余 6 项排期见 [STATUS.md](../STATUS.md) |
+| 5. 匿名网络与 IP 隧道端点 | Tor（TCP 出站）、WireGuard（原生双端），以及后续 OpenVPN、OpenConnect、EasyTier、Tailscale、ZeroTier、MASQUE | `K-E` / `K-B` 系列 | 已合入 |
 
 ## 开工前核对清单
 

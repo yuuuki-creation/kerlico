@@ -8,18 +8,19 @@ See [Releases](https://github.com/yuuuki-creation/kerlico/releases) for the late
 
 ## Key Features & Current Scope
 
-- **Unified Client/Server Core & 23 Protocol Modules**: Includes VLESS, VMess, Trojan, Shadowsocks, SS2022, SSR, AnyTLS, ShadowTLS, Snell, TUIC, Hysteria v1, Hysteria2, ShadowQUIC, Mieru, Naive, TrustTunnel, Sudoku, SOCKS, HTTP, SSH, Gost Relay, Tor, and WireGuard as modular crates selectable via Cargo features.
+- **Unified Client/Server Core & 30 Protocol Modules**: Includes VLESS, VMess, Trojan, Shadowsocks, SS2022, SSR, AnyTLS, ShadowTLS, Snell, TUIC, Hysteria v1, Hysteria2, ShadowQUIC, Mieru, Naive, TrustTunnel, Sudoku, SOCKS, HTTP, SSH, Gost Relay, Tor, WireGuard, TUN, MASQUE, OpenVPN, OpenConnect, Tailscale, EasyTier, and ZeroTier as modular crates selectable via Cargo features.
 - **Independent Nodes & Shared Outbound Dispatcher**: IPv4 and IPv6 inbound nodes maintain separate listeners, authentication scopes, and quotas while sharing a single runtime outbound dispatcher (`EgressRuntime`). Local egress follows per-node `ipv4-only`, `ipv6-only`, or `dual-stack` (IPv4-preferred) policy, while remote proxy outbounds pass original targets through without local website DNS resolution.
 - **Multi-User Accounts & Telemetry**: Separates management accounts (`AccountSpec`) from protocol-native credentials (`native_credential`) and provides single-boundary payload accounting, bounded in-memory flow records (`Telemetry`), optional SQLite usage/bandwidth/access history, and read-only `history` queries.
 - **Rule Routing & WARP Fill-in**: `routes` chooses an outbound by domain, CIDR, port, network, node and user. `device` lets `dual-stack` nodes reach a missing address family through WARP.
 - **TUN, DNS & Control**: the `tun` inbound handles kernel IP packets, `dns` configures UDP/TCP/TLS upstreams, and `control` provides a read-only HTTP API.
-- **Remaining Work**: six tunnel/overlay endpoints.
+- **Tunnel & Overlay Outbounds**: MASQUE, OpenVPN, OpenConnect, Tailscale, EasyTier and ZeroTier, all native Rust clients.
 
 ## Quick Start (Configuration Schema v2)
 
 Target build baseline: **Rust 1.99.1 on Linux x86_64**.
 
 ```sh
+export PROTOC="$(tools/fetch_protoc.sh ~/.cache/kerlico)"
 cargo build --locked --release -p kerlico
 cargo run --locked -p kerlico -- modules
 cargo run --locked -p kerlico -- check -c examples/config-v2-minimal.json

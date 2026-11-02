@@ -6,7 +6,7 @@
 
 - 协议范围与组合清单：[三核心协议与组合总表](../reference/reports/三核心%20协议%20组合支持.md)
 - 开发流程约定：[协议开发阶段与工作流](protocol-roadmap.md) 及 [0007](decisions/0007-protocol-development-cycle.md)
-- 当前已实现的 23 个协议契约：[实现接口目录](interfaces/README.md)
+- 当前已实现的 30 个协议契约：[实现接口目录](interfaces/README.md)
 
 ## 一个协议一个独立 Crate
 

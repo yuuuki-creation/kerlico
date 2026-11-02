@@ -11,8 +11,11 @@ Download the Linux `x86_64` `kerlico` binary from [Releases](https://github.com/
 To build from source, use Rust `1.99.1`:
 
 ```sh
+export PROTOC="$(tools/fetch_protoc.sh ~/.cache/kerlico)"
 cargo build --locked --release -p kerlico
 ```
+
+Only the EasyTier outbound needs `protoc`. Otherwise select protocols with `--no-default-features`.
 
 ## Commands
 
@@ -86,6 +89,10 @@ On an IPv4-only or IPv6-only machine, configure `device` so `direct` traffic fro
 ```
 
 It registers with Cloudflare once when first needed and keeps the identity in this directory. The path must be absolute with mode `0700`.
+
+## Tunnel and overlay outbounds
+
+`masque`, `openvpn`, `openconnect`, `tailscale`, `easytier` and `zerotier` turn a remote network into an outbound. Reference their `tag` from a node or a rule. Targets must be reachable in that network, and domains resolve locally. Options and limits are in the [interface documents](interfaces/README.md).
 
 ## TUN
 

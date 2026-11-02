@@ -11,8 +11,11 @@
 从源码构建需要 Rust `1.99.1`：
 
 ```sh
+export PROTOC="$(tools/fetch_protoc.sh ~/.cache/kerlico)"
 cargo build --locked --release -p kerlico
 ```
+
+`protoc` 只有 EasyTier 出站需要。不需要时用 `--no-default-features` 选择协议。
 
 ## 命令
 
@@ -86,6 +89,10 @@ printf '%s' 'your-admin-password' | kerlico account-new --prefix alice
 ```
 
 首次需要时向 Cloudflare 注册一次，身份保存在此目录。目录必须是绝对路径，权限 `0700`。
+
+## 隧道与覆盖网络出站
+
+`masque`、`openvpn`、`openconnect`、`tailscale`、`easytier`、`zerotier` 把远端网络接成出站。在节点或规则里引用它们的 `tag`。目标必须是该网络能到达的地址，域名由本机解析。选项和限制见各[接口文档](interfaces/README.md)。
 
 ## TUN
 

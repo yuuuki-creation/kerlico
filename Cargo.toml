@@ -17,7 +17,7 @@ resolver = "3"
 
 [workspace.package]
 license = "GPL-3.0-only"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 rust-version = "1.99.1"
 publish = false
@@ -64,7 +64,6 @@ kerlico-easytier = { path = "crates/protocol-easytier" }
 tokio = { version = "1", features = ["io-util", "net", "fs", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 kerlico-zerotier = { path = "crates/protocol-zerotier" }
 zerotier-node = { path = "third_party/zerotier-node" }
-tokio ={ version = "1", features = ["io-util", "net", "fs", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

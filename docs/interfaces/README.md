@@ -2,7 +2,7 @@
 
 更新日期：2026-11-02（Asia/Shanghai）
 
-本目录维护当前源码已实现的 Rust 公共接口、JSON v2 配置契约与 23 个协议模块的实现边界。各模块的实时测试进度见根 [STATUS.md](../../STATUS.md)，跨进程设备共享、独立路由/DNS/TUN 等后续目标见 [架构设计导航](../README.md)。
+本目录维护当前源码已实现的 Rust 公共接口、JSON v2 配置契约与 30 个协议模块的实现边界。各模块的实时测试进度见根 [STATUS.md](../../STATUS.md)，跨进程设备共享、独立路由/DNS/TUN 等后续目标见 [架构设计导航](../README.md)。
 
 ## 核心与公共接口
 
@@ -19,7 +19,7 @@
 | [语言与诊断 (localization.md)](localization.md) | 显式语种、双语 CLI、稳定诊断码及目录覆盖边界 |
 | [IP 隧道 (ip-tunnel.md)](ip-tunnel.md) · [HTTP 载体 (http-carrier.md)](http-carrier.md) | WireGuard 共用 IP 数据面与受管 HTTP DATA/QUIC 载体 |
 
-## 协议模块接口（23 个）
+## 协议模块接口（30 个）
 
 | 文档 | 角色与能力范围 |
 | --- | --- |
