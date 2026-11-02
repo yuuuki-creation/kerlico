@@ -119,6 +119,7 @@
 
 ## 未解决项
 
+- **修复后 Mihomo credentials 1 项失败**：最后一次工具改动后，修复后二进制的 credentials 复跑被 80 秒限时截断，写下 104 条记录，其中 1 项失败。工作区清理前没有看错误内容，日志已删除，未定位。`v1.3.1` 上同一套件失败 0。下一步是用修复后二进制重跑这个套件，再跑 `rekey`、`lifecycle`、`mux`。
 - **Sudoku 互通 README 的测试证书**：见上段，示例命令还没有改成 CA 加叶子证书。
 - **Sudoku mux 流提前 EOF**：`kerlico` 作客户端、`mux=on` 的 33MiB 流在约 18MiB 处结束，`rekey` 套件单独复跑 38 条大流失败 3 条，全量矩阵里官方 1 条、Mihomo 12 条（4 条提前 EOF、8 条连接重置）。Sudoku mux 没有流控，接收方队列超过每流 4MiB 就重置该流；官方源码 `muxMaxQueuedBytesPerStream` 同样是 4MiB 且同样重置，所以这是协议性质，读得慢的本地客户端会遇到（根因由读代码推断，未在失败现场抓到重置帧）。用户侧表现是流提前结束，没有明确错误。下一步可以考虑把重置报告为错误。
 - **映射地址同类风险**：Snell 的 IPv4 映射来源问题只在 Snell 上修了。`protocol-hysteria2/src/udp.rs`、`protocol-shadowsocksr/src/udp.rs` 也按字面比较来源与目标，本次对端都没有触发，未验证双栈对端。
