@@ -8,6 +8,8 @@
 
 载体调用 `receive()` 交付完整 IP 包，并持续调用 `next_packet()` 读取待发 IP 包。后者同时推进 TCP 定时器；载体必须仅在单一协议数据路径中消费它。校验、片段重组、范围验证、TCP FIN、UDP 空包及容量限制复用现有实现。
 
+需要自管多对端路径的载体（Tailscale）另用 `PeerCrypto` 持有单个对端的 WireGuard 会话，用 `packet_owner` 判断 UDP 密文属于哪个对端，`Network` 提供 CIDR 匹配。这些接口不决定密文走哪条路径。
+
 调用方持有后台任务所有权与取消域。`close()` 停止准入并关闭本隧道，丢弃最后客户端句柄或服务端实例也会关闭。此关闭不替代调用方对既有 NodeTasks/ServiceContext 的真实任务回收。服务端各逻辑流仍由原节点任务所有者 join。
 
 海外 `masque-resume-ip-api-r2` 通过原 WireGuard 17 项及新增纯 IP 接口 2 项；`masque-resume-carrier-r6` 在共享载体迁移后再次通过。新增验证实际回环双族 TCP 65537 字节、FIN 尾部、UDP 空包和 IPv4 65507/IPv6 65527 最大负载、伪造来源拒绝、可信用户唯一计量及关闭后的真实任务回收。该证据不能用于登记 MASQUE 协议已经实现或互通。

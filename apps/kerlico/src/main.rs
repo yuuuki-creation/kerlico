@@ -86,6 +86,8 @@ fn registry() -> Result<Registry> {
     registry.register(RejectFactory)?;
     #[cfg(feature = "protocol-tor")]
     registry.register(kerlico_tor::TorFactory)?;
+    #[cfg(feature = "protocol-tailscale")]
+    registry.register(kerlico_tailscale::TailscaleFactory)?;
     #[cfg(feature = "protocol-wireguard")]
     {
         registry.register(kerlico_wireguard::WireGuardFactory)?;

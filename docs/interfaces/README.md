@@ -46,6 +46,7 @@
 | [Sudoku](sudoku.md) | 记录/表/流/UoT/多路复用与六类载体双端 |
 | [Tor](tor.md) | 基于 `arti-client` 的原生客户端 TCP 出站、目录权限校验与电路隔离 |
 | [WireGuard](wireguard.md) | 基于 Boringtun + smoltcp 的原生双端 TCP/UDP 隧道与多用户 peer 隔离 |
+| [Tailscale](tailscale.md) | pre-auth key 原生加入 tailnet 的客户端出站：TS2021 控制面、DERP、直连 UDP、出口节点与子网路由 |
 
 ## 集成与专项验证记录
 

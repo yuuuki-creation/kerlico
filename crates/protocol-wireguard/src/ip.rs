@@ -1,8 +1,10 @@
 //! 与加密载体分离的用户态 IP 数据面。调用方负责握手、身份、分配地址及载体生命周期。
 
 pub use crate::config::Limits as StackLimits;
+pub use crate::config::Network;
 use crate::{
-    config::{Addresses, Network, target},
+    config::{Addresses, target},
+    crypto::CryptoPeer,
     packet::{FragmentBudget, IpPacket, Reassembler, control_reply},
     queue::PacketBudget,
     server::RuntimePeer,
@@ -10,12 +12,16 @@ use crate::{
     tcp::TcpStream,
     udp,
 };
+use boringtun::{
+    noise::{Packet, Tunn, handshake::parse_handshake_anon},
+    x25519::{PublicKey, StaticSecret},
+};
 use kerlico_core::{
     CancellationToken, ConnectContext, DatagramAssociation, DatagramChannel, Destination, Error,
     InboundContext, NodeEvent, OpenedTcp, PeerSession, Result, TcpConnectInfo,
 };
 use std::{
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -148,6 +154,58 @@ impl ClientTunnel {
     }
     pub fn active_flows(&self) -> usize {
         self.0.stack.flow_count()
+    }
+}
+
+/// 单个对端的 WireGuard 会话。调用方决定密文走哪条路径。
+pub struct PeerCrypto(CryptoPeer);
+pub struct PeerPackets {
+    pub plain: Option<Vec<u8>>,
+    pub network: Vec<Vec<u8>>,
+}
+impl PeerCrypto {
+    /// `index` 是本端唯一的 24 位对端序号，[`packet_owner`] 返回同一数值。
+    pub fn new(private: [u8; 32], public: [u8; 32], index: u32) -> Self {
+        Self(CryptoPeer::standalone(
+            StaticSecret::from(private),
+            PublicKey::from(public),
+            index,
+        ))
+    }
+    /// `source` 仅用于握手限速的来源判断。
+    pub fn receive(&mut self, source: SocketAddr, packet: &[u8]) -> Result<PeerPackets> {
+        let received = self.0.receive(source, packet)?;
+        Ok(PeerPackets {
+            plain: received.plain,
+            network: received.network,
+        })
+    }
+    /// 无会话时缓存明文并返回握手发起。
+    pub fn encrypt(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.0.encapsulate(packet)
+    }
+    pub fn tick(&mut self) -> Option<Vec<u8>> {
+        self.0.tick()
+    }
+}
+pub enum PacketOwner {
+    /// 握手发起方的静态公钥，已由本端私钥解密认证。
+    Initiator([u8; 32]),
+    /// 接收方序号，等于 [`PeerCrypto::new`] 的 `index`。
+    Index(u32),
+}
+/// 判断无来源身份的 UDP 密文属于哪个对端。
+pub fn packet_owner(private: &[u8; 32], packet: &[u8]) -> Option<PacketOwner> {
+    match Tunn::parse_incoming_packet(packet).ok()? {
+        Packet::HandshakeInit(packet) => {
+            let secret = StaticSecret::from(*private);
+            let public = PublicKey::from(&secret);
+            let half = parse_handshake_anon(&secret, &public, &packet).ok()?;
+            Some(PacketOwner::Initiator(half.peer_static_public))
+        }
+        Packet::HandshakeResponse(packet) => Some(PacketOwner::Index(packet.receiver_idx >> 8)),
+        Packet::PacketCookieReply(packet) => Some(PacketOwner::Index(packet.receiver_idx >> 8)),
+        Packet::PacketData(packet) => Some(PacketOwner::Index(packet.receiver_idx >> 8)),
     }
 }
 
