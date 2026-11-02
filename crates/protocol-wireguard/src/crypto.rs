@@ -37,10 +37,16 @@ impl CryptoPeer {
             ready: false,
         }
     }
-    /// 不共享限速器的独立会话；对端路径由调用方维护。
-    pub fn standalone(private: StaticSecret, public: PublicKey, index: u32) -> Self {
+    /// 对端路径由调用方维护的会话。`limiter` 必须与收包路径前面的分类器共用同一个：
+    /// 限速器各有 cookie 密钥，分开时对方带 cookie 重试也通不过隧道这一层。
+    pub fn standalone(
+        private: StaticSecret,
+        public: PublicKey,
+        index: u32,
+        limiter: Arc<RateLimiter>,
+    ) -> Self {
         Self {
-            tunnel: Tunn::new(private, public, None, None, index, None),
+            tunnel: Tunn::new(private, public, None, None, index, Some(limiter)),
             endpoint: None,
             ready: false,
         }

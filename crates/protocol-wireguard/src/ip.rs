@@ -172,15 +172,7 @@ pub struct PeerPackets {
     pub network: Vec<Vec<u8>>,
 }
 impl PeerCrypto {
-    /// `index` 是本端唯一的 24 位对端序号，[`packet_owner`] 返回同一数值。
-    pub fn new(private: [u8; 32], public: [u8; 32], index: u32) -> Self {
-        Self(CryptoPeer::standalone(
-            StaticSecret::from(private),
-            PublicKey::from(public),
-            index,
-        ))
-    }
-    /// `source` 仅用于握手限速的来源判断。
+    /// `source` 仅用于握手限速的来源判断，须与 [`PacketClassifier::classify`] 同为规范形式。
     pub fn receive(&mut self, source: SocketAddr, packet: &[u8]) -> Result<PeerPackets> {
         let received = self.0.receive(source, packet)?;
         Ok(PeerPackets {
@@ -199,7 +191,7 @@ impl PeerCrypto {
 pub enum PacketRoute {
     /// 握手发起方的静态公钥，已由本端私钥解密认证。
     Initiator([u8; 32]),
-    /// 接收方序号，等于 [`PeerCrypto::new`] 的 `index`。
+    /// 接收方序号，等于 [`PacketClassifier::peer`] 的 `index`。
     Index(u32),
     /// 握手超过限速且未带有效 MAC2：把 cookie 回复原路发回，对端证明地址后重试。
     CookieReply(Vec<u8>),
@@ -210,32 +202,43 @@ const HANDSHAKE_LIMIT: u64 = 100;
 pub struct PacketClassifier {
     secret: StaticSecret,
     public: PublicKey,
-    limiter: RateLimiter,
+    limiter: Arc<RateLimiter>,
 }
 impl PacketClassifier {
     pub fn new(private: [u8; 32]) -> Self {
         let secret = StaticSecret::from(private);
         let public = PublicKey::from(&secret);
-        let limiter = RateLimiter::new(&public, HANDSHAKE_LIMIT);
+        let limiter = Arc::new(RateLimiter::new(&public, HANDSHAKE_LIMIT));
         Self {
             secret,
             public,
             limiter,
         }
     }
-    /// `source` 是外层来源地址，用于 cookie。
+    /// 与本分类器共用限速器的对端会话。`index` 是本端唯一的 24 位对端序号，
+    /// [`PacketRoute::Index`] 返回同一数值。
+    pub fn peer(&self, public: [u8; 32], index: u32) -> PeerCrypto {
+        PeerCrypto(CryptoPeer::standalone(
+            self.secret.clone(),
+            PublicKey::from(public),
+            index,
+            self.limiter.clone(),
+        ))
+    }
+    /// `source` 是外层来源地址，用于 cookie；IPv4-mapped 形式按 IPv4 计算。
     pub fn classify(&self, source: IpAddr, packet: &[u8]) -> Option<PacketRoute> {
         let mut cookie = [0; 64];
-        let parsed = match self
-            .limiter
-            .verify_packet(Some(source), packet, &mut cookie)
-        {
-            Ok(parsed) => parsed,
-            Err(TunnResult::WriteToNetwork(reply)) => {
-                return Some(PacketRoute::CookieReply(reply.to_vec()));
-            }
-            Err(_) => return None,
-        };
+        let parsed =
+            match self
+                .limiter
+                .verify_packet(Some(source.to_canonical()), packet, &mut cookie)
+            {
+                Ok(parsed) => parsed,
+                Err(TunnResult::WriteToNetwork(reply)) => {
+                    return Some(PacketRoute::CookieReply(reply.to_vec()));
+                }
+                Err(_) => return None,
+            };
         match parsed {
             Packet::HandshakeInit(packet) => {
                 let half = parse_handshake_anon(&self.secret, &self.public, &packet).ok()?;
@@ -331,7 +334,7 @@ mod tests {
         let responder_public = *PublicKey::from(&StaticSecret::from(responder)).as_bytes();
         let initiator = [2; 32];
         let initiator_public = *PublicKey::from(&StaticSecret::from(initiator)).as_bytes();
-        let mut peer = PeerCrypto::new(initiator, responder_public, 1);
+        let mut peer = PacketClassifier::new(initiator).peer(responder_public, 1);
         let init = peer.encrypt(&[0x45; 20]).unwrap().unwrap();
         (responder, initiator_public, init)
     }
@@ -368,7 +371,7 @@ mod tests {
         let responder_public = *PublicKey::from(&StaticSecret::from(responder)).as_bytes();
         let initiator_public = *PublicKey::from(&StaticSecret::from([2; 32])).as_bytes();
         let classifier = PacketClassifier::new(responder);
-        let mut session = PeerCrypto::new(responder, initiator_public, 1);
+        let mut session = classifier.peer(initiator_public, 1);
         let mapped = IpAddr::V6(std::net::Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped());
         let canonical: SocketAddr = "192.0.2.1:5000".parse().unwrap();
 

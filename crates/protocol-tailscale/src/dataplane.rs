@@ -519,7 +519,7 @@ impl Dataplane {
                 let index = state.next_index;
                 state.next_index += 1;
                 Peer {
-                    crypto: PeerCrypto::new(self.node.bytes(), key.0, index),
+                    crypto: state.classifier.peer(key.0, index),
                     index,
                     disco: None,
                     home_derp: None,
