@@ -45,6 +45,8 @@
 - **SS2022 EIH UDP 测试**：整树门禁中无回包失败过 2 次，单独压测 1000 轮与整树 5 轮都未复现，原因未定位。测试现在带新包序号重发，并断言节点的 `Dropped` 与 `Failed` 为零，重发次数打印到标准错误。
 - **Shadowsocks 与 SS2022 TCP 截断（已修复，待发布）**：`v1.3.1` 及之前的节点和出站在写 Pending 后可能丢弃数据末尾，连接随后停滞。根因与补丁见 `third_party/shadowsocks/PATCHES.md`。
 - **Snell 出站（已修复，待发布）**：`v1.3.1` 及之前接官方 snell-server 时 IPv4 目标的 UDP 无回包，官方双栈套接字的来源是 IPv4 映射地址。
+- **Sudoku 分离传输截断（已修复，待发布）**：`v1.3.1` 及之前的客户端接官方节点时，并发 split 流偶发丢失尾部数据，应用侧只看到正常 EOF。原因是复用了官方写完即关闭的下载连接。
+- **Sudoku mux 大流**：`mux=on` 的 33MiB 流偶发提前结束，见[互通记录](docs/testing/peer-interop-2026-11-03.md)的未解决项。
 - **`kerlico-core`**：`interrupted_node_force_keeps_count_until_actual_socket_join` 全量运行失败过 1 次，单跑 10 次通过，疑似不稳定，未定位。
 - **WireGuard 出站**：定时发送和业务发送失败时隧道服务退出，本地网络短暂不可达会触发。
 - **ZeroTier**：伪造流量持续时，首次主动联系我们的成员学习变慢；本节点发起的查询不受影响。
@@ -54,8 +56,9 @@
 ## 已知互通差异
 
 - **ShadowQUIC v2**：与固定版本 Mihomo 不互通；与受控 Go 参照 24 配置通过。
-- **ShadowsocksR**：固定版本 Mihomo 同参数下会向 Rust 与 Python 两种服务端发出坏 MAC 流；Rust→Python 100/100。
-- **Sudoku**：494 配置矩阵 18 项失败后已修订，修订后的 20 配置 740 项与 12 条 33MiB 大流通过，全矩阵未重跑。六类生命周期用例的参考客户端在双端同样停滞。
+- **ShadowsocksR**：固定版本 Mihomo 的 `random_head` 与 `tls1.2_ticket_*` 混淆客户端发出坏流。抓包里失败流都带重复密文片段或被破坏的 TLS 记录头，通过的流没有；Rust→Python 100/100。
+- **Sudoku**：固定 Mihomo 的 UDP 路径把数据报截断到 16384 字节。Mihomo 与官方的 split 客户端在停服后 12 秒内不关闭活动流，Mihomo 重启后的首个请求可能 EOF，两者的双端对照相同。
+- **TrustTunnel**：官方 endpoint v1.1.0 的 H3 回写丢弃 16000 字节及以上的数据报，官方客户端接它同样超时；H1、H2 通过。
 - **Tor**：公网字面 IPv6 未测。
 - **sing-box 1.14.4**：Snell 与 Hysteria1 入站丢弃域名目标的 UDP，HTTPUpgrade 入站拒绝带 `Sec-WebSocket-Key` 的请求，gRPC 没有 multi 模式。对照见 [互通记录](docs/testing/peer-interop-2026-11-03.md)。
 

@@ -18,11 +18,13 @@ import time
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from config_v2 import bind_members
+from mihomo_ready import add_probe, wait_running
 SOURCE = json.loads((HERE / "SOURCE.json").read_text())
 MODES = ["raw", "legacy", "stream", "poll", "auto", "ws"]
 METHODS = ["aes-128-gcm", "chacha20-poly1305", "none"]
 KEY = "synthetic-sudoku-cli-node-a-secret"
 TIMEOUT = 12
+ALLOCATED_PORTS = set()
 
 
 class StreamEof(EOFError):
@@ -44,9 +46,14 @@ def family(host):
 
 
 def free_port(host, kind=socket.SOCK_STREAM):
-    with socket.socket(family(host), kind) as sock:
-        sock.bind((host, 0))
-        return sock.getsockname()[1]
+    # 端口绑定后立刻释放，内核可能把同一个端口再发一次；节点与 SOCKS 入口撞过。
+    while True:
+        with socket.socket(family(host), kind) as sock:
+            sock.bind((host, 0))
+            port = sock.getsockname()[1]
+        if port not in ALLOCATED_PORTS:
+            ALLOCATED_PORTS.add(port)
+            return port
 
 
 def exact(stream, length):
@@ -255,7 +262,7 @@ def native_config(peer, case, server, host, port, socks_port):
                        "http-mask": not raw, "http-mask-tls": case["tls"], "http-mask-host": "localhost" if case["tls"] else "",
                        "multiplex": case["mux"]})
         config.update({"socks-port": socks_port, "bind-address": "127.0.0.1", "proxies": [fields], "rules": ["MATCH,proxy"]})
-    return config
+    return add_probe(config, free_port("127.0.0.1"))
 
 
 def start(binary, peer, config, directory, env):
@@ -272,7 +279,10 @@ def start(binary, peer, config, directory, env):
         result = subprocess.run(check, env=env, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:
         raise RuntimeError("原生配置校验失败，保留check.log")
-    return Process(run, directory, env)
+    process = Process(run, directory, env)
+    if peer == "mihomo":
+        wait_running(process.process, config)
+    return process
 
 
 def tcp_check(connect, size, first, eof):
@@ -409,10 +419,10 @@ def execute(case, args, directory, emit, tls):
                     ended = True
                 except socket.timeout:
                     ended = None
-                    if args.peer == "official" and case["role"] == "kernel-server" and case["mode"] in ("stream", "poll", "auto"):
+                    if args.peer in ("official", "mihomo") and case["role"] == "kernel-server" and case["mode"] in ("stream", "poll", "auto"):
                         reference_stalled = True
                         emit(case, "server-stop-live-stream", "reference_boundary",
-                             reason="固定官方split客户端在停服后的拨号/HTTP传输失败上持续重试；官方双端控制同样不在12秒内关闭业务流")
+                             reason="固定参考split客户端在停服后的拨号/HTTP传输失败上持续重试；参考端双端控制同样不在12秒内关闭业务流")
                     else:
                         emit(case, "server-stop-live-stream", "fail", reason="停服后业务流未在原期限内关闭")
                 if ended is not None:
@@ -430,7 +440,7 @@ def execute(case, args, directory, emit, tls):
                 if not reference_stalled or isinstance(error, StreamEof) and (error.received != 0 or error.expected != 5):
                     raise
                 emit(case, "restart-same-endpoint", "reference_boundary",
-                     reason="固定官方split客户端保留旧mux会话；官方双端控制在同端点重启后也未完成首次新请求",
+                     reason="固定参考split客户端保留旧mux会话；参考端双端控制在同端点重启后也未完成首次新请求",
                      error=type(error).__name__ + ": " + str(error))
                 client.close()
                 client = start(args.reference, args.peer,
@@ -485,7 +495,9 @@ def execute(case, args, directory, emit, tls):
                         emit(case, "udp", "pass", size=size, target_family=("domain" if index == 2 else 4 if index == 0 else 6),
                              association="same_socks_control" if native_udp else "fixed_target_per_forwarder")
                     except Exception as error:
-                        emit(case, "udp", "fail", size=size, target_family=("domain" if index == 2 else 4 if index == 0 else 6), error=type(error).__name__ + ": " + str(error))
+                        # Mihomo 的 UDP 路径把数据报截断到 16384 字节；Mihomo 双端对照同样如此。
+                        status = "reference_boundary" if args.peer == "mihomo" and size > 16384 else "fail"
+                        emit(case, "udp", status, size=size, target_family=("domain" if index == 2 else 4 if index == 0 else 6), error=type(error).__name__ + ": " + str(error))
             if native_udp and all(t.sources for t in udp_targets):
                 same = udp_targets[0].sources[-1][1] == udp_targets[1].sources[-1][1]
                 emit(case, "udp-same-source-port-cross-family", "pass" if same else "fail")

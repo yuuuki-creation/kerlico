@@ -240,7 +240,11 @@ impl HttpClient {
             request = request.header("x-sudoku-tunnel", mode);
         }
         if path == "/stream" && mode.is_some() {
-            request = request.header(http::header::TE, "trailers");
+            // 官方节点的下载响应声明 keep-alive，写完就关闭。放回连接池的话，下一个请求会撞上 RST；
+            // 该请求可能是别的业务的 FIN，失败会截断那条业务流。HTTP/2 下 hyper 会去掉这个头。
+            request = request
+                .header(http::header::TE, "trailers")
+                .header(http::header::CONNECTION, "close");
         }
         if let Some(content_type) = content_type {
             request = request.header(http::header::CONTENT_TYPE, content_type);

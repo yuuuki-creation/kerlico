@@ -522,6 +522,116 @@ mod tests {
         );
     }
 
+    /// 官方节点的下载响应声明 keep-alive，写完 EOF 尾部就关闭连接。这里把关闭推迟到下一个请求到达，
+    /// 让复用这条连接的竞争必然发生：下一个请求收不到响应。
+    async fn serve_like_official(mut stream: tokio::net::TcpStream, reused: Arc<AtomicBool>) {
+        let mut served_pull = false;
+        loop {
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                match stream.read_u8().await {
+                    Ok(byte) => header.push(byte),
+                    Err(_) => return,
+                }
+            }
+            if served_pull {
+                reused.store(true, Ordering::SeqCst);
+                return;
+            }
+            if String::from_utf8_lossy(&header).starts_with("GET ") {
+                served_pull = true;
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Sudoku-Stream-EOF\r\nConnection: keep-alive\r\n\r\n0\r\nX-Sudoku-Stream-EOF: 1\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn finished_pull_connection_is_not_reused_for_next_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let reused = Arc::new(AtomicBool::new(false));
+        let observed = reused.clone();
+        let peer = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(serve_like_official(stream, observed.clone()));
+            }
+        });
+        let config = serde_json::from_value::<crate::config::OutOptions>(serde_json::json!({
+            "server": {"host": "127.0.0.1", "port": address.port()},
+            "protocol": {"key": "synthetic-pull-reuse-seed"},
+            "http_mask": {"mode": "stream"}
+        }))
+        .unwrap()
+        .prepare()
+        .unwrap();
+        let owner = kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("pull-reuse").unwrap(),
+            CancellationToken::new(),
+        );
+        let scope = Scope::node(&owner.cancel(), owner);
+        let client = HttpClient::new(
+            &config,
+            Arc::new(crate::carrier::endpoint::Endpoint::new(
+                config.server.clone(),
+            )),
+            scope.clone(),
+            true,
+        );
+        let (mut received, writer) = tokio::io::duplex(1024);
+        let writer = DownloadWriter {
+            inner: writer,
+            failed: Arc::new(AtomicBool::new(false)),
+            normal: false,
+        };
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            download(
+                client.clone(),
+                Mode::Stream,
+                "synthetic-token".into(),
+                writer,
+                None,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut downlink = Vec::new();
+        received.read_to_end(&mut downlink).await.unwrap();
+        assert!(downlink.is_empty());
+        // hyper 在响应体读完后才把连接放回连接池；等它放回，复用才可能发生。
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status = tokio::time::timeout(
+            Duration::from_secs(2),
+            post(
+                &client,
+                Mode::Stream,
+                "other-token",
+                Some("fin"),
+                None,
+                Bytes::new(),
+            ),
+        )
+        .await
+        .unwrap();
+        scope.shutdown().await;
+        peer.abort();
+        assert!(!reused.load(Ordering::SeqCst), "下载结束的连接不应被复用");
+        assert_eq!(status.unwrap(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn rejected_fin_stays_failed_across_shutdown_and_flush() {
         for failure in [io::ErrorKind::ConnectionAborted, io::ErrorKind::TimedOut] {

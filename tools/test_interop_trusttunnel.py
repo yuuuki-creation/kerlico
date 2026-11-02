@@ -129,7 +129,7 @@ class TlsNegativeEvidenceTests(unittest.TestCase):
                 with patch.object(tt, "port", return_value=22000), \
                      patch.object(tt, "mihomo_client", return_value={"proxies": [{}]}), \
                      patch.object(tt, "process", side_effect=fake_process), \
-                     patch.object(tt, "ready"), patch.object(tt, "socket_owned", return_value=True), \
+                     patch.object(tt, "ready"), patch.object(tt, "wait_running"), patch.object(tt, "socket_owned", return_value=True), \
                      patch.object(tt, "socks_open", side_effect=failed_request), \
                      patch.object(tt.time, "monotonic", side_effect=[0, 2]):
                     observed = tt.observe_tls_probe(args, directory, child, "127.0.0.1", 23000,
@@ -157,7 +157,7 @@ class TlsNegativeEvidenceTests(unittest.TestCase):
                 with patch.object(tt, "port", return_value=22000), \
                      patch.object(tt, "mihomo_client", return_value={"proxies": [{}]}), \
                      patch.object(tt, "process", side_effect=fake_process), \
-                     patch.object(tt, "ready"), patch.object(tt, "socket_owned", return_value=True), \
+                     patch.object(tt, "ready"), patch.object(tt, "wait_running"), patch.object(tt, "socket_owned", return_value=True), \
                      patch.object(tt, "socks_open", return_value=(MagicMock(), None)), \
                      patch.object(tt, "exact", side_effect=[b"hello|", RuntimeError("目标数据提前结束")]), \
                      patch.object(tt, "socks_udp", side_effect=bad_udp_reply):
@@ -186,7 +186,7 @@ class TlsNegativeEvidenceTests(unittest.TestCase):
                 with patch.object(tt, "port", return_value=22000), \
                      patch.object(tt, "mihomo_client", return_value={"proxies": [{}]}), \
                      patch.object(tt, "process", side_effect=fake_process), \
-                     patch.object(tt, "ready"), patch.object(tt, "socket_owned", return_value=True), \
+                     patch.object(tt, "ready"), patch.object(tt, "wait_running"), patch.object(tt, "socket_owned", return_value=True), \
                      patch.object(tt, "socks_open", return_value=(MagicMock(), None)), \
                      patch.object(tt, "exact", side_effect=ended_before_greeting), \
                      patch.object(tt.time, "monotonic", side_effect=[0, 2]):
