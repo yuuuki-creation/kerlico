@@ -28,7 +28,7 @@ BASE_LANGUAGE = "zh-Hans"
 LANGUAGES = ["en", "ja", "ko", "ru", "es"]
 IMPORT_BATCH = 10  # 导入请求的委托证明只有 10 秒
 DOC_URL = "https://kerlico-wiki.invalid/doc/"
-IN_FLIGHT = 2  # 同时在翻的文档数；免费模型约每分钟 20 次，还要和索引共用
+IN_FLIGHT = 3  # 英文之外同时申请翻译的文档数，免费模型约每分钟 20 次
 RETRY_STOPPED_AFTER = 3600
 BATCH_OUTPUT_TOKENS = 4000
 EMBED_PREPROCESSOR = "none;tiktoken-go@v0.7.0;cl100k_base"
@@ -41,7 +41,8 @@ MODELS = [
     {"modelId": "nemotron-3-5-lightning", "providerModelVersion": "nvidia/nemotron-3.5-lightning:free", "capabilities": ["chat"], "dimension": 0, "preprocessorVersion": "none", "maxInputTokens": 1000000, "maxOutputTokens": 65536},
     {"modelId": "nemotron-3-5-vl", "providerModelVersion": "nvidia/nemotron-3.5-super-vl:free", "capabilities": ["chat", "vision"], "dimension": 0, "preprocessorVersion": "none", "maxInputTokens": 1000000, "maxOutputTokens": 131072},
     # 网关要求回包的模型名与请求一致（去掉前缀后比较）；免费向量模型里目前只有这个回包带 :free。
-    {"modelId": "lfm-2-5-embedding", "providerModelVersion": "liquid/lfm-2.5-embedding-350m:free", "capabilities": ["embedding"], "dimension": 1024, "preprocessorVersion": EMBED_PREPROCESSOR, "maxInputTokens": 512, "maxOutputTokens": 0},
+    # maxInputTokens 是整批的预算，单段由 CHUNK_TOKENS 控制在模型的 512 词元以内。
+    {"modelId": "lfm-2-5-embedding", "providerModelVersion": "liquid/lfm-2.5-embedding-350m:free", "capabilities": ["embedding"], "dimension": 1024, "preprocessorVersion": EMBED_PREPROCESSOR, "maxInputTokens": 8191, "maxOutputTokens": 0},
 ]
 # 档位 → 模型（第一个是主模型，后面按顺序备用）。重排没有免费模型，不建档位，任务按“能力不可用”降级。
 TIERS = {
@@ -254,7 +255,10 @@ def index(client):
         client.call("PUT", "/v1/policies", {"siteId": site, "expectedRevision": 0, "policyJSON": GUARD_DEFAULTS})
     qa = client.call("GET", "/v1/admin/policy")
     client.put("/v1/admin/policy", {"expectedVersion": qa["version"], "policy": {**qa["policy"], "enabled": True, "retrievalSpace": space}})
-    print("知识索引与公开问答已开启")
+    # 已发布文档补建一次索引（已是最新的直接复用），之后每次发布自动建。
+    for document in options["documents"]:
+        client.put("/v1/builds", {"document": document["reference"], "force": False}, "POST")
+    print(f"知识索引与公开问答已开启，补建索引 {len(options['documents'])} 篇")
 
 
 def flatten(nodes):
@@ -349,7 +353,7 @@ def ensure_language(client, tag, automatic):
 
 
 def pace(client, manifest_path):
-    """一次只让少量文档在翻：先逐篇发布（英文随发布自动翻译），英文译完后其余语言逐篇申请，全部完成后打开自动翻译。"""
+    """先逐篇发布（英文随发布自动排队翻译），英文译完后其余语言按在途上限逐篇申请，全部完成后打开自动翻译。"""
     with open(manifest_path, encoding="utf-8") as handle:
         manifest = {node["title"]: node for node in flatten(json.load(handle))}
     ensure_language(client, "en", True)
@@ -364,25 +368,24 @@ def pace(client, manifest_path):
         if now - last_report > 300:
             print(time.strftime("%H:%M:%S"), "未发布", len(unpublished), "在途", active, json.dumps(tally, ensure_ascii=False), flush=True)
             last_report = now
-        if active < IN_FLIGHT:
-            if unpublished:
-                # 文档树是前序，父文档先发布。
-                node = unpublished[0]
-                publish(client, node, manifest[node["title"]])
-            else:
-                target = next((tag for tag in LANGUAGES if tag not in tally or set(tally[tag]) != {"translated"}), None)
-                if target is None:
-                    for tag in LANGUAGES:
-                        ensure_language(client, tag, True)
-                    print("全部语言翻译完成", json.dumps(tally, ensure_ascii=False), flush=True)
-                    return
-                ensure_language(client, target, target == "en")
-                for row in progress["documents"]:
-                    key = (row["documentId"], row["language"])
-                    if row["language"] == target and (row["state"] == "waiting" or (row["state"] == "stopped" and now - retried.get(key, 0) > RETRY_STOPPED_AFTER)):
-                        retried[key] = now
-                        client.put("/v1/translations", {"document": references[row["documentId"]], "targetLanguage": target}, "POST")
-                        break
+        if unpublished:
+            # 文档树是前序，父文档先发布。基准语言不等翻译；英文译文在翻译服务里排队，队列自己按并发消化。
+            node = unpublished[0]
+            publish(client, node, manifest[node["title"]])
+        elif active < IN_FLIGHT:
+            target = next((tag for tag in LANGUAGES if tag not in tally or set(tally[tag]) != {"translated"}), None)
+            if target is None:
+                for tag in LANGUAGES:
+                    ensure_language(client, tag, True)
+                print("全部语言翻译完成", json.dumps(tally, ensure_ascii=False), flush=True)
+                return
+            ensure_language(client, target, target == "en")
+            for row in progress["documents"]:
+                key = (row["documentId"], row["language"])
+                if row["language"] == target and (row["state"] == "waiting" or (row["state"] == "stopped" and now - retried.get(key, 0) > RETRY_STOPPED_AFTER)):
+                    retried[key] = now
+                    client.put("/v1/translations", {"document": references[row["documentId"]], "targetLanguage": target}, "POST")
+                    break
         time.sleep(20)
 
 
