@@ -93,7 +93,9 @@ async fn slow_tcp_reader_gets_backpressure_instead_of_session_abort() {
             .unwrap()
             .stream;
         let (mut reader, mut writer) = tokio::io::split(stream);
-        let body = (0..4usize << 20).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let body = (0..4usize << 20)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>();
         let sent = body.clone();
         let upload = tokio::spawn(async move {
             writer.write_all(&sent).await.unwrap();

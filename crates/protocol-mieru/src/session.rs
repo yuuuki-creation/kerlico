@@ -1137,9 +1137,10 @@ impl TcpActor {
         Ok(())
     }
     fn update_receive_room(&self) {
-        let blocked = self.entries.values().any(|entry| {
-            entry.life.received_bytes.load(Ordering::Acquire) >= RECEIVE_PAUSE_BYTES
-        });
+        let blocked = self
+            .entries
+            .values()
+            .any(|entry| entry.life.received_bytes.load(Ordering::Acquire) >= RECEIVE_PAUSE_BYTES);
         self.link.receive_blocked.store(blocked, Ordering::Release);
         if self.link.receive_ready() {
             self.link.receive_room.notify_waiters();
