@@ -7,6 +7,34 @@
 {"key": "outbound/gost-relay/tls", "test": "pass", "evidence": "gost tls 监听：配 ca_pem 通 1.89 MiB/s；bad_ca 不通（socks_reply_1）", "date": "2026-11-03"}
 {"key": "outbound/gost-relay/udp", "test": "pass", "evidence": "udp-forward 经 gost：dynamic 1200 字节 5 轮 True，forward 1200 字节 True；SOCKS5 UDP 多目标关联结果 socks_reply_7（恒开固定目标，无开关，不提供多目标）", "date": "2026-11-03"}
 {"key": "outbound/gost-relay/username", "test": "pass", "evidence": "gost auth：用户名正确通，bad_user 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/masque/address", "test": "fail", "evidence": "未成立：通。server.host/port 指向对端通；端口改错 bad_port 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/masque/masque", "test": "fail", "evidence": "未成立：通。Xray 固定提交 0afec66 的 masque 入站，经两端用户态转发（Mesh MTU 低于 QUIC 下限）：1 MiB 摘要一致 None MiB/s", "date": "2026-11-03"}
+{"key": "outbound/masque/network", "test": "fail", "evidence": "未成立：h3 通。固定 HTTP/3 对 Xray alpn=h3 通；('network', 'h2') check 拒绝（ configuration: The MASQUE outbound configuration is invalid）", "date": "2026-11-03"}
+{"key": "outbound/masque/password", "test": "fail", "evidence": "未成立：通。Xray users：正确通；bad_pass 不通（socks_reply_2）；no_auth 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/masque/path", "test": "fail", "evidence": "未成立：路径生效。路径取自 uri，/custom 通、/other path_bad 不通（socks_reply_2）；含 {target}、{ipproto} 的 uri check 拒绝（ configuration: The MASQUE outbound configuration is invalid）", "date": "2026-11-03"}
+{"key": "outbound/masque/port", "test": "fail", "evidence": "未成立：通。server.host/port 指向对端通；端口改错 bad_port 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/masque/private-key", "test": "blocked", "evidence": "缺能强制校验客户端证书的 masque 服务端：Xray 配 verifyClientCertificate 后 mtls_ok=False（stall@0 sent=64），缺证书 mtls_missing 不通（stall@0 sent=64），观察不到证书被校验", "date": "2026-11-03"}
+{"key": "outbound/masque/protocol", "test": "fail", "evidence": "未成立：通。Xray 固定提交 0afec66 的 masque 入站，经两端用户态转发（Mesh MTU 低于 QUIC 下限）：1 MiB 摘要一致 None MiB/s", "date": "2026-11-03"}
+{"key": "outbound/masque/server", "test": "fail", "evidence": "未成立：通。server.host/port 指向对端通；端口改错 bad_port 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/masque/server-port", "test": "fail", "evidence": "未成立：通。server.host/port 指向对端通；端口改错 bad_port 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/masque/sni", "test": "fail", "evidence": "未成立：通。tls.server_name=证书名通；bad_sni 不通（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/masque/tls", "test": "pass", "evidence": "ca_pem 配上通，去掉 no_ca 不通（socks_reply_1）；server_name 见 sni 项；insecure 字段 check 拒绝（ configuration: The MASQUE outbound configuration is invalid）", "date": "2026-11-03"}
+{"key": "outbound/masque/uri", "test": "fail", "evidence": "未成立：路径一致通。Xray masqueSettings.path=/custom：uri 路径 /custom 通 None MiB/s；path_bad 不通（socks_reply_2）；省略 uri 走 / 时 path_default 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/masque/username", "test": "fail", "evidence": "未成立：通。Xray users：正确通；bad_user 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/masque/version", "test": "fail", "evidence": "未成立：h3 通。固定 HTTP/3 对 Xray alpn=h3 通；('version', 2) check 拒绝（ configuration: The MASQUE outbound configuration is invalid）", "date": "2026-11-03"}
+{"key": "outbound/openconnect/base-mtu", "test": "pass", "evidence": "mtu 同时写 X-CSTP-Base-MTU 和 X-CSTP-MTU：客户端 1280 与 1400 时 ocserv tun 口 MTU 为 cat: '/sys/class/net/vpns*/mtu': No such file or directory、1372；两项不能分开设，符合标注 partial", "date": "2026-11-03"}
+{"key": "outbound/openconnect/combo", "test": "fail", "evidence": "未成立：唯一组合通。kerlico 只开放 anyconnect + 用户名密码 + TLS 数据通道 + 无压缩 + ca_pem + 无客户端证书 + 内部栈这一组：对 ocserv TCP 256 KiB、UDP 1200 字节通；token、cookie、auth_group、no_udp、客户端证书、system 接口、压缩字段都被 check 拒绝", "date": "2026-11-03"}
+{"key": "outbound/openconnect/compression-disabled", "test": "fail", "evidence": "未成立：通。ocserv 开 compression=true：kerlico 1 MiB 摘要一致 None MiB/s，服务端 -d 9 日志没有选定压缩算法；固定不协商，没有开关", "date": "2026-11-03"}
+{"key": "outbound/openconnect/flavor", "test": "pass", "evidence": "anyconnect（ocserv）1 MiB 通；flavor 字段不存在，gp check 拒绝（] Invalid configuration: Invalid OpenConnect outbound fields）", "date": "2026-11-03"}
+{"key": "outbound/openconnect/mtu", "test": "fail", "evidence": "未成立：1280 生效；服务端上限。ocserv tun 口 MTU 与隧道 SYN MSS：mtu=1280 时 MTU cat: '/sys/class/net/vpns*/mtu': No such file or directory、MSS []；mtu=1400 时 MTU 1372、MSS ['1260', '1332']；ocserv 配 mtu=1300 而客户端 1400 时 MTU cat: '/sys/class/net/vpns*/mtu': No such file or directory、MSS []（以服务端为准）；1279 check 拒绝", "date": "2026-11-03"}
+{"key": "outbound/openconnect/no-udp", "test": "fail", "evidence": "未成立：通；无 UDP 数据通道。ocserv 开 udp-port=443：1 MiB 走 CSTP None MiB/s，B 桥接上 20 秒内到 443/udp 的包 204 个，日志 DTLS 协商相关行 0；固定只走 TLS，没有开关", "date": "2026-11-03"}
+{"key": "outbound/openconnect/password", "test": "pass", "evidence": "ocserv plain 认证：正确通；bad_pass 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/openconnect/protocol", "test": "pass", "evidence": "官方 ocserv 容器，CSTP 隧道 NAT 到 C：1 MiB 摘要一致，P0 0.43、P2 0.17 MiB/s", "date": "2026-11-03"}
+{"key": "outbound/openconnect/server", "test": "pass", "evidence": "server.host/port 指向对端通；端口改错 bad_port 不通（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/openconnect/tls", "test": "pass", "evidence": "tls 只有 server_name、ca_pem，两者效果见同组正反例；insecure 等其他字段 check 拒绝（] Invalid configuration: Invalid OpenConnect outbound fields）", "date": "2026-11-03"}
+{"key": "outbound/openconnect/tls-certificate-authority", "test": "pass", "evidence": "ocserv 用私有 CA：ca_pem 配上通；去掉 no_ca 不通（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/openconnect/tls-server-name", "test": "pass", "evidence": "tls.server_name=证书名通；bad_sni 不通（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/openconnect/username", "test": "pass", "evidence": "ocserv plain 认证：正确通；bad_user 不通（socks_reply_2）", "date": "2026-11-03"}
 {"key": "outbound/openvpn/auth", "test": "pass", "evidence": "tls_auth.digest 四种配同名服务端 auth 通；客户端 SHA256 对服务端 SHA1 d_miss 不通（socks_reply_1；）；MD5 check 拒绝（alid] Invalid configuration: Invalid OpenVPN outbound fields）。摘要只作用于控制通道，数据通道只有 AEAD", "date": "2026-11-03"}
 {"key": "outbound/openvpn/ca", "test": "pass", "evidence": "ca_pem=签发服务端的 CA 通；换成无关 CA bad_ca 不通（socks_reply_1）", "date": "2026-11-03"}
 {"key": "outbound/openvpn/cert", "test": "pass", "evidence": "服务端强制客户端证书：cert_pem+key_pem 通；去掉证书 no_cert 不通（socks_reply_6）；私钥换成不配对的 bad_key_pair 不通（tion.invalid] Invalid configuration: Invalid OpenVPN certificate or private key ；）", "date": "2026-11-03"}
