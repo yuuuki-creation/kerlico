@@ -553,6 +553,49 @@ impl Outbound for ProfileOutbound {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn options(security: Value, transport: Value) -> Value {
+        json!({
+            "server": {"host": "node.example.invalid", "port": 443},
+            "uuid": "00000000-0000-4000-8000-000000000001",
+            "security": security,
+            "transport": transport,
+        })
+    }
+
+    #[test]
+    fn reality_rejects_fingerprints_it_cannot_dial() {
+        let reality = |fingerprint: &str| {
+            options(
+                json!({
+                    "type": "reality",
+                    "server_name": "node.example.invalid",
+                    "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+                    "short_id": "ab",
+                    "fingerprint": fingerprint,
+                }),
+                json!({"type": "tcp"}),
+            )
+        };
+        assert!(compile(&reality("chrome")).is_ok());
+        assert!(compile(&reality("unsafe")).is_err());
+        assert!(compile(&reality("no-such-browser")).is_err());
+    }
+
+    #[test]
+    fn xhttp_padding_cannot_be_disabled_or_descending() {
+        let xhttp = |padding: [u32; 2]| {
+            options(
+                json!({"type": "tls", "server_name": "node.example.invalid"}),
+                json!({"type": "xhttp", "settings": {"padding_bytes": padding}}),
+            )
+        };
+        assert!(compile(&xhttp([100, 200])).is_ok());
+        assert!(compile(&xhttp([0, 0])).is_err());
+        assert!(compile(&xhttp([0, 100])).is_err());
+        assert!(compile(&xhttp([200, 100])).is_err());
+    }
 
     #[test]
     fn xudp_global_id_follows_source_and_target() {

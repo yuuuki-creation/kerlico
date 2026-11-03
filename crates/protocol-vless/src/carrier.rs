@@ -183,6 +183,8 @@ impl Carrier {
                 mldsa65_verify,
             } => {
                 xray_transport::validate_tls_server_name(&server_name).map_err(|_| invalid())?;
+                xray_transport::reality::validate_reality_fingerprint(&fingerprint)
+                    .map_err(|_| invalid())?;
                 let key = URL_SAFE_NO_PAD.decode(public_key).map_err(|_| invalid())?;
                 let public_key: [u8; 32] = key.try_into().map_err(|_| invalid())?;
                 if public_key == [0; 32] || short_id.len() > 16 || short_id.len() % 2 != 0 {
@@ -641,6 +643,10 @@ fn xhttp(
         input.sc_max_buffered_posts = n.into();
     }
     if let Some([a, b]) = settings.padding_bytes {
+        // 配置层把 0 当未设置，这里不拦就会静默变成默认填充；Xray 同样报错。
+        if a == 0 || b < a {
+            return Err(invalid());
+        }
         input.x_padding_bytes = XhttpRange {
             from: i32::try_from(a).map_err(|_| invalid())?,
             to: i32::try_from(b).map_err(|_| invalid())?,

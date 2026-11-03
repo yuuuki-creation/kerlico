@@ -545,3 +545,9 @@ async fn session_cancel_and_shared_shutdown_close_both_real_http_driver_connecti
         drop(finish);
     }
 }
+
+#[test]
+fn damaged_announcement_is_an_error_not_a_session() {
+    assert!(announced_ring(b"").unwrap().is_none());
+    assert!(announced_ring(b"not-json").is_err());
+}

@@ -32,6 +32,20 @@ type Body = UnsyncBoxBody<Bytes, io::Error>;
 #[cfg(test)]
 mod task_tests;
 
+/// 无会话路径的 POST 就是 stream-one。Xray 的 stream-up 节点也接受它。
+fn accepts_stream_one(mode: &str) -> bool {
+    matches!(mode, "auto" | "stream-one" | "stream-up")
+}
+
+#[cfg(test)]
+#[test]
+fn stream_up_node_accepts_stream_one() {
+    assert!(accepts_stream_one("stream-up"));
+    assert!(accepts_stream_one("auto"));
+    assert!(accepts_stream_one("stream-one"));
+    assert!(!accepts_stream_one("packet-up"));
+}
+
 #[derive(Clone)]
 struct NodeExecutor(kerlico_core::NodeTasks);
 impl<F> hyper::rt::Executor<F> for NodeExecutor
@@ -487,7 +501,7 @@ impl State {
                     .filter(|p| !p.is_empty())
                     .collect();
                 if parts.is_empty() && request.method() == http::Method::POST {
-                    if !matches!(settings.mode.as_str(), "auto" | "stream-one") {
+                    if !accepts_stream_one(&settings.mode) {
                         return empty(StatusCode::METHOD_NOT_ALLOWED);
                     }
                     return self.direct(request.into_body(), payload, access, context, None);

@@ -243,7 +243,14 @@ impl Transport {
                                 Some(data) => data,
                                 None => self.store.get(&announce).await?.unwrap_or_default(),
                             };
-                            let ring = if data.is_empty() { None } else { Some(slots::Ring::parse(&data)?) };
+                            let ring = match announced_ring(&data) {
+                                Ok(ring) => ring,
+                                Err(error) => {
+                                    context.events.diagnostic(Diagnostic { code: "vless.xdrive.announcement_invalid", error: &error });
+                                    let _ = self.store.delete(&announce).await;
+                                    continue;
+                                }
+                            };
                             let diagnostic_events = context.events.clone();
                             let diagnostics = DiagnosticSink::new(move |event| diagnostic_events.diagnostic(event));
                             let connection = self.connection(id, true, ring, diagnostics);
@@ -279,6 +286,14 @@ impl Transport {
         let cleanup = drain_sessions(&mut tasks, &context).await;
         result.and(cleanup)
     }
+}
+
+/// 公告来自共享存储。解析失败只影响这一条，调用方记诊断、删除后继续，不能停掉节点。
+fn announced_ring(data: &[u8]) -> Result<Option<slots::Ring>> {
+    if data.is_empty() {
+        return Ok(None);
+    }
+    slots::Ring::parse(data).map(Some)
 }
 
 async fn drain_sessions(tasks: &mut JoinSet<()>, context: &InboundContext) -> Result<()> {
