@@ -49,6 +49,10 @@
 - **Sudoku mux 大流**：`mux=on` 的 33MiB 流偶发提前结束，见[互通记录](docs/testing/peer-interop-2026-11-03.md)的未解决项。
 - **`kerlico-core`**：`interrupted_node_force_keeps_count_until_actual_socket_join` 全量运行失败过 1 次，单跑 10 次通过，疑似不稳定，未定位。
 - **WireGuard 出站**：定时发送和业务发送失败时隧道服务退出，本地网络短暂不可达会触发。
+- **WireGuard 丢包死锁（已修复，待发布）**：`v1.3.1` 及之前，kerlico 两端的全双工流在丢包路径上可能互相忽略 ACK，60 秒后断开。根因是 smoltcp 回退后的纯 ACK 序号，补丁见 `third_party/smoltcp/PATCHES.md`。
+- **用户态栈吞吐**：丢包路径上吞吐很低，3% 丢包、60 毫秒 RTT 的全双工回显约 0.05 MiB/s，内核 TCP 为 4.56。原因是 smoltcp 发送端没有 SACK、RTO 下限 1 秒，默认窗口 64 KiB 在高 RTT 下也限速。见[跨机矩阵](docs/testing/cross-host-2026-11-03.md#隧道复测)。
+- **EasyTier udp 载体**：跨机时 1 MiB 也会断流，B 到 A 方向的满长段到不了 kerlico，原因未定位；tcp 载体和同机通过。
+- **MASQUE**：`perf-03` 到 `perf-01` 的转发路径 32 MiB 约 20 分钟后 `eof`，吞吐 0.01 MiB/s，原因未定位。Mesh MTU 1300 低于 QUIC 路径 MTU 下限 1350，属路径限制。
 - **ZeroTier**：伪造流量持续时，首次主动联系我们的成员学习变慢；本节点发起的查询不受影响。
 - **`Engine::bind`**：用 `connect_timeout_ms` 作为统计库初始化期限，设得很小时可能启动失败（推断，未抓到错误内容）。
 - **TUN**：放开来源后，IPv6 链路本地来源发往组播的 UDP（如 mDNS）可能进入出站（读代码推测，未验证）。
