@@ -283,7 +283,11 @@ impl Outbound for Client {
                     for task in tasks {
                         let _ = task.await;
                     }
-                    state.endpoint.wait_idle().await;
+                    let _ = tokio::time::timeout(
+                        kerlico_core::QUIC_CLOSE_GRACE,
+                        state.endpoint.wait_idle(),
+                    )
+                    .await;
                 }
             }
             Ok(())

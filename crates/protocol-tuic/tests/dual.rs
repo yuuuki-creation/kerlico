@@ -418,6 +418,73 @@ async fn half_close_waits_for_target_response_and_port_is_reusable() {
         assert!(rebound);
     }
 }
+/// 转发 UDP 并给每个方向加固定延迟，用来得到高 RTT、因而排空期很长的 QUIC 路径。
+async fn delayed_relay(server: std::net::SocketAddr, delay: Duration) -> (u16, JoinSet<()>) {
+    let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let back = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let port = front.local_addr().unwrap().port();
+    let client = Arc::new(std::sync::Mutex::new(None));
+    let mut tasks = JoinSet::new();
+    let (front_up, back_up, seen) = (front.clone(), back.clone(), client.clone());
+    tasks.spawn(async move {
+        let mut bytes = vec![0; 65535];
+        loop {
+            let (count, source) = front_up.recv_from(&mut bytes).await.unwrap();
+            *seen.lock().unwrap() = Some(source);
+            let (back, packet) = (back_up.clone(), bytes[..count].to_vec());
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = back.send_to(&packet, server).await;
+            });
+        }
+    });
+    tasks.spawn(async move {
+        let mut bytes = vec![0; 65535];
+        loop {
+            let (count, _) = back.recv_from(&mut bytes).await.unwrap();
+            let Some(source) = *client.lock().unwrap() else {
+                continue;
+            };
+            let (front, packet) = (front.clone(), bytes[..count].to_vec());
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = front.send_to(&packet, source).await;
+            });
+        }
+    });
+    (port, tasks)
+}
+
+#[tokio::test]
+async fn outbound_shutdown_does_not_wait_for_draining_on_a_slow_path() {
+    let fixture = fixture(5, "native", "127.0.0.1", "cubic").await;
+    let (port, _relay) = delayed_relay(fixture.address, Duration::from_millis(400)).await;
+    let mut options = fixture.options.clone();
+    options["server"] = json!({"host":"127.0.0.1","port":port});
+    let outbound = shared::outbound(&TuicFactory, &options).await.unwrap();
+    let (target, task) = echo_tcp("127.0.0.1").await;
+    let mut stream = outbound
+        .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .stream;
+    stream.write_all(b"slow-path").await.unwrap();
+    let mut reply = [0; 9];
+    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    drop(stream);
+    let started = tokio::time::Instant::now();
+    outbound.shutdown().await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "关闭不应等满 3×PTO 排空期：{:?}",
+        started.elapsed()
+    );
+    task.abort();
+}
+
 #[tokio::test]
 async fn rejects_mixed_versions_unknown_options_and_duplicate_users() {
     let tls = json!({"server_name":"localhost"});

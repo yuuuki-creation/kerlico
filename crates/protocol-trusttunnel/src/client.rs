@@ -39,7 +39,6 @@ pub(crate) struct Carrier {
     driver: Mutex<Option<ServiceTask<()>>>,
     maintenance: Mutex<Option<ServiceTask<()>>>,
     quic: Option<(quinn::Endpoint, quinn::Connection)>,
-    socket: Option<kerlico_http_carrier::socket::Close>,
 }
 impl Carrier {
     pub fn touch(&self) {
@@ -56,9 +55,6 @@ impl Carrier {
         if let Some((endpoint, connection)) = &self.quic {
             connection.close(0x100u32.into(), b"");
             endpoint.close(0x100u32.into(), b"");
-        }
-        if let Some(socket) = &self.socket {
-            socket.close();
         }
         if let Ok(driver) = self.driver.lock()
             && let Some(driver) = driver.as_ref()
@@ -225,7 +221,6 @@ impl Client {
         let closed = Arc::new(AtomicBool::new(false));
         let mark = closed.clone();
         let mut quic = None;
-        let mut socket_close = None;
         let (sender, driver) = if self.transport == Transport::H2 {
             let io = self.tls().await?;
             let (sender, connection) = h2::client::Builder::new()
@@ -256,9 +251,7 @@ impl Client {
             .map_err(|_| crate::invalid())?;
             let socket = std::net::UdpSocket::bind(bind)?;
             socket.set_nonblocking(true)?;
-            let (socket, close) = kerlico_http_carrier::socket::wrap(socket)?;
-            socket_close = Some(close);
-            let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
+            let mut endpoint = quinn::Endpoint::new(
                 quinn::EndpointConfig::default(),
                 None,
                 socket,
@@ -300,7 +293,6 @@ impl Client {
             driver: Mutex::new(Some(driver)),
             maintenance: Mutex::new(None),
             quic,
-            socket: socket_close,
         });
         let weak = Arc::downgrade(&carrier);
         let idle = self.limits.idle();
@@ -427,7 +419,11 @@ impl Outbound for Client {
                         let _ = task.await;
                     }
                     if let Some((endpoint, _)) = &carrier.quic {
-                        endpoint.wait_idle().await;
+                        let _ = tokio::time::timeout(
+                            kerlico_core::QUIC_CLOSE_GRACE,
+                            endpoint.wait_idle(),
+                        )
+                        .await;
                     }
                 }
             }

@@ -185,7 +185,9 @@ impl Connection {
         }
         if let Some(owner) = &self._owner {
             owner.endpoint.close(0u32.into(), b"");
-            owner.endpoint.wait_idle().await;
+            let _ =
+                tokio::time::timeout(kerlico_core::QUIC_CLOSE_GRACE, owner.endpoint.wait_idle())
+                    .await;
             owner.runtime.shutdown().await;
         }
     }

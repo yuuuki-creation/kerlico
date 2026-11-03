@@ -29,7 +29,6 @@ const MIN_DATAGRAM: usize = TUNNEL_MTU + 2;
 const H3_NO_ERROR: u32 = 0x100;
 const SETTINGS_POLL: Duration = Duration::from_millis(5);
 const IDLE_POLL: Duration = Duration::from_secs(1);
-const CLOSE_GRACE: Duration = Duration::from_millis(200);
 
 type Sender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
@@ -242,7 +241,7 @@ pub(crate) async fn establish(prepared: &Prepared, host: &ServiceContext) -> Res
         drop(sender);
         connection.close(H3_NO_ERROR.into(), b"");
         // 留出发送 CONNECTION_CLOSE 的时间，代理才能立刻回收这条隧道的地址。
-        let _ = timeout(CLOSE_GRACE, endpoint.wait_idle()).await;
+        let _ = timeout(kerlico_core::QUIC_CLOSE_GRACE, endpoint.wait_idle()).await;
         socket_close.close();
     })?;
     Ok(tunnel)
