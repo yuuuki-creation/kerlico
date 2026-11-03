@@ -113,13 +113,20 @@ impl DnsResolver {
                 .iter()
                 .map(|server| {
                     let (transport, address) = parse_server(server)?;
-                    let mut connection = match transport {
-                        Transport::Udp => ConnectionConfig::udp(),
-                        Transport::Tcp => ConnectionConfig::tcp(),
-                        Transport::Tls(name) => ConnectionConfig::tls(Arc::from(name)),
+                    // `udp://` 同时登记同端口的 TCP：解析器收到截断响应时要靠它取完整答案。
+                    let connections = match transport {
+                        Transport::Udp => vec![ConnectionConfig::udp(), ConnectionConfig::tcp()],
+                        Transport::Tcp => vec![ConnectionConfig::tcp()],
+                        Transport::Tls(name) => vec![ConnectionConfig::tls(Arc::from(name))],
                     };
-                    connection.port = address.port();
-                    Ok(NameServerConfig::new(address.ip(), true, vec![connection]))
+                    let connections = connections
+                        .into_iter()
+                        .map(|mut connection| {
+                            connection.port = address.port();
+                            connection
+                        })
+                        .collect();
+                    Ok(NameServerConfig::new(address.ip(), true, connections))
                 })
                 .collect::<Result<Vec<_>>>()?;
             let mut builder = TokioResolver::builder_with_config(
@@ -151,7 +158,10 @@ impl DnsResolver {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tokio::net::UdpSocket;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, UdpSocket},
+    };
 
     fn spec(value: serde_json::Value) -> DnsSpec {
         serde_json::from_value(value).unwrap()
@@ -259,6 +269,70 @@ mod tests {
             vec!["10.0.0.5".parse::<IpAddr>().unwrap()]
         );
         assert!(resolver.resolve("other.internal").await.is_err());
+    }
+
+    /// UDP 只回 TC 标志，同端口 TCP 回一条 A 记录。
+    async fn truncating_upstream() -> SocketAddr {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = udp.local_addr().unwrap();
+        let tcp = TcpListener::bind(address).await.unwrap();
+        let question_end = |query: &[u8]| {
+            query[12..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|index| 12 + index + 5)
+                .unwrap()
+        };
+        tokio::spawn(async move {
+            let mut buffer = [0; 512];
+            loop {
+                let (length, peer) = udp.recv_from(&mut buffer).await.unwrap();
+                let mut reply = buffer[..question_end(&buffer[..length])].to_vec();
+                reply[2] = 0x83;
+                reply[3] = 0x80;
+                reply[6..12].copy_from_slice(&[0; 6]);
+                udp.send_to(&reply, peer).await.unwrap();
+            }
+        });
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = tcp.accept().await.unwrap();
+                tokio::spawn(async move {
+                    while let Ok(length) = stream.read_u16().await {
+                        let mut query = vec![0; usize::from(length)];
+                        stream.read_exact(&mut query).await.unwrap();
+                        let end = question_end(&query);
+                        let is_a = query[end - 4..end - 2] == [0, 1];
+                        let mut reply = query[..end].to_vec();
+                        reply[2] = 0x81;
+                        reply[3] = 0x80;
+                        reply[6..12].copy_from_slice(&[0, u8::from(is_a), 0, 0, 0, 0]);
+                        if is_a {
+                            reply.extend_from_slice(&[
+                                0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 9,
+                            ]);
+                        }
+                        stream
+                            .write_u16(u16::try_from(reply.len()).unwrap())
+                            .await
+                            .unwrap();
+                        stream.write_all(&reply).await.unwrap();
+                    }
+                });
+            }
+        });
+        address
+    }
+
+    #[tokio::test]
+    async fn truncated_udp_answers_retry_over_tcp() {
+        let upstream = truncating_upstream().await;
+        let resolver =
+            DnsResolver::new(&spec(json!({"servers":[format!("udp://{upstream}")]}))).unwrap();
+        assert_eq!(
+            resolver.resolve("big.example").await.unwrap(),
+            vec!["192.0.2.9".parse::<IpAddr>().unwrap()]
+        );
     }
 
     #[tokio::test]
