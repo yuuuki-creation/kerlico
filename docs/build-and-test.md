@@ -67,3 +67,22 @@ tools/interop_cross_host.py cleanup-outbound
 ```
 
 公网入站被机器防火墙拦截，默认 `--network mesh` 走 Mesh 接口地址；`--network public` 走公网地址。`run-outbound` 不要并发多个实例。Windows 的 Git Bash 下运行要设 `MSYS_NO_PATHCONV=1`。结果 JSON 里的地址和路径已替换为别名。结果见 [2026-11-03 跨机矩阵](testing/cross-host-2026-11-03.md)。
+
+## 逐协议深度测试
+
+`tools/protocol_deep.py` 回答“哪里不对”：完整性、并发、鉴权负例、恢复、长连接、UDP、弱网、资源、优雅退出、多用户计量。它复用跨机矩阵的配置表和 agent，工作目录是 worker 的 `/srv/build/kerlico/deep`，只读 xhost 下的二进制。
+
+```sh
+tools/test_protocol_deep.py                                     # 工具自身的测试，不需要 worker
+tools/protocol_deep.py check                                    # 校验全部载体的深度配置，打印从二进制得出的能力
+tools/protocol_deep.py run --only ss2022/aes-128-gcm --placements 0,1,2 --expect-sha 0136fc5e --out deep.json
+tools/protocol_deep.py run --only vless --scenarios integrity,auth --controls-from deep.json --out vless.json
+tools/protocol_deep.py run --only ss2022/aes-128-gcm --scenarios resources --set resources_after_storm.storms=10 --out diag.json
+tools/protocol_deep.py report deep.json --out deep.md           # 按协议分组，不含地址和密钥
+```
+
+`--only` 里带 `/` 的词是完整载体名，不带的按子串匹配。判定只有四种：`pass`、`fail`、`na`、`tool-error`。
+
+**怎么读结果。** 每轮先跑全部对照，一个场景至少一个必然通过和一个必然失败的对照，失败对照还要命中预期分类。对照不符时该场景这一轮记 `tool-error`。协议失败后工具再测裸路径，路径不通记 `tool-error`，路径正常再复测一次，复测结果写在 `retest`。`--controls-from` 只在工具和二进制摘要都相同时接受。
+
+**路径事实。** 裸 Mesh 不保留半关闭：客户端关写后连接随即结束，响应丢失（每轮的 `half_close` 基线记录实测值）。半关闭、空连接和配额释放场景所以只在同机回环上判定。弱网场景在两个 netns 之间用 tc netem，只碰工具自建的 veth。

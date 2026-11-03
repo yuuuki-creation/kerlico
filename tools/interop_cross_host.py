@@ -660,9 +660,9 @@ class AgentState:
 METHODS = {"tcp_socks": tcp_socks, "tcp_direct": tcp_direct, "udp_forward": udp_forward, "udp_direct": udp_direct, "udp_socks": udp_socks, "http_socks": http_socks, "http_direct": http_direct, "tcp_watch": tcp_watch}
 
 
-def agent_main(args):
+def agent_main(args, state_class=AgentState):
     os.umask(0o077)
-    state = AgentState(args.root, args.binary)
+    state = state_class(args.root, args.binary)
     output_lock = threading.Lock()
     signal.signal(signal.SIGTERM, lambda *_: (state.shutdown(), os._exit(0)))
 
