@@ -9,6 +9,16 @@
 - **关系准则：紧扣当前任务。** 直接回应当前问题与目标。
 - **方式准则：清楚、有条理。** 先说结论与要点，再列依据；术语明确、结构清晰。
 
+## Agent 工作流（pstack 强制）
+
+所有探查、设计、编码、调试、性能测量、审查与文档任务默认启用 `pstack` 技能栈（入口为 `poteto-mode`）：
+
+- **任务路由**：凡涉及跨文件修改、函数签名或边界变更、架构与数据结构设计、根因未知的缺陷、性能问题或多步演进，先读取并遵循 `poteto-mode` 及其匹配的 Playbook；目标明确时直接进入对应专项技能（`how`、`why`、`recall`、`architect`、`tdd`、`swarm`、`arena`、`interrogate`、`thermos`、`benchmark-checklist`、`technical-writing`、`unslop`、`deslop`、`no-comments`）。
+- **核心动作**：
+  - 首条回复先用一句话复述用户目标、所解问题及最小预期改动（只读探查除外）。
+  - 写代码前先按 `principle-model-the-domain` 与 `principle-type-system-discipline` 明确数据结构与边界；跨模块读取或大规模探查按 `principle-guard-the-context-window` 派发只读子代理并行完成。
+  - 交付前按 `principle-prove-it-works` 在真实产物上验证，文档与回复经 `unslop` 与格莱斯准则去套话。
+
 ## 仓库、许可与语言
 
 - **仓库与发布目标**：`yuuuki-creation/kerlico`。
@@ -40,7 +50,7 @@
 ## 开发流程与编译测试环境
 
 - **协议清单与开发循环**：
-  - 协议支持范围与任务编号统一维护在 `reference/reports/三核心 协议 组合支持.md`，阶段路线见 `docs/protocol-roadmap.md`。
+  - 协议支持范围与任务编号统一维护在 `reference/reports/三核心 协议 组合支持.md` 与 `docs/capability-matrix/`（由 `tools/capability_matrix.py` 生成与校验），阶段路线见 `docs/protocol-roadmap.md`。
   - 协议开发固定执行“调研 → 完整首轮编写（代码与接口文档） → 远端测试 → 修改”（`docs/decisions/0007-protocol-development-cycle.md`）。
 - **海外 Worker 构建测试与本机保护**：
   - 所有 Rust 构建、格式/静态检查、单元/集成测试、互通与性能验证统一在专用海外 worker（`perf-01`、`perf-02`、`perf-03`）的项目独立工作区执行；本机仅用于编辑、阅读、同步与 Git 管理。
