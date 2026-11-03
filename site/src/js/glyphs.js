@@ -95,15 +95,15 @@ function splitByLine(tri, px, py, nx, ny, out) {
 
 function createWord(w, h, narrow, rtl) {
   const rand = rng(1307);
-  const lines = narrow ? ['KER', 'LICO'] : ['KERLICO'];
+  const lines = ['KERLICO'];
   const gapUnits = 10;
   const widths = lines.map((line) => [...line].reduce((sum, ch, i) => sum + GLYPHS[ch].w + (i ? gapUnits : 0), 0));
   const widest = Math.max(...widths);
-  const W = narrow ? w - 40 : w * 0.9;
+  const W = narrow ? w - 48 : Math.min(w * 0.68, 1120);
   const sx = W / widest;
-  const lineH = narrow ? Math.min(h * 0.2, sx * 132) : Math.min(h * 0.36, sx * 150);
+  const lineH = Math.min(h * 0.26, sx * 132);
   const sy = lineH / 100;
-  const top = Math.max(68, h * (narrow ? 0.09 : 0.11));
+  const top = Math.max(84, h * (narrow ? 0.24 : 0.18));
   const left = (w - W) / 2;
   const lineGap = lineH * 0.1;
   const totalH = lines.length * lineH + (lines.length - 1) * lineGap;
@@ -148,7 +148,7 @@ function createWord(w, h, narrow, rtl) {
     nz: new Float32Array(n),
     tone: new Float32Array(n),
     bottom: top + totalH,
-    cut: { px, py, tx, ty, nx, ny, shift: W * 0.011, gap: Math.max(3, W * 0.003), len: W * 0.56 },
+    cut: { px, py, tx, ty, nx, ny, shift: W * 0.004, gap: Math.max(1.5, W * 0.0016), len: W * 0.56 },
     buf: new Float32Array((n * 2 + 2) * 15),
   };
   const diag = Math.hypot(w, h);

@@ -9,208 +9,149 @@
 <meta name="theme-color" content="#10131C">
 {{@alternates}}
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%2310131C' d='M0 0h32v32H0z'/%3E%3Cpath fill='%23FF4B2B' d='M4 28 16 4l6 14z'/%3E%3Cpath fill='%232D4BFF' d='m16 4 12 24-6-10z'/%3E%3Cpath fill='%23EFE9DC' d='M4 28h24l-6-10z'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="../assets/site.css">
+<link rel="stylesheet" href="../assets/site.css?v={{@asset_version}}">
 <script>
 (function () {
   var c = document.documentElement.classList;
   c.add('js');
   if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) { c.add('rm'); return; }
   var seen = false;
-  try { seen = localStorage.getItem('kerlico.intro') === '1'; } catch (e) {}
+  try { seen = sessionStorage.getItem('kerlico.intro') === '1'; } catch (e) {}
   if (!seen) c.add('intro');
 })();
 </script>
 </head>
 <body>
-<a class="skip-link" href="#roles">{{nav.to_content}}</a>
+<a class="skip-link" href="#uses">{{nav.to_content}}</a>
 <canvas id="mesh" aria-hidden="true"></canvas>
-<svg id="anno" aria-hidden="true"></svg>
 
 <header class="bar">
-  <a class="brand" href="#top" dir="ltr">KERLICO<i>/{{cfg:version}}</i></a>
-  <nav class="langs" aria-label="{{plain:nav.languages}}">{{@lang_links}}</nav>
+  <a class="brand" href="#top" dir="ltr">KERLICO</a>
   <nav class="links" aria-label="{{plain:nav.links}}">
     <a href="{{cfg:wiki_url}}">{{nav.wiki}}</a>
     <a href="{{cfg:repo_url}}" dir="ltr">GitHub</a>
+    <details class="langs">
+      <summary aria-label="{{plain:nav.languages}}">{{@lang_current}}</summary>
+      <div class="lang-menu">{{@lang_links}}</div>
+    </details>
   </nav>
 </header>
-<button id="skip-intro" class="t-ink" type="button">{{nav.skip}}</button>
 
 <main>
 <section id="top" class="sec hero" data-sec>
   <h1 class="word" dir="ltr">KERLICO</h1>
-  <div class="hero-grid">
-    <div class="plate t-bone hero-lede">
-      <p class="lede">{{hero.tag}}</p>
-      <p class="cta">
-        <a class="btn" href="{{cfg:releases_url}}">{{hero.download}}</a>
-        <a class="btn alt" href="{{cfg:wiki_url}}">{{hero.docs}}</a>
-      </p>
-    </div>
-    <dl class="plate t-ink stats">
-      <div><dt>{{hero.stat_total}}</dt><dd dir="ltr">{{count:total}}</dd></div>
-      <div><dt>{{wall.both}}</dt><dd dir="ltr">{{count:both}}</dd></div>
-      <div><dt>{{wall.in}}</dt><dd dir="ltr">{{count:in}}</dd></div>
-      <div><dt>{{wall.out}}</dt><dd dir="ltr">{{count:out}}</dd></div>
-    </dl>
+  <div class="hero-copy">
+    <p class="lede">{{hero.tag}}</p>
+    <p class="sub">{{hero.sub}}</p>
+    <p class="cta">
+      <a class="btn" href="{{cfg:releases_url}}">{{hero.download}}</a>
+      <a class="btn alt" href="{{cfg:wiki_url}}">{{hero.docs}}</a>
+    </p>
   </div>
+  <span class="cue" aria-hidden="true"></span>
 </section>
 
-<section id="roles" class="sec roles" data-sec>
-  <div class="ghost" aria-hidden="true" dir="ltr"><span>1</span></div><div class="ghost over" aria-hidden="true" dir="ltr"><span>1</span></div>
-  <i class="rule a"></i><i class="rule b"></i><span class="coord" aria-hidden="true" dir="ltr"></span>
-  <div class="plate main t-ink">
-    <h2 class="slice">{{slice:roles.title}}</h2>
-    <p class="lead">{{roles.lead}}</p>
-    <ul class="paths">
-      <li><b>{{roles.client_label}}</b><span>{{roles.client_path}}</span></li>
-      <li><b>{{roles.server_label}}</b><span>{{roles.server_path}}</span></li>
-      <li><b>{{roles.both_label}}</b><span>{{roles.both_path}}</span></li>
+<section id="uses" class="sec" data-sec>
+  <div class="panel wide">
+    <h2>{{uses.title}}</h2>
+    <p class="lead">{{uses.lead}}</p>
+    <ul class="uses">
+      <li><span class="flow out" aria-hidden="true"><i></i><i></i><i></i></span><h3>{{uses.client_t}}</h3><p>{{uses.client}}</p></li>
+      <li><span class="flow in" aria-hidden="true"><i></i><i></i><i></i></span><h3>{{uses.server_t}}</h3><p>{{uses.server}}</p></li>
+      <li><span class="flow both" aria-hidden="true"><i></i><i></i><i></i><i></i></span><h3>{{uses.both_t}}</h3><p>{{uses.both}}</p></li>
     </ul>
   </div>
-  <div class="plate t-cobalt roles-side">
-    <p>{{roles.trim}}</p>
-    <p>{{roles.ref}}</p>
-  </div>
 </section>
 
-<section id="dispatcher" class="sec disp" data-sec>
-  <div class="ghost" aria-hidden="true" dir="ltr"><span>×1</span></div><div class="ghost over" aria-hidden="true" dir="ltr"><span>×1</span></div>
-  <i class="rule a"></i><span class="coord" aria-hidden="true" dir="ltr"></span>
-  <div class="plate t-vermilion disp-head">
-    <h2 class="slice">{{slice:disp.title}}</h2>
-    <p class="lead">{{disp.lead}}</p>
+<section id="how" class="sec how" data-sec>
+  <div class="panel narrow">
+    <h2>{{how.title}}</h2>
+    <p class="lead">{{how.lead}}</p>
   </div>
   <div class="disp-track">
-    <div class="disp-stage t-ink">
-      <div id="diagram" role="img" aria-label="{{plain:disp.aria}}"></div>
+    <div class="disp-stage">
+      <div id="diagram" role="img" aria-label="{{plain:how.aria}}"></div>
       <ol class="steps">
-        <li data-n="1"><h3>{{disp.s1_t}}</h3><p>{{disp.s1}}</p></li>
-        <li data-n="2"><h3>{{disp.s2_t}}</h3><p>{{disp.s2}}</p></li>
-        <li data-n="3"><h3>{{disp.s3_t}}</h3><p>{{disp.s3}}</p></li>
-        <li data-n="4"><h3>{{disp.s4_t}}</h3><p>{{disp.s4}}</p></li>
+        <li><h3>{{how.s1_t}}</h3><p>{{how.s1}}</p></li>
+        <li><h3>{{how.s2_t}}</h3><p>{{how.s2}}</p></li>
+        <li><h3>{{how.s3_t}}</h3><p>{{how.s3}}</p></li>
       </ol>
     </div>
   </div>
 </section>
 
-<section id="protocols" class="sec protos" data-sec>
-  <div class="ghost" aria-hidden="true" dir="ltr"><span>{{count:total}}</span></div><div class="ghost over" aria-hidden="true" dir="ltr"><span>{{count:total}}</span></div>
-  <i class="rule a"></i><i class="rule b"></i><span class="coord" aria-hidden="true" dir="ltr"></span>
-  <div class="plate t-bone protos-head">
-    <h2 class="slice">{{slice:wall.title}}</h2>
+<section id="protocols" class="sec" data-sec>
+  <div class="panel wide shift">
+    <h2>{{wall.title}}</h2>
     <p class="lead">{{wall.lead}}</p>
-  </div>
-  <div class="plate t-ink wall-plate">
     <div class="filters" role="group" aria-label="{{plain:wall.filter}}">
-      <button type="button" data-filter="all" aria-pressed="true">{{wall.f_all}} <i dir="ltr">{{count:total}}</i></button>
-      <button type="button" data-filter="both" aria-pressed="false">{{wall.both}} <i dir="ltr">{{count:both}}</i></button>
-      <button type="button" data-filter="in" aria-pressed="false">{{wall.in}} <i dir="ltr">{{count:in}}</i></button>
-      <button type="button" data-filter="out" aria-pressed="false">{{wall.out}} <i dir="ltr">{{count:out}}</i></button>
+      <button type="button" data-filter="all" aria-pressed="true">{{wall.f_all}}</button>
+      <button type="button" data-filter="both" aria-pressed="false">{{wall.both}}</button>
+      <button type="button" data-filter="in" aria-pressed="false">{{wall.in}}</button>
+      <button type="button" data-filter="out" aria-pressed="false">{{wall.out}}</button>
     </div>
-    <p class="hint">{{wall.hint}}</p>
     <div class="wall-box">
       <ul id="wall" class="wall">
 {{@protocols}}
       </ul>
-      <div id="pcard" class="pcard" aria-hidden="true"><b dir="ltr"></b><span class="pd"></span><span class="pm" dir="ltr"></span><p></p></div>
+      <div id="pcard" class="pcard" aria-hidden="true"><b dir="ltr"></b><span class="pd"></span><p></p></div>
     </div>
   </div>
 </section>
 
-<section id="tunnels" class="sec tunnels" data-sec>
-  <div class="ghost" aria-hidden="true" dir="ltr"><span>6</span></div><div class="ghost over" aria-hidden="true" dir="ltr"><span>6</span></div>
-  <i class="rule a"></i><span class="coord" aria-hidden="true" dir="ltr"></span>
-  <div class="plate t-bone">
-    <h2 class="slice">{{slice:tun.title}}</h2>
-    <p class="lead">{{tun.lead}}</p>
-    <ol class="stair">
-      <li style="--i:0"><b dir="ltr">MASQUE</b><span>{{tun.masque}}</span></li>
-      <li style="--i:1"><b dir="ltr">OpenVPN</b><span>{{tun.openvpn}}</span></li>
-      <li style="--i:2"><b dir="ltr">OpenConnect</b><span>{{tun.openconnect}}</span></li>
-      <li style="--i:3"><b dir="ltr">Tailscale</b><span>{{tun.tailscale}}</span></li>
-      <li style="--i:4"><b dir="ltr">EasyTier</b><span>{{tun.easytier}}</span></li>
-      <li style="--i:5"><b dir="ltr">ZeroTier</b><span>{{tun.zerotier}}</span></li>
+<section id="networks" class="sec" data-sec>
+  <div class="panel narrow">
+    <h2>{{net.title}}</h2>
+    <p class="lead">{{net.lead}}</p>
+    <ul class="names" dir="ltr">
+      <li style="--i:0">OpenVPN</li>
+      <li style="--i:1">OpenConnect</li>
+      <li style="--i:2">Tailscale</li>
+      <li style="--i:3">ZeroTier</li>
+      <li style="--i:4">EasyTier</li>
+      <li style="--i:5">MASQUE</li>
+    </ul>
+  </div>
+</section>
+
+<section id="usage" class="sec" data-sec>
+  <div class="panel narrow shift">
+    <h2>{{use.title}}</h2>
+    <p class="lead">{{use.lead}}</p>
+    <div class="meter" aria-hidden="true">
+      <span style="--i:0;--w:78%"></span>
+      <span style="--i:1;--w:46%"></span>
+      <span style="--i:2;--w:62%"></span>
+      <span style="--i:3;--w:28%"></span>
+    </div>
+    <p>{{use.more}}</p>
+  </div>
+</section>
+
+<section id="start" class="sec" data-sec>
+  <div class="panel wide">
+    <h2>{{start.title}}</h2>
+    <ol class="three">
+      <li><h3>{{start.s1_t}}</h3><p>{{start.s1}}</p></li>
+      <li><h3>{{start.s2_t}}</h3><p>{{start.s2}}</p></li>
+      <li><h3>{{start.s3_t}}</h3><p>{{start.s3}}</p><div class="run"><code class="cmd" dir="ltr">kerlico run -c config.json</code></div></li>
     </ol>
-    <p class="note">{{tun.note}}</p>
-  </div>
-</section>
-
-<section id="users" class="sec users" data-sec>
-  <div class="ghost" aria-hidden="true" dir="ltr"><span>∑</span></div><div class="ghost over" aria-hidden="true" dir="ltr"><span>∑</span></div>
-  <i class="rule a"></i><i class="rule b"></i><span class="coord" aria-hidden="true" dir="ltr"></span>
-  <div class="plate main t-cobalt">
-    <h2 class="slice">{{slice:users.title}}</h2>
-    <p class="lead">{{users.lead}}</p>
-    <div class="meter" role="img" aria-label="{{plain:users.meter_aria}}" dir="ltr">
-      <span class="m-in"></span><span class="m-gate">×1</span>
-      <span class="m-view" style="--i:0">Engine</span>
-      <span class="m-view" style="--i:1">UserId</span>
-      <span class="m-view" style="--i:2">NodeId</span>
-      <span class="m-view" style="--i:3">OutId</span>
-    </div>
-  </div>
-  <dl class="plate t-ink facts">
-    <div><dt>{{users.a1_t}}</dt><dd>{{users.a1}}</dd></div>
-    <div><dt>{{users.a2_t}}</dt><dd>{{users.a2}}</dd></div>
-    <div><dt>{{users.a3_t}}</dt><dd>{{users.a3}}</dd></div>
-    <div><dt>{{users.a4_t}}</dt><dd>{{users.a4}}</dd></div>
-    <div><dt>{{users.a5_t}}</dt><dd>{{users.a5}}</dd></div>
-  </dl>
-</section>
-
-<section id="start" class="sec start" data-sec>
-  <div class="ghost" aria-hidden="true" dir="ltr"><span>$</span></div><div class="ghost over" aria-hidden="true" dir="ltr"><span>$</span></div>
-  <i class="rule a"></i><span class="coord" aria-hidden="true" dir="ltr"></span>
-  <div class="plate main t-ink">
-    <h2 class="slice">{{slice:start.title}}</h2>
-    <p class="lead">{{start.dl}}</p>
-    <p class="cta"><a class="btn" href="{{cfg:releases_url}}">{{hero.download}}</a></p>
-    <ul class="cmds">
-      <li><code class="cmd" dir="ltr">kerlico check -c config.json</code><span>{{start.c_check}}</span></li>
-      <li><code class="cmd" dir="ltr">kerlico run -c config.json</code><span>{{start.c_run}}</span></li>
-      <li><code class="cmd" dir="ltr">kerlico modules</code><span>{{start.c_modules}}</span></li>
-    </ul>
-    <p>{{start.src}}</p>
-    <p>{{start.cli_lang}}</p>
-  </div>
-  <div class="plate t-bone limits">
-    <h3>{{start.limits_title}}</h3>
-    <ul>
-      <li>{{start.l1}}</li>
-      <li>{{start.l2}}</li>
-      <li>{{start.l3}}</li>
-      <li>{{start.l4}}</li>
-      <li>{{start.l5}}</li>
-      <li>{{start.l6}}</li>
-    </ul>
-    <p>{{start.rel}} <a href="{{cfg:notes_url}}">{{start.rel_link}}</a> · <a href="{{cfg:status_url}}" dir="ltr">STATUS.md</a></p>
-  </div>
-</section>
-
-<section id="license" class="sec license" data-sec>
-  <i class="rule a"></i><span class="coord" aria-hidden="true" dir="ltr"></span>
-  <div class="plate main t-vermilion">
-    <h2 class="slice" dir="ltr">{{slice:license.title}}</h2>
-    <p>{{license.text}}</p>
-    <p><a href="{{cfg:license_url}}" dir="ltr">LICENSE</a></p>
-  </div>
-  <div class="plate t-ink wiki">
-    <h2>{{wiki.title}}</h2>
-    <p>{{wiki.text}}</p>
-    <p class="cta"><a class="btn" href="{{cfg:wiki_url}}">{{wiki.cta}}</a></p>
+    <p class="cta">
+      <a class="btn" href="{{cfg:releases_url}}">{{hero.download}}</a>
+      <a class="btn alt" href="{{cfg:wiki_url}}">{{start.guide}}</a>
+    </p>
+    <p class="note">{{start.note}}</p>
   </div>
 </section>
 </main>
 
 <footer class="foot">
-  <span dir="ltr">kerlico {{cfg:version}} · GPL-3.0-only</span>
-  <a href="{{cfg:repo_url}}" dir="ltr">yuuuki-creation/kerlico</a>
-  <a href="{{cfg:releases_url}}" dir="ltr">Releases</a>
+  <span>{{foot.license}}</span>
+  <a href="{{cfg:repo_url}}" dir="ltr">GitHub</a>
   <a href="{{cfg:wiki_url}}">{{nav.wiki}}</a>
 </footer>
 
 <script id="labels" type="application/json">{{@labels}}</script>
-<script src="../assets/site.js" defer></script>
+<script src="../assets/site.js?v={{@asset_version}}" defer></script>
 </body>
 </html>

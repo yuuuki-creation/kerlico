@@ -4,14 +4,12 @@ const SKIP_EVENTS = ['scroll', 'wheel', 'keydown', 'pointerdown'];
 
 function createIntro(onReveal) {
   const root = document.documentElement;
-  const button = document.getElementById('skip-intro');
   const state = { active: root.classList.contains('intro'), time: 0, revealed: false };
 
   const reveal = () => {
     if (state.revealed) return;
     state.revealed = true;
     root.classList.remove('intro');
-    button.hidden = true;
     onReveal();
   };
   const finish = () => {
@@ -26,12 +24,9 @@ function createIntro(onReveal) {
   };
 
   if (state.active) {
-    try { localStorage.setItem('kerlico.intro', '1'); } catch (e) { /* 存储不可用时下次重播，不影响页面 */ }
-    button.hidden = false;
-    button.addEventListener('click', finish);
+    try { sessionStorage.setItem('kerlico.intro', '1'); } catch (e) { /* 存储不可用时下次重播，不影响页面 */ }
     for (const name of SKIP_EVENTS) window.addEventListener(name, finish, { passive: true });
   } else {
-    button.hidden = true;
     state.revealed = true;
   }
 

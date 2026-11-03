@@ -18,6 +18,8 @@ HREF = re.compile(r"\bhref\s*=\s*[\"']([^\"']+)", re.I)
 CSS_URL = re.compile(r"url\(\s*[\"']?([^\"')]+)", re.I)
 CSS_IMPORT = re.compile(r"@import\s+[\"']?([^\"';\s]+)", re.I)
 EXTERNAL = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|//)", re.I)
+# 官网写给没有背景的读者：不出现函数名、字段名和内部模块名。
+JARGON = re.compile(r"`|Dispatcher|EgressRuntime|NodeId|UserId|Engine|Registry|TargetPolicy|native_credential|crate|inbound/|outbound/")
 FAILURES = []
 
 
@@ -63,8 +65,8 @@ def check_i18n(config, protocols):
         if set(catalog) != reference:
             fail(f"{code} 键不一致：{sorted(set(catalog) ^ reference)}")
         for key, value in catalog.items():
-            if value.count("`") % 2:
-                fail(f"{code}.{key} 反引号不成对")
+            if JARGON.search(value):
+                fail(f"{code}.{key} 含内部名字：{JARGON.search(value).group(0)}")
     required = {"zh-CN", "en", "ja", "ko", "ru", "es", "fa"}
     if set(codes) != required:
         fail(f"语言集合不符：{sorted(set(codes) ^ required)}")

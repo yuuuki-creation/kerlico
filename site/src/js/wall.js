@@ -6,7 +6,6 @@ function createWall(root, card, filters, labels, rtl, reduced) {
       el, button, index,
       id: el.dataset.id,
       dir: el.dataset.dir,
-      modules: el.dataset.modules,
       front: el.querySelector('.front'),
       name: el.querySelector('.front b').textContent,
       sentence: el.querySelector('.sentence').innerHTML,
@@ -19,9 +18,9 @@ function createWall(root, card, filters, labels, rtl, reduced) {
   let current = null;
   let closeTimer = 0;
 
-  const SHADE_FROM = { both: COBALT, out: VERMILION, in: ACID };
-  const SHADE_TO = { both: INK, out: BONE, in: BONE };
-  const SHADE_MAX = { both: 0.36, out: 0.26, in: 0.24 };
+  // 暗色三角面，都配 bone 文字；靠近光源时只往更亮一点走，对比度保持 AA。
+  const SHADE_FROM = { both: [0.13, 0.17, 0.42], out: [0.46, 0.17, 0.11], in: [0.2, 0.22, 0.27] };
+  const SHADE_GAIN = { both: 0.09, out: 0.08, in: 0.09 };
 
   const pickGrid = (count, width) => {
     const target = width < 620 ? 128 : 178;
@@ -81,7 +80,6 @@ function createWall(root, card, filters, labels, rtl, reduced) {
     const dirLabel = labels[`wall.${item.dir}`];
     card.querySelector('b').textContent = item.name;
     card.querySelector('.pd').textContent = dirLabel;
-    card.querySelector('.pm').textContent = item.modules.replace(' ', '  ');
     card.querySelector('p').innerHTML = item.sentence;
     card.className = `pcard d-${item.dir} ${item.up ? 'up' : 'down'}`;
     const width = box.clientWidth;
@@ -138,12 +136,12 @@ function createWall(root, card, filters, labels, rtl, reduced) {
       const cy = boxRect.top + item.y + item.base * 0.45;
       const d = Math.hypot(S.lightX - cx, S.lightY - cy);
       const lit = clamp(1 - d / 520, 0, 1);
-      const from = SHADE_FROM[item.dir], to = SHADE_TO[item.dir], max = SHADE_MAX[item.dir];
+      const from = SHADE_FROM[item.dir], gain = SHADE_GAIN[item.dir];
       const tone = ((item.index * 37) % 11) / 10;
-      const amount = max * (item.dir === 'both' ? clamp(tone * 0.7 + (1 - lit) * 0.5, 0, 1) : clamp(tone * 0.35 + lit * 0.65, 0, 1));
-      const r = lerp(from[0], to[0], amount) * 255;
-      const g = lerp(from[1], to[1], amount) * 255;
-      const b = lerp(from[2], to[2], amount) * 255;
+      const amount = (tone * 0.35 + lit * 0.65) * gain;
+      const r = (from[0] + amount) * 255;
+      const g = (from[1] + amount) * 255;
+      const b = (from[2] + amount) * 255;
       item.front.style.backgroundColor = `rgb(${r | 0},${g | 0},${b | 0})`;
     }
   };

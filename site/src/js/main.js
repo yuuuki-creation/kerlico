@@ -4,6 +4,10 @@ function initChrome(labels) {
       try { localStorage.setItem('kerlico.lang', link.dataset.lang); } catch (e) { /* 存储不可用时只影响下次跳转 */ }
     });
   }
+  const menu = document.querySelector('.langs');
+  document.addEventListener('click', (event) => {
+    if (menu.open && !menu.contains(event.target)) menu.open = false;
+  });
   for (const cmd of document.querySelectorAll('.cmd')) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -47,7 +51,7 @@ function main() {
   );
   const track = document.querySelector('.disp-track');
 
-  let field, word, anno;
+  let field, word;
   let vw = 0, vh = 0, dpr = 1;
   let narrow = false;
   const light = { x: 0, y: 0, tx: 0, ty: 0, lastInput: -1e9 };
@@ -64,7 +68,6 @@ function main() {
     field = createField(w, h, narrow);
     word = createWord(w, h, narrow, rtl);
     root.style.setProperty('--word-bottom', `${Math.round(word.bottom)}px`);
-    if (anno) anno.field = field;
     dispatcher.rebuild(narrow);
     wall.layout();
     scroller.measure();
@@ -77,14 +80,13 @@ function main() {
     const span = track.offsetHeight - window.innerHeight;
     const rect = track.getBoundingClientRect();
     const progress = clamp(-rect.top / (span || 1), 0, 0.999);
-    dispatcher.setStage(Math.floor(progress * 4));
+    dispatcher.setStage(Math.floor(progress * 3));
   };
 
-  const draw = (now) => {
+  const draw = () => {
     emitField(field, S);
     emitWord(word, S, field.diag);
     renderer.draw(field, word);
-    anno.tick(S, vw, vh, now, renderer.kind, dpr);
     wall.tick(S);
   };
 
@@ -104,7 +106,6 @@ function main() {
   };
 
   rebuild();
-  anno = createAnno(document.getElementById('anno'), field);
 
   const io = new IntersectionObserver((entries) => {
     for (const entry of entries) {
@@ -121,7 +122,7 @@ function main() {
     S.lightX = light.x;
     S.lightY = light.y;
     S.lightZ = field.diag * 0.2;
-    draw(performance.now());
+    draw();
   };
 
   let resizeTimer = 0;
@@ -169,7 +170,7 @@ function main() {
     updateLight(dt, now);
     syncStage();
     dispatcher.tick(dt);
-    draw(now);
+    draw();
     frames++;
     if (elapsed > 26) slow++;
     if (frames >= 90) {

@@ -6,9 +6,8 @@ function createFrameState() {
     angle: -24 * RAD, crackX: 0.6, crackY: 0.5,
     gap: 10, slide: 40, burst: 0,
     rampAngle: -35 * RAD, rampOff: 0,
-    wireW: 0, wireAngle: 60 * RAD,
     intro: 1, breath: 1,
-    sliceP: 1, cutFlash: 0, wordDrift: 0, scrollY: 0,
+    sliceP: 1, cutFlash: 0, wordScatter: 0, scrollY: 0,
   };
 }
 
@@ -56,7 +55,6 @@ function createField(w, h, narrow) {
     fy: new Float32Array(tCount),
     fr: new Float32Array(tCount),
     delay: new Float32Array(tCount),
-    signal: new Uint8Array(tCount),
     triBuf: new Float32Array(tCount * 15),
     lineBuf: new Float32Array(tCount * 30),
   };
@@ -82,7 +80,6 @@ function createField(w, h, narrow) {
     f.fy[i] = Math.sin(ang) * reach;
     f.fr[i] = (rand() - 0.5) * 7;
     f.delay[i] = 0.04 + 0.3 * (Math.hypot(cx - cxMid, cy - cyMid) / (f.diag / 2)) + rand() * 0.16;
-    f.signal[i] = rand() < 0.006 ? 1 : 0;
   }
   return f;
 }
@@ -98,6 +95,7 @@ function rampColor(u, out) {
 }
 
 const scratch = [0, 0, 0];
+const MESH_STRENGTH = 0.62;
 
 // 把网格当前帧写入 triBuf / lineBuf，返回三角形数和线段数。
 function emitField(f, S) {
@@ -114,14 +112,13 @@ function emitField(f, S) {
   const tx = Math.cos(S.angle), ty = Math.sin(S.angle);
   const px = S.crackX * f.w, py = S.crackY * f.h;
   const rx = Math.cos(S.rampAngle), ry = Math.sin(S.rampAngle);
-  const mx = -Math.sin(S.wireAngle), my = Math.cos(S.wireAngle);
   const midX = f.w / 2, midY = f.h / 2;
   const halfDiag = f.diag / 2;
   const reach = S.burst * f.diag * 1.5 + 1;
   const falloff = (f.diag * 0.62) * (f.diag * 0.62);
   const introing = S.intro < 1;
-  let tn = 0, ln = 0;
-  const tb = f.triBuf, lb = f.lineBuf, tris = f.tris;
+  let tn = 0;
+  const tb = f.triBuf, tris = f.tris;
 
   for (let i = 0; i < f.tCount; i++) {
     const a = tris[i * 3], b = tris[i * 3 + 1], c = tris[i * 3 + 2];
@@ -155,23 +152,6 @@ function emitField(f, S) {
     const x1 = ccx + scale * (bx * cos - by * sin), y1 = ccy + scale * (bx * sin + by * cos);
     const x2 = ccx + scale * (dx * cos - dy * sin), y2 = ccy + scale * (dx * sin + dy * cos);
 
-    if (S.wireW > 0 && side > 0) {
-      const wd = (cx - px) * mx + (cy - py) * my;
-      if (wd > 0 && wd < S.wireW) {
-        const shade = 0.46 + f.r1[i] * 0.2;
-        const seg = [x0, y0, x1, y1, x1, y1, x2, y2, x2, y2, x0, y0];
-        for (let s = 0; s < 6; s++) {
-          lb[ln * 5] = seg[s * 2];
-          lb[ln * 5 + 1] = seg[s * 2 + 1];
-          lb[ln * 5 + 2] = shade;
-          lb[ln * 5 + 3] = shade;
-          lb[ln * 5 + 4] = shade * 1.08;
-          ln++;
-        }
-        continue;
-      }
-    }
-
     const e1x = wx[b] - wx[a], e1y = wy[b] - wy[a], e1z = wz[b] - wz[a];
     const e2x = wx[c] - wx[a], e2y = wy[c] - wy[a], e2z = wz[c] - wz[a];
     let nnx = e1y * e2z - e1z * e2y;
@@ -187,21 +167,15 @@ function emitField(f, S) {
     const ilen = 1 / Math.sqrt(dist2);
     const att = 1 / (1 + dist2 / falloff);
     const dot = Math.max(0, (nnx * lx + nny * ly + nnz * lz) * ilen);
-    const shade = 0.2 + dot * att * 1.5;
-    const spec = Math.pow(dot, 12) * att * 0.42;
+    const shade = 0.16 + dot * att * 1.15;
+    const spec = Math.pow(dot, 12) * att * 0.22;
 
-    let cr, cg, cb;
-    if (f.signal[i]) {
-      cr = ACID[0] * (0.55 + shade * 0.5);
-      cg = ACID[1] * (0.55 + shade * 0.5);
-      cb = ACID[2] * (0.55 + shade * 0.5);
-    } else {
-      const u = ((cx - midX) * rx + (cy - midY) * ry) / halfDiag * 0.62 + 0.5 + S.rampOff + f.tone[i];
-      rampColor(u, scratch);
-      cr = scratch[0] * shade + spec * BONE[0];
-      cg = scratch[1] * shade + spec * BONE[1];
-      cb = scratch[2] * shade + spec * BONE[2];
-    }
+    const u = ((cx - midX) * rx + (cy - midY) * ry) / halfDiag * 0.62 + 0.5 + S.rampOff + f.tone[i];
+    rampColor(u, scratch);
+    // 网格只是氛围，向底色收一些，前面的文字才是主角。
+    const cr = lerp(INK[0], scratch[0] * shade + spec * BONE[0], MESH_STRENGTH);
+    const cg = lerp(INK[1], scratch[1] * shade + spec * BONE[1], MESH_STRENGTH);
+    const cb = lerp(INK[2], scratch[2] * shade + spec * BONE[2], MESH_STRENGTH);
     const base = tn * 5;
     tb[base] = x0; tb[base + 1] = y0; tb[base + 2] = cr; tb[base + 3] = cg; tb[base + 4] = cb;
     tb[base + 5] = x1; tb[base + 6] = y1; tb[base + 7] = cr; tb[base + 8] = cg; tb[base + 9] = cb;
@@ -209,13 +183,18 @@ function emitField(f, S) {
     tn += 3;
   }
   f.triCount = tn;
-  f.lineCount = ln;
+  f.lineCount = 0;
 }
 
 function emitWord(word, S, diag) {
   const buf = word.buf;
   const cut = word.cut;
   const introing = S.intro < 1;
+  const scatter = S.wordScatter;
+  if (scatter >= 1) {
+    word.count = 0;
+    return;
+  }
   let n = 0;
   const yOff = -S.scrollY;
   const push = (x, y, r, g, b) => {
@@ -227,11 +206,19 @@ function emitWord(word, S, diag) {
   for (let pass = 0; pass < 2; pass++) {
     for (let i = 0; i < word.n; i++) {
       const part = word.part[i];
-      const shift = cut.shift * S.sliceP * (part > 0 ? 1 : -0.45) + S.wordDrift * part;
+      const shift = cut.shift * S.sliceP * (part > 0 ? 1 : -0.45);
       const gap = cut.gap * S.sliceP * part;
       let ox = cut.tx * shift + cut.nx * gap;
       let oy = cut.ty * shift + cut.ny * gap + yOff;
       let rot = 0, scale = 1;
+      if (scatter > 0) {
+        // 往下滚时大字重新碎开，碎片飞向开场时来的方向。
+        const k = sstep(word.delay[i] * 0.5, 0.5 + word.delay[i] * 0.5, scatter);
+        ox += word.fx[i] * k * 0.8;
+        oy += word.fy[i] * k * 0.8;
+        rot = word.fr[i] * k;
+        scale = 1 - k;
+      }
       if (introing) {
         const k = easeOutExpo(clamp((S.intro - word.delay[i]) / 0.36, 0, 1));
         const left = 1 - k;
@@ -255,7 +242,7 @@ function emitWord(word, S, diag) {
         const lum = 0.66 + word.tone[i] * 0.08 + dot * att * 0.58;
         r = BONE[0] * lum; g = BONE[1] * lum; b = BONE[2] * lum;
       }
-      const sh = pass === 0 ? 7 : 0;
+      const sh = pass === 0 ? 3 : 0;
       const cos = Math.cos(rot), sin = Math.sin(rot);
       for (let k = 0; k < 3; k++) {
         const vx = word.pos[i * 6 + k * 2] - cx, vy = word.pos[i * 6 + k * 2 + 1] - cy;
@@ -264,18 +251,17 @@ function emitWord(word, S, diag) {
     }
   }
   if (S.cutFlash > 0) {
-    // 切割线本身用 acid，是整个开场里唯一的信号色。
     const reach = cut.len * S.cutFlash;
     const hw = 1.6;
     const ax = cut.px - cut.tx * cut.len, ay = cut.py - cut.ty * cut.len + yOff;
     const bx = ax + cut.tx * reach * 2, by = ay + cut.ty * reach * 2;
     const qx = cut.nx * hw, qy = cut.ny * hw;
-    push(ax - qx, ay - qy, ACID[0], ACID[1], ACID[2]);
-    push(ax + qx, ay + qy, ACID[0], ACID[1], ACID[2]);
-    push(bx + qx, by + qy, ACID[0], ACID[1], ACID[2]);
-    push(ax - qx, ay - qy, ACID[0], ACID[1], ACID[2]);
-    push(bx + qx, by + qy, ACID[0], ACID[1], ACID[2]);
-    push(bx - qx, by - qy, ACID[0], ACID[1], ACID[2]);
+    push(ax - qx, ay - qy, BONE[0], BONE[1], BONE[2]);
+    push(ax + qx, ay + qy, BONE[0], BONE[1], BONE[2]);
+    push(bx + qx, by + qy, BONE[0], BONE[1], BONE[2]);
+    push(ax - qx, ay - qy, BONE[0], BONE[1], BONE[2]);
+    push(bx + qx, by + qy, BONE[0], BONE[1], BONE[2]);
+    push(bx - qx, by - qy, BONE[0], BONE[1], BONE[2]);
   }
   word.count = n;
 }

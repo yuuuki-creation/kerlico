@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """把 src/template.html 与 src/i18n/<lang>.json 生成到 dist/。缺键、多键或未解析占位符都让构建失败。"""
 
+import hashlib
 import html
 import json
 import re
@@ -16,8 +17,8 @@ DIST = ROOT / "dist"
 JS_PARTS = ["geom", "glyphs", "field", "render", "intro", "scroll", "dispatcher", "wall", "main"]
 PLACEHOLDER = re.compile(r"\{\{([^{}]+)\}\}")
 CODE_SPAN = re.compile(r"`([^`]+)`")
-LABEL_PREFIXES = ("disp.l_", "wall.both", "wall.in", "wall.out", "start.copy", "start.copied")
-DIR_LABEL = {"both": ("wall.both", "IN/OUT"), "in": ("wall.in", "IN"), "out": ("wall.out", "OUT")}
+LABEL_PREFIXES = ("how.l_", "wall.both", "wall.in", "wall.out", "start.copy", "start.copied")
+DIR_LABEL = {"both": "wall.both", "in": "wall.in", "out": "wall.out"}
 
 
 class BuildError(Exception):
@@ -42,15 +43,6 @@ def to_html(text):
 
 def to_plain(text):
     return html.escape(text.replace("`", ""), quote=True)
-
-
-def slice_markup(text):
-    rendered = to_html(text)
-    return (
-        f'<span class="s s0">{rendered}</span>'
-        f'<span class="s s1" aria-hidden="true">{rendered}</span>'
-        f'<span class="s s2" aria-hidden="true">{rendered}</span>'
-    )
 
 
 def load_catalogs(config, protocols):
@@ -95,17 +87,11 @@ def lang_links(config, current):
 def protocol_items(protocols, catalog):
     items = []
     for protocol in protocols:
-        label_key, token = DIR_LABEL[protocol["dir"]]
-        modules = []
-        if protocol["dir"] in ("both", "out"):
-            modules.append(f"outbound/{protocol['id']}")
-        if protocol["dir"] in ("both", "in"):
-            modules.append(f"inbound/{protocol['id']}")
+        label_key = DIR_LABEL[protocol["dir"]]
         items.append(
-            f'<li class="tri d-{protocol["dir"]}" data-id="{protocol["id"]}" data-dir="{protocol["dir"]}" '
-            f'data-modules="{" ".join(modules)}">'
+            f'<li class="tri d-{protocol["dir"]}" data-id="{protocol["id"]}" data-dir="{protocol["dir"]}">'
             f'<button type="button"><span class="flipper"><span class="face front"><b dir="ltr">{html.escape(protocol["name"])}</b></span>'
-            f'<span class="face back" dir="ltr" aria-hidden="true">{token}</span></span>'
+            f'<span class="face back" aria-hidden="true"></span></span>'
             f'<span class="desc"><span class="dir-label">{to_html(catalog[label_key])}</span> '
             f'<span class="sentence">{to_html(catalog["proto." + protocol["id"]])}</span></span></button></li>'
         )
@@ -118,7 +104,7 @@ def labels_json(catalog):
     return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
 
 
-def render_page(template, config, protocols, lang, catalog, used):
+def render_page(template, config, protocols, lang, catalog, used, asset_version):
     counts = {
         "total": len(protocols),
         "both": sum(item["dir"] == "both" for item in protocols),
@@ -138,8 +124,12 @@ def render_page(template, config, protocols, lang, catalog, used):
             return lang["code"]
         if token == "dir":
             return lang["dir"]
+        if token == "@asset_version":
+            return asset_version
         if token == "@alternates":
             return alternates(config)
+        if token == "@lang_current":
+            return html.escape(lang["name"])
         if token == "@lang_links":
             return lang_links(config, lang["code"])
         if token == "@protocols":
@@ -155,8 +145,6 @@ def render_page(template, config, protocols, lang, catalog, used):
             return html.escape(config[token[4:]], quote=True)
         if token.startswith("plain:"):
             return to_plain(text_of(token[6:]))
-        if token.startswith("slice:"):
-            return slice_markup(text_of(token[6:]))
         return to_html(text_of(token))
 
     page = PLACEHOLDER.sub(replace, template)
@@ -221,10 +209,15 @@ def build():
         shutil.rmtree(DIST)
     (DIST / "assets").mkdir(parents=True)
 
+    style = (SRC / "style.css").read_bytes()
+    script = "\n".join((SRC / "js" / f"{name}.js").read_text(encoding="utf-8") for name in JS_PARTS)
+    # CDN 和浏览器都会缓存静态资源，地址带内容哈希，更新后立刻换新。
+    asset_version = hashlib.sha256(style + script.encode("utf-8")).hexdigest()[:10]
+
     used = set()
     for lang in config["languages"]:
         catalog = catalogs[lang["code"]]
-        page = render_page(template, config, protocols, lang, catalog, used)
+        page = render_page(template, config, protocols, lang, catalog, used, asset_version)
         out = DIST / lang["code"] / "index.html"
         out.parent.mkdir(parents=True)
         out.write_text(page, encoding="utf-8", newline="\n")
@@ -235,8 +228,7 @@ def build():
         raise BuildError(f"有键未被模板使用：{unused}")
 
     (DIST / "index.html").write_text(root_page(config), encoding="utf-8", newline="\n")
-    shutil.copyfile(SRC / "style.css", DIST / "assets" / "site.css")
-    script = "\n".join((SRC / "js" / f"{name}.js").read_text(encoding="utf-8") for name in JS_PARTS)
+    (DIST / "assets" / "site.css").write_bytes(style)
     (DIST / "assets" / "site.js").write_text(
         "(function () {\n'use strict';\n" + script + "\n})();\n", encoding="utf-8", newline="\n"
     )
