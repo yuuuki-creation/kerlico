@@ -1,0 +1,24 @@
+[package]
+name = "kerlico-ruleset"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = ["formats"]
+formats = ["dep:zstd", "dep:flate2", "dep:serde_yaml", "dep:regex", "dep:aho-corasick", "dep:serde_json"]
+
+[dependencies]
+kerlico-core.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, optional = true }
+zstd = { version = "0.14", optional = true }
+flate2 = { version = "1", optional = true }
+serde_yaml = { version = "0.9", optional = true }
+regex = { workspace = true, optional = true }
+aho-corasick = { version = "1", optional = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "kerlico-sniff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ring = "0.17"
+
+[lints]
+workspace = true

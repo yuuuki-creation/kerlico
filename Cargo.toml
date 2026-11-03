@@ -31,6 +31,8 @@ kerlico-device = { path = "crates/device" }
 kerlico-vless = { path = "crates/protocol-vless" }
 kerlico-egress = { path = "crates/egress" }
 kerlico-routing = { path = "crates/routing" }
+kerlico-ruleset = { path = "crates/ruleset" }
+kerlico-sniff = { path = "crates/sniff" }
 kerlico-dns = { path = "crates/dns" }
 kerlico-control = { path = "crates/control" }
 kerlico-tun = { path = "crates/protocol-tun" }
