@@ -7,7 +7,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http::{Method, StatusCode};
 use http_body_util::BodyExt;
 use kerlico_core::{CancellationToken, Error, Result};
@@ -201,10 +201,31 @@ async fn upload(
     mut requests: mpsc::Receiver<Upload>,
 ) -> Result<()> {
     let mut sequence = 1u64;
-    while let Some(request) = requests.recv().await {
+    let mut held = None;
+    loop {
+        let request = match held.take() {
+            Some(request) => request,
+            None => match requests.recv().await {
+                Some(request) => request,
+                None => break,
+            },
+        };
         match request {
             Upload::Data(bytes) => {
-                let encoded = Bytes::from(mode.encode(&bytes));
+                // 上传一问一答，吞吐是单次请求量除以 RTT；上一个请求在途时排队的写入并进这一次。
+                let mut batch = BytesMut::from(&bytes[..]);
+                while let Ok(next) = requests.try_recv() {
+                    match next {
+                        Upload::Data(more) if batch.len() + more.len() <= mode.max_batch() => {
+                            batch.extend_from_slice(&more);
+                        }
+                        other => {
+                            held = Some(other);
+                            break;
+                        }
+                    }
+                }
+                let encoded = Bytes::from(mode.encode(&batch));
                 let mut attempts = 0;
                 loop {
                     let result = post(
@@ -373,7 +394,7 @@ pub(crate) async fn connect(
         sequences,
     } = authorization;
     let (reader, writer) = tokio::io::duplex(64 * 1024);
-    let (sender, requests) = mpsc::channel(8);
+    let (sender, requests) = mpsc::channel(16);
     let (ready, received) = oneshot::channel();
     let cancel = scope.cancel.child_token();
     let failed = Arc::new(AtomicBool::new(false));
@@ -630,6 +651,106 @@ mod tests {
         peer.abort();
         assert!(!reused.load(Ordering::SeqCst), "下载结束的连接不应被复用");
         assert_eq!(status.unwrap(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn queued_writes_share_one_upload_request_up_to_the_batch_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    header.push(stream.read_u8().await.unwrap());
+                }
+                let header = String::from_utf8(header).unwrap();
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).await.unwrap();
+                let fin = header.lines().next().unwrap().contains("fin=1");
+                requests.push((header.lines().next().unwrap().to_owned(), body));
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                stream.shutdown().await.unwrap();
+                if fin {
+                    return requests;
+                }
+            }
+        });
+        let config = serde_json::from_value::<crate::config::OutOptions>(serde_json::json!({
+            "server": {"host": "127.0.0.1", "port": address.port()},
+            "protocol": {"key": "synthetic-upload-batch-seed"},
+            "http_mask": {"mode": "stream"}
+        }))
+        .unwrap()
+        .prepare()
+        .unwrap();
+        let owner = kerlico_core::NodeTasks::new(
+            kerlico_core::NodeId::parse("upload-batch").unwrap(),
+            CancellationToken::new(),
+        );
+        let scope = Scope::node(&owner.cancel(), owner);
+        let client = HttpClient::new(
+            &config,
+            Arc::new(crate::carrier::endpoint::Endpoint::new(
+                config.server.clone(),
+            )),
+            scope.clone(),
+            false,
+        );
+        const WRITES: usize = 12;
+        const SIZE: usize = 32 * 1024;
+        let (sender, receiver) = mpsc::channel(WRITES + 1);
+        let mut expected = Vec::new();
+        for index in 0..WRITES {
+            let bytes = vec![index as u8; SIZE];
+            expected.extend_from_slice(&bytes);
+            sender.send(Upload::Data(Bytes::from(bytes))).await.unwrap();
+        }
+        let (ack, _confirmed) = oneshot::channel();
+        sender.send(Upload::Fin(ack)).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            upload(
+                client,
+                Mode::Stream,
+                "synthetic-token".into(),
+                true,
+                receiver,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let requests = tokio::time::timeout(Duration::from_secs(2), peer)
+            .await
+            .unwrap()
+            .unwrap();
+        scope.shutdown().await;
+        let (fin, uploads) = requests.split_last().unwrap();
+        assert!(fin.0.contains("fin=1") && fin.1.is_empty());
+        assert_eq!(
+            uploads
+                .iter()
+                .map(|(_, body)| body.len())
+                .collect::<Vec<_>>(),
+            vec![Mode::Stream.max_batch(), 4 * SIZE],
+            "排队的写入应合并，单次不超过批量上限"
+        );
+        assert!(uploads[0].0.contains("seq=1") && uploads[1].0.contains("seq=2"));
+        let uploaded: Vec<u8> = uploads.iter().flat_map(|(_, body)| body.clone()).collect();
+        assert_eq!(uploaded, expected);
     }
 
     #[tokio::test]

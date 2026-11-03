@@ -89,7 +89,10 @@ impl TaskOwner {
             if self.0.state.lock().expect("运行任务所有者已损坏").applications == 0 { break; }
             changed.await;
         }
-        for endpoint in endpoints { endpoint.wait_idle().await; }
+        // 只等 CONNECTION_CLOSE 发出。排空期是 3×PTO，高延迟路径上会超过调用方的关闭预算；下面中止运行任务时一并结束。
+        for endpoint in endpoints {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(200), endpoint.wait_idle()).await;
+        }
         {
             let mut state = self.0.state.lock().expect("运行任务所有者已损坏");
             state.endpoints.clear();

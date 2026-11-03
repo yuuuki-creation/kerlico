@@ -109,7 +109,8 @@ impl Session {
             }
             if let Some(endpoint) = endpoint {
                 endpoint.close(0u32.into(), b"");
-                endpoint.wait_idle().await;
+                let _ = tokio::time::timeout(kerlico_core::QUIC_CLOSE_GRACE, endpoint.wait_idle())
+                    .await;
             }
         })?;
         *self.driver.lock().map_err(|_| config::malformed())? = Some(task);
@@ -483,7 +484,11 @@ impl Outbound for Client {
                         .take();
                     if let Some(endpoint) = endpoint {
                         endpoint.close(0u32.into(), b"");
-                        endpoint.wait_idle().await;
+                        let _ = tokio::time::timeout(
+                            kerlico_core::QUIC_CLOSE_GRACE,
+                            endpoint.wait_idle(),
+                        )
+                        .await;
                     }
                 }
             }

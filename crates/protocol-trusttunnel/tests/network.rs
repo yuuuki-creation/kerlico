@@ -858,6 +858,97 @@ async fn idle_pool_is_reaped_health_uses_no_business_target_and_active_shutdown_
 }
 
 #[tokio::test]
+async fn h3_shutdown_sends_connection_close_and_returns_without_draining() {
+    let targets = Targets::new().await;
+    let (cert, key) = certificate();
+    let engine = Engine::start(
+        json!([node(
+            "node",
+            "127.0.0.1:0",
+            "closing",
+            &cert,
+            &key,
+            "h3",
+            "tls13"
+        )]),
+        4000,
+    )
+    .await;
+    let server = engine.addresses[0].1;
+    let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let back = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let relay_address = front.local_addr().unwrap();
+    let client_address = Arc::new(Mutex::new(None));
+    let upstream = Arc::new(AtomicUsize::new(0));
+    let delay = Duration::from_millis(300);
+    let mut relay = JoinSet::new();
+    let (front_up, back_up, seen, counted) = (
+        front.clone(),
+        back.clone(),
+        client_address.clone(),
+        upstream.clone(),
+    );
+    relay.spawn(async move {
+        let mut bytes = vec![0; 65535];
+        loop {
+            let (count, source) = front_up.recv_from(&mut bytes).await.unwrap();
+            *seen.lock().unwrap() = Some(source);
+            counted.fetch_add(1, Ordering::SeqCst);
+            let (back, packet) = (back_up.clone(), bytes[..count].to_vec());
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = back.send_to(&packet, server).await;
+            });
+        }
+    });
+    relay.spawn(async move {
+        let mut bytes = vec![0; 65535];
+        loop {
+            let (count, _) = back.recv_from(&mut bytes).await.unwrap();
+            let Some(source) = *client_address.lock().unwrap() else {
+                continue;
+            };
+            let (front, packet) = (front.clone(), bytes[..count].to_vec());
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = front.send_to(&packet, source).await;
+            });
+        }
+    });
+    let options = client(relay_address, "closing", &cert, "h3", "tls13");
+    let outbound = shared::outbound(&TrustTunnelFactory, &options)
+        .await
+        .unwrap();
+    let context = ConnectContext::new(Duration::from_secs(10));
+    let mut io = outbound
+        .connect_tcp(&targets.tcp[0], &context)
+        .await
+        .unwrap()
+        .stream;
+    let mut greeting = [0; 2];
+    tokio::time::timeout(Duration::from_secs(10), io.read_exact(&mut greeting))
+        .await
+        .unwrap()
+        .unwrap();
+    drop(io);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let before = upstream.load(Ordering::SeqCst);
+    let started = tokio::time::Instant::now();
+    outbound.shutdown().await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "关闭不应等满 3×PTO 排空期：{:?}",
+        started.elapsed()
+    );
+    assert!(
+        upstream.load(Ordering::SeqCst) > before,
+        "关闭时应发出 CONNECTION_CLOSE，对端才能立刻回收连接"
+    );
+    relay.abort_all();
+    engine.stop().await;
+}
+
+#[tokio::test]
 async fn disabled_udp_and_connect_deadline_are_explicit() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (cert, _) = certificate();

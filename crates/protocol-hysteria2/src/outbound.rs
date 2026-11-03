@@ -279,7 +279,11 @@ impl Outbound for Hysteria2Outbound {
                     task.abort();
                     let _ = task.await;
                 }
-                session.endpoint.wait_idle().await;
+                let _ = tokio::time::timeout(
+                    kerlico_core::QUIC_CLOSE_GRACE,
+                    session.endpoint.wait_idle(),
+                )
+                .await;
             }
             Ok(())
         })

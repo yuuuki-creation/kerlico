@@ -12,6 +12,11 @@ use tokio::{
     time::{Duration, Instant},
 };
 
+/// 读写共用一个任务，每轮的字节额度决定两个方向的 CPU 份额。下行多分：协议没有流控，
+/// 上行快于下行时，回显积压在节点到目标的方向，超过每流队列上限就被节点重置。
+pub(super) const DOWNLINK_TURN: usize = 8 * super::SEND_CHUNK;
+pub(super) const UPLINK_TURN: usize = super::SEND_CHUNK;
+
 async fn frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Frame> {
     let mut header = [0; 9];
     reader.read_exact(&mut header).await?;
@@ -37,8 +42,13 @@ pub(super) async fn read_loop(
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     let mut frames = 0usize;
     let mut bytes = 0usize;
+    let turn = if accept.is_some() {
+        UPLINK_TURN
+    } else {
+        DOWNLINK_TURN
+    };
     loop {
-        if frames == 8 || bytes >= super::SEND_CHUNK {
+        if frames == 8 || bytes >= turn {
             // 载体读取可能连续命中内存缓冲；给同一driver中的写/控制方向机会。
             tokio::task::yield_now().await;
             frames = 0;
@@ -187,17 +197,20 @@ pub(super) async fn write_loop(
     shared: Arc<Shared>,
     mut data: mpsc::Receiver<Command>,
     mut control: mpsc::Receiver<Frame>,
+    turn: usize,
 ) -> Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_secs(15));
     ticker.tick().await;
     let mut last = Instant::now();
     let mut controls = 0usize;
     let mut commands = 0usize;
+    let mut bytes = 0usize;
     loop {
-        if commands == 8 {
+        if commands == 8 || bytes >= turn {
             // 全局发送队列持续就绪时也必须让读方向推进，不能依赖socket偶然阻塞。
             tokio::task::yield_now().await;
             commands = 0;
+            bytes = 0;
         }
         let queued = if controls >= 8 {
             data.try_recv().ok()
@@ -221,6 +234,7 @@ pub(super) async fn write_loop(
                 }
             }
             Command::Frame(mut frame) => {
+                bytes = bytes.saturating_add(frame.payload.len());
                 if frame
                     .owner
                     .as_ref()

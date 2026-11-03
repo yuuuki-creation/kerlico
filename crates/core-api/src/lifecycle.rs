@@ -569,6 +569,10 @@ impl<T> Future for ServiceTask<T> {
     }
 }
 
+/// QUIC 出站关闭时等待 CONNECTION_CLOSE 发出的时长。排空期是 3×PTO，随路径 RTT 增长，
+/// 高延迟路径上会超过任何固定的关闭预算；排空由服务任务继续，到强制回收时点结束。
+pub const QUIC_CLOSE_GRACE: Duration = Duration::from_millis(200);
+
 #[derive(Clone, Debug, Default)]
 pub struct ShutdownReport {
     pub timed_out: bool,

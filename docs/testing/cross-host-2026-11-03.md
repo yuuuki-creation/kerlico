@@ -2,6 +2,8 @@
 
 30 个协议模块都在 `perf-01`、`perf-02`、`perf-03` 上跨机跑过。小载荷、1 MiB 和 UDP 小包在 29 个模块通过；Sudoku 分离传输（stream、poll）在高延迟路径上 1 MiB 也会失败，WireGuard 的 IPv6 载体 1 MiB 失败。32 MiB 的失败集中在 Sudoku 分离传输、WireGuard 和用户态栈配 UDP 外层的隧道。这轮修掉 Mieru 和 HTTP QUIC socket 两个缺陷，并确认另外两个已在 `main` 修复的缺陷在 `v1.3.1` 上存在。
 
+后续定位推翻了其中一部分：工具的发送线程会被 socket 超时静默终止，耗时超过 40 或 180 秒的流都被判失败。下表数字是当时的记录，结论和修复见[修复的缺陷](#修复的缺陷)与[未解决](#未解决)。
+
 ## 环境
 
 **路径。** 三台的机器防火墙只放行 SSH 端口，公网 IPv4、IPv6 的高位端口在六个方向全部不通（`probe --network public` 实测，读 nftables 规则相符），不改防火墙走不通。所有用例走 Mesh 接口地址，这是真实跨机路径，但不是公网地址，经 Cloudflare 中转。接口 MTU 为 1300。
@@ -39,18 +41,18 @@
 | ShadowsocksR | auth_aes128_sha1 + tls1.2_ticket、auth_chain_a + plain | 81 | 9 | 0 | 3.40–9.77 | 9 | 否 | UDP 1400、IPv6 UDP 1200：环境 |
 | Trojan | tcp、ws、httpupgrade、grpc（均 TLS） | 156 | 0 | 24 | 0.18–13.90 | 0 | 否 | 无 |
 | VMess | tcp、tcp-tls、ws-tls、httpupgrade-tls、grpc-tls | 195 | 0 | 30 | 0.18–9.60 | 0 | 否 | 无 |
-| VLESS | raw-tls、vision、xudp、mux、reality、encryption、ws、httpupgrade、grpc、xhttp-h2、xhttp-h3 | 428 | 1 | 66 | 0.16–13.41 | 5 | 仅 xhttp-h3 | xhttp-h3 退出码 1 |
+| VLESS | raw-tls、vision、xudp、mux、reality、encryption、ws、httpupgrade、grpc、xhttp-h2、xhttp-h3 | 428 | 1 | 66 | 0.16–13.41 | 5 | 仅 xhttp-h3 | xhttp-h3 退出码 1，已修 |
 | AnyTLS | tls | 39 | 0 | 6 | 4.76–8.44 | 0 | 否 | 无 |
 | Snell | v6-default、v4 客户端对 v5 节点、v6-unshaped | 117 | 0 | 18 | 3.16–12.11 | 0 | 否 | 无 |
-| TUIC | v5-native、v5-quic、v4-native、v4-quic | 167 | 13 | 0 | 0.78–4.16 | 31 | 是 | v4-native UDP 1252、1400 和 IPv6 1200：协议限制，v4 native 不分片。退出码 1 共 4 次 |
+| TUIC | v5-native、v5-quic、v4-native、v4-quic | 167 | 13 | 0 | 0.78–4.16 | 31 | 是 | v4-native UDP 1252、1400 和 IPv6 1200：协议限制，v4 native 不分片。退出码 1 共 4 次，已修 |
 | Hysteria v1 | udp、wechat-video + xplus | 90 | 0 | 0 | 0.42–2.22 | 12 | 是 | 首轮 32 MiB eof 和退出码 1 未复现 |
 | Hysteria2 | quic、salamander | 90 | 0 | 0 | 0.64–3.65 | 12 | 是 | 同上 |
-| ShadowQUIC | v1-datagram、v1-stream | 79 | 11 | 0 | 0.24–1.98 | 25 | 是 | datagram UDP 1252、1400 和 IPv6 1200：协议限制，超 MTU 整包拒绝。退出码 1 共 2 次 |
+| ShadowQUIC | v1-datagram、v1-stream | 79 | 11 | 0 | 0.24–1.98 | 25 | 是 | datagram UDP 1252、1400 和 IPv6 1200：协议限制，超 MTU 整包拒绝。退出码 1 共 2 次，已修 |
 | Mieru | tcp-mux、tcp-nomux | 90 | 0 | 0 | 5.98–16.77 | 9 | 是 | 首轮是实现缺陷，已修 |
 | ShadowTLS | v1、v2、v3（内层 SS2022） | 63 | 0 | 0 | 6.65–17.07 | 12 | 是 | 首轮是内层写重试截断。节点只监听 TCP，UDP 未测 |
-| TrustTunnel | h1、h2、h3（均 TLS） | 112 | 5 | 18 | 0.18–13.11 | 17 | 是 | h3 首轮是实现缺陷，已修；h3 退出码 1 共 4 次；h2 的 32 MiB eof 1 次，未定位 |
+| TrustTunnel | h1、h2、h3（均 TLS） | 112 | 5 | 18 | 0.18–13.11 | 17 | 是 | h3 首轮是实现缺陷，已修；h3 退出码 1 共 4 次，已修；h2 的 32 MiB eof 1 次是工具缺陷 |
 | Naive | h1、h2、h3（均 TLS） | 135 | 0 | 0 | 0.67–13.08 | 9 | 是 | 首轮 32 MiB 停滞未复现 |
-| Sudoku | raw、legacy、ws-tls、raw-mux、stream-tls、poll-tls | 260 | 10 | 0 | 0.85–6.27 | 11 | 是 | stream-tls、poll-tls 的 10 项未解决，见下 |
+| Sudoku | raw、legacy、ws-tls、raw-mux、stream-tls、poll-tls | 260 | 10 | 0 | 0.85–6.27 | 11 | 是 | stream-tls、poll-tls 的 10 项是工具缺陷加上传吞吐低，已修 |
 | WireGuard | udp（隧道 MTU 1280） | 36 | 9 | 0 | 无通过 | 45 | 是 | IPv4 32 MiB 全失败，IPv6 1 MiB 和 UDP 1200 全失败，见下。首轮 45 项是工具配的 MTU 低于下限 |
 
 ## 仅出站协议结果（`v1.3.1`）
@@ -87,18 +89,32 @@ netns 内的内核 TCP 和 UDP 进入 TUN，kerlico 留在主 netns，出站到 
 | --- | --- | --- | --- |
 | Mieru TCP 全双工断流 | 载体读取没有背压，会话缓存超过 256 KiB 就被中止 | 缓存到一半停读，写超时改用空闲期限 | 回环 10/10 失败变矩阵 90 项全过；回归测试关闭修复后失败 |
 | TrustTunnel H3 1 MiB 必断 | HTTP QUIC socket 包装缓存 GSO 段数。设备拒绝 GSO 后 quinn 继续组批，发出的包全部被丢弃，连接约 2 秒后静默，30 秒后空闲超时 | 段数改为读原生 socket | 跨机 10/10；抓包确认修复前无后续报文。MASQUE 共用此包装，未复测 |
+| 工具把慢路径判成失败（脚本问题） | 发送线程与接收共用 socket 超时。Python 的 `sendall` 超时是整次调用的总时长，发送线程在 40 秒（`exchange`）或 180 秒（`tcp_watch`）后被静默终止；回显收完已发数据后停滞，或再等空闲超时后 eof | 发送独立且阻塞，停滞只看接收进度，结果带已发送字节 | `tools/test_interop_cross_host.py` 用旧实现复现 `stall@466944`。旧工具的 32 MiB 通过项最长 175.9 秒，没有超过 180 秒的 |
+| QUIC 客户端 SIGTERM 退出码 1 | `Outbound::shutdown` 等 `wait_idle`，即 3×PTO 排空期。入口排空先用掉最多一半预算，高延迟路径上 3×PTO 超过剩余预算 | 出站只等 200 毫秒让 CONNECTION_CLOSE 发出，其余由服务任务在强制回收时点结束 | 5 秒预算 80 次关闭：修复前 40 次退出码 1，修复后 TUIC、Hysteria、ShadowQUIC、Naive、TrustTunnel 72 次全为 0。`xray-transport` 修复后 VLESS xhttp-h3 通过，跨机矩阵关闭 39/39 |
+| TrustTunnel H3 关闭等满预算、CONNECTION_CLOSE 丢失 | 先关 socket 再 `wait_idle`。关闭帧发不出去；quinn 的 endpoint 驱动因 socket 错误退出时清空连接表但不唤醒 idle 等待（读源码），实测 30 秒预算等满 | 客户端不再包装 socket | 回归测试撤销修复后失败：关闭时没有发出任何报文 |
+| Sudoku 分离传输上行约 10 KB/s | 每次写入发一个 POST，一问一答，RTT 250 毫秒时上行约 10 KB/s。官方按批发送，stream 单次 256 KiB、poll 单次 64 KiB | 在途时排队的写入并进下一次请求，上限同官方 | 跨机 P2 和 A=`perf-01`、B=`perf-03`：stream-tls 32 MiB 0.12–0.13 MiB/s，poll-tls 0.04 MiB/s，两条路径全过 |
+
+修复前 stream-tls、poll-tls 的 10 项失败可以逐项对上：`stall@425984` 约等于 40 秒 × 10.6 KB/s；`eof@4475392` 在 476 秒，按 10.7 KB/s 约 416 秒收完已发数据，再加 60 秒空闲超时。无独立超时的探针在 P1 上 1 MiB 通过（TLS 106 秒、明文 97 秒，最长间隔 1.2 秒）。
+
+修复版二进制（`4ec93826…`，`perf-01` 构建）的 QUIC 协议跨机复跑，排列同上一行，IPv4 两条路径加 IPv6 一条：13 个配置 312 项，通过 296，不适用 6，失败 10。失败都是 TUIC v4-native 和 ShadowQUIC datagram 的 UDP 超 MTU，是上表的协议限制。32 MiB 26/26，关闭 39/39。`perf-01` 的 glibc 高于 `perf-02`，修复版没有在 `perf-02` 上跑，所以 P0、P1 没有复测。
 
 Shadowsocks、SS2022 写重试截断由 `main` 修复（`01b3e23`）。本工具独立定位到同一根因：`copy_bidirectional` 在写 Pending 时继续读入，重试切片变长，写端按新长度确认，多出的明文被丢弃。修复版上该类失败为 0，ShadowTLS 和 TUN ss2022 同时恢复。这也解释 `STATUS.md` 记录的 SS2022 回显偶发差数十字节（推断，未用该脚本复核）。
 
 ## 未解决
 
-- **Sudoku stream-tls、poll-tls。** P1 的 1 MiB 必现 `stall@425984`，32 MiB 三种排列都在 240–480 秒后 eof。已观察：上传每个 POST 约 22 KB、耗时约 1 个 RTT（P1 约 300 毫秒），串行发送，所以高延迟下上传很慢；停滞时三台 socket 队列为空。下行为何 40 秒无进展没有定位。raw、legacy、ws-tls、raw-mux 全过。
-- **用户态栈加 UDP 外层的大流量。** MASQUE、OpenVPN udp、ZeroTier、EasyTier udp、WireGuard 的 32 MiB 或 1 MiB 失败，多数整条流无进展 60 秒后被空闲超时断开；同协议 TCP 外层全过，MASQUE、OpenVPN、EasyTier 同机对照通过。Mesh 丢包是可能原因（推测）。EasyTier udp 的 A、B 段丢包很低（0–0.27%、2.8–6.7%）仍失败，最值得先查。WireGuard 隧道 MTU 下限 1280 加外层后超过 Mesh MTU，IPv6 不能分片，所以 IPv6 大包不通属环境限制。
+- **用户态栈加 UDP 外层的大流量。** 下面的数据来自有发送超时缺陷的旧工具，“无进展 60 秒”可能是发送被终止后的空闲超时（推断），要用新工具复核。 MASQUE、OpenVPN udp、ZeroTier、EasyTier udp、WireGuard 的 32 MiB 或 1 MiB 失败，多数整条流无进展 60 秒后被空闲超时断开；同协议 TCP 外层全过，MASQUE、OpenVPN、EasyTier 同机对照通过。Mesh 丢包是可能原因（推测）。EasyTier udp 的 A、B 段丢包很低（0–0.27%、2.8–6.7%）仍失败，最值得先查。WireGuard 隧道 MTU 下限 1280 加外层后超过 Mesh MTU，IPv6 不能分片，所以 IPv6 大包不通属环境限制。
 - **ZeroTier 只配 `roots`。** 约 11 次试验 2 次通（次数按运行记录回忆）。抓包见请求发出后控制器没有回配置。加 `peers` 后稳定。
-- **QUIC 客户端 SIGTERM 退出码 1。** `shutdown.incomplete; cleanup_timed_out=true`，修复版复跑的 34 个配置中出现 11 次，都在 QUIC 客户端（xhttp-h3、TUIC v4、ShadowQUIC datagram、TrustTunnel h3），业务用例不受影响。首轮排空预算 1.5 秒时更频繁，5 秒时减少。可能是 `wait_idle` 的等待随路径 PTO 变长（推测，未验证）。
-- **偶发。** TrustTunnel h2 32 MiB eof 一次；TUN hysteria2 见上。
+- **QUIC 节点关闭耗时。** TUIC、ShadowQUIC、VLESS H3、Naive H3 的节点即使没有连接也要等满一半排空预算才退出，退出码 0。Hysteria2 的节点循环会检查入口已关且无连接后退出，这几个没有这项检查。
+- **偶发。** TUN hysteria2 见上，它的 32 MiB 也来自旧工具。
 
-首轮 Hysteria、TUIC、ShadowQUIC、Naive 的 32 MiB 失败在复跑中没有再现。复跑的 180 秒判定、并发 2（首轮 3）和 5 秒排空都不同，所以不能确定首轮是负载、判定阈值还是缺陷。
+## 退出码 1 的结论
+
+不是远端能触发的进程退出。首轮和复跑共 78 项关闭失败：72 项是客户端退出码 1、节点 0，错误都是 `shutdown.incomplete; primary=none; cleanup_timed_out=true`，发生在工具发 SIGTERM 之后；另外 6 项是首轮 WireGuard 配置校验失败。两轮 4128 条记录里没有一条在运行中看到进程已退出。`primary=none` 表示没有协议错误触发停止。
+
+## 其他归因
+
+- **TrustTunnel h2 32 MiB eof 一次：脚本问题。** 修复前的二进制加新工具，P0、P1、P2 全过，耗时 24、182、188 秒，后两条已到旧工具 180 秒发送上限附近。原记录在 211 秒 eof，时差约等于 180 秒加 TrustTunnel 默认 30 秒空闲（推断，当次日志已无）。
+- **首轮 Hysteria、TUIC、ShadowQUIC、Naive 的 32 MiB 失败：脚本问题（推断）。** 首轮 32 MiB 走 `exchange`，发送上限 30 至 40 秒，这些协议的 32 MiB 都要更久。复跑换成 180 秒后再没出现。
 
 ## 复现
 

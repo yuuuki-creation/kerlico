@@ -15,3 +15,7 @@ tls.rs 的自动配置默认关闭会话恢复，避免共享配置缓存把 TLS
 原Tokio异步测试已显式进入TaskOwner作用域，测试派生任务沿同一所有者登记；测试结束等待关闭，panic时由守卫取消。没有新增ignore或删除原测试。
 
 集成审阅后移除了cfg(test)下缺少所有者仍创建detached任务的例外，测试与生产采用同一拒绝行为。任务panic通过持久watch状态通知上层ServiceContext，只停止对应命名服务；新增同owner关闭和其他owner继续的回归代码，尚未执行。
+
+## QUIC 关闭不等排空期（2026-11-03）
+
+`TaskOwner::shutdown` 对每个 endpoint 只等 200 毫秒，让 CONNECTION_CLOSE 发出，随后中止运行任务。原来等 `wait_idle`，排空期 3×PTO 在高延迟路径上超过关闭预算，进程退出码为 1。

@@ -294,7 +294,17 @@ impl Session {
                 // RecordStream/ObfsStream的读操作也会推进待写缓冲。两个方向必须
                 // 使用同一任务waker，避免读侧替换写就绪注册后遗失写侧推进。
                 let reading = driver::read_loop(reader, driving.clone(), server.then_some(accept));
-                let writing = driver::write_loop(writer, driving.clone(), data_rx, control_rx);
+                let writing = driver::write_loop(
+                    writer,
+                    driving.clone(),
+                    data_rx,
+                    control_rx,
+                    if server {
+                        driver::DOWNLINK_TURN
+                    } else {
+                        driver::UPLINK_TURN
+                    },
+                );
                 tokio::pin!(reading);
                 tokio::pin!(writing);
                 tokio::select! {
