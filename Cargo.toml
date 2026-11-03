@@ -111,6 +111,7 @@ argon2 = "0.5.3"
 russh-util = { path = "crates/protocol-ssh/vendor/russh-util" }
 ml-kem = { path = "third_party/ml-kem-legacy" }
 shadowsocks = { path = "third_party/shadowsocks" }
+smoltcp = { path = "third_party/smoltcp" }
 h3 = { path = "third_party/h3" }
 rustls = { path = "third_party/shaped-rustls/rustls" }
 quinn = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d37466492242a1827f9a16aa91ca4c1b00be" }
