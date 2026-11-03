@@ -115,14 +115,45 @@
 | 修复后 | 官方 v0.5.2.0 | carriers、tables | 2880、4800 通过，失败 0 |
 | 修复后 | Mihomo 1.10.0 | carriers、tables | carriers 失败 0；tables 收尾前跑完 5625 条记录，7 项失败都来自同一用例：端口分配把同一端口同时发给节点和 SOCKS 入口，日志是 `address already in use`。分配器已去重，这个套件没有重跑 |
 
-修复后的 `rekey`、`lifecycle`、`mux` 全量没有跑完，这几项对修复后二进制未验证。TLS 下的 H1、H2 回环由 crate 测试和一次 kerlico 双端往返覆盖。`tools/sudoku_interop/README.md` 给的自签 CA 证书当叶子时，kerlico 客户端拒绝，`--peer self --suite tls` 全部失败，`v1.3.1` 相同；改用 CA 加叶子证书后 H1、H2 通过。
+后续全量复跑（`perf-01`，修复版 `0346f5e1…` 含 `ecea3ed`、上传合并和 mux 调整）失败 0：
+
+| 对端 | credentials | mux | lifecycle | rekey | tables | carriers |
+| --- | --- | --- | --- | --- | --- | --- |
+| Mihomo 1.10.0 | 96 通过 | 567 通过 | 414 通过 | 296 通过 | 3720 通过 | 2232 通过 |
+| 官方 v0.5.2.0 | 96 通过 | 648 通过 | 522 通过 | 368 通过 | 4541 通过 | 2880 通过 |
+
+通过数以外的记录是进程观察、入口上限和参考边界。TLS 下的 H1、H2 回环由 crate 测试和一次 kerlico 双端往返覆盖。`tools/sudoku_interop/README.md` 给的自签 CA 证书当叶子时，kerlico 客户端拒绝，`--peer self --suite tls` 全部失败，`v1.3.1` 相同；改用 CA 加叶子证书后 H1、H2 通过。
 
 ## 未解决项
 
-- **修复后 Mihomo credentials 1 项失败**：最后一次工具改动后，修复后二进制的 credentials 复跑被 80 秒限时截断，写下 104 条记录，其中 1 项失败。工作区清理前没有看错误内容，日志已删除，未定位。`v1.3.1` 上同一套件失败 0。下一步是用修复后二进制重跑这个套件，再跑 `rekey`、`lifecycle`、`mux`。
+- **Mihomo credentials 那 1 项失败**：没有复现，也没有定位。当时的复跑被 80 秒限时截断，全量需要约 140 秒，日志已删。修复前二进制的 Mihomo 全量、修复版的 Mihomo 与官方全量各 96 通过、0 失败。
 - **Sudoku 互通 README 的测试证书**：见上段，示例命令还没有改成 CA 加叶子证书。
-- **Sudoku mux 流提前 EOF**：`kerlico` 作客户端、`mux=on` 的 33MiB 流在约 18MiB 处结束，`rekey` 套件单独复跑 38 条大流失败 3 条，全量矩阵里官方 1 条、Mihomo 12 条（4 条提前 EOF、8 条连接重置）。Sudoku mux 没有流控，接收方队列超过每流 4MiB 就重置该流；官方源码 `muxMaxQueuedBytesPerStream` 同样是 4MiB 且同样重置，所以这是协议性质，读得慢的本地客户端会遇到（根因由读代码推断，未在失败现场抓到重置帧）。用户侧表现是流提前结束，没有明确错误。下一步可以考虑把重置报告为错误。
+- **Sudoku mux 重置的用户侧表现**：流被重置时 `tcp-forward` 入口有时是 FIN、有时是 RST，应用可能把截断的流当成正常结束。上传持续快于目标读取时，协议没有流控，官方和 Mihomo 同样会重置，见下节。
 - **映射地址同类风险**：Snell 的 IPv4 映射来源问题只在 Snell 上修了。`protocol-hysteria2/src/udp.rs`、`protocol-shadowsocksr/src/udp.rs` 也按字面比较来源与目标，本次对端都没有触发，未验证双栈对端。
+
+## Sudoku mux 大流提前结束
+
+kerlico 客户端的缺陷，已修。“与官方 4MiB 重置一致”只说对了一半：重置是协议性质，但在没有慢读者的回显里只有 kerlico 客户端会触发。
+
+| 客户端 → 节点 | 修复前 33 MiB | 修复前 80 MiB | 修复后 80 MiB |
+| --- | --- | --- | --- |
+| 官方 → 官方 | 6/6 | 3/3 | 未重跑 |
+| Mihomo → Mihomo | 6/6 | 未测 | 未重跑 |
+| kerlico → 官方 | 3/6 | 0/3 | 6/6 |
+| kerlico → Mihomo | 4/6 | 0/3 | 6/6 |
+| kerlico → kerlico | 6/6 | 1/3 | 6/6 |
+| 官方 → kerlico | 6/6 | 3/3 | 6/6 |
+| Mihomo → kerlico | 6/6 | 未测 | 6/6 |
+
+同机回环，`raw` 和 `ws`，80 MiB 修复前只测了 `raw`。
+
+- **机制。** 读写循环在同一任务里，读每轮 32 KiB，写每轮 256 KiB。失败时已发字节约是已收的 2.2 倍（`sent=42237952`、`received=18617792`）。回显积压在节点到目标的方向，超过每流 4 MiB 后节点重置。
+- **上传限速对照。** kerlico 客户端写入限到 4 MiB/s，接官方和 Mihomo 各 4/4 通过。
+- **协议性质对照。** 官方双端和 Mihomo 双端，读者限到约 3 MiB/s，各 4/4 在 5–7 MiB 处提前结束。
+- **修复。** 下行每轮 256 KiB，上行 32 KiB，按角色分配。只把两方向调成相等时 kerlico 客户端全过，但官方客户端接 kerlico 节点 6/6 被重置，Mihomo 客户端接 kerlico 节点 raw 2/3 失败。
+- **未直接观测。** 没有抓到重置帧，“节点重置”由上面的对照推出。kerlico 比对端慢约 3 倍（约 10 MiB/s 对 33 MiB/s）的原因未查。
+
+`rekey` 套件接 Mihomo 从 9 项失败到 0，都是这个问题。
 
 ## 观察项
 
