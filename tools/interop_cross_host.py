@@ -14,6 +14,7 @@ import os
 import random
 import re
 import secrets
+import select
 import signal
 import socket
 import ssl
@@ -55,36 +56,58 @@ def recv_exact(stream, size, stall):
     return data
 
 
-def exchange(stream, size, stall=40.0):
-    """全双工发送并接收回显，不依赖半关闭；返回结果字典。"""
-    data = payload(size)
-    sender_error = []
+class Sender:
+    """后台发送。socket 保持阻塞：settimeout 对 sendall 是整次调用的总时长，慢路径上发送会被提前终止。"""
 
-    def send():
+    def __init__(self, stream, data):
+        self.stream, self.data = stream, data
+        self.sent, self.error = 0, None
+        stream.settimeout(None)
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def run(self):
+        view = memoryview(self.data)
         try:
-            stream.sendall(data)
+            while self.sent < len(view):
+                self.sent += self.stream.send(view[self.sent:self.sent + (1 << 16)])
         except OSError as error:
-            sender_error.append(type(error).__name__)
+            self.error = type(error).__name__
 
+    def stop(self):
+        try:
+            self.stream.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
+def recv_or_stall(stream, limit, stall):
+    if not select.select([stream], [], [], stall)[0]:
+        raise socket.timeout
+    return stream.recv(limit)
+
+
+def exchange(stream, size, stall=40.0):
+    """全双工发送并接收回显，不依赖半关闭；stall 是接收无进展的上限，返回结果字典。"""
+    data = payload(size)
     started = time.monotonic()
-    worker = threading.Thread(target=send, daemon=True)
-    worker.start()
+    sender = Sender(stream, data)
     received = bytearray()
-    stream.settimeout(stall)
     outcome = {"ok": False, "size": size}
     try:
         while len(received) < size:
-            chunk = stream.recv(min(1 << 18, size - len(received)))
+            chunk = recv_or_stall(stream, min(1 << 18, size - len(received)), stall)
             if not chunk:
-                outcome["error"] = f"eof@{len(received)}"
+                outcome["error"] = f"eof@{len(received)} sent={sender.sent}"
                 return outcome
             received.extend(chunk)
     except socket.timeout:
-        outcome["error"] = f"stall@{len(received)}"
+        outcome["error"] = f"stall@{len(received)} sent={sender.sent}"
         return outcome
     except OSError as error:
-        outcome["error"] = f"{type(error).__name__}@{len(received)}"
+        outcome["error"] = f"{type(error).__name__}@{len(received)} sent={sender.sent}"
         return outcome
+    finally:
+        sender.stop()
     elapsed = time.monotonic() - started
     if hashlib.sha256(received).digest() != hashlib.sha256(data).digest():
         diff = next((i for i in range(size) if received[i] != data[i]), -1)
@@ -222,15 +245,7 @@ def tcp_watch(socks, host, port, size, stall=180.0, deadline=1200.0):
         return {"ok": False, "size": size, "error": detail}
     data = payload(size)
     digest = hashlib.sha256()
-    stream.settimeout(stall)
-
-    def send():
-        try:
-            stream.sendall(data)
-        except OSError:
-            pass
-
-    threading.Thread(target=send, daemon=True).start()
+    sender = Sender(stream, data)
     started = last = time.monotonic()
     received, longest, longest_at = 0, 0.0, 0
     outcome = {"ok": False, "size": size}
@@ -240,7 +255,7 @@ def tcp_watch(socks, host, port, size, stall=180.0, deadline=1200.0):
                 if time.monotonic() - started > deadline:
                     outcome["error"] = f"deadline@{received}"
                     break
-                chunk = stream.recv(min(1 << 18, size - received))
+                chunk = recv_or_stall(stream, min(1 << 18, size - received), stall)
                 now = time.monotonic()
                 if now - last > longest:
                     longest, longest_at = now - last, received
@@ -254,8 +269,10 @@ def tcp_watch(socks, host, port, size, stall=180.0, deadline=1200.0):
             outcome["error"] = f"stall@{received}"
         except OSError as error:
             outcome["error"] = f"{type(error).__name__}@{received}"
+        finally:
+            sender.stop()
     elapsed = time.monotonic() - started
-    outcome.update(elapsed=round(elapsed, 3), mib_s=round(received / 1048576 / max(elapsed, 1e-3), 2), received=received, longest_gap=round(longest, 1), longest_gap_at=longest_at)
+    outcome.update(elapsed=round(elapsed, 3), mib_s=round(received / 1048576 / max(elapsed, 1e-3), 2), received=received, sent=sender.sent, sender_error=sender.error, longest_gap=round(longest, 1), longest_gap_at=longest_at)
     if received == size and "error" not in outcome:
         if digest.digest() == hashlib.sha256(data).digest():
             outcome["ok"] = True
