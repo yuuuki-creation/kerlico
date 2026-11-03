@@ -139,12 +139,13 @@ impl Rule {
             && rule.network.is_none()
             && rule.node.is_empty()
             && rule.user.is_empty();
-        // 目标域名已是 punycode，非 ASCII 关键字永远不会命中。
+        // 目标域名已是 punycode，非 ASCII 或带通配符的关键字永远不会命中；目标端口非零。
         if empty
+            || rule.port.contains(&0)
             || rule
                 .domain_keyword
                 .iter()
-                .any(|keyword| keyword.is_empty() || !keyword.is_ascii())
+                .any(|keyword| keyword.is_empty() || !Destination::is_hostname_text(keyword))
         {
             return Err(invalid());
         }
@@ -192,8 +193,10 @@ fn invalid() -> Error {
 
 fn domain(value: &str) -> Result<String> {
     match Destination::new(value, 1).map_err(|_| invalid())?.address() {
-        Address::Domain(name) => Ok(name.strip_suffix('.').unwrap_or(name).to_owned()),
-        Address::Ip(_) => Err(invalid()),
+        Address::Domain(name) if Destination::is_hostname_text(name) => {
+            Ok(name.strip_suffix('.').unwrap_or(name).to_owned())
+        }
+        _ => Err(invalid()),
     }
 }
 
@@ -382,6 +385,10 @@ mod tests {
             json!({"outbound":"a","ip_cidr":["10.0.0.0/"]}),
             json!({"outbound":"a","ip_cidr":["::ffff:10.0.0.0/104"]}),
             json!({"outbound":"a","domain_keyword":["例子"]}),
+            json!({"outbound":"a","domain_keyword":["*ads*"]}),
+            json!({"outbound":"a","domain":["*.example.com"]}),
+            json!({"outbound":"a","domain_suffix":["+.example.com"]}),
+            json!({"outbound":"a","port":[0]}),
             json!({"outbound":"bad tag","port":[1]}),
         ] {
             let spec: RuleSpec = serde_json::from_value(rule).unwrap();

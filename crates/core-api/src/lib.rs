@@ -146,6 +146,12 @@ impl Destination {
             Address::Domain(name) => name.clone(),
         }
     }
+    /// 校验配置里要和目标域名比较的文本：只有字母、数字、连字符、下划线和点。
+    /// 目标可能是任意文本，但带 `*`、`+` 的通配写法在路由规则和 hosts 里永远不会命中。
+    pub fn is_hostname_text(text: &str) -> bool {
+        text.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    }
     /// 仅判断字面 IP 是否为回环地址；不解析域名，也不识别域名别名。
     pub fn is_loopback(&self) -> bool {
         matches!(self.address, Address::Ip(ip) if ip.is_loopback())

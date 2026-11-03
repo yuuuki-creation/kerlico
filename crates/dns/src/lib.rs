@@ -66,8 +66,10 @@ fn parse_server(text: &str) -> Result<(Transport, SocketAddr)> {
 
 fn normalize(host: &str) -> Result<String> {
     match Destination::new(host, 1).map_err(|_| invalid())?.address() {
-        Address::Domain(name) => Ok(name.strip_suffix('.').unwrap_or(name).to_owned()),
-        Address::Ip(_) => Err(invalid()),
+        Address::Domain(name) if Destination::is_hostname_text(name) => {
+            Ok(name.strip_suffix('.').unwrap_or(name).to_owned())
+        }
+        _ => Err(invalid()),
     }
 }
 
@@ -198,6 +200,8 @@ mod tests {
             json!({"servers":["tcp://[192.0.2.1]"]}),
             json!({"hosts":{"10.0.0.1":["10.0.0.2"]}}),
             json!({"hosts":{"a.example":[]}}),
+            json!({"hosts":{"*.a.example":["10.0.0.2"]}}),
+            json!({"hosts":{"+.a.example":["10.0.0.2"]}}),
         ] {
             assert!(spec(value).validate().is_err());
         }

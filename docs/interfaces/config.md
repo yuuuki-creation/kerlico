@@ -47,7 +47,7 @@
 
 路由不查询 DNS，域名目标不会匹配 `ip_cidr`。多目标 UDP 关联建立时没有单一目标，固定走节点绑定的出站；TCP 与固定目标 UDP 按规则选择。规则选中的出站缺少对应能力时，该连接返回不支持错误。
 
-以下规则永远不会按预期命中，`kerlico check` 直接拒绝：`node` 不是任何入站的标签，`user` 不在 `accounts` 内，`ip_cidr` 前缀为空（`10.0.0.0/`）或是 IPv4-mapped 网段（`::ffff:10.0.0.0/104`），`domain_keyword` 含非 ASCII 字符（目标域名已是 punycode）。
+以下规则永远不会按预期命中，`kerlico check` 直接拒绝：`node` 不是任何入站的标签，`user` 不在 `accounts` 内，`ip_cidr` 前缀为空（`10.0.0.0/`）或是 IPv4-mapped 网段（`::ffff:10.0.0.0/104`），`domain_keyword` 含非 ASCII 字符（目标域名已是 punycode），`domain`、`domain_suffix`、`domain_keyword` 含通配符（`*.a.example`、`+.a.example`），`port` 含 `0`。
 
 ```json
 "routes": [
