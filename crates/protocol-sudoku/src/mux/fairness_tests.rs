@@ -122,6 +122,87 @@ async fn continuously_ready_keepalive_does_not_keep_an_idle_session_alive() {
     assert!(reads.load(Ordering::Relaxed) > 0);
 }
 
+/// 两端持续收发时返回（对端收到的字节，本地读到的字节）。
+async fn saturated(server: bool) -> (u64, u64) {
+    let (peer, transport) = tokio::io::duplex(256 * 1024);
+    let cancel = CancellationToken::new();
+    let session = Session::start(
+        Box::new(transport),
+        &cancel,
+        4,
+        Duration::from_secs(30),
+        None,
+        server,
+    );
+    let (mut peer_read, mut peer_write) = tokio::io::split(peer);
+    let target = Destination::new("192.0.2.3", 443).unwrap();
+    let (stream, id) = if server {
+        send(&mut peer_write, OPEN, 1, &address::encode(&target)).await;
+        (session.accept().await.unwrap().stream, 1)
+    } else {
+        let context = ConnectContext::new(Duration::from_secs(2));
+        let opened = tokio::spawn(async move {
+            let (kind, id, _) = receive(&mut peer_read).await;
+            assert_eq!(kind, OPEN);
+            (id, peer_read)
+        });
+        let stream = session.open(&target, &context).await.unwrap();
+        let (id, reader) = opened.await.unwrap();
+        peer_read = reader;
+        (stream, id)
+    };
+    let peer_received = Arc::new(AtomicU64::new(0));
+    let counted = peer_received.clone();
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move {
+        loop {
+            let (kind, _, payload) = receive(&mut peer_read).await;
+            assert_eq!(kind, DATA);
+            counted.fetch_add(payload.len() as u64, Ordering::Relaxed);
+        }
+    });
+    tasks.spawn(async move {
+        let payload = vec![0x11; SEND_CHUNK];
+        loop {
+            send(&mut peer_write, DATA, id, &payload).await;
+        }
+    });
+    let (mut down, mut up) = tokio::io::split(stream);
+    tasks.spawn(async move {
+        let payload = vec![0x22; SEND_CHUNK];
+        loop {
+            up.write_all(&payload).await.unwrap();
+        }
+    });
+    let mut local_received = 0u64;
+    let mut buffer = vec![0; 64 * 1024];
+    while peer_received.load(Ordering::Relaxed) + local_received < 16 * 1024 * 1024 {
+        let count = down.read(&mut buffer).await.unwrap();
+        assert_ne!(count, 0);
+        local_received += count as u64;
+    }
+    let result = (peer_received.load(Ordering::Relaxed), local_received);
+    tasks.abort_all();
+    cancel.cancel();
+    result
+}
+
+#[tokio::test]
+async fn saturated_client_gives_the_downlink_the_larger_share() {
+    let (uplink, downlink) = tokio::time::timeout(Duration::from_secs(20), saturated(false))
+        .await
+        .unwrap();
+    assert!(downlink >= 2 * uplink, "上行 {uplink}，下行 {downlink}");
+}
+
+#[tokio::test]
+async fn saturated_node_gives_the_downlink_the_larger_share() {
+    let (downlink, uplink) = tokio::time::timeout(Duration::from_secs(20), saturated(true))
+        .await
+        .unwrap();
+    assert!(downlink >= 2 * uplink, "上行 {uplink}，下行 {downlink}");
+}
+
 async fn send(writer: &mut (impl AsyncWrite + Unpin), kind: u8, id: u32, payload: &[u8]) {
     let mut header = [0; 9];
     header[0] = kind;
