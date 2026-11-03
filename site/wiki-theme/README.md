@@ -16,12 +16,12 @@ kerlico 文档站跑在 nice-wiki 上。这里放外观包 `kerlico` 和把实�
 镜像按 nice-wiki main 自行构建：v0.2.1 发布镜像没有外观功能，子文档的公开页也会 404（main 已修）。在部署目录放好 nice-wiki 的 `deploy/` 和 `bin/nw-keys` 后：
 
 ```sh
-python3 make_compose.py --version <镜像标签>
+python3 make_compose.py --version <镜像标签> --public-url https://wiki.kerlico.com --mtu 1280
 sh deploy/init-secrets.sh
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --no-build --pull never
 ```
 
-编排的项目名是 `kerlico-wiki`，网段 `10.231.98.0/24`，入口只有 `127.0.0.1:18790`，没有 Caddy。同一台机器上的其他 nice-wiki 不受影响。OpenRouter 密钥放 `private/openrouter-key`（0600），不进任何仓库。
+编排的项目名是 `kerlico-wiki`，网段 `10.231.98.0/24`，入口只有 `127.0.0.1:18790`，由反向代理对外。`--public-url` 让 edge 信任 Docker 网段传来的访客地址，否则所有访客算同一个地址，限流和问答额度会被共用。不带这个参数就是只能经 SSH 隧道访问的本地实例。同一台机器上的其他 nice-wiki 不受影响。OpenRouter 密钥放 `private/openrouter-key`（0600），不进任何仓库。
 
 配置（管理员文件两行：账号、口令，只在标准输入里传）：
 
@@ -34,11 +34,9 @@ python3 provision.py status < 管理员文件   # 查翻译进度
 
 ## 访问
 
-```sh
-ssh -F <ssh 配置> -N -L 18790:127.0.0.1:18790 perf-02
-```
+正式地址是 https://wiki.kerlico.com ，后台在 `/admin`。Cloudflare 代理到部署机的 Caddy，再到 `127.0.0.1:18790`。
 
-然后打开 `http://127.0.0.1:18790/`，后台在 `/admin`。本地端口必须也是 18790：入口按 `NW_PUBLIC_BASE_URL` 校验来源。
+公开地址在初始化时写进数据库，换域名后运行 `python3 provision.py public-url --base <新地址> --public-url <新地址> < 管理员文件`。经 Cloudflare 运行时脚本要带自己的 User-Agent，默认的 Python UA 会被拒绝（错误 1010）。
 
 ## 模型
 

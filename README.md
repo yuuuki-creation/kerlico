@@ -4,6 +4,8 @@
 
 `kerlico` 是使用 Rust 开发的客户端与服务端一体代理内核，参考 mihomo、sing-box 与 Xray-core 设计，编译为单一可执行程序。
 
+官网：[www.kerlico.com](https://www.kerlico.com)，文档站：[wiki.kerlico.com](https://wiki.kerlico.com)。
+
 最新版本见 [Releases](https://github.com/yuuuki-creation/kerlico/releases)，[使用指南](docs/usage.md)说明安装和配置，完成计划见 [STATUS.md](STATUS.md)。
 
 ## 核心特性与当前范围

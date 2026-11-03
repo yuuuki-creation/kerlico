@@ -4,6 +4,8 @@
 
 `kerlico` is a unified client-and-server proxy core written in Rust, informed by the architectures of mihomo, sing-box, and Xray-core, and compiled into a single executable.
 
+Website: [www.kerlico.com](https://www.kerlico.com). Docs: [wiki.kerlico.com](https://wiki.kerlico.com).
+
 See [Releases](https://github.com/yuuuki-creation/kerlico/releases) for the latest version, the [usage guide](docs/usage.en.md) for installation and configuration, and [STATUS.md](STATUS.md) for the completion plan.
 
 ## Key Features & Current Scope

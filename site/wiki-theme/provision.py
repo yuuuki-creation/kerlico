@@ -93,6 +93,7 @@ class Client:
         for attempt in range(12):
             request = urllib.request.Request(self.base + path, data=data, method=method)
             request.add_header("Origin", self.base)
+            request.add_header("User-Agent", "kerlico-wiki-provision")  # Cloudflare 拒绝默认的 Python UA
             if data is not None:
                 request.add_header("Content-Type", content_type or "application/json")
             if self.cookie:
@@ -419,10 +420,21 @@ def status(client):
         print(tag, states)
 
 
+def public_url(client, url):
+    """公开地址在初始化时写入数据库，换域名要单独改，规范链接和站点地图都用它。"""
+    config = client.call("GET", "/v1/config")
+    config = config.get("config", config)
+    fields = ("titleTemplate", "description", "indexingEnabled", "resourceLimits", "securityPolicy")
+    body = {name: config[name] for name in fields}
+    client.call("PUT", "/v1/config", {**body, "publicBaseURL": url, "expectedRevision": config["revision"]})
+    print("publicBaseURL", client.call("GET", "/v1/config").get("publicBaseURL", "见 config"))
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("steps", nargs="+", choices=["account", "theme", "models", "index", "docs", "pace", "status"])
+    parser.add_argument("steps", nargs="+", choices=["account", "theme", "models", "index", "docs", "public-url", "pace", "status"])
     parser.add_argument("--base", default="http://127.0.0.1:18790")
+    parser.add_argument("--public-url", default="https://wiki.kerlico.com")
     parser.add_argument("--openrouter-key", default="private/openrouter-key")
     parser.add_argument("--theme-zip", default="import/kerlico-theme-1.0.1.zip")
     parser.add_argument("--docs-zip", default="import/kerlico-docs.zip")
@@ -431,7 +443,7 @@ def main():
     client = Client(args.base)
     client.credentials = read_admin()
     account(client, *client.credentials)
-    runners = {"account": lambda: None, "theme": lambda: theme(client, args.theme_zip), "models": lambda: models(client, args.openrouter_key), "index": lambda: index(client),
+    runners = {"account": lambda: None, "public-url": lambda: public_url(client, args.public_url), "theme": lambda: theme(client, args.theme_zip), "models": lambda: models(client, args.openrouter_key), "index": lambda: index(client),
                "docs": lambda: docs(client, args.docs_zip, args.docs_manifest), "pace": lambda: pace(client, args.docs_manifest), "status": lambda: status(client)}
     for step in args.steps:
         runners[step]()
