@@ -1,0 +1,61 @@
+{"key": "outbound/gost-relay/combo", "test": "pass", "evidence": "mode（dynamic、forward）× tls × mux 共 8 组对官方 gost 3.3.2，TCP 256 KiB 与 UDP 64 字节都通；udp 无开关恒开", "date": "2026-11-03"}
+{"key": "outbound/gost-relay/forward", "test": "pass", "evidence": "gost forwarder 指向 C：forward_target=C 时 1 MiB 2.3 MiB/s；请求其他目标被拒（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/gost-relay/mux", "test": "pass", "evidence": "mux=true 对 mtcp 1.43、mtls 2.28 MiB/s 通；对普通 tcp 监听 mux_on_plain 不通（socks_reply_1），说明确实发 SMUX", "date": "2026-11-03"}
+{"key": "outbound/gost-relay/password", "test": "pass", "evidence": "gost auth：密码正确通，bad_pass 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/gost-relay/protocol", "test": "pass", "evidence": "官方 gost 3.3.2 relay，1 MiB 摘要一致：P0 1.26，P2 0.79 MiB/s", "date": "2026-11-03"}
+{"key": "outbound/gost-relay/sni", "test": "pass", "evidence": "tls.server_name=证书名通；bad_sni 不通（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/gost-relay/tls", "test": "pass", "evidence": "gost tls 监听：配 ca_pem 通 1.89 MiB/s；bad_ca 不通（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/gost-relay/udp", "test": "pass", "evidence": "udp-forward 经 gost：dynamic 1200 字节 5 轮 True，forward 1200 字节 True；SOCKS5 UDP 多目标关联结果 socks_reply_7（恒开固定目标，无开关，不提供多目标）", "date": "2026-11-03"}
+{"key": "outbound/gost-relay/username", "test": "pass", "evidence": "gost auth：用户名正确通，bad_user 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/auth", "test": "pass", "evidence": "tls_auth.digest 四种配同名服务端 auth 通；客户端 SHA256 对服务端 SHA1 d_miss 不通（socks_reply_1；）；MD5 check 拒绝（alid] Invalid configuration: Invalid OpenVPN outbound fields）。摘要只作用于控制通道，数据通道只有 AEAD", "date": "2026-11-03"}
+{"key": "outbound/openvpn/ca", "test": "pass", "evidence": "ca_pem=签发服务端的 CA 通；换成无关 CA bad_ca 不通（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/cert", "test": "pass", "evidence": "服务端强制客户端证书：cert_pem+key_pem 通；去掉证书 no_cert 不通（socks_reply_6）；私钥换成不配对的 bad_key_pair 不通（tion.invalid] Invalid configuration: Invalid OpenVPN certificate or private key ；）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/cipher", "test": "pass", "evidence": "三种 AEAD 各自对官方服务端 256 KiB 通且服务端日志显示协商到该算法；ciphers 写 CBC check 拒绝（alid] Invalid configuration: Invalid OpenVPN outbound fields）；服务端只有 AES-256-CBC 时 server_cbc 不通（socks_reply_2；）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/combo", "test": "pass", "evidence": "proto 2 × 认证 3 × 控制封装 3 × AEAD 3 × topology 3 共 162 组对官方 OpenVPN 2.6 隧道就绪且 TCP 64 字节、UDP 64 字节通（其中 0 组第一次未在 25 秒内就绪后重开通过）；禁止或缺失的 tls-auth+tls-crypt、无认证、tls-crypt-v2、comp-lzo、CBC、证书缺私钥都被 check 拒绝", "date": "2026-11-03"}
+{"key": "outbound/openvpn/data-ciphers", "test": "pass", "evidence": "ciphers=[AES-128-GCM,CHACHA20-POLY1305] 对只开 CHACHA20 的服务端通，服务端日志协商到 CHACHA20；无交集 list_miss 不通（socks_reply_2；）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/data-ciphers-fallback", "test": "pass", "evidence": "官方 OpenVPN 2.4 ncp-disable、cipher AES-128-GCM（不推送 cipher）：ciphers 首项 AES-128-GCM 时隧道通，首项 AES-256-GCM 时 socks_reply_6。没有单独字段", "date": "2026-11-03"}
+{"key": "outbound/openvpn/dev", "test": "pass", "evidence": "服务端 dev tun，隧道通；kerlico 进程打开的 /dev/net/tun 数量 0，走用户态 IP 栈。tap 没有字段", "date": "2026-11-03"}
+{"key": "outbound/openvpn/handshake-timeout", "test": "pass", "evidence": "静默对端，A 上按 session id 区分握手，相邻两次的时刻差：handshake_timeout_secs=3 时 [2.0, 5.0, 7.0, 11.0]，=9 时 [8.0, 11.0, 13.0]；首个差值的起点早于抓包开始，其后都等于预算加 2、4、8 秒退避", "date": "2026-11-03"}
+{"key": "outbound/openvpn/handshake-window", "test": "pass", "evidence": "静默对端，A 上按 session id 区分握手，相邻两次的时刻差：handshake_timeout_secs=3 时 [2.0, 5.0, 7.0, 11.0]，=9 时 [8.0, 11.0, 13.0]；首个差值的起点早于抓包开始，其后都等于预算加 2、4、8 秒退避", "date": "2026-11-03"}
+{"key": "outbound/openvpn/key", "test": "pass", "evidence": "服务端强制客户端证书：cert_pem+key_pem 通；去掉证书 no_cert 不通（socks_reply_6）；私钥换成不配对的 bad_key_pair 不通（tion.invalid] Invalid configuration: Invalid OpenVPN certificate or private key ；）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/key-direction", "test": "pass", "evidence": "tls_auth.direction：与服务端相反方向通（1/0、0/1），同向 dir_11 不通（socks_reply_6）；两端都省略走双向通；客户端省略对服务端方向 0 dir_none_vs_0 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/mode", "test": "pass", "evidence": "tls 模式通；mode 字段不存在，static_key check 拒绝（ration.invalid] Invalid configuration: Invalid OpenVPN outbound fields）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/mtu", "test": "pass", "evidence": "B 的桥接上抓隧道出口 SYN：mtu=1280 时 MSS ['1240']，mtu=1360 时 MSS ['1260', '1320']", "date": "2026-11-03"}
+{"key": "outbound/openvpn/network", "test": "pass", "evidence": "proto=udp 对 proto udp 服务 0.33 MiB/s，proto=tcp 对 tcp-server 服务 0.58 MiB/s；对 tcp 服务改配 udp proto_mismatch 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/password", "test": "pass", "evidence": "服务端 auth-user-pass-verify：正确通；pw_bad 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/ping", "test": "pass", "evidence": "服务端不推 keepalive，A 上抓空闲 14 秒的外发包：ping_secs=2 共 6 个，ping_secs=30 共 0 个；服务端 push ping 3 配 ping_secs=30 时 4 个，推送覆盖本地值", "date": "2026-11-03"}
+{"key": "outbound/openvpn/ping-interval", "test": "pass", "evidence": "服务端不推 keepalive，A 上抓空闲 14 秒的外发包：ping_secs=2 共 6 个，ping_secs=30 共 0 个；服务端 push ping 3 配 ping_secs=30 时 4 个，推送覆盖本地值", "date": "2026-11-03"}
+{"key": "outbound/openvpn/ping-restart", "test": "pass", "evidence": "暂停服务端容器后抓 HARD_RESET：ping_restart_secs=5 时 5.4 秒后重建；本地 0、服务端 push ping-restart 6 时 6.3 秒后重建", "date": "2026-11-03"}
+{"key": "outbound/openvpn/ping-restart-disabled", "test": "pass", "evidence": "ping_restart_secs=0 且服务端不推送时暂停服务端 22 秒没有 HARD_RESET（None）；服务端推送时仍在 6.3 秒后重建，符合标注", "date": "2026-11-03"}
+{"key": "outbound/openvpn/proto", "test": "pass", "evidence": "proto=udp 对 proto udp 服务 0.33 MiB/s，proto=tcp 对 tcp-server 服务 0.58 MiB/s；对 tcp 服务改配 udp proto_mismatch 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/protocol", "test": "pass", "evidence": "官方 OpenVPN 2.6 容器，kerlico 经 B 上转发接入，隧道 NAT 到 C：udp P0 0.33、P2 0.08，tcp 0.58 MiB/s，1 MiB 摘要一致", "date": "2026-11-03"}
+{"key": "outbound/openvpn/renegotiate-disabled", "test": "pass", "evidence": "服务端 reneg-sec 0，reneg_secs=0 观察 26 秒：服务端日志 Control Channel TLS 握手 1 次，之后 256 KiB 摘要一致", "date": "2026-11-03"}
+{"key": "outbound/openvpn/renegotiate-interval", "test": "pass", "evidence": "服务端 reneg-sec 0，reneg_secs=8 观察 26 秒：服务端日志 Control Channel TLS 握手 4 次（首次加客户端发起的重协商），之后 256 KiB 摘要一致", "date": "2026-11-03"}
+{"key": "outbound/openvpn/route-no-pull", "test": "pass", "evidence": "服务端推送 route、redirect-gateway、dhcp-option（日志确认已发送）：allowed_ips 只含隧道网段时到 C 仍 socks_reply_2，未配 allowed_ips 时通，说明推送路由不被读取、不改系统路由", "date": "2026-11-03"}
+{"key": "outbound/openvpn/routes", "test": "pass", "evidence": "allowed_ips=[C/32] 到 C 通，到别的地址 socks_reply_2；allowed_ips=[<ip>/24] 到 C socks_reply_2", "date": "2026-11-03"}
+{"key": "outbound/openvpn/server", "test": "pass", "evidence": "remote 指向对端时 1 MiB 通；端口改错 bad_port 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/server-port", "test": "pass", "evidence": "remote 指向对端时 1 MiB 通；端口改错 bad_port 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/tls", "test": "pass", "evidence": "顶层 ca_pem、cert_pem、key_pem、verify_x509_name、tls_auth、tls_crypt_key 分别观察到效果（见同组各项）；对官方服务端正反例都成立。版本、算法、吊销没有字段，符合标注 partial", "date": "2026-11-03"}
+{"key": "outbound/openvpn/tls-auth", "test": "pass", "evidence": "服务端 tls-auth：同 key 通；换 key auth_bad 不通（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/tls-certificate", "test": "pass", "evidence": "ca_pem=签发服务端的 CA 通；换成无关 CA bad_ca 不通（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/tls-client-certificate", "test": "pass", "evidence": "服务端强制客户端证书：cert_pem+key_pem 通；去掉证书 no_cert 不通（socks_reply_6）；私钥换成不配对的 bad_key_pair 不通（tion.invalid] Invalid configuration: Invalid OpenVPN certificate or private key ；）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/tls-client-key", "test": "pass", "evidence": "服务端强制客户端证书：cert_pem+key_pem 通；去掉证书 no_cert 不通（socks_reply_6）；私钥换成不配对的 bad_key_pair 不通（tion.invalid] Invalid configuration: Invalid OpenVPN certificate or private key ；）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/tls-control-wrap", "test": "pass", "evidence": "无封装 0.24、tls-auth 0.58、tls-crypt 0.33 MiB/s 都对官方服务端通；tls-crypt-v2 没有字段", "date": "2026-11-03"}
+{"key": "outbound/openvpn/tls-control-wrap-direction", "test": "pass", "evidence": "tls_auth.direction：与服务端相反方向通（1/0、0/1），同向 dir_11 不通（socks_reply_6）；两端都省略走双向通；客户端省略对服务端方向 0 dir_none_vs_0 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/tls-control-wrap-key", "test": "pass", "evidence": "tls_auth.key 和 tls_crypt_key 各自同 key 通；换 key 分别 auth_bad 不通（socks_reply_1）、crypt_bad 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/tls-crypt", "test": "pass", "evidence": "服务端 tls-crypt：同 key 通；换 key crypt_bad 不通（socks_reply_6）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/tls-server-name", "test": "pass", "evidence": "verify_x509_name=server 通；改 other x509_bad 不通（socks_reply_1）；省略不校验 CN 通", "date": "2026-11-03"}
+{"key": "outbound/openvpn/tls-server-name-type", "test": "pass", "evidence": "只有 name 语义：CN 完全相等才通，错 CN x509_bad 不通（socks_reply_1）；check 拒绝额外字段（ration.invalid] Invalid configuration: Invalid OpenVPN outbound fields）", "date": "2026-11-03"}
+{"key": "outbound/openvpn/topology", "test": "pass", "evidence": "服务端 topology subnet 0.37、net30 0.67、p2p 0.46 MiB/s，推送的 ifconfig 被解析，1 MiB 通", "date": "2026-11-03"}
+{"key": "outbound/openvpn/username", "test": "pass", "evidence": "服务端 auth-user-pass-verify：正确通；pw_user_bad 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/ssh/combo", "test": "pass", "evidence": "auth 4 种 × 主机密钥 ed25519、rsa、ecdsa 共 12 组对 OpenSSH 各传 256 KiB 通；host_key=any（空、省略）和 algorithms 字段 check 拒绝（figuration.invalid] Invalid configuration: Invalid SSH outbound fields），kerlico 只开放 pinned", "date": "2026-11-03"}
+{"key": "outbound/ssh/host-key", "test": "pass", "evidence": "host_key_sha256：正确指纹通；bad_pin 不通（socks_reply_2）；check 拒绝空列表（configuration.invalid] Invalid configuration: Invalid SSH options or credentials）和省略（[configuration.invalid] Invalid configuration: Invalid SSH outbound fields）。只支持固定指纹，与标注 partial 一致", "date": "2026-11-03"}
+{"key": "outbound/ssh/password", "test": "pass", "evidence": "OpenSSH：正确口令 1 MiB 通；bad_password 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/ssh/private-key", "test": "pass", "evidence": "OpenSSH：授权的内联私钥 1 MiB 通；other_key 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/ssh/private-key-passphrase", "test": "pass", "evidence": "OpenSSH：带口令的私钥配对口令 1 MiB 通；pass_bad 不通（nvalid] Invalid configuration: Invalid SSH private key or decryption passphrase ；）；pass_none 不通（nvalid] Invalid configuration: Invalid SSH private key or decryption passphrase ；）", "date": "2026-11-03"}
+{"key": "outbound/ssh/private-key-path", "test": "pass", "evidence": "OpenSSH：private_key_file 指向 A 上文件，1 MiB 通 1.01 MiB/s", "date": "2026-11-03"}
+{"key": "outbound/ssh/protocol", "test": "pass", "evidence": "OpenSSH 容器，A→B OpenSSH→C 回显，1 MiB 摘要一致：P0 0.73 MiB/s，P2 0.44 MiB/s", "date": "2026-11-03"}
+{"key": "outbound/ssh/server", "test": "pass", "evidence": "OpenSSH：server.host/port 指向 sshd 时通；端口改错后 bad_port 不通（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/ssh/server-port", "test": "pass", "evidence": "OpenSSH：server.host/port 指向 sshd 时通；端口改错后 bad_port 不通（socks_reply_1）", "date": "2026-11-03"}
+{"key": "outbound/ssh/user", "test": "pass", "evidence": "OpenSSH AllowUsers 单用户：username=proxy-test 通；改成其他用户 bad_user 不通（socks_reply_2）", "date": "2026-11-03"}
+{"key": "outbound/ssh/username", "test": "pass", "evidence": "OpenSSH AllowUsers 单用户：username=proxy-test 通；改成其他用户 bad_user 不通（socks_reply_2）", "date": "2026-11-03"}
