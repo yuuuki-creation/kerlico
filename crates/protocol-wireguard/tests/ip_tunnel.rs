@@ -54,6 +54,134 @@ fn context(cancel: CancellationToken) -> InboundContext {
     }
 }
 
+fn carries_tcp_data(packet: &[u8]) -> bool {
+    let header = usize::from(packet[0] & 15) * 4;
+    packet[9] == 6 && packet.len() > header + usize::from(packet[header + 12] >> 4) * 4
+}
+/// 取出当前拥塞窗口放行的全部数据段；ACK 随之丢弃。
+async fn first_flight(next: impl AsyncFn() -> Result<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut flight = Vec::new();
+    while let Ok(packet) = timeout(Duration::from_millis(200), next()).await {
+        let packet = packet.unwrap();
+        if carries_tcp_data(&packet) {
+            flight.push(packet);
+        }
+    }
+    assert!(flight.len() > 1, "回退后重传一段不足以越过对端已收的序号");
+    flight
+}
+
+/// 两端的多段数据交叉送达而 ACK 全丢时，两端都超时回退到对端已收过的序号。
+/// 回退后的空 ACK 若仍带回退序号，会被对端当作窗口外报文丢弃，两端互相忽略 ACK，流永久停住。
+#[tokio::test]
+async fn tcp_recovers_when_both_ends_time_out_after_crossing_segments() {
+    timeout(Duration::from_secs(20), async {
+        let input =
+            NodeBuildContext::for_test(json!({}), vec![json!({"password":"synthetic-ip-member"})]);
+        let credentials = input
+            .credentials(vec![b"synthetic-ip-member".to_vec()])
+            .unwrap();
+        let direct = kerlico_net::DirectFactory
+            .compile(&json!({}))
+            .unwrap()
+            .start(ServiceContext::for_test())
+            .await
+            .unwrap();
+        let (ingress, _telemetry) = kerlico_egress::testing::ingress_with_resolver(
+            &input,
+            direct,
+            TargetPolicy::Local,
+            FamilyMode::DualV4Preferred,
+            Arc::new(NoDns),
+        )
+        .unwrap();
+        let stop = CancellationToken::new();
+        let context = context(stop.clone());
+        let verified = credentials
+            .verify(&b"synthetic-ip-member".to_vec(), |expected, value| {
+                Ok((expected == value).then_some(()))
+            })
+            .unwrap();
+        let (access, ()) = ingress.authenticated(verified, &context).unwrap();
+        let client =
+            ClientTunnel::new(options(&["10.77.0.2"], &["0.0.0.0/0"]), stop.clone()).unwrap();
+        let server = Arc::new(
+            ServerTunnel::new(
+                options(&["10.77.0.1"], &["10.77.0.2/32"]),
+                access,
+                context,
+            )
+            .unwrap(),
+        );
+        let pump = |client: ClientTunnel, server: Arc<ServerTunnel>| {
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        packet = client.next_packet() => { server.receive(&packet.unwrap()).unwrap(); }
+                        packet = server.next_packet() => { client.receive(&packet.unwrap()).unwrap(); }
+                    }
+                }
+            })
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handshake = pump(client.clone(), server.clone());
+        let mut stream = client
+            .connect_tcp(
+                &Destination::new(&address.ip().to_string(), address.port()).unwrap(),
+                &ConnectContext::new(Duration::from_secs(3)),
+            )
+            .await
+            .unwrap()
+            .stream;
+        let (mut target, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        handshake.abort();
+
+        let up = vec![0x5a; 5000];
+        let down = vec![0xa5; 5000];
+        stream.write_all(&up).await.unwrap();
+        target.write_all(&down).await.unwrap();
+        let (from_client, from_server) = tokio::join!(
+            first_flight(async || client.next_packet().await),
+            first_flight(async || server.next_packet().await),
+        );
+        for packet in &from_client {
+            server.receive(packet).unwrap();
+        }
+        for packet in &from_server {
+            client.receive(packet).unwrap();
+        }
+
+        // 此后的全部 ACK 丢失，时长超过初始重传超时。
+        let _ = timeout(Duration::from_millis(1500), async {
+            loop {
+                tokio::select! {
+                    packet = client.next_packet() => { packet.unwrap(); }
+                    packet = server.next_packet() => { packet.unwrap(); }
+                }
+            }
+        })
+        .await;
+
+        let recovered = pump(client.clone(), server.clone());
+        let mut received_up = vec![0; up.len()];
+        let mut received_down = vec![0; down.len()];
+        let (read_up, read_down) = tokio::join!(
+            target.read_exact(&mut received_up),
+            stream.read_exact(&mut received_down),
+        );
+        read_up.unwrap();
+        read_down.unwrap();
+        assert_eq!(received_up, up);
+        assert_eq!(received_down, down);
+        recovered.abort();
+        stop.cancel();
+    })
+    .await
+    .expect("两端都超时后 TCP 流没有恢复");
+}
+
 #[tokio::test]
 async fn plaintext_ip_bridge_preserves_tcp_fin_maximum_udp_and_trusted_usage() {
     timeout(Duration::from_secs(20), async {
