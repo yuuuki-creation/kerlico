@@ -38,11 +38,13 @@ default = [
     "protocol-zerotier",
     "protocol-tun",
     "protocol-easytier",
+    "protocol-mixed",
     "warp",
 ]
 warp = ["dep:kerlico-device"]
 protocol-tun = ["dep:kerlico-tun"]
 protocol-easytier = ["dep:kerlico-easytier"]
+protocol-mixed = ["dep:kerlico-mixed"]
 protocol-vless = ["dep:kerlico-vless"]
 protocol-anytls = ["dep:kerlico-anytls"]
 protocol-ss2022 = ["dep:kerlico-ss2022"]
@@ -84,6 +86,7 @@ kerlico-control.workspace = true
 kerlico-device = { workspace = true, optional = true }
 kerlico-tun = { workspace = true, optional = true }
 kerlico-easytier = { workspace = true, optional = true }
+kerlico-mixed = { workspace = true, optional = true }
 kerlico-vless = { workspace = true, optional = true }
 kerlico-anytls = { workspace = true, optional = true }
 kerlico-ss2022 = { workspace = true, optional = true }

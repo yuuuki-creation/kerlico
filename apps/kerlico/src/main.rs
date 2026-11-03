@@ -134,6 +134,10 @@ fn registry() -> Result<Registry> {
         registry.register(kerlico_vmess::VmessFactory)?;
         registry.register_node(kerlico_vmess::VmessNodeFactory)?;
     }
+    #[cfg(feature = "protocol-mixed")]
+    {
+        registry.register_node(kerlico_mixed::MixedNodeFactory)?;
+    }
     #[cfg(feature = "protocol-http")]
     {
         registry.register(kerlico_http::HttpFactory)?;

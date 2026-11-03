@@ -2,5 +2,6 @@
 mod config;
 mod inbound;
 mod outbound;
+pub use config::{ServerTls, server_tls};
 pub use inbound::HttpNodeFactory;
 pub use outbound::HttpFactory;

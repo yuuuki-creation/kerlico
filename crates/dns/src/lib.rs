@@ -1,8 +1,9 @@
 //! 为 `Local` 路径解析网站域名：静态 hosts 优先，其余查询配置的上游并使用其缓存。
+mod doh;
+use doh::{Bootstrap, Dial, HttpsUpstream, Provider};
 use hickory_resolver::{
-    TokioResolver,
+    Resolver,
     config::{ConnectionConfig, LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig},
-    net::runtime::TokioRuntimeProvider,
 };
 use kerlico_core::{Address, Destination, Error, Result};
 use serde::Deserialize;
@@ -12,14 +13,56 @@ use std::{
     sync::Arc,
 };
 
-/// 上游只接受字面 IP，避免解析上游本身时递归。
+/// `udp://`、`tcp://`、`tls://` 只接受字面 IP；`https://` 可写域名，由
+/// `hosts` 或 `default_nameserver` 引导，引导解析不经过 `servers`。
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DnsSpec {
     #[serde(default)]
-    pub servers: Vec<String>,
+    pub servers: Vec<ServerSpec>,
+    #[serde(default)]
+    pub default_nameserver: Vec<ServerSpec>,
     #[serde(default)]
     pub hosts: BTreeMap<String, Vec<IpAddr>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ServerSpec {
+    Url(String),
+    Https(HttpsServerSpec),
+}
+
+/// 字段名与 sing-box 的 `https` DNS 服务器一致。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpsServerSpec {
+    #[serde(rename = "type")]
+    kind: HttpsKind,
+    server: String,
+    #[serde(default)]
+    server_port: Option<u16>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    tls: Option<HttpsTlsSpec>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+enum HttpsKind {
+    #[serde(rename = "https")]
+    Https,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpsTlsSpec {
+    #[serde(default)]
+    server_name: Option<String>,
+    #[serde(default)]
+    ca_pem: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -29,11 +72,16 @@ enum Transport {
     Tls(String),
 }
 
+enum Upstream {
+    Plain(Transport, SocketAddr),
+    Https(Box<HttpsUpstream>),
+}
+
 fn invalid() -> Error {
     Error::Config("DNS 配置不合法".into())
 }
 
-fn parse_server(text: &str) -> Result<(Transport, SocketAddr)> {
+fn parse_plain(text: &str) -> Result<(Transport, SocketAddr)> {
     let (scheme, rest) = text.split_once("://").ok_or_else(invalid)?;
     let (authority, name) = match rest.split_once('#') {
         Some((authority, name)) => (authority, Some(name)),
@@ -64,6 +112,19 @@ fn parse_server(text: &str) -> Result<(Transport, SocketAddr)> {
     Ok((transport, address))
 }
 
+fn parse_upstream(spec: &ServerSpec) -> Result<Upstream> {
+    Ok(match spec {
+        ServerSpec::Url(text) if text.starts_with("https://") => {
+            Upstream::Https(Box::new(HttpsUpstream::from_url(text)?))
+        }
+        ServerSpec::Url(text) => {
+            let (transport, address) = parse_plain(text)?;
+            Upstream::Plain(transport, address)
+        }
+        ServerSpec::Https(spec) => Upstream::Https(Box::new(HttpsUpstream::from_spec(spec)?)),
+    })
+}
+
 fn normalize(host: &str) -> Result<String> {
     match Destination::new(host, 1).map_err(|_| invalid())?.address() {
         Address::Domain(name) => Ok(name.strip_suffix('.').unwrap_or(name).to_owned()),
@@ -71,64 +132,132 @@ fn normalize(host: &str) -> Result<String> {
     }
 }
 
-impl DnsSpec {
-    pub fn validate(&self) -> Result<()> {
-        if self.servers.is_empty() && self.hosts.is_empty() {
+/// 校验后的配置，`check` 和运行共用；不访问网络。
+struct Compiled {
+    servers: Vec<Upstream>,
+    default_nameserver: Vec<Upstream>,
+    hosts: BTreeMap<String, Vec<IpAddr>>,
+}
+
+impl Compiled {
+    fn new(spec: &DnsSpec) -> Result<Self> {
+        if spec.servers.is_empty() && spec.hosts.is_empty() {
             return Err(invalid());
         }
-        for server in &self.servers {
-            parse_server(server)?;
-        }
-        for (host, addresses) in &self.hosts {
-            normalize(host)?;
-            if addresses.is_empty() {
+        let servers = spec
+            .servers
+            .iter()
+            .map(parse_upstream)
+            .collect::<Result<Vec<_>>>()?;
+        let default_nameserver = spec
+            .default_nameserver
+            .iter()
+            .map(parse_upstream)
+            .collect::<Result<Vec<_>>>()?;
+        let hosts = spec
+            .hosts
+            .iter()
+            .map(|(host, addresses)| {
+                if addresses.is_empty() {
+                    return Err(invalid());
+                }
+                Ok((normalize(host)?, addresses.clone()))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        for upstream in &default_nameserver {
+            if let Upstream::Https(https) = upstream
+                && matches!(https.dial(), Dial::Domain(_))
+            {
                 return Err(invalid());
             }
         }
-        Ok(())
+        for upstream in &servers {
+            if let Upstream::Https(https) = upstream
+                && let Dial::Domain(name) = https.dial()
+                && default_nameserver.is_empty()
+                && !hosts.contains_key(name)
+            {
+                return Err(invalid());
+            }
+        }
+        for upstream in servers.iter().chain(&default_nameserver) {
+            if let Upstream::Https(https) = upstream {
+                https.client(None)?;
+            }
+        }
+        Ok(Self {
+            servers,
+            default_nameserver,
+            hosts,
+        })
     }
 }
 
+impl DnsSpec {
+    pub fn validate(&self) -> Result<()> {
+        Compiled::new(self).map(|_| ())
+    }
+}
+
+/// hickory 的连接池要求每个上游有固定 IP，DoH 域名的地址随引导解析变化，
+/// 所以 DoH 上游在池内用占位地址，真正的拨号在 [`doh`] 内完成。
+fn pool(upstreams: &[Upstream], bootstrap: Option<&Arc<Bootstrap>>) -> Result<Resolver<Provider>> {
+    let mut provider = Provider::default();
+    let servers = upstreams
+        .iter()
+        .map(|upstream| match upstream {
+            Upstream::Plain(transport, address) => {
+                let mut connection = match transport {
+                    Transport::Udp => ConnectionConfig::udp(),
+                    Transport::Tcp => ConnectionConfig::tcp(),
+                    Transport::Tls(name) => ConnectionConfig::tls(Arc::from(name.as_str())),
+                };
+                connection.port = address.port();
+                Ok(NameServerConfig::new(address.ip(), true, vec![connection]))
+            }
+            Upstream::Https(https) => {
+                let placeholder = provider.add(https.client(bootstrap)?);
+                Ok(NameServerConfig::new(
+                    placeholder,
+                    true,
+                    vec![ConnectionConfig::tcp()],
+                ))
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut builder =
+        Resolver::builder_with_config(ResolverConfig::from_name_servers(servers), provider);
+    builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
+    builder.options_mut().use_hosts_file = ResolveHosts::Never;
+    builder.build().map_err(|_| invalid())
+}
+
 pub struct DnsResolver {
-    upstream: Option<TokioResolver>,
+    upstream: Option<Resolver<Provider>>,
     hosts: BTreeMap<String, Vec<IpAddr>>,
 }
 
 impl DnsResolver {
     /// 需要在 Tokio 运行时内调用。
     pub fn new(spec: &DnsSpec) -> Result<Self> {
-        spec.validate()?;
-        let hosts = spec
-            .hosts
-            .iter()
-            .map(|(host, addresses)| Ok((normalize(host)?, addresses.clone())))
-            .collect::<Result<_>>()?;
-        let upstream = if spec.servers.is_empty() {
+        let compiled = Compiled::new(spec)?;
+        let bootstrap = Arc::new(Bootstrap {
+            hosts: compiled.hosts.clone(),
+            resolver: if compiled.default_nameserver.is_empty() {
+                None
+            } else {
+                Some(pool(&compiled.default_nameserver, None)?)
+            },
+        });
+        let upstream = if compiled.servers.is_empty() {
             None
         } else {
-            let servers = spec
-                .servers
-                .iter()
-                .map(|server| {
-                    let (transport, address) = parse_server(server)?;
-                    let mut connection = match transport {
-                        Transport::Udp => ConnectionConfig::udp(),
-                        Transport::Tcp => ConnectionConfig::tcp(),
-                        Transport::Tls(name) => ConnectionConfig::tls(Arc::from(name)),
-                    };
-                    connection.port = address.port();
-                    Ok(NameServerConfig::new(address.ip(), true, vec![connection]))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let mut builder = TokioResolver::builder_with_config(
-                ResolverConfig::from_name_servers(servers),
-                TokioRuntimeProvider::default(),
-            );
-            builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
-            builder.options_mut().use_hosts_file = ResolveHosts::Never;
-            Some(builder.build().map_err(|_| invalid())?)
+            Some(pool(&compiled.servers, Some(&bootstrap))?)
         };
-        Ok(Self { upstream, hosts })
+        Ok(Self {
+            upstream,
+            hosts: compiled.hosts,
+        })
     }
 
     pub async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>> {
@@ -211,15 +340,15 @@ mod tests {
     #[test]
     fn bracketed_ipv6_without_port_uses_the_default_port() {
         assert_eq!(
-            parse_server("tcp://[2001:db8::1]").unwrap(),
+            parse_plain("tcp://[2001:db8::1]").unwrap(),
             (Transport::Tcp, "[2001:db8::1]:53".parse().unwrap())
         );
         assert_eq!(
-            parse_server("tcp://2001:db8::1").unwrap(),
+            parse_plain("tcp://2001:db8::1").unwrap(),
             (Transport::Tcp, "[2001:db8::1]:53".parse().unwrap())
         );
         assert_eq!(
-            parse_server("tls://[2001:db8::1]#dns.example").unwrap(),
+            parse_plain("tls://[2001:db8::1]#dns.example").unwrap(),
             (
                 Transport::Tls("dns.example".into()),
                 "[2001:db8::1]:853".parse().unwrap()

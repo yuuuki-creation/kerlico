@@ -19,10 +19,28 @@ use tokio::{
     sync::watch,
 };
 
+/// SOCKS4/4a 的 `userid` 策略。Mixed 无鉴权入口与 Mihomo、sing-box 一样不看 userid；
+/// 有成员时 SOCKS4 无法携带密码，整体拒绝。
+enum Socks4Identity {
+    Exact(String),
+    Any,
+    Denied,
+}
+impl Socks4Identity {
+    fn allows(&self, userid: &[u8]) -> bool {
+        match self {
+            Self::Exact(expected) => config::equal(userid, expected.as_bytes()),
+            Self::Any => true,
+            Self::Denied => false,
+        }
+    }
+}
+
 struct SocksNode {
     version: Version,
     auth: CredentialSet<Auth>,
-    userid: String,
+    identity: Socks4Identity,
+    udp: bool,
 }
 
 fn budget(context: &InboundContext) -> ConnectContext {
@@ -149,6 +167,10 @@ impl SocksNode {
                 Ok((access, header[1], host, port))
             })
             .await?;
+        if command == 3 && !self.udp {
+            response(&mut stream, 7, SocketAddr::from(([0, 0, 0, 0], 0))).await?;
+            return Err(Error::Unsupported("SOCKS 请求命令未实现"));
+        }
         if command == 3 {
             return self
                 .udp(stream, &host, port, access, handshake, context)
@@ -198,7 +220,6 @@ impl SocksNode {
         ingress: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
-        let access = ingress.local(&context)?;
         let handshake = budget(&context);
         let target = handshake
             .run(async {
@@ -216,7 +237,7 @@ impl SocksNode {
                 if header[0] != 4
                     || header[1] != 1
                     || (extension && self.version != Version::FourA)
-                    || !config::equal(&userid, self.userid.as_bytes())
+                    || !self.identity.allows(&userid)
                 {
                     stream.write_all(&[0, 91, 0, 0, 0, 0, 0, 0]).await?;
                     return Err(Error::Rejected);
@@ -224,6 +245,7 @@ impl SocksNode {
                 Destination::new(&host, port)
             })
             .await?;
+        let access = ingress.local(&context)?;
         let remote = match access.connect_tcp(&target, &handshake).await {
             Ok(remote) => remote,
             Err(error) => {
@@ -402,6 +424,49 @@ impl InboundProtocol for SocksNode {
     }
 }
 
+fn member_rows(input: &NodeBuildContext) -> Result<Vec<Auth>> {
+    input
+        .native_credentials()
+        .iter()
+        .map(|value| {
+            let auth: Auth = serde_json::from_value(value.clone())
+                .map_err(|_| Error::Config("SOCKS 用户凭据字段不合法".into()))?;
+            auth.validate()?;
+            Ok(auth)
+        })
+        .collect()
+}
+
+/// Mixed 入站的两个 SOCKS 分支。
+pub struct MixedHandlers {
+    pub five: Arc<dyn InboundProtocol>,
+    pub four: Arc<dyn InboundProtocol>,
+}
+
+/// `udp` 为 `false` 时 SOCKS5 的 UDP ASSOCIATE 返回命令不支持。
+pub fn mixed_handlers(input: &NodeBuildContext, udp: bool) -> Result<MixedHandlers> {
+    let rows = member_rows(input)?;
+    let identity = if rows.is_empty() {
+        Socks4Identity::Any
+    } else {
+        Socks4Identity::Denied
+    };
+    Ok(MixedHandlers {
+        five: Arc::new(SocksNode {
+            version: Version::Five,
+            auth: input.credentials(rows.clone())?,
+            identity: Socks4Identity::Denied,
+            udp,
+        }),
+        four: Arc::new(SocksNode {
+            version: Version::FourA,
+            auth: input.credentials(rows)?,
+            identity,
+            udp: false,
+        }),
+    })
+}
+
 pub struct SocksNodeFactory;
 impl NodeFactory for SocksNodeFactory {
     fn kind(&self) -> &'static str {
@@ -414,23 +479,15 @@ impl NodeFactory for SocksNodeFactory {
         let options: NodeOptions = serde_json::from_value(input.options().clone())
             .map_err(|_| Error::Config("SOCKS 节点字段不合法".into()))?;
         config::validate(options.version, &None, &options.userid)?;
-        let rows = input
-            .native_credentials()
-            .iter()
-            .map(|value| {
-                let auth: Auth = serde_json::from_value(value.clone())
-                    .map_err(|_| Error::Config("SOCKS 用户凭据字段不合法".into()))?;
-                auth.validate()?;
-                Ok(auth)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let rows = member_rows(input)?;
         if options.version != Version::Five && !rows.is_empty() {
             return Err(Error::Config("SOCKS4/4a 只能作为 Local 入站".into()));
         }
         Ok(Arc::new(SocksNode {
             version: options.version,
             auth: input.credentials(rows)?,
-            userid: options.userid,
+            identity: Socks4Identity::Exact(options.userid),
+            udp: true,
         }))
     }
 }

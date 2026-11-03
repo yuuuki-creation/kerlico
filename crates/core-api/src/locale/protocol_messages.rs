@@ -93,6 +93,7 @@ pub(super) const DIAGNOSTICS: &[(&str, &str)] = &[
         "Invalid SOCKS user credential fields",
     ),
     ("SOCKS 节点字段不合法", "Invalid SOCKS node fields"),
+    ("Mixed 节点字段不合法", "Invalid Mixed node fields"),
     (
         "SOCKS 请求命令未实现",
         "The SOCKS request command is not implemented",
