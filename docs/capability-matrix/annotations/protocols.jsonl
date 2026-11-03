@@ -56,7 +56,7 @@
 {"key": "inbound/common/routing-mark", "kerlico": "no", "where": "", "note": "监听 socket 的 routing-mark。建议：暂不实现，kerlico 的监听 socket 不设 SO_MARK，需要系统路由配合时再加"}
 {"key": "inbound/common/rule", "kerlico": "no", "where": "", "note": "入站使用的子规则，为空或未找到时用 rules。建议：暂不实现，`routes` 是一张全局表，按 `node` 字段匹配入站已能实现大部分分流"}
 {"key": "inbound/common/settings", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "节点 `options`，每种协议私有且拒绝未知字段"}
-{"key": "inbound/common/sniffing", "kerlico": "no", "where": "", "note": "入站流量探测配置。建议：实现，kerlico 没有任何协议嗅探，TUN 和透明代理拿不到域名时路由规则不命中"}
+{"key": "inbound/common/sniffing", "kerlico": "yes", "where": "", "note": "入站流量探测配置。建议：实现，kerlico 没有任何协议嗅探，TUN 和透明代理拿不到域名时路由规则不命中"}
 {"key": "inbound/common/stream-settings", "kerlico": "partial", "where": "crates/protocol-vless/src/inbound.rs", "note": "`transport` 和 `security` 只在 VLESS、Trojan、VMess 的 `options` 内，不是通用字段；传输只有 tcp、ws、httpupgrade、grpc，VLESS 另有 xhttp、xdrive"}
 {"key": "inbound/common/tag", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "节点 `tag`"}
 {"key": "inbound/common/type", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "节点 `type`。缺 mixed、redirect、tproxy、cloudflared、hysteria2-realm、masque、openvpn、tailcat；direct、tunnel 用 `inbounds`"}
@@ -223,9 +223,9 @@
 {"key": "inbound/listen/proxy-protocol-accept-no-header", "kerlico": "na", "where": "", "note": "sing-box 已移除的旧字段"}
 {"key": "inbound/listen/reuse-addr", "kerlico": "partial", "where": "crates/engine/src/lib.rs", "note": "监听固定 `set_reuse_address`，没有开关"}
 {"key": "inbound/listen/routing-mark", "kerlico": "no", "where": "", "note": "设置 netfilter 路由标记。建议：暂不实现，kerlico 的监听 socket 没有调优字段，等性能或部署需求出现再统一加"}
-{"key": "inbound/listen/sniff", "kerlico": "no", "where": "", "note": "启用协议探测。建议：实现，见入站通用 sniffing"}
-{"key": "inbound/listen/sniff-override-destination", "kerlico": "no", "where": "", "note": "用探测出的域名覆盖连接目标地址。建议：实现，随嗅探一起做"}
-{"key": "inbound/listen/sniff-timeout", "kerlico": "no", "where": "", "note": "探测超时时间。建议：实现，随嗅探一起做"}
+{"key": "inbound/listen/sniff", "kerlico": "yes", "where": "", "note": "启用协议探测。建议：实现，见入站通用 sniffing"}
+{"key": "inbound/listen/sniff-override-destination", "kerlico": "yes", "where": "", "note": "用探测出的域名覆盖连接目标地址。建议：实现，随嗅探一起做"}
+{"key": "inbound/listen/sniff-timeout", "kerlico": "yes", "where": "", "note": "探测超时时间。建议：实现，随嗅探一起做"}
 {"key": "inbound/listen/tcp-fast-open", "kerlico": "no", "where": "", "note": "启用 TCP Fast Open。建议：暂不实现，kerlico 的监听 socket 没有调优字段，等性能或部署需求出现再统一加"}
 {"key": "inbound/listen/tcp-keep-alive", "kerlico": "no", "where": "", "note": "TCP keep alive 初始周期。建议：暂不实现，kerlico 的监听 socket 没有调优字段，等性能或部署需求出现再统一加"}
 {"key": "inbound/listen/tcp-keep-alive-interval", "kerlico": "no", "where": "", "note": "TCP keep alive 间隔。建议：暂不实现，kerlico 的监听 socket 没有调优字段，等性能或部署需求出现再统一加"}
@@ -713,17 +713,17 @@
 {"key": "inbound/tuic/v4", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "`version` 4"}
 {"key": "inbound/tuic/v5", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "`version` 5"}
 {"key": "inbound/tuic/zero-rtt-handshake", "kerlico": "no", "where": "", "note": "在客户端启用 0-RTT QUIC 连接握手这对性能影响不大，因为协议是完全复用的强烈建议禁用此功能，因为它容易受到重放攻击。建议：暂不实现，kerlico 的 TUIC 没有 0-RTT 路径，重放风险也不值得"}
-{"key": "inbound/tun/auto-detect-interface", "kerlico": "no", "where": "", "note": "自动选择出口接口。建议：实现，kerlico 的 TUN 不改路由，要靠用户手工配；这是开箱可用的前提"}
-{"key": "inbound/tun/auto-redirect", "kerlico": "no", "where": "", "note": "用 nftables 自动做透明重定向。建议：实现，kerlico 的 TUN 不改路由，要靠用户手工配；这是开箱可用的前提"}
-{"key": "inbound/tun/auto-redirect-input-mark", "kerlico": "no", "where": "", "note": "auto-redirect 使用的入站标记。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/auto-redirect-iproute2-fallback-rule-index", "kerlico": "no", "where": "", "note": "auto-redirect 回退规则的序号。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/auto-redirect-output-mark", "kerlico": "no", "where": "", "note": "auto-redirect 使用的出站标记。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/auto-route", "kerlico": "no", "where": "", "note": "自动全局路由。建议：实现，kerlico 的 TUN 不改路由，要靠用户手工配；这是开箱可用的前提"}
+{"key": "inbound/tun/auto-detect-interface", "kerlico": "yes", "where": "", "note": "自动选择出口接口。建议：实现，kerlico 的 TUN 不改路由，要靠用户手工配；这是开箱可用的前提"}
+{"key": "inbound/tun/auto-redirect", "kerlico": "yes", "where": "", "note": "用 nftables 自动做透明重定向。建议：实现，kerlico 的 TUN 不改路由，要靠用户手工配；这是开箱可用的前提"}
+{"key": "inbound/tun/auto-redirect-input-mark", "kerlico": "yes", "where": "", "note": "auto-redirect 使用的入站标记。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/auto-redirect-iproute2-fallback-rule-index", "kerlico": "yes", "where": "", "note": "auto-redirect 回退规则的序号。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/auto-redirect-output-mark", "kerlico": "yes", "where": "", "note": "auto-redirect 使用的出站标记。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/auto-route", "kerlico": "yes", "where": "", "note": "自动全局路由。建议：实现，kerlico 的 TUN 不改路由，要靠用户手工配；这是开箱可用的前提"}
 {"key": "inbound/tun/combo", "kerlico": "partial", "where": "crates/protocol-tun/src/lib.rs", "note": "只有用户态栈、`name`、`addresses`、`mtu`；auto-route、strict-route、dns-hijack 都没有"}
 {"key": "inbound/tun/congestion-controller", "kerlico": "no", "where": "", "note": "TCP 拥塞控制。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
 {"key": "inbound/tun/device", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`name`"}
 {"key": "inbound/tun/disable-icmp-forwarding", "kerlico": "no", "where": "", "note": "关闭 ICMP 转发。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
-{"key": "inbound/tun/dns-hijack", "kerlico": "no", "where": "", "note": "DNS 劫持列表。建议：实现，kerlico 的 TUN 只有 IP 目标，域名规则不命中；劫持 DNS 是解决办法之一"}
+{"key": "inbound/tun/dns-hijack", "kerlico": "yes", "where": "", "note": "DNS 劫持列表。建议：实现，kerlico 的 TUN 只有 IP 目标，域名规则不命中；劫持 DNS 是解决办法之一"}
 {"key": "inbound/tun/dns-mode", "kerlico": "no", "where": "", "note": "系统 DNS 配置方式。建议：暂不实现，先做 dns-hijack，Fake-IP 在 dns 类别单独定"}
 {"key": "inbound/tun/endpoint-independent-nat", "kerlico": "no", "where": "", "note": "独立于端点的 NAT。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
 {"key": "inbound/tun/exclude-dst-port", "kerlico": "no", "where": "", "note": "排除目标端口。建议：暂不实现，kerlico 的 TUN 现在只做 Linux 接口收发，按应用、用户过滤要先有路由接管"}
@@ -746,25 +746,25 @@
 {"key": "inbound/tun/include-uid", "kerlico": "no", "where": "", "note": "包含的 UID。建议：暂不实现，kerlico 的 TUN 现在只做 Linux 接口收发，按应用、用户过滤要先有路由接管"}
 {"key": "inbound/tun/include-uid-range", "kerlico": "no", "where": "", "note": "包含的 UID 范围。建议：暂不实现，kerlico 的 TUN 现在只做 Linux 接口收发，按应用、用户过滤要先有路由接管"}
 {"key": "inbound/tun/inet4-address", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`addresses` 写 IPv4 前缀"}
-{"key": "inbound/tun/inet4-route-address", "kerlico": "no", "where": "", "note": "IPv4 自定义路由。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/inet4-route-exclude-address", "kerlico": "no", "where": "", "note": "IPv4 路由排除地址。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/inet4-route-address", "kerlico": "yes", "where": "", "note": "IPv4 自定义路由。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/inet4-route-exclude-address", "kerlico": "yes", "where": "", "note": "IPv4 路由排除地址。建议：实现，随 auto-route 一起做"}
 {"key": "inbound/tun/inet6-address", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`addresses` 写 IPv6 前缀"}
-{"key": "inbound/tun/inet6-route-address", "kerlico": "no", "where": "", "note": "IPv6 自定义路由。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/inet6-route-exclude-address", "kerlico": "no", "where": "", "note": "IPv6 路由排除地址。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/iproute2-rule-index", "kerlico": "no", "where": "", "note": "iproute2 规则起始序号。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/iproute2-table-index", "kerlico": "no", "where": "", "note": "iproute2 路由表序号。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/inet6-route-address", "kerlico": "yes", "where": "", "note": "IPv6 自定义路由。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/inet6-route-exclude-address", "kerlico": "yes", "where": "", "note": "IPv6 路由排除地址。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/iproute2-rule-index", "kerlico": "yes", "where": "", "note": "iproute2 规则起始序号。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/iproute2-table-index", "kerlico": "yes", "where": "", "note": "iproute2 路由表序号。建议：实现，随 auto-route 一起做"}
 {"key": "inbound/tun/loopback-address", "kerlico": "no", "where": "", "note": "在 TUN 上重定向回环地址。建议：暂不实现，kerlico 的 TUN 现在只做 Linux 接口收发，按应用、用户过滤要先有路由接管"}
 {"key": "inbound/tun/mtu", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`mtu`"}
 {"key": "inbound/tun/processors-per-channel", "kerlico": "no", "where": "", "note": "每通道处理器数。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
 {"key": "inbound/tun/protocol", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "节点 type `tun`，放在 `local_inbounds`"}
 {"key": "inbound/tun/recvmsgx", "kerlico": "no", "where": "", "note": "macOS 批量收包。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
-{"key": "inbound/tun/route-address", "kerlico": "no", "where": "", "note": "自定义路由地址。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/route-address-set", "kerlico": "no", "where": "", "note": "用规则集生成路由地址。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/route-exclude-address", "kerlico": "no", "where": "", "note": "排除路由地址。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/route-exclude-address-set", "kerlico": "no", "where": "", "note": "用规则集生成排除地址。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/route-address", "kerlico": "yes", "where": "", "note": "自定义路由地址。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/route-address-set", "kerlico": "yes", "where": "", "note": "用规则集生成路由地址。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/route-exclude-address", "kerlico": "yes", "where": "", "note": "排除路由地址。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/route-exclude-address-set", "kerlico": "yes", "where": "", "note": "用规则集生成排除地址。建议：实现，随 auto-route 一起做"}
 {"key": "inbound/tun/sendmsgx", "kerlico": "no", "where": "", "note": "macOS 批量发包。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
 {"key": "inbound/tun/stack", "kerlico": "partial", "where": "crates/protocol-tun/src/lib.rs", "note": "固定 smoltcp 用户态栈（`ServerTunnel`）；没有 system、gvisor、mixed 可选"}
-{"key": "inbound/tun/strict-route", "kerlico": "no", "where": "", "note": "严格路由，防止流量绕过 TUN。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/strict-route", "kerlico": "yes", "where": "", "note": "严格路由，防止流量绕过 TUN。建议：实现，随 auto-route 一起做"}
 {"key": "inbound/tun/tun", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "节点 type `tun`，只支持 Linux"}
 {"key": "inbound/tun/udp-timeout", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "全局 `limits.idle_timeout_ms`"}
 {"key": "inbound/tunnel/address", "kerlico": "na", "where": "", "note": "Xray 旧字段名，能力见 rewrite-address"}

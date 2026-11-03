@@ -7,7 +7,7 @@ use kerlico_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     net::SocketAddr,
     sync::Arc,
     time::Duration,
@@ -16,7 +16,10 @@ mod plan;
 pub use plan::*;
 mod users;
 pub use kerlico_dns::DnsSpec;
-pub use kerlico_routing::{Network, RouteTable, RuleSpec};
+pub use kerlico_routing::{
+    CompiledRuleSet, GeoConfigSpec, GeoxUrlSpec, Network, RouteTable, RuleProviderSpec,
+    RuleSetSpec, RuleSpec,
+};
 pub use users::AccountSpec;
 
 #[derive(Deserialize)]
@@ -45,7 +48,11 @@ pub struct Config {
     #[serde(default, alias = "tproxy-port")]
     pub tproxy_port: Option<u16>,
     #[serde(default)]
+    pub tun: Option<Value>,
+    #[serde(default)]
     pub dialer: GlobalDialerSpec,
+    #[serde(default, alias = "interface-name", alias = "bind-interface")]
+    pub interface_name: Option<String>,
     #[serde(default, alias = "routing-mark")]
     pub routing_mark: Option<u32>,
     #[serde(
@@ -75,7 +82,35 @@ pub struct Config {
     #[serde(default)]
     pub routes: Vec<RuleSpec>,
     #[serde(default)]
+    pub route: Option<RouteConfigSpec>,
+    #[serde(default, alias = "rule-set")]
+    pub rule_set: Vec<RuleSetSpec>,
+    #[serde(default, alias = "rule-providers")]
+    pub rule_providers: BTreeMap<String, RuleProviderSpec>,
+    #[serde(default, alias = "geodata-mode")]
+    pub geodata_mode: Option<bool>,
+    #[serde(default, alias = "geodata-loader")]
+    pub geodata_loader: Option<String>,
+    #[serde(default, alias = "geosite-matcher")]
+    pub geosite_matcher: Option<String>,
+    #[serde(default, alias = "geo-auto-update")]
+    pub geo_auto_update: Option<bool>,
+    #[serde(default, alias = "geo-update-interval")]
+    pub geo_update_interval: Option<u64>,
+    #[serde(default, alias = "geox-url")]
+    pub geox_url: Option<GeoxUrlSpec>,
+    #[serde(default)]
     pub dns: Option<DnsSpec>,
+    #[serde(default)]
+    pub fakedns: Option<kerlico_dns::FakeDnsInput>,
+    #[serde(default)]
+    pub sniffer: Option<GlobalSnifferSpec>,
+    #[serde(default)]
+    pub experimental: Option<ExperimentalSpec>,
+    #[serde(default, alias = "cache-file")]
+    pub cache_file: Option<kerlico_dns::CacheFileSpec>,
+    #[serde(default)]
+    pub profile: Option<ProfileCacheSpec>,
     #[serde(default)]
     pub control: Option<ControlSpec>,
 }
@@ -211,6 +246,7 @@ pub struct NodeSpec {
     pub outbound: String,
     #[serde(default)]
     pub mode: NodeMode,
+    #[serde(default = "empty_object")]
     pub options: Value,
     #[serde(default)]
     pub members: Vec<MemberSpec>,
@@ -218,6 +254,14 @@ pub struct NodeSpec {
     pub max_sessions: Option<usize>,
     #[serde(default, alias = "accept-proxy-protocol")]
     pub accept_proxy_protocol: bool,
+    #[serde(default)]
+    pub sniff: Option<bool>,
+    #[serde(default, alias = "sniff-override-destination")]
+    pub sniff_override_destination: Option<bool>,
+    #[serde(default, alias = "sniff-timeout")]
+    pub sniff_timeout: Option<DurationSpec>,
+    #[serde(default)]
+    pub sniffing: Option<InboundSniffingSpec>,
 }
 
 /// 每个协议仅见本节点原生凭据和不可由网络构造的签发者。
@@ -317,6 +361,14 @@ pub struct ForwardSpec {
     pub require_remote_eof: bool,
     #[serde(default, alias = "accept-proxy-protocol")]
     pub accept_proxy_protocol: bool,
+    #[serde(default)]
+    pub sniff: Option<bool>,
+    #[serde(default, alias = "sniff-override-destination")]
+    pub sniff_override_destination: Option<bool>,
+    #[serde(default, alias = "sniff-timeout")]
+    pub sniff_timeout: Option<DurationSpec>,
+    #[serde(default)]
+    pub sniffing: Option<InboundSniffingSpec>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub enum ForwardKind {
@@ -384,6 +436,10 @@ impl DurationSpec {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GlobalDialerSpec {
+    #[serde(alias = "interface-name", alias = "bind-interface")]
+    pub interface: Option<String>,
+    #[serde(alias = "auto-detect-interface")]
+    pub auto_detect_interface: bool,
     #[serde(alias = "routing-mark", alias = "mark")]
     pub routing_mark: Option<u32>,
     #[serde(alias = "tfo", alias = "tcp-fast-open")]
@@ -398,6 +454,281 @@ pub struct GlobalDialerSpec {
     pub tcp_keep_alive_idle: Option<DurationSpec>,
     #[serde(alias = "keep-alive-interval", alias = "tcp-keep-alive-interval")]
     pub tcp_keep_alive_interval: Option<DurationSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RouteConfigSpec {
+    #[serde(alias = "auto-detect-interface")]
+    pub auto_detect_interface: bool,
+    #[serde(alias = "default-interface")]
+    pub default_interface: Option<String>,
+    #[serde(alias = "default-mark")]
+    pub default_mark: Option<u32>,
+    #[serde(alias = "default-domain-resolver")]
+    pub default_domain_resolver: Option<Value>,
+    #[serde(default, alias = "rule-set")]
+    pub rule_set: Vec<RuleSetSpec>,
+    #[serde(default)]
+    pub rules: Vec<RuleSpec>,
+    #[serde(rename = "final", alias = "final_outbound", alias = "final-outbound")]
+    pub final_outbound: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExperimentalSpec {
+    #[serde(alias = "cache-file")]
+    pub cache_file: Option<kerlico_dns::CacheFileSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProfileCacheSpec {
+    #[serde(alias = "store-selected")]
+    pub store_selected: Option<bool>,
+    #[serde(alias = "store-fake-ip")]
+    pub store_fake_ip: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SniffProtoPortSpec {
+    #[serde(default)]
+    pub ports: Vec<Value>,
+    #[serde(alias = "override-destination")]
+    pub override_destination: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GlobalSnifferSpec {
+    #[serde(alias = "enabled")]
+    pub enable: Option<bool>,
+    #[serde(alias = "override-destination")]
+    pub override_destination: Option<bool>,
+    #[serde(alias = "force-dns-mapping")]
+    pub force_dns_mapping: Option<bool>,
+    #[serde(alias = "parse-pure-ip")]
+    pub parse_pure_ip: Option<bool>,
+    #[serde(default, alias = "force-domain")]
+    pub force_domain: Vec<String>,
+    #[serde(default, alias = "skip-domain", alias = "domains-excluded")]
+    pub skip_domain: Vec<String>,
+    #[serde(default, alias = "skip-src-address")]
+    pub skip_src_address: Vec<String>,
+    #[serde(default, alias = "skip-dst-address")]
+    pub skip_dst_address: Vec<String>,
+    #[serde(default)]
+    pub sniff: BTreeMap<String, SniffProtoPortSpec>,
+    #[serde(default, alias = "sniff-ports")]
+    pub sniff_ports: BTreeMap<String, Vec<Value>>,
+    pub timeout: Option<DurationSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InboundSniffingSpec {
+    #[serde(alias = "enable")]
+    pub enabled: Option<bool>,
+    #[serde(default, alias = "destOverride", alias = "dest-override")]
+    pub dest_override: Vec<String>,
+    #[serde(alias = "routeOnly", alias = "route-only")]
+    pub route_only: Option<bool>,
+    #[serde(
+        default,
+        alias = "domainsExcluded",
+        alias = "domains-excluded",
+        alias = "skip-domain"
+    )]
+    pub domains_excluded: Vec<String>,
+    #[serde(default, alias = "force-domain")]
+    pub force_domain: Vec<String>,
+    #[serde(alias = "parse-pure-ip")]
+    pub parse_pure_ip: Option<bool>,
+    pub timeout: Option<DurationSpec>,
+}
+
+fn parse_port_range_entry(val: &Value) -> Result<(u16, u16)> {
+    match val {
+        Value::Number(n) => {
+            let p = n
+                .as_u64()
+                .and_then(|v| u16::try_from(v).ok())
+                .filter(|p| *p != 0)
+                .ok_or_else(|| Error::Config("嗅探端口必须为 1..=65535".into()))?;
+            Ok((p, p))
+        }
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if let Some((a, b)) = trimmed.split_once('-').or_else(|| trimmed.split_once(':')) {
+                let start: u16 = a
+                    .trim()
+                    .parse()
+                    .map_err(|_| Error::Config("嗅探端口范围不合法".into()))?;
+                let end: u16 = b
+                    .trim()
+                    .parse()
+                    .map_err(|_| Error::Config("嗅探端口范围不合法".into()))?;
+                if start == 0 || end == 0 || start > end {
+                    return Err(Error::Config("嗅探端口范围起止不合法".into()));
+                }
+                Ok((start, end))
+            } else {
+                let p: u16 = trimmed
+                    .parse()
+                    .map_err(|_| Error::Config("嗅探端口不合法".into()))?;
+                if p == 0 {
+                    return Err(Error::Config("嗅探端口不能为 0".into()));
+                }
+                Ok((p, p))
+            }
+        }
+        _ => Err(Error::Config("嗅探端口项须为整数或范围字符串".into())),
+    }
+}
+
+impl GlobalSnifferSpec {
+    pub fn to_policy(&self) -> Result<kerlico_core::SniffPolicy> {
+        let mut policy = kerlico_core::SniffPolicy {
+            enabled: self.enable.unwrap_or(true),
+            override_destination: self.override_destination.unwrap_or(false),
+            parse_pure_ip: self.parse_pure_ip.unwrap_or(false),
+            domains_excluded: self.skip_domain.clone(),
+            force_domain: self.force_domain.clone(),
+            ..Default::default()
+        };
+        if let Some(timeout) = &self.timeout {
+            policy.timeout = timeout.to_duration()?;
+        }
+        for (proto, spec) in &self.sniff {
+            let key = proto.trim().to_ascii_lowercase();
+            if key.is_empty() {
+                return Err(Error::Config("嗅探协议名不能为空".into()));
+            }
+            if !policy.protocols.contains(&key) {
+                policy.protocols.push(key.clone());
+            }
+            if spec.override_destination == Some(true) {
+                policy.override_destination = true;
+            }
+            let mut ranges = Vec::new();
+            for item in &spec.ports {
+                ranges.push(parse_port_range_entry(item)?);
+            }
+            if !ranges.is_empty() {
+                policy.sniff_ports.insert(key, ranges);
+            }
+        }
+        for (proto, items) in &self.sniff_ports {
+            let key = proto.trim().to_ascii_lowercase();
+            let mut ranges = Vec::new();
+            for item in items {
+                ranges.push(parse_port_range_entry(item)?);
+            }
+            if !ranges.is_empty() {
+                policy.sniff_ports.insert(key, ranges);
+            }
+        }
+        Ok(policy)
+    }
+}
+
+fn apply_inbound_sniffing(
+    policy: &mut kerlico_core::SniffPolicy,
+    sniff: Option<bool>,
+    override_dest: Option<bool>,
+    timeout: Option<&DurationSpec>,
+    sniffing: Option<&InboundSniffingSpec>,
+) -> Result<()> {
+    if let Some(en) = sniff {
+        policy.enabled = en;
+    }
+    if let Some(ov) = override_dest {
+        policy.override_destination = ov;
+    }
+    if let Some(tm) = timeout {
+        policy.timeout = tm.to_duration()?;
+    }
+    if let Some(sn) = sniffing {
+        policy.enabled = sn.enabled.unwrap_or(true);
+        if !sn.dest_override.is_empty() {
+            policy.protocols = sn
+                .dest_override
+                .iter()
+                .map(|p| p.trim().to_ascii_lowercase())
+                .collect();
+            if override_dest.is_none() {
+                policy.override_destination = true;
+            }
+        }
+        if let Some(ro) = sn.route_only {
+            policy.route_only = ro;
+        }
+        if !sn.domains_excluded.is_empty() {
+            policy.domains_excluded = sn.domains_excluded.clone();
+        }
+        if !sn.force_domain.is_empty() {
+            policy.force_domain = sn.force_domain.clone();
+        }
+        if let Some(pp) = sn.parse_pure_ip {
+            policy.parse_pure_ip = pp;
+        }
+        if let Some(tm) = &sn.timeout {
+            policy.timeout = tm.to_duration()?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_sniff_policy(
+    options: &mut Value,
+    base: &kerlico_core::SniffPolicy,
+) -> Result<kerlico_core::SniffPolicy> {
+    let mut policy = base.clone();
+    let Some(map) = options.as_object_mut() else {
+        return Ok(policy);
+    };
+    let sniff = match map.remove("sniff") {
+        Some(v) => Some(
+            v.as_bool()
+                .ok_or_else(|| Error::Config("sniff 须为布尔值".into()))?,
+        ),
+        None => None,
+    };
+    let mut override_dest = None;
+    for key in ["sniff_override_destination", "sniff-override-destination"] {
+        if let Some(v) = map.remove(key) {
+            override_dest =
+                Some(v.as_bool().ok_or_else(|| {
+                    Error::Config("sniff_override_destination 须为布尔值".into())
+                })?);
+        }
+    }
+    let mut timeout = None;
+    for key in ["sniff_timeout", "sniff-timeout"] {
+        if let Some(v) = map.remove(key) {
+            let spec: DurationSpec = serde_json::from_value(v)
+                .map_err(|_| Error::Config("sniff_timeout 时长不合法".into()))?;
+            timeout = Some(spec);
+        }
+    }
+    let sniffing = match map.remove("sniffing") {
+        Some(v) => {
+            let spec: InboundSniffingSpec = serde_json::from_value(v)
+                .map_err(|_| Error::Config("sniffing 配置不合法".into()))?;
+            Some(spec)
+        }
+        None => None,
+    };
+    apply_inbound_sniffing(
+        &mut policy,
+        sniff,
+        override_dest,
+        timeout.as_ref(),
+        sniffing.as_ref(),
+    )?;
+    Ok(policy)
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -490,6 +821,22 @@ fn apply_dialer_map(
     map: &mut serde_json::Map<String, Value>,
     out: &mut kerlico_core::DialerOptions,
 ) -> Result<()> {
+    for key in [
+        "interface",
+        "interface_name",
+        "interface-name",
+        "bind_interface",
+        "bind-interface",
+    ] {
+        if let Some(val) = map.remove(key) {
+            let s = val
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| Error::Config("绑定网卡名须为非空字符串".into()))?;
+            out.interface = Some(s.to_owned());
+        }
+    }
     for key in ["detour", "dialer_proxy", "dialer-proxy"] {
         if let Some(val) = map.remove(key) {
             let s = val
@@ -729,6 +1076,42 @@ impl Registry {
             return Err(Error::Config("配置代次必须大于零".into()));
         }
         config.limits.validate()?;
+        if let Some(loader) = &config.geodata_loader
+            && !matches!(
+                loader.trim().to_ascii_lowercase().as_str(),
+                "standard" | "memconservative"
+            )
+        {
+            return Err(Error::Config(
+                "geodata-loader 仅支持 standard 或 memconservative".into(),
+            ));
+        }
+        if let Some(matcher) = &config.geosite_matcher
+            && !matches!(
+                matcher.trim().to_ascii_lowercase().as_str(),
+                "mph" | "succinct" | "default"
+            )
+        {
+            return Err(Error::Config(
+                "geosite-matcher 仅支持 mph、succinct 或 default".into(),
+            ));
+        }
+        let geo_spec = GeoConfigSpec {
+            geo_auto_update: config.geo_auto_update.unwrap_or(false),
+            geo_update_interval: config
+                .geo_update_interval
+                .map(|v| {
+                    u32::try_from(v).map_err(|_| Error::Config("Geo 自动更新间隔不合法".into()))
+                })
+                .transpose()?,
+            geox_url: config.geox_url.clone(),
+            ..Default::default()
+        };
+        geo_spec.validate()?;
+        let base_sniff_policy = match &config.sniffer {
+            Some(sniffer) => sniffer.to_policy()?,
+            None => kerlico_core::SniffPolicy::default(),
+        };
         let lan_filter =
             kerlico_core::IpFilter::compile(&config.lan_allowed_ips, &config.lan_disallowed_ips)?;
         let default_outbound = config.outbounds.first().map(|spec| spec.tag.clone());
@@ -756,6 +1139,59 @@ impl Registry {
                     members: Vec::new(),
                     max_sessions: None,
                     accept_proxy_protocol: false,
+                    sniff: None,
+                    sniff_override_destination: None,
+                    sniff_timeout: None,
+                    sniffing: None,
+                });
+            }
+        }
+        if let Some(mut tun_val) = config.tun.take() {
+            let map = tun_val
+                .as_object_mut()
+                .ok_or_else(|| Error::Config("tun 顶层配置必须为对象".into()))?;
+            let enabled = match map.remove("enable").or_else(|| map.remove("enabled")) {
+                Some(v) => v
+                    .as_bool()
+                    .ok_or_else(|| Error::Config("tun.enable 须为布尔值".into()))?,
+                None => true,
+            };
+            if enabled {
+                let tag = match map.remove("tag") {
+                    Some(v) => v
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| Error::Config("tun.tag 须为字符串".into()))?,
+                    None => "tun-in".to_owned(),
+                };
+                let listen = match map.remove("listen") {
+                    Some(v) => serde_json::from_value(v)
+                        .map_err(|_| Error::Config("tun.listen 地址不合法".into()))?,
+                    None => SocketAddr::from(([127, 0, 0, 1], 0)),
+                };
+                let outbound = match map.remove("outbound") {
+                    Some(v) => v
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| Error::Config("tun.outbound 须为字符串".into()))?,
+                    None => default_outbound.clone().ok_or_else(|| {
+                        Error::Config("启用顶层 tun 时必须至少配置一个出站".into())
+                    })?,
+                };
+                config.local_inbounds.push(NodeSpec {
+                    tag,
+                    kind: "tun".into(),
+                    listen,
+                    outbound,
+                    mode: NodeMode::Dual,
+                    options: tun_val,
+                    members: Vec::new(),
+                    max_sessions: None,
+                    accept_proxy_protocol: false,
+                    sniff: None,
+                    sniff_override_destination: None,
+                    sniff_timeout: None,
+                    sniffing: None,
                 });
             }
         }
@@ -768,9 +1204,26 @@ impl Registry {
             }
         }
         let detour_table = kerlico_core::DetourTable::new();
+        let route_mark = config.route.as_ref().and_then(|r| r.default_mark);
         let global_dialer = kerlico_core::DialerOptions {
             detour: None,
-            routing_mark: config.routing_mark.or(config.dialer.routing_mark),
+            interface: config
+                .interface_name
+                .clone()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    config
+                        .dialer
+                        .interface
+                        .as_ref()
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                }),
+            routing_mark: config
+                .routing_mark
+                .or(config.dialer.routing_mark)
+                .or(route_mark),
             tcp_fast_open: config.dialer.tcp_fast_open,
             disable_tcp_keep_alive: config.disable_keep_alive
                 || config.dialer.disable_tcp_keep_alive,
@@ -800,8 +1253,82 @@ impl Registry {
         {
             return Err(Error::Config("设备状态目录必须是绝对路径".into()));
         }
+        if config.fakedns.is_some()
+            || config.cache_file.is_some()
+            || config
+                .experimental
+                .as_ref()
+                .is_some_and(|e| e.cache_file.is_some())
+            || config
+                .profile
+                .as_ref()
+                .is_some_and(|p| p.store_fake_ip.is_some())
+        {
+            let dns = config.dns.get_or_insert_with(|| DnsSpec {
+                servers: vec![kerlico_dns::DnsServerInput::Url("udp://1.1.1.1:53".into())],
+                ..Default::default()
+            });
+            if dns.servers.is_empty() && dns.hosts.is_empty() {
+                dns.servers
+                    .push(kerlico_dns::DnsServerInput::Url("udp://1.1.1.1:53".into()));
+            }
+            if dns.fakedns.is_none() {
+                dns.fakedns = config.fakedns.clone();
+            }
+            if dns.cache_file.is_none() {
+                dns.cache_file = config.cache_file.clone().or_else(|| {
+                    config
+                        .experimental
+                        .as_ref()
+                        .and_then(|e| e.cache_file.clone())
+                });
+            }
+            if let Some(store_fake_ip) = config.profile.as_ref().and_then(|p| p.store_fake_ip) {
+                let cf = dns
+                    .cache_file
+                    .get_or_insert_with(|| kerlico_dns::CacheFileSpec {
+                        enabled: store_fake_ip,
+                        store_fakeip: store_fake_ip,
+                        ..Default::default()
+                    });
+                cf.store_fakeip |= store_fake_ip;
+            }
+        }
+        let mut compiled_rule_sets: HashMap<String, CompiledRuleSet> = HashMap::new();
+        for set_spec in config.rule_set.iter().chain(
+            config
+                .route
+                .as_ref()
+                .map(|r| r.rule_set.iter())
+                .into_iter()
+                .flatten(),
+        ) {
+            let compiled = CompiledRuleSet::compile_spec(set_spec)?;
+            if compiled_rule_sets
+                .insert(set_spec.tag.trim().to_owned(), compiled)
+                .is_some()
+            {
+                return Err(Error::Config("rule-set 标签重复".into()));
+            }
+        }
+        for (tag, provider_spec) in &config.rule_providers {
+            let compiled = CompiledRuleSet::compile_provider(tag, provider_spec)?;
+            if compiled_rule_sets
+                .insert(tag.trim().to_owned(), compiled)
+                .is_some()
+            {
+                return Err(Error::Config("rule-providers 与 rule-set 标签重复".into()));
+            }
+        }
         if let Some(dns) = &config.dns {
             dns.validate()?;
+            for rule in &dns.rules {
+                for set_tag in &rule.rule_set {
+                    if !compiled_rule_sets.contains_key(set_tag.trim()) {
+                        return Err(Error::Config("DNS 规则引用的 rule-set 不存在".into()));
+                    }
+                }
+            }
         }
         if let Some(control) = &config.control
             && (control.secret.as_ref().is_some_and(String::is_empty)
@@ -859,13 +1386,34 @@ impl Registry {
                 steps += 1;
             }
         }
-        let routes = RouteTable::compile(&config.routes)?;
+        let mut all_rules = config.routes.clone();
+        if let Some(route_block) = &config.route {
+            all_rules.extend(route_block.rules.iter().cloned());
+        }
+        let final_outbound = match config
+            .route
+            .as_ref()
+            .and_then(|r| r.final_outbound.as_deref())
+        {
+            Some(raw) => Some(OutId::parse(raw)?),
+            None => None,
+        };
+        let routes = RouteTable::compile_with_sets(&all_rules, compiled_rule_sets.clone())?
+            .with_final_outbound(final_outbound);
+        if routes
+            .referenced_rule_sets()
+            .into_iter()
+            .any(|tag| !compiled_rule_sets.contains_key(tag))
+        {
+            return Err(Error::Config("路由规则引用的 rule-set 不存在".into()));
+        }
         if routes.outbounds().any(|id| !profiles.contains_key(id)) {
             return Err(Error::Config("路由规则引用的出站不存在".into()));
         }
         if routes.users().any(|id| !accounts.contains_key(id)) {
             return Err(Error::Config("路由规则引用的管理账户不存在".into()));
         }
+        let route_needs_sniff = routes.has_sniff_rules();
         let mut tags = BTreeSet::new();
         let mut listeners = BTreeSet::new();
         let mut bindings = Vec::new();
@@ -914,11 +1462,24 @@ impl Registry {
             if tcp && !supports_tcp || !tcp && !udp {
                 return Err(Error::Config("出站不支持入站需要的数据能力".into()));
             }
+            let mut sniff_policy = base_sniff_policy.clone();
+            apply_inbound_sniffing(
+                &mut sniff_policy,
+                spec.sniff,
+                spec.sniff_override_destination,
+                spec.sniff_timeout.as_ref(),
+                spec.sniffing.as_ref(),
+            )?;
+            if route_needs_sniff && !sniff_policy.enabled {
+                sniff_policy.enabled = true;
+                sniff_policy.route_only = true;
+            }
             bindings.push(IngressPlan {
                 issuer: CredentialIssuer::new(node, config.epoch, Vec::new())?,
                 outbound,
                 mode: spec.mode.into(),
                 local: true,
+                sniff_policy,
             });
         }
         let mut fingerprints = BTreeSet::new();
@@ -931,6 +1492,42 @@ impl Registry {
         {
             let accept_proxy_protocol =
                 spec.accept_proxy_protocol || extract_accept_proxy_protocol(&mut spec.options)?;
+            let mut sniff_policy = extract_sniff_policy(&mut spec.options, &base_sniff_policy)?;
+            apply_inbound_sniffing(
+                &mut sniff_policy,
+                spec.sniff,
+                spec.sniff_override_destination,
+                spec.sniff_timeout.as_ref(),
+                spec.sniffing.as_ref(),
+            )?;
+            if route_needs_sniff && !sniff_policy.enabled {
+                sniff_policy.enabled = true;
+                sniff_policy.route_only = true;
+            }
+            if spec.kind == "tun"
+                && let Some(map) = spec.options.as_object_mut()
+            {
+                for key in [
+                    "route_address_set",
+                    "route-address-set",
+                    "route_exclude_address_set",
+                    "route-exclude-address-set",
+                ] {
+                    if let Some(arr) = map.get(key).and_then(Value::as_array) {
+                        for item in arr {
+                            let set_tag = item.as_str().ok_or_else(|| {
+                                Error::Config("TUN 路由规则集标签须为字符串".into())
+                            })?;
+                            if !compiled_rule_sets.contains_key(set_tag.trim()) {
+                                return Err(Error::Config(
+                                    "TUN 引用的 route_address_set/route_exclude_address_set 不存在"
+                                        .into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
             let node = NodeId::parse(&spec.tag)?;
             if !tags.insert(node.clone()) {
                 return Err(Error::Config("节点与入站标签重复".into()));
@@ -1047,6 +1644,7 @@ impl Registry {
                 outbound,
                 mode: spec.mode.into(),
                 local,
+                sniff_policy,
             });
             nodes.push(PreparedNode {
                 tag: spec.tag,
@@ -1096,4 +1694,174 @@ pub fn parse(bytes: &[u8]) -> Result<Config> {
         ));
     }
     serde_json::from_value(value).map_err(|_| Error::Config("JSON 结构或字段不合法".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyDirectFactory;
+    impl OutboundFactory for DummyDirectFactory {
+        fn kind(&self) -> &'static str {
+            "direct"
+        }
+        fn compile(&self, _options: &Value) -> Result<OutboundPlan> {
+            Ok(OutboundPlan::new(
+                Capabilities {
+                    tcp: true,
+                    tcp_eof: true,
+                    udp: true,
+                },
+                true,
+                kerlico_core::TargetPolicy::Local,
+                |_ctx| Box::pin(async { Err(Error::Unsupported("dummy")) }),
+            ))
+        }
+    }
+
+    struct DummyLocalNodeFactory(&'static str);
+    impl NodeFactory for DummyLocalNodeFactory {
+        fn kind(&self) -> &'static str {
+            self.0
+        }
+        fn allows_local_inbound(&self) -> bool {
+            true
+        }
+        fn build(&self, _input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+            struct DummyNode;
+            impl InboundProtocol for DummyNode {
+                fn credential_manifest(&self) -> kerlico_core::CredentialManifest {
+                    kerlico_core::CredentialManifest::new()
+                }
+                fn handle<'a>(
+                    &'a self,
+                    _stream: kerlico_core::BoxStream,
+                    _ingress: kerlico_core::IngressBinding,
+                    _context: kerlico_core::InboundContext,
+                ) -> kerlico_core::BoxFuture<'a, Result<()>> {
+                    Box::pin(async { Ok(()) })
+                }
+            }
+            Ok(Arc::new(DummyNode))
+        }
+    }
+
+    #[test]
+    fn m3_config_route_fakedns_sniffer_cache_tun_roundtrip() {
+        let raw = r#"{
+            "version": 2,
+            "interface_name": "eth0",
+            "geodata_mode": true,
+            "geodata_loader": "standard",
+            "geosite_matcher": "mph",
+            "geo_auto_update": true,
+            "geo_update_interval": 24,
+            "geox_url": {
+                "geoip": "https://example.com/geoip.dat",
+                "geosite": "https://example.com/geosite.dat"
+            },
+            "fakedns": [
+                {"ipPool": "198.18.0.0/16", "poolSize": 65535}
+            ],
+            "sniffer": {
+                "enable": true,
+                "override_destination": true,
+                "force_dns_mapping": true,
+                "parse_pure_ip": true,
+                "sniff": {
+                    "HTTP": {"ports": [80, 8080], "override_destination": true},
+                    "TLS": {"ports": [443, 8443]},
+                    "QUIC": {"ports": [443]}
+                },
+                "force_domain": ["+.netflix.com"],
+                "skip_domain": ["+.push.apple.com"],
+                "skip_src_address": ["192.168.0.0/16"],
+                "skip_dst_address": ["10.0.0.0/8"]
+            },
+            "cache_file": {
+                "enabled": true,
+                "path": "cache.db",
+                "cache_id": "main",
+                "store_fakeip": true
+            },
+            "profile": {
+                "store_fake_ip": true
+            },
+            "tun": {
+                "enable": true,
+                "device": "utun9",
+                "stack": "mixed",
+                "mtu": 1400,
+                "auto_route": true,
+                "auto_redirect": true,
+                "auto_detect_interface": true,
+                "strict_route": true,
+                "dns_hijack": ["any:53", "tcp://any:53"],
+                "inet4_address": ["172.19.0.1/30"],
+                "route_exclude_address": ["192.168.0.0/16"]
+            },
+            "route": {
+                "final": "direct",
+                "auto_detect_interface": true,
+                "default_interface": "eth0",
+                "default_mark": 255,
+                "rule_set": [
+                    {
+                        "tag": "ads",
+                        "type": "inline",
+                        "rules": [
+                            {"domain_suffix": ["ads.example.com"], "ip_cidr": ["203.0.113.0/24"]}
+                        ]
+                    }
+                ],
+                "rules": [
+                    {
+                        "rule_set": ["ads"],
+                        "action": "reject"
+                    },
+                    {
+                        "protocol": ["dns"],
+                        "action": "hijack-dns"
+                    },
+                    {
+                        "action": "resolve",
+                        "strategy": "prefer_ipv4",
+                        "outbound": "direct"
+                    }
+                ]
+            },
+            "outbounds": [
+                {"tag": "direct", "type": "direct"}
+            ],
+            "local_inbounds": [
+                {
+                    "tag": "socks-in",
+                    "listen": "127.0.0.1:1080",
+                    "type": "socks",
+                    "outbound": "direct",
+                    "sniff": true,
+                    "sniff_override_destination": true,
+                    "sniff_timeout": "300ms"
+                }
+            ]
+        }"#;
+        let cfg = parse(raw.as_bytes()).expect("parse m3 config");
+        let mut reg = Registry::default();
+        reg.register(DummyDirectFactory).unwrap();
+        reg.register_node(DummyLocalNodeFactory("socks")).unwrap();
+        reg.register_node(DummyLocalNodeFactory("tun")).unwrap();
+        let prepared = reg.prepare(cfg).expect("prepare m3 config");
+        assert_eq!(prepared.egress.bindings.len(), 2);
+        let sniff_policy = &prepared.egress.bindings[0].sniff_policy;
+        assert!(sniff_policy.enabled);
+        assert!(sniff_policy.override_destination);
+        let dns_spec = prepared
+            .egress
+            .dns
+            .as_ref()
+            .expect("dns synthesized from fakedns");
+        assert!(dns_spec.fakedns.is_some());
+        assert!(dns_spec.cache_file.as_ref().unwrap().enabled);
+        assert!(dns_spec.cache_file.as_ref().unwrap().store_fakeip);
+    }
 }

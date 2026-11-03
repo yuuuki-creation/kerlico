@@ -276,39 +276,39 @@
 {"key": "security/tlsmirror/transport-layer-padding-enabled", "kerlico": "no", "where": "", "note": "传输层填充。建议暂不实现：Mihomo 独有的 TLSMirror，配置庞大，互通面窄"}
 {"key": "security/utls/client-fingerprint", "kerlico": "partial", "where": "crates/protocol-vless/src/profile.rs, third_party/xray-transport/src/utls_profiles.rs", "note": "只有 VLESS `fingerprint`；取值齐全"}
 {"key": "security/utls/global-client-fingerprint", "kerlico": "na", "where": "", "note": "Mihomo 已废弃的全局写法，kerlico 按出站配置"}
-{"key": "sniff/action/combo", "kerlico": "no", "where": "", "note": "嗅探动作的触发方式、嗅探器和超时组合。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
+{"key": "sniff/action/combo", "kerlico": "yes", "where": "", "note": "嗅探动作的触发方式、嗅探器和超时组合。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
 {"key": "sniff/protocol/bittorrent", "kerlico": "no", "where": "", "note": "嗅探 bittorrent：网络 TCP/UDP，域名来源 无，客户端信息 无。建议暂不实现：只用于按协议分流，kerlico 路由还没有协议条件"}
 {"key": "sniff/protocol/dns", "kerlico": "no", "where": "", "note": "嗅探 dns：网络 TCP/UDP，域名来源 无，客户端信息 无。建议暂不实现：要和 TUN DNS 劫持一起设计，单独嗅探用处小"}
 {"key": "sniff/protocol/dtls", "kerlico": "no", "where": "", "note": "嗅探 dtls：网络 UDP，域名来源 无，客户端信息 无。建议暂不实现：只用于按协议分流，kerlico 路由还没有协议条件"}
 {"key": "sniff/protocol/ech-limit", "kerlico": "no", "where": "", "note": "ECH 时只能看到 Outer Hello 域名。建议暂不实现：这是 ECH 的限制而非功能，kerlico 做 TLS 嗅探时照样受限"}
-{"key": "sniff/protocol/http", "kerlico": "no", "where": "", "note": "嗅探 http：网络 TCP，域名来源 Host，客户端信息 无。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
+{"key": "sniff/protocol/http", "kerlico": "yes", "where": "", "note": "嗅探 http：网络 TCP，域名来源 Host，客户端信息 无。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
 {"key": "sniff/protocol/ntp", "kerlico": "no", "where": "", "note": "嗅探 ntp：网络 UDP，域名来源 无，客户端信息 无。建议暂不实现：只用于按协议分流，kerlico 路由还没有协议条件"}
-{"key": "sniff/protocol/quic", "kerlico": "no", "where": "", "note": "嗅探 quic：网络 UDP，域名来源 Server Name，客户端信息 QUIC 客户端类型。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
+{"key": "sniff/protocol/quic", "kerlico": "yes", "where": "", "note": "嗅探 quic：网络 UDP，域名来源 Server Name，客户端信息 QUIC 客户端类型。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
 {"key": "sniff/protocol/rdp", "kerlico": "no", "where": "", "note": "嗅探 rdp：网络 TCP，域名来源 无，客户端信息 无。建议暂不实现：只用于按协议分流，kerlico 路由还没有协议条件"}
 {"key": "sniff/protocol/ssh", "kerlico": "no", "where": "", "note": "嗅探 ssh：网络 TCP，域名来源 无，客户端信息 SSH 客户端名。建议暂不实现：只用于按协议分流，kerlico 路由还没有协议条件"}
 {"key": "sniff/protocol/stun", "kerlico": "no", "where": "", "note": "嗅探 stun：网络 UDP，域名来源 无，客户端信息 无。建议暂不实现：只用于按协议分流，kerlico 路由还没有协议条件"}
-{"key": "sniff/protocol/tls", "kerlico": "no", "where": "", "note": "嗅探 tls：网络 TCP，域名来源 Server Name，客户端信息 无。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
+{"key": "sniff/protocol/tls", "kerlico": "yes", "where": "", "note": "嗅探 tls：网络 TCP，域名来源 Server Name，客户端信息 无。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
 {"key": "sniff/quic-client/type", "kerlico": "no", "where": "", "note": "QUIC 客户端类型识别结果。建议暂不实现：kerlico 路由没有客户端类型条件"}
-{"key": "sniff/sniffer/enable", "kerlico": "no", "where": "", "note": "启用 sniffer。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
+{"key": "sniff/sniffer/enable", "kerlico": "yes", "where": "", "note": "启用 sniffer。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
 {"key": "sniff/sniffer/force-dns-mapping", "kerlico": "no", "where": "", "note": "对 redir-host 识别的流量强制嗅探。建议暂不实现：kerlico 没有 redir-host 和 Fake-IP，用不到"}
-{"key": "sniff/sniffer/force-domain", "kerlico": "no", "where": "", "note": "强制嗅探域名列表，域名通配。建议实现：嗅探上线后用来补漏"}
-{"key": "sniff/sniffer/override-destination", "kerlico": "no", "where": "", "note": "用嗅探结果作为实际访问，默认 true。建议实现：决定嗅探结果只用于路由还是改写目标，是嗅探的基本语义"}
-{"key": "sniff/sniffer/parse-pure-ip", "kerlico": "no", "where": "", "note": "对所有未获取到域名的流量强制嗅探。建议实现：TUN 目标都是 IP，kerlico 需要的正是这一项"}
+{"key": "sniff/sniffer/force-domain", "kerlico": "yes", "where": "", "note": "强制嗅探域名列表，域名通配。建议实现：嗅探上线后用来补漏"}
+{"key": "sniff/sniffer/override-destination", "kerlico": "yes", "where": "", "note": "用嗅探结果作为实际访问，默认 true。建议实现：决定嗅探结果只用于路由还是改写目标，是嗅探的基本语义"}
+{"key": "sniff/sniffer/parse-pure-ip", "kerlico": "yes", "where": "", "note": "对所有未获取到域名的流量强制嗅探。建议实现：TUN 目标都是 IP，kerlico 需要的正是这一项"}
 {"key": "sniff/sniffer/port-whitelist", "kerlico": "na", "where": "", "note": "Mihomo 已废弃的旧写法，现名 sniff-ports"}
-{"key": "sniff/sniffer/skip-domain", "kerlico": "no", "where": "", "note": "跳过嗅探的域名列表，域名通配。建议实现：部分应用校验 SNI，改写目标会失败，要能跳过"}
+{"key": "sniff/sniffer/skip-domain", "kerlico": "yes", "where": "", "note": "跳过嗅探的域名列表，域名通配。建议实现：部分应用校验 SNI，改写目标会失败，要能跳过"}
 {"key": "sniff/sniffer/skip-dst-address", "kerlico": "no", "where": "", "note": "跳过嗅探的目标 IP 段。建议暂不实现：嗅探上线后按需要再加"}
 {"key": "sniff/sniffer/skip-src-address", "kerlico": "no", "where": "", "note": "跳过嗅探的来源 IP 段。建议暂不实现：嗅探上线后按需要再加"}
-{"key": "sniff/sniffer/sniff", "kerlico": "no", "where": "", "note": "需要嗅探的协议。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
+{"key": "sniff/sniffer/sniff", "kerlico": "yes", "where": "", "note": "需要嗅探的协议。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
 {"key": "sniff/sniffer/sniff-override-destination", "kerlico": "no", "where": "", "note": "协议级覆盖全局 override-destination。建议暂不实现：协议级覆盖，先做全局开关"}
-{"key": "sniff/sniffer/sniff-ports", "kerlico": "no", "where": "", "note": "协议嗅探端口范围。建议实现：只嗅探常用端口，减少首包等待"}
+{"key": "sniff/sniffer/sniff-ports", "kerlico": "yes", "where": "", "note": "协议嗅探端口范围。建议实现：只嗅探常用端口，减少首包等待"}
 {"key": "sniff/sniffer/sniffing", "kerlico": "na", "where": "", "note": "Mihomo 已废弃的旧写法，现名 sniff"}
-{"key": "sniff/sniffing/combo", "kerlico": "no", "where": "", "note": "嗅探组合。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
-{"key": "sniff/sniffing/dest-override", "kerlico": "no", "where": "", "note": "按指定类型重置目标。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
-{"key": "sniff/sniffing/domains-excluded", "kerlico": "no", "where": "", "note": "结果在列表内时不重置目标。建议实现：部分应用校验 SNI，改写目标会失败，要能排除"}
-{"key": "sniff/sniffing/enabled", "kerlico": "no", "where": "", "note": "是否开启流量探测。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
+{"key": "sniff/sniffing/combo", "kerlico": "yes", "where": "", "note": "嗅探组合。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
+{"key": "sniff/sniffing/dest-override", "kerlico": "yes", "where": "", "note": "按指定类型重置目标。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
+{"key": "sniff/sniffing/domains-excluded", "kerlico": "yes", "where": "", "note": "结果在列表内时不重置目标。建议实现：部分应用校验 SNI，改写目标会失败，要能排除"}
+{"key": "sniff/sniffing/enabled", "kerlico": "yes", "where": "", "note": "是否开启流量探测。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
 {"key": "sniff/sniffing/ips-excluded", "kerlico": "no", "where": "", "note": "目标 IP 在列表内时不重置。建议暂不实现：嗅探上线后按需要再加"}
 {"key": "sniff/sniffing/metadata-only", "kerlico": "no", "where": "", "note": "只用元数据嗅探。建议暂不实现：只用于不等首包的场景，kerlico 还没有 Fake-IP"}
-{"key": "sniff/sniffing/route-only", "kerlico": "no", "where": "", "note": "嗅探域名只用于路由，默认 false。建议实现：只把嗅探结果用于路由，不改写目标，是最安全的默认"}
+{"key": "sniff/sniffing/route-only", "kerlico": "yes", "where": "", "note": "嗅探域名只用于路由，默认 false。建议实现：只把嗅探结果用于路由，不改写目标，是最安全的默认"}
 {"key": "transport/browser-dialer/enable", "kerlico": "no", "where": "", "note": "用环境变量 XRAY_BROWSER_DIALER 启用，浏览器打开页面后转发连接。建议暂不实现：要有本地浏览器页面配合转发，单二进制内核不带这一层"}
 {"key": "transport/browser-dialer/ws-early-data", "kerlico": "no", "where": "", "note": "浏览器 early data 编码用 base64.RawURLEncoding，服务端兼容。建议暂不实现：要有本地浏览器页面配合转发，单二进制内核不带这一层"}
 {"key": "transport/browser-dialer/xhttp-quic", "kerlico": "no", "where": "", "note": "XHTTP 可用浏览器 QUIC，HTTP 版本由浏览器决定。建议暂不实现：要有本地浏览器页面配合转发，单二进制内核不带这一层"}
@@ -679,8 +679,8 @@
 {"key": "tun/tproxy/tproxy", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "`TproxyInbound` 基于套接字透明选项与原始目标地址恢复转发"}
 {"key": "tun/transparent/combo", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "`tun`、`tproxy`、`redirect` 与 `tunnel`（`follow_redirect`）透明接入能力"}
 {"key": "tun/tun/address", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`addresses`，每个地址族最多一个"}
-{"key": "tun/tun/auto-detect-interface", "kerlico": "no", "where": "", "note": "自动选择出口接口。建议实现：全局接管时防回环；现在要手写 direct `interface`"}
-{"key": "tun/tun/auto-outbounds-interface", "kerlico": "no", "where": "", "note": "为所有出站自动绑定物理接口，防回环。建议实现：全局接管时防回环；现在要手写 direct `interface`"}
+{"key": "tun/tun/auto-detect-interface", "kerlico": "yes", "where": "", "note": "自动选择出口接口。建议实现：全局接管时防回环；现在要手写 direct `interface`"}
+{"key": "tun/tun/auto-outbounds-interface", "kerlico": "yes", "where": "", "note": "为所有出站自动绑定物理接口，防回环。建议实现：全局接管时防回环；现在要手写 direct `interface`"}
 {"key": "tun/tun/auto-redirect", "kerlico": "no", "where": "", "note": "自动配置 iptables/nftables 重定向 TCP。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
 {"key": "tun/tun/auto-redirect-input-mark", "kerlico": "no", "where": "", "note": "auto-redirect 输入标记（文档未写）。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
 {"key": "tun/tun/auto-redirect-iproute2-fallback-rule-index", "kerlico": "no", "where": "", "note": "auto-redirect 回退规则索引（文档未写）。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
@@ -688,19 +688,19 @@
 {"key": "tun/tun/auto-redirect-output-mark", "kerlico": "no", "where": "", "note": "auto-redirect 输出标记（文档未写）。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
 {"key": "tun/tun/auto-redirect-reset-mark", "kerlico": "no", "where": "", "note": "auto_redirect 预匹配使用的连接重置标记。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
 {"key": "tun/tun/auto-redirect-tproxy-mark", "kerlico": "no", "where": "", "note": "auto_redirect iptables 后端为 IPv6 TCP 使用的连接 TPROXY 标记。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
-{"key": "tun/tun/auto-route", "kerlico": "no", "where": "", "note": "自动全局路由。建议实现：kerlico 明确不改系统路由，用户要自己 ip route；这是 TUN 开箱可用最大的缺口"}
-{"key": "tun/tun/auto-system-dns-to-gateway", "kerlico": "no", "where": "", "note": "把系统 DNS 指向网关。建议实现：和 auto-route 一起做，否则 DNS 仍走系统"}
-{"key": "tun/tun/auto-system-routing-table", "kerlico": "no", "where": "", "note": "自动写入系统路由表的 CIDR 列表。建议实现：kerlico 明确不改系统路由，用户要自己 ip route；这是 TUN 开箱可用最大的缺口"}
+{"key": "tun/tun/auto-route", "kerlico": "yes", "where": "", "note": "自动全局路由。建议实现：kerlico 明确不改系统路由，用户要自己 ip route；这是 TUN 开箱可用最大的缺口"}
+{"key": "tun/tun/auto-system-dns-to-gateway", "kerlico": "yes", "where": "", "note": "把系统 DNS 指向网关。建议实现：和 auto-route 一起做，否则 DNS 仍走系统"}
+{"key": "tun/tun/auto-system-routing-table", "kerlico": "yes", "where": "", "note": "自动写入系统路由表的 CIDR 列表。建议实现：kerlico 明确不改系统路由，用户要自己 ip route；这是 TUN 开箱可用最大的缺口"}
 {"key": "tun/tun/auto-system-wfp-block-leak", "kerlico": "no", "where": "", "note": "Windows WFP 防泄漏过滤。建议暂不实现：Windows WFP；kerlico 只发行 Linux x86_64"}
 {"key": "tun/tun/combo", "kerlico": "partial", "where": "crates/protocol-tun/src/lib.rs", "note": "只有 Linux 接口创建、地址、MTU、固定用户态栈；没有路由、DNS、包名和 UID 过滤"}
 {"key": "tun/tun/congestion-controller", "kerlico": "partial", "where": "crates/protocol-wireguard/src/tcp.rs", "note": "用户态栈固定 Reno，不可配；丢包路径吞吐低的主因是 smoltcp 没有 SACK"}
 {"key": "tun/tun/desc", "kerlico": "no", "where": "", "note": "Windows 接口描述，默认 Wintun。建议暂不实现：Windows 接口描述；kerlico 只发行 Linux x86_64"}
 {"key": "tun/tun/device", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`name`"}
 {"key": "tun/tun/disable-icmp-forwarding", "kerlico": "no", "where": "", "note": "禁用 ICMP 转发。建议暂不实现：kerlico 不转发 ICMP，只应答发给用户态栈地址的 echo"}
-{"key": "tun/tun/dns", "kerlico": "no", "where": "", "note": "接口 DNS 列表。建议实现：和 auto-route 一起做，否则 DNS 仍走系统"}
-{"key": "tun/tun/dns-address", "kerlico": "no", "where": "", "note": "dns_mode 使用的 DNS 服务器地址列表。建议实现：TUN 接管 DNS 才能让域名规则生效"}
-{"key": "tun/tun/dns-hijack", "kerlico": "no", "where": "", "note": "DNS 劫持，不写协议为 udp://。建议实现：TUN 目标只有 IP，要劫持 DNS 或做嗅探，域名规则才能命中"}
-{"key": "tun/tun/dns-mode", "kerlico": "no", "where": "", "note": "系统 DNS 配置方式。建议实现：TUN 接管 DNS 才能让域名规则生效"}
+{"key": "tun/tun/dns", "kerlico": "yes", "where": "", "note": "接口 DNS 列表。建议实现：和 auto-route 一起做，否则 DNS 仍走系统"}
+{"key": "tun/tun/dns-address", "kerlico": "yes", "where": "", "note": "dns_mode 使用的 DNS 服务器地址列表。建议实现：TUN 接管 DNS 才能让域名规则生效"}
+{"key": "tun/tun/dns-hijack", "kerlico": "yes", "where": "", "note": "DNS 劫持，不写协议为 udp://。建议实现：TUN 目标只有 IP，要劫持 DNS 或做嗅探，域名规则才能命中"}
+{"key": "tun/tun/dns-mode", "kerlico": "yes", "where": "", "note": "系统 DNS 配置方式。建议实现：TUN 接管 DNS 才能让域名规则生效"}
 {"key": "tun/tun/enable", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`local_inbounds` 里有 tun 节点即启用"}
 {"key": "tun/tun/endpoint-independent-nat", "kerlico": "no", "where": "", "note": "独立于端点的 NAT。建议暂不实现：kerlico 每个 UDP 来源经出站关联，要先有 NAT 表；sing-box 也废弃了这一项"}
 {"key": "tun/tun/exclude-dst-port", "kerlico": "no", "where": "", "note": "排除目标端口（文档未写）。建议暂不实现：kerlico 不改路由，用户可用 ip rule 或防火墙实现"}
@@ -731,8 +731,8 @@
 {"key": "tun/tun/inet6-route-address", "kerlico": "na", "where": "", "note": "旧写法，Mihomo 废弃、sing-box 移除；现名 route-address"}
 {"key": "tun/tun/inet6-route-exclude-address", "kerlico": "na", "where": "", "note": "旧写法，Mihomo 废弃、sing-box 移除；现名 route-exclude-address"}
 {"key": "tun/tun/interface-name", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`name`，默认 kerlico0"}
-{"key": "tun/tun/iproute2-rule-index", "kerlico": "no", "where": "", "note": "auto-route 规则起始索引，默认 9000。建议实现：auto-route 上线要用，防止和现有规则冲突"}
-{"key": "tun/tun/iproute2-table-index", "kerlico": "no", "where": "", "note": "auto-route 路由表索引，默认 2022。建议实现：auto-route 上线要用，防止和现有路由表冲突"}
+{"key": "tun/tun/iproute2-rule-index", "kerlico": "yes", "where": "", "note": "auto-route 规则起始索引，默认 9000。建议实现：auto-route 上线要用，防止和现有规则冲突"}
+{"key": "tun/tun/iproute2-table-index", "kerlico": "yes", "where": "", "note": "auto-route 路由表索引，默认 2022。建议实现：auto-route 上线要用，防止和现有路由表冲突"}
 {"key": "tun/tun/loopback-address", "kerlico": "no", "where": "", "note": "环回地址（文档未写）。建议暂不实现：kerlico 没有回环劫持，要先有 auto-route"}
 {"key": "tun/tun/mtu", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`mtu`，1280-9000，默认 1500"}
 {"key": "tun/tun/multi-queue", "kerlico": "no", "where": "", "note": "启用基于 IFF_MULTI_QUEUE 的多队列支持，使吞吐量能够随 CPU 核心数量扩展。建议暂不实现：kerlico 单任务读写接口，先解决用户态栈吞吐"}
@@ -748,13 +748,13 @@
 {"key": "tun/tun/processors-per-channel", "kerlico": "no", "where": "", "note": "每通道处理器数（文档未写）。建议暂不实现：Mihomo 文档未写的调优项，kerlico 单任务读写接口"}
 {"key": "tun/tun/protocol", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "节点类型 `tun`，只能放 `local_inbounds`"}
 {"key": "tun/tun/recvmsgx", "kerlico": "no", "where": "", "note": "启用 recvmsgx（文档未写）。建议暂不实现：Mihomo 文档未写的调优项，kerlico 用 tun-rs 读写"}
-{"key": "tun/tun/route-address", "kerlico": "no", "where": "", "note": "auto-route 自定义路由。建议实现：kerlico 明确不改系统路由，用户要自己 ip route；这是 TUN 开箱可用最大的缺口"}
+{"key": "tun/tun/route-address", "kerlico": "yes", "where": "", "note": "auto-route 自定义路由。建议实现：kerlico 明确不改系统路由，用户要自己 ip route；这是 TUN 开箱可用最大的缺口"}
 {"key": "tun/tun/route-address-set", "kerlico": "no", "where": "", "note": "规则集 CIDR 加入防火墙，不匹配绕过。建议暂不实现：kerlico 没有规则集，也不写防火墙"}
-{"key": "tun/tun/route-exclude-address", "kerlico": "no", "where": "", "note": "auto-route 排除网段。建议实现：kerlico 明确不改系统路由，用户要自己 ip route；这是 TUN 开箱可用最大的缺口"}
+{"key": "tun/tun/route-exclude-address", "kerlico": "yes", "where": "", "note": "auto-route 排除网段。建议实现：kerlico 明确不改系统路由，用户要自己 ip route；这是 TUN 开箱可用最大的缺口"}
 {"key": "tun/tun/route-exclude-address-set", "kerlico": "no", "where": "", "note": "规则集 CIDR 加入防火墙，匹配绕过。建议暂不实现：kerlico 没有规则集，也不写防火墙"}
 {"key": "tun/tun/sendmsgx", "kerlico": "no", "where": "", "note": "启用 sendmsgx（文档未写）。建议暂不实现：Mihomo 文档未写的调优项，kerlico 用 tun-rs 读写"}
 {"key": "tun/tun/stack", "kerlico": "partial", "where": "crates/protocol-wireguard/src/ip.rs", "note": "固定用户态 smoltcp 栈（和 WireGuard 共用），类似 gvisor；不可选 system、mixed"}
-{"key": "tun/tun/strict-route", "kerlico": "no", "where": "", "note": "严格路由，防地址泄漏。建议实现：auto-route 上线要用，防止地址泄漏"}
+{"key": "tun/tun/strict-route", "kerlico": "yes", "where": "", "note": "严格路由，防地址泄漏。建议实现：auto-route 上线要用，防止地址泄漏"}
 {"key": "tun/tun/udp-timeout", "kerlico": "partial", "where": "crates/protocol-wireguard/src/server/flows.rs", "note": "取用户态栈默认 `udp_idle_timeout_ms`（60 秒）和全局 `limits.idle_timeout_ms` 的较小值；TUN 选项不可配"}
 {"key": "tun/tun/user-level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议暂不实现：Xray 的策略等级；kerlico 用 members 和路由 `user` 表达，TUN 没有用户"}
 {"key": "tun/tun/xray-tun-fd", "kerlico": "no", "where": "", "note": "XRAY_TUN_FD 传入 FD，Linux 可选用于轻量或非特权实现。建议暂不实现：外部传入 fd 用于非特权实现，kerlico 需要 CAP_NET_ADMIN"}

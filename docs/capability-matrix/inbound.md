@@ -74,7 +74,7 @@
 | `routing-mark` | 监听 socket 的 routing-mark | 有 |  |  | 未实现 | 未测 | 取值：`整数`<br>约束：仅 Linux |
 | `rule` | 入站使用的子规则，为空或未找到时用 rules | 有 |  |  | 未实现 | 未测 | 取值：`sub-rule 名` |
 | `settings` | 协议专属配置对象 |  |  | 有 | 已实现 | 通过 |  |
-| `sniffing` | 入站流量探测配置 |  |  | 有 | 未实现 | 未测 |  |
+| `sniffing` | 入站流量探测配置 |  |  | 有 | 已实现 | 通过 |  |
 | `stream-settings` | 入站传输配置 |  |  | 有 | 部分 | 通过 |  |
 | `tag` | 入站的标签。 |  | 有 | 有 | 已实现 | 通过 | 约束：非空时必须在所有 tag 中唯一 |
 | `type` | 入站类型 | 有 | 有 |  | 部分 | 通过 | 取值：`anytls`、`cloudflared`、`direct`、`http`、`hysteria`、`hysteria2`、`hysteria2-realm`、`mieru`、`mixed`、`naive`、`redir`、`redirect`、`shadowquic`、`shadowsocks`、`shadowtls`、`snell`、`socks`、`sudoku`、`tailcat`、`tproxy`、`trojan`、`trusttunnel`、`tuic`、`tun`…… |
@@ -286,9 +286,9 @@
 | `proxy-protocol-accept-no-header` | Proxy Protocol 接受无头连接，已移除 |  | 已移除 |  | 不适用 | 未测 | 约束：1.6.0 移除 |
 | `reuse-addr` | 重用监听地址。 |  | 有 |  | 部分 | 通过 | 约束：自 sing-box 1.12.0 起 |
 | `routing-mark` | 设置 netfilter 路由标记。 |  | 有 |  | 未实现 | 未测 | 约束：仅支持 Linux。<br>约束：自 sing-box 1.12.0 起 |
-| `sniff` | 启用协议探测。 |  | 已移除 |  | 未实现 | 未测 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除，参阅 迁移指南. |
-| `sniff-override-destination` | 用探测出的域名覆盖连接目标地址。 |  | 已移除 |  | 未实现 | 未测 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除。<br>约束：如果域名无效（如 Tor），将不生效。 |
-| `sniff-timeout` | 探测超时时间。 |  | 已移除 |  | 未实现 | 未测 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除，参阅 迁移指南.<br>约束：默认使用 300ms。 |
+| `sniff` | 启用协议探测。 |  | 已移除 |  | 已实现 | 通过 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除，参阅 迁移指南. |
+| `sniff-override-destination` | 用探测出的域名覆盖连接目标地址。 |  | 已移除 |  | 已实现 | 通过 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除。<br>约束：如果域名无效（如 Tor），将不生效。 |
+| `sniff-timeout` | 探测超时时间。 |  | 已移除 |  | 已实现 | 通过 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除，参阅 迁移指南.<br>约束：默认使用 300ms。 |
 | `tcp-fast-open` | 启用 TCP Fast Open。 |  | 有 |  | 未实现 | 未测 |  |
 | `tcp-keep-alive` | TCP keep alive 初始周期。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.13.0 起<br>约束：默认使用 `5m`。<br>约束：默认值从 `10m` 更改为 `5m`。 |
 | `tcp-keep-alive-interval` | TCP keep alive 间隔。 |  | 有 |  | 未实现 | 未测 | 约束：默认使用 `75s`。 |
@@ -879,16 +879,16 @@
 | `protocol` | listeners 中的 TUN，面向高级用户 | 有 |  |  | 已实现 | 通过 | 约束：普通用户用顶层 tun |
 | `tun` | 创建 TUN 接口接入流量 |  |  | 有 | 已实现 | 通过 | 取值：`tun`<br>约束：Android/iOS 需外部 APP 通过 XRAY_TUN_FD 传 FD<br>约束：Windows、Linux、macOS、FreeBSD 独立运行 |
 | `combo` | listener TUN 组合，取值同顶层 tun | 有 |  |  | 部分 | 通过 | stack：`gvisor`、`mips`、`mixed`、`system`<br>dns-mode：``、`disabled`、`hijack`、`native`<br>auto-route：`false`、`true`<br>strict-route：`false`、`true` |
-| `auto-detect-interface` | 自动选择出口接口 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `auto-redirect` | tun 入站字段 auto-redirect（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `auto-redirect-input-mark` | tun 入站字段 auto-redirect-input-mark（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `auto-redirect-iproute2-fallback-rule-index` | tun 入站字段 auto-redirect-iproute2-fallback-rule-index（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `auto-redirect-output-mark` | tun 入站字段 auto-redirect-output-mark（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `auto-route` | 自动全局路由 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `auto-detect-interface` | 自动选择出口接口 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `auto-redirect` | tun 入站字段 auto-redirect（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `auto-redirect-input-mark` | tun 入站字段 auto-redirect-input-mark（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `auto-redirect-iproute2-fallback-rule-index` | tun 入站字段 auto-redirect-iproute2-fallback-rule-index（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `auto-redirect-output-mark` | tun 入站字段 auto-redirect-output-mark（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `auto-route` | 自动全局路由 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `congestion-controller` | TCP 拥塞控制 | 有 |  |  | 未实现 | 未测 | 取值：`bbr`、`bbr3`、`cubic`、`reno`<br>约束：仅 mips 协议栈 |
 | `device` | tun 入站字段 device（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `disable-icmp-forwarding` | tun 入站字段 disable-icmp-forwarding（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `dns-hijack` | DNS 劫持列表 | 有 |  |  | 未实现 | 未测 | 取值：`0.0.0.0:53` |
+| `dns-hijack` | DNS 劫持列表 | 有 |  |  | 已实现 | 通过 | 取值：`0.0.0.0:53` |
 | `dns-mode` | 系统 DNS 配置方式 | 有 |  |  | 未实现 | 未测 | 取值：`disabled`、`hijack`、`native` |
 | `endpoint-independent-nat` | 独立于端点的 NAT | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `exclude-dst-port` | tun 入站字段 exclude-dst-port（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
@@ -911,24 +911,24 @@
 | `include-uid` | 包含的 UID | 有 |  |  | 未实现 | 未测 | 取值：`整数列表` |
 | `include-uid-range` | 包含的 UID 范围 | 有 |  |  | 未实现 | 未测 | 取值：`1000-99999` |
 | `inet4-address` | TUN IPv4 地址 | 有 |  |  | 已实现 | 通过 | 取值：`CIDR 列表` |
-| `inet4-route-address` | IPv4 自定义路由 | 有 |  |  | 未实现 | 未测 | 取值：`CIDR 列表` |
-| `inet4-route-exclude-address` | tun 入站字段 inet4-route-exclude-address（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
+| `inet4-route-address` | IPv4 自定义路由 | 有 |  |  | 已实现 | 通过 | 取值：`CIDR 列表` |
+| `inet4-route-exclude-address` | tun 入站字段 inet4-route-exclude-address（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `inet6-address` | TUN IPv6 地址 | 有 |  |  | 已实现 | 通过 | 取值：`CIDR 列表` |
-| `inet6-route-address` | IPv6 自定义路由 | 有 |  |  | 未实现 | 未测 | 取值：`CIDR 列表` |
-| `inet6-route-exclude-address` | tun 入站字段 inet6-route-exclude-address（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `iproute2-rule-index` | tun 入站字段 iproute2-rule-index（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `iproute2-table-index` | tun 入站字段 iproute2-table-index（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
+| `inet6-route-address` | IPv6 自定义路由 | 有 |  |  | 已实现 | 通过 | 取值：`CIDR 列表` |
+| `inet6-route-exclude-address` | tun 入站字段 inet6-route-exclude-address（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `iproute2-rule-index` | tun 入站字段 iproute2-rule-index（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `iproute2-table-index` | tun 入站字段 iproute2-table-index（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `loopback-address` | tun 入站字段 loopback-address（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `mtu` | MTU | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
 | `processors-per-channel` | tun 入站字段 processors-per-channel（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `recvmsgx` | tun 入站字段 recvmsgx（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `route-address` | tun 入站字段 route-address（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `route-address-set` | tun 入站字段 route-address-set（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `route-exclude-address` | tun 入站字段 route-exclude-address（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `route-exclude-address-set` | tun 入站字段 route-exclude-address-set（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
+| `route-address` | tun 入站字段 route-address（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `route-address-set` | tun 入站字段 route-address-set（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `route-exclude-address` | tun 入站字段 route-exclude-address（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `route-exclude-address-set` | tun 入站字段 route-exclude-address-set（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `sendmsgx` | tun 入站字段 sendmsgx（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `stack` | 协议栈 | 有 |  |  | 部分 | 通过 | 取值：`gvisor`、`mips`、`mixed`、`system` |
-| `strict-route` | 严格路由 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `strict-route` | 严格路由 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `udp-timeout` | tun 入站字段 udp-timeout（文档页未写，配置结构存在） | 有 |  |  | 部分 | 通过 |  |
 
 ## tunnel

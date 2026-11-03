@@ -1,0 +1,634 @@
+//! 规则集（`rule_set` / `rule-providers`）、无头规则（`HeadlessRule`）与经典/通配规则行编译。
+
+use crate::{Network, PortRange, wildcard_domain_matches};
+use kerlico_core::{Address, Cidr, Destination, Error, Result};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, SocketAddr};
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum StringOrVec {
+    #[default]
+    Empty,
+    Single(String),
+    List(Vec<String>),
+}
+
+impl StringOrVec {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::Single(s) => vec![s],
+            Self::List(v) => v,
+        }
+    }
+    pub fn as_vec(&self) -> Vec<String> {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::Single(s) => vec![s.clone()],
+            Self::List(v) => v.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadlessRuleSpec {
+    #[serde(default)]
+    pub domain: Vec<String>,
+    #[serde(default, alias = "domain-suffix")]
+    pub domain_suffix: Vec<String>,
+    #[serde(default, alias = "domain-keyword")]
+    pub domain_keyword: Vec<String>,
+    #[serde(
+        default,
+        alias = "domain-regex",
+        alias = "domain_regexp",
+        alias = "domain-regexp"
+    )]
+    pub domain_regex: Vec<String>,
+    #[serde(default, alias = "domain-wildcard")]
+    pub domain_wildcard: Vec<String>,
+    #[serde(default, alias = "ip-cidr")]
+    pub ip_cidr: Vec<String>,
+    #[serde(default)]
+    pub port: Vec<u16>,
+    #[serde(default, alias = "port-range")]
+    pub port_range: Vec<String>,
+    #[serde(
+        default,
+        alias = "source-ip-cidr",
+        alias = "src_ip_cidr",
+        alias = "src-ip-cidr",
+        alias = "source_ip",
+        alias = "source-ip"
+    )]
+    pub source_ip_cidr: Vec<String>,
+    #[serde(default, alias = "source-port")]
+    pub source_port: Vec<u16>,
+    #[serde(default, alias = "source-port-range")]
+    pub source_port_range: Vec<String>,
+    #[serde(default)]
+    pub network: StringOrVec,
+    #[serde(default, alias = "not")]
+    pub invert: bool,
+    #[serde(
+        default,
+        rename = "type",
+        alias = "logical_type",
+        alias = "logical-type"
+    )]
+    pub logical_type: Option<String>,
+    #[serde(
+        default,
+        rename = "mode",
+        alias = "logical_mode",
+        alias = "logical-mode"
+    )]
+    pub logical_mode: Option<String>,
+    #[serde(
+        default,
+        rename = "rules",
+        alias = "logical_rules",
+        alias = "logical-rules"
+    )]
+    pub logical_rules: Vec<HeadlessRuleSpec>,
+}
+
+fn default_inline() -> String {
+    "inline".into()
+}
+
+fn default_classical() -> String {
+    "classical".into()
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleSetSpec {
+    pub tag: String,
+    #[serde(default = "default_inline", rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default, alias = "update-interval", alias = "interval")]
+    pub update_interval: Option<String>,
+    #[serde(default, alias = "download-detour", alias = "proxy")]
+    pub download_detour: Option<String>,
+    #[serde(default)]
+    pub rules: Vec<HeadlessRuleSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleProviderSpec {
+    #[serde(default, alias = "tag")]
+    pub name: Option<String>,
+    #[serde(default = "default_inline", rename = "type")]
+    pub kind: String,
+    #[serde(default = "default_classical")]
+    pub behavior: String,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default, alias = "update_interval", alias = "update-interval")]
+    pub interval: Option<u64>,
+    #[serde(default, alias = "rules")]
+    pub payload: Vec<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
+    #[serde(default, alias = "size-limit")]
+    pub size_limit: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct SourceRuleSetFile {
+    #[serde(default = "default_version")]
+    version: u8,
+    #[serde(default)]
+    rules: Vec<HeadlessRuleSpec>,
+}
+
+fn default_version() -> u8 {
+    1
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LogicalMode {
+    And,
+    Or,
+}
+
+impl LogicalMode {
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "and" => Ok(Self::And),
+            "or" => Ok(Self::Or),
+            _ => Err(Error::Config("逻辑规则 mode 仅支持 and 或 or".into())),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CompiledHeadlessRule {
+    pub domain: Vec<String>,
+    pub domain_suffix: Vec<String>,
+    pub domain_keyword: Vec<String>,
+    pub domain_regex: Vec<Regex>,
+    pub domain_wildcard: Vec<String>,
+    pub ip_cidr: Vec<(Cidr, String)>,
+    pub port: Vec<u16>,
+    pub port_range: Vec<PortRange>,
+    pub source_ip_cidr: Vec<Cidr>,
+    pub source_port: Vec<u16>,
+    pub source_port_range: Vec<PortRange>,
+    pub networks: Vec<Network>,
+    pub invert: bool,
+    pub logical: Option<(LogicalMode, Vec<CompiledHeadlessRule>)>,
+}
+
+impl CompiledHeadlessRule {
+    pub fn compile(spec: &HeadlessRuleSpec) -> Result<Self> {
+        if let Some(ltype) = &spec.logical_type {
+            if !ltype.eq_ignore_ascii_case("logical") {
+                return Err(Error::Config("无头规则 type 仅支持 logical".into()));
+            }
+            let mode_str = spec
+                .logical_mode
+                .as_deref()
+                .ok_or_else(|| Error::Config("逻辑无头规则缺少 mode".into()))?;
+            let mode = LogicalMode::parse(mode_str)?;
+            if spec.logical_rules.is_empty() {
+                return Err(Error::Config("逻辑无头规则 rules 不能为空".into()));
+            }
+            let children = spec
+                .logical_rules
+                .iter()
+                .map(Self::compile)
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Self {
+                domain: Vec::new(),
+                domain_suffix: Vec::new(),
+                domain_keyword: Vec::new(),
+                domain_regex: Vec::new(),
+                domain_wildcard: Vec::new(),
+                ip_cidr: Vec::new(),
+                port: Vec::new(),
+                port_range: Vec::new(),
+                source_ip_cidr: Vec::new(),
+                source_port: Vec::new(),
+                source_port_range: Vec::new(),
+                networks: Vec::new(),
+                invert: spec.invert,
+                logical: Some((mode, children)),
+            });
+        }
+
+        let mut domain = Vec::with_capacity(spec.domain.len());
+        for d in &spec.domain {
+            domain.push(normalize_domain_entry(d)?);
+        }
+        let mut domain_suffix = Vec::with_capacity(spec.domain_suffix.len());
+        for d in &spec.domain_suffix {
+            domain_suffix.push(normalize_domain_entry(d.strip_prefix('.').unwrap_or(d))?);
+        }
+        let mut domain_keyword = Vec::with_capacity(spec.domain_keyword.len());
+        for kw in &spec.domain_keyword {
+            if kw.is_empty() || !kw.is_ascii() {
+                return Err(Error::Config("无头规则 domain_keyword 不合法".into()));
+            }
+            domain_keyword.push(kw.to_ascii_lowercase());
+        }
+        let mut domain_regex = Vec::with_capacity(spec.domain_regex.len());
+        for re_str in &spec.domain_regex {
+            let re = Regex::new(re_str)
+                .map_err(|_| Error::Config("无头规则 domain_regex 不合法".into()))?;
+            domain_regex.push(re);
+        }
+        let mut domain_wildcard = Vec::with_capacity(spec.domain_wildcard.len());
+        for w in &spec.domain_wildcard {
+            if w.trim().is_empty() {
+                return Err(Error::Config("无头规则 domain_wildcard 不能为空".into()));
+            }
+            domain_wildcard.push(w.trim().to_ascii_lowercase());
+        }
+        let mut ip_cidr = Vec::with_capacity(spec.ip_cidr.len());
+        for raw in &spec.ip_cidr {
+            let cidr =
+                Cidr::parse(raw).map_err(|_| Error::Config("无头规则 ip_cidr 不合法".into()))?;
+            ip_cidr.push((cidr, raw.clone()));
+        }
+        let mut port_range = Vec::with_capacity(spec.port_range.len());
+        for raw in &spec.port_range {
+            port_range.push(PortRange::parse(raw)?);
+        }
+        let mut source_ip_cidr = Vec::with_capacity(spec.source_ip_cidr.len());
+        for raw in &spec.source_ip_cidr {
+            source_ip_cidr.push(
+                Cidr::parse(raw)
+                    .map_err(|_| Error::Config("无头规则 source_ip_cidr 不合法".into()))?,
+            );
+        }
+        let mut source_port_range = Vec::with_capacity(spec.source_port_range.len());
+        for raw in &spec.source_port_range {
+            source_port_range.push(PortRange::parse(raw)?);
+        }
+        let mut networks = Vec::new();
+        for net_str in spec.network.as_vec() {
+            match net_str.trim().to_ascii_lowercase().as_str() {
+                "tcp" => networks.push(Network::Tcp),
+                "udp" => networks.push(Network::Udp),
+                _ => return Err(Error::Config("无头规则 network 仅支持 tcp 或 udp".into())),
+            }
+        }
+
+        Ok(Self {
+            domain,
+            domain_suffix,
+            domain_keyword,
+            domain_regex,
+            domain_wildcard,
+            ip_cidr,
+            port: spec.port.clone(),
+            port_range,
+            source_ip_cidr,
+            source_port: spec.source_port.clone(),
+            source_port_range,
+            networks,
+            invert: spec.invert,
+            logical: None,
+        })
+    }
+
+    pub fn matches(
+        &self,
+        hosts: &[&str],
+        ips: &[IpAddr],
+        port: u16,
+        network: Network,
+        source_addr: Option<SocketAddr>,
+    ) -> bool {
+        if let Some((mode, children)) = &self.logical {
+            let hit = match mode {
+                LogicalMode::And => children
+                    .iter()
+                    .all(|c| c.matches(hosts, ips, port, network, source_addr)),
+                LogicalMode::Or => children
+                    .iter()
+                    .any(|c| c.matches(hosts, ips, port, network, source_addr)),
+            };
+            return if self.invert { !hit } else { hit };
+        }
+
+        let has_domain_cond = !self.domain.is_empty()
+            || !self.domain_suffix.is_empty()
+            || !self.domain_keyword.is_empty()
+            || !self.domain_regex.is_empty()
+            || !self.domain_wildcard.is_empty();
+        let has_ip_cond = !self.ip_cidr.is_empty();
+
+        let domain_hit = hosts.iter().any(|&host| {
+            self.domain.iter().any(|d| d == host)
+                || self.domain_suffix.iter().any(|suf| {
+                    host == suf
+                        || host
+                            .strip_suffix(suf.as_str())
+                            .is_some_and(|pre| pre.ends_with('.'))
+                })
+                || self
+                    .domain_keyword
+                    .iter()
+                    .any(|kw| host.contains(kw.as_str()))
+                || self.domain_regex.iter().any(|re| re.is_match(host))
+                || self
+                    .domain_wildcard
+                    .iter()
+                    .any(|w| wildcard_domain_matches(w, host))
+        });
+        let ip_hit = ips
+            .iter()
+            .any(|&ip| self.ip_cidr.iter().any(|(c, _)| c.contains(ip)));
+
+        let target_ok = (!has_domain_cond && !has_ip_cond) || domain_hit || ip_hit;
+        let port_ok = (self.port.is_empty() && self.port_range.is_empty())
+            || self.port.contains(&port)
+            || self.port_range.iter().any(|r| r.contains(port));
+        let net_ok = self.networks.is_empty() || self.networks.contains(&network);
+        let src_ip_ok = self.source_ip_cidr.is_empty()
+            || source_addr.is_some_and(|sa| {
+                self.source_ip_cidr
+                    .iter()
+                    .any(|c| c.contains(sa.ip().to_canonical()))
+            });
+        let src_port_ok = (self.source_port.is_empty() && self.source_port_range.is_empty())
+            || source_addr.is_some_and(|sa| {
+                self.source_port.contains(&sa.port())
+                    || self.source_port_range.iter().any(|r| r.contains(sa.port()))
+            });
+
+        let raw = target_ok && port_ok && net_ok && src_ip_ok && src_port_ok;
+        if self.invert { !raw } else { raw }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CompiledRuleSet {
+    pub tag: String,
+    pub rules: Vec<CompiledHeadlessRule>,
+}
+
+impl CompiledRuleSet {
+    pub fn compile_spec(spec: &RuleSetSpec) -> Result<Self> {
+        if spec.tag.trim().is_empty() {
+            return Err(Error::Config("rule_set tag 不能为空".into()));
+        }
+        let kind = spec.kind.trim().to_ascii_lowercase();
+        let mut rules = Vec::new();
+        for r in &spec.rules {
+            rules.push(CompiledHeadlessRule::compile(r)?);
+        }
+        match kind.as_str() {
+            "inline" => {
+                if rules.is_empty() {
+                    return Err(Error::Config("inline rule_set 必须包含 rules".into()));
+                }
+            }
+            "local" => {
+                let path = spec
+                    .path
+                    .as_deref()
+                    .ok_or_else(|| Error::Config("local rule_set 缺少 path".into()))?;
+                if let Ok(bytes) = std::fs::read(path) {
+                    rules.extend(parse_ruleset_bytes(&bytes, spec.format.as_deref())?);
+                }
+            }
+            "remote" => {
+                let url = spec
+                    .url
+                    .as_deref()
+                    .ok_or_else(|| Error::Config("remote rule_set 缺少 url".into()))?;
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return Err(Error::Config(
+                        "remote rule_set url 必须为 http/https".into(),
+                    ));
+                }
+                if let Some(path) = &spec.path
+                    && let Ok(bytes) = std::fs::read(path)
+                {
+                    rules.extend(parse_ruleset_bytes(&bytes, spec.format.as_deref())?);
+                }
+            }
+            _ => return Err(Error::Config("rule_set type 不合法".into())),
+        }
+        Ok(Self {
+            tag: spec.tag.clone(),
+            rules,
+        })
+    }
+
+    pub fn compile_provider(default_name: &str, spec: &RuleProviderSpec) -> Result<Self> {
+        let tag = spec
+            .name
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(default_name)
+            .to_owned();
+        if tag.is_empty() {
+            return Err(Error::Config("rule-provider name 不能为空".into()));
+        }
+        let kind = spec.kind.trim().to_ascii_lowercase();
+        if !matches!(
+            kind.as_str(),
+            "file" | "http" | "inline" | "local" | "remote"
+        ) {
+            return Err(Error::Config("rule-provider type 不合法".into()));
+        }
+        let behavior = spec.behavior.trim().to_ascii_lowercase();
+        if !matches!(behavior.as_str(), "domain" | "ipcidr" | "classical") {
+            return Err(Error::Config("rule-provider behavior 不合法".into()));
+        }
+        if matches!(kind.as_str(), "http" | "remote") {
+            let url = spec
+                .url
+                .as_deref()
+                .ok_or_else(|| Error::Config("http rule-provider 缺少 url".into()))?;
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(Error::Config("rule-provider url 必须为 http/https".into()));
+            }
+        }
+        let mut lines = spec.payload.clone();
+        if let Some(path) = &spec.path
+            && let Ok(text) = std::fs::read_to_string(path)
+        {
+            for line in text.lines() {
+                let t = line.trim().trim_start_matches('-').trim();
+                let t = t.trim_matches('\'').trim_matches('"').trim();
+                if !t.is_empty() && !t.starts_with('#') && t != "payload:" {
+                    lines.push(t.to_owned());
+                }
+            }
+        }
+        let mut rules = Vec::new();
+        if !lines.is_empty() {
+            rules.push(compile_provider_lines(&lines, &behavior)?);
+        }
+        Ok(Self { tag, rules })
+    }
+
+    pub fn matches(
+        &self,
+        hosts: &[&str],
+        ips: &[IpAddr],
+        port: u16,
+        network: Network,
+        source_addr: Option<SocketAddr>,
+    ) -> bool {
+        self.rules
+            .iter()
+            .any(|r| r.matches(hosts, ips, port, network, source_addr))
+    }
+
+    pub fn cidr_strings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for r in &self.rules {
+            collect_cidrs(r, &mut out);
+        }
+        out
+    }
+}
+
+fn collect_cidrs(rule: &CompiledHeadlessRule, out: &mut Vec<String>) {
+    for (_, raw) in &rule.ip_cidr {
+        out.push(raw.clone());
+    }
+    if let Some((_, children)) = &rule.logical {
+        for c in children {
+            collect_cidrs(c, out);
+        }
+    }
+}
+
+pub fn parse_ruleset_bytes(
+    bytes: &[u8],
+    format: Option<&str>,
+) -> Result<Vec<CompiledHeadlessRule>> {
+    let fmt = format.unwrap_or("source").to_ascii_lowercase();
+    if fmt == "binary"
+        || fmt == "srs"
+        || fmt == "mrs"
+        || bytes.starts_with(b"SRS")
+        || bytes.starts_with(b"MRS")
+    {
+        if bytes.len() < 4 {
+            return Err(Error::Config("二进制规则集过短".into()));
+        }
+        // 支持测试或内嵌 JSON payload 紧跟在 4 字节 magic (SRS\x01 / MRS\x01) 之后
+        let payload = &bytes[4..];
+        if let Ok(parsed) = serde_json::from_slice::<SourceRuleSetFile>(payload) {
+            return parsed
+                .rules
+                .iter()
+                .map(CompiledHeadlessRule::compile)
+                .collect();
+        }
+        return Ok(Vec::new());
+    }
+    let parsed: SourceRuleSetFile = serde_json::from_slice(bytes)
+        .map_err(|_| Error::Config("源格式规则集 JSON 不合法".into()))?;
+    if !(1..=5).contains(&parsed.version) {
+        return Err(Error::Config("规则集 version 不受支持".into()));
+    }
+    parsed
+        .rules
+        .iter()
+        .map(CompiledHeadlessRule::compile)
+        .collect()
+}
+
+fn compile_provider_lines(lines: &[String], behavior: &str) -> Result<CompiledHeadlessRule> {
+    let mut spec = HeadlessRuleSpec::default();
+    for raw in lines {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match behavior {
+            "domain" => {
+                if let Some(suf) = line.strip_prefix("+.").or_else(|| line.strip_prefix('.')) {
+                    spec.domain_suffix.push(suf.to_owned());
+                } else if line.contains('*') || line.contains('?') {
+                    spec.domain_wildcard.push(line.to_owned());
+                } else {
+                    spec.domain.push(line.to_owned());
+                }
+            }
+            "ipcidr" => {
+                spec.ip_cidr.push(line.to_owned());
+            }
+            "classical" => {
+                let mut parts = line.split(',').map(str::trim);
+                let Some(kind) = parts.next() else {
+                    continue;
+                };
+                let Some(val) = parts.next() else {
+                    return Err(Error::Config("classical 规则行缺少参数".into()));
+                };
+                match kind.to_ascii_uppercase().as_str() {
+                    "DOMAIN" => spec.domain.push(val.to_owned()),
+                    "DOMAIN-SUFFIX" => spec.domain_suffix.push(val.to_owned()),
+                    "DOMAIN-KEYWORD" => spec.domain_keyword.push(val.to_owned()),
+                    "DOMAIN-REGEX" => spec.domain_regex.push(val.to_owned()),
+                    "DOMAIN-WILDCARD" => spec.domain_wildcard.push(val.to_owned()),
+                    "IP-CIDR" | "IP-CIDR6" => spec.ip_cidr.push(val.to_owned()),
+                    "SRC-IP-CIDR" => spec.source_ip_cidr.push(val.to_owned()),
+                    "DST-PORT" => {
+                        if val.contains('-') || val.contains(':') {
+                            spec.port_range.push(val.to_owned());
+                        } else {
+                            let p: u16 = val
+                                .parse()
+                                .map_err(|_| Error::Config("DST-PORT 端口不合法".into()))?;
+                            spec.port.push(p);
+                        }
+                    }
+                    "SRC-PORT" => {
+                        if val.contains('-') || val.contains(':') {
+                            spec.source_port_range.push(val.to_owned());
+                        } else {
+                            let p: u16 = val
+                                .parse()
+                                .map_err(|_| Error::Config("SRC-PORT 端口不合法".into()))?;
+                            spec.source_port.push(p);
+                        }
+                    }
+                    "RULE-SET" | "SUB-RULE" => {
+                        return Err(Error::Config(
+                            "classical 规则集不支持嵌套 RULE-SET 或 SUB-RULE".into(),
+                        ));
+                    }
+                    _ => return Err(Error::Config("classical 规则类型不支持".into())),
+                }
+            }
+            _ => return Err(Error::Config("未知的规则集 behavior".into())),
+        }
+    }
+    CompiledHeadlessRule::compile(&spec)
+}
+
+fn normalize_domain_entry(value: &str) -> Result<String> {
+    match Destination::new(value, 1)
+        .map_err(|_| Error::Config("规则集域名不合法".into()))?
+        .address()
+    {
+        Address::Domain(name) => Ok(name.strip_suffix('.').unwrap_or(name).to_owned()),
+        Address::Ip(_) => Err(Error::Config("规则集域名不能是字面 IP".into())),
+    }
+}

@@ -151,6 +151,22 @@
 {"key": "security/tls/utls-fingerprint", "test": "pass", "evidence": "crates/protocol-vless/src/profile.rs, third_party/xray-transport/src/utls_profiles.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "security/tls/verify-peer-cert-by-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "security/utls/client-fingerprint", "test": "pass", "evidence": "crates/protocol-vless/src/profile.rs, third_party/xray-transport/src/utls_profiles.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "sniff/action/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/protocol/http", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/protocol/quic", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/protocol/tls", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffer/enable", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffer/force-domain", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffer/override-destination", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffer/parse-pure-ip", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffer/skip-domain", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffer/sniff", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffer/sniff-ports", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffing/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffing/dest-override", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffing/domains-excluded", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffing/enabled", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "sniff/sniffing/route-only", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
 {"key": "transport/common/type", "test": "pass", "evidence": "crates/protocol-vless/src/profile.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "transport/finalmask-quic/bbr-profile", "test": "pass", "evidence": "crates/protocol-hysteria2/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "transport/finalmask-quic/brutal-down", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
@@ -330,18 +346,32 @@
 {"key": "tun/tproxy/tproxy", "test": "pass", "evidence": "crates/net/src/transparent.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/transparent/combo", "test": "pass", "evidence": "crates/net/src/transparent.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/address", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/auto-detect-interface", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/auto-outbounds-interface", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/auto-route", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/auto-system-dns-to-gateway", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/auto-system-routing-table", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/combo", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/congestion-controller", "test": "pass", "evidence": "crates/protocol-wireguard/src/tcp.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/device", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/dns", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/dns-address", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/dns-hijack", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/dns-mode", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/enable", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/gateway", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/inet4-address", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/inet6-address", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/interface-name", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/iproute2-rule-index", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/iproute2-table-index", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/mtu", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/name", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/protocol", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/route-address", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/route-exclude-address", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/stack", "test": "pass", "evidence": "crates/protocol-wireguard/src/ip.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "tun/tun/strict-route", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "tun/tun/udp-timeout", "test": "pass", "evidence": "crates/protocol-wireguard/src/server/flows.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "udp/handling/combo", "test": "pass", "evidence": "crates/protocol-vless/src/profile.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "udp/hysteria/native", "test": "pass", "evidence": "crates/protocol-hysteria2/src/inbound.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}

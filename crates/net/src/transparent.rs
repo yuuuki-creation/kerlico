@@ -58,9 +58,11 @@ impl InboundProtocol for RedirectNode {
                 context.original_dst(),
                 context.local_addr,
             )?;
+            let (stream, orig_target) =
+                crate::sniff::sniff_and_prepare_tcp(stream, &target, access.sniff_policy()).await;
             let budget =
                 ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
-            let remote = budget.run(access.connect_tcp(&target, &budget)).await?;
+            let remote = budget.run(access.open_tcp(orig_target, &budget)).await?;
             kerlico_core::relay_tcp(stream, remote, context.idle_timeout, context.cancel).await
         })
     }
@@ -137,9 +139,11 @@ impl InboundProtocol for TproxyNode {
                 context.original_dst(),
                 context.local_addr,
             )?;
+            let (stream, orig_target) =
+                crate::sniff::sniff_and_prepare_tcp(stream, &target, access.sniff_policy()).await;
             let budget =
                 ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
-            let remote = budget.run(access.connect_tcp(&target, &budget)).await?;
+            let remote = budget.run(access.open_tcp(orig_target, &budget)).await?;
             kerlico_core::relay_tcp(stream, remote, context.idle_timeout, context.cancel).await
         })
     }
@@ -175,10 +179,12 @@ impl InboundProtocol for TproxyNode {
                     }
                 };
                 let payload = buffer[..len].to_vec();
+                let orig_target =
+                    crate::sniff::sniff_and_prepare_udp(&payload, &target, access.sniff_policy());
                 let budget = ConnectContext::new(context.connect_timeout)
                     .with_cancel(context.cancel.clone())
                     .with_udp_source(peer);
-                let Ok(channel) = budget.run(access.connect_udp(&target, &budget)).await else {
+                let Ok(channel) = budget.run(access.open_udp(orig_target, &budget)).await else {
                     context.events.record(NodeEvent::Failed);
                     continue;
                 };

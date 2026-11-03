@@ -2,6 +2,7 @@
 
 pub mod fallback;
 pub mod sing_mux;
+pub mod sniff;
 pub mod transparent;
 pub mod uot;
 pub use transparent::{RedirectNodeFactory, TproxyNodeFactory};
@@ -32,12 +33,13 @@ pub fn apply_tcp_socket_options(
     dialer: &kerlico_core::DialerOptions,
     interface: Option<&str>,
 ) -> std::io::Result<()> {
+    let effective_if = interface.or(dialer.interface.as_deref());
     #[cfg(target_os = "linux")]
-    if let Some(name) = interface {
+    if let Some(name) = effective_if {
         socket.bind_device(Some(name.as_bytes()))?;
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = interface;
+    let _ = effective_if;
 
     let sock_ref = socket2::SockRef::from(socket);
     #[cfg(target_os = "linux")]
@@ -214,7 +216,11 @@ impl NativeDevice {
     fn bind_udp(&self, socket: &socket2::Socket) -> std::io::Result<()> {
         #[cfg(target_os = "linux")]
         {
-            if let Some(name) = &self.interface {
+            if let Some(name) = self
+                .interface
+                .as_deref()
+                .or(self.dialer.interface.as_deref())
+            {
                 socket.bind_device(Some(name.as_bytes()))?;
             }
             if let Some(mark) = self.dialer.routing_mark {
@@ -650,8 +656,13 @@ impl OutboundFactory for DnsFactory {
             None
         } else {
             let spec = kerlico_dns::DnsSpec {
-                servers: options.servers,
+                servers: options
+                    .servers
+                    .into_iter()
+                    .map(kerlico_dns::DnsServerInput::Url)
+                    .collect(),
                 hosts: options.hosts,
+                ..Default::default()
             };
             spec.validate()?;
             Some(spec)

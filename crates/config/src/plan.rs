@@ -66,6 +66,7 @@ pub struct IngressPlan {
     pub outbound: OutId,
     pub mode: FamilyMode,
     pub local: bool,
+    pub sniff_policy: kerlico_core::SniffPolicy,
 }
 
 #[derive(Clone)]

@@ -8,9 +8,8 @@ publish.workspace = true
 
 [dependencies]
 kerlico-core.workspace = true
+regex.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
 
 [lints]

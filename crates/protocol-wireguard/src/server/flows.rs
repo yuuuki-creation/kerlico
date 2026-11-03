@@ -54,17 +54,35 @@ pub(super) async fn tcp(
     let budget =
         ConnectContext::new(scope.context.connect_timeout).with_cancel(stream.pending_cancel());
     let result = async {
-        let remote = access.connect_tcp(&target, &budget).await?;
-        let accepted = async {
-            stream.resume_accept()?;
-            stream.established().await
-        };
-        if let Err(error) = budget.run(accepted).await {
-            remote.finish(FlowOutcome::Failed(FlowFailure::from_error(&error)));
-            return Err(error);
-        }
+        let (stream, remote): (kerlico_core::BoxStream, _) =
+            if access.sniff_policy().should_sniff_target(&target) {
+                let accepted = async {
+                    stream.resume_accept()?;
+                    stream.established().await
+                };
+                budget.run(accepted).await?;
+                let (restored, orig_target) = kerlico_net::sniff::sniff_and_prepare_tcp(
+                    Box::new(stream),
+                    &target,
+                    access.sniff_policy(),
+                )
+                .await;
+                let remote = access.open_tcp(orig_target, &budget).await?;
+                (restored, remote)
+            } else {
+                let remote = access.connect_tcp(&target, &budget).await?;
+                let accepted = async {
+                    stream.resume_accept()?;
+                    stream.established().await
+                };
+                if let Err(error) = budget.run(accepted).await {
+                    remote.finish(FlowOutcome::Failed(FlowFailure::from_error(&error)));
+                    return Err(error);
+                }
+                (Box::new(stream), remote)
+            };
         kerlico_core::relay_tcp(
-            Box::new(stream),
+            stream,
             remote,
             scope.context.idle_timeout,
             scope.context.cancel.clone(),

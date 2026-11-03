@@ -709,11 +709,12 @@ impl DetourResolver for DetourTable {
     }
 }
 
-/// 出站底层拨号与套接字选项（链式代理、路由标记、TCP Fast Open、TCP Keep-Alive）。
+/// 出站底层拨号与套接字选项（链式代理、路由标记、出站接口、TCP Fast Open、TCP Keep-Alive）。
 #[derive(Clone, Default)]
 pub struct DialerOptions {
     pub detour: Option<OutId>,
     pub routing_mark: Option<u32>,
+    pub interface: Option<String>,
     pub tcp_fast_open: bool,
     pub disable_tcp_keep_alive: bool,
     pub tcp_keep_alive_idle: Option<Duration>,
@@ -726,6 +727,7 @@ impl fmt::Debug for DialerOptions {
         f.debug_struct("DialerOptions")
             .field("detour", &self.detour)
             .field("routing_mark", &self.routing_mark)
+            .field("interface", &self.interface)
             .field("tcp_fast_open", &self.tcp_fast_open)
             .field("disable_tcp_keep_alive", &self.disable_tcp_keep_alive)
             .field("tcp_keep_alive_idle", &self.tcp_keep_alive_idle)
@@ -738,6 +740,7 @@ impl DialerOptions {
     pub fn is_default(&self) -> bool {
         self.detour.is_none()
             && self.routing_mark.is_none()
+            && self.interface.is_none()
             && !self.tcp_fast_open
             && !self.disable_tcp_keep_alive
             && self.tcp_keep_alive_idle.is_none()

@@ -254,14 +254,14 @@
 {"key": "cache/api/storage", "kerlico": "no", "note": "/storage/{key} 持久 KV；建议暂不实现：只服务面板存放设置，kerlico 没有面板"}
 {"key": "cache/file/buffer-size", "kerlico": "no", "note": "写缓存的大小；建议暂不实现：实现细节和多配置隔离，kerlico 的 SQLite 统计已有独立目录"}
 {"key": "cache/file/cache-id", "kerlico": "no", "note": "缓存文件中的标识符；建议暂不实现：实现细节和多配置隔离，kerlico 的 SQLite 统计已有独立目录"}
-{"key": "cache/file/enabled", "kerlico": "no", "note": "启用缓存文件；建议实现：FakeIP 映射重启丢失会让客户端拿到失效地址，实现 FakeIP 时要一起持久化"}
+{"key": "cache/file/enabled", "kerlico": "yes", "note": "启用缓存文件；建议实现：FakeIP 映射重启丢失会让客户端拿到失效地址，实现 FakeIP 时要一起持久化"}
 {"key": "cache/file/flush-interval", "kerlico": "no", "note": "自动冲刷写缓存的间隔；建议暂不实现：实现细节和多配置隔离，kerlico 的 SQLite 统计已有独立目录"}
-{"key": "cache/file/path", "kerlico": "no", "note": "缓存文件路径；建议实现：FakeIP 映射重启丢失会让客户端拿到失效地址，实现 FakeIP 时要一起持久化"}
+{"key": "cache/file/path", "kerlico": "yes", "note": "缓存文件路径；建议实现：FakeIP 映射重启丢失会让客户端拿到失效地址，实现 FakeIP 时要一起持久化"}
 {"key": "cache/file/rdrc-timeout", "kerlico": "na", "note": "sing-box 已废弃字段，1.16.0 移除，改用 store_dns"}
 {"key": "cache/file/store-dns", "kerlico": "no", "note": "将 DNS 缓存存储在缓存文件中；建议暂不实现：服务端重启后重新查询代价小"}
-{"key": "cache/file/store-fakeip", "kerlico": "no", "note": "将 fakeip 存储在缓存文件中；建议实现：FakeIP 映射重启丢失会让客户端拿到失效地址，实现 FakeIP 时要一起持久化"}
+{"key": "cache/file/store-fakeip", "kerlico": "yes", "note": "将 fakeip 存储在缓存文件中；建议实现：FakeIP 映射重启丢失会让客户端拿到失效地址，实现 FakeIP 时要一起持久化"}
 {"key": "cache/file/store-rdrc", "kerlico": "na", "note": "sing-box 已废弃字段，1.16.0 移除，改用 store_dns"}
-{"key": "cache/profile/store-fake-ip", "kerlico": "no", "note": "储存 fakeip 映射表，域名再次连接时用原映射；建议实现：FakeIP 映射重启丢失会让客户端拿到失效地址，实现 FakeIP 时要一起持久化"}
+{"key": "cache/profile/store-fake-ip", "kerlico": "yes", "note": "储存 fakeip 映射表，域名再次连接时用原映射；建议实现：FakeIP 映射重启丢失会让客户端拿到失效地址，实现 FakeIP 时要一起持久化"}
 {"key": "cache/profile/store-selected", "kerlico": "no", "note": "储存 API 对策略组的选择供下次启动使用；建议实现：随策略组提供，手动选的节点重启后要保留"}
 {"key": "cert/dns01-acmedns/password", "kerlico": "no", "note": "acmedns DNS01 提供者的 password 字段；建议暂不实现：先做 Cloudflare 这一家 DNS01"}
 {"key": "cert/dns01-acmedns/server-url", "kerlico": "no", "note": "acmedns DNS01 提供者的 server_url 字段；建议暂不实现：先做 Cloudflare 这一家 DNS01"}
@@ -742,26 +742,26 @@
 {"key": "config/types/int32range", "kerlico": "na", "note": "Xray 的配置取值写法，不是能力"}
 {"key": "config/version/max", "kerlico": "no", "note": "允许运行的最高版本，x.y.z 语法；建议暂不实现：kerlico 配置靠 `version` 固定结构，发行版之间不限制"}
 {"key": "config/version/min", "kerlico": "no", "note": "允许运行的最低版本，x.y.z 语法；建议暂不实现：kerlico 配置靠 `version` 固定结构，发行版之间不限制"}
-{"key": "dns/action/action", "kerlico": "no", "note": "DNS 规则要执行的动作；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/action/action", "kerlico": "yes", "note": "DNS 规则要执行的动作；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/action/answer", "kerlico": "no", "note": "用于作为回答响应的文本 DNS 记录列表；建议暂不实现：固定应答只在 kerlico 提供 DNS 服务端后才有用"}
 {"key": "dns/action/client-subnet", "kerlico": "no", "note": "默认情况下，将带有指定 IP 前缀的 `edns0-subnet` OPT 附加记录附加到每个查询；建议暂不实现：kerlico 只解析本机 Local 路径的目标域名，ECS 的主要收益在转发给客户端的 DNS 服务场景"}
 {"key": "dns/action/disable-cache", "kerlico": "no", "note": "在此查询中禁用缓存；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
 {"key": "dns/action/disable-optimistic-cache", "kerlico": "no", "note": "在此查询中禁用乐观 DNS 缓存；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
 {"key": "dns/action/evaluate", "kerlico": "no", "note": "evaluate 向指定服务器发查询并保存响应，供后续规则用 match_response 匹配，不终止规则评估；建议暂不实现：响应匹配和竞速是高级用法，先做基础 DNS 规则"}
 {"key": "dns/action/extra", "kerlico": "no", "note": "用于作为额外记录响应的文本 DNS 记录列表；建议暂不实现：固定应答只在 kerlico 提供 DNS 服务端后才有用"}
-{"key": "dns/action/method", "kerlico": "no", "note": "reject 动作的方式：返回 REFUSED 或丢弃；建议实现：kerlico 无法按规则拒绝查询；随 DNS 规则一起提供"}
-{"key": "dns/action/no-drop", "kerlico": "no", "note": "reject 动作短时间多次触发后自动转丢弃的开关；建议实现：kerlico 无法按规则拒绝查询；随 DNS 规则一起提供"}
+{"key": "dns/action/method", "kerlico": "yes", "note": "reject 动作的方式：返回 REFUSED 或丢弃；建议实现：kerlico 无法按规则拒绝查询；随 DNS 规则一起提供"}
+{"key": "dns/action/no-drop", "kerlico": "yes", "note": "reject 动作短时间多次触发后自动转丢弃的开关；建议实现：kerlico 无法按规则拒绝查询；随 DNS 规则一起提供"}
 {"key": "dns/action/ns", "kerlico": "no", "note": "用于作为名称服务器响应的文本 DNS 记录列表；建议暂不实现：固定应答只在 kerlico 提供 DNS 服务端后才有用"}
 {"key": "dns/action/predefined", "kerlico": "no", "note": "`predefined` 以预定义的 DNS 记录响应；建议暂不实现：固定应答只在 kerlico 提供 DNS 服务端后才有用"}
 {"key": "dns/action/race", "kerlico": "no", "note": "DNS 规则的并发竞速选项；建议暂不实现：响应匹配和竞速是高级用法，先做基础 DNS 规则"}
 {"key": "dns/action/rcode", "kerlico": "no", "note": "固定应答的响应码；建议暂不实现：固定应答只在 kerlico 提供 DNS 服务端后才有用"}
-{"key": "dns/action/reject", "kerlico": "no", "note": "`reject` 拒绝 DNS 请求；建议实现：kerlico 无法按规则拒绝查询；随 DNS 规则一起提供"}
+{"key": "dns/action/reject", "kerlico": "yes", "note": "`reject` 拒绝 DNS 请求；建议实现：kerlico 无法按规则拒绝查询；随 DNS 规则一起提供"}
 {"key": "dns/action/remove-client-subnet", "kerlico": "no", "note": "移除查询中的 `edns0-subnet` OPT 附加记录，并抑制 `dns.client_subnet`；建议暂不实现：kerlico 只解析本机 Local 路径的目标域名，ECS 的主要收益在转发给客户端的 DNS 服务场景"}
 {"key": "dns/action/respond", "kerlico": "no", "note": "`respond` 会终止规则评估，并直接返回前序 `evaluate` 动作保存的已评估的响应；建议暂不实现：响应匹配和竞速是高级用法，先做基础 DNS 规则"}
 {"key": "dns/action/rewrite-ttl", "kerlico": "no", "note": "重写 DNS 回应中的 TTL；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
-{"key": "dns/action/route", "kerlico": "no", "note": "`route` 继承了将 DNS 请求 路由到指定服务器的经典规则动作；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/action/route", "kerlico": "yes", "note": "`route` 继承了将 DNS 请求 路由到指定服务器的经典规则动作；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/action/route-options", "kerlico": "no", "note": "`route-options` 为路由设置选项；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
-{"key": "dns/action/server", "kerlico": "no", "note": "目标 DNS 服务器的标签；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/action/server", "kerlico": "yes", "note": "目标 DNS 服务器的标签；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/action/speculative", "kerlico": "no", "note": "DNS 规则的抢先解析选项；建议暂不实现：响应匹配和竞速是高级用法，先做基础 DNS 规则"}
 {"key": "dns/action/strategy", "kerlico": "na", "note": "sing-box 已废弃的动作字段，1.16.0 移除，能力见 dns/config/strategy"}
 {"key": "dns/action/tag", "kerlico": "no", "note": "已评估响应的标签；建议暂不实现：响应匹配和竞速是高级用法，先做基础 DNS 规则"}
@@ -771,16 +771,16 @@
 {"key": "dns/config/disable-cache", "kerlico": "no", "note": "禁用 DNS 缓存；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
 {"key": "dns/config/disable-expire", "kerlico": "no", "note": "禁用 DNS 缓存过期；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
 {"key": "dns/config/fakeip", "kerlico": "na", "note": "sing-box 已移除的旧配置对象，能力见 dns/server-fakeip/protocol"}
-{"key": "dns/config/final", "kerlico": "no", "note": "默认 DNS 服务器的标签；建议实现：随 DNS 规则提供，未命中规则时的默认上游"}
+{"key": "dns/config/final", "kerlico": "yes", "note": "默认 DNS 服务器的标签；建议实现：随 DNS 规则提供，未命中规则时的默认上游"}
 {"key": "dns/config/independent-cache", "kerlico": "na", "note": "sing-box 已废弃字段，迁移办法是直接删除"}
 {"key": "dns/config/optimistic", "kerlico": "no", "note": "启用乐观 DNS 缓存；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
 {"key": "dns/config/optimistic-enabled", "kerlico": "no", "note": "启用乐观 DNS 缓存；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
 {"key": "dns/config/optimistic-timeout", "kerlico": "no", "note": "过期缓存条目可被乐观提供的最长时间；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
-{"key": "dns/config/reverse-mapping", "kerlico": "no", "note": "在响应 DNS 查询后存储 IP 地址的反向映射以为路由目的提供域名；建议实现：TUN 目标只有 IP，域名规则不命中；反查是不用 FakeIP 时补回域名的办法"}
-{"key": "dns/config/rules", "kerlico": "no", "note": "DNS 规则列表；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/config/reverse-mapping", "kerlico": "yes", "note": "在响应 DNS 查询后存储 IP 地址的反向映射以为路由目的提供域名；建议实现：TUN 目标只有 IP，域名规则不命中；反查是不用 FakeIP 时补回域名的办法"}
+{"key": "dns/config/rules", "kerlico": "yes", "note": "DNS 规则列表；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/config/servers", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "`dns.servers`，只有 udp://、tcp://、tls://，只接受字面 IP"}
 {"key": "dns/config/strategy", "kerlico": "partial", "where": "crates/egress/src/lib.rs", "note": "固定查 A 和 AAAA，再按节点 `mode`（ipv4-only、ipv6-only、dual-stack 优先 IPv4）筛选；缺 prefer_ipv6"}
-{"key": "dns/config/timeout", "kerlico": "no", "note": "每次 DNS 查询的默认超时时间；建议实现：kerlico 查询超时跟随解析器默认值，不能配置，实现量小"}
+{"key": "dns/config/timeout", "kerlico": "yes", "note": "每次 DNS 查询的默认超时时间；建议实现：kerlico 查询超时跟随解析器默认值，不能配置，实现量小"}
 {"key": "dns/dns/client-ip", "kerlico": "no", "note": "ECS IP；建议暂不实现：kerlico 只解析本机 Local 路径的目标域名，ECS 的主要收益在转发给客户端的 DNS 服务场景"}
 {"key": "dns/dns/disable-cache", "kerlico": "no", "note": "禁用缓存；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
 {"key": "dns/dns/disable-fallback", "kerlico": "no", "note": "禁用 fallback；建议暂不实现：污染判断依赖 GeoIP 和多组上游，kerlico 先做按域名分上游"}
@@ -796,10 +796,10 @@
 {"key": "dns/dns/use-system-hosts", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "配置 `dns` 后固定不读系统 hosts（`ResolveHosts::Never`）；未配置时系统解析器自带"}
 {"key": "dns/fakedns/array-form", "kerlico": "no", "note": "fakedns 可写成多池数组，同时返回多池 FakeIP；建议暂不实现：先做单地址池和显式配置"}
 {"key": "dns/fakedns/auto-init", "kerlico": "no", "note": "未配置时按 queryStrategy 初始化；建议暂不实现：先做单地址池和显式配置"}
-{"key": "dns/fakedns/combo", "kerlico": "no", "note": "FakeDNS 组合；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
-{"key": "dns/fakedns/fakedns", "kerlico": "no", "note": "FakeDNS 虚构解析以取回域名；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
-{"key": "dns/fakedns/ip-pool", "kerlico": "no", "note": "FakeIP 地址段；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
-{"key": "dns/fakedns/pool-size", "kerlico": "no", "note": "映射上限，LRU 淘汰；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/fakedns/combo", "kerlico": "yes", "note": "FakeDNS 组合；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/fakedns/fakedns", "kerlico": "yes", "note": "FakeDNS 虚构解析以取回域名；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/fakedns/ip-pool", "kerlico": "yes", "note": "FakeIP 地址段；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/fakedns/pool-size", "kerlico": "yes", "note": "映射上限，LRU 淘汰；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
 {"key": "dns/flow/pipeline", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "先 `dns.hosts` 后 `dns.servers`；缺按域名选上游和 fallback"}
 {"key": "dns/flow/query-types", "kerlico": "yes", "where": "crates/dns/src/lib.rs", "note": "`LookupIpStrategy::Ipv4AndIpv6`，只查 A 和 AAAA"}
 {"key": "dns/global/cache-algorithm", "kerlico": "no", "note": "DNS 缓存算法；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
@@ -808,12 +808,12 @@
 {"key": "dns/global/direct-nameserver", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "`dns.servers` 只解析 `Local` 路径目标，语义相同；没有单独字段"}
 {"key": "dns/global/direct-nameserver-follow-policy", "kerlico": "no", "note": "direct-nameserver 是否遵循 nameserver-policy；建议暂不实现：要先有 nameserver-policy"}
 {"key": "dns/global/enable", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "配置 `dns` 段即启用，未配置时用系统解析器"}
-{"key": "dns/global/enhanced-mode", "kerlico": "no", "note": "DNS 处理模式；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
-{"key": "dns/global/fake-ip-filter", "kerlico": "no", "note": "fakeip 过滤，支持域名通配与 rule-set:、geosite: 引入；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/global/enhanced-mode", "kerlico": "yes", "note": "DNS 处理模式；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/global/fake-ip-filter", "kerlico": "yes", "note": "fakeip 过滤，支持域名通配与 rule-set:、geosite: 引入；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
 {"key": "dns/global/fake-ip-filter-mode", "kerlico": "no", "note": "fakeip 过滤模式；建议暂不实现：先做黑名单过滤"}
-{"key": "dns/global/fake-ip-range", "kerlico": "no", "note": "fakeip IPv4 段，tun 默认 IPv4 地址参考此值；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
-{"key": "dns/global/fake-ip-range6", "kerlico": "no", "note": "fakeip IPv6 段；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
-{"key": "dns/global/fake-ip-ttl", "kerlico": "no", "note": "fakeip 查询返回的 TTL；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/global/fake-ip-range", "kerlico": "yes", "note": "fakeip IPv4 段，tun 默认 IPv4 地址参考此值；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/global/fake-ip-range6", "kerlico": "yes", "note": "fakeip IPv6 段；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/global/fake-ip-ttl", "kerlico": "yes", "note": "fakeip 查询返回的 TTL；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
 {"key": "dns/global/fallback", "kerlico": "no", "note": "后备解析服务器；配置后默认启用 fallback-filter，geoip-code 为 cn；建议暂不实现：污染判断依赖 GeoIP 和多组上游，kerlico 先做按域名分上游"}
 {"key": "dns/global/fallback-filter-domain", "kerlico": "no", "note": "命中域名直接用 fallback；建议暂不实现：污染判断依赖 GeoIP 和多组上游，kerlico 先做按域名分上游"}
 {"key": "dns/global/fallback-filter-geoip", "kerlico": "no", "note": "启用 geoip 判断；建议暂不实现：污染判断依赖 GeoIP 和多组上游，kerlico 先做按域名分上游"}
@@ -823,17 +823,17 @@
 {"key": "dns/global/fallback-lazy-query", "kerlico": "no", "note": "默认 false；true 时先判断 nameserver 结果再发起 fallback；建议暂不实现：污染判断依赖 GeoIP 和多组上游，kerlico 先做按域名分上游"}
 {"key": "dns/global/ipv6", "kerlico": "partial", "where": "crates/egress/src/lib.rs", "note": "节点 `mode: ipv4-only` 时不用 AAAA 结果；不能全局关闭 AAAA 查询"}
 {"key": "dns/global/ipv6-timeout", "kerlico": "no", "note": "内部双栈并发时等待 AAAA 的时间，单位 ms；建议暂不实现：kerlico 同时查 A 和 AAAA 再按节点 `mode` 选择，没有单独的等待窗口"}
-{"key": "dns/global/listen", "kerlico": "no", "note": "DNS 服务监听，支持 udp、tcp；建议实现：kerlico 没有 DNS 服务端，TUN 接管和局域网客户端都要一个本机 DNS 入口"}
+{"key": "dns/global/listen", "kerlico": "yes", "note": "DNS 服务监听，支持 udp、tcp；建议实现：kerlico 没有 DNS 服务端，TUN 接管和局域网客户端都要一个本机 DNS 入口"}
 {"key": "dns/global/listen-routing-mark", "kerlico": "no", "note": "DNS 监听 socket 的 routing-mark；建议暂不实现：kerlico 没有 SO_MARK，先做 route/config/default-mark"}
 {"key": "dns/global/nameserver", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "`dns.servers`，只有 udp://、tcp://、tls://，只接受字面 IP"}
-{"key": "dns/global/nameserver-policy", "kerlico": "no", "note": "指定域名查询的解析服务器，优先于 nameserver、fallback；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/global/nameserver-policy", "kerlico": "yes", "note": "指定域名查询的解析服务器，优先于 nameserver、fallback；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/global/prefer-h3", "kerlico": "no", "note": "DoH 优先 HTTP/3；建议暂不实现：先做 DoH，DoH3 需求小"}
-{"key": "dns/global/proxy-server-nameserver", "kerlico": "no", "note": "仅解析代理节点域名的 DNS；建议实现：代理节点域名由系统解析，TUN 全局接管或系统 DNS 被污染时节点连不上"}
-{"key": "dns/global/proxy-server-nameserver-policy", "kerlico": "no", "note": "节点域名解析策略，格式同 nameserver-policy；建议实现：代理节点域名由系统解析，TUN 全局接管或系统 DNS 被污染时节点连不上"}
+{"key": "dns/global/proxy-server-nameserver", "kerlico": "yes", "note": "仅解析代理节点域名的 DNS；建议实现：代理节点域名由系统解析，TUN 全局接管或系统 DNS 被污染时节点连不上"}
+{"key": "dns/global/proxy-server-nameserver-policy", "kerlico": "yes", "note": "节点域名解析策略，格式同 nameserver-policy；建议实现：代理节点域名由系统解析，TUN 全局接管或系统 DNS 被污染时节点连不上"}
 {"key": "dns/global/respect-rules", "kerlico": "no", "note": "DNS 连接遵守路由规则；建议暂不实现：DNS 上游恒从系统路由直出，先做按上游指定出站"}
 {"key": "dns/global/use-hosts", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "`dns.hosts` 恒优先于上游，不能关闭"}
 {"key": "dns/global/use-system-hosts", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "配置 `dns` 后固定不读系统 hosts（`ResolveHosts::Never`）；未配置时系统解析器自带"}
-{"key": "dns/hijack/ip-to-domain", "kerlico": "no", "note": "经 DNS 劫持进入 DNS 模块，使 TUN、Redirect、TProxy 入站流量把 IP 映射回域名；建议实现：TUN 目标只有 IP，域名规则不命中，经内部 DNS 把 IP 映射回域名才能按域名分流"}
+{"key": "dns/hijack/ip-to-domain", "kerlico": "yes", "note": "经 DNS 劫持进入 DNS 模块，使 TUN、Redirect、TProxy 入站流量把 IP 映射回域名；建议实现：TUN 目标只有 IP，域名规则不命中，经内部 DNS 把 IP 映射回域名才能按域名分流"}
 {"key": "dns/hosts/lan", "kerlico": "no", "note": "值 lan 加入本机所有网卡地址；建议暂不实现：写法便利项，kerlico 的 hosts 只有显式 IP"}
 {"key": "dns/hosts/mapping", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "`dns.hosts`，键必须是具体域名，值必须是 IP 数组；缺通配和域名重定向"}
 {"key": "dns/hosts/predefined-format", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "`dns.hosts` 值只收 IP 数组，单 IP 字符串会被拒绝；没有 path"}
@@ -848,29 +848,29 @@
 {"key": "dns/param/ecs-override", "kerlico": "no", "note": "强制覆盖查询 subnet；建议暂不实现：kerlico 只解析本机 Local 路径的目标域名，ECS 的主要收益在转发给客户端的 DNS 服务场景"}
 {"key": "dns/param/h3", "kerlico": "no", "note": "强制 HTTP/3 建立 DoH；建议暂不实现：先做 DoH，DoH3 需求小"}
 {"key": "dns/param/name-cert-verify", "kerlico": "no", "note": "仅修改证书 DNSName 校验目标，不改 SNI；建议暂不实现：`tls://IP#证书名` 已能指定校验名，分开 SNI 和校验名需求小"}
-{"key": "dns/param/proxy-or-interface", "kerlico": "no", "note": "#<名称> 指定代理或接口；优先代理，名称不存在则视作接口；建议实现：DNS 上游只能从系统路由直出，不能走命名出站，受污染网络下解析不可靠"}
+{"key": "dns/param/proxy-or-interface", "kerlico": "yes", "note": "#<名称> 指定代理或接口；优先代理，名称不存在则视作接口；建议实现：DNS 上游只能从系统路由直出，不能走命名出站，受污染网络下解析不可靠"}
 {"key": "dns/param/rules", "kerlico": "no", "note": "#RULES 遵守路由规则，等同 respect-rules；建议暂不实现：DNS 上游恒从系统路由直出，先做按上游指定出站"}
 {"key": "dns/param/skip-cert-verify", "kerlico": "no", "note": "跳过 TLS 证书验证；建议暂不实现：`tls://` 已能指定证书名；跳过校验削弱安全性"}
 {"key": "dns/query-options/combo", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "固定查 A 和 AAAA、按 TTL 缓存，结果再按节点 `mode` 筛选；缺 ECS、TTL 改写、按查询超时"}
 {"key": "dns/resolve/flow", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "只有 hosts 到 `dns.servers` 两步；缺 nameserver-policy 和 fallback"}
-{"key": "dns/rule/action", "kerlico": "no", "note": "DNS 规则的动作；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/rule/action", "kerlico": "yes", "note": "DNS 规则的动作；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/rule/auth-user", "kerlico": "no", "note": "按认证用户名匹配 DNS 查询；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/clash-mode", "kerlico": "no", "note": "匹配 Clash 模式；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/client-subnet", "kerlico": "na", "note": "sing-box 已废弃写法，已移到 DNS 规则动作，能力见 dns/action 同名项"}
-{"key": "dns/rule/combo", "kerlico": "no", "note": "DNS 规则的类型、动作和响应匹配组合；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/rule/combo", "kerlico": "yes", "note": "DNS 规则的类型、动作和响应匹配组合；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/rule/default-interface-address", "kerlico": "no", "note": "匹配默认接口地址；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "dns/rule/disable-cache", "kerlico": "na", "note": "sing-box 已废弃写法，已移到 DNS 规则动作，能力见 dns/action 同名项"}
 {"key": "dns/rule/dns-search-domain", "kerlico": "no", "note": "匹配指定 DNS 服务器的搜索域；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/dns-server-address", "kerlico": "no", "note": "匹配指定 DNS 服务器的服务器地址；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
-{"key": "dns/rule/domain", "kerlico": "no", "note": "匹配完整域名；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
-{"key": "dns/rule/domain-keyword", "kerlico": "no", "note": "匹配域名关键字；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
-{"key": "dns/rule/domain-regex", "kerlico": "no", "note": "匹配域名正则表达式；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
-{"key": "dns/rule/domain-suffix", "kerlico": "no", "note": "匹配域名后缀；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/rule/domain", "kerlico": "yes", "note": "匹配完整域名；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/rule/domain-keyword", "kerlico": "yes", "note": "匹配域名关键字；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/rule/domain-regex", "kerlico": "yes", "note": "匹配域名正则表达式；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/rule/domain-suffix", "kerlico": "yes", "note": "匹配域名后缀；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/rule/geoip", "kerlico": "na", "note": "sing-box 已移除的旧规则字段"}
 {"key": "dns/rule/geosite", "kerlico": "na", "note": "sing-box 已移除的旧规则字段"}
 {"key": "dns/rule/inbound", "kerlico": "no", "note": "按入站标签匹配 DNS 查询；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/interface-address", "kerlico": "no", "note": "匹配接口地址；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
-{"key": "dns/rule/invert", "kerlico": "no", "note": "反选匹配结果；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/rule/invert", "kerlico": "yes", "note": "反选匹配结果；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/rule/ip-accept-any", "kerlico": "no", "note": "当 DNS 查询响应包含至少一个地址时匹配；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/ip-cidr", "kerlico": "no", "note": "与查询响应匹配 IP CIDR；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/ip-is-private", "kerlico": "no", "note": "与查询响应匹配非公开 IP；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
@@ -896,13 +896,13 @@
 {"key": "dns/rule/protocol", "kerlico": "no", "note": "按嗅探到的协议匹配 DNS 查询；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/query-client-subnet", "kerlico": "no", "note": "匹配查询中的 `edns0-subnet` OPT 附加记录（EDNS 客户端子网）；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/query-dnssec", "kerlico": "no", "note": "匹配设置了 DNSSEC OK (`DO`) 位的查询；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
-{"key": "dns/rule/query-type", "kerlico": "no", "note": "DNS 查询类型；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/rule/query-type", "kerlico": "yes", "note": "DNS 查询类型；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/rule/response-answer", "kerlico": "no", "note": "匹配 DNS 应答记录；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/response-extra", "kerlico": "no", "note": "匹配 DNS 额外记录；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/response-ns", "kerlico": "no", "note": "匹配 DNS 名称服务器记录；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/response-rcode", "kerlico": "no", "note": "匹配 DNS 响应码；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/rewrite-ttl", "kerlico": "na", "note": "sing-box 已废弃写法，已移到 DNS 规则动作，能力见 dns/action 同名项"}
-{"key": "dns/rule/rule-set", "kerlico": "no", "note": "匹配规则集；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/rule/rule-set", "kerlico": "yes", "note": "匹配规则集；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/rule/rule-set-ip-cidr-accept-empty", "kerlico": "na", "note": "sing-box 已废弃字段，1.16.0 移除"}
 {"key": "dns/rule/rule-set-ip-cidr-match-source", "kerlico": "no", "note": "使规则集中的 `ip_cidr` 规则匹配源 IP；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/rule-set-ipcidr-match-source", "kerlico": "na", "note": "sing-box 已移除的旧规则字段"}
@@ -918,13 +918,13 @@
 {"key": "dns/rule/user-id", "kerlico": "no", "note": "匹配用户 ID；建议暂不实现：kerlico 还没有 DNS 规则，先做域名和规则集匹配"}
 {"key": "dns/rule/wifi-bssid", "kerlico": "no", "note": "匹配 WiFi BSSID；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "dns/rule/wifi-ssid", "kerlico": "no", "note": "匹配 WiFi SSID；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
-{"key": "dns/server-common/tag", "kerlico": "no", "note": "DNS 服务器的标签；建议实现：DNS 规则要按标签选上游，随 DNS 规则提供"}
+{"key": "dns/server-common/tag", "kerlico": "yes", "note": "DNS 服务器的标签；建议实现：DNS 规则要按标签选上游，随 DNS 规则提供"}
 {"key": "dns/server-common/type", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "URI 协议头决定类型，只有 udp、tcp、tls"}
 {"key": "dns/server-dhcp/interface", "kerlico": "no", "note": "要监听的网络接口名称；建议暂不实现：服务器网络配置固定，kerlico 目标场景用不到 DHCP 取 DNS"}
 {"key": "dns/server-dhcp/protocol", "kerlico": "no", "note": "DHCP 取得的 DNS 上游；建议暂不实现：服务器网络配置固定，kerlico 目标场景用不到 DHCP 取 DNS"}
-{"key": "dns/server-fakeip/inet4-range", "kerlico": "no", "note": "FakeIP 的 IPv4 地址范围；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
-{"key": "dns/server-fakeip/inet6-range", "kerlico": "no", "note": "FakeIP 的 IPv6 地址范围；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
-{"key": "dns/server-fakeip/protocol", "kerlico": "no", "note": "FakeIP 上游；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/server-fakeip/inet4-range", "kerlico": "yes", "note": "FakeIP 的 IPv4 地址范围；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/server-fakeip/inet6-range", "kerlico": "yes", "note": "FakeIP 的 IPv6 地址范围；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/server-fakeip/protocol", "kerlico": "yes", "note": "FakeIP 上游；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
 {"key": "dns/server-hosts/path", "kerlico": "no", "note": "hosts 文件路径列表；建议暂不实现：`dns.hosts` 内联已够用，读取外部 hosts 文件需求小"}
 {"key": "dns/server-hosts/predefined", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "`dns.hosts`，值只收 IP 数组"}
 {"key": "dns/server-hosts/protocol", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "`dns.hosts` 在查上游前命中，不是独立的上游类型"}
@@ -934,12 +934,12 @@
 {"key": "dns/server-http3/server", "kerlico": "no", "note": "DNS 服务器的地址；建议暂不实现：先做 DoH，DoH3 需求小"}
 {"key": "dns/server-http3/server-port", "kerlico": "no", "note": "DNS 服务器的端口；建议暂不实现：先做 DoH，DoH3 需求小"}
 {"key": "dns/server-http3/tls", "kerlico": "no", "note": "DoH3 上游的 TLS 配置；建议暂不实现：先做 DoH，DoH3 需求小"}
-{"key": "dns/server-https/headers", "kerlico": "no", "note": "发送到 DNS 服务器的额外标头；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
-{"key": "dns/server-https/path", "kerlico": "no", "note": "DNS 服务器的路径；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
-{"key": "dns/server-https/protocol", "kerlico": "no", "note": "DoH 上游；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
-{"key": "dns/server-https/server", "kerlico": "no", "note": "DNS 服务器的地址；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
-{"key": "dns/server-https/server-port", "kerlico": "no", "note": "DNS 服务器的端口；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
-{"key": "dns/server-https/tls", "kerlico": "no", "note": "DoH 上游的 TLS 配置；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
+{"key": "dns/server-https/headers", "kerlico": "yes", "note": "发送到 DNS 服务器的额外标头；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
+{"key": "dns/server-https/path", "kerlico": "yes", "note": "DNS 服务器的路径；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
+{"key": "dns/server-https/protocol", "kerlico": "yes", "note": "DoH 上游；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
+{"key": "dns/server-https/server", "kerlico": "yes", "note": "DNS 服务器的地址；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
+{"key": "dns/server-https/server-port", "kerlico": "yes", "note": "DNS 服务器的端口；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
+{"key": "dns/server-https/tls", "kerlico": "yes", "note": "DoH 上游的 TLS 配置；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
 {"key": "dns/server-legacy/address", "kerlico": "na", "note": "sing-box 已移除的旧版 DNS 服务器格式"}
 {"key": "dns/server-legacy/address-resolver", "kerlico": "na", "note": "sing-box 已移除的旧版 DNS 服务器格式"}
 {"key": "dns/server-legacy/address-strategy", "kerlico": "na", "note": "sing-box 已移除的旧版 DNS 服务器格式"}
@@ -988,7 +988,7 @@
 {"key": "dns/server/client-ip", "kerlico": "no", "note": "覆盖全局同名配置；建议暂不实现：kerlico 只解析本机 Local 路径的目标域名，ECS 的主要收益在转发给客户端的 DNS 服务场景"}
 {"key": "dns/server/combo", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "只有 udp、tcp、tls 上游和系统路由直出；没有经出站拨号"}
 {"key": "dns/server/disable-cache", "kerlico": "no", "note": "覆盖全局同名配置；建议暂不实现：hickory 解析器已按 TTL 缓存，暂无定制缓存的需求"}
-{"key": "dns/server/domains", "kerlico": "no", "note": "优先用此服务器的域名；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
+{"key": "dns/server/domains", "kerlico": "yes", "note": "优先用此服务器的域名；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/server/expect-ips", "kerlico": "na", "note": "Xray 旧字段名，能力见 dns/server/expected-ips"}
 {"key": "dns/server/expected-ips", "kerlico": "no", "note": "校验返回 IP，只保留列表内；建议暂不实现：污染判断依赖 GeoIP 和多组上游，kerlico 先做按域名分上游"}
 {"key": "dns/server/final-query", "kerlico": "no", "note": "最终尝试，不触发 fallback；建议暂不实现：污染判断依赖 GeoIP 和多组上游，kerlico 先做按域名分上游"}
@@ -1003,16 +1003,16 @@
 {"key": "dns/server/unexpected-ips", "kerlico": "no", "note": "去掉列表内 IP；建议暂不实现：污染判断依赖 GeoIP 和多组上游，kerlico 先做按域名分上游"}
 {"key": "dns/upstream/combo", "kerlico": "partial", "where": "crates/dns/src/lib.rs", "note": "只有 udp、tcp、tls；附加参数只有 tls 的证书名"}
 {"key": "dns/upstream/dhcp", "kerlico": "no", "note": "DHCP 上游；建议暂不实现：服务器网络配置固定，kerlico 目标场景用不到 DHCP 取 DNS"}
-{"key": "dns/upstream/doh", "kerlico": "no", "note": "DNS over HTTPS；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
+{"key": "dns/upstream/doh", "kerlico": "yes", "note": "DNS over HTTPS；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
 {"key": "dns/upstream/doh3", "kerlico": "no", "note": "HTTP/3 的 DoH，由 h3 附加参数或 prefer-h3 开启；建议暂不实现：先做 DoH，DoH3 需求小"}
 {"key": "dns/upstream/doq", "kerlico": "no", "note": "DNS over QUIC；建议暂不实现：先做 DoH，DoQ 需求小"}
 {"key": "dns/upstream/dot", "kerlico": "yes", "where": "crates/dns/src/lib.rs", "note": "`tls://IP[:端口]#证书名`，证书名必填，使用内置 WebPKI 根"}
 {"key": "dns/upstream/easytier", "kerlico": "no", "note": "解析 EasyTier 出站 overlay 的 A/PTR 记录；建议暂不实现：kerlico 对应出站不向 DNS 模块暴露推送的解析器；要访问虚拟网内名称时再做"}
-{"key": "dns/upstream/fakedns", "kerlico": "no", "note": "FakeDNS；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
+{"key": "dns/upstream/fakedns", "kerlico": "yes", "note": "FakeDNS；建议实现：STATUS 记录暂无 Fake-IP；TUN 目标只有 IP，域名规则不命中，FakeIP 是补回域名最直接的办法"}
 {"key": "dns/upstream/h2c", "kerlico": "no", "note": "DoH 明文 h2c；建议暂不实现：明文 DoH 只适合内网，需求小"}
 {"key": "dns/upstream/h2c-local", "kerlico": "no", "note": "h2c 本地模式；建议暂不实现：明文 DoH 只适合内网，需求小"}
-{"key": "dns/upstream/https", "kerlico": "no", "note": "DoH，遵循路由；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
-{"key": "dns/upstream/https-local", "kerlico": "no", "note": "DoH 本地模式；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
+{"key": "dns/upstream/https", "kerlico": "yes", "note": "DoH，遵循路由；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
+{"key": "dns/upstream/https-local", "kerlico": "yes", "note": "DoH 本地模式；建议实现：kerlico 只有 UDP、TCP、DoT，DoH 走 443 最难被阻断，是受限网络的常用上游"}
 {"key": "dns/upstream/localhost", "kerlico": "partial", "where": "crates/egress/src/lib.rs", "note": "不配 `dns` 时用系统解析器（`lookup_host`）；不能作为 `dns.servers` 的一项"}
 {"key": "dns/upstream/quic-local", "kerlico": "no", "note": "DoQ 本地模式；建议暂不实现：先做 DoH，DoQ 需求小"}
 {"key": "dns/upstream/rcode", "kerlico": "no", "note": "直接返回指定 rcode；建议暂不实现：规则拒绝的简单写法，先做 DNS 规则的 reject"}
@@ -1021,7 +1021,7 @@
 {"key": "dns/upstream/tcp", "kerlico": "yes", "where": "crates/dns/src/lib.rs", "note": "`tcp://IP[:端口]`，只接受字面 IP"}
 {"key": "dns/upstream/tcp-local", "kerlico": "yes", "where": "crates/dns/src/lib.rs", "note": "kerlico 的 `tcp://` 上游恒从系统路由直出，不经命名出站，就是本地模式"}
 {"key": "dns/upstream/udp", "kerlico": "yes", "where": "crates/dns/src/lib.rs", "note": "`udp://IP[:端口]`，只接受字面 IP"}
-{"key": "experimental/config/cache-file", "kerlico": "no", "note": "缓存文件配置对象；建议实现：随 FakeIP 和策略组选择持久化提供"}
+{"key": "experimental/config/cache-file", "kerlico": "yes", "note": "缓存文件配置对象；建议实现：随 FakeIP 和策略组选择持久化提供"}
 {"key": "experimental/config/clash-api", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "`control` 段，只读，不兼容 Clash"}
 {"key": "experimental/config/debug", "kerlico": "na", "note": "Go 运行时调试接口，Rust 没有对应物"}
 {"key": "experimental/config/v2ray-api", "kerlico": "no", "note": "V2Ray API 配置对象；建议暂不实现：kerlico 控制面是只读 HTTP JSON，不做 gRPC"}
@@ -1315,29 +1315,29 @@
 {"key": "route/action/disable-optimistic-cache", "kerlico": "no", "note": "在此查询中禁用乐观 DNS 缓存；建议暂不实现：属于 resolve 动作的查询选项，先做 resolve 本身"}
 {"key": "route/action/fallback-delay", "kerlico": "no", "note": "route-options 覆盖拨号的回退延迟；建议暂不实现：route-options 对多网络拨号的覆盖，kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "route/action/fallback-network-type", "kerlico": "no", "note": "route-options 覆盖拨号的回退网络类型；建议暂不实现：route-options 对多网络拨号的覆盖，kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
-{"key": "route/action/hijack-dns", "kerlico": "no", "note": "dns 出站把请求劫持到内部 DNS 模块；建议实现：kerlico 没有 DNS 服务端，TUN 接管流量后 53 端口查询需要进内部 DNS 才能配合 FakeIP"}
+{"key": "route/action/hijack-dns", "kerlico": "yes", "note": "dns 出站把请求劫持到内部 DNS 模块；建议实现：kerlico 没有 DNS 服务端，TUN 接管流量后 53 端口查询需要进内部 DNS 才能配合 FakeIP"}
 {"key": "route/action/method", "kerlico": "no", "note": "reject 动作的拒绝方式：回复或静默丢弃；建议暂不实现：`reject` 出站已能拒绝，丢弃和防抖只是抗探测细节，需求低"}
 {"key": "route/action/network-strategy", "kerlico": "no", "note": "route-options 覆盖拨号的网络策略；建议暂不实现：route-options 对多网络拨号的覆盖，kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "route/action/network-type", "kerlico": "no", "note": "route-options 限定拨号可用的网络类型；建议暂不实现：route-options 对多网络拨号的覆盖，kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "route/action/no-drop", "kerlico": "no", "note": "reject 动作短时间多次触发后自动转丢弃的开关；建议暂不实现：`reject` 出站已能拒绝，丢弃和防抖只是抗探测细节，需求低"}
 {"key": "route/action/outbound", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`routes[].outbound`"}
-{"key": "route/action/override-address", "kerlico": "no", "note": "覆盖目标地址；建议实现：route-options 改写目标实现量小，可不走固定转发入口就做端口和地址重定向"}
-{"key": "route/action/override-port", "kerlico": "no", "note": "覆盖目标端口；建议实现：route-options 改写目标实现量小，可不走固定转发入口就做端口和地址重定向"}
+{"key": "route/action/override-address", "kerlico": "yes", "note": "覆盖目标地址；建议实现：route-options 改写目标实现量小，可不走固定转发入口就做端口和地址重定向"}
+{"key": "route/action/override-port", "kerlico": "yes", "note": "覆盖目标端口；建议实现：route-options 改写目标实现量小，可不走固定转发入口就做端口和地址重定向"}
 {"key": "route/action/pass", "kerlico": "no", "note": "跳过当前命中分支继续匹配；在 SUB-RULE 中命中跳回主规则；建议暂不实现：服务于子规则和重匹配，kerlico 规则表是线性的，先补 rule-set 和逻辑规则"}
 {"key": "route/action/pass-rule", "kerlico": "no", "note": "同 PASS，但在 SUB-RULE 中不跳出，继续匹配子规则；建议暂不实现：服务于子规则和重匹配，kerlico 规则表是线性的，先补 rule-set 和逻辑规则"}
 {"key": "route/action/proxy-or-group", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "`routes[].outbound` 只能写命名出站，没有策略组"}
 {"key": "route/action/reject", "kerlico": "yes", "where": "crates/net/src/lib.rs", "note": "`reject` 类型的命名出站，作为 `routes[].outbound` 的目标；请求返回 Error::Rejected"}
 {"key": "route/action/reject-drop", "kerlico": "no", "note": "拒绝并静默丢弃；建议暂不实现：`reject` 出站已能拒绝，丢弃和防抖只是抗探测细节，需求低"}
 {"key": "route/action/rematch", "kerlico": "no", "note": "rematch 出站写入名称或切子规则后重新匹配；建议暂不实现：服务于子规则和重匹配，kerlico 规则表是线性的，先补 rule-set 和逻辑规则"}
-{"key": "route/action/resolve", "kerlico": "no", "note": "`resolve` 将请求的目标从域名解析为 IP 地址；建议实现：kerlico 路由不解析域名，域名目标永远不命中 `ip_cidr`，分流按 IP 的场景必须有这一步"}
+{"key": "route/action/resolve", "kerlico": "yes", "note": "`resolve` 将请求的目标从域名解析为 IP 地址；建议实现：kerlico 路由不解析域名，域名目标永远不命中 `ip_cidr`，分流按 IP 的场景必须有这一步"}
 {"key": "route/action/rewrite-ttl", "kerlico": "no", "note": "重写 DNS 回应中的 TTL；建议暂不实现：属于 resolve 动作的查询选项，先做 resolve 本身"}
 {"key": "route/action/route", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`routes` 规则唯一的动作：命中后选 `outbound`"}
-{"key": "route/action/route-options", "kerlico": "no", "note": "`route-options` 为路由设置选项；建议实现：route-options 改写目标实现量小，可不走固定转发入口就做端口和地址重定向"}
+{"key": "route/action/route-options", "kerlico": "yes", "note": "`route-options` 为路由设置选项；建议实现：route-options 改写目标实现量小，可不走固定转发入口就做端口和地址重定向"}
 {"key": "route/action/server", "kerlico": "no", "note": "指定要使用的 DNS 服务器的标签，而不是通过 DNS 路由进行选择；建议暂不实现：DNS 上游没有标签，要先有 DNS 规则"}
-{"key": "route/action/sniff", "kerlico": "no", "note": "`sniff` 对连接执行协议嗅探；建议实现：TUN 目标只有 IP，域名规则不命中，需要规则触发的嗅探补回域名"}
-{"key": "route/action/sniffer", "kerlico": "no", "note": "启用的探测器；建议实现：TUN 目标只有 IP，域名规则不命中，需要规则触发的嗅探补回域名"}
-{"key": "route/action/strategy", "kerlico": "no", "note": "DNS 解析策略，可用值有：`prefer_ipv4`、`prefer_ipv6`、`ipv4_only`、`ipv6_only`；建议实现：随 resolve 动作一起提供，决定解析地址族"}
-{"key": "route/action/timeout", "kerlico": "no", "note": "sniff 动作的探测超时；建议实现：TUN 目标只有 IP，域名规则不命中，需要规则触发的嗅探补回域名"}
+{"key": "route/action/sniff", "kerlico": "yes", "note": "`sniff` 对连接执行协议嗅探；建议实现：TUN 目标只有 IP，域名规则不命中，需要规则触发的嗅探补回域名"}
+{"key": "route/action/sniffer", "kerlico": "yes", "note": "启用的探测器；建议实现：TUN 目标只有 IP，域名规则不命中，需要规则触发的嗅探补回域名"}
+{"key": "route/action/strategy", "kerlico": "yes", "note": "DNS 解析策略，可用值有：`prefer_ipv4`、`prefer_ipv6`、`ipv4_only`、`ipv6_only`；建议实现：随 resolve 动作一起提供，决定解析地址族"}
+{"key": "route/action/timeout", "kerlico": "yes", "note": "sniff 动作的探测超时；建议实现：TUN 目标只有 IP，域名规则不命中，需要规则触发的嗅探补回域名"}
 {"key": "route/action/tls-fragment", "kerlico": "no", "note": "通过分段 TLS 握手数据包来绕过防火墙检测；建议暂不实现：抗审查技巧，应放在拨号层统一实现，不进路由动作"}
 {"key": "route/action/tls-fragment-fallback-delay", "kerlico": "no", "note": "当 TLS 分片功能无法自动判定等待时间时使用的回退值；建议暂不实现：抗审查技巧，应放在拨号层统一实现，不进路由动作"}
 {"key": "route/action/tls-record-fragment", "kerlico": "no", "note": "通过分段 TLS 握手数据包到多个 TLS 记录来绕过防火墙检测；建议暂不实现：抗审查技巧，应放在拨号层统一实现，不进路由动作"}
@@ -1346,13 +1346,13 @@
 {"key": "route/action/udp-connect", "kerlico": "no", "note": "如果启用，将尝试将 UDP 连接 connect 到目标而不是 listen；建议暂不实现：UDP 关联由协议模块和 `limits.idle_timeout_ms` 统一管，暂无按规则覆盖的需求"}
 {"key": "route/action/udp-disable-domain-unmapping", "kerlico": "no", "note": "如果启用，对于地址为域的 UDP 代理请求，将在响应中发送原始包地址而不是映射的域；建议暂不实现：UDP 关联由协议模块和 `limits.idle_timeout_ms` 统一管，暂无按规则覆盖的需求"}
 {"key": "route/action/udp-timeout", "kerlico": "no", "note": "UDP 连接超时时间；建议暂不实现：UDP 关联由协议模块和 `limits.idle_timeout_ms` 统一管，暂无按规则覆盖的需求"}
-{"key": "route/config/auto-detect-interface", "kerlico": "no", "note": "默认将出站连接绑定到默认网卡，以防止在 tun 下出现路由环路；建议实现：TUN 全局接管时要避免出站绕回 TUN，现在只能手写明细路由或 `direct` 的 `interface`"}
+{"key": "route/config/auto-detect-interface", "kerlico": "yes", "note": "默认将出站连接绑定到默认网卡，以防止在 tun 下出现路由环路；建议实现：TUN 全局接管时要避免出站绕回 TUN，现在只能手写明细路由或 `direct` 的 `interface`"}
 {"key": "route/config/default-domain-resolver", "kerlico": "no", "note": "出站拨号解析域名时默认用的 DNS 解析器；建议暂不实现：kerlico 只有一组 DNS 上游，没有可选的解析器"}
 {"key": "route/config/default-fallback-delay", "kerlico": "no", "note": "默认的多网络回退延迟；建议暂不实现：面向多网卡切换的客户端，kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "route/config/default-fallback-network-type", "kerlico": "no", "note": "默认的回退网络类型；建议暂不实现：面向多网卡切换的客户端，kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "route/config/default-http-client", "kerlico": "no", "note": "远程规则集使用的默认 HTTP 客户端 的标签；建议暂不实现：kerlico 没有共享 HTTP 客户端，规则集下载先用内置客户端"}
 {"key": "route/config/default-interface", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "只有 `direct` 出站的 `options.interface`，没有全局默认网卡"}
-{"key": "route/config/default-mark", "kerlico": "no", "note": "默认为出站连接设置路由标记；建议实现：kerlico 没有 SO_MARK，TUN 全局接管配合策略路由防环路需要它"}
+{"key": "route/config/default-mark", "kerlico": "yes", "note": "默认为出站连接设置路由标记；建议实现：kerlico 没有 SO_MARK，TUN 全局接管配合策略路由防环路需要它"}
 {"key": "route/config/default-network-strategy", "kerlico": "no", "note": "默认网络策略，语义同拨号字段 network_strategy；建议暂不实现：面向多网卡切换的客户端，kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "route/config/default-network-type", "kerlico": "no", "note": "默认可用的网络类型；建议暂不实现：面向多网卡切换的客户端，kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "route/config/dhcp-lease-files", "kerlico": "no", "note": "用于主机名和 MAC 地址解析的自定义 DHCP 租约文件路径；建议暂不实现：服务于按局域网设备分流的路由器场景，不在当前目标内"}
@@ -1362,7 +1362,7 @@
 {"key": "route/config/geoip", "kerlico": "na", "note": "sing-box 已移除的旧配置对象，当前能力见 route/rule/geoip、route/rule/geosite"}
 {"key": "route/config/geosite", "kerlico": "na", "note": "sing-box 已移除的旧配置对象，当前能力见 route/rule/geoip、route/rule/geosite"}
 {"key": "route/config/override-android-vpn", "kerlico": "no", "note": "启用 `auto_detect_interface` 时接受 Android VPN 作为上游网卡；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
-{"key": "route/config/rule-set", "kerlico": "no", "note": "一组 规则集；建议实现：kerlico 规则只能逐条写在配置里，大规模域名和 IP 列表必须靠规则集"}
+{"key": "route/config/rule-set", "kerlico": "yes", "note": "一组 规则集；建议实现：kerlico 规则只能逐条写在配置里，大规模域名和 IP 列表必须靠规则集"}
 {"key": "route/config/rules", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "顶层 `routes` 列表"}
 {"key": "route/geoip/download-detour", "kerlico": "na", "note": "sing-box 已移除的旧配置字段"}
 {"key": "route/geoip/download-url", "kerlico": "na", "note": "sing-box 已移除的旧配置字段"}
@@ -1387,7 +1387,7 @@
 {"key": "route/rule/and", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "不同字段同时满足即与；没有嵌套逻辑规则"}
 {"key": "route/rule/attrs", "kerlico": "no", "note": "HTTP 属性；建议暂不实现：要先有 HTTP 嗅探，且服务端按请求头分流需求小"}
 {"key": "route/rule/auth-user", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "`user` 匹配已鉴权管理账户的 UUID，不接受用户名"}
-{"key": "route/rule/balancer-tag", "kerlico": "no", "note": "命中后由负载均衡器选出站；建议实现：随负载均衡器一起提供"}
+{"key": "route/rule/balancer-tag", "kerlico": "yes", "note": "命中后由负载均衡器选出站；建议实现：随负载均衡器一起提供"}
 {"key": "route/rule/clash-mode", "kerlico": "no", "note": "匹配 Clash 模式；建议暂不实现：依赖运行模式切换，kerlico 没有模式"}
 {"key": "route/rule/client", "kerlico": "no", "note": "按嗅探到的客户端类型匹配；建议暂不实现：kerlico 没有协议嗅探，按 ClientHello 指纹分流需求小"}
 {"key": "route/rule/combo", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "支持 `domain`、`domain_suffix`、`domain_keyword`、`ip_cidr`、`port`、`network`、`node`、`user`，缺其余维度"}
@@ -1399,16 +1399,16 @@
 {"key": "route/rule/domain-ext", "kerlico": "no", "note": "从资源目录文件加载；建议暂不实现：Xray 专属写法，覆盖面小，优先做 geosite 和规则集"}
 {"key": "route/rule/domain-full", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`domain`，等价 Xray 的 full: 写法"}
 {"key": "route/rule/domain-keyword", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`domain_keyword`，只接受 ASCII，非 ASCII 按配置错误拒绝"}
-{"key": "route/rule/domain-regex", "kerlico": "no", "note": "域名正则；建议实现：域名匹配缺这一类写法，实现量小"}
-{"key": "route/rule/domain-regexp", "kerlico": "no", "note": "正则匹配；建议实现：域名匹配缺这一类写法，实现量小"}
+{"key": "route/rule/domain-regex", "kerlico": "yes", "note": "域名正则；建议实现：域名匹配缺这一类写法，实现量小"}
+{"key": "route/rule/domain-regexp", "kerlico": "yes", "note": "正则匹配；建议实现：域名匹配缺这一类写法，实现量小"}
 {"key": "route/rule/domain-suffix", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`domain_suffix`，匹配自身和子域，开头的点被去掉"}
-{"key": "route/rule/domain-wildcard", "kerlico": "no", "note": "通配符匹配，仅 * 和 ?；建议实现：域名匹配缺这一类写法，实现量小"}
+{"key": "route/rule/domain-wildcard", "kerlico": "yes", "note": "通配符匹配，仅 * 和 ?；建议实现：域名匹配缺这一类写法，实现量小"}
 {"key": "route/rule/domains", "kerlico": "na", "note": "Xray 的字段别名，能力见 route/rule/domain"}
 {"key": "route/rule/dscp", "kerlico": "no", "note": "DSCP 标记；建议暂不实现：kerlico 不读取 IP 头 DSCP，需求小"}
 {"key": "route/rule/dst-port", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "`port` 是单端口列表；缺范围写法"}
-{"key": "route/rule/geoip", "kerlico": "no", "note": "匹配 IP 所属国家代码；建议实现：没有 GeoIP 就写不了国内直连这类最常见分流"}
-{"key": "route/rule/geoip-private", "kerlico": "no", "note": "私有地址；建议实现：判断私有地址无需数据库，实现量小，防止代理访问内网很常用"}
-{"key": "route/rule/geosite", "kerlico": "no", "note": "匹配 Geosite 内域名；建议实现：没有 Geosite 就只能手写域名列表，最常见分流缺它"}
+{"key": "route/rule/geoip", "kerlico": "yes", "note": "匹配 IP 所属国家代码；建议实现：没有 GeoIP 就写不了国内直连这类最常见分流"}
+{"key": "route/rule/geoip-private", "kerlico": "yes", "note": "私有地址；建议实现：判断私有地址无需数据库，实现量小，防止代理访问内网很常用"}
+{"key": "route/rule/geosite", "kerlico": "yes", "note": "匹配 Geosite 内域名；建议实现：没有 Geosite 就只能手写域名列表，最常见分流缺它"}
 {"key": "route/rule/geosite-attr", "kerlico": "no", "note": "按属性筛选 geosite；建议暂不实现：先做基础 geosite，属性筛选后补"}
 {"key": "route/rule/in-name", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`node`，填节点或入口标签"}
 {"key": "route/rule/in-port", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "每个节点只有一个监听地址，用 `node` 按标签等价匹配；没有端口条件"}
@@ -1417,22 +1417,22 @@
 {"key": "route/rule/inbound", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`node`，填节点或入口标签"}
 {"key": "route/rule/inbound-tag", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`node`，填节点或入口标签"}
 {"key": "route/rule/interface-address", "kerlico": "no", "note": "匹配接口地址；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
-{"key": "route/rule/invert", "kerlico": "no", "note": "反选匹配结果；建议实现：kerlico 的规则只有字段内或、字段间与这一种组合，缺反选就表达不了“非国内”这种规则"}
+{"key": "route/rule/invert", "kerlico": "yes", "note": "反选匹配结果；建议实现：kerlico 的规则只有字段内或、字段间与这一种组合，缺反选就表达不了“非国内”这种规则"}
 {"key": "route/rule/ip", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`ip_cidr` 接受不带前缀的单个 IP"}
 {"key": "route/rule/ip-asn", "kerlico": "no", "note": "匹配 IP 所属 ASN；建议暂不实现：优先做 GeoIP 和 CIDR，这一项需求小或依赖额外数据库"}
 {"key": "route/rule/ip-cidr", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "`ip_cidr` 只比较字面 IP 目标；目标是域名时不解析，不命中"}
 {"key": "route/rule/ip-cidr6", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "`ip_cidr` 同时接受 IPv6；目标是域名时不解析，不命中"}
 {"key": "route/rule/ip-ext", "kerlico": "no", "note": "从资源目录文件加载；建议暂不实现：优先做 GeoIP 和 CIDR，这一项需求小或依赖额外数据库"}
 {"key": "route/rule/ip-invert", "kerlico": "no", "note": "IP 条件反选；建议暂不实现：先做规则级反选"}
-{"key": "route/rule/ip-is-private", "kerlico": "no", "note": "匹配非公开 IP；建议实现：判断私有地址无需数据库，实现量小，防止代理访问内网很常用"}
+{"key": "route/rule/ip-is-private", "kerlico": "yes", "note": "匹配非公开 IP；建议实现：判断私有地址无需数据库，实现量小，防止代理访问内网很常用"}
 {"key": "route/rule/ip-suffix", "kerlico": "no", "note": "匹配 IP 后缀范围；建议暂不实现：优先做 GeoIP 和 CIDR，这一项需求小或依赖额外数据库"}
-{"key": "route/rule/ip-version", "kerlico": "no", "note": "按目标 IP 版本匹配；建议实现：按地址族分流实现量小，可配合 WARP 补族场景"}
+{"key": "route/rule/ip-version", "kerlico": "yes", "note": "按目标 IP 版本匹配；建议实现：按地址族分流实现量小，可配合 WARP 补族场景"}
 {"key": "route/rule/local-ip", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "每个节点只有一个监听地址，用 `node` 按标签等价匹配；没有 IP 条件"}
 {"key": "route/rule/local-os", "kerlico": "no", "note": "按运行系统匹配；建议暂不实现：kerlico 只发 Linux x86_64"}
 {"key": "route/rule/local-port", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "每个节点只有一个监听地址，用 `node` 按标签等价匹配；没有端口条件"}
-{"key": "route/rule/logical-mode", "kerlico": "no", "note": "逻辑规则的与、或模式；建议实现：kerlico 的规则只有字段内或、字段间与这一种组合，复杂分流要嵌套逻辑规则"}
-{"key": "route/rule/logical-rules", "kerlico": "no", "note": "逻辑规则包含的子规则；建议实现：kerlico 的规则只有字段内或、字段间与这一种组合，复杂分流要嵌套逻辑规则"}
-{"key": "route/rule/logical-type", "kerlico": "no", "note": "声明规则为逻辑规则；建议实现：kerlico 的规则只有字段内或、字段间与这一种组合，复杂分流要嵌套逻辑规则"}
+{"key": "route/rule/logical-mode", "kerlico": "yes", "note": "逻辑规则的与、或模式；建议实现：kerlico 的规则只有字段内或、字段间与这一种组合，复杂分流要嵌套逻辑规则"}
+{"key": "route/rule/logical-rules", "kerlico": "yes", "note": "逻辑规则包含的子规则；建议实现：kerlico 的规则只有字段内或、字段间与这一种组合，复杂分流要嵌套逻辑规则"}
+{"key": "route/rule/logical-type", "kerlico": "yes", "note": "声明规则为逻辑规则；建议实现：kerlico 的规则只有字段内或、字段间与这一种组合，复杂分流要嵌套逻辑规则"}
 {"key": "route/rule/match", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "没有全匹配规则，空条件规则被拒绝；未命中时用入口绑定的 `outbound`"}
 {"key": "route/rule/network", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "`network` 取 tcp 或 udp 单值；缺 icmp 和多值写法"}
 {"key": "route/rule/network-interface-address", "kerlico": "no", "note": "匹配网络接口（可用值同 `network_type`）地址；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
@@ -1440,7 +1440,7 @@
 {"key": "route/rule/network-is-expensive", "kerlico": "no", "note": "匹配如果网络被视为计费 (在 Android) 或被视为昂贵，像蜂窝网络或个人热点 (在 Apple 平台)；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "route/rule/network-type", "kerlico": "no", "note": "匹配网络类型；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "route/rule/no-resolve", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "路由恒不查 DNS，等同所有规则都带 no-resolve；不能按规则关闭"}
-{"key": "route/rule/not", "kerlico": "no", "note": "规则逻辑非；建议实现：kerlico 的规则只有字段内或、字段间与这一种组合，缺非运算"}
+{"key": "route/rule/not", "kerlico": "yes", "note": "规则逻辑非；建议实现：kerlico 的规则只有字段内或、字段间与这一种组合，缺非运算"}
 {"key": "route/rule/or", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "同一字段多值或，域名与 `ip_cidr` 之间或；没有跨字段的显式或"}
 {"key": "route/rule/order", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`RouteTable` 按配置顺序匹配，首条命中生效"}
 {"key": "route/rule/outbound", "kerlico": "na", "note": "sing-box 已废弃写法，已移到规则动作，能力见 route/action/outbound"}
@@ -1448,7 +1448,7 @@
 {"key": "route/rule/package-name", "kerlico": "no", "note": "匹配 Android 应用包名；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "route/rule/package-name-regex", "kerlico": "no", "note": "使用正则表达式匹配 Android 应用包名；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "route/rule/port", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "`port` 是单端口列表；缺范围写法"}
-{"key": "route/rule/port-range", "kerlico": "no", "note": "匹配端口范围；建议实现：`port` 只收单端口，写端口段要列全部取值，实现量小"}
+{"key": "route/rule/port-range", "kerlico": "yes", "note": "匹配端口范围；建议实现：`port` 只收单端口，写端口段要列全部取值，实现量小"}
 {"key": "route/rule/preferred-by", "kerlico": "no", "note": "匹配制定出站的首选路由；建议暂不实现：依赖动态 DNS 服务器和端点路由表，kerlico 的 Tailscale 等出站不向路由暴露这些信息"}
 {"key": "route/rule/process", "kerlico": "no", "note": "按本机进程匹配；建议暂不实现：kerlico 没有进程归属查询，发行目标以服务端和 Linux TUN 为主"}
 {"key": "route/rule/process-name", "kerlico": "no", "note": "进程名；Android 可匹配包名；建议暂不实现：kerlico 没有进程归属查询，发行目标以服务端和 Linux TUN 为主"}
@@ -1457,16 +1457,16 @@
 {"key": "route/rule/process-path", "kerlico": "no", "note": "完整进程路径；建议暂不实现：kerlico 没有进程归属查询，发行目标以服务端和 Linux TUN 为主"}
 {"key": "route/rule/process-path-regex", "kerlico": "no", "note": "进程路径正则；建议暂不实现：kerlico 没有进程归属查询，发行目标以服务端和 Linux TUN 为主"}
 {"key": "route/rule/process-path-wildcard", "kerlico": "no", "note": "进程路径通配，仅 * 和 ?；建议暂不实现：kerlico 没有进程归属查询，发行目标以服务端和 Linux TUN 为主"}
-{"key": "route/rule/protocol", "kerlico": "no", "note": "按嗅探到的协议匹配；建议实现：kerlico 没有协议嗅探，要先做嗅探，之后才能按协议分流"}
+{"key": "route/rule/protocol", "kerlico": "yes", "note": "按嗅探到的协议匹配；建议实现：kerlico 没有协议嗅探，要先做嗅探，之后才能按协议分流"}
 {"key": "route/rule/rematch-name", "kerlico": "no", "note": "匹配 rematch 出站写入的名称；建议暂不实现：依赖 rematch 动作"}
-{"key": "route/rule/rule-set", "kerlico": "no", "note": "引用规则集合；建议实现：kerlico 规则只能逐条写在配置里，大规模列表必须靠规则集"}
+{"key": "route/rule/rule-set", "kerlico": "yes", "note": "引用规则集合；建议实现：kerlico 规则只能逐条写在配置里，大规模列表必须靠规则集"}
 {"key": "route/rule/rule-set-ip-cidr-match-source", "kerlico": "no", "note": "让规则集里的 ip_cidr 匹配来源 IP；建议暂不实现：要先有规则集和来源地址匹配"}
 {"key": "route/rule/rule-set-ipcidr-match-source", "kerlico": "na", "note": "sing-box 已移除的旧字段名，新名见 route/rule/rule-set-ip-cidr-match-source"}
 {"key": "route/rule/rule-tag", "kerlico": "no", "note": "规则名，命中时 Info 日志输出；建议暂不实现：kerlico 没有日志级别和命中记录，先做规则命中统计时再加"}
 {"key": "route/rule/source-geoip", "kerlico": "na", "note": "sing-box 已移除的旧规则字段，能力见 route/rule/src-geoip"}
 {"key": "route/rule/source-hostname", "kerlico": "no", "note": "匹配源设备从 DHCP 租约获取的主机名；建议暂不实现：服务于按局域网设备分流的路由器场景，不在当前目标内"}
-{"key": "route/rule/source-ip", "kerlico": "no", "note": "来源 IP；别名 source；建议实现：规则匹配的 Source 只带节点和用户，要把来源地址传进路由；按来源网段分流和封禁是服务端常见需求"}
-{"key": "route/rule/source-ip-cidr", "kerlico": "no", "note": "匹配源 IP CIDR；建议实现：规则匹配的 Source 只带节点和用户，要把来源地址传进路由；按来源网段分流和封禁是服务端常见需求"}
+{"key": "route/rule/source-ip", "kerlico": "yes", "note": "来源 IP；别名 source；建议实现：规则匹配的 Source 只带节点和用户，要把来源地址传进路由；按来源网段分流和封禁是服务端常见需求"}
+{"key": "route/rule/source-ip-cidr", "kerlico": "yes", "note": "匹配源 IP CIDR；建议实现：规则匹配的 Source 只带节点和用户，要把来源地址传进路由；按来源网段分流和封禁是服务端常见需求"}
 {"key": "route/rule/source-ip-is-private", "kerlico": "no", "note": "匹配非公开源 IP；建议暂不实现：要先把来源地址传进路由，这一项在来源网段之外需求小"}
 {"key": "route/rule/source-mac-address", "kerlico": "no", "note": "匹配源设备 MAC 地址；建议暂不实现：服务于按局域网设备分流的路由器场景，不在当前目标内"}
 {"key": "route/rule/source-port", "kerlico": "no", "note": "匹配源端口；建议暂不实现：要先把来源地址传进路由，这一项在来源网段之外需求小"}
@@ -1474,7 +1474,7 @@
 {"key": "route/rule/src", "kerlico": "no", "note": "把目标 IP 匹配转为来源 IP 匹配；建议暂不实现：要先把来源地址传进路由，这一项在来源网段之外需求小"}
 {"key": "route/rule/src-geoip", "kerlico": "no", "note": "来源 IP 国家代码；建议暂不实现：要先把来源地址传进路由，这一项在来源网段之外需求小"}
 {"key": "route/rule/src-ip-asn", "kerlico": "no", "note": "来源 IP ASN；建议暂不实现：要先把来源地址传进路由，这一项在来源网段之外需求小"}
-{"key": "route/rule/src-ip-cidr", "kerlico": "no", "note": "来源 IP 范围；建议实现：规则匹配的 Source 只带节点和用户，要把来源地址传进路由；按来源网段分流和封禁是服务端常见需求"}
+{"key": "route/rule/src-ip-cidr", "kerlico": "yes", "note": "来源 IP 范围；建议实现：规则匹配的 Source 只带节点和用户，要把来源地址传进路由；按来源网段分流和封禁是服务端常见需求"}
 {"key": "route/rule/src-ip-suffix", "kerlico": "no", "note": "来源 IP 后缀；建议暂不实现：要先把来源地址传进路由，这一项在来源网段之外需求小"}
 {"key": "route/rule/src-port", "kerlico": "no", "note": "来源端口范围；建议暂不实现：要先把来源地址传进路由，这一项在来源网段之外需求小"}
 {"key": "route/rule/sub-rule", "kerlico": "no", "note": "匹配至子规则；建议暂不实现：规则表是线性的，先补 rule-set 和逻辑规则"}
@@ -1496,80 +1496,80 @@
 {"key": "ruleset/adguard/hosts", "kerlico": "no", "note": "AdGuard hosts 格式只接受全零地址项；建议暂不实现：AdGuard 过滤语法是广告过滤专用，先支持通用规则集"}
 {"key": "ruleset/adguard/modifier", "kerlico": "no", "note": "支持的 AdGuard 修饰符；建议暂不实现：AdGuard 过滤语法是广告过滤专用，先支持通用规则集"}
 {"key": "ruleset/adguard/simple", "kerlico": "no", "note": "全部行为合法域名时按逐行精确域名处理；建议暂不实现：AdGuard 过滤语法是广告过滤专用，先支持通用规则集"}
-{"key": "ruleset/config/combo", "kerlico": "no", "note": "规则集的类型、格式、版本和下载方式组合；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/config/combo", "kerlico": "yes", "note": "规则集的类型、格式、版本和下载方式组合；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/config/download-detour", "kerlico": "na", "note": "sing-box 已废弃字段，1.16.0 移除，能力见 ruleset/rule-provider/proxy"}
-{"key": "ruleset/config/format", "kerlico": "no", "note": "规则集格式， `source` 或 `binary`；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/config/format", "kerlico": "yes", "note": "规则集格式， `source` 或 `binary`；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/config/http-client", "kerlico": "no", "note": "用于下载规则集的 HTTP 客户端；建议暂不实现：kerlico 没有共享 HTTP 客户端，先用内置客户端下载"}
 {"key": "ruleset/config/initial-path", "kerlico": "no", "note": "规则集初始内容的文件路径；建议暂不实现：首次下载失败时的兜底，基础能力之后再补"}
-{"key": "ruleset/config/path", "kerlico": "no", "note": "规则集的文件路径；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/config/rules", "kerlico": "no", "note": "内联规则集的规则；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/config/tag", "kerlico": "no", "note": "规则集的标签；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/config/type", "kerlico": "no", "note": "规则集类型， `local` 或 `remote`；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/config/update-interval", "kerlico": "no", "note": "规则集的更新间隔；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/config/url", "kerlico": "no", "note": "规则集的下载 URL；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/content/classical", "kerlico": "no", "note": "classical 内容支持全部规则类型，RULE-SET、SUB-RULE 除外；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/content/domain", "kerlico": "no", "note": "domain 内容遵守 Clash 通配符；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/content/ipcidr", "kerlico": "no", "note": "ipcidr 内容为 CIDR；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/config/path", "kerlico": "yes", "note": "规则集的文件路径；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/config/rules", "kerlico": "yes", "note": "内联规则集的规则；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/config/tag", "kerlico": "yes", "note": "规则集的标签；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/config/type", "kerlico": "yes", "note": "规则集类型， `local` 或 `remote`；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/config/update-interval", "kerlico": "yes", "note": "规则集的更新间隔；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/config/url", "kerlico": "yes", "note": "规则集的下载 URL；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/content/classical", "kerlico": "yes", "note": "classical 内容支持全部规则类型，RULE-SET、SUB-RULE 除外；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/content/domain", "kerlico": "yes", "note": "domain 内容遵守 Clash 通配符；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/content/ipcidr", "kerlico": "yes", "note": "ipcidr 内容为 CIDR；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/ext/file-tag", "kerlico": "no", "note": "ext:file:tag 外部 dat；建议暂不实现：Xray 专属 dat 引用写法，先支持 geoip.dat、geosite.dat"}
-{"key": "ruleset/geo/geo-auto-update", "kerlico": "no", "note": "自动更新 GEO；建议实现：GeoIP、Geosite 要有可更新的数据文件"}
-{"key": "ruleset/geo/geo-update-interval", "kerlico": "no", "note": "GEO 更新间隔，单位小时；建议实现：GeoIP、Geosite 要有可更新的数据文件"}
+{"key": "ruleset/geo/geo-auto-update", "kerlico": "yes", "note": "自动更新 GEO；建议实现：GeoIP、Geosite 要有可更新的数据文件"}
+{"key": "ruleset/geo/geo-update-interval", "kerlico": "yes", "note": "GEO 更新间隔，单位小时；建议实现：GeoIP、Geosite 要有可更新的数据文件"}
 {"key": "ruleset/geo/geodata-loader", "kerlico": "no", "note": "GEO 文件加载器；建议暂不实现：Mihomo 内部数据格式和加载器的选项，kerlico 选定一种格式即可"}
 {"key": "ruleset/geo/geodata-mode", "kerlico": "no", "note": "GEOIP 文件类型：true 用 dat；建议暂不实现：Mihomo 内部数据格式和加载器的选项，kerlico 选定一种格式即可"}
 {"key": "ruleset/geo/geoip-geosite", "kerlico": "na", "note": "sing-box 已移除的 GeoIP、Geosite 数据库说明，能力见 route/rule/geoip、route/rule/geosite"}
 {"key": "ruleset/geo/geosite-matcher", "kerlico": "no", "note": "GeoSite 匹配器实现；建议暂不实现：Mihomo 内部数据格式和加载器的选项，kerlico 选定一种格式即可"}
 {"key": "ruleset/geo/geox-url-asn", "kerlico": "no", "note": "GeoLite2-ASN.mmdb 下载地址；建议暂不实现：ASN 规则暂不实现，数据文件也不需要"}
-{"key": "ruleset/geo/geox-url-geoip", "kerlico": "no", "note": "geoip.dat 下载地址；建议实现：GeoIP、Geosite 要有可更新的数据文件"}
-{"key": "ruleset/geo/geox-url-geosite", "kerlico": "no", "note": "geosite.dat 下载地址；建议实现：GeoIP、Geosite 要有可更新的数据文件"}
-{"key": "ruleset/geo/geox-url-mmdb", "kerlico": "no", "note": "country.mmdb 下载地址；建议实现：GeoIP、Geosite 要有可更新的数据文件"}
+{"key": "ruleset/geo/geox-url-geoip", "kerlico": "yes", "note": "geoip.dat 下载地址；建议实现：GeoIP、Geosite 要有可更新的数据文件"}
+{"key": "ruleset/geo/geox-url-geosite", "kerlico": "yes", "note": "geosite.dat 下载地址；建议实现：GeoIP、Geosite 要有可更新的数据文件"}
+{"key": "ruleset/geo/geox-url-mmdb", "kerlico": "yes", "note": "country.mmdb 下载地址；建议实现：GeoIP、Geosite 要有可更新的数据文件"}
 {"key": "ruleset/geodata/assets", "kerlico": "no", "note": "要下载替换的文件列表；建议暂不实现：Xray 的 cron 定时替换文件；kerlico 优先做规则集式的 `update_interval`"}
 {"key": "ruleset/geodata/cron", "kerlico": "no", "note": "5 段 cron，本地时区；建议暂不实现：Xray 的 cron 定时替换文件；kerlico 优先做规则集式的 `update_interval`"}
 {"key": "ruleset/geodata/file", "kerlico": "no", "note": "geodata 写入文件名；建议暂不实现：Xray 的 cron 定时替换文件；kerlico 优先做规则集式的 `update_interval`"}
 {"key": "ruleset/geodata/outbound", "kerlico": "no", "note": "下载用出站 tag；建议暂不实现：Xray 的 cron 定时替换文件；kerlico 优先做规则集式的 `update_interval`"}
 {"key": "ruleset/geodata/url", "kerlico": "no", "note": "geodata 下载地址；建议暂不实现：Xray 的 cron 定时替换文件；kerlico 优先做规则集式的 `update_interval`"}
-{"key": "ruleset/geoip/geoip", "kerlico": "no", "note": "geoip.dat 预定义 IP 列表；建议实现：GeoIP、Geosite 要有可更新的数据文件，dat 是社区现成的数据格式"}
-{"key": "ruleset/geosite/geosite", "kerlico": "no", "note": "geosite.dat 预定义域名列表；建议实现：GeoIP、Geosite 要有可更新的数据文件，dat 是社区现成的数据格式"}
+{"key": "ruleset/geoip/geoip", "kerlico": "yes", "note": "geoip.dat 预定义 IP 列表；建议实现：GeoIP、Geosite 要有可更新的数据文件，dat 是社区现成的数据格式"}
+{"key": "ruleset/geosite/geosite", "kerlico": "yes", "note": "geosite.dat 预定义域名列表；建议实现：GeoIP、Geosite 要有可更新的数据文件，dat 是社区现成的数据格式"}
 {"key": "ruleset/headless/default-interface-address", "kerlico": "no", "note": "匹配默认接口地址；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
-{"key": "ruleset/headless/domain", "kerlico": "no", "note": "匹配完整域名；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/headless/domain-keyword", "kerlico": "no", "note": "匹配域名关键字；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/headless/domain-regex", "kerlico": "no", "note": "匹配域名正则表达式；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/headless/domain-suffix", "kerlico": "no", "note": "匹配域名后缀；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/headless/invert", "kerlico": "no", "note": "规则集规则的反选；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/headless/ip-cidr", "kerlico": "no", "note": "匹配 IP CIDR；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/domain", "kerlico": "yes", "note": "匹配完整域名；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/domain-keyword", "kerlico": "yes", "note": "匹配域名关键字；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/domain-regex", "kerlico": "yes", "note": "匹配域名正则表达式；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/domain-suffix", "kerlico": "yes", "note": "匹配域名后缀；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/invert", "kerlico": "yes", "note": "规则集规则的反选；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/ip-cidr", "kerlico": "yes", "note": "匹配 IP CIDR；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/headless/logical-mode", "kerlico": "no", "note": "规则集逻辑规则的与、或模式；建议暂不实现：先支持平铺规则，逻辑组合等路由规则先实现"}
 {"key": "ruleset/headless/logical-rules", "kerlico": "no", "note": "规则集逻辑规则包含的子规则；建议暂不实现：先支持平铺规则，逻辑组合等路由规则先实现"}
 {"key": "ruleset/headless/logical-type", "kerlico": "no", "note": "声明规则集规则为逻辑规则；建议暂不实现：先支持平铺规则，逻辑组合等路由规则先实现"}
-{"key": "ruleset/headless/network", "kerlico": "no", "note": "匹配 tcp 或 udp；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/network", "kerlico": "yes", "note": "匹配 tcp 或 udp；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/headless/network-interface-address", "kerlico": "no", "note": "匹配网络接口（可用值同 `network_type`）地址；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "ruleset/headless/network-is-constrained", "kerlico": "no", "note": "匹配如果网络在低数据模式下；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "ruleset/headless/network-is-expensive", "kerlico": "no", "note": "匹配如果网络被视为计费 (在 Android) 或被视为昂贵，像蜂窝网络或个人热点 (在 Apple 平台)；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "ruleset/headless/network-type", "kerlico": "no", "note": "匹配网络类型；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "ruleset/headless/package-name", "kerlico": "no", "note": "匹配 Android 应用包名；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "ruleset/headless/package-name-regex", "kerlico": "no", "note": "使用正则表达式匹配 Android 应用包名；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
-{"key": "ruleset/headless/port", "kerlico": "no", "note": "匹配端口；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/headless/port-range", "kerlico": "no", "note": "匹配端口范围；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/port", "kerlico": "yes", "note": "匹配端口；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/port-range", "kerlico": "yes", "note": "匹配端口范围；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/headless/process-name", "kerlico": "no", "note": "匹配进程名称；建议暂不实现：kerlico 没有进程归属查询，发行目标以服务端和 Linux TUN 为主"}
 {"key": "ruleset/headless/process-path", "kerlico": "no", "note": "匹配进程路径；建议暂不实现：kerlico 没有进程归属查询，发行目标以服务端和 Linux TUN 为主"}
 {"key": "ruleset/headless/process-path-regex", "kerlico": "no", "note": "使用正则表达式匹配进程路径；建议暂不实现：kerlico 没有进程归属查询，发行目标以服务端和 Linux TUN 为主"}
 {"key": "ruleset/headless/query-type", "kerlico": "no", "note": "DNS 查询类型；建议暂不实现：要先有 DNS 规则"}
-{"key": "ruleset/headless/source-ip-cidr", "kerlico": "no", "note": "匹配源 IP CIDR；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/headless/source-port", "kerlico": "no", "note": "匹配源端口；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/headless/source-port-range", "kerlico": "no", "note": "匹配源端口范围；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/source-ip-cidr", "kerlico": "yes", "note": "匹配源 IP CIDR；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/source-port", "kerlico": "yes", "note": "匹配源端口；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/headless/source-port-range", "kerlico": "yes", "note": "匹配源端口范围；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/headless/wifi-bssid", "kerlico": "no", "note": "匹配 WiFi BSSID；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
 {"key": "ruleset/headless/wifi-ssid", "kerlico": "no", "note": "匹配 WiFi SSID；建议暂不实现：kerlico 发行目标是 Linux x86_64，没有移动端和桌面图形客户端"}
-{"key": "ruleset/rule-provider/behavior", "kerlico": "no", "note": "规则集行为：classical、domain、ipcidr；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/rule-provider/combo", "kerlico": "no", "note": "规则集维度；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/rule-provider/format", "kerlico": "no", "note": "规则集文件格式：yaml、text、mrs；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/rule-provider/behavior", "kerlico": "yes", "note": "规则集行为：classical、domain、ipcidr；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/rule-provider/combo", "kerlico": "yes", "note": "规则集维度；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/rule-provider/format", "kerlico": "yes", "note": "规则集文件格式：yaml、text、mrs；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/rule-provider/header", "kerlico": "no", "note": "自定义请求头；建议暂不实现：基础能力之后再补，需求小"}
-{"key": "ruleset/rule-provider/interval", "kerlico": "no", "note": "更新间隔秒；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/rule-provider/name", "kerlico": "no", "note": "规则集名称；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/rule-provider/path", "kerlico": "no", "note": "规则集文件路径；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/rule-provider/interval", "kerlico": "yes", "note": "更新间隔秒；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/rule-provider/name", "kerlico": "yes", "note": "规则集名称；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/rule-provider/path", "kerlico": "yes", "note": "规则集文件路径；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/rule-provider/path-in-bundle", "kerlico": "no", "note": "本地无文件时从 BundleMRS.7z 解压的路径；建议暂不实现：基础能力之后再补，需求小"}
-{"key": "ruleset/rule-provider/payload", "kerlico": "no", "note": "内容，仅 inline 生效；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/rule-provider/proxy", "kerlico": "no", "note": "经指定代理下载；建议实现：规则集站点常被阻断，要能经命名出站下载"}
-{"key": "ruleset/rule-provider/size-limit", "kerlico": "no", "note": "下载大小上限字节，0 不限；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/rule-provider/type", "kerlico": "no", "note": "规则集来源类型；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/rule-provider/url", "kerlico": "no", "note": "http 类型规则集的下载地址；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/source/rules", "kerlico": "no", "note": "源格式规则集的规则；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/rule-provider/payload", "kerlico": "yes", "note": "内容，仅 inline 生效；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/rule-provider/proxy", "kerlico": "yes", "note": "经指定代理下载；建议实现：规则集站点常被阻断，要能经命名出站下载"}
+{"key": "ruleset/rule-provider/size-limit", "kerlico": "yes", "note": "下载大小上限字节，0 不限；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/rule-provider/type", "kerlico": "yes", "note": "规则集来源类型；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/rule-provider/url", "kerlico": "yes", "note": "http 类型规则集的下载地址；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
+{"key": "ruleset/source/rules", "kerlico": "yes", "note": "源格式规则集的规则；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/source/version", "kerlico": "no", "note": "规则集版本；建议暂不实现：版本号服务 sing-box 自身的格式演进，kerlico 第一版不需要"}
 {"key": "ruleset/source/version-values", "kerlico": "no", "note": "源格式规则集版本；建议暂不实现：版本号服务 sing-box 自身的格式演进，kerlico 第一版不需要"}
 {"key": "stats/access-log/connection-record", "kerlico": "yes", "where": "crates/egress/src/history.rs", "note": "`telemetry.access_records` 写 SQLite，`kerlico history --kind flows` 和 `/v1/flows` 查询"}

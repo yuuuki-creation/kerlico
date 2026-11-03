@@ -34,6 +34,17 @@ static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
 
 pub trait Resolver: Send + Sync {
     fn resolve<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Vec<IpAddr>>>;
+    fn lookup_fake_ip(&self, _ip: IpAddr) -> Option<String> {
+        None
+    }
+    fn lookup_reverse_mapping(&self, _ip: IpAddr) -> Option<String> {
+        None
+    }
+    fn exchange_dns_packet<'a>(&'a self, _packet: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async {
+            Err(Error::Unsupported("当前解析器不支持原始 DNS 报文转发"))
+        })
+    }
 }
 struct SystemResolver;
 impl Resolver for SystemResolver {
@@ -53,6 +64,15 @@ pub use kerlico_net::native_device;
 impl Resolver for kerlico_dns::DnsResolver {
     fn resolve<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Vec<IpAddr>>> {
         Box::pin(kerlico_dns::DnsResolver::resolve(self, host))
+    }
+    fn lookup_fake_ip(&self, ip: IpAddr) -> Option<String> {
+        kerlico_dns::DnsResolver::lookup_fake_ip(self, ip)
+    }
+    fn lookup_reverse_mapping(&self, ip: IpAddr) -> Option<String> {
+        kerlico_dns::DnsResolver::lookup_reverse_mapping(self, ip)
+    }
+    fn exchange_dns_packet<'a>(&'a self, packet: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(kerlico_dns::DnsResolver::exchange_packet(self, packet))
     }
 }
 
@@ -285,8 +305,12 @@ impl EgressRuntime {
                 binding.local,
                 dispatcher.clone(),
                 association,
-            ),
+            )
+            .with_sniff_policy(binding.sniff_policy),
         ))
+    }
+    pub fn exchange_dns_packet<'a>(&'a self, packet: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>>> {
+        self.dispatcher.resolver.exchange_dns_packet(packet)
     }
     pub fn ingress(&self, node: &NodeId) -> Result<IngressBinding> {
         self.ingresses.get(node).cloned().ok_or(Error::Rejected)
@@ -387,12 +411,79 @@ async fn shutdown_services<'a>(
 }
 
 impl Dispatcher {
+    fn enrich_original(&self, mut original: OriginalTarget) -> OriginalTarget {
+        if let Address::Ip(ip) = original.target().address().clone() {
+            if let Some(domain) = self.resolver.lookup_fake_ip(ip) {
+                if let Ok(dst) = Destination::new(&domain, original.target().port()) {
+                    original = original.with_target(dst);
+                }
+            } else if original.sniffed_domain().is_none()
+                && let Some(domain) = self.resolver.lookup_reverse_mapping(ip)
+            {
+                original = original.with_sniffed(Some(domain), None);
+            }
+        }
+        original
+    }
+
+    fn evaluate_route(
+        &self,
+        identity: &SessionIdentity,
+        request: Option<(&OriginalTarget, Network)>,
+    ) -> (kerlico_routing::RouteDecision, Option<OutId>) {
+        let binding_out = self
+            .bindings
+            .get(identity.source().node())
+            .map(|b| b.outbound.clone());
+        let Some((original, network)) = request else {
+            return (kerlico_routing::RouteDecision::default(), binding_out);
+        };
+        let ctx = kerlico_routing::RouteContext {
+            target: original.target(),
+            resolved_ips: &[],
+            network,
+            source: identity.source(),
+            source_addr: identity.observed_source(),
+            protocol: original.sniffed_protocol(),
+            sniffed_domain: original.sniffed_domain(),
+        };
+        let decision = self.routes.evaluate(&ctx);
+        let selected = decision.outbound.clone().or(binding_out);
+        (decision, selected)
+    }
+
+    fn apply_route_overrides(
+        mut original: OriginalTarget,
+        decision: &kerlico_routing::RouteDecision,
+    ) -> OriginalTarget {
+        if decision.sniff.is_some()
+            && matches!(original.target().address(), Address::Ip(_))
+            && let Some(sniffed) = original.sniffed_domain()
+            && let Ok(dst) = Destination::new(sniffed, original.target().port())
+        {
+            original = original.with_target(dst);
+        }
+        if decision.override_address.is_some() || decision.override_port.is_some() {
+            let host = decision
+                .override_address
+                .clone()
+                .unwrap_or_else(|| original.target().host());
+            let port = decision
+                .override_port
+                .unwrap_or_else(|| original.target().port());
+            if let Ok(dst) = Destination::new(&host, port) {
+                original = original.with_target(dst);
+            }
+        }
+        original
+    }
+
     /// 多目标 UDP 关联建立时没有单一目标，固定使用节点绑定的出站。
     fn route(
         &self,
         identity: &SessionIdentity,
-        request: Option<(&Destination, Network)>,
-    ) -> Result<(&RunningService, FamilyMode)> {
+        request: Option<(&OriginalTarget, Network)>,
+    ) -> Result<(&RunningService, FamilyMode, kerlico_routing::RouteDecision)> {
         if self.closed.load(Ordering::Acquire)
             || !identity.is_accepting()
             || identity.cancel().is_cancelled()
@@ -404,52 +495,57 @@ impl Dispatcher {
             .bindings
             .get(identity.source().node())
             .ok_or(Error::Rejected)?;
-        let outbound = self
-            .selected_outbound(identity, request)
-            .ok_or(Error::Rejected)?;
-        let service = self.services.get(outbound).ok_or(Error::Rejected)?;
+        let (decision, outbound) = self.evaluate_route(identity, request);
+        if decision.reject {
+            return Err(Error::Rejected);
+        }
+        let outbound = outbound.ok_or(Error::Rejected)?;
+        let service = self.services.get(&outbound).ok_or(Error::Rejected)?;
         service.host.check()?;
-        Ok((service, binding.mode))
+        Ok((service, binding.mode, decision))
     }
+
     fn selected_outbound(
         &self,
         identity: &SessionIdentity,
-        request: Option<(&Destination, Network)>,
-    ) -> Option<&OutId> {
-        let binding = self.bindings.get(identity.source().node())?;
-        Some(
-            request
-                .and_then(|(target, network)| {
-                    self.routes.select(target, network, identity.source())
-                })
-                .unwrap_or(&binding.outbound),
-        )
+        request: Option<(&OriginalTarget, Network)>,
+    ) -> Option<OutId> {
+        let (_, selected) = self.evaluate_route(identity, request);
+        selected
     }
+
     /// 取得流账本前的准入；此处失败还没有租约，单独记一条错误事件。
     fn admit(
         &self,
         identity: &SessionIdentity,
         context: &ConnectContext,
-        request: Option<(&Destination, Network)>,
+        request: Option<(&OriginalTarget, Network)>,
         capable: impl FnOnce(&RunningService) -> Result<()>,
         original: Option<OriginalTarget>,
         kind: Kind,
-    ) -> Result<(&RunningService, FamilyMode, Arc<telemetry::FlowLedger>)> {
+    ) -> Result<(
+        &RunningService,
+        FamilyMode,
+        Arc<telemetry::FlowLedger>,
+        kerlico_routing::RouteDecision,
+    )> {
         if context.cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let admitted = self.route(identity, request).and_then(|(service, mode)| {
-            capable(service)?;
-            let ledger = self.telemetry.open(identity, &service.id, original, kind)?;
-            Ok((service, mode, ledger))
-        });
+        let admitted = self
+            .route(identity, request)
+            .and_then(|(service, mode, decision)| {
+                capable(service)?;
+                let ledger = self.telemetry.open(identity, &service.id, original, kind)?;
+                Ok((service, mode, ledger, decision))
+            });
         if let Err(error) = &admitted
             && let Some(outbound) = self.selected_outbound(identity, request)
         {
             self.telemetry.open_failed(
                 identity.source(),
-                outbound,
-                request.map(|(target, _)| target),
+                &outbound,
+                request.map(|(target, _)| target.target()),
                 error,
             );
         }
@@ -461,10 +557,11 @@ impl Dispatcher {
         original: OriginalTarget,
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, TcpFlow>> {
-        let (service, mode, ledger) = self.admit(
+        let original = self.enrich_original(original);
+        let (service, mode, ledger, decision) = self.admit(
             identity,
             context,
-            Some((original.target(), Network::Tcp)),
+            Some((&original, Network::Tcp)),
             |service| {
                 service
                     .capabilities
@@ -475,6 +572,8 @@ impl Dispatcher {
             Some(original.clone()),
             Kind::Tcp,
         )?;
+        let original = Self::apply_route_overrides(original, &decision);
+        let resolve_strategy = decision.resolve_strategy;
         let scoped = context.scoped(
             &service.host,
             identity.source(),
@@ -488,19 +587,32 @@ impl Dispatcher {
             Box::pin(async move {
                 let result = match service.policy {
                     TargetPolicy::Remote => scoped
-                        .run(service.backend.connect_tcp(original.target(), &scoped))
+                        .run(async {
+                            let target = if let Some(strategy) = resolve_strategy
+                                && let Address::Domain(host) = original.target().address()
+                            {
+                                let raw = self.resolver.resolve(host).await?;
+                                let ips = strategy.filter_ips(&raw);
+                                let first = ips.into_iter().next().ok_or(Error::InvalidAddress)?;
+                                Destination::new(&first.to_string(), original.target().port())?
+                            } else {
+                                original.target().clone()
+                            };
+                            service.backend.connect_tcp(&target, &scoped).await
+                        })
                         .await
                         .map(|stream| (stream, None)),
                     TargetPolicy::Local => {
                         scoped
                             .run(async {
-                                let candidates = recorded_candidates(
+                                let candidates = recorded_candidates_with_strategy(
                                     self.resolver.as_ref(),
                                     &self.telemetry,
                                     identity.source(),
                                     &service.id,
                                     original.target(),
                                     mode,
+                                    resolve_strategy,
                                 )
                                 .await?;
                                 let mut last = Error::InvalidAddress;
@@ -555,10 +667,28 @@ impl Dispatcher {
         original: OriginalTarget,
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, FixedUdpFlow>> {
-        let (service, mode, ledger) = self.admit(
+        let original = self.enrich_original(original);
+        let (decision_pre, _) = self.evaluate_route(identity, Some((&original, Network::Udp)));
+        if decision_pre.hijack_dns {
+            let resolver = self.resolver.clone();
+            return Ok(FlowOpen::fixed_udp(
+                Box::pin(async move {
+                    let (tx, rx) = tokio::sync::mpsc::channel(8);
+                    Ok(kerlico_core::DatagramChannel {
+                        sender: Box::new(DnsHijackSender { resolver, tx }),
+                        receiver: Box::new(DnsHijackReceiver {
+                            rx,
+                            target: original.target().clone(),
+                        }),
+                    })
+                }),
+                |_outcome| {},
+            ));
+        }
+        let (service, mode, ledger, decision) = self.admit(
             identity,
             context,
-            Some((original.target(), Network::Udp)),
+            Some((&original, Network::Udp)),
             |service| {
                 service
                     .capabilities
@@ -569,6 +699,8 @@ impl Dispatcher {
             Some(original.clone()),
             Kind::FixedUdp,
         )?;
+        let original = Self::apply_route_overrides(original, &decision);
+        let resolve_strategy = decision.resolve_strategy;
         let scoped = context.scoped(
             &service.host,
             identity.source(),
@@ -583,14 +715,27 @@ impl Dispatcher {
                 let result = scoped
                     .run(async {
                         let target = match service.policy {
-                            TargetPolicy::Remote => original.target().clone(),
-                            TargetPolicy::Local => recorded_candidates(
+                            TargetPolicy::Remote => {
+                                if let Some(strategy) = resolve_strategy
+                                    && let Address::Domain(host) = original.target().address()
+                                {
+                                    let raw = self.resolver.resolve(host).await?;
+                                    let ips = strategy.filter_ips(&raw);
+                                    let first =
+                                        ips.into_iter().next().ok_or(Error::InvalidAddress)?;
+                                    Destination::new(&first.to_string(), original.target().port())?
+                                } else {
+                                    original.target().clone()
+                                }
+                            }
+                            TargetPolicy::Local => recorded_candidates_with_strategy(
                                 self.resolver.as_ref(),
                                 &self.telemetry,
                                 identity.source(),
                                 &service.id,
                                 original.target(),
                                 mode,
+                                resolve_strategy,
                             )
                             .await?
                             .remove(0),
@@ -627,7 +772,7 @@ impl Dispatcher {
         identity: &'a SessionIdentity,
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, UdpAssociation>> {
-        let (service, mode, ledger) = self.admit(
+        let (service, mode, ledger, _) = self.admit(
             identity,
             context,
             None,
@@ -682,7 +827,7 @@ impl Dispatcher {
 impl SessionDispatcher for Dispatcher {
     fn supports_udp_association(&self, identity: &SessionIdentity) -> bool {
         self.route(identity, None)
-            .is_ok_and(|(service, _)| service.association)
+            .is_ok_and(|(service, _, _)| service.association)
     }
     fn connect_tcp<'a>(
         &'a self,
@@ -706,6 +851,35 @@ impl SessionDispatcher for Dispatcher {
         context: &'a ConnectContext,
     ) -> FlowOpen<'a, UdpAssociation> {
         FlowOpen::deferred(move || self.association(identity, context))
+    }
+}
+
+struct DnsHijackSender {
+    resolver: Arc<dyn Resolver>,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+}
+impl kerlico_core::DatagramSender for DnsHijackSender {
+    fn send<'a>(&'a mut self, packet: &'a [u8]) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let reply = self.resolver.exchange_dns_packet(packet).await?;
+            self.tx
+                .send(reply)
+                .await
+                .map_err(|_| Error::Protocol("DNS 劫持回包通道已关闭"))
+        })
+    }
+}
+
+struct DnsHijackReceiver {
+    rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    target: Destination,
+}
+impl DatagramReceiver for DnsHijackReceiver {
+    fn peer_addr(&self) -> Option<Destination> {
+        Some(self.target.clone())
+    }
+    fn recv(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>>> {
+        Box::pin(async move { Ok(self.rx.recv().await) })
     }
 }
 
@@ -733,6 +907,18 @@ async fn recorded_candidates(
     target: &Destination,
     mode: FamilyMode,
 ) -> Result<Vec<Destination>> {
+    recorded_candidates_with_strategy(resolver, telemetry, source, outbound, target, mode, None)
+        .await
+}
+async fn recorded_candidates_with_strategy(
+    resolver: &dyn Resolver,
+    telemetry: &Telemetry,
+    source: &kerlico_core::Source,
+    outbound: &OutId,
+    target: &Destination,
+    mode: FamilyMode,
+    strategy: Option<kerlico_routing::ResolveStrategy>,
+) -> Result<Vec<Destination>> {
     let mut pending = PendingLookup {
         telemetry,
         source,
@@ -740,15 +926,16 @@ async fn recorded_candidates(
         target,
         settled: false,
     };
-    let result = candidates(resolver, target, mode).await;
+    let result = candidates_with_strategy(resolver, target, mode, strategy).await;
     pending.settled = true;
     telemetry.dns_event(source, outbound, target, &result);
     result
 }
-async fn candidates(
+async fn candidates_with_strategy(
     resolver: &dyn Resolver,
     target: &Destination,
     mode: FamilyMode,
+    strategy: Option<kerlico_routing::ResolveStrategy>,
 ) -> Result<Vec<Destination>> {
     let accepts = |ip: &IpAddr| match mode {
         FamilyMode::V4Only => ip.is_ipv4(),
@@ -759,6 +946,12 @@ async fn candidates(
         Address::Ip(ip) => {
             if ip.to_canonical() != *ip {
                 Err(Error::InvalidAddress)
+            } else if let Some(domain) = resolver.lookup_fake_ip(*ip) {
+                let restored = Destination::new(&domain, target.port())?;
+                Box::pin(candidates_with_strategy(
+                    resolver, &restored, mode, strategy,
+                ))
+                .await
             } else if accepts(ip) {
                 Ok(vec![target.clone()])
             } else {
@@ -767,15 +960,20 @@ async fn candidates(
         }
         Address::Domain(host) => {
             let mut seen = HashSet::new();
-            let mut addresses: Vec<_> = resolver
-                .resolve(host)
-                .await?
+            let raw_ips = resolver.resolve(host).await?;
+            let filtered = match strategy {
+                Some(s) => s.filter_ips(&raw_ips),
+                None => raw_ips,
+            };
+            let mut addresses: Vec<_> = filtered
                 .into_iter()
                 .map(|ip| ip.to_canonical())
                 .filter(accepts)
                 .filter(|ip| seen.insert(*ip))
                 .collect();
-            addresses.sort_by_key(IpAddr::is_ipv6);
+            if strategy.is_none() {
+                addresses.sort_by_key(IpAddr::is_ipv6);
+            }
             addresses.truncate(32);
             if addresses.is_empty() {
                 return Err(Error::InvalidAddress);
@@ -906,5 +1104,66 @@ pub mod testing {
             IngressBinding::assemble(issuer, input.is_local(), dispatcher, association),
             telemetry,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeMapResolver {
+        fake_domain: String,
+        real_ip: IpAddr,
+    }
+
+    impl Resolver for FakeMapResolver {
+        fn resolve<'a>(&'a self, _host: &'a str) -> BoxFuture<'a, Result<Vec<IpAddr>>> {
+            let ip = self.real_ip;
+            Box::pin(async move { Ok(vec![ip]) })
+        }
+        fn lookup_fake_ip(&self, ip: IpAddr) -> Option<String> {
+            if ip == IpAddr::from([198, 18, 0, 10]) {
+                Some(self.fake_domain.clone())
+            } else {
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fake_ip_restores_domain_and_resolves_real_ip() {
+        let resolver = FakeMapResolver {
+            fake_domain: "real.example.com".into(),
+            real_ip: IpAddr::from([93, 184, 216, 34]),
+        };
+        let target = Destination::new("198.18.0.10", 443).unwrap();
+        let candidates =
+            candidates_with_strategy(&resolver, &target, FamilyMode::DualV4Preferred, None)
+                .await
+                .unwrap();
+        assert_eq!(
+            candidates,
+            vec![Destination::new("93.184.216.34", 443).unwrap()]
+        );
+    }
+
+    #[test]
+    fn apply_route_overrides_replaces_host_and_port() {
+        let orig = OriginalTarget::new("old.example.com", 80).unwrap();
+        let decision = kerlico_routing::RouteDecision {
+            outbound: Some(OutId::parse("direct").unwrap()),
+            balancer_tag: None,
+            override_address: Some("new.example.com".into()),
+            override_port: Some(8443),
+            resolve_strategy: None,
+            sniff: None,
+            reject: false,
+            hijack_dns: false,
+        };
+        let updated = Dispatcher::apply_route_overrides(orig, &decision);
+        assert_eq!(
+            updated.target(),
+            &Destination::new("new.example.com", 8443).unwrap()
+        );
     }
 }

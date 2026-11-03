@@ -1025,9 +1025,15 @@ async fn tcp_session(
     limits: &Limits,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let (stream, orig_target) = kerlico_net::sniff::sniff_and_prepare_tcp(
+        Box::new(stream),
+        target,
+        outbound.sniff_policy(),
+    )
+    .await;
     let context = ConnectContext::new(limits.connect_timeout()).with_cancel(cancel.clone());
-    let remote = outbound.connect_tcp(target, &context).await?;
-    relay(Box::new(stream), remote, limits, cancel).await
+    let remote = outbound.open_tcp(orig_target, &context).await?;
+    relay(stream, remote, limits, cancel).await
 }
 
 async fn relay(
@@ -1136,14 +1142,30 @@ async fn udp_session(
     limits: &Limits,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let mut initial_packet = None;
+    let orig_target = if outbound.sniff_policy().should_sniff_target(target) {
+        let Some(first) = queue.recv().await else {
+            return Ok(());
+        };
+        let sniffed =
+            kerlico_net::sniff::sniff_and_prepare_udp(&first, target, outbound.sniff_policy());
+        initial_packet = Some(first);
+        sniffed
+    } else {
+        kerlico_core::OriginalTarget::from_destination(target.clone())
+    };
     let context = ConnectContext::new(limits.connect_timeout())
         .with_cancel(cancel.clone())
         .with_udp_source(peer);
-    let channel = outbound.connect_udp(target, &context).await?;
+    let channel = outbound.open_udp(orig_target, &context).await?;
     let (mut sender, mut receiver, completion) = channel.into_parts();
     let result = {
         let (activity, mut observed) = watch::channel(Instant::now());
         let outgoing = async {
+            if let Some(first) = initial_packet.take() {
+                sender.send(&first).await?;
+                activity.send_replace(Instant::now());
+            }
             while let Some(packet) = queue.recv().await {
                 sender.send(&packet).await?;
                 activity.send_replace(Instant::now());

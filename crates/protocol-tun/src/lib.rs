@@ -1,6 +1,12 @@
 //! 系统 TUN 入站：把内核交来的 IP 包还原成业务流，经本地会话进入共享调度器。
 //!
-//! 只创建接口并配置地址，不修改系统路由。
+//! 支持配置虚拟接口地址、MTU、自动路由、策略表、重定向标记及 DNS 劫持规划。
+pub mod automation;
+pub use automation::{
+    DnsHijackProto, DnsHijackRule, MarkInput, TunDnsMode, TunRoutePlan, compile_route_plan,
+    detect_default_interface, parse_linux_default_interface,
+};
+
 use kerlico_config::{NodeBuildContext, NodeFactory};
 use kerlico_core::{
     BoxFuture, CredentialManifest, Error, InboundContext, InboundProtocol, IngressBinding,
@@ -24,13 +30,80 @@ fn default_max_flows() -> usize {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Options {
-    #[serde(default = "default_name")]
+    #[serde(
+        default = "default_name",
+        alias = "interface_name",
+        alias = "interface-name",
+        alias = "device"
+    )]
     name: String,
+    #[serde(default, alias = "address")]
     addresses: Vec<String>,
+    #[serde(default, alias = "inet4-address")]
+    inet4_address: Vec<String>,
+    #[serde(default, alias = "inet6-address")]
+    inet6_address: Vec<String>,
     #[serde(default = "default_mtu")]
     mtu: u16,
-    #[serde(default = "default_max_flows")]
+    #[serde(default = "default_max_flows", alias = "max-flows")]
     max_flows: usize,
+    #[serde(default, alias = "auto-detect-interface")]
+    auto_detect_interface: bool,
+    #[serde(default, alias = "auto-outbounds-interface")]
+    auto_outbounds_interface: Option<String>,
+    #[serde(default, alias = "auto-route")]
+    auto_route: bool,
+    #[serde(default, alias = "auto-system-routing-table")]
+    auto_system_routing_table: Vec<String>,
+    #[serde(default, alias = "strict-route")]
+    strict_route: bool,
+    #[serde(
+        default = "automation::default_table_index",
+        alias = "iproute2-table-index"
+    )]
+    iproute2_table_index: u32,
+    #[serde(
+        default = "automation::default_rule_index",
+        alias = "iproute2-rule-index"
+    )]
+    iproute2_rule_index: u32,
+    #[serde(default, alias = "route-address")]
+    route_address: Vec<String>,
+    #[serde(default, alias = "inet4-route-address")]
+    inet4_route_address: Vec<String>,
+    #[serde(default, alias = "inet6-route-address")]
+    inet6_route_address: Vec<String>,
+    #[serde(default, alias = "route-exclude-address")]
+    route_exclude_address: Vec<String>,
+    #[serde(default, alias = "inet4-route-exclude-address")]
+    inet4_route_exclude_address: Vec<String>,
+    #[serde(default, alias = "inet6-route-exclude-address")]
+    inet6_route_exclude_address: Vec<String>,
+    #[serde(default, alias = "route-address-set")]
+    route_address_set: Vec<String>,
+    #[serde(default, alias = "route-exclude-address-set")]
+    route_exclude_address_set: Vec<String>,
+    #[serde(default, alias = "auto-redirect")]
+    auto_redirect: bool,
+    #[serde(default, alias = "auto-redirect-input-mark")]
+    auto_redirect_input_mark: Option<MarkInput>,
+    #[serde(default, alias = "auto-redirect-output-mark")]
+    auto_redirect_output_mark: Option<MarkInput>,
+    #[serde(
+        default = "automation::default_fallback_rule_index",
+        alias = "auto-redirect-iproute2-fallback-rule-index"
+    )]
+    auto_redirect_iproute2_fallback_rule_index: u32,
+    #[serde(default, alias = "dns-hijack")]
+    dns_hijack: Vec<String>,
+    #[serde(default, alias = "dns-mode")]
+    dns_mode: Option<String>,
+    #[serde(default, alias = "dns-address")]
+    dns_address: Vec<IpAddr>,
+    #[serde(default)]
+    dns: Vec<IpAddr>,
+    #[serde(default, alias = "auto-system-dns-to-gateway")]
+    auto_system_dns_to_gateway: bool,
 }
 
 fn invalid() -> Error {
@@ -118,6 +191,7 @@ struct TunNode {
     mtu: u16,
     max_flows: usize,
     addresses: Vec<InterfaceAddress>,
+    route_plan: TunRoutePlan,
 }
 
 impl TunNode {
@@ -190,6 +264,7 @@ impl InboundProtocol for TunNode {
         mut context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            let _ = &self.route_plan;
             // Engine 的 max_streams 是单条多路复用连接的上限；TUN 的流由 max_flows 和会话配额约束。
             context.max_streams = self.max_flows;
             let device = self.create()?;
@@ -241,8 +316,22 @@ impl NodeFactory for TunNodeFactory {
         true
     }
     fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
-        let options: Options =
+        let mut options: Options =
             serde_json::from_value(input.options().clone()).map_err(|_| invalid())?;
+        for a4 in &options.inet4_address {
+            if !options.addresses.contains(a4) {
+                options.addresses.push(a4.clone());
+            }
+        }
+        for a6 in &options.inet6_address {
+            if !options.addresses.contains(a6) {
+                options.addresses.push(a6.clone());
+            }
+        }
+        let _ = (
+            &options.route_address_set,
+            &options.route_exclude_address_set,
+        );
         if options.name.is_empty()
             || options.name.len() > 15
             || !options
@@ -263,11 +352,42 @@ impl NodeFactory for TunNodeFactory {
         if addresses.len() == 2 && addresses[0].ip.is_ipv4() == addresses[1].ip.is_ipv4() {
             return Err(invalid());
         }
+        let gateways = addresses
+            .iter()
+            .map(InterfaceAddress::gateway)
+            .collect::<Result<Vec<_>>>()?;
+        let route_plan = compile_route_plan(
+            &options.name,
+            &gateways,
+            options.auto_detect_interface,
+            options.auto_outbounds_interface.as_deref(),
+            options.auto_route,
+            &options.auto_system_routing_table,
+            options.strict_route,
+            options.iproute2_table_index,
+            options.iproute2_rule_index,
+            &options.route_address,
+            &options.inet4_route_address,
+            &options.inet6_route_address,
+            &options.route_exclude_address,
+            &options.inet4_route_exclude_address,
+            &options.inet6_route_exclude_address,
+            options.auto_redirect,
+            options.auto_redirect_input_mark.as_ref(),
+            options.auto_redirect_output_mark.as_ref(),
+            options.auto_redirect_iproute2_fallback_rule_index,
+            &options.dns_hijack,
+            options.dns_mode.as_deref(),
+            &options.dns_address,
+            &options.dns,
+            options.auto_system_dns_to_gateway,
+        )?;
         let node = TunNode {
             name: options.name,
             mtu: options.mtu,
             max_flows: options.max_flows,
             addresses,
+            route_plan,
         };
         node.stack()?.validate().map_err(|_| invalid())?;
         Ok(Arc::new(node))

@@ -24,23 +24,149 @@ pub enum FamilyMode {
     DualV4Preferred,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SniffPolicy {
+    pub enabled: bool,
+    pub protocols: Vec<String>,
+    pub override_destination: bool,
+    pub route_only: bool,
+    pub parse_pure_ip: bool,
+    pub timeout: std::time::Duration,
+    pub domains_excluded: Vec<String>,
+    pub force_domain: Vec<String>,
+    pub sniff_ports: std::collections::BTreeMap<String, Vec<(u16, u16)>>,
+}
+
+impl SniffPolicy {
+    pub fn effective_timeout(&self) -> std::time::Duration {
+        if self.timeout.is_zero() {
+            std::time::Duration::from_millis(300)
+        } else {
+            self.timeout
+        }
+    }
+
+    pub fn allows_protocol(&self, proto: &str, port: u16) -> bool {
+        let proto_lower = proto.to_ascii_lowercase();
+        let allowed_by_list = self.protocols.is_empty()
+            || self.protocols.iter().any(|p| {
+                let p = p.to_ascii_lowercase();
+                p == proto_lower
+                    || (proto_lower == "tls" && (p == "https" || p == "ssl"))
+                    || p == "fakedns+others"
+            });
+        if !allowed_by_list {
+            return false;
+        }
+        if let Some(ranges) = self
+            .sniff_ports
+            .get(&proto_lower)
+            .or_else(|| self.sniff_ports.get(&proto.to_ascii_uppercase()))
+            && !ranges.is_empty()
+        {
+            return ranges
+                .iter()
+                .any(|(start, end)| (*start..=*end).contains(&port));
+        }
+        true
+    }
+
+    pub fn should_sniff_target(&self, target: &Destination) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        match target.address() {
+            crate::Address::Ip(_) => true,
+            crate::Address::Domain(domain) => {
+                self.force_domain.is_empty()
+                    || self
+                        .force_domain
+                        .iter()
+                        .any(|pattern| wildcard_domain_match(pattern, domain))
+            }
+        }
+    }
+
+    pub fn should_override(&self, domain: &str) -> bool {
+        if !self.override_destination || self.route_only {
+            return false;
+        }
+        !self
+            .domains_excluded
+            .iter()
+            .any(|pattern| wildcard_domain_match(pattern, domain))
+    }
+}
+
+fn wildcard_domain_match(pattern: &str, domain: &str) -> bool {
+    let p = pattern.trim().to_ascii_lowercase();
+    let d = domain
+        .trim()
+        .strip_suffix('.')
+        .unwrap_or(domain)
+        .to_ascii_lowercase();
+    if p.is_empty() {
+        return false;
+    }
+    if p == "*" || p == "+" || p == "." {
+        return true;
+    }
+    if let Some(rest) = p.strip_prefix("+.") {
+        return d == rest
+            || d.strip_suffix(rest)
+                .is_some_and(|prefix| prefix.ends_with('.'));
+    }
+    if let Some(rest) = p.strip_prefix("*.") {
+        return d
+            .strip_suffix(rest)
+            .is_some_and(|prefix| prefix.ends_with('.'));
+    }
+    if let Some(rest) = p.strip_prefix('.') {
+        return d == rest
+            || d.strip_suffix(rest)
+                .is_some_and(|prefix| prefix.ends_with('.'));
+    }
+    p == d
+        || d.strip_suffix(&p)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct OriginalTarget {
     target: Destination,
     representation: String,
+    sniffed_domain: Option<String>,
+    sniffed_protocol: Option<String>,
 }
 impl OriginalTarget {
     pub fn new(host: &str, port: u16) -> Result<Self> {
         Ok(Self {
             target: Destination::new(host, port)?,
             representation: host.to_owned(),
+            sniffed_domain: None,
+            sniffed_protocol: None,
         })
     }
     pub fn from_destination(target: Destination) -> Self {
         Self {
             representation: target.host(),
             target,
+            sniffed_domain: None,
+            sniffed_protocol: None,
         }
+    }
+    pub fn with_target(mut self, target: Destination) -> Self {
+        self.target = target;
+        self
+    }
+    pub fn with_sniffed(mut self, domain: Option<String>, protocol: Option<String>) -> Self {
+        if domain.is_some() {
+            self.sniffed_domain = domain;
+        }
+        if protocol.is_some() {
+            self.sniffed_protocol = protocol;
+        }
+        self
     }
     pub fn target(&self) -> &Destination {
         &self.target
@@ -48,12 +174,19 @@ impl OriginalTarget {
     pub fn representation(&self) -> &str {
         &self.representation
     }
+    pub fn sniffed_domain(&self) -> Option<&str> {
+        self.sniffed_domain.as_deref()
+    }
+    pub fn sniffed_protocol(&self) -> Option<&str> {
+        self.sniffed_protocol.as_deref()
+    }
 }
 
 #[derive(Clone)]
 pub struct SessionIdentity {
     source: Source,
     observed: Option<SocketAddr>,
+    sniff_policy: SniffPolicy,
     cancel: CancellationToken,
     node_cancel: CancellationToken,
     peer_lease: Option<PeerLease>,
@@ -65,6 +198,9 @@ impl SessionIdentity {
     }
     pub fn observed_source(&self) -> Option<SocketAddr> {
         self.observed
+    }
+    pub fn sniff_policy(&self) -> &SniffPolicy {
+        &self.sniff_policy
     }
     pub fn cancel(&self) -> CancellationToken {
         self.cancel.clone()
@@ -107,6 +243,7 @@ pub trait SessionDispatcher: Send + Sync {
 pub struct IngressBinding {
     issuer: CredentialIssuer,
     local: bool,
+    sniff_policy: SniffPolicy,
     dispatcher: Arc<dyn SessionDispatcher>,
     association: bool,
     node_cancel: CancellationToken,
@@ -123,12 +260,20 @@ impl IngressBinding {
         Self {
             issuer,
             local,
+            sniff_policy: SniffPolicy::default(),
             dispatcher,
             association,
             node_cancel: CancellationToken::new(),
             admission: Arc::new(AtomicBool::new(true)),
             carrier: crate::carrier::CarrierCounter::default(),
         }
+    }
+    pub fn with_sniff_policy(mut self, sniff_policy: SniffPolicy) -> Self {
+        self.sniff_policy = sniff_policy;
+        self
+    }
+    pub fn sniff_policy(&self) -> &SniffPolicy {
+        &self.sniff_policy
     }
     /// 只登记本节点实际交接的载体字节；不记用户业务量，也不推算设备开销。
     pub fn record_carrier(&self, sent_bytes: u64, received_bytes: u64) {
@@ -173,6 +318,7 @@ impl IngressBinding {
             identity: SessionIdentity {
                 source,
                 observed: context.peer_addr,
+                sniff_policy: self.sniff_policy.clone(),
                 cancel: context.cancel.clone(),
                 node_cancel: self.node_cancel.clone(),
                 peer_lease: context.peer_lease.clone(),
@@ -200,6 +346,14 @@ pub struct PeerSession {
     dispatcher: Arc<dyn SessionDispatcher>,
 }
 impl PeerSession {
+    pub fn with_observed_source(&self, addr: SocketAddr) -> Self {
+        let mut next = self.clone();
+        next.identity.observed = Some(addr);
+        next
+    }
+    pub fn sniff_policy(&self) -> &SniffPolicy {
+        self.identity.sniff_policy()
+    }
     pub fn source(&self) -> &Source {
         self.identity.source()
     }

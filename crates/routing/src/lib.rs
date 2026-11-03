@@ -1,103 +1,500 @@
-//! 按目标、网络、节点和用户选择命名出站。只看字面 IP，不查询 DNS。
-use kerlico_core::{Address, Destination, Error, NodeId, OutId, Result, Source, UserId};
-use serde::Deserialize;
-use std::net::IpAddr;
+//! 按目标、网络、节点、用户、来源、协议、规则集与 GeoData 选择命名出站或执行路由动作。
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+pub mod geodata;
+pub mod ruleset;
+pub use geodata::{GeoConfigSpec, GeoIpDat, GeoSiteDat, GeoxUrlSpec, is_private_ip};
+pub use ruleset::{
+    CompiledHeadlessRule, CompiledRuleSet, HeadlessRuleSpec, LogicalMode, RuleProviderSpec,
+    RuleSetSpec,
+};
+
+use kerlico_core::{Address, Cidr, Destination, Error, NodeId, OutId, Result, Source, UserId};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
     Tcp,
     Udp,
 }
 
-/// 同一字段内任一值命中即可，不同字段须同时满足。
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolveStrategy {
+    #[serde(alias = "prefer-ipv4")]
+    PreferIpv4,
+    #[serde(alias = "prefer-ipv6")]
+    PreferIpv6,
+    #[serde(alias = "ipv4-only")]
+    Ipv4Only,
+    #[serde(alias = "ipv6-only")]
+    Ipv6Only,
+}
+
+impl ResolveStrategy {
+    pub fn filter_ips(self, ips: &[IpAddr]) -> Vec<IpAddr> {
+        match self {
+            Self::Ipv4Only => ips
+                .iter()
+                .copied()
+                .filter(|ip| ip.to_canonical().is_ipv4())
+                .collect(),
+            Self::Ipv6Only => ips
+                .iter()
+                .copied()
+                .filter(|ip| ip.to_canonical().is_ipv6())
+                .collect(),
+            Self::PreferIpv4 => {
+                let mut v4: Vec<IpAddr> = ips
+                    .iter()
+                    .copied()
+                    .filter(|ip| ip.to_canonical().is_ipv4())
+                    .collect();
+                let v6: Vec<IpAddr> = ips
+                    .iter()
+                    .copied()
+                    .filter(|ip| ip.to_canonical().is_ipv6())
+                    .collect();
+                v4.extend(v6);
+                v4
+            }
+            Self::PreferIpv6 => {
+                let mut v6: Vec<IpAddr> = ips
+                    .iter()
+                    .copied()
+                    .filter(|ip| ip.to_canonical().is_ipv6())
+                    .collect();
+                let v4: Vec<IpAddr> = ips
+                    .iter()
+                    .copied()
+                    .filter(|ip| ip.to_canonical().is_ipv4())
+                    .collect();
+                v6.extend(v4);
+                v6
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PortRange {
+    pub start: u16,
+    pub end: u16,
+}
+
+impl PortRange {
+    pub fn parse(text: &str) -> Result<Self> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err(invalid());
+        }
+        if let Some((a, b)) = trimmed.split_once(':').or_else(|| trimmed.split_once('-')) {
+            let start = if a.trim().is_empty() {
+                1
+            } else {
+                a.trim().parse::<u16>().map_err(|_| invalid())?
+            };
+            let end = if b.trim().is_empty() {
+                65535
+            } else {
+                b.trim().parse::<u16>().map_err(|_| invalid())?
+            };
+            if start == 0 || end == 0 || start > end {
+                return Err(invalid());
+            }
+            Ok(Self { start, end })
+        } else {
+            let p = trimmed.parse::<u16>().map_err(|_| invalid())?;
+            if p == 0 {
+                return Err(invalid());
+            }
+            Ok(Self { start: p, end: p })
+        }
+    }
+
+    pub fn contains(self, port: u16) -> bool {
+        (self.start..=self.end).contains(&port)
+    }
+}
+
+/// 匹配域名通配符（支持 `*`、`**`、`?` 以及 Clash `.`、`*`、`+` 前缀语法）。
+pub fn wildcard_domain_matches(pattern: &str, host: &str) -> bool {
+    let p = pattern.trim().to_ascii_lowercase();
+    let h = host
+        .trim()
+        .strip_suffix('.')
+        .unwrap_or(host)
+        .to_ascii_lowercase();
+    if p.is_empty() {
+        return false;
+    }
+    if p == "*" || p == "**" || p == "+" || p == "." {
+        return true;
+    }
+    if let Some(rest) = p.strip_prefix("+.") {
+        return h == rest || h.strip_suffix(rest).is_some_and(|pre| pre.ends_with('.'));
+    }
+    if let Some(rest) = p.strip_prefix('.') {
+        return h == rest || h.strip_suffix(rest).is_some_and(|pre| pre.ends_with('.'));
+    }
+    if !p.contains('*') && !p.contains('?') {
+        return p == h;
+    }
+    // 将通配符转为正则：`**` 匹配跨级任意字符，`*` 匹配单级非 `.` 字符（除非是 `*.` 前缀匹配子域）
+    if let Some(rest) = p.strip_prefix("*.")
+        && !rest.contains('*')
+        && !rest.contains('?')
+    {
+        return h.strip_suffix(rest).is_some_and(|pre| pre.ends_with('.'));
+    }
+    let mut regex_str = String::from("^");
+    let chars: Vec<char> = p.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '*' {
+            if i + 1 < chars.len() && chars[i + 1] == '*' {
+                regex_str.push_str(".*");
+                i += 2;
+            } else {
+                regex_str.push_str("[^.]*");
+                i += 1;
+            }
+        } else if chars[i] == '?' {
+            regex_str.push_str("[^.]");
+            i += 1;
+        } else {
+            for esc in regex::escape(&chars[i].to_string()).chars() {
+                regex_str.push(esc);
+            }
+            i += 1;
+        }
+    }
+    regex_str.push('$');
+    Regex::new(&regex_str).is_ok_and(|re| re.is_match(&h))
+}
+
+/// 同一字段内任一值命中即可，不同字段须同时满足；支持逻辑组合与路由动作。
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSpec {
+    #[serde(default, alias = "outbound_tag", alias = "outbound-tag")]
     pub outbound: String,
+    #[serde(default, alias = "balancer-tag", alias = "balancerTag")]
+    pub balancer_tag: Option<String>,
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default, alias = "override-address")]
+    pub override_address: Option<String>,
+    #[serde(default, alias = "override-port")]
+    pub override_port: Option<u16>,
+    #[serde(default)]
+    pub strategy: Option<ResolveStrategy>,
+    #[serde(default)]
+    pub sniffer: Vec<String>,
+    #[serde(default)]
+    pub timeout: Option<String>,
     #[serde(default)]
     pub domain: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "domain-suffix")]
     pub domain_suffix: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "domain-keyword")]
     pub domain_keyword: Vec<String>,
+    #[serde(
+        default,
+        alias = "domain-regex",
+        alias = "domain_regexp",
+        alias = "domain-regexp"
+    )]
+    pub domain_regex: Vec<String>,
+    #[serde(default, alias = "domain-wildcard")]
+    pub domain_wildcard: Vec<String>,
     #[serde(default)]
+    pub geosite: Vec<String>,
+    #[serde(default, alias = "ip-cidr")]
     pub ip_cidr: Vec<String>,
     #[serde(default)]
+    pub geoip: Vec<String>,
+    #[serde(
+        default,
+        alias = "ip-is-private",
+        alias = "geoip_private",
+        alias = "geoip-private"
+    )]
+    pub ip_is_private: bool,
+    #[serde(default, alias = "ip-version")]
+    pub ip_version: Option<u8>,
+    #[serde(default)]
     pub port: Vec<u16>,
+    #[serde(default, alias = "port-range")]
+    pub port_range: Vec<String>,
+    #[serde(
+        default,
+        alias = "source-ip-cidr",
+        alias = "src_ip_cidr",
+        alias = "src-ip-cidr",
+        alias = "source_ip",
+        alias = "source-ip"
+    )]
+    pub source_ip_cidr: Vec<String>,
+    #[serde(default, alias = "source-port")]
+    pub source_port: Vec<u16>,
+    #[serde(default, alias = "source-port-range")]
+    pub source_port_range: Vec<String>,
     #[serde(default)]
     pub network: Option<Network>,
+    #[serde(default)]
+    pub protocol: Vec<String>,
+    #[serde(
+        default,
+        alias = "rule-set",
+        alias = "domain_set",
+        alias = "domain-set"
+    )]
+    pub rule_set: Vec<String>,
+    #[serde(default, alias = "not")]
+    pub invert: bool,
+    #[serde(
+        default,
+        rename = "type",
+        alias = "logical_type",
+        alias = "logical-type"
+    )]
+    pub logical_type: Option<String>,
+    #[serde(
+        default,
+        rename = "mode",
+        alias = "logical_mode",
+        alias = "logical-mode"
+    )]
+    pub logical_mode: Option<String>,
+    #[serde(
+        default,
+        rename = "rules",
+        alias = "logical_rules",
+        alias = "logical-rules"
+    )]
+    pub logical_rules: Vec<RuleSpec>,
     #[serde(default)]
     pub node: Vec<String>,
     #[serde(default)]
     pub user: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Cidr {
-    network: IpAddr,
-    prefix: u8,
-}
-
-impl Cidr {
-    fn parse(text: &str) -> Result<Self> {
-        let (address, prefix) = match text.split_once('/') {
-            Some((address, prefix)) => (address, Some(prefix)),
-            None => (text, None),
-        };
-        let network: IpAddr = address.parse().map_err(|_| invalid())?;
-        // 匹配前目标已规范化为 IPv4，IPv4-mapped 网段永远不会命中。
-        if network.to_canonical() != network {
-            return Err(invalid());
-        }
-        let bits = if network.is_ipv4() { 32 } else { 128 };
-        let prefix = match prefix {
-            Some(prefix) => prefix.parse().map_err(|_| invalid())?,
-            None => bits,
-        };
-        if prefix > bits {
-            return Err(invalid());
-        }
-        Ok(Self { network, prefix })
-    }
-
-    fn contains(&self, ip: IpAddr) -> bool {
-        match (self.network, ip.to_canonical()) {
-            (IpAddr::V4(network), IpAddr::V4(ip)) => prefix_matches(
-                network.to_bits().into(),
-                ip.to_bits().into(),
-                32,
-                self.prefix,
-            ),
-            (IpAddr::V6(network), IpAddr::V6(ip)) => {
-                prefix_matches(network.to_bits(), ip.to_bits(), 128, self.prefix)
-            }
-            _ => false,
-        }
-    }
-}
-
-fn prefix_matches(network: u128, ip: u128, bits: u8, prefix: u8) -> bool {
-    u32::from(bits - prefix) >= u128::BITS || (network ^ ip) >> (bits - prefix) == 0
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RouteAction {
+    Route {
+        outbound: Option<OutId>,
+        balancer_tag: Option<String>,
+        override_address: Option<String>,
+        override_port: Option<u16>,
+    },
+    RouteOptions {
+        override_address: Option<String>,
+        override_port: Option<u16>,
+    },
+    Resolve {
+        strategy: ResolveStrategy,
+    },
+    Sniff {
+        sniffer: Vec<String>,
+        timeout: Duration,
+    },
+    HijackDns,
+    Reject,
 }
 
 #[derive(Debug)]
 struct Rule {
-    outbound: OutId,
+    action: RouteAction,
     domain: Vec<String>,
     domain_suffix: Vec<String>,
     domain_keyword: Vec<String>,
+    domain_regex: Vec<Regex>,
+    domain_wildcard: Vec<String>,
+    geosite: Vec<String>,
     ip_cidr: Vec<Cidr>,
+    geoip: Vec<String>,
+    ip_is_private: bool,
+    ip_version: Option<u8>,
     port: Vec<u16>,
+    port_range: Vec<PortRange>,
+    source_ip_cidr: Vec<Cidr>,
+    source_port: Vec<u16>,
+    source_port_range: Vec<PortRange>,
     network: Option<Network>,
+    protocol: Vec<String>,
+    rule_set: Vec<String>,
+    invert: bool,
+    logical: Option<(LogicalMode, Vec<Rule>)>,
     node: Vec<NodeId>,
     user: Vec<UserId>,
 }
 
+fn parse_duration_opt(raw: Option<&str>, default_ms: u64) -> Result<Duration> {
+    let Some(s) = raw else {
+        return Ok(Duration::from_millis(default_ms));
+    };
+    let trimmed = s.trim();
+    if let Some(ms) = trimmed.strip_suffix("ms") {
+        let v: u64 = ms.trim().parse().map_err(|_| invalid())?;
+        if v == 0 {
+            return Err(invalid());
+        }
+        return Ok(Duration::from_millis(v));
+    }
+    if let Some(sec) = trimmed.strip_suffix('s') {
+        let v: u64 = sec.trim().parse().map_err(|_| invalid())?;
+        if v == 0 {
+            return Err(invalid());
+        }
+        return Ok(Duration::from_secs(v));
+    }
+    let v: u64 = trimmed.parse().map_err(|_| invalid())?;
+    if v == 0 {
+        return Err(invalid());
+    }
+    Ok(Duration::from_millis(v))
+}
+
 impl Rule {
     fn compile(spec: &RuleSpec) -> Result<Self> {
+        Self::compile_inner(spec, false)
+    }
+
+    fn compile_inner(spec: &RuleSpec, is_child: bool) -> Result<Self> {
+        let action = if is_child {
+            RouteAction::Route {
+                outbound: None,
+                balancer_tag: None,
+                override_address: None,
+                override_port: None,
+            }
+        } else {
+            let act_name = spec.action.as_deref().unwrap_or("route");
+            match act_name {
+                "route" => {
+                    let outbound = if spec.outbound.is_empty() {
+                        None
+                    } else {
+                        Some(OutId::parse(&spec.outbound)?)
+                    };
+                    let balancer_tag = spec
+                        .balancer_tag
+                        .as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(ToOwned::to_owned);
+                    if outbound.is_none() && balancer_tag.is_none() {
+                        return Err(invalid());
+                    }
+                    if let Some(addr) = &spec.override_address {
+                        Destination::new(addr, 1).map_err(|_| invalid())?;
+                    }
+                    if spec.override_port == Some(0) {
+                        return Err(invalid());
+                    }
+                    RouteAction::Route {
+                        outbound,
+                        balancer_tag,
+                        override_address: spec.override_address.clone(),
+                        override_port: spec.override_port,
+                    }
+                }
+                "route-options" => {
+                    if spec.override_address.is_none() && spec.override_port.is_none() {
+                        return Err(invalid());
+                    }
+                    if let Some(addr) = &spec.override_address {
+                        Destination::new(addr, 1).map_err(|_| invalid())?;
+                    }
+                    if spec.override_port == Some(0) {
+                        return Err(invalid());
+                    }
+                    RouteAction::RouteOptions {
+                        override_address: spec.override_address.clone(),
+                        override_port: spec.override_port,
+                    }
+                }
+                "resolve" => RouteAction::Resolve {
+                    strategy: spec.strategy.unwrap_or(ResolveStrategy::PreferIpv4),
+                },
+                "sniff" => RouteAction::Sniff {
+                    sniffer: spec
+                        .sniffer
+                        .iter()
+                        .map(|s| s.trim().to_ascii_lowercase())
+                        .collect(),
+                    timeout: parse_duration_opt(spec.timeout.as_deref(), 300)?,
+                },
+                "hijack-dns" => RouteAction::HijackDns,
+                "reject" => RouteAction::Reject,
+                _ => return Err(invalid()),
+            }
+        };
+
+        if let Some(ltype) = &spec.logical_type {
+            if !ltype.eq_ignore_ascii_case("logical") {
+                return Err(invalid());
+            }
+            let mode_str = spec.logical_mode.as_deref().ok_or_else(invalid)?;
+            let mode = LogicalMode::parse(mode_str)?;
+            if spec.logical_rules.is_empty() {
+                return Err(invalid());
+            }
+            let children = spec
+                .logical_rules
+                .iter()
+                .map(|c| Self::compile_inner(c, true))
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Self {
+                action,
+                domain: Vec::new(),
+                domain_suffix: Vec::new(),
+                domain_keyword: Vec::new(),
+                domain_regex: Vec::new(),
+                domain_wildcard: Vec::new(),
+                geosite: Vec::new(),
+                ip_cidr: Vec::new(),
+                geoip: Vec::new(),
+                ip_is_private: false,
+                ip_version: None,
+                port: Vec::new(),
+                port_range: Vec::new(),
+                source_ip_cidr: Vec::new(),
+                source_port: Vec::new(),
+                source_port_range: Vec::new(),
+                network: spec.network,
+                protocol: Vec::new(),
+                rule_set: Vec::new(),
+                invert: spec.invert,
+                logical: Some((mode, children)),
+                node: spec
+                    .node
+                    .iter()
+                    .map(|v| NodeId::parse(v))
+                    .collect::<Result<_>>()?,
+                user: spec
+                    .user
+                    .iter()
+                    .map(|v| UserId::parse(v))
+                    .collect::<Result<_>>()?,
+            });
+        }
+
+        if let Some(ver) = spec.ip_version
+            && ver != 4
+            && ver != 6
+        {
+            return Err(invalid());
+        }
+
         let rule = Self {
-            outbound: OutId::parse(&spec.outbound)?,
+            action,
             domain: spec
                 .domain
                 .iter()
@@ -113,13 +510,77 @@ impl Rule {
                 .iter()
                 .map(|v| v.to_ascii_lowercase())
                 .collect(),
+            domain_regex: spec
+                .domain_regex
+                .iter()
+                .map(|v| Regex::new(v).map_err(|_| invalid()))
+                .collect::<Result<_>>()?,
+            domain_wildcard: spec
+                .domain_wildcard
+                .iter()
+                .map(|v| {
+                    if v.trim().is_empty() {
+                        Err(invalid())
+                    } else {
+                        Ok(v.trim().to_ascii_lowercase())
+                    }
+                })
+                .collect::<Result<_>>()?,
+            geosite: spec
+                .geosite
+                .iter()
+                .map(|v| {
+                    if v.trim().is_empty() {
+                        Err(invalid())
+                    } else {
+                        Ok(v.trim().to_ascii_lowercase())
+                    }
+                })
+                .collect::<Result<_>>()?,
             ip_cidr: spec
                 .ip_cidr
                 .iter()
-                .map(|v| Cidr::parse(v))
+                .map(|v| Cidr::parse(v).map_err(|_| invalid()))
                 .collect::<Result<_>>()?,
+            geoip: spec
+                .geoip
+                .iter()
+                .map(|v| {
+                    if v.trim().is_empty() {
+                        Err(invalid())
+                    } else {
+                        Ok(v.trim().to_ascii_lowercase())
+                    }
+                })
+                .collect::<Result<_>>()?,
+            ip_is_private: spec.ip_is_private,
+            ip_version: spec.ip_version,
             port: spec.port.clone(),
+            port_range: spec
+                .port_range
+                .iter()
+                .map(|v| PortRange::parse(v))
+                .collect::<Result<_>>()?,
+            source_ip_cidr: spec
+                .source_ip_cidr
+                .iter()
+                .map(|v| Cidr::parse(v).map_err(|_| invalid()))
+                .collect::<Result<_>>()?,
+            source_port: spec.source_port.clone(),
+            source_port_range: spec
+                .source_port_range
+                .iter()
+                .map(|v| PortRange::parse(v))
+                .collect::<Result<_>>()?,
             network: spec.network,
+            protocol: spec
+                .protocol
+                .iter()
+                .map(|v| v.trim().to_ascii_lowercase())
+                .collect(),
+            rule_set: spec.rule_set.clone(),
+            invert: spec.invert,
+            logical: None,
             node: spec
                 .node
                 .iter()
@@ -134,12 +595,27 @@ impl Rule {
         let empty = rule.domain.is_empty()
             && rule.domain_suffix.is_empty()
             && rule.domain_keyword.is_empty()
+            && rule.domain_regex.is_empty()
+            && rule.domain_wildcard.is_empty()
+            && rule.geosite.is_empty()
             && rule.ip_cidr.is_empty()
+            && rule.geoip.is_empty()
+            && !rule.ip_is_private
+            && rule.ip_version.is_none()
             && rule.port.is_empty()
+            && rule.port_range.is_empty()
+            && rule.source_ip_cidr.is_empty()
+            && rule.source_port.is_empty()
+            && rule.source_port_range.is_empty()
             && rule.network.is_none()
+            && rule.protocol.is_empty()
+            && rule.rule_set.is_empty()
             && rule.node.is_empty()
-            && rule.user.is_empty();
-        // 目标域名已是 punycode，非 ASCII 关键字永远不会命中。
+            && rule.user.is_empty()
+            && !matches!(
+                rule.action,
+                RouteAction::Sniff { .. } | RouteAction::Resolve { .. }
+            );
         if empty
             || rule
                 .domain_keyword
@@ -151,19 +627,58 @@ impl Rule {
         Ok(rule)
     }
 
-    fn matches(&self, target: &Destination, network: Network, source: &Source) -> bool {
-        let host = match target.address() {
-            Address::Domain(name) => Some(name.strip_suffix('.').unwrap_or(name)),
-            Address::Ip(_) => None,
-        };
-        let ip = match target.address() {
-            Address::Ip(ip) => Some(*ip),
-            Address::Domain(_) => None,
-        };
-        let names = self.domain.is_empty()
-            && self.domain_suffix.is_empty()
-            && self.domain_keyword.is_empty();
-        let name_hit = host.is_some_and(|host| {
+    fn matches_ctx(&self, ctx: &RouteContext<'_>, sets: &HashMap<String, CompiledRuleSet>) -> bool {
+        if let Some((mode, children)) = &self.logical {
+            let child_hit = match mode {
+                LogicalMode::And => children.iter().all(|c| c.matches_ctx(ctx, sets)),
+                LogicalMode::Or => children.iter().any(|c| c.matches_ctx(ctx, sets)),
+            };
+            let hit = if self.invert { !child_hit } else { child_hit };
+            return hit
+                && self.network.is_none_or(|value| value == ctx.network)
+                && (self.node.is_empty() || self.node.contains(ctx.source.node()))
+                && (self.user.is_empty()
+                    || ctx
+                        .source
+                        .user()
+                        .is_some_and(|user| self.user.contains(&user)));
+        }
+
+        let mut candidate_hosts = Vec::with_capacity(2);
+        if let Address::Domain(name) = ctx.target.address() {
+            candidate_hosts.push(name.strip_suffix('.').unwrap_or(name));
+        }
+        if let Some(sniffed) = ctx.sniffed_domain {
+            let s = sniffed.strip_suffix('.').unwrap_or(sniffed);
+            if !candidate_hosts.contains(&s) {
+                candidate_hosts.push(s);
+            }
+        }
+
+        let mut candidate_ips = Vec::with_capacity(1 + ctx.resolved_ips.len());
+        if let Address::Ip(ip) = ctx.target.address() {
+            candidate_ips.push(ip.to_canonical());
+        }
+        for &ip in ctx.resolved_ips {
+            let c = ip.to_canonical();
+            if !candidate_ips.contains(&c) {
+                candidate_ips.push(c);
+            }
+        }
+
+        let has_domain_cond = !self.domain.is_empty()
+            || !self.domain_suffix.is_empty()
+            || !self.domain_keyword.is_empty()
+            || !self.domain_regex.is_empty()
+            || !self.domain_wildcard.is_empty()
+            || !self.geosite.is_empty();
+        let has_ip_cond = !self.ip_cidr.is_empty()
+            || !self.geoip.is_empty()
+            || self.ip_is_private
+            || self.ip_version.is_some();
+        let has_ruleset_cond = !self.rule_set.is_empty();
+
+        let name_hit = candidate_hosts.iter().any(|&host| {
             self.domain.iter().any(|value| value == host)
                 || self.domain_suffix.iter().any(|value| {
                     host == value
@@ -175,14 +690,88 @@ impl Rule {
                     .domain_keyword
                     .iter()
                     .any(|value| host.contains(value.as_str()))
+                || self.domain_regex.iter().any(|re| re.is_match(host))
+                || self
+                    .domain_wildcard
+                    .iter()
+                    .any(|w| wildcard_domain_matches(w, host))
+                || self
+                    .geosite
+                    .iter()
+                    .any(|code| geodata::matches_geosite_code(code, host, None))
         });
-        let ip_hit = ip.is_some_and(|ip| self.ip_cidr.iter().any(|cidr| cidr.contains(ip)));
-        // 域名条件与 CIDR 都描述目标地址，任一命中即满足目标条件。
-        (names && self.ip_cidr.is_empty() || name_hit || ip_hit)
-            && (self.port.is_empty() || self.port.contains(&target.port()))
-            && self.network.is_none_or(|value| value == network)
-            && (self.node.is_empty() || self.node.contains(source.node()))
-            && (self.user.is_empty() || source.user().is_some_and(|user| self.user.contains(&user)))
+
+        let ip_hit = candidate_ips.iter().any(|&ip| {
+            self.ip_cidr.iter().any(|cidr| cidr.contains(ip))
+                || self
+                    .geoip
+                    .iter()
+                    .any(|code| geodata::matches_geoip_code(code, ip, None))
+                || (self.ip_is_private && geodata::is_private_ip(ip))
+                || self
+                    .ip_version
+                    .is_some_and(|ver| matches!((ver, ip), (4, IpAddr::V4(_)) | (6, IpAddr::V6(_))))
+        });
+
+        let ruleset_hit = self.rule_set.iter().any(|tag| {
+            sets.get(tag).is_some_and(|set| {
+                set.matches(
+                    &candidate_hosts,
+                    &candidate_ips,
+                    ctx.target.port(),
+                    ctx.network,
+                    ctx.source_addr,
+                )
+            })
+        });
+
+        // 域名条件、CIDR/GeoIP 与 rule_set 都描述目标匹配，任一命中即满足目标条件。
+        let target_ok = (!has_domain_cond && !has_ip_cond && !has_ruleset_cond)
+            || name_hit
+            || ip_hit
+            || ruleset_hit;
+
+        let port_ok = (self.port.is_empty() && self.port_range.is_empty())
+            || self.port.contains(&ctx.target.port())
+            || self
+                .port_range
+                .iter()
+                .any(|r| r.contains(ctx.target.port()));
+
+        let src_ip_ok = self.source_ip_cidr.is_empty()
+            || ctx.source_addr.is_some_and(|sa| {
+                self.source_ip_cidr
+                    .iter()
+                    .any(|c| c.contains(sa.ip().to_canonical()))
+            });
+
+        let src_port_ok = (self.source_port.is_empty() && self.source_port_range.is_empty())
+            || ctx.source_addr.is_some_and(|sa| {
+                self.source_port.contains(&sa.port())
+                    || self.source_port_range.iter().any(|r| r.contains(sa.port()))
+            });
+
+        let proto_ok = self.protocol.is_empty()
+            || ctx.protocol.is_some_and(|p| {
+                self.protocol
+                    .iter()
+                    .any(|item| item == &p.to_ascii_lowercase())
+            });
+
+        let core_match = target_ok
+            && port_ok
+            && src_ip_ok
+            && src_port_ok
+            && proto_ok
+            && self.network.is_none_or(|value| value == ctx.network)
+            && (self.node.is_empty() || self.node.contains(ctx.source.node()))
+            && (self.user.is_empty()
+                || ctx
+                    .source
+                    .user()
+                    .is_some_and(|user| self.user.contains(&user)));
+
+        if self.invert { !core_match } else { core_match }
     }
 }
 
@@ -197,17 +786,104 @@ fn domain(value: &str) -> Result<String> {
     }
 }
 
-/// 按配置顺序匹配，首条命中生效；未命中时由调用方使用节点绑定的出站。
+pub struct RouteContext<'a> {
+    pub target: &'a Destination,
+    pub resolved_ips: &'a [IpAddr],
+    pub network: Network,
+    pub source: &'a Source,
+    pub source_addr: Option<SocketAddr>,
+    pub protocol: Option<&'a str>,
+    pub sniffed_domain: Option<&'a str>,
+}
+
+impl<'a> RouteContext<'a> {
+    pub fn simple(target: &'a Destination, network: Network, source: &'a Source) -> Self {
+        Self {
+            target,
+            resolved_ips: &[],
+            network,
+            source,
+            source_addr: None,
+            protocol: None,
+            sniffed_domain: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RouteDecision {
+    pub outbound: Option<OutId>,
+    pub balancer_tag: Option<String>,
+    pub hijack_dns: bool,
+    pub reject: bool,
+    pub override_address: Option<String>,
+    pub override_port: Option<u16>,
+    pub resolve_strategy: Option<ResolveStrategy>,
+    pub sniff: Option<(Vec<String>, Duration)>,
+}
+
+/// 按配置顺序匹配，非终结动作（`sniff`、`resolve`、`route-options`）累积后继续，首条终结动作生效。
 #[derive(Debug, Default)]
 pub struct RouteTable {
     rules: Vec<Rule>,
+    sets: HashMap<String, CompiledRuleSet>,
+    final_outbound: Option<OutId>,
 }
 
 impl RouteTable {
     pub fn compile(specs: &[RuleSpec]) -> Result<Self> {
+        Self::compile_with_sets(specs, HashMap::new())
+    }
+
+    pub fn compile_with_sets(
+        specs: &[RuleSpec],
+        sets: HashMap<String, CompiledRuleSet>,
+    ) -> Result<Self> {
         Ok(Self {
             rules: specs.iter().map(Rule::compile).collect::<Result<_>>()?,
+            sets,
+            final_outbound: None,
         })
+    }
+
+    pub fn with_final_outbound(mut self, final_outbound: Option<OutId>) -> Self {
+        self.final_outbound = final_outbound;
+        self
+    }
+
+    pub fn has_rule_set(&self, tag: &str) -> bool {
+        self.sets.contains_key(tag)
+    }
+
+    pub fn has_sniff_rules(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|r| matches!(r.action, RouteAction::Sniff { .. }))
+    }
+
+    pub fn referenced_rule_sets(&self) -> Vec<&str> {
+        fn collect<'a>(rule: &'a Rule, out: &mut Vec<&'a str>) {
+            for s in &rule.rule_set {
+                out.push(s.as_str());
+            }
+            if let Some((_, children)) = &rule.logical {
+                for c in children {
+                    collect(c, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for rule in &self.rules {
+            collect(rule, &mut out);
+        }
+        out
+    }
+
+    pub fn rule_set_cidrs(&self, tag: &str) -> Vec<String> {
+        self.sets
+            .get(tag)
+            .map(CompiledRuleSet::cidr_strings)
+            .unwrap_or_default()
     }
 
     pub fn select(
@@ -216,14 +892,97 @@ impl RouteTable {
         network: Network,
         source: &Source,
     ) -> Option<&OutId> {
-        self.rules
-            .iter()
-            .find(|rule| rule.matches(target, network, source))
-            .map(|rule| &rule.outbound)
+        let ctx = RouteContext::simple(target, network, source);
+        for rule in &self.rules {
+            if rule.matches_ctx(&ctx, &self.sets) {
+                match &rule.action {
+                    RouteAction::Route {
+                        outbound: Some(out),
+                        ..
+                    } => return Some(out),
+                    RouteAction::HijackDns | RouteAction::Reject => return None,
+                    _ => {}
+                }
+            }
+        }
+        self.final_outbound.as_ref()
+    }
+
+    pub fn evaluate(&self, ctx: &RouteContext<'_>) -> RouteDecision {
+        let mut decision = RouteDecision::default();
+        let mut matched_terminal = false;
+        for rule in &self.rules {
+            if !rule.matches_ctx(ctx, &self.sets) {
+                continue;
+            }
+            match &rule.action {
+                RouteAction::Sniff { sniffer, timeout } => {
+                    if decision.sniff.is_none() {
+                        decision.sniff = Some((sniffer.clone(), *timeout));
+                    }
+                }
+                RouteAction::Resolve { strategy } => {
+                    if decision.resolve_strategy.is_none() {
+                        decision.resolve_strategy = Some(*strategy);
+                    }
+                }
+                RouteAction::RouteOptions {
+                    override_address,
+                    override_port,
+                } => {
+                    if override_address.is_some() {
+                        decision.override_address = override_address.clone();
+                    }
+                    if override_port.is_some() {
+                        decision.override_port = *override_port;
+                    }
+                }
+                RouteAction::HijackDns => {
+                    decision.hijack_dns = true;
+                    matched_terminal = true;
+                    break;
+                }
+                RouteAction::Reject => {
+                    decision.reject = true;
+                    matched_terminal = true;
+                    break;
+                }
+                RouteAction::Route {
+                    outbound,
+                    balancer_tag,
+                    override_address,
+                    override_port,
+                } => {
+                    decision.outbound = outbound.clone();
+                    decision.balancer_tag = balancer_tag.clone();
+                    if override_address.is_some() {
+                        decision.override_address = override_address.clone();
+                    }
+                    if override_port.is_some() {
+                        decision.override_port = *override_port;
+                    }
+                    matched_terminal = true;
+                    break;
+                }
+            }
+        }
+        if !matched_terminal && decision.outbound.is_none() {
+            decision.outbound = self.final_outbound.clone();
+        }
+        decision
     }
 
     pub fn outbounds(&self) -> impl Iterator<Item = &OutId> {
-        self.rules.iter().map(|rule| &rule.outbound)
+        self.rules
+            .iter()
+            .filter_map(|rule| match &rule.action {
+                RouteAction::Route {
+                    outbound: Some(out),
+                    ..
+                } => Some(out),
+                _ => None,
+            })
+            .chain(self.final_outbound.iter())
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = &NodeId> {
@@ -387,5 +1146,138 @@ mod tests {
             let spec: RuleSpec = serde_json::from_value(rule).unwrap();
             assert!(RouteTable::compile(&[spec]).is_err());
         }
+    }
+
+    #[test]
+    fn extended_m3_rules_actions_logical_ruleset_and_geodata_work() {
+        let set_spec: RuleSetSpec = serde_json::from_value(json!({
+            "tag": "corp-set",
+            "type": "inline",
+            "rules": [
+                {
+                    "domain_suffix": ["corp.internal"],
+                    "port_range": ["8000:9000"]
+                }
+            ]
+        }))
+        .unwrap();
+        let mut sets = HashMap::new();
+        sets.insert(
+            "corp-set".into(),
+            CompiledRuleSet::compile_spec(&set_spec).unwrap(),
+        );
+
+        let specs: Vec<RuleSpec> = serde_json::from_value(json!([
+            {
+                "action": "sniff",
+                "sniffer": ["tls", "http"],
+                "timeout": "250ms"
+            },
+            {
+                "action": "resolve",
+                "strategy": "prefer_ipv4"
+            },
+            {
+                "port": [53],
+                "action": "hijack-dns"
+            },
+            {
+                "ip_is_private": true,
+                "action": "route-options",
+                "override_address": "10.0.0.254",
+                "override_port": 8443
+            },
+            {
+                "type": "logical",
+                "mode": "and",
+                "rules": [
+                    {"geosite": ["google"]},
+                    {"protocol": ["tls"]}
+                ],
+                "outbound": "proxy-google"
+            },
+            {
+                "rule_set": ["corp-set"],
+                "outbound": "corp-vpn"
+            },
+            {
+                "domain_wildcard": ["*.wild.*.example.com"],
+                "source_ip_cidr": ["192.168.1.0/24"],
+                "outbound": "wild-out"
+            }
+        ]))
+        .unwrap();
+
+        let table = RouteTable::compile_with_sets(&specs, sets).unwrap();
+        let source = local("n");
+
+        // 1. DNS Hijack on port 53
+        let dns_target = Destination::new("8.8.8.8", 53).unwrap();
+        let dns_dec = table.evaluate(&RouteContext::simple(&dns_target, Network::Udp, &source));
+        assert!(dns_dec.hijack_dns);
+        assert!(dns_dec.sniff.is_some());
+        assert_eq!(dns_dec.resolve_strategy, Some(ResolveStrategy::PreferIpv4));
+
+        // 2. Logical AND (geosite:google + protocol:tls)
+        let google_target = Destination::new("www.google.com", 443).unwrap();
+        let google_dec = table.evaluate(&RouteContext {
+            target: &google_target,
+            resolved_ips: &[],
+            network: Network::Tcp,
+            source: &source,
+            source_addr: None,
+            protocol: Some("tls"),
+            sniffed_domain: None,
+        });
+        assert_eq!(
+            google_dec
+                .outbound
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("proxy-google")
+        );
+
+        // 3. Rule-set match + route-options accumulation
+        let corp_target = Destination::new("10.1.1.5", 8080).unwrap();
+        let corp_dec = table.evaluate(&RouteContext {
+            target: &corp_target,
+            resolved_ips: &[],
+            network: Network::Tcp,
+            source: &source,
+            source_addr: None,
+            protocol: None,
+            sniffed_domain: Some("api.corp.internal"),
+        });
+        assert_eq!(corp_dec.override_address.as_deref(), Some("10.0.0.254"));
+        assert_eq!(corp_dec.override_port, Some(8443));
+        assert_eq!(
+            corp_dec
+                .outbound
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("corp-vpn")
+        );
+
+        // 4. Domain wildcard + source_ip_cidr
+        let wild_target = Destination::new("a.wild.b.example.com", 443).unwrap();
+        let wild_dec = table.evaluate(&RouteContext {
+            target: &wild_target,
+            resolved_ips: &[],
+            network: Network::Tcp,
+            source: &source,
+            source_addr: Some("192.168.1.50:55000".parse().unwrap()),
+            protocol: None,
+            sniffed_domain: None,
+        });
+        assert_eq!(
+            wild_dec
+                .outbound
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("wild-out")
+        );
     }
 }

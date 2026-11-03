@@ -440,7 +440,11 @@ fn accept_tcp(peer: &mut RuntimePeer, bytes: Vec<u8>) -> Result<()> {
     let stream = TcpStream::accept(peer.stack.clone(), tuple, peer.context.cancel.clone())?;
     peer.stack.input_tcp(bytes)?;
     peer.stack.poll()?;
-    let access = peer.access.clone();
+    let access = if peer.context.peer_addr.is_none() {
+        peer.access.with_observed_source(tuple.source)
+    } else {
+        peer.access.clone()
+    };
     let context = peer.context.clone();
     let target = destination(tuple.target)?;
     let events = context.events.clone();
@@ -477,7 +481,11 @@ fn accept_udp(peer: &mut RuntimePeer, packet: &IpPacket<'_>) -> Result<()> {
     let (sender, packets) = mpsc::channel(peer.stack.limits.queue_packets);
     sender.try_send(pending).map_err(|_| Error::ResourceLimit)?;
     let stack = peer.stack.clone();
-    let access = peer.access.clone();
+    let access = if peer.context.peer_addr.is_none() {
+        peer.access.with_observed_source(tuple.source)
+    } else {
+        peer.access.clone()
+    };
     let context = peer.context.clone();
     let events = context.events.clone();
     let owner = context.tasks.clone();
