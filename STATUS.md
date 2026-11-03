@@ -38,7 +38,13 @@
 
 ## 最新门禁
 
-`v1.3.1`（提交 `ebc05ae`，`perf-01`；标签提交 `ad48e8f` 只多文档改动）：fmt、严格 Clippy、zerotier-node 测试、release、许可通知通过；全量测试 971 通过、0 失败、7 忽略。门禁只含回环与单元测试，真实对端互通由 `tools/interop_*.py` 单独运行。MASQUE、OpenVPN、OpenConnect、Tailscale、EasyTier、ZeroTier、Tor 在门禁里只有单元测试。
+`v1.3.2`（提交 `802414e`，`perf-01`）：fmt、严格 Clippy、zerotier-node 测试、release、许可通知通过；全量测试 982 通过、0 失败、7 忽略。门禁只含回环与单元测试。
+
+## 实机测试
+
+30 个协议都在 `perf-01`、`perf-02`、`perf-03` 上跨机跑过，也都对过第三方真实对端，记录见 [跨机矩阵](docs/testing/cross-host-2026-11-03.md) 与 [第三方互通](docs/testing/peer-interop-2026-11-03.md)。`v1.3.2` 二进制的双端矩阵（TCP 小包与 1 MiB、UDP）：通过 1597，失败 45，不适用 128；44 项失败是 1200 字节及以上的 UDP 大包，1 项是 WireGuard IPv6 的 TCP 1 MiB，都在 MTU 1300 的 Mesh 路径上。公网高位端口被机器防火墙拦截，跨机走 Mesh。
+
+官网 https://www.kerlico.com ，文档站 https://wiki.kerlico.com 。源码和部署参数在 `site/`。
 
 ## 已知问题
 

@@ -151,6 +151,14 @@ Shadowsocks、SS2022 写重试截断由 `main` 修复（`01b3e23`）。本工具
 - **TrustTunnel h2 32 MiB eof 一次：脚本问题。** 修复前的二进制加新工具，P0、P1、P2 全过，耗时 24、182、188 秒，后两条已到旧工具 180 秒发送上限附近。原记录在 211 秒 eof，时差约等于 180 秒加 TrustTunnel 默认 30 秒空闲（推断，当次日志已无）。
 - **首轮 Hysteria、TUIC、ShadowQUIC、Naive 的 32 MiB 失败：脚本问题（推断）。** 首轮 32 MiB 走 `exchange`，发送上限 30 至 40 秒，这些协议的 32 MiB 都要更久。复跑换成 180 秒后再没出现。
 
+## `v1.3.2` 候选版复测
+
+二进制来自提交 `802414e`（`perf-02` 构建，glibc 要求低，三台都能运行），修好的工具，三种排列，IPv6 只跑 P0，TCP 用例是小包和 1 MiB，没跑 32 MiB。这补上了修复版此前没在 `perf-02` 上跑的 P0、P1。
+
+结果：通过 1597，失败 45，不适用 128。Hysteria v1、Hysteria2、Mieru、Naive、Sudoku、Trojan、TrustTunnel、VLESS、VMess、AnyTLS、ShadowTLS、Snell、HTTP 无失败。
+
+失败按用例：`udp_1400` 30 项（SOCKS、Shadowsocks、SS2022、ShadowsocksR、ShadowQUIC、TUIC），`udp_1200` 8 项（IPv6 路径），`udp_1252` 6 项（TUIC v4-native、ShadowQUIC v1-datagram 的 IPv4），`tcp_1m` 1 项（WireGuard IPv6，外层 1360 高于 Mesh 1300）。前三类是包大小超过路径或协议上限。
+
 ## 复现
 
 用法见[编译、测试与专用 Worker 安排](../build-and-test.md)。各轮 JSON（已清洗）保存在 worker 的 xhost 目录 `results/` 和本机临时目录，不入库。
