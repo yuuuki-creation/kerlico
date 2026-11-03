@@ -118,15 +118,23 @@ fn stats_json(stats: &Stats) -> Value {
     })
 }
 
-fn query_number(query: &str, name: &str) -> Option<u64> {
+const INVALID_QUERY: &str = "query.invalid";
+
+/// 取值存在但不是无符号整数时返回错误：按默认值继续会让客户端的分页游标静默失效。
+fn query_number(query: &str, name: &str) -> std::result::Result<Option<u64>, &'static str> {
     query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
         .find(|(key, _)| *key == name)
-        .and_then(|(_, value)| value.parse().ok())
+        .map(|(_, value)| value.parse().map_err(|_| INVALID_QUERY))
+        .transpose()
 }
 
-fn route(source: &Source, path: &str, query: &str) -> Result<Option<Value>> {
+fn route(
+    source: &Source,
+    path: &str,
+    query: &str,
+) -> std::result::Result<Option<Value>, &'static str> {
     Ok(Some(match path {
         "/v1/health" => {
             let failed = source.failed.tags();
@@ -137,7 +145,7 @@ fn route(source: &Source, path: &str, query: &str) -> Result<Option<Value>> {
             })
         }
         "/v1/usage" => {
-            let usage = source.telemetry.usage()?;
+            let usage = source.telemetry.usage().map_err(|error| error.code())?;
             json!({
                 "engine": usage.engine,
                 "users": usage.users.iter().map(|(id, usage)| (id.to_string(), *usage)).collect::<BTreeMap<_, _>>(),
@@ -148,14 +156,14 @@ fn route(source: &Source, path: &str, query: &str) -> Result<Option<Value>> {
                 "evicted_records": usage.evicted_records,
             })
         }
-        "/v1/online" => json!(source.telemetry.online()?),
+        "/v1/online" => json!(source.telemetry.online().map_err(|error| error.code())?),
         "/v1/flows" => {
-            let after = query_number(query, "after").unwrap_or(0);
-            let limit = query_number(query, "limit").unwrap_or(1000);
-            let records = source.telemetry.records(
-                after,
-                usize::try_from(limit).map_err(|_| Error::ResourceLimit)?,
-            )?;
+            let after = query_number(query, "after")?.unwrap_or(0);
+            let limit = query_number(query, "limit")?.unwrap_or(1000);
+            let records = usize::try_from(limit)
+                .map_err(|_| Error::ResourceLimit)
+                .and_then(|limit| source.telemetry.records(after, limit))
+                .map_err(|error| error.code())?;
             json!(
                 records
                     .iter()
@@ -198,7 +206,7 @@ fn respond(source: &Source, request: &Request<Incoming>) -> Response<Full<Bytes>
     match route(source, uri.path(), uri.query().unwrap_or("")) {
         Ok(Some(body)) => reply(StatusCode::OK, body),
         Ok(None) => reply(StatusCode::NOT_FOUND, json!({"error": "not found"})),
-        Err(error) => reply(StatusCode::BAD_REQUEST, json!({"error": error.code()})),
+        Err(code) => reply(StatusCode::BAD_REQUEST, json!({"error": code})),
     }
 }
 
@@ -217,9 +225,17 @@ mod tests {
     }
 
     #[test]
-    fn query_numbers_ignore_other_keys() {
-        assert_eq!(query_number("after=5&limit=9", "limit"), Some(9));
-        assert_eq!(query_number("limit=x", "limit"), None);
-        assert_eq!(query_number("", "limit"), None);
+    fn query_numbers_ignore_other_keys_and_reject_bad_values() {
+        assert_eq!(query_number("after=5&limit=9", "limit"), Ok(Some(9)));
+        assert_eq!(query_number("", "limit"), Ok(None));
+        assert_eq!(query_number("after=x", "limit"), Ok(None));
+        for bad in [
+            "limit=x",
+            "limit=-1",
+            "limit=",
+            "limit=99999999999999999999",
+        ] {
+            assert_eq!(query_number(bad, "limit"), Err(INVALID_QUERY), "{bad}");
+        }
     }
 }

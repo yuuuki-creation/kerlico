@@ -78,6 +78,14 @@ async fn control_requires_the_secret_and_reports_runtime_state() {
         json!([])
     );
     assert_eq!(get(address, "/v1/flows?limit=0", secret).await.0, 400);
+    for query in ["limit=abc", "limit=-1", "after=abc"] {
+        let (status, body) = get(address, &format!("/v1/flows?{query}"), secret).await;
+        assert_eq!(
+            (status, &body["error"]),
+            (400, &json!("query.invalid")),
+            "{query}"
+        );
+    }
     assert_eq!(get(address, "/v1/stats", secret).await.0, 200);
     assert_eq!(get(address, "/v1/nothing", secret).await.0, 404);
 
