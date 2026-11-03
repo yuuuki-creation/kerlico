@@ -22,6 +22,13 @@ impl Mode {
             Self::Poll => "text/plain",
         }
     }
+    /// 单次上传请求的原始字节上限，与官方客户端一致；节点按编码后 1MiB 限制请求。
+    pub fn max_batch(self) -> usize {
+        match self {
+            Self::Stream => 256 * 1024,
+            Self::Poll => 64 * 1024,
+        }
+    }
     pub fn encode(self, bytes: &[u8]) -> Vec<u8> {
         if self == Self::Stream {
             return bytes.to_vec();
