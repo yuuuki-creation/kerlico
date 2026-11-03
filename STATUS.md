@@ -4,7 +4,7 @@
 
 ## 版本
 
-最新发布：[v1.3.1](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.3.1)，带 Linux `x86_64` 二进制。完成计划已全部发布，`v1.3.1` 修复发布后复查发现的问题。
+最新发布：[v1.3.2](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.3.2)，带 Linux `x86_64` 二进制。完成计划已全部发布，`v1.3.1` 修复复查发现的问题，`v1.3.2` 修复实机测试查出的问题。
 
 构建基线：Rust `1.99.1`，Linux `x86_64`。
 
@@ -17,6 +17,7 @@
 | `v1.2.0` | `dns`、`tun`、`control` 模块 | 已发布 |
 | `v1.3.0` | MASQUE、OpenVPN、OpenConnect、Tailscale、ZeroTier、EasyTier；VLESS XUDP 迁移 | 已发布 |
 | `v1.3.1` | 复查修复：UDP 包让节点停止、Tailscale 直连握手、ZeroTier 入网、`require_remote_eof` | 已发布 |
+| `v1.3.2` | 实机测试修复：Shadowsocks、SS2022、Sudoku 丢数据，Mieru 断流，WireGuard 丢包死锁，TrustTunnel H3 | 已发布 |
 
 验证规则见 [0012](docs/decisions/0012-simplified-delivery-and-verification.md)。跨进程设备 daemon/IPC 不在计划内，出现多进程部署需求时再排。
 
@@ -43,16 +44,9 @@
 
 - **VLESS**：`xhttp-tls-h3-stream-one` 加 Mux 时 UDP 超时，基线同样存在，未定位。出站没有多目标 UDP 关联，不能作为 TUN 或 SOCKS5 UDP 的出站。
 - **SS2022 EIH UDP 测试**：整树门禁中无回包失败过 2 次，单独压测 1000 轮与整树 5 轮都未复现，原因未定位。测试现在带新包序号重发，并断言节点的 `Dropped` 与 `Failed` 为零，重发次数打印到标准错误。
-- **Shadowsocks 与 SS2022 TCP 截断（已修复，待发布）**：`v1.3.1` 及之前的节点和出站在写 Pending 后可能丢弃数据末尾，连接随后停滞。根因与补丁见 `third_party/shadowsocks/PATCHES.md`。
-- **Snell 出站（已修复，待发布）**：`v1.3.1` 及之前接官方 snell-server 时 IPv4 目标的 UDP 无回包，官方双栈套接字的来源是 IPv4 映射地址。
-- **Sudoku 分离传输截断（已修复，待发布）**：`v1.3.1` 及之前的客户端接官方节点时，并发 split 流偶发丢失尾部数据，应用侧只看到正常 EOF。原因是复用了官方写完即关闭的下载连接。
-- **Sudoku mux 大流（已修复，待发布）**：`v1.3.1` 及之前的客户端 `mux=on` 全双工大流被节点重置，33 MiB 约半数失败。读写共用任务时写的份额过大，上传快于下载，协议又没有流控。上传持续快于目标读取时重置仍会发生，官方和 Mihomo 相同，`tcp-forward` 入口上可能表现为正常结束。见[互通记录](docs/testing/peer-interop-2026-11-03.md)。
-- **Sudoku 分离传输上行（已修复，待发布）**：`v1.3.1` 及之前每次写入发一个 POST，RTT 250 毫秒时上行约 10 KB/s。现在合并排队写入，stream 约 0.13 MiB/s，poll 约 0.04 MiB/s。
-- **QUIC 客户端退出码（已修复，待发布）**：`v1.3.1` 及之前的 QUIC 出站在高延迟路径上收到 SIGTERM 后可能退出码 1（`cleanup_timed_out`），不影响业务也不影响节点。TrustTunnel H3 关闭时还丢失 CONNECTION_CLOSE。根因与验证见[跨机矩阵](docs/testing/cross-host-2026-11-03.md)。
 - **QUIC 节点关闭**：TUIC、ShadowQUIC、VLESS H3、Naive H3 的节点没有连接时也等满一半排空预算才退出，退出码 0。
 - **`kerlico-core`**：`interrupted_node_force_keeps_count_until_actual_socket_join` 全量运行失败过 1 次，单跑 10 次通过，疑似不稳定，未定位。
 - **WireGuard 出站**：定时发送和业务发送失败时隧道服务退出，本地网络短暂不可达会触发。
-- **WireGuard 丢包死锁（已修复，待发布）**：`v1.3.1` 及之前，kerlico 两端的全双工流在丢包路径上可能互相忽略 ACK，60 秒后断开。根因是 smoltcp 回退后的纯 ACK 序号，补丁见 `third_party/smoltcp/PATCHES.md`。
 - **用户态栈吞吐**：丢包路径上吞吐很低，3% 丢包、60 毫秒 RTT 的全双工回显约 0.05 MiB/s，内核 TCP 为 4.56。原因是 smoltcp 发送端没有 SACK、RTO 下限 1 秒，默认窗口 64 KiB 在高 RTT 下也限速。见[跨机矩阵](docs/testing/cross-host-2026-11-03.md#隧道复测)。
 - **EasyTier udp 载体**：跨机时 1 MiB 也会断流，B 到 A 方向的满长段到不了 kerlico，原因未定位；tcp 载体和同机通过。
 - **MASQUE**：`perf-03` 到 `perf-01` 的转发路径 32 MiB 约 20 分钟后 `eof`，吞吐 0.01 MiB/s，原因未定位。Mesh MTU 1300 低于 QUIC 路径 MTU 下限 1350，属路径限制。
