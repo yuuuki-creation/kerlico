@@ -34,10 +34,10 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `mux` | Mux.Cool 多路复用，只需客户端启用 |  |  | 有 | 部分 | 未测 | 取值：`mux.cool` |
-| `combo` | Mux 组合 |  |  | 有 | 部分 | 未测 | tcp：`mux`、`no_mux`<br>udp：`native`、`same_tunnel`、`xudp_tunnel`<br>udp443：`allow`、`reject`、`skip`<br>protocol：`http`、`shadowsocks`、`socks`、`trojan`、`vless`、`vmess`<br>transport：`grpc`、`httpupgrade`、`hysteria`、`mkcp`、`raw`、`websocket`、`xhttp`<br>约束：MASQUE 不支持 Mux<br>约束：Mux 不用于看视频、下载、测速<br>约束：XDRIVE 出站需要 Mux（source:infra/conf/xray.go）<br>约束：XHTTP 不要启用 mux.cool，服务端只接受纯 XUDP（discussion:XTLS/Xray-core#4113）<br>约束：gRPC 不建议启用<br>约束：旧 reverse 默认开 Mux |
-| `concurrency` | 单连接最大子连接，范围 1-128，0 或省略为 8 |  |  | 有 | 已实现 | 未测 | 取值：`0`、`1-128`、`负数`<br>约束：大于 128 视为 128<br>约束：负数：不用 Mux 承载 TCP |
-| `enabled` | 是否启用，默认 false |  |  | 有 | 已实现 | 未测 |  |
+| `mux` | Mux.Cool 多路复用，只需客户端启用 |  |  | 有 | 部分 | 通过 | 取值：`mux.cool` |
+| `combo` | Mux 组合 |  |  | 有 | 部分 | 通过 | tcp：`mux`、`no_mux`<br>udp：`native`、`same_tunnel`、`xudp_tunnel`<br>udp443：`allow`、`reject`、`skip`<br>protocol：`http`、`shadowsocks`、`socks`、`trojan`、`vless`、`vmess`<br>transport：`grpc`、`httpupgrade`、`hysteria`、`mkcp`、`raw`、`websocket`、`xhttp`<br>约束：MASQUE 不支持 Mux<br>约束：Mux 不用于看视频、下载、测速<br>约束：XDRIVE 出站需要 Mux（source:infra/conf/xray.go）<br>约束：XHTTP 不要启用 mux.cool，服务端只接受纯 XUDP（discussion:XTLS/Xray-core#4113）<br>约束：gRPC 不建议启用<br>约束：旧 reverse 默认开 Mux |
+| `concurrency` | 单连接最大子连接，范围 1-128，0 或省略为 8 |  |  | 有 | 已实现 | 通过 | 取值：`0`、`1-128`、`负数`<br>约束：大于 128 视为 128<br>约束：负数：不用 Mux 承载 TCP |
+| `enabled` | 是否启用，默认 false |  |  | 有 | 已实现 | 通过 |  |
 | `xudp-concurrency` | XUDP 聚合隧道并发子 UoT，范围 1-1024 |  |  | 有 | 未实现 | 未测 | 取值：`0`、`1-1024`、`负数`<br>约束：0：与 TCP 同路<br>约束：负数：不用 Mux 承载 UDP，走协议原生方式 |
 | `xudp-proxy-udp443` | UDP/443 处理 |  |  | 有 | 未实现 | 未测 | 取值：`allow`、`reject`、`skip`<br>约束：skip 走协议原生 UDP 方式<br>约束：默认 reject |
 
@@ -80,15 +80,15 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `address` | 子连接地址类型 |  |  | 有 | 已实现 | 未测 | 取值：`0x01 IPv4`、`0x02 域名`、`0x03 IPv6` |
-| `frame` | Mux.Cool 帧：元数据长度+元数据+额外数据 |  |  | 有 | 已实现 | 未测 | 取值：`End 0x03`、`Keep 0x02`、`KeepAlive 0x04`、`New 0x01`<br>约束：服务器不能使用 New<br>约束：目标地址标记 v1.mux.cool |
-| `network` | 子连接网络类型 |  |  | 有 | 已实现 | 未测 | 取值：`0x01 TCP`、`0x02 UDP` |
+| `address` | 子连接地址类型 |  |  | 有 | 已实现 | 通过 | 取值：`0x01 IPv4`、`0x02 域名`、`0x03 IPv6` |
+| `frame` | Mux.Cool 帧：元数据长度+元数据+额外数据 |  |  | 有 | 已实现 | 通过 | 取值：`End 0x03`、`Keep 0x02`、`KeepAlive 0x04`、`New 0x01`<br>约束：服务器不能使用 New<br>约束：目标地址标记 v1.mux.cool |
+| `network` | 子连接网络类型 |  |  | 有 | 已实现 | 通过 | 取值：`0x01 TCP`、`0x02 UDP` |
 
 ## xmux
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | xhttp 的链接复用，见 transport.xhttp.reuse-settings | 有 |  |  | 部分 | 未测 |  |
+| `protocol` | xhttp 的链接复用，见 transport.xhttp.reuse-settings | 有 |  |  | 部分 | 通过 |  |
 
 ## yamux
 

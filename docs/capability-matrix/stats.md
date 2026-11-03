@@ -6,44 +6,44 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `connection-record` | 连接记录即 access log；webhook 提供命中通知 |  |  | 有 | 已实现 | 未测 |  |
+| `connection-record` | 连接记录即 access log；webhook 提供命中通知 |  |  | 有 | 已实现 | 通过 |  |
 
 ## clash-api
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `connections` | Clash API 当前连接和累计流量，GET /connections |  | 有 |  | 部分 | 未测 | 取值：`GET /connections`<br>约束：支持 WebSocket，interval 查询参数 |
-| `traffic` | Clash API 实时流量（字节每秒），GET /traffic |  | 有 |  | 部分 | 未测 | 取值：`GET /traffic`<br>约束：支持 WebSocket |
+| `connections` | Clash API 当前连接和累计流量，GET /connections |  | 有 |  | 部分 | 通过 | 取值：`GET /connections`<br>约束：支持 WebSocket，interval 查询参数 |
+| `traffic` | Clash API 实时流量（字节每秒），GET /traffic |  | 有 |  | 部分 | 通过 | 取值：`GET /traffic`<br>约束：支持 WebSocket |
 
 ## connections
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `record` | 每连接 id、metadata、upload、download、start、chains、providerChains、rule、rulePayload | 有 |  |  | 部分 | 未测 | 取值：`JSON` |
-| `totals` | /connections 的 downloadTotal、uploadTotal、memory | 有 |  |  | 部分 | 未测 | 取值：`字节` |
+| `record` | 每连接 id、metadata、upload、download、start、chains、providerChains、rule、rulePayload | 有 |  |  | 部分 | 通过 | 取值：`JSON` |
+| `totals` | /connections 的 downloadTotal、uploadTotal、memory | 有 |  |  | 部分 | 通过 | 取值：`字节` |
 
 ## counter
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `inbound-tag-traffic-downlink` | 入站下行字节 |  |  | 有 | 已实现 | 未测 |  |
-| `inbound-tag-traffic-uplink` | 入站上行字节 |  |  | 有 | 已实现 | 未测 |  |
-| `outbound-tag-traffic-downlink` | 出站下行字节 |  |  | 有 | 已实现 | 未测 |  |
-| `outbound-tag-traffic-uplink` | 出站上行字节 |  |  | 有 | 已实现 | 未测 |  |
-| `user-email-traffic-downlink` | 用户下行字节 |  |  | 有 | 已实现 | 未测 | 约束：用户无 Email 时不统计 |
-| `user-email-traffic-uplink` | 用户上行字节 |  |  | 有 | 已实现 | 未测 | 约束：用户无 Email 时不统计 |
+| `inbound-tag-traffic-downlink` | 入站下行字节 |  |  | 有 | 已实现 | 通过 |  |
+| `inbound-tag-traffic-uplink` | 入站上行字节 |  |  | 有 | 已实现 | 通过 |  |
+| `outbound-tag-traffic-downlink` | 出站下行字节 |  |  | 有 | 已实现 | 通过 |  |
+| `outbound-tag-traffic-uplink` | 出站上行字节 |  |  | 有 | 已实现 | 通过 |  |
+| `user-email-traffic-downlink` | 用户下行字节 |  |  | 有 | 已实现 | 通过 | 约束：用户无 Email 时不统计 |
+| `user-email-traffic-uplink` | 用户上行字节 |  |  | 有 | 已实现 | 通过 | 约束：用户无 Email 时不统计 |
 
 ## policy
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `stats-inbound-downlink` | 开启所有入站下行统计 |  |  | 有 | 部分 | 未测 |  |
-| `stats-inbound-uplink` | 开启所有入站上行统计 |  |  | 有 | 部分 | 未测 |  |
-| `stats-outbound-downlink` | 开启所有出站下行统计 |  |  | 有 | 部分 | 未测 |  |
-| `stats-outbound-uplink` | 开启所有出站上行统计 |  |  | 有 | 部分 | 未测 |  |
-| `stats-user-downlink` | 开启当前等级用户流量统计 |  |  | 有 | 部分 | 未测 |  |
-| `stats-user-online` | 开启当前等级用户在线统计，20 秒内活动算在线 |  |  | 有 | 部分 | 未测 |  |
-| `stats-user-uplink` | 开启当前等级用户流量统计 |  |  | 有 | 部分 | 未测 |  |
+| `stats-inbound-downlink` | 开启所有入站下行统计 |  |  | 有 | 部分 | 通过 |  |
+| `stats-inbound-uplink` | 开启所有入站上行统计 |  |  | 有 | 部分 | 通过 |  |
+| `stats-outbound-downlink` | 开启所有出站下行统计 |  |  | 有 | 部分 | 通过 |  |
+| `stats-outbound-uplink` | 开启所有出站上行统计 |  |  | 有 | 部分 | 通过 |  |
+| `stats-user-downlink` | 开启当前等级用户流量统计 |  |  | 有 | 部分 | 通过 |  |
+| `stats-user-online` | 开启当前等级用户在线统计，20 秒内活动算在线 |  |  | 有 | 部分 | 通过 |  |
+| `stats-user-uplink` | 开启当前等级用户流量统计 |  |  | 有 | 部分 | 通过 |  |
 
 ## proxies
 
@@ -73,13 +73,13 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `enable` | stats 对象存在即开启 |  |  | 有 | 部分 | 未测 | 约束：还需在 policy 开启对应项 |
+| `enable` | stats 对象存在即开启 |  |  | 有 | 部分 | 通过 | 约束：还需在 policy 开启对应项 |
 
 ## traffic
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `realtime-rate` | /traffic 实时 up、down 与 upTotal、downTotal | 有 |  |  | 部分 | 未测 | 取值：`字节`、`字节/秒` |
+| `realtime-rate` | /traffic 实时 up、down 与 upTotal、downTotal | 有 |  |  | 部分 | 通过 | 取值：`字节`、`字节/秒` |
 
 ## v2ray-api
 

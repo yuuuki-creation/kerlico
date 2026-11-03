@@ -112,11 +112,11 @@
 | `rmrules` | 删除路由规则 |  |  | 有 | 未实现 | 未测 |  |
 | `rmu` | 删除用户 |  |  | 有 | 未实现 | 未测 | 取值：`-tag` |
 | `sib` | 封来源 IP |  |  | 有 | 未实现 | 未测 | 取值：`-inbound`、`-outbound`、`-reset`、`-ruletag` |
-| `stats` | 取统计 |  |  | 有 | 部分 | 未测 | 取值：`-name`、`-reset` |
+| `stats` | 取统计 |  |  | 有 | 部分 | 通过 | 取值：`-name`、`-reset` |
 | `statsgetallonlineusers` | 全部在线用户 |  |  | 有 | 未实现 | 未测 |  |
 | `statsonline` | 用户在线会话数 |  |  | 有 | 未实现 | 未测 | 取值：`-email` |
 | `statsonlineiplist` | 用户在线 IP |  |  | 有 | 未实现 | 未测 | 取值：`-all`、`-email`、`-include-traffic`、`-reset` |
-| `statsquery` | 查询统计 |  |  | 有 | 部分 | 未测 | 取值：`-pattern`、`-reset` |
+| `statsquery` | 查询统计 |  |  | 有 | 部分 | 通过 | 取值：`-pattern`、`-reset` |
 | `statssys` | 系统统计 |  |  | 有 | 未实现 | 未测 |  |
 
 ## base64
@@ -130,7 +130,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `check` | 检查配置 |  | 有 |  | 已实现 | 未测 | 取值：`sing-box check` |
+| `check` | 检查配置 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box check` |
 
 ## command
 
@@ -170,13 +170,13 @@
 | `ext-ctl-tls` | 命令行标志 -ext-ctl-tls：覆盖 HTTPS API 地址 | 有 |  |  | 未实现 | 未测 | 取值：`-ext-ctl-tls` |
 | `ext-ctl-unix` | 命令行标志 -ext-ctl-unix：覆盖 Unix socket | 有 |  |  | 未实现 | 未测 | 取值：`-ext-ctl-unix` |
 | `ext-ui` | 命令行标志 -ext-ui：覆盖面板目录 | 有 |  |  | 未实现 | 未测 | 取值：`-ext-ui` |
-| `f` | 命令行标志 -f：配置文件；- 从标准输入读 | 有 |  |  | 部分 | 未测 | 取值：`-f` |
+| `f` | 命令行标志 -f：配置文件；- 从标准输入读 | 有 |  |  | 部分 | 通过 | 取值：`-f` |
 | `m` | 命令行标志 -m：geodata 模式 | 有 |  |  | 未实现 | 未测 | 取值：`-m` |
 | `post-down` | 命令行标志 -post-down：退出前脚本 | 有 |  |  | 未实现 | 未测 | 取值：`-post-down` |
 | `post-up` | 命令行标志 -post-up：启动后脚本 | 有 |  |  | 未实现 | 未测 | 取值：`-post-up` |
 | `secret` | 命令行标志 -secret：覆盖 secret | 有 |  |  | 未实现 | 未测 | 取值：`-secret` |
-| `t` | 命令行标志 -t：测试配置后退出 | 有 |  |  | 已实现 | 未测 | 取值：`-t` |
-| `v` | 命令行标志 -v：显示版本 | 有 |  |  | 已实现 | 未测 | 取值：`-v` |
+| `t` | 命令行标志 -t：测试配置后退出 | 有 |  |  | 已实现 | 通过 | 取值：`-t` |
+| `v` | 命令行标志 -v：显示版本 | 有 |  |  | 已实现 | 通过 | 取值：`-v` |
 
 ## format
 
@@ -228,7 +228,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `config` | 全局选项：配置文件路径，可重复，stdin 读标准输入 |  | 有 |  | 部分 | 未测 | 取值：`--config`、`-c` |
+| `config` | 全局选项：配置文件路径，可重复，stdin 读标准输入 |  | 有 |  | 部分 | 通过 | 取值：`--config`、`-c` |
 | `config-directory` | 全局选项：配置目录路径，可重复 |  | 有 |  | 未实现 | 未测 | 取值：`--config-directory`、`-C` |
 | `directory` | 全局选项：工作目录 |  | 有 |  | 未实现 | 未测 | 取值：`--directory`、`-D` |
 | `disable-color` | 全局选项：关闭彩色输出 |  | 有 |  | 未实现 | 未测 | 取值：`--disable-color` |
@@ -272,12 +272,12 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `confdir` | 多配置目录 |  |  | 有 | 未实现 | 未测 |  |
-| `config` | 配置源，可重复，别名 -c |  |  | 有 | 部分 | 未测 | 取值：`http+unix://`、`http://`、`https://`、`stdin:`、`本地路径`<br>约束：http+unix 为弃用前缀，改用 socket 路径（source:main/confloader/external/external.go）<br>约束：stdin 需关闭输入流<br>约束：未指定时查工作目录和资源路径的 config.json<br>约束：远程地址前缀须小写 |
+| `config` | 配置源，可重复，别名 -c |  |  | 有 | 部分 | 通过 | 取值：`http+unix://`、`http://`、`https://`、`stdin:`、`本地路径`<br>约束：http+unix 为弃用前缀，改用 socket 路径（source:main/confloader/external/external.go）<br>约束：stdin 需关闭输入流<br>约束：未指定时查工作目录和资源路径的 config.json<br>约束：远程地址前缀须小写 |
 | `dump` | 输出合并后配置 |  |  | 有 | 未实现 | 未测 |  |
 | `format` | 配置格式，默认 auto |  |  | 有 | 未实现 | 未测 | 取值：`auto`、`json`、`protobuf`、`toml`、`yaml` |
 | `http-unix` | -config 的 http+unix 前缀 |  |  | 废弃 | 不适用 | 未测 | 约束：改用 socket 路径，如 /path/socket.sock:/api |
-| `run` | 运行服务 |  | 有 |  | 已实现 | 未测 | 取值：`sing-box run` |
-| `test` | 只测试配置 |  |  | 有 | 已实现 | 未测 |  |
+| `run` | 运行服务 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box run` |
+| `test` | 只测试配置 |  |  | 有 | 已实现 | 通过 |  |
 
 ## schema
 
@@ -321,26 +321,26 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `version` | 打印版本 |  | 有 |  | 已实现 | 未测 | 取值：`sing-box version` |
+| `version` | 打印版本 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box version` |
 | `version-name` | version 的 --name：只打印版本名 |  | 有 |  | 未实现 | 未测 | 取值：`--name`、`-n` |
 
 ## xray
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | CLI 组合 |  |  | 有 | 部分 | 未测 | command：`api`、`base64`、`convert`、`help`、`mldsa65`、`mlkem768`、`run`、`tls`、`uuid`、`version`、`vlessenc`、`wg`、`x25519`<br>config_source：`confdir`、`file`、`http(s)`、`multi-file`、`stdin:`、`unix socket`<br>format：`auto`、`json`、`protobuf`、`toml`、`yaml`<br>约束：Protobuf 只取第一个配置源 |
+| `combo` | CLI 组合 |  |  | 有 | 部分 | 通过 | command：`api`、`base64`、`convert`、`help`、`mldsa65`、`mlkem768`、`run`、`tls`、`uuid`、`version`、`vlessenc`、`wg`、`x25519`<br>config_source：`confdir`、`file`、`http(s)`、`multi-file`、`stdin:`、`unix socket`<br>format：`auto`、`json`、`protobuf`、`toml`、`yaml`<br>约束：Protobuf 只取第一个配置源 |
 | `api` | 调用 gRPC API |  |  | 有 | 未实现 | 未测 |  |
 | `base64` | Base64 编解码 |  |  | 有 | 未实现 | 未测 | 约束：文档未写 |
 | `convert` | 配置转换 |  |  | 有 | 未实现 | 未测 |  |
 | `ed25519` | Ed25519 密钥命令，当前未注册 |  |  | 已移除 | 不适用 | 未测 | 取值：`-i` |
-| `help` | 显示可用命令 |  |  | 有 | 已实现 | 未测 | 取值：`xray help <command>` |
+| `help` | 显示可用命令 |  |  | 有 | 已实现 | 通过 | 取值：`xray help <command>` |
 | `lua` | Lua 脚本签名命令，当前未注册 |  |  | 已移除 | 不适用 | 未测 | 取值：`lua sign [-key seed] [-o file] <input>` |
 | `mldsa65` | 生成 ML-DSA-65 密钥对 |  |  | 有 | 未实现 | 未测 | 取值：`-i` |
 | `mlkem768` | 生成 ML-KEM-768 密钥对 |  |  | 有 | 未实现 | 未测 | 取值：`-i` |
-| `run` | 运行配置，默认命令 |  |  | 有 | 部分 | 未测 | 取值：`xray run [-c config.json] [-confdir dir]` |
+| `run` | 运行配置，默认命令 |  |  | 有 | 部分 | 通过 | 取值：`xray run [-c config.json] [-confdir dir]` |
 | `tls` | TLS 工具 |  |  | 有 | 未实现 | 未测 |  |
 | `uuid` | 生成 UUID |  |  | 有 | 未实现 | 未测 | 取值：`-i` |
-| `version` | 输出版本 |  |  | 有 | 已实现 | 未测 |  |
+| `version` | 输出版本 |  |  | 有 | 已实现 | 通过 |  |
 | `vlessenc` | 生成 VLESS Encryption 配置对 |  |  | 有 | 未实现 | 未测 |  |
 | `wg` | 生成 WireGuard 密钥对 |  |  | 有 | 未实现 | 未测 | 取值：`-i` |
 | `x25519` | 生成 X25519 密钥对 |  |  | 有 | 未实现 | 未测 | 取值：`--std-encoding`、`-i` |

@@ -92,33 +92,33 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `certificate` | 要信任的证书行数组，PEM 格式。 |  | 有 |  | 部分 | 未测 | 约束：自 sing-box 1.12.0 起 |
+| `certificate` | 要信任的证书行数组，PEM 格式。 |  | 有 |  | 部分 | 通过 | 约束：自 sing-box 1.12.0 起 |
 | `certificate-directory-path` | 搜索要信任的证书的目录路径，PEM 格式。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.12.0 起 |
 | `certificate-path` | 要信任的证书路径，PEM 格式。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.12.0 起 |
-| `store` | 默认的 X509 受信任 CA 证书列表。 |  | 有 |  | 部分 | 未测 | 取值：`chrome`、`mozilla`、`none`、`system`<br>约束：自 sing-box 1.12.0 起 |
+| `store` | 默认的 X509 受信任 CA 证书列表。 |  | 有 |  | 部分 | 通过 | 取值：`chrome`、`mozilla`、`none`、`system`<br>约束：自 sing-box 1.12.0 起 |
 
 ## system
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `disable-system-ca` | 见 config.env.disable_system_ca，可禁系统 CA | 有 |  |  | 已实现 | 未测 |  |
+| `disable-system-ca` | 见 config.env.disable_system_ca，可禁系统 CA | 有 |  |  | 已实现 | 通过 |  |
 
 ## tls
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `acme-external` | 自动证书未内置，文档建议 acme.sh 等外部工具 |  |  | 有 | 部分 | 未测 |  |
+| `acme-external` | 自动证书未内置，文档建议 acme.sh 等外部工具 |  |  | 有 | 部分 | 通过 |  |
 | `build-chain` | 签发时嵌入 CA 证书链 |  |  | 有 | 未实现 | 未测 | 约束：仅 usage issue<br>约束：只适合中间 CA |
-| `certificate` | API HTTPS 证书，PEM 内容或路径 | 有 |  | 有 | 部分 | 未测 | 取值：`PEM`、`路径`<br>约束：目前仅用于 API 的 https<br>约束：自 v1.19.18 本地文件支持自动重载 |
-| `certificate-file` | 证书文件路径 |  |  | 有 | 已实现 | 未测 | 约束：同时指定时优先于 certificate |
-| `client-auth-cert` | 顶层 tls 的 mTLS 客户端证书 | 有 |  |  | 部分 | 未测 | 取值：`PEM`、`路径` |
-| `client-auth-type` | 顶层 tls 的 mTLS 类型 | 有 |  |  | 部分 | 未测 | 取值：``、`request`、`require-and-verify`、`require-any`、`verify-if-given`<br>约束：verify-if-given、require-and-verify 时 client-auth-cert 必填 |
-| `custom-certifactes` | 追加自定义信任证书（字段拼写以源码为准） | 有 |  |  | 部分 | 未测 | 取值：`PEM 列表` |
+| `certificate` | API HTTPS 证书，PEM 内容或路径 | 有 |  | 有 | 部分 | 通过 | 取值：`PEM`、`路径`<br>约束：目前仅用于 API 的 https<br>约束：自 v1.19.18 本地文件支持自动重载 |
+| `certificate-file` | 证书文件路径 |  |  | 有 | 已实现 | 通过 | 约束：同时指定时优先于 certificate |
+| `client-auth-cert` | 顶层 tls 的 mTLS 客户端证书 | 有 |  |  | 部分 | 通过 | 取值：`PEM`、`路径` |
+| `client-auth-type` | 顶层 tls 的 mTLS 类型 | 有 |  |  | 部分 | 通过 | 取值：``、`request`、`require-and-verify`、`require-any`、`verify-if-given`<br>约束：verify-if-given、require-and-verify 时 client-auth-cert 必填 |
+| `custom-certifactes` | 追加自定义信任证书（字段拼写以源码为准） | 有 |  |  | 部分 | 通过 | 取值：`PEM 列表` |
 | `ech-key` | API HTTPS 的 ECH 密钥，填写即启用 | 有 |  |  | 未实现 | 未测 | 取值：`PEM`<br>约束：自 v1.19.18 本地文件支持自动重载 |
 | `hot-reload` | 服务端证书每 3600 秒热重载 |  |  | 有 | 未实现 | 未测 |  |
-| `key` | 密钥内容字符串数组 |  |  | 有 | 已实现 | 未测 |  |
-| `key-file` | 密钥文件路径 |  |  | 有 | 已实现 | 未测 | 约束：不支持带密码的 key<br>约束：同时指定时优先于 key |
+| `key` | 密钥内容字符串数组 |  |  | 有 | 已实现 | 通过 |  |
+| `key-file` | 密钥文件路径 |  |  | 有 | 已实现 | 通过 | 约束：不支持带密码的 key<br>约束：同时指定时优先于 key |
 | `ocsp-stapling` | OCSP 装订间隔秒，默认 0 |  |  | 有 | 未实现 | 未测 | 约束：非 0 覆盖 3600 秒重载周期 |
-| `one-time-loading` | 只加载一次，关闭热重载与 OCSP |  |  | 有 | 已实现 | 未测 |  |
-| `private-key` | API HTTPS 私钥，PEM 内容或路径 | 有 |  |  | 部分 | 未测 | 取值：`PEM`、`路径`<br>约束：自 v1.19.18 本地文件支持自动重载 |
+| `one-time-loading` | 只加载一次，关闭热重载与 OCSP |  |  | 有 | 已实现 | 通过 |  |
+| `private-key` | API HTTPS 私钥，PEM 内容或路径 | 有 |  |  | 部分 | 通过 | 取值：`PEM`、`路径`<br>约束：自 v1.19.18 本地文件支持自动重载 |
 | `usage` | 证书用途，默认 encipherment |  |  | 有 | 未实现 | 未测 | 取值：`encipherment`、`issue`、`verify`<br>约束：verify 时 keyFile 和 key 可空<br>约束：verify、issue 必须为 CA<br>约束：无匹配证书时用 issue 签发 1 小时证书 |

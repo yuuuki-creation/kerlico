@@ -142,7 +142,7 @@ impl Node {
         loop {
             tokio::select! {biased;
                             _=context.cancel.cancelled()=>break,
-                            _=gc.tick()=>{endpoint.prune_jls_forwarding();},
+                            _=gc.tick()=>{endpoint.prune_jls_forwarding();if context.stream_budget.is_closed()&&tasks.is_empty(){break;}},
                             result=tasks.join_next(),if !tasks.is_empty()=>{runtime.observe(&result);},
                             incoming=endpoint.accept()=>{let Some(incoming)=incoming else{break;};let Ok(lease)=context.stream_budget.try_acquire()else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};let access=access.clone();let mut context=context.clone();let users=self.users.clone();crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move{let _lease=lease;context.events.record(NodeEvent::Accepted);let result=async{let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|Error::Rejected)?;context.peer_addr=Some(connection.remote_address());if connection.is_jls()!=Some(true){connection.close(0u32.into(),b"");return Err(Error::Rejected);}
             let chosen=connection.jls_chosen_user().ok_or(Error::Rejected)?;

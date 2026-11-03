@@ -35,5 +35,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(Destination, &[u8])> {
         _ => return Err(Error::Protocol("packetaddr 地址格式不合法或被截断")),
     };
     let port = u16::from_be_bytes([bytes[length - 2], bytes[length - 1]]);
-    Ok((Destination::new(&ip.to_string(), port)?, &bytes[length..]))
+    Ok((
+        Destination::new(&ip.to_canonical().to_string(), port)?,
+        &bytes[length..],
+    ))
 }

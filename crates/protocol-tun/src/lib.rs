@@ -37,6 +37,33 @@ fn invalid() -> Error {
     Error::Config("TUN 选项不合法".into())
 }
 
+/// 内核在 TUN 接口拉起时自动发出的链路本地（如 `fe80::/10`、`169.254.0.0/16`）或组播/广播探针，不进入代理转发或计为损坏包。
+fn is_ambient_link_packet(packet: &[u8]) -> bool {
+    let Some(&first) = packet.first() else {
+        return false;
+    };
+    match first >> 4 {
+        4 if packet.len() >= 20 => {
+            let src = std::net::Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+            let dst = std::net::Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+            src.is_link_local()
+                || dst.is_link_local()
+                || dst.is_multicast()
+                || dst.is_broadcast()
+                || packet[9] == 2
+        }
+        6 if packet.len() >= 40 => {
+            let src = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).unwrap());
+            let dst = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).unwrap());
+            src.is_unicast_link_local()
+                || dst.is_unicast_link_local()
+                || dst.is_multicast()
+                || packet[6] == 0
+        }
+        _ => false,
+    }
+}
+
 /// 接口已被销毁。tun 驱动对已摘除的 fd 返回 EBADFD。
 fn device_gone(error: &std::io::Error) -> bool {
     const EBADFD: i32 = 77;
@@ -188,6 +215,9 @@ impl InboundProtocol for TunNode {
                     },
                     read = device.recv(&mut buffer) => {
                         let length = read?;
+                        if is_ambient_link_packet(&buffer[..length]) {
+                            continue;
+                        }
                         match tunnel.receive(&buffer[..length]) {
                             Ok(()) => {}
                             Err(Error::Cancelled) => return Ok(()),

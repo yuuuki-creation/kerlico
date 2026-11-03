@@ -2,8 +2,9 @@
 
 use crate::{UserId, carrier, codec, profile::PacketEncoding};
 use kerlico_core::{
-    BoxFuture, BoxStream, DatagramChannel, DatagramReceiver, DatagramSender, Destination, Error,
-    Result,
+    AddressedDatagram, BoxFuture, BoxStream, DatagramAssociation, DatagramAssociationReceiver,
+    DatagramAssociationSender, DatagramChannel, DatagramReceiver, DatagramSender, Destination,
+    Error, Result,
 };
 use std::{
     io,
@@ -182,9 +183,12 @@ struct Sender {
     encoding: PacketEncoding,
     first: bool,
     global_id: [u8; 8],
+    vision: bool,
+    udp443: bool,
 }
 struct Receiver {
     reader: BufReader<ReadHalf<BoxStream>>,
+    target: Destination,
     encoding: PacketEncoding,
 }
 pub(crate) fn datagrams(
@@ -206,9 +210,38 @@ pub(crate) fn datagrams(
             encoding,
             first: true,
             global_id,
+            vision: false,
+            udp443: true,
         }),
         receiver: Box::new(Receiver {
             reader: BufReader::new(reader),
+            target: target.clone(),
+            encoding,
+        }),
+    })
+}
+pub(crate) fn association(
+    stream: BoxStream,
+    target: &Destination,
+    encoding: PacketEncoding,
+    global_id: [u8; 8],
+    vision: bool,
+    udp443: bool,
+) -> Result<DatagramAssociation> {
+    let (reader, writer) = tokio::io::split(stream);
+    Ok(DatagramAssociation {
+        sender: Box::new(Sender {
+            writer,
+            target: target.clone(),
+            encoding,
+            first: true,
+            global_id,
+            vision,
+            udp443,
+        }),
+        receiver: Box::new(Receiver {
+            reader: BufReader::new(reader),
+            target: target.clone(),
             encoding,
         }),
     })
@@ -234,20 +267,40 @@ impl DatagramSender for Sender {
                     self.first = false;
                 }
                 PacketEncoding::Packetaddr => {
-                    let mut bytes = Vec::with_capacity(packet.len() + 20);
-                    match self.target.address() {
-                        kerlico_core::Address::Ip(std::net::IpAddr::V4(ip)) => {
-                            bytes.push(1);
-                            bytes.extend_from_slice(&ip.octets());
-                        }
-                        kerlico_core::Address::Ip(std::net::IpAddr::V6(ip)) => {
-                            bytes.push(2);
-                            bytes.extend_from_slice(&ip.octets());
-                        }
-                        _ => return Err(Error::InvalidAddress),
+                    let bytes = crate::packetaddr::encode(&self.target, packet)?;
+                    codec::write_datagram(&mut self.writer, &bytes).await?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+impl DatagramAssociationSender for Sender {
+    fn send_to<'a>(
+        &'a mut self,
+        packet: &'a [u8],
+        target: &'a Destination,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if self.vision && !self.udp443 && target.port() == 443 {
+                return Err(Error::Rejected);
+            }
+            match self.encoding {
+                PacketEncoding::Udp => codec::write_datagram(&mut self.writer, packet).await?,
+                PacketEncoding::Xudp => {
+                    let destination = carrier::target(target, true);
+                    let bytes = if self.first {
+                        encode_xudp_new_packet(&destination, packet, self.global_id)
+                    } else {
+                        encode_xudp_keep_packet(Some(&destination), packet)
                     }
-                    bytes.extend_from_slice(&self.target.port().to_be_bytes());
-                    bytes.extend_from_slice(packet);
+                    .map_err(|_| Error::ResourceLimit)?;
+                    self.writer.write_all(&bytes).await?;
+                    self.writer.flush().await?;
+                    self.first = false;
+                }
+                PacketEncoding::Packetaddr => {
+                    let bytes = crate::packetaddr::encode(target, packet)?;
                     codec::write_datagram(&mut self.writer, &bytes).await?;
                 }
             }
@@ -283,6 +336,35 @@ impl DatagramReceiver for Receiver {
                 bytes.drain(..header);
             }
             Ok(Some(bytes))
+        })
+    }
+}
+impl DatagramAssociationReceiver for Receiver {
+    fn recv_from(&mut self) -> BoxFuture<'_, Result<Option<AddressedDatagram>>> {
+        Box::pin(async move {
+            if self.reader.fill_buf().await?.is_empty() {
+                return Ok(None);
+            }
+            if self.encoding == PacketEncoding::Xudp {
+                let packet = read_xudp_packet(&mut self.reader).await?;
+                let source = packet
+                    .source
+                    .as_ref()
+                    .map(crate::mux::destination)
+                    .transpose()?
+                    .unwrap_or_else(|| self.target.clone());
+                return Ok(Some((source, packet.payload.to_vec())));
+            }
+            let Some(bytes) =
+                codec::read_datagram(&mut self.reader, codec::MAX_DATAGRAM_SIZE).await?
+            else {
+                return Ok(None);
+            };
+            if self.encoding == PacketEncoding::Packetaddr {
+                let (source, payload) = crate::packetaddr::decode(&bytes)?;
+                return Ok(Some((source, payload.to_vec())));
+            }
+            Ok(Some((self.target.clone(), bytes)))
         })
     }
 }

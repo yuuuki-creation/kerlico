@@ -6,16 +6,16 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | API 接入组合 |  |  | 有 | 部分 | 未测 | mode：`inbound+routing`、`listen`<br>service：`HandlerService`、`LoggerService`、`ObservatoryService`、`ReflectionService`、`RoutingService`、`StatsService`<br>约束：inbound 方式用 tunnel 入站并路由到 api 出站 |
-| `listen` | API 监听 IP 和端口，可选 |  |  | 有 | 部分 | 未测 | 约束：省略时需加 inbounds 和 routing<br>约束：简易模式不统计 API 入站流量 |
-| `services` | 开启的 API |  |  | 有 | 部分 | 未测 | 取值：`HandlerService`、`LoggerService`、`ObservatoryService`、`ReflectionService`、`RoutingService`、`StatsService`<br>约束：ObservatoryService 文档未列（source:infra/conf/api.go） |
+| `combo` | API 接入组合 |  |  | 有 | 部分 | 通过 | mode：`inbound+routing`、`listen`<br>service：`HandlerService`、`LoggerService`、`ObservatoryService`、`ReflectionService`、`RoutingService`、`StatsService`<br>约束：inbound 方式用 tunnel 入站并路由到 api 出站 |
+| `listen` | API 监听 IP 和端口，可选 |  |  | 有 | 部分 | 通过 | 约束：省略时需加 inbounds 和 routing<br>约束：简易模式不统计 API 入站流量 |
+| `services` | 开启的 API |  |  | 有 | 部分 | 通过 | 取值：`HandlerService`、`LoggerService`、`ObservatoryService`、`ReflectionService`、`RoutingService`、`StatsService`<br>约束：ObservatoryService 文档未列（source:infra/conf/api.go） |
 | `tag` | 出站标识 |  |  | 有 | 未实现 | 未测 | 约束：不能为空（source:infra/conf/api.go） |
 
 ## auth
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `bearer` | 请求带 Authorization: Bearer <secret> | 有 |  |  | 已实现 | 未测 | 取值：`Authorization: Bearer`<br>约束：路径不在工作目录需 SAFE_PATHS |
+| `bearer` | 请求带 Authorization: Bearer <secret> | 有 |  |  | 已实现 | 通过 | 取值：`Authorization: Bearer`<br>约束：路径不在工作目录需 SAFE_PATHS |
 | `websocket-token` | WebSocket 可用 token 查询参数 | 有 |  |  | 未实现 | 未测 | 取值：`token=<secret>` |
 
 ## cache-dns
@@ -34,8 +34,8 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | Clash RESTful API 服务 |  | 有 |  | 部分 | 未测 | 取值：`clash_api`<br>约束：external_controller 为空时禁用<br>约束：需要 with_clash_api 构建标签 |
-| `combo` | Clash API 的 UI、认证和 CORS 组合 |  | 有 |  | 部分 | 未测 | ui：`external_ui`、`external_ui+download`、`none`<br>auth：`none`、`secret`<br>cors：`*`、`custom`<br>private_network：`off`、`on`<br>default_mode：`Rule`、`custom`<br>约束：default_mode 无直接效果，只供 clash_mode 规则使用<br>约束：公网网站访问私网 API 时要明确 access_control_allow_origin 并开 access_control_allow_private_network<br>约束：监听 0.0.0.0 时必须设 secret |
+| `protocol` | Clash RESTful API 服务 |  | 有 |  | 部分 | 通过 | 取值：`clash_api`<br>约束：external_controller 为空时禁用<br>约束：需要 with_clash_api 构建标签 |
+| `combo` | Clash API 的 UI、认证和 CORS 组合 |  | 有 |  | 部分 | 通过 | ui：`external_ui`、`external_ui+download`、`none`<br>auth：`none`、`secret`<br>cors：`*`、`custom`<br>private_network：`off`、`on`<br>default_mode：`Rule`、`custom`<br>约束：default_mode 无直接效果，只供 clash_mode 规则使用<br>约束：公网网站访问私网 API 时要明确 access_control_allow_origin 并开 access_control_allow_private_network<br>约束：监听 0.0.0.0 时必须设 secret |
 | `access-control-allow-origin` | 允许的 CORS 来源，默认使用 `*`。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.10.0 起<br>约束：要从公共网站访问私有网络上的 Clash API，必须在 `access_control_allow_origin` 中明确指定它而不是使用 `*`。 |
 | `access-control-allow-private-network` | 允许从私有网络访问。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.10.0 起<br>约束：要从公共网站访问私有网络上的 Clash API，必须启用 `access_control_allow_private_network`。 |
 | `cache-file` | 缓存文件路径，默认使用`cache.db`。 |  | 已移除 |  | 不适用 | 未测 | 约束：`cache_file` 已在 Clash API 中废弃，且已迁移到 `cache_file.enabled` 和 `cache_file.path`。<br>约束：自 sing-box 1.10.0 起<br>约束：配置后启动报错（source:experimental/clashapi/server.go） |
@@ -43,11 +43,11 @@
 | `default-mode` | Clash 中的默认模式，默认使用 `Rule`。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.10.0 起 |
 | `delete-connections` | Clash API：关闭全部连接 |  | 有 |  | 未实现 | 未测 | 取值：`DELETE /connections`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `delete-connections-id` | Clash API：关闭指定连接 |  | 有 |  | 未实现 | 未测 | 取值：`DELETE /connections/{id}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `external-controller` | RESTful web API 监听地址。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.10.0 起 |
+| `external-controller` | RESTful web API 监听地址。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.10.0 起 |
 | `external-ui` | 到静态网页资源目录的相对路径或绝对路径。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.10.0 起 |
 | `external-ui-download-detour` | 用于下载静态网页资源的出站的标签。 |  | 有 |  | 未实现 | 未测 | 约束：如果为空，将使用默认出站。<br>约束：自 sing-box 1.10.0 起 |
 | `external-ui-download-url` | 静态网页资源的 ZIP 下载 URL，如果指定的 `external_ui` 目录为空，将使用。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.10.0 起<br>约束：默认使用 `https://github.com/MetaCubeX/Yacd-meta/archive/gh-pages.zip`。 |
-| `get` | Clash API：问候 |  | 有 |  | 部分 | 未测 | 取值：`GET /`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get` | Clash API：问候 |  | 有 |  | 部分 | 通过 | 取值：`GET /`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `get-configs` | Clash API：读取配置 |  | 有 |  | 未实现 | 未测 | 取值：`GET /configs`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `get-dns-query` | Clash API：DNS 查询，查询参数 name、type |  | 有 |  | 未实现 | 未测 | 取值：`GET /dns/query`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `get-group` | Clash API：列出策略组 |  | 有 |  | 未实现 | 未测 | 取值：`GET /group`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
@@ -77,7 +77,7 @@
 | `put-providers-proxies-name` | Clash API：更新代理提供者 |  | 有 |  | 未实现 | 未测 | 取值：`PUT /providers/proxies/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `put-providers-rules-name` | Clash API：更新规则提供者 |  | 有 |  | 未实现 | 未测 | 取值：`PUT /providers/rules/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `put-proxies-name` | Clash API：切换 selector |  | 有 |  | 未实现 | 未测 | 取值：`PUT /proxies/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `secret` | RESTful API 的密钥（可选）通过指定 HTTP 标头 `Authorization: Bearer ${secret}` 进行身份验证如果 RESTful API 正在监听 0.0.0.0，请始终设置一个密钥。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.10.0 起 |
+| `secret` | RESTful API 的密钥（可选）通过指定 HTTP 标头 `Authorization: Bearer ${secret}` 进行身份验证如果 RESTful API 正在监听 0.0.0.0，请始终设置一个密钥。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.10.0 起 |
 | `store-fakeip` | 将 fakeip 存储在缓存文件中。 |  | 已移除 |  | 不适用 | 未测 | 约束：`store_selected` 已在 Clash API 中废弃，且已迁移到 `cache_file.store_fakeip`。<br>约束：自 sing-box 1.10.0 起<br>约束：配置后启动报错（source:experimental/clashapi/server.go） |
 | `store-mode` | 将 Clash 模式存储在缓存文件中。 |  | 已移除 |  | 不适用 | 未测 | 约束：`store_mode` 已在 Clash API 中废弃，且默认启用当 `cache_file.enabled`。<br>约束：自 sing-box 1.10.0 起<br>约束：配置后启动报错（source:experimental/clashapi/server.go） |
 | `store-selected` | 将 `Selector` 中出站的选定的目标出站存储在缓存文件中。 |  | 已移除 |  | 不适用 | 未测 | 约束：`store_selected` 已在 Clash API 中废弃，且默认启用当 `cache_file.enabled`。<br>约束：必须为目标出站设置标签。<br>约束：自 sing-box 1.10.0 起<br>约束：配置后启动报错（source:experimental/clashapi/server.go） |
@@ -101,7 +101,7 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `delete-connections` | 关闭所有连接，204 | 有 |  |  | 未实现 | 未测 | 取值：`DELETE` |
-| `get-connections` | 连接信息 | 有 |  |  | 部分 | 未测 | 取值：`GET`、`WS`<br>约束：interval=毫秒，默认 1000 |
+| `get-connections` | 连接信息 | 有 |  |  | 部分 | 通过 | 取值：`GET`、`WS`<br>约束：interval=毫秒，默认 1000 |
 
 ## connections-id
 
@@ -113,8 +113,8 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | 控制接口维度 | 有 |  |  | 部分 | 未测 | listener：`external-controller`、`external-controller-pipe`、`external-controller-tls`、`external-controller-unix`<br>auth：`none`、`secret`<br>cors：`allow-origins`、`allow-private-network`、`off`<br>ui：`external-ui`、`external-ui-url`、`off`<br>doh：`external-doh-server`、`off`<br>约束：tls 需顶层 tls 证书<br>约束：unix、pipe、doh 不验证 secret |
-| `external-controller` | RESTful API 监听地址 | 有 |  |  | 已实现 | 未测 | 取值：`host:port` |
+| `combo` | 控制接口维度 | 有 |  |  | 部分 | 通过 | listener：`external-controller`、`external-controller-pipe`、`external-controller-tls`、`external-controller-unix`<br>auth：`none`、`secret`<br>cors：`allow-origins`、`allow-private-network`、`off`<br>ui：`external-ui`、`external-ui-url`、`off`<br>doh：`external-doh-server`、`off`<br>约束：tls 需顶层 tls 证书<br>约束：unix、pipe、doh 不验证 secret |
+| `external-controller` | RESTful API 监听地址 | 有 |  |  | 已实现 | 通过 | 取值：`host:port` |
 | `external-controller-cors-allow-origins` | API CORS 允许来源 | 有 |  |  | 未实现 | 未测 | 取值：`来源列表` |
 | `external-controller-cors-allow-private-network` | API CORS 允许私有网络 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `external-controller-pipe` | Windows namedpipe API 监听地址 | 有 |  |  | 未实现 | 未测 | 取值：`管道路径`<br>约束：namedpipe 访问不验证 secret |
@@ -122,7 +122,7 @@
 | `external-controller-tls` | HTTPS API 监听地址 | 有 |  |  | 未实现 | 未测 | 取值：`host:port`<br>约束：文档：使用 TLS 也必须填写 external-controller<br>约束：需配置顶层 tls 证书 |
 | `external-controller-unix` | Unix socket API 监听地址 | 有 |  |  | 未实现 | 未测 | 取值：`路径`<br>约束：Unix socket 访问不验证 secret |
 | `external-doh-server` | 在 RESTful API 端口上开启 DoH 服务器 | 有 |  |  | 未实现 | 未测 | 取值：`URL 路径`<br>约束：该 URL 不验证 secret |
-| `secret` | API 访问密钥 | 有 |  |  | 已实现 | 未测 | 取值：`字符串` |
+| `secret` | API 访问密钥 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
 
 ## debug-gc
 
@@ -274,8 +274,8 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `debug-pprof` | pprof 调试 |  |  | 有 | 不适用 | 未测 | 取值：`/debug/pprof/goroutine`、`/debug/pprof/heap` |
-| `debug-vars` | expvars，含 stats 和 observatory |  |  | 有 | 部分 | 未测 | 取值：`observatory`、`stats.inbound`、`stats.outbound`、`stats.user` |
-| `listen` | 直接监听地址 |  |  | 有 | 部分 | 未测 | 约束：tag 为空自动为 Metrics<br>约束：两者都未设启动失败 |
+| `debug-vars` | expvars，含 stats 和 observatory |  |  | 有 | 部分 | 通过 | 取值：`observatory`、`stats.inbound`、`stats.outbound`、`stats.user` |
+| `listen` | 直接监听地址 |  |  | 有 | 部分 | 通过 | 约束：tag 为空自动为 Metrics<br>约束：两者都未设启动失败 |
 | `tag` | 对应出站 tag，配 tunnel 入站与路由访问 |  |  | 有 | 未实现 | 未测 |  |
 
 ## observatory-service
@@ -363,7 +363,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get` | 根路径 hello（文档未写） | 有 |  |  | 部分 | 未测 | 取值：`GET` |
+| `get` | 根路径 hello（文档未写） | 有 |  |  | 部分 | 通过 | 取值：`GET` |
 
 ## routing-service
 
@@ -404,7 +404,7 @@
 | `dashboard-http-client` | 用于下载仪表板的 HTTP 客户端。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
 | `dashboard-path` | 存放仪表板文件的目录。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用工作目录下的 `dashboard`。 |
 | `dashboard-update-interval` | 仪表板的更新间隔。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1d`。 |
-| `secret` | API 密钥。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认无需认证。 |
+| `secret` | API 密钥。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：默认无需认证。 |
 | `tls` | TLS 配置,参阅 TLS。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
 
 ## singbox-grpc
@@ -484,14 +484,14 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-all-online-users` | gRPC 方法 |  |  | 有 | 部分 | 未测 |  |
-| `get-stats` | gRPC 方法 |  |  | 有 | 部分 | 未测 |  |
-| `get-stats-online` | gRPC 方法 |  |  | 有 | 部分 | 未测 |  |
-| `get-stats-online-ip-list` | gRPC 方法 |  |  | 有 | 部分 | 未测 |  |
-| `get-sys-stats` | gRPC 方法 |  |  | 有 | 部分 | 未测 |  |
-| `get-users-stats` | gRPC 方法 |  |  | 有 | 部分 | 未测 |  |
-| `overview` | 内置数据统计服务 |  |  | 有 | 部分 | 未测 |  |
-| `query-stats` | gRPC 方法 |  |  | 有 | 部分 | 未测 |  |
+| `get-all-online-users` | gRPC 方法 |  |  | 有 | 部分 | 通过 |  |
+| `get-stats` | gRPC 方法 |  |  | 有 | 部分 | 通过 |  |
+| `get-stats-online` | gRPC 方法 |  |  | 有 | 部分 | 通过 |  |
+| `get-stats-online-ip-list` | gRPC 方法 |  |  | 有 | 部分 | 通过 |  |
+| `get-sys-stats` | gRPC 方法 |  |  | 有 | 部分 | 通过 |  |
+| `get-users-stats` | gRPC 方法 |  |  | 有 | 部分 | 通过 |  |
+| `overview` | 内置数据统计服务 |  |  | 有 | 部分 | 通过 |  |
+| `query-stats` | gRPC 方法 |  |  | 有 | 部分 | 通过 |  |
 
 ## storage-key
 
@@ -505,7 +505,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-traffic` | 实时流量，每秒推送 up、down、upTotal、downTotal | 有 |  |  | 部分 | 未测 | 取值：`GET`、`WS` |
+| `get-traffic` | 实时流量，每秒推送 up、down、upTotal、downTotal | 有 |  |  | 部分 | 通过 | 取值：`GET`、`WS` |
 
 ## ui
 
@@ -535,9 +535,9 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-stats` | V2Ray API StatsService：读取单个统计 |  | 有 |  | 部分 | 未测 | 取值：`GetStats` |
-| `get-sys-stats` | V2Ray API StatsService：读取系统统计 |  | 有 |  | 部分 | 未测 | 取值：`GetSysStats` |
-| `query-stats` | V2Ray API StatsService：按模式查询统计 |  | 有 |  | 部分 | 未测 | 取值：`QueryStats` |
+| `get-stats` | V2Ray API StatsService：读取单个统计 |  | 有 |  | 部分 | 通过 | 取值：`GetStats` |
+| `get-sys-stats` | V2Ray API StatsService：读取系统统计 |  | 有 |  | 部分 | 通过 | 取值：`GetSysStats` |
+| `query-stats` | V2Ray API StatsService：按模式查询统计 |  | 有 |  | 部分 | 通过 | 取值：`QueryStats` |
 
 ## version
 

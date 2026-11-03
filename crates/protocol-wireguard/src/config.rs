@@ -23,8 +23,8 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_flows: 256,
-            tcp_buffer_bytes: 65536,
-            queue_packets: 128,
+            tcp_buffer_bytes: 262_144,
+            queue_packets: 512,
             queue_bytes: 2 * 1024 * 1024,
             fragment_packets: 64,
             fragment_bytes: 2 * 1024 * 1024,
@@ -152,6 +152,7 @@ pub(crate) fn unicast(address: IpAddr) -> bool {
         && !address.is_multicast()
         && address.to_canonical() == address
         && !matches!(address, IpAddr::V4(ip) if ip.is_broadcast())
+        && !matches!(address, IpAddr::V6(ip) if ip.is_unicast_link_local())
 }
 pub(crate) fn target(value: &Destination) -> Result<SocketAddr> {
     match value.address() {

@@ -1749,7 +1749,7 @@ impl<'a> Socket<'a> {
                         }
                     }
                     (true, false) => {
-                        if window_start <= segment_start && segment_start < window_end {
+                        if window_start <= segment_start && segment_start <= window_end {
                             true
                         } else {
                             net_debug!("zero-length segment not inside window, will send an ACK.");
@@ -2108,7 +2108,7 @@ impl<'a> Socket<'a> {
                 // Increment duplicate ACK count, notify congestion controller and
                 // set for retransmit if we just received the third duplicate ACK
                 Some(last_rx_ack)
-                    if repr.payload.is_empty()
+                    if (repr.payload.is_empty() || repr.sack_ranges.iter().any(|r| r.is_some()))
                         && last_rx_ack == ack_number
                         && ack_number < self.remote_last_seq
                         && !is_window_update =>
@@ -2140,6 +2140,8 @@ impl<'a> Socket<'a> {
                         in_flight,
                     );
                 }
+
+                Some(last_rx_ack) if last_rx_ack == ack_number => {}
 
                 // No duplicate ACK means we reset the duplicate ACK count
                 // and notify the congestion controller of the fresh ACK

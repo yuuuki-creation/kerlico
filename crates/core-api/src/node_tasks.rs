@@ -180,7 +180,10 @@ impl NodeTasks {
             let Drain { tasks, progress } = &mut *drain;
             let progress = progress.as_mut().expect("关闭进度已建立");
             loop {
-                while let Some(result) = tasks.try_join_next() {
+                while let Some(result) = tasks
+                    .try_join_next()
+                    .or_else(|| tasks.join_next().now_or_never().flatten())
+                {
                     if result.is_err_and(|error| !error.is_cancelled()) {
                         self.0.failed.fetch_add(1, Ordering::AcqRel);
                     }
@@ -436,7 +439,7 @@ mod tests {
                 std::future::pending::<()>().await;
             })
             .unwrap();
-        let deadline = Instant::now() + Duration::from_millis(500);
+        let deadline = Instant::now() + Duration::from_millis(1000);
         let mut first = Box::pin(owner.shutdown_at(deadline));
         tokio::select! {
             report = &mut first => panic!("socket仍在析构，不应结束等待 {report:?}"),

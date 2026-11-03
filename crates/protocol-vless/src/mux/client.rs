@@ -1,8 +1,9 @@
 use super::frame::{self, Frame};
 use crate::carrier;
 use kerlico_core::{
-    BoxFuture, BoxStream, CancellationToken, DatagramChannel, DatagramReceiver, DatagramSender,
-    Destination, Diagnostic, DiagnosticSink, Error, Result,
+    AddressedDatagram, BoxFuture, BoxStream, CancellationToken, DatagramAssociation,
+    DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel, DatagramReceiver,
+    DatagramSender, Destination, Diagnostic, DiagnosticSink, Error, Result,
 };
 use std::{
     collections::HashMap,
@@ -363,8 +364,8 @@ impl Pool {
             global_id,
             payload: None,
         };
-        // Xray 的非零 global ID 分支会直接读取首包；不能先发送没有数据的 NEW。
-        if global_id.is_some() {
+        // UDP 与 XUDP 会话均在首包发送时一并携带 NEW 帧与真实目标。
+        if udp || global_id.is_some() {
             return Ok((lease, receiver, Some(first)));
         }
         let (ack, ready) = oneshot::channel();
@@ -443,8 +444,38 @@ impl Pool {
                 lease: lease.clone(),
                 first,
                 target: target.clone(),
+                vision: false,
+                udp443: true,
             }),
-            receiver: Box::new(Receiver { lease, incoming }),
+            receiver: Box::new(Receiver {
+                lease,
+                incoming,
+                target: target.clone(),
+            }),
+        })
+    }
+    pub async fn associate_udp<F: Future<Output = Result<BoxStream>> + Send>(
+        &self,
+        target: &Destination,
+        global_id: Option<[u8; 8]>,
+        vision: bool,
+        udp443: bool,
+        open: F,
+    ) -> Result<DatagramAssociation> {
+        let (lease, incoming, first) = self.session(target, true, global_id, open).await?;
+        Ok(DatagramAssociation {
+            sender: Box::new(Sender {
+                lease: lease.clone(),
+                first,
+                target: target.clone(),
+                vision,
+                udp443,
+            }),
+            receiver: Box::new(Receiver {
+                lease,
+                incoming,
+                target: target.clone(),
+            }),
         })
     }
 }
@@ -511,6 +542,8 @@ struct Sender {
     lease: Arc<Lease>,
     first: Option<Frame>,
     target: Destination,
+    vision: bool,
+    udp443: bool,
 }
 impl DatagramSender for Sender {
     fn send<'a>(&'a mut self, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {
@@ -537,9 +570,43 @@ impl DatagramSender for Sender {
         })
     }
 }
+impl DatagramAssociationSender for Sender {
+    fn send_to<'a>(
+        &'a mut self,
+        bytes: &'a [u8],
+        target: &'a Destination,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if bytes.len() > MAX_PAYLOAD {
+                return Err(Error::ResourceLimit);
+            }
+            if self.vision && !self.udp443 && target.port() == 443 {
+                return Err(Error::Rejected);
+            }
+            let frame = if let Some(mut first) = self.first.take() {
+                first.target = Some(carrier::target(target, true));
+                first.payload = Some(bytes.to_vec());
+                first
+            } else {
+                Frame::data(
+                    self.lease.id,
+                    bytes.to_vec(),
+                    Some(carrier::target(target, true)),
+                )
+            };
+            let guard = self.lease.cancel.clone().drop_guard();
+            let result = self.lease.send(frame).await;
+            if result.is_ok() {
+                guard.disarm();
+            }
+            result
+        })
+    }
+}
 struct Receiver {
     lease: Arc<Lease>,
     incoming: mpsc::Receiver<Frame>,
+    target: Destination,
 }
 impl DatagramReceiver for Receiver {
     fn recv(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>>> {
@@ -557,6 +624,33 @@ impl DatagramReceiver for Receiver {
                 }
                 if let Some(bytes) = frame.payload {
                     return Ok(Some(bytes));
+                }
+            }
+        })
+    }
+}
+impl DatagramAssociationReceiver for Receiver {
+    fn recv_from(&mut self) -> BoxFuture<'_, Result<Option<AddressedDatagram>>> {
+        Box::pin(async move {
+            loop {
+                let frame = tokio::select! {_=self.lease.cancel.cancelled()=>{if self.lease.failed.load(Ordering::Acquire){return Err(Error::Protocol("Mux 数据报会话失败"));}return Ok(None);},v=self.incoming.recv()=>match v{Some(v)=>v,None=>{if self.lease.failed.load(Ordering::Acquire){return Err(Error::Protocol("Mux 载体中断"));}return Ok(None)}}};
+                if frame.error {
+                    self.lease.failed.store(true, Ordering::Release);
+                    self.lease.finish();
+                    return Err(Error::Protocol("Mux 对端拒绝数据报会话"));
+                }
+                if frame.status == Status::End {
+                    self.lease.finish();
+                    return Ok(None);
+                }
+                if let Some(bytes) = frame.payload {
+                    let source = frame
+                        .target
+                        .as_ref()
+                        .map(super::frame::destination)
+                        .transpose()?
+                        .unwrap_or_else(|| self.target.clone());
+                    return Ok(Some((source, bytes)));
                 }
             }
         })
@@ -668,6 +762,57 @@ mod tests {
             Some(b"reply".to_vec())
         );
         assert!(channel.receiver.recv().await.unwrap().is_none());
+        peer_task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn associate_udp_switches_targets_and_decodes_response_sources() {
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let first_target = Destination::new("192.0.2.10", 53).unwrap();
+        let second_target = Destination::new("192.0.2.20", 5353).unwrap();
+        let expected_first = first_target.clone();
+        let expected_second = second_target.clone();
+        let peer_task = tokio::spawn(async move {
+            let first = frame::read(&mut peer).await.unwrap().unwrap();
+            assert_eq!(first.status, Status::New);
+            assert_eq!(
+                super::frame::destination(first.target.as_ref().unwrap()).unwrap(),
+                expected_first
+            );
+            assert_eq!(first.payload.as_deref(), Some(b"one".as_slice()));
+            let second = frame::read(&mut peer).await.unwrap().unwrap();
+            assert_eq!(second.status, Status::Keep);
+            assert_eq!(
+                super::frame::destination(second.target.as_ref().unwrap()).unwrap(),
+                expected_second
+            );
+            assert_eq!(second.payload.as_deref(), Some(b"two".as_slice()));
+            frame::write(
+                &mut peer,
+                Frame::data(
+                    first.id,
+                    b"from-second".to_vec(),
+                    Some(carrier::target(&expected_second, true)),
+                ),
+            )
+            .await
+            .unwrap();
+            frame::write(&mut peer, Frame::end(first.id, false))
+                .await
+                .unwrap();
+        });
+        let pool = Pool::new(1, 1, kerlico_core::ServiceContext::for_test());
+        let initial = Destination::new("v1.mux.cool", 666).unwrap();
+        let mut assoc = pool
+            .associate_udp(&initial, Some([9; 8]), false, true, async {
+                Ok(Box::new(client) as BoxStream)
+            })
+            .await
+            .unwrap();
+        assoc.sender.send_to(b"one", &first_target).await.unwrap();
+        assoc.sender.send_to(b"two", &second_target).await.unwrap();
+        let (source, payload) = assoc.receiver.recv_from().await.unwrap().unwrap();
+        assert_eq!(source, second_target);
+        assert_eq!(payload, b"from-second");
         peer_task.await.unwrap();
     }
     #[tokio::test]

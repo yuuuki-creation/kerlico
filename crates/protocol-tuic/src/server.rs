@@ -97,9 +97,11 @@ impl Node {
             runtime.clone(),
         )?;
         let mut connections = JoinSet::new();
+        let mut maintenance = tokio::time::interval(std::time::Duration::from_millis(50));
         loop {
             tokio::select! {
                 _=context.cancel.cancelled()=>break,
+                _=maintenance.tick()=>{if context.stream_budget.is_closed()&&connections.is_empty(){break;}},
                 result=connections.join_next(),if !connections.is_empty()=>{runtime.observe(&result);},
                 incoming=endpoint.accept()=>{let Some(incoming)=incoming else{break;};if context.stream_budget.is_closed(){incoming.refuse();continue;}let Ok(lease)=context.stream_budget.try_acquire()else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};
                     let context=context.clone();let access=access.clone();let version=self.version;let credentials=self.users.clone();

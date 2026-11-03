@@ -38,10 +38,14 @@ python3 tools/sudoku_interop/run.py --peer mihomo --kerlico "$FIXED_KERLICO_BIN"
 python3 tools/sudoku_interop/run.py --peer official --kerlico "$FIXED_KERLICO_BIN" --reference "$FIXED_OFFICIAL_BIN" --reference-metadata "$OFFICIAL_PEER_SOURCE_JSON" --suite all --cert "$TEST_CERT" --key "$TEST_KEY" --work "$NEW_OFFICIAL_JOB"
 ```
 
-测试证书只用于合成localhost身份，CA由客户端明确装入，禁止skip-verify。可在worker项目区生成：
+测试证书只用于合成localhost身份，CA由客户端明确装入，禁止skip-verify。`rustls` 拒绝将 `CA:TRUE` 证书直接作为服务端 leaf 证书，需在worker项目区生成独立测试CA与由其签发的 `CA:FALSE` 服务端证书（可合并写入 `$TEST_CERT` 证书链，或通过 `--ca` 显式传入测试CA）：
 
 ```sh
-openssl req -x509 -newkey ed25519 -nodes -days 2 -subj /CN=localhost -addext subjectAltName=DNS:localhost -addext basicConstraints=critical,CA:TRUE -keyout "$TEST_KEY" -out "$TEST_CERT"
+openssl req -x509 -newkey ed25519 -nodes -days 2 -subj /CN=kerlico-test-ca -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign -keyout "$TEST_CA_KEY" -out "$TEST_CA"
+openssl req -newkey ed25519 -nodes -subj /CN=localhost -keyout "$TEST_KEY" -out "$TEST_CSR"
+printf "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1\n" > "$TEST_EXT"
+openssl x509 -req -days 2 -in "$TEST_CSR" -CA "$TEST_CA" -CAkey "$TEST_CA_KEY" -CAcreateserial -extfile "$TEST_EXT" -out "$TEST_LEAF_CERT"
+cat "$TEST_LEAF_CERT" "$TEST_CA" > "$TEST_CERT"
 ```
 
 `--plan-only`仅输出计划，不生成通过记录。`--suite`可独立选择carriers、tables、mux、tls、rekey、credentials、lifecycle，便于按失败维度建立新标签；不以单个基础组合代替全部范围。每标签写入输入二进制摘要、逐组合配置、check/process原始日志、逐负载`results.jsonl`和终态摘要。不覆盖旧日志。失败继续保留，启动失败、入口限制、参考边界、未提供证书分别记录。退出码0只表示没有本次可执行项失败/阻塞；`all_requested_scope_accepted=false`仍表示范围没有全部验收。

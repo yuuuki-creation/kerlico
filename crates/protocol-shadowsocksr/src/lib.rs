@@ -30,7 +30,9 @@ pub(crate) fn address(target: &Destination) -> Address {
 }
 pub(crate) fn destination(target: &Address) -> Result<Destination> {
     match target {
-        Address::SocketAddress(value) => Destination::new(&value.ip().to_string(), value.port()),
+        Address::SocketAddress(value) => {
+            Destination::new(&value.ip().to_canonical().to_string(), value.port())
+        }
         Address::DomainNameAddress(name, port) => Destination::new(name, *port),
     }
 }

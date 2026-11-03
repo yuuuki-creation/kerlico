@@ -1,6 +1,6 @@
 # VLESS 双端接口
 
-更新日期：2026-11-02（Asia/Shanghai）。本模块采用配置 v2 与全局共享 `Dispatcher`（`TargetPolicy::Remote`），服务端节点成员凭据 `members[].native_credential` 格式为 `{"uuid": "<协议UUID>", "flow": ""}`（`flow` 可为空或 `"xtls-rprx-vision"`）。验证进展见 [VLESS 扩展验证记录](../testing/vless-combinations.md)。
+更新日期：2026-11-04（Asia/Shanghai）。本模块采用配置 v2 与全局共享 `Dispatcher`（`TargetPolicy::Remote`），服务端节点成员凭据 `members[].native_credential` 格式为 `{"uuid": "<协议UUID>", "flow": ""}`（`flow` 可为空或 `"xtls-rprx-vision"`）。验证进展见 [VLESS 扩展验证记录](../testing/vless-combinations.md)。
 
 ## 角色与分层
 
@@ -117,14 +117,14 @@ TLS 使用 `certificate_pem`/`private_key_pem` 或 `certificate_file`/`private_k
 
 **与 Xray 的差异**：
 
-- Xray 的 ID 只按来源计算（`common/xudp/xudp.go`）。这里每个目标一条通道，同来源的第二个目标若共用 ID 会把第一条通道摘下，因此目标也参与计算。线上 ID 不透明，互通不受影响。
+- Xray 的 ID 只按来源计算（`common/xudp/xudp.go`）。这里单目标 `open_udp` 按 `来源‖目标` 计算，多目标 `associate_udp` 按来源计算并由逐包 XUDP 帧携带各目标地址。线上 ID 不透明，互通不受影响。
 - Xray 的表按进程共用（`common/mux/session.go` 的 `XUDPManager`），任何已认证用户都能用相同 ID 接管。这里按节点分表并把用户放进键。
 - Xray 客户端只在缓冲区带逐包目标时写 Global ID（`common/mux/frame.go` 的 `WriteTo`），`tunnel`/`dokodemo-door` 入站不写，其会话不会迁移；`socks` 入站会写。
 
 **限制**：
 
 - 客户端在察觉载体断开后才换载体；静默断开要等到读写错误或空闲超时。
-- VLESS 出站不提供多目标 UDP 关联，SOCKS5 UDP ASSOCIATE 与 TUN 入站不能走 VLESS，迁移只覆盖 `udp-forward`。
+- VLESS 出站提供多目标 UDP 关联（`associate_udp`），`packet_encoding: packetaddr` 时按逐包 IP 地址封装，其余模式按 XUDP 逐包目标封装，支持 SOCKS5 `UDP ASSOCIATE` 与 TUN 入站。
 
 复验命令为 `tools/interop_vless_matrix.py --xudp-migration`（kerlico 客户端到 Xray）与 `tools/interop_vless_server.py --xudp-migration`（Xray 客户端到 kerlico 节点，加 `--control-server` 时服务端换成 Xray 作为对照）。两者用可切断的 TCP 中继模拟载体中断，并用普通 UDP 对照确认端口确实会变。
 

@@ -36,7 +36,7 @@ impl Frame {
 pub(crate) fn destination(target: &Target) -> Result<Destination> {
     Destination::new(
         &match &target.addr {
-            TargetAddr::Ip(ip) => ip.to_string(),
+            TargetAddr::Ip(ip) => ip.to_canonical().to_string(),
             TargetAddr::Domain(name) => name.clone(),
         },
         target.port,

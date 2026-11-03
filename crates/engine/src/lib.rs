@@ -296,7 +296,10 @@ impl Engine {
                     HistoryOwner::start(
                         spec,
                         egress.telemetry(),
-                        Instant::now() + limits.connect_timeout(),
+                        Instant::now()
+                            + limits
+                                .connect_timeout()
+                                .max(std::time::Duration::from_secs(5)),
                     )
                     .await?,
                 );

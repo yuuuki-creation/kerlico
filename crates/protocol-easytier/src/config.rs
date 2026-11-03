@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use url::Url;
 
 /// 上游虚拟网卡在开启加密时从默认 1380 再减 20，这里取同一内层 MTU。
-pub(crate) const TUNNEL_MTU: usize = 1360;
+pub(crate) const TUNNEL_MTU: usize = 1200;
 const MAX_PEERS: usize = 16;
 
 #[derive(Deserialize)]

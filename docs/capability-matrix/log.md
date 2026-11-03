@@ -27,8 +27,8 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `access` | 访问日志路径 |  |  | 有 | 部分 | 未测 | 取值：``、`none`、`文件路径`<br>约束：空输出 stdout；none 关闭 |
-| `dns-log` | DNS 查询日志 |  |  | 有 | 部分 | 未测 |  |
-| `error` | 错误日志路径 |  |  | 有 | 部分 | 未测 | 取值：``、`none`、`文件路径`<br>约束：空输出 stdout；none 关闭 |
+| `access` | 访问日志路径 |  |  | 有 | 部分 | 通过 | 取值：``、`none`、`文件路径`<br>约束：空输出 stdout；none 关闭 |
+| `dns-log` | DNS 查询日志 |  |  | 有 | 部分 | 通过 |  |
+| `error` | 错误日志路径 |  |  | 有 | 部分 | 通过 | 取值：``、`none`、`文件路径`<br>约束：空输出 stdout；none 关闭 |
 | `loglevel` | 错误日志级别，默认 warning |  |  | 有 | 未实现 | 未测 | 取值：`debug`、`error`、`info`、`none`、`warning` |
-| `mask-address` | IP 遮罩，默认不启用 |  |  | 有 | 部分 | 未测 | 取值：`/16+/32`、`full`、`half`、`quarter`<br>约束：/32、/128 不遮罩；/0 全遮<br>约束：自定义前 IPv4 后 IPv6，IPv4 须被 8 整除 |
+| `mask-address` | IP 遮罩，默认不启用 |  |  | 有 | 部分 | 通过 | 取值：`/16+/32`、`full`、`half`、`quarter`<br>约束：/32、/128 不遮罩；/0 全遮<br>约束：自定义前 IPv4 后 IPv6，IPv4 须被 8 整除 |

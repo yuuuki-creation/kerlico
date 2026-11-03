@@ -37,9 +37,11 @@ pub(crate) async fn serve(
         Arc::new(NodeRuntime(context.tasks.clone())),
     )?;
     let mut connections = JoinSet::new();
+    let mut maintenance = tokio::time::interval(std::time::Duration::from_millis(50));
     loop {
         tokio::select! {
             _=context.cancel.cancelled()=>break,
+            _=maintenance.tick()=>{if context.stream_budget.is_closed()&&connections.is_empty(){break;}},
             result=connections.join_next(),if !connections.is_empty()=>{if result.is_some_and(|r|r.is_err()){context.events.record(NodeEvent::Failed);}},
             incoming=endpoint.accept()=>{
                 let Some(incoming)=incoming else{break};let Ok(lease)=context.stream_budget.try_acquire() else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};

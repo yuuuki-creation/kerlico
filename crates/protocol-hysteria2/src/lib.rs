@@ -20,7 +20,7 @@ fn invalid() -> Error {
 }
 fn target(text: &str) -> Result<Destination> {
     if let Ok(address) = text.parse::<std::net::SocketAddr>() {
-        return Destination::new(&address.ip().to_string(), address.port());
+        return Destination::new(&address.ip().to_canonical().to_string(), address.port());
     }
     let (host, port) = text.rsplit_once(':').ok_or_else(invalid)?;
     Destination::new(host, port.parse().map_err(|_| invalid())?)

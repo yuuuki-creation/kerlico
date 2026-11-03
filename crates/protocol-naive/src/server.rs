@@ -430,8 +430,9 @@ impl InboundProtocol for Node {
             let endpoint =
                 quinn::Endpoint::new(endpoint_config, Some(server), standard, runtime.clone())?;
             let mut tasks = JoinSet::new();
+            let mut maintenance = tokio::time::interval(std::time::Duration::from_millis(50));
             loop {
-                tokio::select! {biased;_=context.cancel.cancelled()=>break,joined=tasks.join_next(),if !tasks.is_empty()=>{runtime.observe(&joined);if joined.is_some_and(|r|r.is_err()){context.events.record(NodeEvent::Failed);}},incoming=endpoint.accept()=>{
+                tokio::select! {biased;_=context.cancel.cancelled()=>break,_=maintenance.tick()=>{if context.stream_budget.is_closed()&&tasks.is_empty(){break;}},joined=tasks.join_next(),if !tasks.is_empty()=>{runtime.observe(&joined);if joined.is_some_and(|r|r.is_err()){context.events.record(NodeEvent::Failed);}},incoming=endpoint.accept()=>{
                     let Some(incoming)=incoming else{break};let lease=match context.stream_budget.try_acquire(){Ok(lease)=>lease,Err(_)=>{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;}};
                     let node=self.clone_owned();let access=access.clone();let context=context.clone();let owner=crate::runtime::BridgeOwner::Node(runtime.clone());crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move {let _lease=lease;context.events.record(NodeEvent::Accepted);let connection=ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone()).run(async {incoming.await.map_err(|_|config::malformed())}).await;
                         match connection {Ok(connection)=>{let result=node.h3_connection(owner,connection,access,context.clone()).await;context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});},Err(_)=>context.events.record(NodeEvent::Failed)}

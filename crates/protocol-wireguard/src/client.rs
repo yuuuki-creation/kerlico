@@ -249,6 +249,20 @@ pub(crate) async fn send(
     Ok(())
 }
 
+async fn send_or_drop(
+    socket: &UdpSocket,
+    endpoint: SocketAddr,
+    packet: &[u8],
+    cancel: &kerlico_core::CancellationToken,
+    carrier: &Carrier,
+) -> Result<()> {
+    match send(socket, endpoint, packet, cancel, carrier).await {
+        Ok(()) => Ok(()),
+        Err(Error::Cancelled) => Err(Error::Cancelled),
+        Err(_) => Ok(()),
+    }
+}
+
 pub(crate) async fn run(
     socket: UdpSocket,
     prepared: Prepared,
@@ -273,7 +287,7 @@ pub(crate) async fn run(
                 fragments.expire(Instant::now());
                 if let Some(packet) = crypto.tick()
                     && let Some(endpoint) = crypto.endpoint
-                { send(&socket, endpoint, &packet, &stack.cancel, &carrier).await?; }
+                { send_or_drop(&socket, endpoint, &packet, &stack.cancel, &carrier).await?; }
             }
             result = socket.recv_from(&mut receive) => {
                 let (count, source) = match result {
@@ -302,7 +316,7 @@ pub(crate) async fn run(
             && let Some(packet) = crypto.initiate()
             && let Some(endpoint) = crypto.endpoint
         {
-            send(&socket, endpoint, &packet, &stack.cancel, &carrier).await?;
+            send_or_drop(&socket, endpoint, &packet, &stack.cancel, &carrier).await?;
         }
         if crypto.ready() {
             for packet in stack.drain(64)? {
@@ -313,7 +327,7 @@ pub(crate) async fn run(
                 if let Some(wire) = crypto.encrypt(&packet)?
                     && let Some(endpoint) = crypto.endpoint
                 {
-                    send(&socket, endpoint, &wire, &stack.cancel, &carrier).await?;
+                    send_or_drop(&socket, endpoint, &wire, &stack.cancel, &carrier).await?;
                 }
             }
             if stack.has_output() {

@@ -92,7 +92,7 @@
 | `xray-buf-readv` | 环境变量 XRAY_BUF_READV：缓冲 readv 开关 |  |  | 有 | 不适用 | 未测 | 约束：文档只列名，含义来自源码常量名（source:common/platform/platform.go） |
 | `xray-buf-splice` | 环境变量 XRAY_BUF_SPLICE：Freedom splice 开关 |  |  | 有 | 不适用 | 未测 | 约束：文档只列名，含义来自源码常量名（source:common/platform/platform.go） |
 | `xray-cone-disabled` | 环境变量 XRAY_CONE_DISABLED：关闭 Cone NAT 行为 |  |  | 有 | 未实现 | 未测 | 约束：文档只列名，含义来自源码常量名（source:common/platform/platform.go） |
-| `xray-json-strict` | 启用标准 JSON 解析器，默认 false |  |  | 有 | 已实现 | 未测 | 约束：写入 env 块无效 |
+| `xray-json-strict` | 启用标准 JSON 解析器，默认 false |  |  | 有 | 已实现 | 通过 | 约束：写入 env 块无效 |
 | `xray-location-asset` | geoip.dat/geosite.dat 目录 |  |  | 有 | 未实现 | 未测 | 取值：`./`、`/usr/local/share/xray`、`/usr/share/xray`<br>约束：未指定时按取值顺序查找 |
 | `xray-location-cert` | 环境变量 XRAY_LOCATION_CERT：证书路径 |  |  | 有 | 未实现 | 未测 | 约束：文档只列名，含义来自源码常量名（source:common/platform/platform.go） |
 | `xray-location-confdir` | 多配置目录，内部 .json 按文件名读取 |  |  | 有 | 未实现 | 未测 | 约束：优先级低于 -confdir<br>约束：写入 env 块无效 |
@@ -121,7 +121,7 @@
 | `array-shorthand` | 只有一项时 JSON 数组的 [] 可省略 |  | 有 |  | 未实现 | 未测 | 约束：适用于文档标注该说明的字段 |
 | `duration` | 时长字段用 Go Duration 格式 |  | 有 |  | 未实现 | 未测 | 取值：`h`、`m`、`ms`、`ns`、`s`、`us`<br>约束：DNS optimistic、cache rdrc 等示例也用 d 单位，如 3d、7d |
 | `extended-json` | 读取时用扩展 JSON 解析，接受注释和尾逗号 |  | 有 |  | 未实现 | 未测 | 约束：UnmarshalExtendedContext；具体语法以 sing/common/json 为准，需实测 |
-| `json` | YAML 为 JSON 超集，可写多行、单行或全 JSON | 有 | 有 | 有 | 已实现 | 未测 | 取值：`JSON`、`json`<br>约束：文档只写 JSON，未提供 YAML |
+| `json` | YAML 为 JSON 超集，可写多行、单行或全 JSON | 有 | 有 | 有 | 已实现 | 通过 | 取值：`JSON`、`json`<br>约束：文档只写 JSON，未提供 YAML |
 | `jsonc` | JSON 内允许注释：默认自定义解析器会剔除注释及其他非标准字符 |  |  | 有 | 未实现 | 未测 | 约束：XRAY_JSON_STRICT=true 时改用标准 JSON 解析器，不再容忍注释 |
 | `merge` | -c 可重复、-C 指定目录，多个配置合并加载 |  | 有 |  | 未实现 | 未测 | 取值：`-C`、`-c`<br>约束：-c stdin 从标准输入读取 |
 | `protobuf` | Protobuf 配置，扩展名 .pb，由 xray convert pb 生成 |  |  | 有 | 未实现 | 未测 | 约束：只读取第一个配置源 |
@@ -184,16 +184,16 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `certificate` | 顶层字段：证书信任配置 |  | 有 |  | 未实现 | 未测 |  |
 | `certificate-providers` | 顶层字段：证书提供者列表 |  | 有 |  | 未实现 | 未测 |  |
-| `dns` | 顶层字段：DNS 配置 |  | 有 |  | 已实现 | 未测 |  |
-| `endpoints` | 顶层字段：端点列表 |  | 有 |  | 部分 | 未测 |  |
+| `dns` | 顶层字段：DNS 配置 |  | 有 |  | 已实现 | 通过 |  |
+| `endpoints` | 顶层字段：端点列表 |  | 有 |  | 部分 | 通过 |  |
 | `experimental` | 顶层字段：实验性功能配置 |  | 有 |  | 未实现 | 未测 |  |
 | `http-clients` | 顶层字段：共享 HTTP 客户端列表 |  | 有 |  | 未实现 | 未测 |  |
-| `inbounds` | 顶层字段：入站列表 |  | 有 |  | 已实现 | 未测 |  |
+| `inbounds` | 顶层字段：入站列表 |  | 有 |  | 已实现 | 通过 |  |
 | `log` | 顶层字段：日志配置 |  | 有 |  | 未实现 | 未测 |  |
 | `network-namespaces` | 顶层字段：网络命名空间列表 |  | 有 |  | 未实现 | 未测 |  |
 | `ntp` | 顶层字段：NTP 配置 |  | 有 |  | 未实现 | 未测 |  |
-| `outbounds` | 顶层字段：出站列表 |  | 有 |  | 已实现 | 未测 |  |
-| `route` | 顶层字段：路由配置 |  | 有 |  | 部分 | 未测 |  |
+| `outbounds` | 顶层字段：出站列表 |  | 有 |  | 已实现 | 通过 |  |
+| `route` | 顶层字段：路由配置 |  | 有 |  | 部分 | 通过 |  |
 | `schema` | 兼容编辑器使用的 Schema URI。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
 | `services` | 顶层字段：服务列表 |  | 有 |  | 未实现 | 未测 |  |
 
@@ -210,27 +210,27 @@
 | `domain-set` | 引入域名集合 | 有 |  |  | 未实现 | 未测 | 取值：`geosite:xxx`、`rule-set:xxx`<br>约束：rule-set 仅 behavior 为 domain、classical |
 | `port-range` | 端口范围，- 范围，/ 或 , 分隔 | 有 |  |  | 未实现 | 未测 | 取值：`114-514/810-1919,65530` |
 | `wildcard-dot` | . 多级但不含本身 | 有 |  |  | 未实现 | 未测 | 取值：`.baidu.com`<br>约束：只能用于域名前缀 |
-| `wildcard-plus` | + 类似 DOMAIN-SUFFIX，多级且含本身 | 有 |  |  | 部分 | 未测 | 取值：`+.baidu.com`<br>约束：只能用于域名前缀 |
+| `wildcard-plus` | + 类似 DOMAIN-SUFFIX，多级且含本身 | 有 |  |  | 部分 | 通过 | 取值：`+.baidu.com`<br>约束：只能用于域名前缀 |
 | `wildcard-star` | * 一次匹配一级；只匹配无 . 的主机名 | 有 |  |  | 未实现 | 未测 | 取值：`*`、`*.baidu.com`<br>约束：使用通配符应加引号 |
 
 ## top
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `api` | 配置文件顶层字段：gRPC API 配置 |  |  | 有 | 部分 | 未测 |  |
+| `api` | 配置文件顶层字段：gRPC API 配置 |  |  | 有 | 部分 | 通过 |  |
 | `burst-observatory` | 配置文件顶层字段：突发连接观测 |  |  | 有 | 未实现 | 未测 |  |
-| `dns` | 配置文件顶层字段：内置 DNS 配置 |  |  | 有 | 已实现 | 未测 |  |
+| `dns` | 配置文件顶层字段：内置 DNS 配置 |  |  | 有 | 已实现 | 通过 |  |
 | `env` | 配置文件顶层字段：环境变量配置块 |  |  | 有 | 未实现 | 未测 |  |
 | `fakedns` | 配置文件顶层字段：FakeDNS，对象或数组 |  |  | 有 | 未实现 | 未测 | 约束：源码 JSON 键为 fakeDns，Go JSON 解析大小写不敏感，文档写法 fakedns 可用（source:infra/conf/xray.go） |
 | `geodata` | 配置文件顶层字段：地理数据文件定时更新与热重载 |  |  | 有 | 未实现 | 未测 |  |
-| `inbounds` | 配置文件顶层字段：入站配置数组 |  |  | 有 | 已实现 | 未测 |  |
-| `log` | 配置文件顶层字段：日志配置 |  |  | 有 | 部分 | 未测 |  |
-| `metrics` | 配置文件顶层字段：metrics 导出配置 |  |  | 有 | 部分 | 未测 |  |
+| `inbounds` | 配置文件顶层字段：入站配置数组 |  |  | 有 | 已实现 | 通过 |  |
+| `log` | 配置文件顶层字段：日志配置 |  |  | 有 | 部分 | 通过 |  |
+| `metrics` | 配置文件顶层字段：metrics 导出配置 |  |  | 有 | 部分 | 通过 |  |
 | `observatory` | 配置文件顶层字段：后台连接观测 |  |  | 有 | 未实现 | 未测 |  |
-| `outbounds` | 配置文件顶层字段：出站配置数组 |  |  | 有 | 已实现 | 未测 |  |
-| `policy` | 配置文件顶层字段：本地策略配置 |  |  | 有 | 部分 | 未测 |  |
-| `routing` | 配置文件顶层字段：路由配置 |  |  | 有 | 部分 | 未测 |  |
-| `stats` | 配置文件顶层字段：统计开关 |  |  | 有 | 部分 | 未测 |  |
+| `outbounds` | 配置文件顶层字段：出站配置数组 |  |  | 有 | 已实现 | 通过 |  |
+| `policy` | 配置文件顶层字段：本地策略配置 |  |  | 有 | 部分 | 通过 |  |
+| `routing` | 配置文件顶层字段：路由配置 |  |  | 有 | 部分 | 通过 |  |
+| `stats` | 配置文件顶层字段：统计开关 |  |  | 有 | 部分 | 通过 |  |
 | `transport` | 全局传输配置 |  |  | 已移除 | 不适用 | 未测 | 约束：存在时启动报错，要求改用 inbounds/outbounds 的 streamSettings |
 | `version` | 限制配置可运行的 Xray 版本 |  |  | 有 | 未实现 | 未测 |  |
 

@@ -47,8 +47,8 @@
 | `optimistic-timeout` | 过期缓存条目可被乐观提供的最长时间。 |  | 有 |  | 未实现 | 未测 | 约束：默认使用 `3d`。 |
 | `reverse-mapping` | 在响应 DNS 查询后存储 IP 地址的反向映射以为路由目的提供域名。 |  | 有 |  | 未实现 | 未测 |  |
 | `rules` | 规则列表 |  | 有 |  | 未实现 | 未测 |  |
-| `servers` | DNS 服务器列表 |  | 有 |  | 部分 | 未测 |  |
-| `strategy` | 默认解析域名策略。 |  | 有 |  | 部分 | 未测 | 取值：`ipv4_only`、`ipv6_only`、`prefer_ipv4`、`prefer_ipv6` |
+| `servers` | DNS 服务器列表 |  | 有 |  | 部分 | 通过 |  |
+| `strategy` | 默认解析域名策略。 |  | 有 |  | 部分 | 通过 | 取值：`ipv4_only`、`ipv6_only`、`prefer_ipv4`、`prefer_ipv6` |
 | `timeout` | 每次 DNS 查询的默认超时时间。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `10s`。 |
 
 ## dns
@@ -60,14 +60,14 @@
 | `disable-fallback` | 禁用 fallback，默认 false |  |  | 有 | 未实现 | 未测 |  |
 | `disable-fallback-if-match` | 命中优先列表时禁用 fallback |  |  | 有 | 未实现 | 未测 |  |
 | `enable-parallel-query` | 并行查询：动态分组、组内竞速、组间回退 |  |  | 有 | 未实现 | 未测 | 约束：相邻且 clientIP、skipFallback、queryStrategy、tag、domains、expectedIPs、unexpectedIPs 完全相同为一组 |
-| `hosts` | 静态映射 |  |  | 有 | 部分 | 未测 | 取值：`"a.com":"#3"`、`"a.com":"b.com"`、`"baidu.com":"127.0.0.1"`、`"dns.google":["8.8.8.8","8.8.4.4"]`<br>约束：#数字 请求失败；DNS 出站返回对应 rcode<br>约束：单域名递归，最大深度 5<br>约束：同时有 IP 和域名时只返回 IP<br>约束：多个域名视为失败<br>约束：无前缀默认 full: |
-| `query-strategy` | 查询类型，默认 UseIP |  |  | 有 | 部分 | 未测 | 取值：`UseIP`、`UseIPv4`、`UseIPv6`、`UseSystem`<br>约束：UseSystem 检查默认网关，图形环境实时、命令行一次<br>约束：子项冲突时空响应 |
+| `hosts` | 静态映射 |  |  | 有 | 部分 | 通过 | 取值：`"a.com":"#3"`、`"a.com":"b.com"`、`"baidu.com":"127.0.0.1"`、`"dns.google":["8.8.8.8","8.8.4.4"]`<br>约束：#数字 请求失败；DNS 出站返回对应 rcode<br>约束：单域名递归，最大深度 5<br>约束：同时有 IP 和域名时只返回 IP<br>约束：多个域名视为失败<br>约束：无前缀默认 full: |
+| `query-strategy` | 查询类型，默认 UseIP |  |  | 有 | 部分 | 通过 | 取值：`UseIP`、`UseIPv4`、`UseIPv6`、`UseSystem`<br>约束：UseSystem 检查默认网关，图形环境实时、命令行一次<br>约束：子项冲突时空响应 |
 | `script` | Lua DNS 脚本路径 |  |  | 有 | 未实现 | 未测 | 约束：不能与 disableFallback、disableFallbackIfMatch、enableParallelQuery、server 的 domains、skipFallback、finalQuery 同用（source:infra/conf/dns.go） |
 | `serve-expired-ttl` | 乐观缓存有效期秒，默认 0 永不过期 |  |  | 有 | 未实现 | 未测 |  |
 | `serve-stale` | 乐观缓存，默认 false |  |  | 有 | 未实现 | 未测 |  |
-| `servers` | 服务器列表，字符串或对象 |  |  | 有 | 部分 | 未测 |  |
+| `servers` | 服务器列表，字符串或对象 |  |  | 有 | 部分 | 通过 |  |
 | `tag` | 内置 DNS 查询的 inboundTag |  |  | 有 | 未实现 | 未测 | 约束：localhost、fakedns、TCPL、DOHL、DOQL 除外 |
-| `use-system-hosts` | 附加系统 hosts |  |  | 有 | 部分 | 未测 |  |
+| `use-system-hosts` | 附加系统 hosts |  |  | 有 | 部分 | 通过 |  |
 
 ## fakedns
 
@@ -84,8 +84,8 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `pipeline` | 先 Hosts，再按 domains 列表 1 + fallback 列表 2 依次查询 |  |  | 有 | 部分 | 未测 | 约束：disableFallback 跳过列表 2<br>约束：disableFallbackIfMatch 列表 1 非空时跳过<br>约束：expectedIPs/unexpectedIPs 过滤为空时试下一个<br>约束：finalQuery 截断后续<br>约束：skipFallback 不进列表 2<br>约束：配 script 时交给 Lua |
-| `query-types` | 内置 DNS 只支持 A 和 AAAA，CNAME 重复查询 |  |  | 有 | 已实现 | 未测 | 约束：其他查询不进内置 DNS |
+| `pipeline` | 先 Hosts，再按 domains 列表 1 + fallback 列表 2 依次查询 |  |  | 有 | 部分 | 通过 | 约束：disableFallback 跳过列表 2<br>约束：disableFallbackIfMatch 列表 1 非空时跳过<br>约束：expectedIPs/unexpectedIPs 过滤为空时试下一个<br>约束：finalQuery 截断后续<br>约束：skipFallback 不进列表 2<br>约束：配 script 时交给 Lua |
+| `query-types` | 内置 DNS 只支持 A 和 AAAA，CNAME 重复查询 |  |  | 有 | 已实现 | 通过 | 约束：其他查询不进内置 DNS |
 
 ## global
 
@@ -94,9 +94,9 @@
 | `cache-algorithm` | DNS 缓存算法，默认 lru | 有 |  |  | 未实现 | 未测 | 取值：`arc`、`lru` |
 | `cache-max-size` | DNS 缓存最大容量（文档未写） | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `default-nameserver` | 解析 DNS 服务器域名用的 DNS | 有 |  |  | 未实现 | 未测 | 取值：`纯 IP 上游`<br>约束：必须为 IP，可为加密 DNS |
-| `direct-nameserver` | direct 出口域名解析的 DNS | 有 |  |  | 部分 | 未测 | 取值：`上游列表`<br>约束：不填时遵循 nameserver-policy、nameserver、fallback |
+| `direct-nameserver` | direct 出口域名解析的 DNS | 有 |  |  | 部分 | 通过 | 取值：`上游列表`<br>约束：不填时遵循 nameserver-policy、nameserver、fallback |
 | `direct-nameserver-follow-policy` | direct-nameserver 是否遵循 nameserver-policy，默认否 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true`<br>约束：仅 direct-nameserver 不为空时生效 |
-| `enable` | 启用 DNS 模块，false 用系统 DNS | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true` |
+| `enable` | 启用 DNS 模块，false 用系统 DNS | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `enhanced-mode` | DNS 处理模式，默认 redir-host | 有 |  |  | 未实现 | 未测 | 取值：`fake-ip`、`redir-host` |
 | `fake-ip-filter` | fakeip 过滤，支持域名通配与 rule-set:、geosite: 引入 | 有 |  |  | 未实现 | 未测 | 取值：`geosite:x`、`rule-set:x`、`规则语法`、`通配域名`<br>约束：fake-ip-filter-mode 为 rule 时改用规则写法，目标为 fake-ip 或 real-ip<br>约束：规则模式 RuleSet behavior 须为 domain 或 classical；classical 仅域名类规则生效<br>约束：规则模式支持 GEOSITE、RuleSet、DOMAIN*、MATCH |
 | `fake-ip-filter-mode` | fakeip 过滤模式，默认 blacklist | 有 |  |  | 未实现 | 未测 | 取值：`blacklist`、`rule`、`whitelist` |
@@ -110,18 +110,18 @@
 | `fallback-filter-geosite` | 命中域名只用 fallback | 废弃 |  |  | 不适用 | 未测 | 取值：`geosite 集合`<br>约束：字段已废弃，改用 nameserver-policy |
 | `fallback-filter-ipcidr` | 命中网段的结果视为污染 | 有 |  |  | 未实现 | 未测 | 取值：`CIDR 列表` |
 | `fallback-lazy-query` | 默认 false；true 时先判断 nameserver 结果再发起 fallback | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `ipv6` | 是否解析 IPv6，false 时 AAAA 返回空 | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `ipv6` | 是否解析 IPv6，false 时 AAAA 返回空 | 有 |  |  | 部分 | 通过 | 取值：`false`、`true` |
 | `ipv6-timeout` | 内部双栈并发时等待 AAAA 的时间，单位 ms，默认 100 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `listen` | DNS 服务监听，支持 udp、tcp | 有 |  |  | 未实现 | 未测 | 取值：`host:port` |
 | `listen-routing-mark` | DNS 监听 socket 的 routing-mark（文档未写） | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `nameserver` | 默认解析服务器 | 有 |  |  | 部分 | 未测 | 取值：`上游列表` |
+| `nameserver` | 默认解析服务器 | 有 |  |  | 部分 | 通过 | 取值：`上游列表` |
 | `nameserver-policy` | 指定域名查询的解析服务器，优先于 nameserver、fallback | 有 |  |  | 未实现 | 未测 | 取值：`geosite:`、`rule-set:`、`域名通配`<br>约束：值支持字符串或数组 |
 | `prefer-h3` | DoH 优先 HTTP/3 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true`<br>约束：强烈不建议与 respect-rules 一起用 |
 | `proxy-server-nameserver` | 仅解析代理节点域名的 DNS | 有 |  |  | 未实现 | 未测 | 取值：`上游列表`<br>约束：不填时遵循 nameserver-policy、nameserver、fallback |
 | `proxy-server-nameserver-policy` | 节点域名解析策略，格式同 nameserver-policy | 有 |  |  | 未实现 | 未测 | 取值：`映射`<br>约束：仅 proxy-server-nameserver 不为空时生效 |
 | `respect-rules` | DNS 连接遵守路由规则 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true`<br>约束：强烈不建议和 prefer-h3 一起使用<br>约束：需配置 proxy-server-nameserver |
-| `use-hosts` | 回应配置中的 hosts，默认 true | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
-| `use-system-hosts` | 查询系统 hosts，默认 true | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `use-hosts` | 回应配置中的 hosts，默认 true | 有 |  |  | 部分 | 通过 | 取值：`false`、`true` |
+| `use-system-hosts` | 查询系统 hosts，默认 true | 有 |  |  | 部分 | 通过 | 取值：`false`、`true` |
 
 ## hijack
 
@@ -134,8 +134,8 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `lan` | 值 lan 加入本机所有网卡地址 | 有 |  |  | 未实现 | 未测 | 取值：`lan` |
-| `mapping` | hosts 映射，键支持域名通配，值支持字符串或数组 | 有 |  |  | 部分 | 未测 | 取值：`IP`、`IP 数组`、`域名重定向`<br>约束：域名重定向不支持数组<br>约束：完整域名优先于通配：foo.example.com > *.example.com > .example.com |
-| `predefined-format` | hosts 服务器 predefined 取单 IP 字符串或 IP 列表；path 默认系统 hosts 文件 |  | 有 |  | 部分 | 未测 | 约束：/etc/hosts 为默认路径，Windows 用 C:\Windows\System32\Drivers\etc\hosts |
+| `mapping` | hosts 映射，键支持域名通配，值支持字符串或数组 | 有 |  |  | 部分 | 通过 | 取值：`IP`、`IP 数组`、`域名重定向`<br>约束：域名重定向不支持数组<br>约束：完整域名优先于通配：foo.example.com > *.example.com > .example.com |
+| `predefined-format` | hosts 服务器 predefined 取单 IP 字符串或 IP 列表；path 默认系统 hosts 文件 |  | 有 |  | 部分 | 通过 | 约束：/etc/hosts 为默认路径，Windows 用 C:\Windows\System32\Drivers\etc\hosts |
 
 ## legacy
 
@@ -170,13 +170,13 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | DNS 查询策略、缓存、ECS、TTL 和超时组合 |  | 有 |  | 部分 | 未测 | strategy：`ipv4_only`、`ipv6_only`、`prefer_ipv4`、`prefer_ipv6`<br>cache：`default`、`disable_cache`、`disable_expire`、`optimistic`<br>cache_scope：`independent_cache(deprecated)`、`shared`<br>ecs：`dns.client_subnet`、`off`、`remove_client_subnet`、`rule client_subnet`<br>ttl：`rewrite_ttl`、`upstream`<br>timeout：`action timeout`、`default-10s`、`dns.timeout`<br>reverse_mapping：`off`、`on`<br>约束：cache_capacity 小于 1024 被忽略<br>约束：disable_cache、disable_expire 与 optimistic 冲突<br>约束：dns.timeout 可被规则 timeout 或 domain_resolver.timeout 覆盖<br>约束：optimistic 为 true 时超时默认 3d<br>约束：rule.client_subnet 覆盖 dns.client_subnet；remove_client_subnet 与 client_subnet 冲突 |
+| `combo` | DNS 查询策略、缓存、ECS、TTL 和超时组合 |  | 有 |  | 部分 | 通过 | strategy：`ipv4_only`、`ipv6_only`、`prefer_ipv4`、`prefer_ipv6`<br>cache：`default`、`disable_cache`、`disable_expire`、`optimistic`<br>cache_scope：`independent_cache(deprecated)`、`shared`<br>ecs：`dns.client_subnet`、`off`、`remove_client_subnet`、`rule client_subnet`<br>ttl：`rewrite_ttl`、`upstream`<br>timeout：`action timeout`、`default-10s`、`dns.timeout`<br>reverse_mapping：`off`、`on`<br>约束：cache_capacity 小于 1024 被忽略<br>约束：disable_cache、disable_expire 与 optimistic 冲突<br>约束：dns.timeout 可被规则 timeout 或 domain_resolver.timeout 覆盖<br>约束：optimistic 为 true 时超时默认 3d<br>约束：rule.client_subnet 覆盖 dns.client_subnet；remove_client_subnet 与 client_subnet 冲突 |
 
 ## resolve
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `flow` | 解析流程：规则判定域名或 IP，经 nameserver-policy、nameserver 与 fallback 并发、fallback-filter、direct-nameserver 重新解析 | 有 |  |  | 部分 | 未测 | 约束：direct-nameserver 重新解析自 v1.19.10 也用于 UDP；Tun 入站 UDP 仅限 Fakeip 模式 |
+| `flow` | 解析流程：规则判定域名或 IP，经 nameserver-policy、nameserver 与 fallback 并发、fallback-filter、direct-nameserver 重新解析 | 有 |  |  | 部分 | 通过 | 约束：direct-nameserver 重新解析自 v1.19.10 也用于 UDP；Tun 入站 UDP 仅限 Fakeip 模式 |
 
 ## rule
 
@@ -252,8 +252,8 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | DNS 上游类型和拨号方式组合 |  | 有 |  | 部分 | 未测 | type：`dhcp`、`fakeip`、`h3`、`hosts`、`https`、`local`、`mdns`、`openconnect`、`openvpn`、`quic`、`resolved`、`tailscale`、`tcp`、`tls`、`udp`<br>dial：`bind_interface`、`detour`、`direct-default`、`domain_resolver`<br>tls_config：`h3`、`https`、`quic`、`tls`<br>server_name_kind：`domain`、`ip`<br>约束：dhcp 需要 with_dhcp；quic、h3 需要 with_quic<br>约束：fakeip 配 inet4_range、inet6_range；缓存见 store_fakeip<br>约束：server 用域名时必须配 domain_resolver<br>约束：tailscale、openconnect、openvpn 的 endpoint 必填，resolved 的 service 必填<br>约束：新格式默认走空 direct 拨号，不再默认走默认出站 |
-| `address` | 服务器地址，形式同 upstream |  |  | 有 | 部分 | 未测 |  |
+| `combo` | DNS 上游类型和拨号方式组合 |  | 有 |  | 部分 | 通过 | type：`dhcp`、`fakeip`、`h3`、`hosts`、`https`、`local`、`mdns`、`openconnect`、`openvpn`、`quic`、`resolved`、`tailscale`、`tcp`、`tls`、`udp`<br>dial：`bind_interface`、`detour`、`direct-default`、`domain_resolver`<br>tls_config：`h3`、`https`、`quic`、`tls`<br>server_name_kind：`domain`、`ip`<br>约束：dhcp 需要 with_dhcp；quic、h3 需要 with_quic<br>约束：fakeip 配 inet4_range、inet6_range；缓存见 store_fakeip<br>约束：server 用域名时必须配 domain_resolver<br>约束：tailscale、openconnect、openvpn 的 endpoint 必填，resolved 的 service 必填<br>约束：新格式默认走空 direct 拨号，不再默认走默认出站 |
+| `address` | 服务器地址，形式同 upstream |  |  | 有 | 部分 | 通过 |  |
 | `client-ip` | 覆盖全局同名配置 |  |  | 有 | 未实现 | 未测 |  |
 | `disable-cache` | 覆盖全局同名配置 |  |  | 有 | 未实现 | 未测 |  |
 | `domains` | 优先用此服务器的域名 |  |  | 有 | 未实现 | 未测 | 约束：格式同路由 domain |
@@ -261,7 +261,7 @@
 | `expected-ips` | 校验返回 IP，只保留列表内 |  |  | 有 | 未实现 | 未测 | 取值：`*`、`geoip:cn`<br>约束：含 * 时过滤后为空仍返回原 IP |
 | `final-query` | 最终尝试，不触发 fallback |  |  | 有 | 未实现 | 未测 |  |
 | `id` | 服务器标识，供 Lua serverObj.ID |  |  | 有 | 未实现 | 未测 |  |
-| `port` | 端口，默认 53 |  |  | 有 | 已实现 | 未测 | 约束：DoH、DoHL、DoQL 无效 |
+| `port` | 端口，默认 53 |  |  | 有 | 已实现 | 通过 | 约束：DoH、DoHL、DoQL 无效 |
 | `query-strategy` | 子项策略，继承全局 |  |  | 有 | 未实现 | 未测 | 取值：`UseIP`、`UseIPv4`、`UseIPv6`、`UseSystem`<br>约束：受全局约束 |
 | `serve-expired-ttl` | 覆盖全局同名配置 |  |  | 有 | 未实现 | 未测 |  |
 | `serve-stale` | 覆盖全局同名配置 |  |  | 有 | 未实现 | 未测 |  |
@@ -275,7 +275,7 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `tag` | DNS 服务器的标签。 |  | 有 |  | 未实现 | 未测 |  |
-| `type` | DNS 服务器的类型。 |  | 有 |  | 部分 | 未测 | 取值：`dhcp`、`fakeip`、`h3`、`hosts`、`https`、`local`、`mdns`、`openconnect`、`openvpn`、`quic`、`resolved`、`tailscale`、`tcp`、`tls`、`udp` |
+| `type` | DNS 服务器的类型。 |  | 有 |  | 部分 | 通过 | 取值：`dhcp`、`fakeip`、`h3`、`hosts`、`https`、`local`、`mdns`、`openconnect`、`openvpn`、`quic`、`resolved`、`tailscale`、`tcp`、`tls`、`udp` |
 
 ## server-dhcp
 
@@ -296,9 +296,9 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | hosts 文件和预定义记录 上游 |  | 有 |  | 部分 | 未测 | 取值：`hosts` |
+| `protocol` | hosts 文件和预定义记录 上游 |  | 有 |  | 部分 | 通过 | 取值：`hosts` |
 | `path` | hosts 文件路径列表。 |  | 有 |  | 未实现 | 未测 | 约束：在 Windows 上默认使用 `C:\Windows\System32\Drivers\etc\hosts`。<br>约束：自 sing-box 1.12.0 起<br>约束：默认使用 `/etc/hosts`。 |
-| `predefined` | 预定义的 hosts。 |  | 有 |  | 部分 | 未测 | 约束：自 sing-box 1.12.0 起 |
+| `predefined` | 预定义的 hosts。 |  | 有 |  | 部分 | 通过 | 约束：自 sing-box 1.12.0 起 |
 
 ## server-http3
 
@@ -339,7 +339,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | 系统 DNS 上游 |  | 有 |  | 部分 | 未测 | 取值：`local` |
+| `protocol` | 系统 DNS 上游 |  | 有 |  | 部分 | 通过 | 取值：`local` |
 | `neighbor-domain` | 用于从邻居解析器而非上游回答 A/AAAA 查询的域后缀列表。 |  | 有 |  | 未实现 | 未测 | 约束：仅匹配后缀之前的主机名部分不包含点的查询；<br>约束：每一项必须以 `.` 开头。<br>约束：自 sing-box 1.14.0 起 |
 | `prefer-go` | 启用后，`local` DNS 服务器将尽可能通过拨号自身来解析 DNS。 |  | 有 |  | 未实现 | 未测 | 约束：在运行 Android 10 以下版本的设备上，此接口只能解析 A/AAAA 请求。<br>约束：自 sing-box 1.13.0 起 |
 
@@ -400,26 +400,26 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | DNS over TCP 上游 |  | 有 |  | 已实现 | 未测 | 取值：`tcp` |
-| `server` | DNS 服务器的地址。 |  | 有 |  | 部分 | 未测 | 约束：如果使用域名，还必须设置 `domain_resolver` 来解析 IP 地址。<br>约束：必填<br>约束：自 sing-box 1.12.0 起 |
-| `server-port` | DNS 服务器的端口。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.12.0 起<br>约束：默认使用 `53`。 |
+| `protocol` | DNS over TCP 上游 |  | 有 |  | 已实现 | 通过 | 取值：`tcp` |
+| `server` | DNS 服务器的地址。 |  | 有 |  | 部分 | 通过 | 约束：如果使用域名，还必须设置 `domain_resolver` 来解析 IP 地址。<br>约束：必填<br>约束：自 sing-box 1.12.0 起 |
+| `server-port` | DNS 服务器的端口。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.12.0 起<br>约束：默认使用 `53`。 |
 
 ## server-tls
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | DoT 上游 |  | 有 |  | 已实现 | 未测 | 取值：`tls` |
-| `server` | DNS 服务器的地址。 |  | 有 |  | 部分 | 未测 | 约束：如果使用域名，还必须设置 `domain_resolver` 来解析 IP 地址。<br>约束：必填<br>约束：自 sing-box 1.12.0 起 |
-| `server-port` | DNS 服务器的端口。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.12.0 起<br>约束：默认使用 `853`。 |
-| `tls` | TLS 配置，参阅 TLS。 |  | 有 |  | 部分 | 未测 | 约束：自 sing-box 1.12.0 起 |
+| `protocol` | DoT 上游 |  | 有 |  | 已实现 | 通过 | 取值：`tls` |
+| `server` | DNS 服务器的地址。 |  | 有 |  | 部分 | 通过 | 约束：如果使用域名，还必须设置 `domain_resolver` 来解析 IP 地址。<br>约束：必填<br>约束：自 sing-box 1.12.0 起 |
+| `server-port` | DNS 服务器的端口。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.12.0 起<br>约束：默认使用 `853`。 |
+| `tls` | TLS 配置，参阅 TLS。 |  | 有 |  | 部分 | 通过 | 约束：自 sing-box 1.12.0 起 |
 
 ## server-udp
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | DNS over UDP 上游 |  | 有 |  | 已实现 | 未测 | 取值：`udp` |
-| `server` | DNS 服务器的地址。 |  | 有 |  | 部分 | 未测 | 约束：如果使用域名，还必须设置 `domain_resolver` 来解析 IP 地址。<br>约束：必填<br>约束：自 sing-box 1.12.0 起 |
-| `server-port` | DNS 服务器的端口。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.12.0 起<br>约束：默认使用 `53`。 |
+| `protocol` | DNS over UDP 上游 |  | 有 |  | 已实现 | 通过 | 取值：`udp` |
+| `server` | DNS 服务器的地址。 |  | 有 |  | 部分 | 通过 | 约束：如果使用域名，还必须设置 `domain_resolver` 来解析 IP 地址。<br>约束：必填<br>约束：自 sing-box 1.12.0 起 |
+| `server-port` | DNS 服务器的端口。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.12.0 起<br>约束：默认使用 `53`。 |
 
 ## upstream
 
@@ -429,19 +429,19 @@
 | `doh` | DNS over HTTPS | 有 |  |  | 未实现 | 未测 | 取值：`https://doh.pub/dns-query` |
 | `doh3` | HTTP/3 的 DoH，由 h3 附加参数或 prefer-h3 开启 | 有 |  |  | 未实现 | 未测 | 取值：`https://host/dns-query#h3=true` |
 | `doq` | DNS over QUIC | 有 |  |  | 未实现 | 未测 | 取值：`quic://dns.adguard.com:784` |
-| `dot` | DNS over TLS | 有 |  |  | 已实现 | 未测 | 取值：`tls://1.1.1.1` |
+| `dot` | DNS over TLS | 有 |  |  | 已实现 | 通过 | 取值：`tls://1.1.1.1` |
 | `easytier` | 解析 EasyTier 出站 overlay 的 A/PTR 记录 | 有 |  |  | 未实现 | 未测 | 取值：`et://easytier`<br>约束：建议放在 nameserver-policy |
 | `rcode` | 直接返回指定 rcode | 有 |  |  | 未实现 | 未测 | 取值：`rcode://format_error`、`rcode://name_error`、`rcode://not_implemented`、`rcode://refused`、`rcode://server_failure`、`rcode://success` |
-| `system` | 系统 DNS | 有 |  |  | 部分 | 未测 | 取值：`system`、`system://` |
+| `system` | 系统 DNS | 有 |  |  | 部分 | 通过 | 取值：`system`、`system://` |
 | `tailscale` | 用指定 Tailscale 出站的 DNS 配置查询 | 有 |  |  | 未实现 | 未测 | 取值：`ts://tailscale`<br>约束：source:config/config.go 同时接受 tailscale:// 协议名 |
-| `tcp` | TCP DNS | 有 |  | 有 | 已实现 | 未测 | 取值：`tcp://8.8.8.8`、`tcp://8.8.8.8:53`<br>约束：默认 53 |
-| `udp` | UDP DNS | 有 |  | 有 | 已实现 | 未测 | 取值：`223.5.5.5`、`8.8.8.8`、`8.8.8.8:53`、`udp://223.5.5.5`<br>约束：默认 53 |
-| `combo` | DNS 上游类型与附加参数的维度 | 有 |  | 有 | 部分 | 未测 | scheme：`dhcp`、`et`、`https`、`quic`、`rcode`、`system`、`tcp`、`tls`、`ts`、`udp`<br>section：`default-nameserver`、`direct-nameserver`、`fallback`、`nameserver`、`nameserver-policy`、`proxy-server-nameserver`、`proxy-server-nameserver-policy`<br>param：`#RULES`、`#interface`、`#proxy`、`disable-ipv4`、`disable-ipv6`、`disable-qtype-<int>`、`ecs`、`ecs-override`、`h3`、`name-cert-verify`、`skip-cert-verify`<br>enhanced-mode：`fake-ip`、`redir-host`<br>约束：default-nameserver 必须为 IP<br>约束：dhcp://system 仅限 cmfa<br>约束：et:// 仅解析 overlay A/PTR<br>约束：h3 仅对 DoH<br>约束：respect-rules 需 proxy-server-nameserver<br>upstream：`fakedns`、`h2c`、`h2c+local`、`https`、`https+local`、`localhost`、`quic+local`、`tcp`、`tcp+local`、`udp`<br>route：`local`、`routing`<br>query_strategy：`UseIP`、`UseIPv4`、`UseIPv6`、`UseSystem`<br>fallback：`default`、`disableFallback`、`disableFallbackIfMatch`、`finalQuery`、`parallel`、`skipFallback`<br>filter：`expectedIPs`、`none`、`unexpectedIPs`<br>ecs：`clientIp`、`off`<br>cache：`default`、`disableCache`、`serveStale`<br>约束：+local 不进路由；其他进路由，tag 可匹配 inboundTag<br>约束：FakeDNS 需 sniffing fakedns<br>约束：port 对 DoH、DoHL、DoQL 无效<br>约束：serveStale 受 disableCache 约束<br>约束：全局 queryStrategy 优先，子项冲突得空响应<br>约束：文档未列 DoT、DHCP、远程 quic://<br>约束：非 local 请求跳过 IPIfNonMatch、IPOnDemand 解析 |
+| `tcp` | TCP DNS | 有 |  | 有 | 已实现 | 通过 | 取值：`tcp://8.8.8.8`、`tcp://8.8.8.8:53`<br>约束：默认 53 |
+| `udp` | UDP DNS | 有 |  | 有 | 已实现 | 通过 | 取值：`223.5.5.5`、`8.8.8.8`、`8.8.8.8:53`、`udp://223.5.5.5`<br>约束：默认 53 |
+| `combo` | DNS 上游类型与附加参数的维度 | 有 |  | 有 | 部分 | 通过 | scheme：`dhcp`、`et`、`https`、`quic`、`rcode`、`system`、`tcp`、`tls`、`ts`、`udp`<br>section：`default-nameserver`、`direct-nameserver`、`fallback`、`nameserver`、`nameserver-policy`、`proxy-server-nameserver`、`proxy-server-nameserver-policy`<br>param：`#RULES`、`#interface`、`#proxy`、`disable-ipv4`、`disable-ipv6`、`disable-qtype-<int>`、`ecs`、`ecs-override`、`h3`、`name-cert-verify`、`skip-cert-verify`<br>enhanced-mode：`fake-ip`、`redir-host`<br>约束：default-nameserver 必须为 IP<br>约束：dhcp://system 仅限 cmfa<br>约束：et:// 仅解析 overlay A/PTR<br>约束：h3 仅对 DoH<br>约束：respect-rules 需 proxy-server-nameserver<br>upstream：`fakedns`、`h2c`、`h2c+local`、`https`、`https+local`、`localhost`、`quic+local`、`tcp`、`tcp+local`、`udp`<br>route：`local`、`routing`<br>query_strategy：`UseIP`、`UseIPv4`、`UseIPv6`、`UseSystem`<br>fallback：`default`、`disableFallback`、`disableFallbackIfMatch`、`finalQuery`、`parallel`、`skipFallback`<br>filter：`expectedIPs`、`none`、`unexpectedIPs`<br>ecs：`clientIp`、`off`<br>cache：`default`、`disableCache`、`serveStale`<br>约束：+local 不进路由；其他进路由，tag 可匹配 inboundTag<br>约束：FakeDNS 需 sniffing fakedns<br>约束：port 对 DoH、DoHL、DoQL 无效<br>约束：serveStale 受 disableCache 约束<br>约束：全局 queryStrategy 优先，子项冲突得空响应<br>约束：文档未列 DoT、DHCP、远程 quic://<br>约束：非 local 请求跳过 IPIfNonMatch、IPOnDemand 解析 |
 | `fakedns` | FakeDNS |  |  | 有 | 未实现 | 未测 | 取值：`fakedns` |
 | `h2c` | DoH 明文 h2c |  |  | 有 | 未实现 | 未测 | 取值：`h2c://dns.google/dns-query`<br>约束：需 Freedom+streamSettings TLS 包装 |
 | `h2c-local` | h2c 本地模式，文档未写 |  |  | 有 | 未实现 | 未测 | 取值：`h2c+local://` |
 | `https` | DoH，遵循路由 |  |  | 有 | 未实现 | 未测 | 取值：`https://1.1.1.1/dns-query`、`https://a.b.c.d:8443/my-dns-query`、`https://dns.google/dns-query` |
 | `https-local` | DoH 本地模式 |  |  | 有 | 未实现 | 未测 | 取值：`https+local://dns.google/dns-query` |
-| `localhost` | 本机 DNS |  |  | 有 | 部分 | 未测 | 取值：`localhost`<br>约束：disableCache 和 timeoutMs 对其无效<br>约束：请求不受 Xray 控制 |
+| `localhost` | 本机 DNS |  |  | 有 | 部分 | 通过 | 取值：`localhost`<br>约束：disableCache 和 timeoutMs 对其无效<br>约束：请求不受 Xray 控制 |
 | `quic-local` | DoQ 本地模式 |  |  | 有 | 未实现 | 未测 | 取值：`quic+local://dns.adguard.com`<br>约束：只有 local 形式<br>约束：默认 853 |
-| `tcp-local` | TCP 本地模式，直走 Freedom |  |  | 有 | 已实现 | 未测 | 取值：`tcp+local://8.8.8.8:53`<br>约束：默认 53 |
+| `tcp-local` | TCP 本地模式，直走 Freedom |  |  | 有 | 已实现 | 通过 | 取值：`tcp+local://8.8.8.8:53`<br>约束：默认 53 |

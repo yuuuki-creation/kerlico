@@ -4,7 +4,8 @@ use crate::{UserId, carrier::Carrier, payload};
 use hmac::{Hmac, Mac};
 use kerlico_config::{OutboundPlan, TargetSpec};
 use kerlico_core::{
-    BoxFuture, Capabilities, ConnectContext, DatagramChannel, Destination, Error, Outbound, Result,
+    BoxFuture, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel, Destination,
+    Error, Outbound, Result,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -356,7 +357,7 @@ pub(crate) fn compile(value: &Value) -> Result<OutboundPlan> {
             tcp_eof: false,
             udp: true,
         },
-        false,
+        true,
         kerlico_core::TargetPolicy::Remote,
         move |host| {
             Box::pin(async move {
@@ -441,6 +442,73 @@ impl Outbound for ProfileOutbound {
             tcp_eof: false,
             udp: true,
         }
+    }
+    fn supports_udp_association(&self) -> bool {
+        true
+    }
+    fn associate_udp<'a>(
+        &'a self,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<DatagramAssociation>> {
+        Box::pin(async move {
+            let resources = self.resources(context)?;
+            let target = Destination::new("v1.mux.cool", 666)?;
+            let encoding = if self.encoding == PacketEncoding::Packetaddr {
+                PacketEncoding::Packetaddr
+            } else {
+                PacketEncoding::Xudp
+            };
+            let global_id = xudp_global_id(&resources.xudp_key, context.udp_source(), &target);
+            context
+                .run(async {
+                    if self.mux_udp {
+                        return resources
+                            .mux
+                            .as_ref()
+                            .ok_or(Error::Protocol("Mux 配置不可用"))?
+                            .associate_udp(
+                                &target,
+                                (self.encoding == PacketEncoding::Xudp).then_some(global_id),
+                                self.vision,
+                                self.udp443,
+                                async {
+                                    let carrier = self.carrier.open(context, &self.host).await?;
+                                    payload::open(
+                                        carrier,
+                                        resources.encryption.as_ref(),
+                                        self.user,
+                                        &target,
+                                        self.vision,
+                                        true,
+                                        PacketEncoding::Xudp,
+                                    )
+                                    .await
+                                },
+                            )
+                            .await;
+                    }
+                    let carrier = self.carrier.open(context, &self.host).await?;
+                    let stream = payload::open(
+                        carrier,
+                        resources.encryption.as_ref(),
+                        self.user,
+                        &target,
+                        self.vision,
+                        true,
+                        encoding,
+                    )
+                    .await?;
+                    payload::association(
+                        stream,
+                        &target,
+                        encoding,
+                        global_id,
+                        self.vision,
+                        self.udp443,
+                    )
+                })
+                .await
+        })
     }
     fn connect_tcp<'a>(
         &'a self,

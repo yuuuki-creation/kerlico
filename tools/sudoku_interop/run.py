@@ -37,6 +37,22 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def split_pem_certs(pem_text):
+    blocks = []
+    current = []
+    in_cert = False
+    for line in pem_text.splitlines(keepends=True):
+        if "-----BEGIN CERTIFICATE-----" in line:
+            in_cert = True
+            current = [line]
+        elif in_cert:
+            current.append(line)
+            if "-----END CERTIFICATE-----" in line:
+                blocks.append("".join(current))
+                in_cert = False
+    return blocks
+
+
 def endpoint(host, port):
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
@@ -222,7 +238,7 @@ def kernel_client(case, host, port, tcp_targets, udp_targets, tls, key=KEY):
     if case["mode"] in ("stream", "poll", "auto", "ws"):
         mask.update({"path_root": "sudoku-gate", "http_version": case["http_version"]})
     if case["tls"]:
-        mask.update({"tls": {"server_name": "localhost", "ca_pem": tls["cert"]}, "host": "localhost"})
+        mask.update({"tls": {"server_name": "localhost", "ca_pem": tls["ca"]}, "host": "localhost"})
     options = {"server": {"host": host, "port": port}, "protocol": protocol(case, "synthetic-wrong-sudoku-cli-secret" if case["axis"] == "credentials" else key),
                "http_mask": mask, "multiplex": case["mux"], "max_mux_streams": 32}
     entries, ports = [], {"tcp": [], "udp": []}
@@ -320,7 +336,9 @@ def execute(case, args, directory, emit, tls):
     phase = "setup"
     env = os.environ.copy()
     if tls:
-        env["SSL_CERT_FILE"] = str(Path(args.cert).resolve())
+        ca_path = directory / "ca.pem"
+        ca_path.write_text(tls["ca"])
+        env["SSL_CERT_FILE"] = str(ca_path.resolve())
     host = "::1" if case["node_ipv6"] else "127.0.0.1"
     port, proxy_port = free_port(host), free_port("127.0.0.1")
     first = case["first"]
@@ -567,6 +585,7 @@ def main():
     parser.add_argument("--work", required=True, type=Path)
     parser.add_argument("--cert")
     parser.add_argument("--key")
+    parser.add_argument("--ca")
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--isolated-netns", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -594,7 +613,14 @@ def main():
         meta = json.loads(args.reference_metadata.read_text())
         if meta["commit"] != SOURCE[args.peer]["commit"] or meta["binary_sha256"] != sha(args.reference) or meta["production_source_changes"] != 0:
             raise SystemExit("参考来源、原生源码或二进制摘要不符")
-    tls = {"cert": Path(args.cert).read_text(), "key": Path(args.key).read_text()} if args.cert and args.key else {}
+    if args.cert and args.key:
+        raw_cert = Path(args.cert).read_text()
+        certs = split_pem_certs(raw_cert)
+        leaf_cert = certs[0] if certs else raw_cert
+        ca_cert = Path(args.ca).read_text() if args.ca else (certs[-1] if certs else raw_cert)
+        tls = {"cert": leaf_cert, "key": Path(args.key).read_text(), "ca": ca_cert}
+    else:
+        tls = {}
     args.work.mkdir(parents=True, mode=0o700)
     (args.work / "inputs.json").write_text(json.dumps({"kerlico_sha256": sha(args.kerlico), "peer": args.peer,
         "reference_sha256": sha(args.reference) if args.reference else None, "suite": args.suite,

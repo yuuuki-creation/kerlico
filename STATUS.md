@@ -18,7 +18,7 @@
 | `v1.3.0` | MASQUE、OpenVPN、OpenConnect、Tailscale、ZeroTier、EasyTier；VLESS XUDP 迁移 | 已发布 |
 | `v1.3.1` | 复查修复：UDP 包让节点停止、Tailscale 直连握手、ZeroTier 入网、`require_remote_eof` | 已发布 |
 | `v1.3.2` | 实机测试修复：Shadowsocks、SS2022、Sudoku 丢数据，Mieru 断流，WireGuard 丢包死锁，TrustTunnel H3 | 已发布 |
-| `M0`（`v1.3.3`） | 能力总表 1,105 项已实现/部分实现实测回填；QUIC 空载关闭、VLESS 出站多目标 UDP、WireGuard 瞬时容错、EasyTier UDP、smoltcp 丢包恢复修复 | 待开始 |
+| `M0`（`v1.3.3`） | 能力总表 1,105 项已实现/部分实现实测回填；QUIC 空载关闭、VLESS 出站多目标 UDP、WireGuard 瞬时容错、EasyTier UDP、smoltcp 丢包恢复修复 | 已完成 |
 | `M1`（`v1.4.0`） | 入站与出站角色对齐：`mixed`、`redirect`、`tproxy` 入站，入站 `fallback` 分流，MASQUE 与 OpenVPN 服务端入站，`vless-reverse`，`dns`/`loopback`/`rematch` 内部出站，SS2022 Relay 与 SS SIP003 插件 | 规划中 |
 | `M2`（`v1.5.0`） | 传输、安全、复用与拨号对齐：`dialer-proxy`/`detour` 链式拨号，`sing-mux`（`h2mux`/`smux`/`yamux`），`UoT` v1/v2，mKCP 与 V2Ray H2/QUIC 传输，Xray `finalmask`，ECH 双端，TLS 分片/伪装，内置 ACME 自动证书 | 规划中 |
 | `M3`（`v1.6.0`） | 流量感知、DNS、路由规则集与 TUN 自动化对齐：TLS/HTTP/QUIC/BT 协议嗅探，Fake-IP 双栈池与持久化还原，DoH/DoQ、乐观缓存、ECS 与 DNS 规则动作，`rule-set`（`srs`/`mrs`/`dat`）与逻辑/进程规则，TUN `auto-route`/`auto-redirect` | 规划中 |
@@ -117,17 +117,9 @@ flowchart TD
 
 ## 已知问题
 
-- **VLESS**：`xhttp-tls-h3-stream-one` 加 Mux 时 UDP 超时，基线同样存在，未定位。出站没有多目标 UDP 关联，不能作为 TUN 或 SOCKS5 UDP 的出站。
 - **SS2022 EIH UDP 测试**：整树门禁中无回包失败过 2 次，单独压测 1000 轮与整树 5 轮都未复现，原因未定位。测试现在带新包序号重发，并断言节点的 `Dropped` 与 `Failed` 为零，重发次数打印到标准错误。
-- **QUIC 节点关闭**：TUIC、ShadowQUIC、VLESS H3、Naive H3 的节点没有连接时也等满一半排空预算才退出，退出码 0。
-- **`kerlico-core`**：`interrupted_node_force_keeps_count_until_actual_socket_join` 全量运行失败过 1 次，单跑 10 次通过，疑似不稳定，未定位。
-- **WireGuard 出站**：定时发送和业务发送失败时隧道服务退出，本地网络短暂不可达会触发。
-- **用户态栈吞吐**：丢包路径上吞吐很低，3% 丢包、60 毫秒 RTT 的全双工回显约 0.05 MiB/s，内核 TCP 为 4.56。原因是 smoltcp 发送端没有 SACK、RTO 下限 1 秒，默认窗口 64 KiB 在高 RTT 下也限速。见[跨机矩阵](docs/testing/cross-host-2026-11-03.md#隧道复测)。
-- **EasyTier udp 载体**：跨机时 1 MiB 也会断流，B 到 A 方向的满长段到不了 kerlico，原因未定位；tcp 载体和同机通过。
 - **MASQUE**：`perf-03` 到 `perf-01` 的转发路径 32 MiB 约 20 分钟后 `eof`，吞吐 0.01 MiB/s，原因未定位。Mesh MTU 1300 低于 QUIC 路径 MTU 下限 1350，属路径限制。
 - **ZeroTier**：伪造流量持续时，首次主动联系我们的成员学习变慢；本节点发起的查询不受影响。
-- **`Engine::bind`**：用 `connect_timeout_ms` 作为统计库初始化期限，设得很小时可能启动失败（推断，未抓到错误内容）。
-- **TUN**：放开来源后，IPv6 链路本地来源发往组播的 UDP（如 mDNS）可能进入出站（读代码推测，未验证）。
 
 ## 已知互通差异
 

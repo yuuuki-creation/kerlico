@@ -41,7 +41,7 @@ impl StackOptions {
     }
     fn checked(&self) -> Result<(Addresses, Vec<Network>)> {
         self.limits.validate()?;
-        if !(1280..=9000).contains(&self.mtu)
+        if !(576..=9000).contains(&self.mtu)
             || self.allowed_ips.is_empty()
             || self.allowed_ips.len() > 256
         {
