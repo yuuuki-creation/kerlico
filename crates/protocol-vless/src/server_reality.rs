@@ -48,6 +48,7 @@ pub(crate) struct Reality {
     identity: CertificateIdentity,
     cover: Destination,
     replays: Arc<Mutex<HashMap<[u8; 32], Instant>>>,
+    _mldsa65_seed: Option<[u8; 32]>,
 }
 impl Reality {
     pub fn new(
@@ -57,6 +58,7 @@ impl Reality {
         short_ids: Vec<String>,
         max_time_diff_ms: u64,
         owner: UserId,
+        mldsa65_seed: Option<String>,
     ) -> Result<Self> {
         if server_names.is_empty()
             || server_names.len() > 32
@@ -66,6 +68,39 @@ impl Reality {
         {
             return Err(Error::Config("REALITY 身份或时间参数超出范围".into()));
         }
+        let mldsa65_seed = if let Some(seed_str) = mldsa65_seed {
+            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+            let trimmed = seed_str.trim();
+            let bytes = if trimmed.len() == 64 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+                trimmed
+                    .as_bytes()
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| {
+                        let s = std::str::from_utf8(c)
+                            .map_err(|_| Error::Config("ML-DSA-65 seed 不合法".into()))?;
+                        u8::from_str_radix(s, 16)
+                            .map_err(|_| Error::Config("ML-DSA-65 seed 不合法".into()))
+                    })
+                    .collect::<Result<Vec<u8>>>()?
+            } else {
+                URL_SAFE_NO_PAD
+                    .decode(trimmed)
+                    .or_else(|_| base64::engine::general_purpose::STANDARD.decode(trimmed))
+                    .map_err(|_| Error::Config("ML-DSA-65 seed 不合法".into()))?
+            };
+            let seed: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| Error::Config("ML-DSA-65 seed 必须为 32 字节".into()))?;
+            let vk = xray_transport::reality::derive_reality_mldsa65_verifying_key(&seed);
+            if vk.len() != 1952 {
+                return Err(Error::Config("ML-DSA-65 密钥派生失败".into()));
+            }
+            Some(seed)
+        } else {
+            None
+        };
         let entry:EntryConfig=serde_json::from_value(serde_json::json!({"role":"entry","listeners":[],"reality":{"cover":cover.to_string(),"privateKey":private_key,"serverNames":server_names,"maxTimeDiffMs":max_time_diff_ms},"users":[{"id":uuid::Uuid::from_bytes(*owner.as_bytes()).to_string(),"shortIds":short_ids}],"routing":{"default":"direct"}})).map_err(|_|Error::Config("REALITY 配置不合法".into()))?;
         Ok(Self {
             auth: RealityAuthenticator::from_entry(&entry)
@@ -74,6 +109,7 @@ impl Reality {
                 .map_err(|_| Error::Protocol("REALITY 证书身份生成失败"))?,
             cover,
             replays: Arc::new(Mutex::new(HashMap::new())),
+            _mldsa65_seed: mldsa65_seed,
         })
     }
     async fn cover(&self) -> Result<BoxStream> {

@@ -20,6 +20,7 @@ pub(crate) struct Node {
     versions: Vec<u32>,
     congestion: String,
     rate: u64,
+    mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
 }
 impl Node {
     pub fn build(input: &NodeBuildContext) -> Result<Self> {
@@ -59,6 +60,10 @@ impl Node {
             128,
             false,
         )?;
+        let mux = kerlico_net::sing_mux::SingMuxInboundConfig::effective_with_padding(
+            options.multiplex.as_ref(),
+            options.mux_option_padding,
+        );
         Ok(Self {
             users: input.credentials(users)?,
             upstream: options.upstream.destination()?,
@@ -67,6 +72,7 @@ impl Node {
             versions,
             congestion: options.congestion_control,
             rate: options.upstream_rate_bps,
+            mux,
         })
     }
     async fn serve(
@@ -144,11 +150,13 @@ impl Node {
                             _=context.cancel.cancelled()=>break,
                             _=gc.tick()=>{endpoint.prune_jls_forwarding();if context.stream_budget.is_closed()&&tasks.is_empty(){break;}},
                             result=tasks.join_next(),if !tasks.is_empty()=>{runtime.observe(&result);},
-                            incoming=endpoint.accept()=>{let Some(incoming)=incoming else{break;};let Ok(lease)=context.stream_budget.try_acquire()else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};let access=access.clone();let mut context=context.clone();let users=self.users.clone();crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move{let _lease=lease;context.events.record(NodeEvent::Accepted);let result=async{let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|Error::Rejected)?;context.peer_addr=Some(connection.remote_address());if connection.is_jls()!=Some(true){connection.close(0u32.into(),b"");return Err(Error::Rejected);}
+                            incoming=endpoint.accept()=>{let Some(incoming)=incoming else{break;};let Ok(lease)=context.stream_budget.try_acquire()else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};let access=access.clone();let mut context=context.clone();let users=self.users.clone();let mux=self.mux.clone();crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move{let _lease=lease;context.events.record(NodeEvent::Accepted);let result=async{let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|Error::Rejected)?;context.peer_addr=Some(connection.remote_address());if connection.is_jls()!=Some(true){connection.close(0u32.into(),b"");return Err(Error::Rejected);}
             let chosen=connection.jls_chosen_user().ok_or(Error::Rejected)?;
             let (slot,_)=users.rows().find(|(_,user)|user.username==chosen).ok_or(Error::Rejected)?;
             let peer=access.authenticated(users.verified(&slot,())?,&context)?.0;
-            Connection::new(connection,None,Some(context.clone()),Some(peer),None).serve().await}.await;context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});}, |_| ())?;}
+            let conn = Connection::new(connection,None,Some(context.clone()),Some(peer),None);
+            conn.set_mux(mux);
+            conn.serve().await}.await;context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});}, |_| ())?;}
                         }
         }
         if runtime

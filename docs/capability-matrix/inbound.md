@@ -206,7 +206,7 @@
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `obfs` | QUIC 混淆，为空禁用 | 有 | 有 |  | 部分 | 通过 | 取值：`salamander`<br>约束：启用混淆与标准 QUIC 不兼容，失去 HTTP/3 伪装 |
 | `obfs-max-packet-size` | hysteria2 入站字段 obfs-max-packet-size（文档页未写，配置结构存在） | 有 | 有 |  | 未实现 | 未测 | 约束：仅限 Gecko。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1200`。 |
 | `obfs-min-packet-size` | hysteria2 入站字段 obfs-min-packet-size（文档页未写，配置结构存在） | 有 | 有 |  | 未实现 | 未测 | 约束：仅限 Gecko。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `512`。 |
@@ -479,7 +479,7 @@
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `quic-versions` | 支持的 QUIC 版本 | 有 |  |  | 已实现 | 通过 | 取值：`v1`、`v2` |
 | `recv-window` | 连接级接收窗口，0 内部默认 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `recv-window-conn` | 流级接收窗口，0 内部默认 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
@@ -540,11 +540,11 @@
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
 | `managed` | 默认为 `false`。 |  | 有 |  | 未实现 | 未测 | 约束：当该入站需要由 SSM API 管理用户时必须启用此字段。 |
 | `method` | 加密方法 |  | 有 | 有 | 部分 | 通过 | 取值：`2022-blake3-aes-128-gcm`、`2022-blake3-aes-256-gcm`、`2022-blake3-chacha20-poly1305`、`aes-128-gcm`、`aes-192-gcm`、`aes-256-gcm`、`chacha20-ietf-poly1305`、`chacha20-poly1305`、`none`、`xchacha20-ietf-poly1305`、`xchacha20-poly1305`<br>约束：必填<br>约束：上层 method 非 SS2022 时可设置且仅支持非 SS2022，上层 password 被忽略<br>约束：上层为 SS2022 时不支持单用户 method |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 未实现 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `network` | 监听的网络协议，`tcp` `udp` 之一。 |  | 有 | 有 | 部分 | 通过 | 取值：`tcp`、`tcp,udp`、`udp`<br>约束：默认所有。<br>约束：tcp 不代表拒绝 UDP 代理请求，UDP 仍可经 XUDP 走 TCP |
 | `password` | 密码 | 有 | 有 | 有 | 已实现 | 通过 | 取值：`2022 methods`、`base64`、`none`、`other methods`、`任意字符串`<br>约束：2022 用 openssl rand --base64 <长度><br>约束：none 无密码<br>约束：必填<br>约束：SS2022 客户端密码写 ServerPassword:UserPassword<br>约束：SS2022 用预共享密钥：128-gcm 16 字节，256-gcm 与 chacha20 32 字节<br>约束：其他方法任意字符串 |
 | `res-tls-dest` | 回落目标 | 有 |  |  | 未实现 | 未测 | 取值：`host:port` |
@@ -704,7 +704,7 @@
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `padding-max` | 最大填充率 | 有 |  |  | 已实现 | 通过 | 取值：`0-100`<br>约束：必须 >= padding-min |
 | `padding-min` | 最小填充率 | 有 |  |  | 已实现 | 通过 | 取值：`0-100` |
 | `path-root` | httpmask.path-root 的兼容写法 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
@@ -772,11 +772,11 @@
 | `jls-config-users-password` | JLS 密码 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `jls-config-users-username` | JLS 用户名 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 未实现 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `password` | 密码，必填 |  |  | 有 | 已实现 | 通过 |  |
 | `private-key` | TLS 私钥，PEM 或路径 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`、`路径`<br>约束：与 certificate 同时填写 |
 | `reality-config-dest` | REALITY 回落目标 | 有 |  |  | 未实现 | 未测 | 取值：`host:port`<br>约束：不可与 certificate、private-key 同时填写 |
@@ -862,7 +862,7 @@
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `private-key` | TLS 私钥，PEM 或路径 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`、`路径`<br>约束：与 certificate 同时填写 |
 | `tls` | TLS 配置, 参阅 TLS。 |  | 有 |  | 部分 | 通过 | 约束：必填 |
 | `token` | TUIC v4 token 列表 | 有 |  |  | 已实现 | 通过 | 取值：`列表` |
@@ -993,11 +993,11 @@
 | `jls-config-users-password` | JLS 密码 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `jls-config-users-username` | JLS 用户名 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 未实现 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `private-key` | TLS 私钥，PEM 或路径 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`、`路径`<br>约束：与 certificate 同时填写 |
 | `reality-config-dest` | REALITY 回落目标 | 有 |  |  | 已实现 | 通过 | 取值：`host:port`<br>约束：不可与 certificate、private-key 同时填写 |
 | `reality-config-limit-fallback-download-after-bytes` | 回落下载传输该字节后开始限速 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
@@ -1125,11 +1125,11 @@
 | `mkcp-config-tti` | 传输时间间隔，毫秒 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mkcp-config-uplink-capacity` | 上行容量，MB/s | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mkcp-config-write-buffer` | 写缓冲，字节 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 未实现 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `private-key` | TLS 私钥，PEM 或路径 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`、`路径`<br>约束：与 certificate 同时填写 |
 | `reality-config-dest` | REALITY 回落目标 | 有 |  |  | 未实现 | 未测 | 取值：`host:port`<br>约束：不可与 certificate、private-key 同时填写 |
 | `reality-config-limit-fallback-download-after-bytes` | 回落下载传输该字节后开始限速 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |

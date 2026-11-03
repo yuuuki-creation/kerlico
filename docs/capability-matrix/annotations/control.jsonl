@@ -271,32 +271,32 @@
 {"key": "cert/dns01-alidns/access-key-secret", "kerlico": "no", "note": "alidns DNS01 提供者的 access_key_secret 字段；建议暂不实现：先做 Cloudflare 这一家 DNS01"}
 {"key": "cert/dns01-alidns/region-id", "kerlico": "no", "note": "alidns DNS01 提供者的 region_id 字段；建议暂不实现：先做 Cloudflare 这一家 DNS01"}
 {"key": "cert/dns01-alidns/security-token", "kerlico": "no", "note": "alidns DNS01 提供者的 security_token 字段；建议暂不实现：先做 Cloudflare 这一家 DNS01"}
-{"key": "cert/dns01-cloudflare/api-token", "kerlico": "no", "note": "cloudflare DNS01 提供者的 api_token 字段；建议实现：没有公网 80、443 时只能走 DNS01，Cloudflare 用户最多"}
+{"key": "cert/dns01-cloudflare/api-token", "kerlico": "yes", "note": "cloudflare DNS01 提供者的 api_token 字段；建议实现：没有公网 80、443 时只能走 DNS01，Cloudflare 用户最多"}
 {"key": "cert/dns01-cloudflare/zone-token", "kerlico": "no", "note": "cloudflare DNS01 提供者的 zone_token 字段；建议暂不实现：api_token 已够用"}
 {"key": "cert/dns01/override-domain", "kerlico": "no", "note": "覆盖 DNS 质询记录使用的域名；建议暂不实现：DNS01 的调优项，默认值够用时不需要"}
 {"key": "cert/dns01/propagation-delay", "kerlico": "no", "note": "创建质询记录后，在开始传播检查前要等待的时间；建议暂不实现：DNS01 的调优项，默认值够用时不需要"}
 {"key": "cert/dns01/propagation-timeout", "kerlico": "no", "note": "等待质询记录传播完成的最长时间；建议暂不实现：DNS01 的调优项，默认值够用时不需要"}
-{"key": "cert/dns01/provider", "kerlico": "no", "note": "DNS 提供商；建议实现：没有公网 80、443 时只能走 DNS01"}
+{"key": "cert/dns01/provider", "kerlico": "yes", "note": "DNS 提供商；建议实现：没有公网 80、443 时只能走 DNS01"}
 {"key": "cert/dns01/resolvers", "kerlico": "no", "note": "进行 DNS 传播检查时优先使用的 DNS 解析器；建议暂不实现：DNS01 的调优项，默认值够用时不需要"}
 {"key": "cert/dns01/ttl", "kerlico": "no", "note": "DNS 质询临时 TXT 记录的 TTL；建议暂不实现：DNS01 的调优项，默认值够用时不需要"}
 {"key": "cert/provider-acme/account-key", "kerlico": "no", "note": "现有 ACME 帐户的 PEM 编码私钥；建议暂不实现：ACME 高级选项，基础签发和续期之后再补"}
-{"key": "cert/provider-acme/alternative-http-port", "kerlico": "no", "note": "用于 ACME HTTP 质询的备用端口；如果非空，将使用此端口而不是 80 来启动 HTTP 质询的侦听器；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
-{"key": "cert/provider-acme/alternative-tls-port", "kerlico": "no", "note": "用于 ACME TLS-ALPN 质询的备用端口； 系统必须将 443 转发到此端口以使质询成功；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
-{"key": "cert/provider-acme/data-directory", "kerlico": "no", "note": "ACME 数据存储目录；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
+{"key": "cert/provider-acme/alternative-http-port", "kerlico": "yes", "note": "用于 ACME HTTP 质询的备用端口；如果非空，将使用此端口而不是 80 来启动 HTTP 质询的侦听器；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
+{"key": "cert/provider-acme/alternative-tls-port", "kerlico": "yes", "note": "用于 ACME TLS-ALPN 质询的备用端口； 系统必须将 443 转发到此端口以使质询成功；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
+{"key": "cert/provider-acme/data-directory", "kerlico": "yes", "note": "ACME 数据存储目录；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
 {"key": "cert/provider-acme/default-server-name", "kerlico": "no", "note": "如果 ClientHello 的 ServerName 字段为空，则选择证书时要使用的服务器名称；建议暂不实现：ACME 高级选项，基础签发和续期之后再补"}
-{"key": "cert/provider-acme/disable-http-challenge", "kerlico": "no", "note": "禁用所有 HTTP 质询；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
-{"key": "cert/provider-acme/disable-tls-alpn-challenge", "kerlico": "no", "note": "禁用所有 TLS-ALPN 质询；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
-{"key": "cert/provider-acme/dns01-challenge", "kerlico": "no", "note": "ACME DNS01 质询字段；建议实现：没有公网 80、443 时只能走 DNS01"}
-{"key": "cert/provider-acme/domain", "kerlico": "no", "note": "域名列表；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
-{"key": "cert/provider-acme/email", "kerlico": "no", "note": "创建或选择现有 ACME 服务器帐户时使用的电子邮件地址；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
+{"key": "cert/provider-acme/disable-http-challenge", "kerlico": "yes", "note": "禁用所有 HTTP 质询；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
+{"key": "cert/provider-acme/disable-tls-alpn-challenge", "kerlico": "yes", "note": "禁用所有 TLS-ALPN 质询；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
+{"key": "cert/provider-acme/dns01-challenge", "kerlico": "yes", "note": "ACME DNS01 质询字段；建议实现：没有公网 80、443 时只能走 DNS01"}
+{"key": "cert/provider-acme/domain", "kerlico": "yes", "note": "域名列表；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
+{"key": "cert/provider-acme/email", "kerlico": "yes", "note": "创建或选择现有 ACME 服务器帐户时使用的电子邮件地址；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
 {"key": "cert/provider-acme/external-account", "kerlico": "no", "note": "EAB（外部帐户绑定）包含将 ACME 帐户绑定或映射到 CA 已知的其他帐户所需的信息；建议暂不实现：ACME 高级选项，基础签发和续期之后再补"}
 {"key": "cert/provider-acme/external-account-key-id", "kerlico": "no", "note": "密钥标识符；建议暂不实现：ACME 高级选项，基础签发和续期之后再补"}
 {"key": "cert/provider-acme/external-account-mac-key", "kerlico": "no", "note": "MAC 密钥；建议暂不实现：ACME 高级选项，基础签发和续期之后再补"}
 {"key": "cert/provider-acme/http-client", "kerlico": "no", "note": "用于所有提供者 HTTP 请求的 HTTP 客户端；建议暂不实现：ACME 高级选项，基础签发和续期之后再补"}
-{"key": "cert/provider-acme/key-type", "kerlico": "no", "note": "为新证书生成的私钥类型；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
+{"key": "cert/provider-acme/key-type", "kerlico": "yes", "note": "为新证书生成的私钥类型；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
 {"key": "cert/provider-acme/profile", "kerlico": "no", "note": "用于证书签发的 ACME profile；建议暂不实现：ACME 高级选项，基础签发和续期之后再补"}
-{"key": "cert/provider-acme/protocol", "kerlico": "no", "note": "ACME 证书提供者；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
-{"key": "cert/provider-acme/provider", "kerlico": "no", "note": "要使用的 ACME CA 提供商；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
+{"key": "cert/provider-acme/protocol", "kerlico": "yes", "note": "ACME 证书提供者；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
+{"key": "cert/provider-acme/provider", "kerlico": "yes", "note": "要使用的 ACME CA 提供商；建议实现：kerlico 入站证书全靠外部工具签发，且更新后要重启；内置 ACME 能让新手一步部署 TLS 节点"}
 {"key": "cert/provider-cloudflare-origin-ca/api-token", "kerlico": "no", "note": "用于创建证书的 Cloudflare API Token；建议暂不实现：只适用 Cloudflare 回源，先做 ACME"}
 {"key": "cert/provider-cloudflare-origin-ca/data-directory", "kerlico": "no", "note": "保存签发证书、私钥和元数据的根目录；建议暂不实现：只适用 Cloudflare 回源，先做 ACME"}
 {"key": "cert/provider-cloudflare-origin-ca/domain", "kerlico": "no", "note": "要写入证书的域名或通配符域名列表；建议暂不实现：只适用 Cloudflare 回源，先做 ACME"}
@@ -305,13 +305,13 @@
 {"key": "cert/provider-cloudflare-origin-ca/protocol", "kerlico": "no", "note": "Cloudflare Origin CA 证书提供者；建议暂不实现：只适用 Cloudflare 回源，先做 ACME"}
 {"key": "cert/provider-cloudflare-origin-ca/request-type", "kerlico": "no", "note": "向 Cloudflare 请求的签名类型；建议暂不实现：只适用 Cloudflare 回源，先做 ACME"}
 {"key": "cert/provider-cloudflare-origin-ca/requested-validity", "kerlico": "no", "note": "请求的证书有效期，单位为天；建议暂不实现：只适用 Cloudflare 回源，先做 ACME"}
-{"key": "cert/provider-common/tag", "kerlico": "no", "note": "证书提供者的标签；建议实现：随证书提供者提供"}
-{"key": "cert/provider-common/type", "kerlico": "no", "note": "证书提供者类型；建议实现：随证书提供者提供"}
+{"key": "cert/provider-common/tag", "kerlico": "yes", "note": "证书提供者的标签；建议实现：随证书提供者提供"}
+{"key": "cert/provider-common/type", "kerlico": "yes", "note": "证书提供者类型；建议实现：随证书提供者提供"}
 {"key": "cert/provider-tailscale/endpoint", "kerlico": "no", "note": "要复用的 Tailscale 端点 的标签；建议暂不实现：kerlico 的 Tailscale 只是出站，不暴露证书能力"}
 {"key": "cert/provider-tailscale/protocol", "kerlico": "no", "note": "Tailscale 证书提供者；建议暂不实现：kerlico 的 Tailscale 只是出站，不暴露证书能力"}
 {"key": "cert/store/certificate", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "各协议 TLS 的 `ca_pem`，追加到内置根；没有全局信任配置"}
 {"key": "cert/store/certificate-directory-path", "kerlico": "no", "note": "搜索要信任的证书的目录路径，PEM 格式；建议暂不实现：`ca_pem` 已能追加，目录搜索需求小"}
-{"key": "cert/store/certificate-path", "kerlico": "no", "note": "要信任的证书路径，PEM 格式；建议实现：kerlico 客户端只能内联 `ca_pem`，从文件读实现量小"}
+{"key": "cert/store/certificate-path", "kerlico": "yes", "note": "要信任的证书路径，PEM 格式；建议实现：kerlico 客户端只能内联 `ca_pem`，从文件读实现量小"}
 {"key": "cert/store/store", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "固定用内置 `webpki_roots`，相当 mozilla；缺 system、chrome、none"}
 {"key": "cert/system/disable-system-ca", "kerlico": "yes", "where": "crates/net/src/lib.rs", "note": "kerlico 只用内置 `webpki_roots`，不读系统 CA"}
 {"key": "cert/tls/acme-external", "kerlico": "partial", "where": "crates/protocol-trojan/src/config.rs", "note": "`certificate_file`、`private_key_file` 读外部工具签发的证书；没有热重载，更新后要重启"}
@@ -322,7 +322,7 @@
 {"key": "cert/tls/client-auth-type", "kerlico": "partial", "where": "crates/protocol-trusttunnel/src/config.rs", "note": "TrustTunnel 配了 `client_ca_pem` 即要求并校验客户端证书；缺其余模式"}
 {"key": "cert/tls/custom-certifactes", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "各协议 TLS 的 `ca_pem`；没有全局列表"}
 {"key": "cert/tls/ech-key", "kerlico": "no", "note": "API HTTPS 的 ECH 密钥，填写即启用；建议暂不实现：kerlico 的 TLS 没有 ECH，归安全层统一决定"}
-{"key": "cert/tls/hot-reload", "kerlico": "no", "note": "服务端证书定时热重载；建议实现：kerlico 只在启动时读一次证书，外部续期后必须重启，会断开全部连接"}
+{"key": "cert/tls/hot-reload", "kerlico": "yes", "note": "服务端证书定时热重载；建议实现：kerlico 只在启动时读一次证书，外部续期后必须重启，会断开全部连接"}
 {"key": "cert/tls/key", "kerlico": "yes", "where": "crates/protocol-trojan/src/config.rs", "note": "`private_key_pem`，内容是单个字符串"}
 {"key": "cert/tls/key-file", "kerlico": "yes", "where": "crates/protocol-trojan/src/config.rs", "note": "`private_key_file`"}
 {"key": "cert/tls/ocsp-stapling", "kerlico": "no", "note": "OCSP 装订间隔秒；建议暂不实现：代理流量极少依赖 OCSP"}

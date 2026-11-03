@@ -55,7 +55,10 @@ pub use reality_runtime::{
     RealityHandshakeContextProvider, RealityRuntimeEngine, SystemRealityHandshakeContextProvider,
 };
 pub use reality_rustls::RustlsRealityTlsSessionProvider;
-pub use tls::{plain_tls_client_hello_bytes, TlsConnector};
+pub use tls::{
+    build_custom_tls_client_config, plain_tls_client_hello_bytes, CustomTlsClientOptions,
+    TlsConnector,
+};
 pub use utls_profiles::draw_modern_fingerprint;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,6 +307,24 @@ pub trait ResolvedTcpConnector: Send + Sync {
     ) -> Result<BoxedTransportStream, TransportError>;
 }
 
+pub struct FnResolvedTcpConnector<F>(pub F);
+
+#[async_trait]
+impl<F, Fut> ResolvedTcpConnector for FnResolvedTcpConnector<F>
+where
+    F: Fn(Target, Vec<SocketAddr>) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<BoxedTransportStream, TransportError>> + Send + 'static,
+{
+    async fn connect_resolved(
+        &self,
+        original_target: &Target,
+        candidates: &[SocketAddr],
+        _happy_eyeballs: Option<&HappyEyeballsConfig>,
+    ) -> Result<BoxedTransportStream, TransportError> {
+        (self.0)(original_target.clone(), candidates.to_vec()).await
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SocketHandle {
     raw: i64,
@@ -378,6 +399,13 @@ pub trait PreparedRealityTlsConnection: Send {
         Err(TransportError::UnsupportedConnectorConfig(
             "REALITY tlshello fragmentation",
         ))
+    }
+
+    async fn complete_boxed(
+        self: Box<Self>,
+        _stream: BoxedTransportStream,
+    ) -> Result<BoxedTransportStream, TransportError> {
+        Err(TransportError::UnsupportedChainedTransport("REALITY"))
     }
 }
 

@@ -61,6 +61,12 @@ pub(crate) struct ClientOptions {
     pub password: String,
     #[serde(default)]
     pub allow_insecure: bool,
+    #[serde(default, alias = "udp-over-tcp")]
+    pub udp_over_tcp: Option<bool>,
+    #[serde(default, alias = "udp-over-tcp-version")]
+    pub udp_over_tcp_version: Option<u8>,
+    #[serde(default)]
+    pub multiplex: Option<kerlico_net::sing_mux::SingMuxOutboundConfig>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -111,7 +117,13 @@ fn server(
     ServerConfig::new(addr, password, method)
         .map_err(|_| Error::Config("Shadowsocks 密码或方法不合法".into()))
 }
-pub(crate) fn client(options: ClientOptions) -> Result<(ServerConfig, Destination)> {
+pub(crate) struct PreparedClient {
+    pub config: ServerConfig,
+    pub target: Destination,
+    pub uot_version: Option<u8>,
+    pub multiplex: Option<kerlico_net::sing_mux::SingMuxOutboundConfig>,
+}
+pub(crate) fn client(options: ClientOptions) -> Result<PreparedClient> {
     let target = Destination::new(&options.server, options.port)?;
     let config = server(
         ServerAddr::DomainName(target.host(), target.port()),
@@ -119,7 +131,29 @@ pub(crate) fn client(options: ClientOptions) -> Result<(ServerConfig, Destinatio
         &options.method,
         options.allow_insecure,
     )?;
-    Ok((config, target))
+    if let Some(v) = options.udp_over_tcp_version
+        && !matches!(v, 1 | 2)
+    {
+        return Err(Error::Config(
+            "Shadowsocks udp_over_tcp_version 仅支持 1 或 2".into(),
+        ));
+    }
+    let uot_version = match (options.udp_over_tcp, options.udp_over_tcp_version) {
+        (Some(false), _) => None,
+        (Some(true), v) => Some(v.unwrap_or(2)),
+        (None, Some(v)) => Some(v),
+        (None, None) => None,
+    };
+    if let Some(mux) = &options.multiplex {
+        mux.validate()?;
+    }
+    let multiplex = options.multiplex.filter(|m| m.enabled);
+    Ok(PreparedClient {
+        config,
+        target,
+        uot_version,
+        multiplex,
+    })
 }
 pub(crate) fn node(options: NodeOptions) -> Result<(ServerConfig, Vec<[u8; 32]>)> {
     let password = options.password.clone();

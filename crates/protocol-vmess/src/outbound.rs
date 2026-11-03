@@ -6,8 +6,8 @@ use crate::{
 };
 use kerlico_config::{OutboundFactory, OutboundPlan, TargetSpec};
 use kerlico_core::{
-    BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramChannel, DatagramReceiver,
-    DatagramSender, Destination, Error, Outbound, Result,
+    BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
+    DatagramReceiver, DatagramSender, Destination, Error, Outbound, Result,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -32,6 +32,8 @@ struct Options {
     global_padding: bool,
     #[serde(default)]
     no_termination_signal: bool,
+    #[serde(default)]
+    multiplex: Option<kerlico_net::sing_mux::SingMuxOutboundConfig>,
 }
 fn auto() -> String {
     "auto".into()
@@ -47,6 +49,7 @@ struct VmessOutbound {
     carrier: Client,
     account: Account,
     options: RecordOptions,
+    mux: Option<Arc<kerlico_net::sing_mux::SingMuxClient>>,
 }
 impl OutboundFactory for VmessFactory {
     fn kind(&self) -> &'static str {
@@ -57,6 +60,14 @@ impl OutboundFactory for VmessFactory {
         if options.global_padding && !options.chunk_masking {
             return Err(invalid());
         }
+        if let Some(mux) = &options.multiplex {
+            mux.validate()?;
+        }
+        let mux = options
+            .multiplex
+            .filter(|m| m.enabled)
+            .map(|cfg| Arc::new(kerlico_net::sing_mux::SingMuxClient::new(cfg)));
+        let has_assoc = mux.as_ref().is_some_and(|m| m.handles_udp());
         let id = *uuid::Uuid::parse_str(&options.uuid)
             .map_err(|_| invalid())?
             .as_bytes();
@@ -82,7 +93,7 @@ impl OutboundFactory for VmessFactory {
                 tcp_eof: options.termination,
                 udp: true,
             },
-            false,
+            has_assoc,
             kerlico_core::TargetPolicy::Remote,
             move |host| {
                 Box::pin(async move {
@@ -90,6 +101,7 @@ impl OutboundFactory for VmessFactory {
                         carrier: carrier.start(&host)?,
                         account,
                         options,
+                        mux,
                     }) as Arc<dyn Outbound>)
                 })
             },
@@ -124,12 +136,24 @@ impl Outbound for VmessOutbound {
             udp: true,
         }
     }
+    fn supports_udp_association(&self) -> bool {
+        self.mux.as_ref().is_some_and(|m| m.handles_udp())
+    }
     fn connect_tcp<'a>(
         &'a self,
         target: &'a Destination,
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<kerlico_core::OpenedTcp>> {
         Box::pin(async move {
+            if let Some(mux) = &self.mux
+                && mux.handles_tcp()
+            {
+                return context
+                    .run(mux.connect_tcp(target, |magic| async move {
+                        self.open(&magic, false, context).await
+                    }))
+                    .await;
+            }
             let opening: kerlico_core::BoxFuture<'_, Result<BoxStream>> =
                 Box::pin(self.open(target, false, context));
             let stream = opening.await?;
@@ -145,6 +169,15 @@ impl Outbound for VmessOutbound {
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramChannel>> {
         Box::pin(async move {
+            if let Some(mux) = &self.mux
+                && mux.handles_udp()
+            {
+                return context
+                    .run(mux.connect_udp(target, |magic| async move {
+                        self.open(&magic, false, context).await
+                    }))
+                    .await;
+            }
             let inner = self.open(target, true, context).await?;
             let (reader, writer) = tokio::io::split(inner);
             Ok(DatagramChannel {
@@ -154,6 +187,23 @@ impl Outbound for VmessOutbound {
                 }),
                 receiver: Box::new(Receiver { reader }),
             })
+        })
+    }
+    fn associate_udp<'a>(
+        &'a self,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<DatagramAssociation>> {
+        Box::pin(async move {
+            if let Some(mux) = &self.mux
+                && mux.handles_udp()
+            {
+                return context
+                    .run(mux.associate_udp(|magic| async move {
+                        self.open(&magic, false, context).await
+                    }))
+                    .await;
+            }
+            Err(Error::Unsupported("VMess 未启用多路复用 UDP 关联"))
         })
     }
 }

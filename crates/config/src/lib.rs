@@ -45,6 +45,28 @@ pub struct Config {
     #[serde(default, alias = "tproxy-port")]
     pub tproxy_port: Option<u16>,
     #[serde(default)]
+    pub dialer: GlobalDialerSpec,
+    #[serde(default, alias = "routing-mark")]
+    pub routing_mark: Option<u32>,
+    #[serde(
+        default,
+        alias = "disable-keep-alive",
+        alias = "disable-tcp-keep-alive"
+    )]
+    pub disable_keep_alive: bool,
+    #[serde(default, alias = "keep-alive-idle", alias = "tcp-keep-alive")]
+    pub keep_alive_idle: Option<DurationSpec>,
+    #[serde(
+        default,
+        alias = "keep-alive-interval",
+        alias = "tcp-keep-alive-interval"
+    )]
+    pub keep_alive_interval: Option<DurationSpec>,
+    #[serde(default)]
+    pub certificate: RootCertificateSpec,
+    #[serde(default, alias = "certificate-providers")]
+    pub certificate_providers: Vec<CertificateProviderSpec>,
+    #[serde(default)]
     pub limits: Limits,
     #[serde(default)]
     pub telemetry: Option<HistorySpec>,
@@ -194,6 +216,8 @@ pub struct NodeSpec {
     pub members: Vec<MemberSpec>,
     #[serde(default)]
     pub max_sessions: Option<usize>,
+    #[serde(default, alias = "accept-proxy-protocol")]
+    pub accept_proxy_protocol: bool,
 }
 
 /// 每个协议仅见本节点原生凭据和不可由网络构造的签发者。
@@ -291,6 +315,8 @@ pub struct ForwardSpec {
     pub mode: NodeMode,
     #[serde(default)]
     pub require_remote_eof: bool,
+    #[serde(default, alias = "accept-proxy-protocol")]
+    pub accept_proxy_protocol: bool,
 }
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub enum ForwardKind {
@@ -312,6 +338,305 @@ impl TargetSpec {
     pub fn destination(&self) -> Result<Destination> {
         Destination::new(&self.host, self.port)
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum DurationSpec {
+    Seconds(u64),
+    Text(String),
+}
+impl DurationSpec {
+    pub fn to_duration(&self) -> Result<Duration> {
+        match self {
+            Self::Seconds(secs) => {
+                if *secs == 0 || *secs > 86_400 {
+                    return Err(Error::Config("时长秒数须在 1 至 86400 之间".into()));
+                }
+                Ok(Duration::from_secs(*secs))
+            }
+            Self::Text(raw) => {
+                let s = raw.trim();
+                let (num, scale_ms) = if let Some(v) = s.strip_suffix("ms") {
+                    (v.trim(), 1u64)
+                } else if let Some(v) = s.strip_suffix('s') {
+                    (v.trim(), 1000u64)
+                } else if let Some(v) = s.strip_suffix('m') {
+                    (v.trim(), 60_000u64)
+                } else if let Some(v) = s.strip_suffix('h') {
+                    (v.trim(), 3_600_000u64)
+                } else {
+                    (s, 1000u64)
+                };
+                let parsed: u64 = num
+                    .parse()
+                    .map_err(|_| Error::Config("时长格式不合法".into()))?;
+                let ms = parsed.saturating_mul(scale_ms);
+                if !(1..=86_400_000).contains(&ms) {
+                    return Err(Error::Config("时长须在 1ms 至 24h 之间".into()));
+                }
+                Ok(Duration::from_millis(ms))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GlobalDialerSpec {
+    #[serde(alias = "routing-mark", alias = "mark")]
+    pub routing_mark: Option<u32>,
+    #[serde(alias = "tfo", alias = "tcp-fast-open")]
+    pub tcp_fast_open: bool,
+    #[serde(alias = "disable-keep-alive", alias = "disable-tcp-keep-alive")]
+    pub disable_tcp_keep_alive: bool,
+    #[serde(
+        alias = "keep-alive-idle",
+        alias = "tcp-keep-alive",
+        alias = "tcp-keep-alive-idle"
+    )]
+    pub tcp_keep_alive_idle: Option<DurationSpec>,
+    #[serde(alias = "keep-alive-interval", alias = "tcp-keep-alive-interval")]
+    pub tcp_keep_alive_interval: Option<DurationSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RootCertificateSpec {
+    pub store: Option<String>,
+    #[serde(alias = "use-system-ca")]
+    pub use_system_ca: bool,
+    #[serde(default)]
+    pub certificate: Vec<String>,
+    #[serde(default, alias = "certificate-path")]
+    pub certificate_path: Vec<std::path::PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dns01ChallengeSpec {
+    pub provider: String,
+    #[serde(default, alias = "api-token")]
+    pub api_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertificateProviderSpec {
+    pub tag: String,
+    #[serde(rename = "type", default = "default_acme_type")]
+    pub kind: String,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub domain: Vec<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default, alias = "data-directory")]
+    pub data_directory: Option<std::path::PathBuf>,
+    #[serde(default, alias = "key-type")]
+    pub key_type: Option<String>,
+    #[serde(default, alias = "alternative-http-port")]
+    pub alternative_http_port: Option<u16>,
+    #[serde(default, alias = "alternative-tls-port")]
+    pub alternative_tls_port: Option<u16>,
+    #[serde(default, alias = "disable-http-challenge")]
+    pub disable_http_challenge: bool,
+    #[serde(default, alias = "disable-tls-alpn-challenge")]
+    pub disable_tls_alpn_challenge: bool,
+    #[serde(default, alias = "dns01-challenge")]
+    pub dns01_challenge: Option<Dns01ChallengeSpec>,
+}
+fn default_acme_type() -> String {
+    "acme".into()
+}
+impl CertificateProviderSpec {
+    pub fn validate(&self) -> Result<()> {
+        if self.tag.trim().is_empty()
+            || !matches!(self.kind.as_str(), "acme")
+            || self.domain.is_empty()
+            || self.domain.iter().any(|d| d.trim().is_empty())
+            || self.alternative_http_port == Some(0)
+            || self.alternative_tls_port == Some(0)
+        {
+            return Err(Error::Config("证书提供者配置不合法".into()));
+        }
+        if let Some(key_type) = &self.key_type
+            && !matches!(
+                key_type.as_str(),
+                "ec256" | "ec384" | "ed25519" | "rsa2048" | "rsa4096"
+            )
+        {
+            return Err(Error::Config("不支持的 ACME 密钥类型".into()));
+        }
+        if let Some(dns01) = &self.dns01_challenge
+            && (!dns01.provider.eq_ignore_ascii_case("cloudflare")
+                || dns01
+                    .api_token
+                    .as_deref()
+                    .is_none_or(|t| t.trim().is_empty()))
+        {
+            return Err(Error::Config(
+                "DNS-01 质询必须提供合法提供商与非空 api_token".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn apply_dialer_map(
+    map: &mut serde_json::Map<String, Value>,
+    out: &mut kerlico_core::DialerOptions,
+) -> Result<()> {
+    for key in ["detour", "dialer_proxy", "dialer-proxy"] {
+        if let Some(val) = map.remove(key) {
+            let s = val
+                .as_str()
+                .ok_or_else(|| Error::Config("链式拨号目标标签须为字符串".into()))?;
+            out.detour = Some(OutId::parse(s)?);
+        }
+    }
+    for key in ["proxy_settings", "proxy-settings", "proxySettings"] {
+        if let Some(val) = map.remove(key) {
+            let obj = val
+                .as_object()
+                .ok_or_else(|| Error::Config("proxy_settings 须为对象".into()))?;
+            if let Some(tag) = obj.get("tag").and_then(Value::as_str) {
+                out.detour = Some(OutId::parse(tag)?);
+            } else {
+                return Err(Error::Config("proxy_settings 缺少有效的 tag 字段".into()));
+            }
+        }
+    }
+    for key in ["routing_mark", "routing-mark", "mark"] {
+        if let Some(val) = map.remove(key) {
+            let mark = val
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| Error::Config("routing_mark 须为 32 位无符号整数".into()))?;
+            out.routing_mark = Some(mark);
+        }
+    }
+    for key in ["tfo", "tcp_fast_open", "tcp-fast-open", "tcpFastOpen"] {
+        if let Some(val) = map.remove(key) {
+            let enabled = val
+                .as_bool()
+                .ok_or_else(|| Error::Config("tcp_fast_open 须为布尔值".into()))?;
+            out.tcp_fast_open = enabled;
+        }
+    }
+    for key in [
+        "disable_tcp_keep_alive",
+        "disable-tcp-keep-alive",
+        "disable_keep_alive",
+        "disable-keep-alive",
+    ] {
+        if let Some(val) = map.remove(key) {
+            let disabled = val
+                .as_bool()
+                .ok_or_else(|| Error::Config("disable_tcp_keep_alive 须为布尔值".into()))?;
+            out.disable_tcp_keep_alive = disabled;
+        }
+    }
+    for key in [
+        "tcp_keep_alive",
+        "tcp-keep-alive",
+        "keep_alive_idle",
+        "keep-alive-idle",
+        "tcp_keep_alive_idle",
+        "tcp-keep-alive-idle",
+        "tcpKeepAliveIdle",
+    ] {
+        if let Some(val) = map.remove(key) {
+            let spec: DurationSpec = serde_json::from_value(val)
+                .map_err(|_| Error::Config("tcp_keep_alive_idle 时长不合法".into()))?;
+            out.tcp_keep_alive_idle = Some(spec.to_duration()?);
+        }
+    }
+    for key in [
+        "tcp_keep_alive_interval",
+        "tcp-keep-alive-interval",
+        "keep_alive_interval",
+        "keep-alive-interval",
+        "tcpKeepAliveInterval",
+    ] {
+        if let Some(val) = map.remove(key) {
+            let spec: DurationSpec = serde_json::from_value(val)
+                .map_err(|_| Error::Config("tcp_keep_alive_interval 时长不合法".into()))?;
+            out.tcp_keep_alive_interval = Some(spec.to_duration()?);
+        }
+    }
+    Ok(())
+}
+
+fn extract_dialer_options(
+    options: &mut Value,
+    base: &kerlico_core::DialerOptions,
+) -> Result<kerlico_core::DialerOptions> {
+    let mut dialer = base.clone();
+    let Some(map) = options.as_object_mut() else {
+        return Ok(dialer);
+    };
+    for sub_key in ["dialer", "sockopt"] {
+        if let Some(mut sub) = map.remove(sub_key) {
+            let sub_map = sub
+                .as_object_mut()
+                .ok_or_else(|| Error::Config("dialer/sockopt 须为对象".into()))?;
+            apply_dialer_map(sub_map, &mut dialer)?;
+        }
+    }
+    apply_dialer_map(map, &mut dialer)?;
+    Ok(dialer)
+}
+
+fn extract_accept_proxy_protocol(options: &mut Value) -> Result<bool> {
+    let Some(map) = options.as_object_mut() else {
+        return Ok(false);
+    };
+    let mut enabled = false;
+    for key in [
+        "accept_proxy_protocol",
+        "accept-proxy-protocol",
+        "acceptProxyProtocol",
+    ] {
+        if let Some(val) = map.remove(key) {
+            enabled |= val
+                .as_bool()
+                .ok_or_else(|| Error::Config("accept_proxy_protocol 须为布尔值".into()))?;
+        }
+    }
+    if let Some(sockopt) = map.get_mut("sockopt").and_then(Value::as_object_mut) {
+        for key in [
+            "accept_proxy_protocol",
+            "accept-proxy-protocol",
+            "acceptProxyProtocol",
+        ] {
+            if let Some(val) = sockopt.remove(key) {
+                enabled |= val
+                    .as_bool()
+                    .ok_or_else(|| Error::Config("accept_proxy_protocol 须为布尔值".into()))?;
+            }
+        }
+        if sockopt.is_empty() {
+            map.remove("sockopt");
+        }
+    }
+    if let Some(transport) = map.get_mut("transport").and_then(Value::as_object_mut) {
+        for key in [
+            "accept_proxy_protocol",
+            "accept-proxy-protocol",
+            "acceptProxyProtocol",
+        ] {
+            if let Some(val) = transport.remove(key) {
+                enabled |= val
+                    .as_bool()
+                    .ok_or_else(|| Error::Config("accept_proxy_protocol 须为布尔值".into()))?;
+            }
+        }
+    }
+    Ok(enabled)
 }
 
 #[derive(Clone, Deserialize)]
@@ -430,9 +755,43 @@ impl Registry {
                     options: empty_object(),
                     members: Vec::new(),
                     max_sessions: None,
+                    accept_proxy_protocol: false,
                 });
             }
         }
+        for provider in &config.certificate_providers {
+            provider.validate()?;
+        }
+        for path in &config.certificate.certificate_path {
+            if path.as_os_str().is_empty() {
+                return Err(Error::Config("根证书文件路径不能为空".into()));
+            }
+        }
+        let detour_table = kerlico_core::DetourTable::new();
+        let global_dialer = kerlico_core::DialerOptions {
+            detour: None,
+            routing_mark: config.routing_mark.or(config.dialer.routing_mark),
+            tcp_fast_open: config.dialer.tcp_fast_open,
+            disable_tcp_keep_alive: config.disable_keep_alive
+                || config.dialer.disable_tcp_keep_alive,
+            tcp_keep_alive_idle: match config
+                .keep_alive_idle
+                .as_ref()
+                .or(config.dialer.tcp_keep_alive_idle.as_ref())
+            {
+                Some(spec) => Some(spec.to_duration()?),
+                None => None,
+            },
+            tcp_keep_alive_interval: match config
+                .keep_alive_interval
+                .as_ref()
+                .or(config.dialer.tcp_keep_alive_interval.as_ref())
+            {
+                Some(spec) => Some(spec.to_duration()?),
+                None => None,
+            },
+            detour_resolver: Some(detour_table.clone()),
+        };
         if let Some(history) = &config.telemetry {
             history.validate()?;
         }
@@ -461,7 +820,8 @@ impl Registry {
         }
         let mut services = Vec::new();
         let mut profiles = BTreeMap::new();
-        for spec in config.outbounds {
+        let mut detours = BTreeMap::new();
+        for mut spec in config.outbounds {
             let id = OutId::parse(&spec.tag)?;
             if profiles.contains_key(&id) {
                 return Err(Error::Config("出站标签重复".into()));
@@ -470,12 +830,34 @@ impl Registry {
                 .factories
                 .get(spec.kind.as_str())
                 .ok_or_else(|| Error::Config("出站类型未注册或未编译".into()))?;
-            let plan = factory.compile(&spec.options)?;
+            let dialer = extract_dialer_options(&mut spec.options, &global_dialer)?;
+            if let Some(upstream) = &dialer.detour {
+                detours.insert(id.clone(), upstream.clone());
+            }
+            let plan =
+                kerlico_core::with_compile_dialer(dialer, || factory.compile(&spec.options))?;
             profiles.insert(
                 id.clone(),
                 (plan.capabilities(), plan.supports_udp_association()),
             );
             services.push(NamedServicePlan { id, plan });
+        }
+        for (from, target) in &detours {
+            let Some((caps, _)) = profiles.get(target) else {
+                return Err(Error::Config("链式拨号引用的上游出站不存在".into()));
+            };
+            if !caps.tcp {
+                return Err(Error::Config("链式拨号引用的上游出站不支持 TCP".into()));
+            }
+            let mut cursor = Some(target);
+            let mut steps = 0usize;
+            while let Some(curr) = cursor {
+                if curr == from || steps > detours.len() {
+                    return Err(Error::Config("链式拨号存在循环依赖".into()));
+                }
+                cursor = detours.get(curr);
+                steps += 1;
+            }
         }
         let routes = RouteTable::compile(&config.routes)?;
         if routes.outbounds().any(|id| !profiles.contains_key(id)) {
@@ -541,12 +923,14 @@ impl Registry {
         }
         let mut fingerprints = BTreeSet::new();
         let mut nodes = Vec::new();
-        for (spec, local) in config
+        for (mut spec, local) in config
             .nodes
             .into_iter()
             .map(|node| (node, false))
             .chain(config.local_inbounds.into_iter().map(|node| (node, true)))
         {
+            let accept_proxy_protocol =
+                spec.accept_proxy_protocol || extract_accept_proxy_protocol(&mut spec.options)?;
             let node = NodeId::parse(&spec.tag)?;
             if !tags.insert(node.clone()) {
                 return Err(Error::Config("节点与入站标签重复".into()));
@@ -669,6 +1053,7 @@ impl Registry {
                 listen: spec.listen,
                 protocol,
                 max_sessions: maximum,
+                accept_proxy_protocol,
             });
         }
         if routes.nodes().any(|id| !tags.contains(id)) {
@@ -689,6 +1074,7 @@ impl Registry {
                 routes,
                 dns: config.dns,
                 max_flows: config.limits.max_flow_records,
+                detour_table,
             },
             inbounds: config.inbounds,
             limits: config.limits,

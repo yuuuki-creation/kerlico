@@ -27,7 +27,23 @@
 {"key": "api/v2ray/get-stats", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
 {"key": "api/v2ray/get-sys-stats", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
 {"key": "api/v2ray/query-stats", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
+{"key": "cert/dns01-cloudflare/api-token", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/dns01/provider", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-acme/alternative-http-port", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-acme/alternative-tls-port", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-acme/data-directory", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-acme/disable-http-challenge", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-acme/disable-tls-alpn-challenge", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-acme/dns01-challenge", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-acme/domain", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-acme/email", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-acme/key-type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-acme/protocol", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-acme/provider", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-common/tag", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
+{"key": "cert/provider-common/type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
 {"key": "cert/store/certificate", "test": "pass", "evidence": "crates/net/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
+{"key": "cert/store/certificate-path", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
 {"key": "cert/store/store", "test": "pass", "evidence": "crates/net/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
 {"key": "cert/system/disable-system-ca", "test": "pass", "evidence": "crates/net/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
 {"key": "cert/tls/acme-external", "test": "pass", "evidence": "crates/protocol-trojan/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
@@ -36,6 +52,7 @@
 {"key": "cert/tls/client-auth-cert", "test": "pass", "evidence": "crates/protocol-trusttunnel/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "cert/tls/client-auth-type", "test": "pass", "evidence": "crates/protocol-trusttunnel/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "cert/tls/custom-certifactes", "test": "pass", "evidence": "crates/net/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
+{"key": "cert/tls/hot-reload", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
 {"key": "cert/tls/key", "test": "pass", "evidence": "crates/protocol-trojan/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "cert/tls/key-file", "test": "pass", "evidence": "crates/protocol-trojan/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "cert/tls/one-time-loading", "test": "pass", "evidence": "crates/protocol-trojan/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}

@@ -34,6 +34,7 @@ pub struct Hysteria2Node {
     udp: bool,
     up_bps: Option<u64>,
     masquerade: Arc<MasqueradePlan>,
+    mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
     limits: Limits,
 }
 impl Hysteria2Node {
@@ -51,6 +52,10 @@ impl Hysteria2Node {
             .transpose()?
             .filter(|bps| *bps > 0);
         let masquerade = Arc::new(options.masquerade_plan()?);
+        let mux = kerlico_net::sing_mux::SingMuxInboundConfig::effective_with_padding(
+            options.multiplex.as_ref(),
+            options.mux_option_padding,
+        );
         Ok(Self {
             auth: input.credentials(
                 input
@@ -68,6 +73,7 @@ impl Hysteria2Node {
             udp: options.udp,
             up_bps,
             masquerade,
+            mux,
             limits: options.limits,
         })
     }
@@ -116,12 +122,12 @@ impl Hysteria2Node {
                 incoming=endpoint.accept()=>{
                     let Some(incoming)=incoming else{break};let Ok(lease)=context.stream_budget.try_acquire() else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};
                     let mut context=context.clone();let access=access.clone();let limits=self.limits.clone();let auth=self.auth.clone();let udp=self.udp;
-                    let up_bps=self.up_bps;let masquerade=self.masquerade.clone();
+                    let up_bps=self.up_bps;let masquerade=self.masquerade.clone();let mux=self.mux.clone();
                     crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut connections, async move{
                         let _lease=lease;context.events.record(NodeEvent::Accepted);
                         let result=async {
                             let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|invalid())?;
-                            context.peer_addr=Some(connection.remote_address());connection_loop(connection,access,context.clone(),limits,auth,udp,up_bps,masquerade).await
+                            context.peer_addr=Some(connection.remote_address());connection_loop(connection,access,context.clone(),limits,auth,udp,up_bps,masquerade,mux).await
                         }.await;
                         context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});
                     }, |_| ())?;
@@ -318,6 +324,7 @@ async fn connection_loop(
     udp_enabled: bool,
     up_bps: Option<u64>,
     masquerade: Arc<MasqueradePlan>,
+    mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
 ) -> Result<()> {
     let _guard = ConnectionGuard(connection.clone());
     let authenticated = Arc::new(AtomicBool::new(false));
@@ -374,8 +381,8 @@ async fn connection_loop(
             _ = tokio::time::sleep_until(draining.unwrap_or_else(tokio::time::Instant::now)), if draining.is_some()=>return Err(Error::Timeout),
             result=tasks.join_next(),if !tasks.is_empty()=>{if result.is_some_and(|result|result.is_err()){context.events.record(NodeEvent::Failed);}},
             stream=streams.recv(),if native_open=>{
-                let Some(stream)=stream else{native_open=false;continue;};let access=peer.lock().map_err(|_|invalid())?.as_ref().map(|(_,peer)|peer.clone()).ok_or(Error::Rejected)?;let context=context.clone();let flows=flows.clone();context.events.record(NodeEvent::Accepted);
-                crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move{let result=proxy_tcp(stream,access,context.clone(),flows).await;context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});result}, Err)?;
+                let Some(stream)=stream else{native_open=false;continue;};let access=peer.lock().map_err(|_|invalid())?.as_ref().map(|(_,peer)|peer.clone()).ok_or(Error::Rejected)?;let context=context.clone();let flows=flows.clone();let mux=mux.clone();context.events.record(NodeEvent::Accepted);
+                crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move{let result=proxy_tcp(stream,access,context.clone(),flows,mux).await;context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});result}, Err)?;
             },
             request=h3.next(draining.is_some())=>{
                 let resolver=match request? {
@@ -445,10 +452,22 @@ async fn proxy_tcp(
     access: PeerSession,
     context: InboundContext,
     flows: Arc<crate::flow::FlowSet>,
+    mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
 ) -> Result<()> {
     let establish = crate::budget(&context);
     let address = establish.run(wire::request(&mut stream)).await?;
     let target = crate::target(&address)?;
+    if kerlico_net::sing_mux::is_magic_target(&target) {
+        let Some(mux_cfg) = mux else {
+            let _ = wire::send_response(&mut stream, false).await;
+            return Err(Error::Rejected);
+        };
+        establish
+            .run(wire::send_response(&mut stream, true))
+            .await?;
+        return kerlico_net::sing_mux::serve_inbound(Box::new(stream), access, &mux_cfg, &context)
+            .await;
+    }
     let remote = match access.connect_tcp(&target, &establish).await {
         Ok(remote) => remote,
         Err(error) => {

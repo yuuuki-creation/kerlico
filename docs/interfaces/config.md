@@ -21,6 +21,9 @@
 | `dns` | 网站域名解析的上游与 hosts，默认用系统解析器，见 [DNS](dns.md) |
 | `control` | 只读 HTTP 控制接口，默认关闭，见[控制接口](control.md) |
 | `telemetry` | SQLite 统计历史，默认关闭，见[统计历史](history.md) |
+| `certificate` | 根级附加信任证书配置（`certificate_path`），默认空 |
+| `certificate_providers` | 命名证书提供者数组（支持 `acme` 及 Cloudflare DNS-01 质询配置），默认空 |
+| `routing_mark` / `disable_keep_alive` / `keep_alive_idle` / `keep_alive_interval` | 全局默认出站套接字选项，可被单条出站 `dialer` / `sockopt` 覆盖 |
 
 - **标签与校验**：`tag` 为 1–64 个 ASCII 字母、数字、`-` 或 `_`；出站拥有独立标签命名空间，所有入站（`inbounds` / `nodes` / `local_inbounds`）共用另一命名空间。未知字段、缺失类型、无效引用或能力不匹配在编译期直接拒绝。
 - **管理账户（`accounts`）**：包含持久非零 UUID `user_id`、1–128 字符唯一 `username`、Argon2id v19 PHC 摘要 `password_hash`（参数范围：`m` 19456–262144，`t` 2–10，`p` 1–8）与可选 `enabled`。

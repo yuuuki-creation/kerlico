@@ -28,6 +28,7 @@ pub(crate) struct Node {
     users: CredentialSet<Credential>,
     tls: Arc<dyn quinn::crypto::ServerConfig>,
     congestion: String,
+    mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
 }
 impl Node {
     pub fn build(input: &NodeBuildContext) -> Result<Self> {
@@ -60,11 +61,16 @@ impl Node {
             None,
             128,
         )?;
+        let mux = kerlico_net::sing_mux::SingMuxInboundConfig::effective_with_padding(
+            options.multiplex.as_ref(),
+            options.mux_option_padding,
+        );
         Ok(Self {
             version: options.version,
             users: input.credentials(users)?,
             tls: config::server_tls(options.tls)?,
             congestion: options.congestion_control,
+            mux,
         })
     }
     async fn serve(
@@ -104,8 +110,8 @@ impl Node {
                 _=maintenance.tick()=>{if context.stream_budget.is_closed()&&connections.is_empty(){break;}},
                 result=connections.join_next(),if !connections.is_empty()=>{runtime.observe(&result);},
                 incoming=endpoint.accept()=>{let Some(incoming)=incoming else{break;};if context.stream_budget.is_closed(){incoming.refuse();continue;}let Ok(lease)=context.stream_budget.try_acquire()else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};
-                    let context=context.clone();let access=access.clone();let version=self.version;let credentials=self.users.clone();
-                    crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut connections, async move {let _lease=lease;context.events.record(NodeEvent::Accepted);let result=async {let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|codec::malformed())?;connection_loop(connection,version,credentials,access,context.clone()).await}.await;context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});}, |_| ())?;
+                    let context=context.clone();let access=access.clone();let version=self.version;let credentials=self.users.clone();let mux=self.mux.clone();
+                    crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut connections, async move {let _lease=lease;context.events.record(NodeEvent::Accepted);let result=async {let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|codec::malformed())?;connection_loop(connection,version,credentials,access,context.clone(),mux).await}.await;context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});}, |_| ())?;
                 }
             }
         }
@@ -168,6 +174,7 @@ struct State {
     users: CredentialSet<Credential>,
     access: IngressBinding,
     context: InboundContext,
+    mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
     auth: watch::Sender<Option<PeerSession>>,
     auth_seen: AtomicBool,
     stopping: AtomicBool,
@@ -398,6 +405,34 @@ impl State {
             })
             .await?;
         let access = self.authenticated().await?;
+        if kerlico_net::sing_mux::is_magic_target(&target) {
+            let Some(mux_cfg) = &self.mux else {
+                if self.version == 4 {
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut send, &[4, 255, 255]).await;
+                    let _ = send.finish();
+                }
+                return Err(Error::Rejected);
+            };
+            if self.version == 4 {
+                connect
+                    .run(async {
+                        tokio::io::AsyncWriteExt::write_all(&mut send, &[4, 255, 0]).await?;
+                        Ok(())
+                    })
+                    .await?;
+            }
+            return kerlico_net::sing_mux::serve_inbound(
+                Box::new(crate::io::QuicIo {
+                    send,
+                    recv,
+                    owner: None,
+                }),
+                access,
+                mux_cfg,
+                &self.context,
+            )
+            .await;
+        }
         let remote = match access.connect_tcp(&target, &connect).await {
             Ok(value) => value,
             Err(error) => {
@@ -471,6 +506,7 @@ async fn connection_loop(
     users: CredentialSet<Credential>,
     access: IngressBinding,
     mut context: InboundContext,
+    mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
 ) -> Result<()> {
     context.peer_addr = Some(connection.remote_address());
     context.cancel = context.cancel.child_token();
@@ -482,6 +518,7 @@ async fn connection_loop(
         users,
         access,
         context,
+        mux,
         auth,
         auth_seen: AtomicBool::new(false),
         stopping: AtomicBool::new(false),

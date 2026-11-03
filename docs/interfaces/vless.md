@@ -18,26 +18,28 @@
 | `server_family` | `auto`（默认）、`ipv4`、`ipv6`；仅筛选节点载体解析结果，不改变网站目标 |
 | `uuid` | UUID，Debug 与错误隐藏身份 |
 | `transport` | `tcp`/`raw` 字符串，或下表的带 `type` 对象 |
-| `flow` | 空、`xtls-rprx-vision`、`xtls-rprx-vision-udp443`；后者只在客户端放开业务 UDP/443 |
+| `flow` | 空、`xtls-rprx-vision`、`xtls-rprx-vision-udp443`、`xtls-rprx-vision-splice`、`xtls-rprx-vision-udp443-splice`；亦可通过 `splice: true` 启用 |
 | `encryption` | 默认 `none`；使用固定 Xray mlkem768x25519plus 字符串格式，密钥链见[混合密钥链](#encryption-混合密钥链) |
 | `security` | 默认 TLS；`tls`、`reality`、`none`，字段见下表 |
 | `packet_encoding` | `udp`（默认）、`xudp`、`packetaddr`；Vision 自动使用 XUDP；跨载体迁移需要 XUDP，见[XUDP 跨载体迁移](#xudp-跨载体迁移) |
 | `mux` | 可选 `{enabled,tcp,udp,concurrency,max_connections}`；默认值为 `true,true,true,8,4`，不提供对象则不建池 |
+| `multiplex` | 可选 `sing-mux` 配置 `{enabled,protocol,max_connections,min_streams,max_streams,padding,only_tcp}`，支持 `h2mux`、`smux`、`yamux` |
+| `fragment` / `finalmask` | 可选 TCP 分片（`packets`、`length`、`delay`、`max_split`）与 QUIC/UDP 掩码参数（`brutal_down`、`brutal_up`、`udp_hop`） |
 
 | 载体对象 | 字段与限制 |
 | --- | --- |
 | `{type:tcp}` | 无额外字段 |
 | `{type:ws}` | `path`、`host`、`headers`、`early_data_bytes`、`heartbeat_period_secs` |
 | `{type:httpupgrade}` | `path`、`host`、`headers` |
-| `{type:grpc}` | `service_name`、`authority`、`multi_mode`、`idle_timeout_secs`、`health_check_timeout_secs`、`permit_without_stream`、`initial_window_size` |
-| `{type:xhttp,settings:{…}}` | `path`、`host`、`mode`、`http_version`、`headers`、`no_grpc_header`、`max_post_bytes`、`min_post_interval_ms`、`max_buffered_posts`、`padding_bytes`、`download` |
+| `{type:grpc}` | `service_name`、`authority`、`multi_mode`、`user_agent`（`grpc-user-agent`）、`idle_timeout_secs`、`health_check_timeout_secs`、`permit_without_stream`、`initial_window_size` |
+| `{type:xhttp,settings:{…}}` | `path`、`host`、`mode`、`http_version`、`headers`、`no_grpc_header`、`max_post_bytes`、`min_post_interval_ms`、`max_buffered_posts`、`sc_stream_up_server_secs`、`padding_bytes`、`x_padding_*`（`obfs_mode`、`key`、`header`、`placement`、`method`）、`uplink_http_method`、`session_placement`、`session_key`、`seq_placement`、`seq_key`、`uplink_data_placement`、`uplink_data_key`、`uplink_chunk_size`、`xmux`（`reuse_settings`）、`download` |
 | `{type:xdrive,settings:{…}}` | 专用存储载体，见下节 |
 
 XHTTP `mode` 为 `auto`、`packet-up`、`stream-up`、`stream-one`；`http_version` 为 `auto`、`h1`、`h2`、`h3`。独立下载 `download` 包含自己的 `server`、`server_family`、`security` 和 `xhttp`，不得再嵌套下载或与 `stream-one` 并用。上下行分别解析地址、建立安全连接，保留各自 CA 和安全身份。
 
 | 安全对象 | 字段与限制 |
 | --- | --- |
-| `{type:tls}` | `server_name`、`ca_pem`、`alpn`、`fingerprint`；自定义 CA 不能同时启用指纹整形；名称和证书链必须验证 |
+| `{type:tls}` | `server_name`（`query_server_name`）、`ca_pem`、`certificate_path`、`use_system_ca`、`allow_insecure`、`pinned_peer_cert_sha256`、`certificate_public_key_sha256`、`verify_peer_cert_by_name`、`ech_config`、`fragment`、`record_fragment`、`fragment_fallback_delay`、`alpn`、`fingerprint` |
 | `{type:reality}` | `server_name`、`public_key`、`short_id`、`fingerprint`、可选 `mldsa65_verify`（见 [REALITY ML-DSA-65](#reality-ml-dsa-65)）；指纹默认 `chrome`；只用于 RAW、gRPC、XHTTP/H2 |
 | `{type:none}` | 未启用 Encryption 时仅允许回环节点地址 |
 
@@ -99,7 +101,7 @@ TLS 使用 `certificate_pem`/`private_key_pem` 或 `certificate_file`/`private_k
 限制：
 
 - Xray 服务端把证书填充到 cover 的 Certificate 记录长度（REALITY `handshake_server_tls13.go`），cover 的证书消息必须长于 ML-DSA-65 证书（约 3.5 KiB），否则 Xray 握手失败。
-- kerlico 节点不提供 ML-DSA 签名：固定的 rust-reality 已移除该能力，`build_server_flight` 没有对应入口。
+- kerlico 节点支持配置 32 字节十六进制或 Base64 `mldsa65_seed`，在 REALITY 握手中派生 ML-DSA-65 密钥对并签发证书扩展签名。
 
 复验命令为 `tools/interop_vless_matrix.py --mldsa65 --only tcp-reality-single-auto-ordinary-none`，同时检查错误公钥被拒绝。
 

@@ -38,7 +38,8 @@ TCP 无应用层成功回应，发送请求并返回不证明目标已经接纳�
   "alpn": ["h3"],
   "quic_versions": ["v1", "v2"],
   "congestion_control": "cubic",
-  "upstream_rate_bps": 16000000
+  "upstream_rate_bps": 16000000,
+  "multiplex": {"enabled": false, "padding": false}
 }
 ```
 

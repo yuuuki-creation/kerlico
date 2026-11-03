@@ -82,8 +82,14 @@ pub(crate) struct Connection {
     send_slots: Arc<Semaphore>,
     context: Option<InboundContext>,
     access: Option<PeerSession>,
+    mux: Mutex<Option<kerlico_net::sing_mux::SingMuxInboundConfig>>,
 }
 impl Connection {
+    pub fn set_mux(&self, mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>) {
+        if let Ok(mut guard) = self.mux.lock() {
+            *guard = mux;
+        }
+    }
     pub fn new(
         quic: jls_quinn::Connection,
         owner: Option<EndpointOwner>,
@@ -120,6 +126,7 @@ impl Connection {
             send_slots: Arc::new(Semaphore::new(128)),
             context,
             access,
+            mux: Mutex::new(None),
         });
         value.start();
         value
@@ -542,6 +549,23 @@ impl Connection {
                     })
                     .await?;
                 let _lease = lease;
+                if kerlico_net::sing_mux::is_magic_target(&target) {
+                    let mux_cfg = self.mux.lock().ok().and_then(|g| g.clone());
+                    let Some(mux_cfg) = mux_cfg else {
+                        return Err(Error::Rejected);
+                    };
+                    return kerlico_net::sing_mux::serve_inbound(
+                        Box::new(crate::io::QuicIo {
+                            send,
+                            recv,
+                            owner: None,
+                        }),
+                        access,
+                        &mux_cfg,
+                        &context,
+                    )
+                    .await;
+                }
                 let remote = self
                     .flows
                     .tcp(access.connect_tcp(&target, &connect).await?)?;

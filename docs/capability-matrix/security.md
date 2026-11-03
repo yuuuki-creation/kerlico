@@ -18,13 +18,13 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | ECH 组合 |  |  | 有 | 未实现 | 未测 | config_source：`domain+https`、`fixed`、`h2c`、`https`、`udp`<br>alpn_inner：`http/1.1(ws/httpupgrade)`、`用户配置`<br>fingerprint：`uTLS`<br>server_mode：`ech+non-ech`<br>约束：WARP masque 边缘不支持 ECH（docs/document/level-2/warp.md）<br>约束：WebSocket 或 HTTPUpgrade 时 inner 强制 http/1.1<br>约束：outer ALPN 总为 h2,http/1.1 |
-| `config` | ECH 配置，空则 DNS 解析，否则 base64 | 有 |  |  | 未实现 | 未测 | 取值：`base64`<br>约束：可由 mihomo generate ech-keypair 生成，Config 填此，Key 填服务端 ech-key |
-| `ech-config-list` | 仅客户端，ECHConfig |  |  | 有 | 未实现 | 未测 | 取值：`base64 固定 ECHConfig`、`example.com+https://1.1.1.1/dns-query`、`h2c://...`、`https://1.1.1.1/dns-query`、`udp://1.1.1.1`<br>约束：DNS 模式遵守 TTL，查询 SNI 或服务器域名<br>约束：默认端口 53/443 |
-| `ech-server-keys` | 仅服务端，启用 ECH 的密钥 |  |  | 有 | 未实现 | 未测 | 约束：xray tls ech 生成<br>约束：配置后仍接受非 ECH 连接 |
+| `combo` | ECH 组合 |  |  | 有 | 已实现 | 通过 | config_source：`domain+https`、`fixed`、`h2c`、`https`、`udp`<br>alpn_inner：`http/1.1(ws/httpupgrade)`、`用户配置`<br>fingerprint：`uTLS`<br>server_mode：`ech+non-ech`<br>约束：WARP masque 边缘不支持 ECH（docs/document/level-2/warp.md）<br>约束：WebSocket 或 HTTPUpgrade 时 inner 强制 http/1.1<br>约束：outer ALPN 总为 h2,http/1.1 |
+| `config` | ECH 配置，空则 DNS 解析，否则 base64 | 有 |  |  | 已实现 | 通过 | 取值：`base64`<br>约束：可由 mihomo generate ech-keypair 生成，Config 填此，Key 填服务端 ech-key |
+| `ech-config-list` | 仅客户端，ECHConfig |  |  | 有 | 已实现 | 通过 | 取值：`base64 固定 ECHConfig`、`example.com+https://1.1.1.1/dns-query`、`h2c://...`、`https://1.1.1.1/dns-query`、`udp://1.1.1.1`<br>约束：DNS 模式遵守 TTL，查询 SNI 或服务器域名<br>约束：默认端口 53/443 |
+| `ech-server-keys` | 仅服务端，启用 ECH 的密钥 |  |  | 有 | 已实现 | 通过 | 约束：xray tls ech 生成<br>约束：配置后仍接受非 ECH 连接 |
 | `ech-sockopt` | 查询 ECH DNS 的 socket 选项 |  |  | 有 | 未实现 | 未测 |  |
-| `enable` | 启用 ECH | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `query-server-name` | DNS 解析 ECH 时用的域名 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
+| `enable` | 启用 ECH | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `query-server-name` | DNS 解析 ECH 时用的域名 | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
 
 ## jls
 
@@ -58,7 +58,7 @@
 | `max-client-ver` | 仅服务端，客户端最高版本 x.y.z |  |  | 有 | 未实现 | 未测 |  |
 | `max-time-diff` | 仅服务端，最大时间差毫秒 |  |  | 有 | 已实现 | 通过 |  |
 | `min-client-ver` | 仅服务端，客户端最低版本 x.y.z |  |  | 有 | 未实现 | 未测 |  |
-| `mldsa65-seed` | 仅服务端，ML-DSA-65 后量子签名私钥 |  |  | 有 | 未实现 | 未测 | 约束：target 证书长度必须大于 3500<br>约束：target 需支持 X25519MLKEM768<br>约束：不能与 privateKey 相同（source:infra/conf/transport_security.go） |
+| `mldsa65-seed` | 仅服务端，ML-DSA-65 后量子签名私钥 |  |  | 有 | 已实现 | 通过 | 约束：target 证书长度必须大于 3500<br>约束：target 需支持 X25519MLKEM768<br>约束：不能与 privateKey 相同（source:infra/conf/transport_security.go） |
 | `mldsa65-verify` | 仅客户端，mldsa65 公钥 |  |  | 有 | 已实现 | 通过 |  |
 | `password` | 仅客户端，必填，服务端私钥对应公钥 |  |  | 有 | 已实现 | 通过 | 约束：旧称 publicKey，xray x25519 -i 生成 |
 | `post-quantum` | target 支持 X25519MLKEM768 时客户端自动使用后量子密钥协商 |  |  | 有 | 已实现 | 通过 |  |
@@ -123,8 +123,8 @@
 | `certificate` | 服务器证书链行数组，PEM 格式。 |  | 有 |  | 已实现 | 通过 |  |
 | `certificate-path` | 服务器证书链路径，PEM 格式。 |  | 有 |  | 已实现 | 通过 |  |
 | `certificate-provider` | 字符串或对象。 |  | 有 |  | 未实现 | 未测 | 约束：仅服务器<br>约束：自 sing-box 1.14.0 起 |
-| `certificate-public-key-sha256` | 服务器证书公钥的 SHA-256 哈希列表，base64 格式。 |  | 有 |  | 未实现 | 未测 | 约束：仅客户端<br>约束：自 sing-box 1.13.0 起 |
-| `certificate-sha256` | 服务器证书的 SHA-256 哈希列表，base64 格式。 |  | 有 |  | 未实现 | 未测 | 约束：仅客户端<br>约束：如果只需要固定公钥，请使用 `certificate_public_key_sha256`。<br>约束：自 sing-box 1.15.0 起 |
+| `certificate-public-key-sha256` | 服务器证书公钥的 SHA-256 哈希列表，base64 格式。 |  | 有 |  | 已实现 | 通过 | 约束：仅客户端<br>约束：自 sing-box 1.13.0 起 |
+| `certificate-sha256` | 服务器证书的 SHA-256 哈希列表，base64 格式。 |  | 有 |  | 已实现 | 通过 | 约束：仅客户端<br>约束：如果只需要固定公钥，请使用 `certificate_public_key_sha256`。<br>约束：自 sing-box 1.15.0 起 |
 | `certificates` | 证书列表，建议 fullchain |  |  | 有 | 部分 | 通过 |  |
 | `cipher-suites` | 启用的 TLS 1.0–1.2 密码套件列表。 |  | 有 | 有 | 未实现 | 未测 | 取值：`TLS_AES_128_GCM_SHA256`、`TLS_AES_256_GCM_SHA384`、`TLS_CHACHA20_POLY1305_SHA256`、`TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA`、`TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`、`TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA`、`TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`、`TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256`、`TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA`、`TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`、`TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA`、`TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`、`TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256`、`TLS_RSA_WITH_AES_128_CBC_SHA`、`TLS_RSA_WITH_AES_128_GCM_SHA256`、`TLS_RSA_WITH_AES_256_CBC_SHA`、`TLS_RSA_WITH_AES_256_GCM_SHA384`<br>约束：列表的顺序被忽略。<br>约束：如果为空，则使用安全的默认列表。<br>约束：默认密码套件可能会随着时间的推移而改变。 |
 | `client-authentication` | 要使用的客户端身份验证类型。 |  | 有 |  | 部分 | 通过 | 取值：`no`、`request`、`require-and-verify`、`require-any`、`verify-if-given`<br>约束：* `no`（默认）<br>约束：仅服务器<br>约束：如果此选项设置为 `verify-if-given` 或 `require-and-verify`，则需要 `client_certificate`、`client_certificate_path`、`client_certificate_sha256` 或 `client_certificate_public_key_sha256` 中的一个。<br>约束：自 sing-box 1.13.0 起 |
@@ -137,21 +137,21 @@
 | `curve-preferences` | 支持的密钥交换机制集合。 |  | 有 | 有 | 未实现 | 未测 | 取值：`CurveP256`、`CurveP384`、`CurveP521`、`P256`、`P384`、`P521`、`SecP256r1MLKEM768`、`SecP384r1MLKEM1024`、`X25519`、`X25519MLKEM768`<br>约束：列表的顺序被忽略，密钥交换机制通过 Golang 的内部偏好顺序从此列表中选择。<br>约束：可用值，同时也是默认列表：<br>约束：自 sing-box 1.13.0 起<br>约束：SecP256r1MLKEM768、SecP384r1MLKEM1024 未被 utls 支持<br>约束：调整顺序不改变偏好 |
 | `disable-sni` | 不要在 ClientHello 中发送服务器名称. |  | 有 |  | 未实现 | 未测 | 约束：仅客户端 |
 | `disable-system-root` | true 时只用 certificates 中的证书 |  |  | 有 | 未实现 | 未测 |  |
-| `ech` | ECH 配置对象 |  | 有 |  | 未实现 | 未测 |  |
-| `ech-config` | ECH 配置行数组，PEM 格式。 |  | 有 |  | 未实现 | 未测 | 约束：仅客户端 |
-| `ech-config-path` | ECH 配置路径，PEM 格式。 |  | 有 |  | 未实现 | 未测 | 约束：仅客户端 |
+| `ech` | ECH 配置对象 |  | 有 |  | 已实现 | 通过 |  |
+| `ech-config` | ECH 配置行数组，PEM 格式。 |  | 有 |  | 已实现 | 通过 | 约束：仅客户端 |
+| `ech-config-path` | ECH 配置路径，PEM 格式。 |  | 有 |  | 已实现 | 通过 | 约束：仅客户端 |
 | `ech-dynamic-record-sizing-disabled` | 禁用 TLS 记录的自适应大小调整。 |  | 已移除 |  | 不适用 | 未测 | 约束：`dynamic_record_sizing_disabled` 已在 sing-box 1.12.0 废弃且已在 sing-box 1.13.0 中被移除。 |
-| `ech-enabled` | 启用开关 |  | 有 |  | 未实现 | 未测 |  |
-| `ech-key` | ECH 密钥行数组，PEM 格式。 |  | 有 |  | 未实现 | 未测 | 约束：仅服务器 |
-| `ech-key-path` | ECH 密钥路径，PEM 格式。 |  | 有 |  | 未实现 | 未测 | 约束：仅服务器 |
+| `ech-enabled` | 启用开关 |  | 有 |  | 已实现 | 通过 |  |
+| `ech-key` | ECH 密钥行数组，PEM 格式。 |  | 有 |  | 已实现 | 通过 | 约束：仅服务器 |
+| `ech-key-path` | ECH 密钥路径，PEM 格式。 |  | 有 |  | 已实现 | 通过 | 约束：仅服务器 |
 | `ech-pq-signature-schemes-enabled` | 启用对后量子对等证书签名方案的支持。 |  | 已移除 |  | 不适用 | 未测 | 约束：`pq_signature_schemes_enabled` 已在 sing-box 1.12.0 废弃且已在 sing-box 1.13.0 中被移除。 |
-| `ech-query-server-name` | 覆盖用于 ECH HTTPS 记录查询的域名。 |  | 有 |  | 未实现 | 未测 | 约束：仅客户端<br>约束：自 sing-box 1.13.0 起 |
+| `ech-query-server-name` | 覆盖用于 ECH HTTPS 记录查询的域名。 |  | 有 |  | 已实现 | 通过 | 约束：仅客户端<br>约束：自 sing-box 1.13.0 起 |
 | `enable-session-resumption` | 会话恢复，默认禁用 |  |  | 有 | 未实现 | 未测 | 约束：不是 0-RTT<br>约束：两端都启用才协商 |
 | `enabled` | 启用 TLS |  | 有 |  | 已实现 | 通过 |  |
 | `engine` | 要使用的 TLS 引擎。 |  | 有 |  | 未实现 | 未测 | 取值：`apple`、`go`、`windows`<br>约束：* `go`（默认）<br>约束：TLS 1.3 仅在 Windows 11 或 Windows Server 2022 及后续版本上协商。<br>约束：`windows` 通过 SSPI 使用 Schannel，仅在 Windows build 17763 及以上可用，包括 Windows 10 版本 1809、Windows Server 2019 及后续版本。<br>约束：不支持的字段：<br>约束：仅客户端<br>约束：自 sing-box 1.14.0 起<br>约束：默认版本范围为 TLS 1.2 到 TLS 1.3，与 `go` 引擎一致。 |
 | `fingerprint` | 证书 SHA256 指纹 | 有 |  | 有 | 部分 | 通过 | 取值：`360`、`Hello360_11_0`、`Hello360_7_5`、`Hello360_Auto`、`HelloAndroid_11_OkHttp`、`HelloChrome_100`、`HelloChrome_100_PSK`、`HelloChrome_102`、`HelloChrome_106_Shuffle`、`HelloChrome_112_PSK_Shuf`、`HelloChrome_114_Padding_PSK_Shuf`、`HelloChrome_120`、`HelloChrome_131`、`HelloChrome_133`、`HelloChrome_58`、`HelloChrome_62`、`HelloChrome_70`、`HelloChrome_72`、`HelloChrome_83`、`HelloChrome_87`、`HelloChrome_96`、`HelloChrome_Auto`、`HelloEdge_106`、`HelloEdge_85`……<br>约束：不是 HPKP 公钥指纹<br>约束：中级或根证书验证链，自 v1.19.20 还需符合 SNI<br>约束：叶子证书只比对指纹<br>约束：ECH 时 outer 总为 h2,http/1.1<br>约束：uTLS 下 ALPN 默认 h2,http/1.1；WebSocket/HTTPUpgrade 默认 http/1.1<br>约束：uTLS 下仍传递 serverName、disableSystemRoot、pinnedPeerCertSha256、masterKeyLog、echConfigList、echSockopt<br>约束：unsafe 恢复原生 Go TLS<br>约束：指纹名单来自文档与 source:transport/internet/tls/tls.go |
-| `fragment` | 通过分段 TLS 握手数据包来绕过防火墙。 |  | 有 |  | 未实现 | 未测 | 约束：仅客户端<br>约束：在 Linux、Apple 平台和（需要管理员权限的）Windows 系统上，可以自动检测等待时间。<br>约束：由于性能不佳，请首先尝试 `record_fragment`，且仅应用于已知被阻止的服务器名称。<br>约束：自 sing-box 1.12.0 起 |
-| `fragment-fallback-delay` | 当 TLS 分段无法自动确定等待时间时使用的回退值。 |  | 有 |  | 未实现 | 未测 | 约束：仅客户端<br>约束：自 sing-box 1.12.0 起<br>约束：默认使用 `500ms`。 |
+| `fragment` | 通过分段 TLS 握手数据包来绕过防火墙。 |  | 有 |  | 已实现 | 通过 | 约束：仅客户端<br>约束：在 Linux、Apple 平台和（需要管理员权限的）Windows 系统上，可以自动检测等待时间。<br>约束：由于性能不佳，请首先尝试 `record_fragment`，且仅应用于已知被阻止的服务器名称。<br>约束：自 sing-box 1.12.0 起 |
+| `fragment-fallback-delay` | 当 TLS 分段无法自动确定等待时间时使用的回退值。 |  | 有 |  | 已实现 | 通过 | 约束：仅客户端<br>约束：自 sing-box 1.12.0 起<br>约束：默认使用 `500ms`。 |
 | `handshake-timeout` | TLS 握手超时，采用 golang 的 Duration 格式。 |  | 有 |  | 部分 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `15s`。 |
 | `insecure` | 接受任何服务器证书。 |  | 有 |  | 未实现 | 未测 | 约束：仅客户端 |
 | `kernel-rx` | 启用内核 TLS 接收支持。 |  | 有 |  | 未实现 | 未测 | 约束：仅支持 Linux 5.1+，如果可能，使用较新的内核。<br>约束：仅支持 TLS 1.3。<br>约束：自 sing-box 1.13.0 起 |
@@ -162,8 +162,8 @@
 | `max-version` | 可接受的最大 TLS 版本。 |  | 有 | 有 | 部分 | 通过 | 取值：`1.0`、`1.1`、`1.2`、`1.3`<br>约束：默认情况下，当前最高版本为 TLS 1.3。<br>约束：取值来自源码（source:transport/internet/tls/config.go） |
 | `min-version` | 可接受的最低 TLS 版本。 |  | 有 | 有 | 部分 | 通过 | 取值：`1.0`、`1.1`、`1.2`、`1.3`<br>约束：默认使用 TLS 1.2。<br>约束：取值来自源码（source:transport/internet/tls/config.go） |
 | `mtls` | 文档用 usage=verify 验证远端证书；未单列 mTLS 配置，masque warp 另有客户端证书 |  |  | 有 | 部分 | 通过 |  |
-| `name-cert-verify` | 仅修改证书 DNSName 校验目标，不改 SNI | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
-| `pinned-peer-cert-sha256` | 证书 SHA256 pin，hex，逗号分隔 |  |  | 有 | 未实现 | 未测 | 约束：兼容带冒号格式<br>约束：命中叶子证书直接通过；命中 CA 时按 serverName 验签<br>约束：覆盖默认校验 |
+| `name-cert-verify` | 仅修改证书 DNSName 校验目标，不改 SNI | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
+| `pinned-peer-cert-sha256` | 证书 SHA256 pin，hex，逗号分隔 |  |  | 有 | 已实现 | 通过 | 约束：兼容带冒号格式<br>约束：命中叶子证书直接通过；命中 CA 时按 serverName 验签<br>约束：覆盖默认校验 |
 | `reality` | REALITY 配置对象 |  | 有 |  | 已实现 | 通过 |  |
 | `reality-enabled` | 启用开关 |  | 有 |  | 已实现 | 通过 |  |
 | `reality-handshake` | 握手服务器地址和 拨号参数。 |  | 有 |  | 部分 | 通过 | 约束：仅服务器<br>约束：必填 |
@@ -173,7 +173,7 @@
 | `reality-private-key` | 私钥，由 `sing-box generate reality-keypair` 生成。 |  | 有 |  | 已实现 | 通过 | 约束：仅服务器<br>约束：必填 |
 | `reality-public-key` | 公钥，由 `sing-box generate reality-keypair` 生成。 |  | 有 |  | 已实现 | 通过 | 约束：仅客户端<br>约束：必填 |
 | `reality-short-id` | 一个零到八位的十六进制字符串。 |  | 有 |  | 已实现 | 通过 | 约束：必填 |
-| `record-fragment` | 将 TLS 握手分段为多个 TLS 记录以绕过防火墙。 |  | 有 |  | 未实现 | 未测 | 约束：仅客户端<br>约束：自 sing-box 1.12.0 起 |
+| `record-fragment` | 将 TLS 握手分段为多个 TLS 记录以绕过防火墙。 |  | 有 |  | 已实现 | 通过 | 约束：仅客户端<br>约束：自 sing-box 1.12.0 起 |
 | `reject-unknown-sni` | 服务端 SNI 不匹配证书时拒绝握手，默认 false |  |  | 有 | 未实现 | 未测 |  |
 | `server-name` | 用于验证返回证书上的主机名，除非设置不安全。 |  | 有 | 有 | 已实现 | 通过 | 取值：`FromMitM`、`IP`、`[IPv6]`、`域名`<br>约束：FromMitM 用 tunnel 入站解密 TLS 的 SNI<br>约束：IP 不发 SNI<br>约束：留空用 address（域名） |
 | `servername` | VMess、VLESS 的 SNI 字段 | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
@@ -182,11 +182,11 @@
 | `spoof` | 在真实 ClientHello 之前注入一个伪造的、携带白名单 SNI 的 TLS ClientHello，以欺骗基于 SNI 过滤的中间盒放行连接。 |  | 有 |  | 未实现 | 未测 | 约束：Linux 上需要 `CAP_NET_RAW` 和 `CAP_NET_ADMIN`，macOS 上需要 root，Windows 上需要 Administrator。<br>约束：不支持 Windows ARM64。<br>约束：仅客户端<br>约束：仅支持 Linux、macOS 和 Windows，需要提升的权限。<br>约束：自 sing-box 1.14.0 起 |
 | `spoof-method` | 控制伪造报文被真实服务器拒绝的方式。 |  | 有 |  | 未实现 | 未测 | 取值：`wrong-ack`、`wrong-checksum`、`wrong-md5`、`wrong-sequence`、`wrong-timestamp`<br>约束：仅客户端<br>约束：自 sing-box 1.14.0 起 |
 | `tls` | 启用 tls | 有 |  | 有 | 已实现 | 通过 | 取值：`false`、`tls`、`true`<br>约束：trojan 强制启用<br>约束：本页列表未含 MASQUE，docs/config/transport.md 列出 MASQUE |
-| `use-system-ca` | 默认 false 用内置 CA，true 用系统 CA |  |  | 有 | 未实现 | 未测 |  |
+| `use-system-ca` | 默认 false 用内置 CA，true 用系统 CA |  |  | 有 | 已实现 | 通过 |  |
 | `utls` | uTLS 是 "crypto/tls" 的一个分支，它提供了 ClientHello 指纹识别阻力。 |  | 有 |  | 部分 | 通过 | 取值：`360`、`android`、`chrome`、`edge`、`firefox`、`ios`、`qq`、`random`、`randomized`、`safari`<br>约束：1.10.0 起已移除并回退到 chrome：chrome_psk、chrome_psk_shuffle、chrome_padding_psk_shuffle、chrome_pq、chrome_pq_psk<br>约束：仅客户端<br>约束：默认使用 chrome 指纹。 |
 | `utls-enabled` | 启用开关 |  | 有 |  | 部分 | 通过 |  |
 | `utls-fingerprint` | uTLS 指纹名称 |  | 有 |  | 部分 | 通过 | 取值：`360`、`android`、`chrome`、`edge`、`firefox`、`ios`、`qq`、`random`、`randomized`、`safari`<br>约束：留空时使用 chrome |
-| `verify-peer-cert-by-name` | 仅客户端，校验证书用的名字，逗号分隔 |  |  | 有 | 未实现 | 未测 | 取值：`FromMitM`、`域名列表`<br>约束：覆盖 serverName 校验 |
+| `verify-peer-cert-by-name` | 仅客户端，校验证书用的名字，逗号分隔 |  |  | 有 | 已实现 | 通过 | 取值：`FromMitM`、`域名列表`<br>约束：覆盖 serverName 校验 |
 
 ## tlsmirror
 

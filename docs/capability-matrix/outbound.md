@@ -49,7 +49,7 @@
 | `name` | 必须，代理名称，不可重复 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
 | `port` | 必须，端口 | 有 |  |  | 已实现 | 通过 | 取值：`端口` |
 | `protocol` | 出站协议名 |  |  | 有 | 部分 | 通过 | 取值：`blackhole`、`dns`、`freedom`、`http`、`hysteria`、`loopback`、`masque`、`shadowsocks`、`socks`、`trojan`、`vless`、`vmess`、`wireguard`<br>约束：源码另接受别名 block、direct |
-| `proxy-settings` | 出站 proxySettings |  |  | 已移除 | 未实现 | 未测 | 约束：配置时报错，改用 sockopt.dialerProxy |
+| `proxy-settings` | 出站 proxySettings |  |  | 已移除 | 已实现 | 通过 | 约束：配置时报错，改用 sockopt.dialerProxy |
 | `send-through` | 发送数据的本地 IP，默认 0.0.0.0 |  |  | 有 | 部分 | 通过 | 取值：`IP`、`IPv6 CIDR`、`origin`、`srcip`<br>约束：CIDR 时随机选 IP，需系统允许 bind；ndp 网络不建议小于 /120<br>约束：origin 用本机被连接的 IP；对 UDP 无效<br>约束：srcip 用入站源 IP |
 | `server` | 必须，服务器域名或 IP | 有 |  |  | 已实现 | 通过 | 取值：`IP`、`域名` |
 | `settings` | 协议专属配置对象 |  |  | 有 | 已实现 | 通过 |  |
@@ -609,7 +609,7 @@
 | `email` | 邮箱，可选 |  |  | 有 | 未实现 | 未测 |  |
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
 | `method` | 加密方法： |  | 有 | 有 | 部分 | 通过 | 取值：`2022-blake3-aes-128-gcm`、`2022-blake3-aes-256-gcm`、`2022-blake3-chacha20-poly1305`、`aes-128-cfb`、`aes-128-ctr`、`aes-128-gcm`、`aes-192-cfb`、`aes-192-ctr`、`aes-192-gcm`、`aes-256-cfb`、`aes-256-ctr`、`aes-256-gcm`、`chacha20-ietf`、`chacha20-ietf-poly1305`、`chacha20-poly1305`、`none`、`rc4-md5`、`xchacha20`、`xchacha20-ietf-poly1305`、`xchacha20-poly1305`<br>约束：后 9 种为旧版流加密方法<br>约束：必填 |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 未实现 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `network` | 启用的网络协议`tcp` 或 `udp`。 |  | 有 |  | 部分 | 通过 | 取值：`tcp`、`udp`<br>约束：默认所有。 |
 | `password` | 密码 | 有 | 有 | 有 | 已实现 | 通过 | 取值：`字符串`<br>约束：必填<br>约束：SS2022 预共享密钥：128-gcm 16 字节，其他 32 字节 |
 | `plugin` | 插件 | 有 | 有 |  | 部分 | 通过 | 取值：`gost-plugin`、`jls`、`kcptun`、`obfs`、`obfs-local`、`restls`、`shadow-tls`、`v2ray-plugin`<br>约束：仅支持 `obfs-local` 和 `v2ray-plugin`。 |
@@ -872,7 +872,7 @@
 | `email` | 邮箱，可选 |  |  | 有 | 未实现 | 未测 |  |
 | `flow` | Trojan flow |  |  | 已移除 | 未实现 | 未测 | 约束：配置时报错 |
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 未实现 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `network` | 传输层，其他值为 tcp | 有 | 有 |  | 部分 | 通过 | 取值：`grpc`、`tcp`、`udp`、`ws`<br>约束：默认所有。 |
 | `password` | 必须，密码 | 有 | 有 | 有 | 已实现 | 通过 | 取值：`字符串`<br>约束：必填 |
 | `port` | 服务端端口 |  |  | 有 | 已实现 | 通过 |  |
@@ -955,7 +955,7 @@
 | `flow` | VLESS 子协议 | 有 | 有 | 有 | 已实现 | 通过 | 取值：``、`xtls-rprx-vision`、`xtls-rprx-vision-udp443`<br>约束：XTLS 仅在 TCP+TLS/REALITY 或 VLESS Encryption 下可用<br>约束：xtls-rprx-vision 拦截 UDP 443，-udp443 不拦截 |
 | `id` | 用户 ID：UUID 或小于 30 字节字符串 |  |  | 有 | 部分 | 通过 |  |
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 未实现 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `network` | 传输层，其他值为 tcp | 有 | 有 |  | 部分 | 通过 | 取值：`grpc`、`h2`、`http`、`tcp`、`udp`、`ws`、`xhttp`<br>约束：默认所有。 |
 | `packet-addr` | vless 出站字段 packet-addr（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `packet-encoding` | UDP 包编码，空为原始 | 有 | 有 |  | 已实现 | 通过 | 取值：``、`(none)`、`packetaddr`、`xudp` |
@@ -996,7 +996,7 @@
 | `max-simultaneous-write-connection` | vmess 出站字段 max-simultaneous-write-connection（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `max-write-duration-ms` | vmess 出站字段 max-write-duration-ms（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `max-write-size` | vmess 出站字段 max-write-size（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 未实现 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `network` | 传输层，其他值为 tcp | 有 | 有 |  | 部分 | 通过 | 取值：`grpc`、`h2`、`http`、`mekya`、`mkcp`、`tcp`、`udp`、`ws`<br>约束：默认所有。 |
 | `packet-addr` | vmess 出站字段 packet-addr（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `packet-encoding` | UDP 包编码，空为原始 | 有 | 有 |  | 未实现 | 未测 | 取值：``、`(none)`、`packetaddr`、`xudp` |

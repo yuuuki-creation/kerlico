@@ -6,13 +6,16 @@ use kerlico_core::{Address, Destination, Error, Result};
 use std::{io::Cursor, net::SocketAddr, sync::Arc};
 use xray_routing::{Network, Target, TargetAddr};
 use xray_transport::stream::{
-    Authority, GrpcConfig, GrpcTransport, HeaderMap, HeaderValue, HttpUpgradeConfig,
-    TransportLayer, WebSocketConfig, XhttpConfig, XhttpConfigInput, XhttpEndpoint,
-    XhttpHttpVersion, XhttpModeSelection, XhttpRange, XhttpScheme, XhttpTransport, XhttpXmuxPolicy,
+    Authority, GrpcConfig, GrpcTransport, HeaderMap, HttpUpgradeConfig, TransportLayer,
+    WebSocketConfig, XhttpConfig, XhttpConfigInput, XhttpEndpoint, XhttpHttpVersion,
+    XhttpMetadataPlacement, XhttpModeSelection, XhttpPaddingMethod, XhttpPaddingPlacement,
+    XhttpRange, XhttpScheme, XhttpTransport, XhttpUplinkDataPlacement, XhttpXmuxPolicy,
+    xhttp_h3_test_only::{H3Congestion, H3QuicConfig},
 };
 use xray_transport::{
-    BoxedTransportStream, ConnectorConfig, RealityClientConfig, RealityRuntimeEngine,
-    RustlsRealityTlsSessionProvider, TlsClientConfig, TlsConnector, TransportDialer,
+    BoxedTransportStream, ConnectorConfig, CustomTlsClientOptions, RealityClientConfig,
+    RealityRuntimeEngine, RustlsRealityTlsSessionProvider, TlsClientConfig, TlsConnector,
+    TransportDialer, build_custom_tls_client_config,
 };
 
 pub(crate) fn target(value: &Destination, udp: bool) -> Target {
@@ -35,6 +38,8 @@ enum LayerPlan {
         config: Box<XhttpConfig>,
         endpoint: XhttpEndpoint,
         version: XhttpHttpVersion,
+        xmux: XhttpXmuxPolicy,
+        h3_quic: H3QuicConfig,
     },
 }
 impl LayerPlan {
@@ -48,12 +53,15 @@ impl LayerPlan {
                 config,
                 endpoint,
                 version,
+                xmux,
+                h3_quic,
             } => TransportLayer::Xhttp(
-                XhttpTransport::new(
+                XhttpTransport::new_with_h3_quic(
                     config.as_ref().clone(),
                     endpoint.clone(),
                     *version,
-                    XhttpXmuxPolicy::default(),
+                    *xmux,
+                    h3_quic.clone(),
                 )
                 .map_err(|_| invalid())?,
             ),
@@ -66,6 +74,7 @@ pub(crate) struct Carrier {
     connector: ConnectorConfig,
     transport: LayerPlan,
     dialer: TransportDialer,
+    dialer_opts: kerlico_core::DialerOptions,
     download: Option<Box<Carrier>>,
     storage: Option<crate::xdrive::Plan>,
     storage_resources: std::sync::Mutex<
@@ -109,7 +118,9 @@ impl Carrier {
         transport: Transport,
         encrypted: bool,
         family: Family,
+        mut fragment_input: Option<crate::profile::TcpFragmentInput>,
     ) -> Result<Self> {
+        let dialer_opts = kerlico_core::current_compile_dialer();
         if let Transport::Xdrive { settings } = transport {
             if !encrypted || !matches!(family, Family::Auto) {
                 return Err(Error::Config(
@@ -123,6 +134,7 @@ impl Carrier {
                     ca_pem,
                     alpn,
                     fingerprint,
+                    ..
                 } => {
                     if server_name.is_some() || !alpn.is_empty() || fingerprint.is_some() {
                         return Err(Error::Config(
@@ -139,6 +151,7 @@ impl Carrier {
                 connector: ConnectorConfig::Tcp,
                 transport: LayerPlan::Raw,
                 dialer: TransportDialer::system().map_err(|_| invalid())?,
+                dialer_opts,
                 download: None,
                 storage: Some(storage),
                 storage_resources: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -154,7 +167,24 @@ impl Carrier {
             return Err(Error::Config("节点地址不属于指定载体地址族".into()));
         }
         let quic_tls = match &security {
-            Security::Tls { ca_pem, .. } => Some(quic_config(ca_pem.as_deref())?),
+            Security::Tls {
+                ca_pem,
+                certificate_path,
+                use_system_ca,
+                allow_insecure,
+                pinned_peer_cert_sha256,
+                certificate_public_key_sha256,
+                verify_peer_cert_by_name,
+                ..
+            } => Some(quic_config(
+                ca_pem.as_deref(),
+                certificate_path.as_deref(),
+                use_system_ca.unwrap_or(true),
+                *allow_insecure,
+                pinned_peer_cert_sha256,
+                certificate_public_key_sha256,
+                verify_peer_cert_by_name,
+            )?),
             _ => None,
         };
         let raw = matches!(transport, Transport::Tcp);
@@ -220,10 +250,23 @@ impl Carrier {
             Security::Tls {
                 server_name,
                 ca_pem,
+                certificate_path,
+                use_system_ca,
+                allow_insecure,
+                pinned_peer_cert_sha256,
+                certificate_public_key_sha256,
+                verify_peer_cert_by_name,
+                ech_config,
+                query_server_name,
+                fragment: tls_fragment,
+                record_fragment,
+                fragment_fallback_delay,
                 mut alpn,
                 fingerprint,
             } => {
-                let name = server_name.unwrap_or_else(|| server.host());
+                let name = server_name
+                    .or(query_server_name)
+                    .unwrap_or_else(|| server.host());
                 xray_transport::validate_tls_server_name(&name).map_err(|_| invalid())?;
                 if alpn.iter().any(|s| s.is_empty() || s.len() > 255) {
                     return Err(invalid());
@@ -236,70 +279,188 @@ impl Carrier {
                         HttpVersion::Auto => alpn,
                     };
                 }
-                if let Some(pem) = ca_pem {
-                    if fingerprint.as_deref().is_some_and(|s| s != "unsafe") {
+                if tls_fragment == Some(true)
+                    && fragment_input.as_ref().is_none_or(|f| f.packets.is_empty())
+                {
+                    let delay_ms = i32::try_from(fragment_fallback_delay.unwrap_or(15))
+                        .map_err(|_| invalid())?;
+                    let entry = fragment_input.get_or_insert_with(Default::default);
+                    entry.packets = "tlshello".into();
+                    entry.length = Some(crate::profile::RangeOrExactInput::Range([100, 200]));
+                    entry.delay = Some(crate::profile::RangeOrExactInput::Exact(delay_ms));
+                }
+                let cert_pins = decode_sha256_pins(&pinned_peer_cert_sha256)?;
+                let spki_pins = decode_sha256_pins(&certificate_public_key_sha256)?;
+                let ech_bytes = ech_config
+                    .as_deref()
+                    .map(decode_ech_config_bytes)
+                    .transpose()?;
+                let custom_ca_der =
+                    load_custom_ca_der(ca_pem.as_deref(), certificate_path.as_deref())?;
+                let needs_custom_config = !custom_ca_der.is_empty()
+                    || use_system_ca == Some(false)
+                    || !spki_pins.is_empty()
+                    || ech_bytes.is_some()
+                    || record_fragment == Some(true);
+                if needs_custom_config {
+                    if !custom_ca_der.is_empty()
+                        && fingerprint.as_deref().is_some_and(|s| s != "unsafe")
+                    {
                         return Err(Error::Config(
                             "自定义 CA 当前不能与 TLS 指纹整形一起使用".into(),
                         ));
                     }
-                    let mut roots = rustls::RootCertStore::from_iter(
-                        webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-                    );
-                    let certs = rustls_pemfile::certs(&mut Cursor::new(pem))
-                        .collect::<std::io::Result<Vec<_>>>()?;
-                    if certs.is_empty() {
-                        return Err(invalid());
-                    }
-                    for cert in certs {
-                        roots.add(cert).map_err(|_| invalid())?;
-                    }
-                    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
-                        rustls::crypto::aws_lc_rs::default_provider(),
-                    ));
-                    let mut config = if raw {
-                        builder.with_protocol_versions(&[&rustls::version::TLS13])
-                    } else {
-                        builder.with_safe_default_protocol_versions()
-                    }
-                    .map_err(|_| invalid())?
-                    .with_root_certificates(roots)
-                    .with_no_client_auth();
-                    config.resumption = rustls::client::Resumption::disabled();
-                    config.alpn_protocols = if matches!(transport, Transport::Grpc { .. }) {
-                        vec![b"h2".to_vec()]
+                    let effective_alpn = if matches!(transport, Transport::Grpc { .. }) {
+                        vec!["h2".to_owned()]
                     } else if matches!(
                         transport,
                         Transport::Ws { .. } | Transport::Httpupgrade { .. }
                     ) {
-                        vec![b"http/1.1".to_vec()]
+                        vec!["http/1.1".to_owned()]
                     } else if matches!(transport, Transport::Xhttp { .. }) && alpn.is_empty() {
-                        vec![b"h2".to_vec()]
+                        vec!["h2".to_owned()]
                     } else {
-                        alpn.iter().map(|s| s.as_bytes().to_vec()).collect()
+                        alpn.clone()
                     };
+                    let tls13_only = raw && custom_ca_der.is_empty() && fingerprint.is_none();
+                    let custom_config = build_custom_tls_client_config(&CustomTlsClientOptions {
+                        allow_insecure,
+                        use_system_ca: use_system_ca.unwrap_or(true),
+                        custom_ca_der,
+                        pinned_peer_cert_sha256: cert_pins,
+                        pinned_public_key_sha256: spki_pins,
+                        verify_peer_cert_by_name,
+                        ech_config_list: ech_bytes,
+                        record_fragment: record_fragment == Some(true),
+                        alpn: effective_alpn,
+                        fingerprint: fingerprint.clone(),
+                        tls13_only,
+                    })
+                    .map_err(|_| invalid())?;
                     dialer = TransportDialer::with_tls_connector(
-                        TlsConnector::with_pinned_client_config(Arc::new(config)),
+                        TlsConnector::with_pinned_client_config(Arc::new(custom_config)),
                     )
                     .with_reality_engine(Arc::new(RealityRuntimeEngine::new(Arc::new(
                         RustlsRealityTlsSessionProvider::new(),
                     ))));
+                    let config = TlsClientConfig {
+                        server_name: name,
+                        allow_insecure: false,
+                        pinned_peer_cert_sha256: Vec::new(),
+                        verify_peer_cert_by_name: Vec::new(),
+                        alpn,
+                        fingerprint,
+                    };
+                    dialer
+                        .tls_connector()
+                        .client_config_for(&config)
+                        .map_err(|_| invalid())?;
+                    ConnectorConfig::Tls(config)
+                } else {
+                    let config = TlsClientConfig {
+                        server_name: name,
+                        allow_insecure,
+                        pinned_peer_cert_sha256: cert_pins,
+                        verify_peer_cert_by_name,
+                        alpn,
+                        fingerprint,
+                    };
+                    dialer
+                        .tls_connector()
+                        .client_config_for(&config)
+                        .map_err(|_| invalid())?;
+                    ConnectorConfig::Tls(config)
                 }
-                let config = TlsClientConfig {
-                    server_name: name,
-                    allow_insecure: false,
-                    pinned_peer_cert_sha256: Vec::new(),
-                    verify_peer_cert_by_name: Vec::new(),
-                    alpn,
-                    fingerprint,
-                };
-                // 配置检查不拨号，及早拒绝未知或无法协商的指纹。
-                dialer
-                    .tls_connector()
-                    .client_config_for(&config)
-                    .map_err(|_| invalid())?;
-                ConnectorConfig::Tls(config)
             }
         };
+        if !dialer_opts.is_default() {
+            let opts = dialer_opts.clone();
+            let server_dest = server.clone();
+            dialer = dialer.with_resolved_tcp_connector(Arc::new(
+                xray_transport::FnResolvedTcpConnector(
+                    move |target: Target, candidates: Vec<SocketAddr>| {
+                        let opts = opts.clone();
+                        let server_dest = server_dest.clone();
+                        async move {
+                            let dest = if let Some(addr) = candidates.first()
+                                && opts.detour.is_none()
+                            {
+                                Destination::new(&addr.ip().to_string(), addr.port())
+                                    .unwrap_or(server_dest)
+                            } else {
+                                match &target.addr {
+                                    TargetAddr::Ip(ip) => {
+                                        Destination::new(&ip.to_string(), target.port)
+                                            .unwrap_or(server_dest)
+                                    }
+                                    TargetAddr::Domain(d) => {
+                                        Destination::new(d, target.port).unwrap_or(server_dest)
+                                    }
+                                }
+                            };
+                            let stream =
+                                kerlico_net::TcpConnector::connect_raw_with_dialer(&dest, &opts)
+                                    .await
+                                    .map_err(|e| {
+                                        xray_transport::TransportError::ChainedOutbound(
+                                            e.to_string(),
+                                        )
+                                    })?;
+                            Ok(Box::new(DialerTransportStream(stream)) as BoxedTransportStream)
+                        }
+                    },
+                ),
+            ));
+        }
+        if let Some(frag) = &fragment_input
+            && !frag.packets.is_empty()
+        {
+            match frag.packets.as_str() {
+                "tlshello" | "1-1" | "1-2" | "1-3" => {}
+                other => {
+                    if let Some((a, b)) = other.split_once('-') {
+                        let start: u64 = a.parse().map_err(|_| invalid())?;
+                        let end: u64 = b.parse().map_err(|_| invalid())?;
+                        if start == 0 || start > end {
+                            return Err(invalid());
+                        }
+                    } else {
+                        return Err(invalid());
+                    }
+                }
+            }
+            let (length_min, length_max) = frag
+                .length
+                .map(crate::profile::RangeOrExactInput::to_u64_pair)
+                .transpose()?
+                .unwrap_or((100, 200));
+            let (delay_min_ms, delay_max_ms) = frag
+                .delay
+                .map(crate::profile::RangeOrExactInput::to_u64_pair)
+                .transpose()?
+                .unwrap_or((10, 20));
+            let (max_split_min, max_split_max) = frag
+                .max_split
+                .map(crate::profile::RangeOrExactInput::to_u64_pair)
+                .transpose()?
+                .unwrap_or((0, 0));
+            let tcp_frag = xray_transport::TcpFragmentConfig::new(
+                std::iter::once(
+                    u32::try_from(length_min).map_err(|_| invalid())?
+                        ..=u32::try_from(length_max).map_err(|_| invalid())?,
+                )
+                .collect(),
+                std::iter::once(
+                    u32::try_from(delay_min_ms).map_err(|_| invalid())?
+                        ..=u32::try_from(delay_max_ms).map_err(|_| invalid())?,
+                )
+                .collect(),
+                u32::try_from(max_split_min).map_err(|_| invalid())?
+                    ..=u32::try_from(max_split_max).map_err(|_| invalid())?,
+            )
+            .map_err(|_| invalid())?;
+            dialer = dialer.with_tcp_fragment(Arc::new(tcp_frag));
+        }
         let authority = match &connector {
             ConnectorConfig::Tls(c) => c.server_name.clone(),
             ConnectorConfig::Reality(c) => c.server_name.clone(),
@@ -344,6 +505,7 @@ impl Carrier {
                 service_name,
                 authority: host,
                 multi_mode,
+                user_agent,
                 idle_timeout_secs,
                 health_check_timeout_secs,
                 permit_without_stream,
@@ -354,11 +516,13 @@ impl Carrier {
                 }
                 let authority: Authority =
                     host.unwrap_or(authority).parse().map_err(|_| invalid())?;
+                let user_agent =
+                    GrpcConfig::resolve_user_agent(user_agent.as_deref()).map_err(|_| invalid())?;
                 LayerPlan::Grpc(GrpcConfig {
                     service_name,
                     authority,
                     multi_mode,
-                    user_agent: HeaderValue::from_static("grpc-go/1.81.0"),
+                    user_agent,
                     idle_timeout_secs,
                     health_check_timeout_secs,
                     permit_without_stream,
@@ -378,6 +542,9 @@ impl Carrier {
                     if reality && settings.mode == XhttpMode::Auto {
                         settings.mode = XhttpMode::StreamUp;
                     }
+                    if down.xhttp.xmux.is_none() {
+                        down.xhttp.xmux = down.xmux.take();
+                    }
                     down.xhttp.download = None;
                     download = Some(Box::new(Self::build(
                         down.server.destination()?,
@@ -387,9 +554,10 @@ impl Carrier {
                         },
                         encrypted,
                         down.server_family,
+                        fragment_input.clone(),
                     )?));
                 }
-                xhttp(settings, &connector, &authority)?
+                xhttp(settings, &connector, &authority, fragment_input.as_ref())?
             }
         };
         Ok(Self {
@@ -397,6 +565,7 @@ impl Carrier {
             connector,
             transport: layer,
             dialer,
+            dialer_opts,
             download,
             storage: None,
             storage_resources: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -532,12 +701,21 @@ impl Carrier {
             return storage.open(host).await;
         }
         let server = target(&self.server, false);
-        let candidates: Vec<SocketAddr> =
-            tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
-                .await?
+        let candidates: Vec<SocketAddr> = match tokio::net::lookup_host((
+            self.server.host().as_str(),
+            self.server.port(),
+        ))
+        .await
+        {
+            Ok(addrs) => addrs
                 .filter(|address| self.family.accepts(address.ip()))
                 .map(|address| SocketAddr::new(address.ip().to_canonical(), address.port()))
-                .collect();
+                .collect(),
+            Err(_) if self.dialer_opts.detour.is_some() => {
+                vec![SocketAddr::from(([127, 0, 0, 1], self.server.port()))]
+            }
+            Err(e) => return Err(e.into()),
+        };
         if let Some(down) = &self.download {
             let down_candidates: Vec<_> =
                 tokio::net::lookup_host((down.server.host().as_str(), down.server.port()))
@@ -592,6 +770,7 @@ fn xhttp(
     settings: XhttpSettings,
     security: &ConnectorConfig,
     authority: &str,
+    fragment_input: Option<&crate::profile::TcpFragmentInput>,
 ) -> Result<LayerPlan> {
     let reality = matches!(security, ConnectorConfig::Reality(_));
     let version = match (security, settings.http_version) {
@@ -620,6 +799,7 @@ fn xhttp(
         headers,
         is_reality: reality,
         no_grpc_header: settings.no_grpc_header,
+        x_padding_obfs_mode: settings.x_padding_obfs_mode,
         mode: match settings.mode {
             XhttpMode::Auto => XhttpModeSelection::Auto,
             XhttpMode::PacketUp => XhttpModeSelection::PacketUp,
@@ -628,8 +808,60 @@ fn xhttp(
         },
         ..Default::default()
     };
+    if let Some(key) = settings.x_padding_key {
+        input.x_padding_key = key;
+    }
+    if let Some(header) = settings.x_padding_header {
+        input.x_padding_header = header;
+    }
+    if let Some(placement) = settings.x_padding_placement {
+        input.x_padding_placement = match placement.as_str() {
+            "cookie" => XhttpPaddingPlacement::Cookie,
+            "header" => XhttpPaddingPlacement::Header,
+            "query" => XhttpPaddingPlacement::Query,
+            "query-in-header" | "query_in_header" => XhttpPaddingPlacement::QueryInHeader,
+            _ => return Err(invalid()),
+        };
+    }
+    if let Some(method) = settings.x_padding_method {
+        input.x_padding_method = match method.as_str() {
+            "repeat-x" | "repeat_x" => XhttpPaddingMethod::RepeatX,
+            "tokenish" => XhttpPaddingMethod::Tokenish,
+            _ => return Err(invalid()),
+        };
+    }
+    if let Some(method) = settings.uplink_http_method {
+        input.uplink_http_method = method;
+    }
+    if let Some(placement) = settings.session_placement {
+        input.session_placement = parse_metadata_placement(&placement)?;
+    }
+    if let Some(key) = settings.session_key {
+        input.session_key = key;
+    }
+    if let Some(placement) = settings.seq_placement {
+        input.seq_placement = parse_metadata_placement(&placement)?;
+    }
+    if let Some(key) = settings.seq_key {
+        input.seq_key = key;
+    }
+    if let Some(placement) = settings.uplink_data_placement {
+        input.uplink_data_placement = match placement.as_str() {
+            "auto" => XhttpUplinkDataPlacement::Auto,
+            "body" => XhttpUplinkDataPlacement::Body,
+            "cookie" => XhttpUplinkDataPlacement::Cookie,
+            "header" => XhttpUplinkDataPlacement::Header,
+            _ => return Err(invalid()),
+        };
+    }
+    if let Some(key) = settings.uplink_data_key {
+        input.uplink_data_key = key;
+    }
     fn range(n: u32) -> Result<XhttpRange> {
         Ok(XhttpRange::exact(i32::try_from(n).map_err(|_| invalid())?))
+    }
+    if let Some(n) = settings.uplink_chunk_size {
+        input.uplink_chunk_size = range(n)?;
     }
     if let Some(n) = settings.max_post_bytes {
         input.sc_max_each_post_bytes = range(n)?;
@@ -640,10 +872,49 @@ fn xhttp(
     if let Some(n) = settings.max_buffered_posts {
         input.sc_max_buffered_posts = n.into();
     }
+    if let Some([a, b]) = settings.sc_stream_up_server_secs {
+        input.sc_stream_up_server_secs = XhttpRange {
+            from: i32::try_from(a).map_err(|_| invalid())?,
+            to: i32::try_from(b).map_err(|_| invalid())?,
+        };
+    }
     if let Some([a, b]) = settings.padding_bytes {
         input.x_padding_bytes = XhttpRange {
             from: i32::try_from(a).map_err(|_| invalid())?,
             to: i32::try_from(b).map_err(|_| invalid())?,
+        };
+    }
+    let mut xmux = XhttpXmuxPolicy::default();
+    if let Some(xmux_cfg) = settings.xmux {
+        if let Some(v) = xmux_cfg.max_concurrency {
+            xmux.max_concurrency = v.to_xhttp_range();
+            if xmux_cfg.max_connections.is_none() {
+                xmux.max_connections = XhttpRange::exact(0);
+            }
+        }
+        if let Some(v) = xmux_cfg.max_connections {
+            xmux.max_connections = v.to_xhttp_range();
+        }
+        if let Some(v) = xmux_cfg.c_max_reuse_times {
+            xmux.c_max_reuse_times = v.to_xhttp_range();
+        }
+        if let Some(v) = xmux_cfg.h_max_request_times {
+            xmux.h_max_request_times = v.to_xhttp_range();
+        }
+        if let Some(v) = xmux_cfg.h_max_reusable_secs {
+            xmux.h_max_reusable_secs = v.to_xhttp_range();
+        }
+        if let Some(v) = xmux_cfg.h_keep_alive_period {
+            xmux.h_keep_alive_period_secs = v;
+        }
+    }
+    let mut h3_quic = H3QuicConfig::default();
+    if let Some(frag) = fragment_input
+        && let Some(bps) = frag.brutal_up.or(frag.brutal_down)
+        && bps > 0
+    {
+        h3_quic.congestion = H3Congestion::ForceBrutal {
+            bytes_per_second: bps,
         };
     }
     let config = XhttpConfig::normalize(input).map_err(|_| invalid())?;
@@ -660,27 +931,179 @@ fn xhttp(
         config: Box::new(config),
         endpoint,
         version,
+        xmux,
+        h3_quic,
     })
 }
 
-fn quic_config(ca: Option<&str>) -> Result<Arc<rustls::ClientConfig>> {
-    let mut roots =
-        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    if let Some(ca) = ca {
-        for cert in
-            rustls_pemfile::certs(&mut Cursor::new(ca)).collect::<std::io::Result<Vec<_>>>()?
-        {
-            roots.add(cert).map_err(|_| invalid())?;
+fn parse_metadata_placement(s: &str) -> Result<XhttpMetadataPlacement> {
+    match s {
+        "path" => Ok(XhttpMetadataPlacement::Path),
+        "cookie" => Ok(XhttpMetadataPlacement::Cookie),
+        "header" => Ok(XhttpMetadataPlacement::Header),
+        "query" => Ok(XhttpMetadataPlacement::Query),
+        _ => Err(invalid()),
+    }
+}
+
+fn decode_sha256_pins(values: &[String]) -> Result<Vec<[u8; 32]>> {
+    let mut out = Vec::with_capacity(values.len());
+    for raw in values {
+        let trimmed = raw.trim().replace(':', "");
+        let bytes = if trimmed.len() == 64 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+            trimmed
+                .as_bytes()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| {
+                    let s = std::str::from_utf8(c).map_err(|_| invalid())?;
+                    u8::from_str_radix(s, 16).map_err(|_| invalid())
+                })
+                .collect::<Result<Vec<u8>>>()?
+        } else {
+            base64::engine::general_purpose::STANDARD
+                .decode(&trimmed)
+                .or_else(|_| URL_SAFE_NO_PAD.decode(&trimmed))
+                .map_err(|_| invalid())?
+        };
+        let pin: [u8; 32] = bytes.try_into().map_err(|_| invalid())?;
+        out.push(pin);
+    }
+    Ok(out)
+}
+
+fn decode_ech_config_bytes(raw: &str) -> Result<Vec<u8>> {
+    let trimmed = raw.trim();
+    if trimmed.contains("-----BEGIN") {
+        let body: String = trimmed
+            .lines()
+            .filter(|line| !line.starts_with("-----"))
+            .collect();
+        return base64::engine::general_purpose::STANDARD
+            .decode(body.trim())
+            .map_err(|_| invalid());
+    }
+    if trimmed.len().is_multiple_of(2) && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return trimmed
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| {
+                let s = std::str::from_utf8(c).map_err(|_| invalid())?;
+                u8::from_str_radix(s, 16).map_err(|_| invalid())
+            })
+            .collect();
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .or_else(|_| URL_SAFE_NO_PAD.decode(trimmed))
+        .map_err(|_| invalid())
+}
+
+fn load_custom_ca_der(
+    ca_pem: Option<&str>,
+    certificate_path: Option<&str>,
+) -> Result<Vec<Vec<u8>>> {
+    let mut out = Vec::new();
+    if let Some(pem) = ca_pem {
+        let certs =
+            rustls_pemfile::certs(&mut Cursor::new(pem)).collect::<std::io::Result<Vec<_>>>()?;
+        if certs.is_empty() {
+            return Err(invalid());
+        }
+        for cert in certs {
+            out.push(cert.as_ref().to_vec());
         }
     }
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(|_| invalid())?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    config.resumption = rustls::client::Resumption::disabled();
-    config.alpn_protocols = vec![b"h3".to_vec()];
+    if let Some(path) = certificate_path {
+        let pem = std::fs::read_to_string(path).map_err(|_| invalid())?;
+        let certs =
+            rustls_pemfile::certs(&mut Cursor::new(pem)).collect::<std::io::Result<Vec<_>>>()?;
+        if certs.is_empty() {
+            return Err(invalid());
+        }
+        for cert in certs {
+            out.push(cert.as_ref().to_vec());
+        }
+    }
+    Ok(out)
+}
+
+struct DialerTransportStream(kerlico_core::BoxStream);
+impl tokio::io::AsyncRead for DialerTransportStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+impl tokio::io::AsyncWrite for DialerTransportStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+impl xray_transport::TransportStream for DialerTransportStream {
+    fn poll_read_direct(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        output: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        tokio::io::AsyncRead::poll_read(self, cx, output)
+    }
+    fn poll_write_direct(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        input: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        tokio::io::AsyncWrite::poll_write(self, cx, input)
+    }
+}
+
+fn quic_config(
+    ca: Option<&str>,
+    cert_path: Option<&str>,
+    use_system_ca: bool,
+    allow_insecure: bool,
+    cert_pins: &[String],
+    spki_pins: &[String],
+    verify_names: &[String],
+) -> Result<Arc<rustls::ClientConfig>> {
+    let custom_ca_der = load_custom_ca_der(ca, cert_path)?;
+    let pinned_peer_cert_sha256 = decode_sha256_pins(cert_pins)?;
+    let pinned_public_key_sha256 = decode_sha256_pins(spki_pins)?;
+    let config = build_custom_tls_client_config(&CustomTlsClientOptions {
+        allow_insecure,
+        use_system_ca,
+        custom_ca_der,
+        pinned_peer_cert_sha256,
+        pinned_public_key_sha256,
+        verify_peer_cert_by_name: verify_names.to_vec(),
+        ech_config_list: None,
+        record_fragment: false,
+        alpn: vec!["h3".to_owned()],
+        fingerprint: None,
+        tls13_only: true,
+    })
+    .map_err(|_| invalid())?;
     Ok(Arc::new(config))
 }

@@ -293,6 +293,39 @@ impl NodeOptions {
         }
     }
 }
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct UdpHopFinalmaskSpec {
+    #[serde(alias = "remote-ports", alias = "ports")]
+    pub remote_ports: Option<PortHopSpec>,
+    #[serde(alias = "remote-ips", alias = "ips")]
+    pub remote_ips: Vec<std::net::IpAddr>,
+    pub interval: Option<HopIntervalSpec>,
+    #[serde(alias = "interval-max")]
+    pub interval_max: Option<HopIntervalSpec>,
+    pub mode: Option<String>,
+}
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct QuicFinalmaskSpec {
+    #[serde(alias = "brutal-down")]
+    pub brutal_down: Option<BandwidthSpec>,
+    #[serde(alias = "brutal-up")]
+    pub brutal_up: Option<BandwidthSpec>,
+    #[serde(alias = "udp-hop", alias = "udp-udphop")]
+    pub udp_hop: Option<UdpHopFinalmaskSpec>,
+}
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Hysteria2FinalmaskSpec {
+    #[serde(alias = "brutal-down")]
+    pub brutal_down: Option<BandwidthSpec>,
+    #[serde(alias = "brutal-up")]
+    pub brutal_up: Option<BandwidthSpec>,
+    #[serde(alias = "udp-hop", alias = "udp-udphop")]
+    pub udp_hop: Option<UdpHopFinalmaskSpec>,
+    pub quic: Option<QuicFinalmaskSpec>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientOptions {
@@ -311,6 +344,8 @@ pub(crate) struct ClientOptions {
     pub tls: ClientTls,
     #[serde(default)]
     pub salamander_password: Option<String>,
+    #[serde(default)]
+    pub finalmask: Option<Hysteria2FinalmaskSpec>,
     #[serde(default)]
     pub limits: Limits,
 }
@@ -355,6 +390,10 @@ pub(crate) struct NodeOptions {
     pub masquerade_status_code: Option<u16>,
     #[serde(default, alias = "masquerade-headers")]
     pub masquerade_headers: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    pub multiplex: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
+    #[serde(default, alias = "mux-option-padding")]
+    pub mux_option_padding: Option<bool>,
     #[serde(default)]
     pub limits: Limits,
 }

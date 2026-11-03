@@ -1,13 +1,13 @@
 # 核心接口
 
-更新日期：2026-11-02（Asia/Shanghai）
+更新日期：2026-11-04（Asia/Shanghai）
 
-本文描述 `kerlico-core`、`kerlico-egress` 与 `kerlico-engine` 当前源码实现的运行装配、身份鉴别、业务流完成权（`FlowOpen`）、唯一业务计量与生命周期契约。
+本文描述 `kerlico-core`、`kerlico-net`、`kerlico-egress` 与 `kerlico-engine` 当前源码实现的运行装配、拨号选项与链式代理、通用复用与 UoT、身份鉴别、业务流完成权（`FlowOpen`）、唯一业务计量与生命周期契约。
 
 ## 运行装配
 
-- **`Registry::prepare(Config)`**：校验 JSON v2 配置、编译原生凭据与证书资产，返回不可克隆的 `PreparedConfig`。`OutboundFactory::compile` 返回 `OutboundPlan`（含 `Capabilities`、`TargetPolicy` 与一次性启动闭包），此阶段不创建运行后端、监听器或网络任务。
-- **`Engine::bind(PreparedConfig)`**：消费装配计划，构造唯一 `EgressRuntime` 与私有 `Dispatcher`。每个命名出站计划调用一次 `start(ServiceContext)`，随后绑定全部入站监听器。节点仅保存入站协议、监听器与配额，不各自持有 `Outbound`；本地固定转发同样接入唯一 `Dispatcher`。
+- **`Registry::prepare(Config)`**：校验 JSON v2 配置、编译原生凭据与证书资产，返回不可克隆的 `PreparedConfig`。`OutboundFactory::compile` 在 `with_compile_dialer` 注入的 `DialerOptions` 上下文中执行，返回 `OutboundPlan`（含 `Capabilities`、`TargetPolicy` 与一次性启动闭包），此阶段不创建运行后端、监听器或网络任务。
+- **`Engine::bind(PreparedConfig)`**：消费装配计划，构造唯一 `EgressRuntime`、共享 `DetourTable` 与私有 `Dispatcher`。每个命名出站计划调用一次 `start(ServiceContext)`，并登记到 `DetourTable` 供链式拨号（`detour` / `dialer-proxy` / `proxySettings`）解析上游出站，随后绑定全部入站监听器。节点支持 `accept_proxy_protocol` 在外层监听器剥离 PROXY protocol v1/v2 头并更新观测来源与本地地址。
 
 ## 身份与访问
 

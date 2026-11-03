@@ -33,10 +33,15 @@ struct Options {
     fallback_for_alpn: BTreeMap<String, FallbackDestInput>,
     #[serde(default)]
     fallbacks: Vec<FallbackRuleInput>,
+    #[serde(default)]
+    multiplex: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
+    #[serde(default, alias = "mux-option-padding")]
+    mux_option_padding: Option<bool>,
 }
 pub(crate) struct Payload {
     pub users: CredentialSet<[u8; 56]>,
     pub fallbacks: Vec<FallbackRule>,
+    pub mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
 }
 struct TrojanNode {
     payload: Arc<Payload>,
@@ -81,10 +86,15 @@ impl NodeFactory for TrojanNodeFactory {
         let fallback_alpns: Vec<String> = fallbacks.iter().filter_map(|r| r.alpn.clone()).collect();
         let transport = options.transport.normalize()?;
         let tls = server_tls(options.security, &transport, &fallback_alpns)?;
+        let mux = kerlico_net::sing_mux::SingMuxInboundConfig::effective_with_padding(
+            options.multiplex.as_ref(),
+            options.mux_option_padding,
+        );
         Ok(Arc::new(TrojanNode {
             payload: Arc::new(Payload {
                 users: input.credentials(users)?,
                 fallbacks,
+                mux,
             }),
             tls,
             transport,
@@ -204,6 +214,12 @@ impl Payload {
             access.authenticated(self.users.verified(&slot, (target, udp))?, &context)?;
         if udp {
             return crate::udp::serve(stream, access, context).await;
+        }
+        if kerlico_net::sing_mux::is_magic_target(&target) {
+            let Some(mux_cfg) = &self.mux else {
+                return Err(kerlico_core::Error::Rejected);
+            };
+            return kerlico_net::sing_mux::serve_inbound(stream, access, mux_cfg, &context).await;
         }
         let remote = access.connect_tcp(&target, &connect).await?;
         kerlico_core::relay_tcp(stream, remote, context.idle_timeout, context.cancel).await

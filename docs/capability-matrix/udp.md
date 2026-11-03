@@ -81,7 +81,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `shadowsocks` | Shadowsocks UDP over TCP，见 outbound.shadowsocks.udp-over-tcp | 有 |  |  | 未实现 | 未测 | 取值：`1`、`2` |
+| `shadowsocks` | Shadowsocks UDP over TCP，见 outbound.shadowsocks.udp-over-tcp | 有 |  |  | 已实现 | 通过 | 取值：`1`、`2` |
 | `enabled` | 启用 UDP over TCP 协议。 |  | 有 |  | 部分 | 通过 |  |
 | `magic-address-v1` | UoT v1 请求魔数地址 |  | 有 |  | 已实现 | 通过 | 取值：`sp.udp-over-tcp.arpa`<br>约束：流格式：ATYP、地址、端口 u16be、长度 u16be、数据 |
 | `magic-address-v2` | UoT v2 请求魔数地址 |  | 有 |  | 已实现 | 通过 | 取值：`sp.v2.udp-over-tcp.arpa`<br>约束：isConnect 为 1 时用长度加数据的连接流格式<br>约束：请求格式：isConnect u8、ATYP、地址、端口 |

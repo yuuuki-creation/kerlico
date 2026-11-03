@@ -84,6 +84,14 @@ pub trait RealityTlsSession: Send {
             "REALITY tlshello fragmentation",
         ))
     }
+    async fn complete_boxed(
+        self: Box<Self>,
+        _stream: BoxedTransportStream,
+        _prepared: RealityPreparedHandshake,
+        _mldsa65_verify: Option<Vec<u8>>,
+    ) -> Result<BoxedTransportStream, TransportError> {
+        Err(TransportError::UnsupportedChainedTransport("REALITY"))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -22,6 +22,7 @@ pub struct ShadowsocksNode {
     pub(crate) credentials: CredentialSet<Credential>,
     local: bool,
     local_fingerprints: Vec<[u8; 32]>,
+    mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
 }
 impl ShadowsocksNode {
     pub fn from_context(input: &NodeBuildContext) -> Result<Self> {
@@ -33,6 +34,10 @@ impl ShadowsocksNode {
             allow_insecure: bool,
             #[serde(default)]
             password: Option<String>,
+            #[serde(default)]
+            multiplex: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
+            #[serde(default, alias = "mux-option-padding")]
+            mux_option_padding: Option<bool>,
         }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -93,12 +98,17 @@ impl ShadowsocksNode {
         let config = fallback
             .or_else(|| rows.first().map(|row| row.config.clone()))
             .ok_or(Error::Rejected)?;
+        let mux = kerlico_net::sing_mux::SingMuxInboundConfig::effective_with_padding(
+            options.multiplex.as_ref(),
+            options.mux_option_padding,
+        );
         Ok(Self {
             config,
             crypto: crate::crypto(ServerType::Server),
             credentials: input.credentials(rows)?,
             local,
             local_fingerprints,
+            mux,
         })
     }
 }
@@ -204,6 +214,16 @@ impl InboundProtocol for ShadowsocksNode {
                     .authenticated(self.credentials.verified(&slot, ())?, &context)?
                     .0
             };
+            if let Some(version) = kerlico_net::uot::magic_version(&target) {
+                return kerlico_net::uot::serve(stream, version, access, context).await;
+            }
+            if kerlico_net::sing_mux::is_magic_target(&target) {
+                let Some(mux_cfg) = &self.mux else {
+                    return Err(Error::Rejected);
+                };
+                return kerlico_net::sing_mux::serve_inbound(stream, access, mux_cfg, &context)
+                    .await;
+            }
             let remote = access.connect_tcp(&target, &handshake).await?;
             kerlico_core::relay_tcp(stream, remote, context.idle_timeout, context.cancel).await
         })

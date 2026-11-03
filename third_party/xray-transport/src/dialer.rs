@@ -336,12 +336,18 @@ impl TransportDialer {
                 }
             }
             ConnectorConfig::Reality(reality_config) => {
-                if self.resolved_tcp_connector.is_some() {
-                    return Err(TransportError::UnsupportedChainedTransport("REALITY"));
-                }
                 let Some(reality) = &self.reality else {
                     return Err(TransportError::UnsupportedConnectorConfig("reality"));
                 };
+                if self.resolved_tcp_connector.is_some() {
+                    let prepared = reality
+                        .prepare_preconnected(reality_config, original_target)?
+                        .ok_or(TransportError::UnsupportedChainedTransport("REALITY"))?;
+                    let stream = self
+                        .connect_tcp_carrier(original_target, candidates, happy_eyeballs)
+                        .await?;
+                    return prepared.complete_boxed(stream).await;
+                }
 
                 let first = candidates
                     .first()

@@ -21,6 +21,10 @@ struct Options {
     security: ServerSecurity,
     #[serde(default)]
     transport: Transport,
+    #[serde(default)]
+    multiplex: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
+    #[serde(default, alias = "mux-option-padding")]
+    mux_option_padding: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +40,7 @@ struct Node {
 pub(crate) struct Payload {
     accounts: CredentialSet<Account>,
     replay: Replay,
+    mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
 }
 fn invalid() -> Error {
     Error::Config("VMess 节点配置不合法".into())
@@ -67,11 +72,16 @@ impl NodeFactory for VmessNodeFactory {
             }
             accounts.push(Account::new(id));
         }
+        let mux = kerlico_net::sing_mux::SingMuxInboundConfig::effective_with_padding(
+            options.multiplex.as_ref(),
+            options.mux_option_padding,
+        );
         let tls = carrier::server_tls(options.security, &options.transport)?;
         Ok(Arc::new(Node {
             payload: Arc::new(Payload {
                 accounts: input.credentials(accounts)?,
                 replay: Replay::new(),
+                mux,
             }),
             transport: options.transport,
             tls,
@@ -135,6 +145,18 @@ impl Payload {
             .await?;
         let (access, session) = access.authenticated(session, &context)?;
         if !session.udp {
+            if kerlico_net::sing_mux::is_magic_target(&session.target) {
+                let Some(mux_cfg) = &self.mux else {
+                    return Err(Error::Rejected);
+                };
+                return kerlico_net::sing_mux::serve_inbound(
+                    Box::new(session.stream),
+                    access,
+                    mux_cfg,
+                    &context,
+                )
+                .await;
+            }
             let target = access.connect_tcp(&session.target, &connect).await?;
             return kerlico_core::relay_tcp(
                 Box::new(session.stream),

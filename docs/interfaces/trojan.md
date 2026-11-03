@@ -4,8 +4,8 @@
 
 ## 配置
 
-- **出站选项**：`server: {host, port}`、`password`、`transport` 和 `security`。
-- **节点配置**：`options` 为 `transport` 和必填 `security`，协议密码位于 `members[].native_credential`（格式 `{"password": "协议密码"}`）。密码非空、最长 4096 字节，节点最多 256 个且不能重复。
+- **出站选项**：`server: {host, port}`、`password`、`transport`、`security` 与可选 `multiplex`（`sing-mux` 连接池，`h2mux` / `smux` / `yamux`）。
+- **节点配置**：`options` 为 `transport`、必填 `security`、可选 `multiplex`、`mux_option_padding`、`fallbacks` 与 `fallback_for_alpn`，协议密码位于 `members[].native_credential`（格式 `{"password": "协议密码"}`）。密码非空、最长 4096 字节，节点最多 256 个且不能重复。
 
 `transport` 默认为 `"tcp"`，也接受 `"raw"`；对象形式如下：
 
@@ -14,7 +14,7 @@
 | tcp/raw | 无 |
 | ws | path（默认 `/`）、host、headers（二元数组列表）、early_data_bytes（默认 0，上限 65536） |
 | httpupgrade | path（默认 `/`）、host、headers |
-| grpc | service_name（默认空）、authority、multi_mode（客户端默认 false，服务端接受 Tun/TunMulti） |
+| grpc | service_name（默认空）、authority、multi_mode（客户端默认 false，服务端接受 Tun/TunMulti）、user_agent / grpc-user-agent |
 
 TLS 出站使用 `security: {type: "tls", server_name, ca_pem}`；省略名称时使用 server.host。TLS 节点使用 `security: {type: "tls", certificate_pem, private_key_pem}`，也支持分别与内联互斥的 `certificate_file`/`private_key_file`。证书与密钥文件上限各 1 MiB。不提供跳过证书校验选项。`{type: "none"}` 仅允许回环节点与服务器；客户端未提供 security 时按该限制处理。
 

@@ -25,7 +25,9 @@
   "auth":"synthetic-node-secret",
   "tls": {"server_name":"localhost","ca_pem":"PEM 内容"},
   "salamander_password":null,
-  "limits": {"congestion":"bbr"}
+  "limits": {"congestion":"bbr"},
+  "finalmask": {"brutal_up":10000000,"brutal_down":50000000,"udp_hop":{"remote_ports":[8443,8444],"interval":30}},
+  "multiplex": {"enabled":false,"padding":false}
 }
 ```
 
@@ -36,7 +38,9 @@
   "tls": {"certificate_file":"certificate.pem","private_key_file":"private-key.pem"},
   "udp":true,
   "salamander_password":null,
-  "limits": {"congestion":"bbr"}
+  "limits": {"congestion":"bbr"},
+  "finalmask": {"brutal_up":10000000,"brutal_down":50000000,"udp_hop":{"remote_ports":[8443,8444],"interval":30}},
+  "multiplex": {"enabled":false,"padding":false}
 }
 ```
 

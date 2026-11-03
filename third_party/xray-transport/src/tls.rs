@@ -480,6 +480,7 @@ struct XrayCertificateVerification {
     provider: Arc<crypto::CryptoProvider>,
     system_roots: Arc<rustls::RootCertStore>,
     pins: Vec<[u8; 32]>,
+    spki_pins: Vec<[u8; 32]>,
     verification_names: Vec<String>,
 }
 
@@ -501,19 +502,24 @@ impl ServerCertVerifier for XrayCertificateVerification {
             .map(certificate_ca_flag)
             .collect::<Result<Vec<_>, _>>()?;
 
-        if self.matches_pin(end_entity) {
+        if self.matches_pin(end_entity) || self.matches_spki_pin(end_entity)? {
             return Ok(ServerCertVerified::assertion());
         }
 
         let roots =
-            if self.pins.is_empty() {
+            if self.pins.is_empty() && self.spki_pins.is_empty() {
                 Arc::clone(&self.system_roots)
             } else {
-                let Some(pinned_ca) = intermediates.iter().zip(intermediate_ca_flags).find_map(
-                    |(certificate, is_ca)| {
-                        (is_ca && self.matches_pin(certificate)).then_some(certificate)
-                    },
-                ) else {
+                let mut matched = None;
+                for (certificate, is_ca) in intermediates.iter().zip(intermediate_ca_flags) {
+                    if is_ca
+                        && (self.matches_pin(certificate) || self.matches_spki_pin(certificate)?)
+                    {
+                        matched = Some(certificate);
+                        break;
+                    }
+                }
+                let Some(pinned_ca) = matched else {
                     return Err(certificate_verification_error());
                 };
 
@@ -598,6 +604,16 @@ impl XrayCertificateVerification {
     fn matches_pin(&self, certificate: &CertificateDer<'_>) -> bool {
         let digest: [u8; 32] = Sha256::digest(certificate.as_ref()).into();
         self.pins.contains(&digest)
+    }
+
+    fn matches_spki_pin(&self, certificate: &CertificateDer<'_>) -> Result<bool, RustlsError> {
+        if self.spki_pins.is_empty() {
+            return Ok(false);
+        }
+        let (_, parsed) = X509Certificate::from_der(certificate.as_ref())
+            .map_err(|_| RustlsError::InvalidCertificate(CertificateError::BadEncoding))?;
+        let digest: [u8; 32] = Sha256::digest(parsed.tbs_certificate.subject_pki.raw).into();
+        Ok(self.spki_pins.contains(&digest))
     }
 }
 
@@ -903,6 +919,7 @@ fn custom_verification_rustls_client_config(
         provider: Arc::clone(&provider),
         system_roots: Arc::new(system_roots),
         pins: pinned_peer_cert_sha256.to_vec(),
+        spki_pins: Vec::new(),
         verification_names: verify_peer_cert_by_name.to_vec(),
     });
     rustls::ClientConfig::builder_with_provider(provider)
@@ -970,6 +987,136 @@ fn insecure_rustls_client_config(
         })
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CustomTlsClientOptions {
+    pub allow_insecure: bool,
+    pub use_system_ca: bool,
+    pub custom_ca_der: Vec<Vec<u8>>,
+    pub pinned_peer_cert_sha256: Vec<[u8; 32]>,
+    pub pinned_public_key_sha256: Vec<[u8; 32]>,
+    pub verify_peer_cert_by_name: Vec<String>,
+    pub ech_config_list: Option<Vec<u8>>,
+    pub record_fragment: bool,
+    pub alpn: Vec<String>,
+    pub fingerprint: Option<String>,
+    pub tls13_only: bool,
+}
+
+pub fn build_custom_tls_client_config(
+    options: &CustomTlsClientOptions,
+) -> Result<rustls::ClientConfig, TransportError> {
+    if options.allow_insecure
+        && (!options.pinned_peer_cert_sha256.is_empty()
+            || !options.pinned_public_key_sha256.is_empty()
+            || !options.verify_peer_cert_by_name.is_empty())
+    {
+        return Err(TransportError::TlsConfig(
+            "allow_insecure cannot be combined with certificate pins or verifyPeerCertByName"
+                .to_owned(),
+        ));
+    }
+    let shaped = crate::utls_tls::shaping_profile(options.fingerprint.as_deref())?;
+    let provider = Arc::new(shaping_crypto_provider());
+    let versions: &[&'static rustls::SupportedProtocolVersion] =
+        if options.ech_config_list.is_some() || options.tls13_only {
+            &[&rustls::version::TLS13]
+        } else if let Some((fingerprint, profile)) = shaped {
+            let v = profile_protocol_versions(profile);
+            reject_unnegotiable_fingerprint(fingerprint, profile, &provider, v)?;
+            v
+        } else {
+            rustls::DEFAULT_VERSIONS
+        };
+
+    let mut root_store = if options.use_system_ca {
+        rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        }
+    } else {
+        rustls::RootCertStore::empty()
+    };
+    for der in &options.custom_ca_der {
+        root_store
+            .add(CertificateDer::from(der.clone()))
+            .map_err(|e| TransportError::TlsConfig(e.to_string()))?;
+    }
+
+    let wants_verifier = if let Some(ech_bytes) = &options.ech_config_list {
+        let ech_config = rustls::client::EchConfig::new(
+            rustls::pki_types::EchConfigListBytes::from(ech_bytes.as_slice()),
+            rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES,
+        )
+        .map_err(|e| TransportError::TlsConfig(e.to_string()))?;
+        rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
+            .with_ech(rustls::client::EchMode::Enable(ech_config))
+            .map_err(|e| TransportError::TlsConfig(e.to_string()))?
+    } else {
+        rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
+            .with_protocol_versions(versions)
+            .map_err(|e| TransportError::TlsConfig(e.to_string()))?
+    };
+
+    let mut client_config = if options.allow_insecure {
+        let verifier = Arc::new(NoCertificateVerification {
+            provider: Arc::clone(&provider),
+        });
+        wants_verifier
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth()
+    } else if !options.pinned_peer_cert_sha256.is_empty()
+        || !options.pinned_public_key_sha256.is_empty()
+        || !options.verify_peer_cert_by_name.is_empty()
+    {
+        let verifier = Arc::new(XrayCertificateVerification {
+            provider: Arc::clone(&provider),
+            system_roots: Arc::new(root_store),
+            pins: options.pinned_peer_cert_sha256.clone(),
+            spki_pins: options.pinned_public_key_sha256.clone(),
+            verification_names: options.verify_peer_cert_by_name.clone(),
+        });
+        wants_verifier
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth()
+    } else {
+        if root_store.is_empty() {
+            return Err(TransportError::TlsConfig(
+                "no trusted CA certificates configured".to_owned(),
+            ));
+        }
+        wants_verifier
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    };
+
+    if let Some((_, profile)) = shaped {
+        crate::utls_shaping::retain_profile_certificate_decompressors(
+            profile,
+            &mut client_config.cert_decompressors,
+        );
+        client_config.client_hello_customizer = Some(Arc::new(
+            crate::utls_tls::UtlsClientHelloCustomizer::new(
+                profile,
+                &options.alpn,
+                TlsAlpnPolicy::Raw,
+            ),
+        ));
+    }
+    if !options.alpn.is_empty() {
+        client_config.alpn_protocols = options
+            .alpn
+            .iter()
+            .map(|s| s.as_bytes().to_vec())
+            .collect();
+    }
+    if options.record_fragment {
+        client_config.max_fragment_size = Some(512);
+    }
+    client_config.resumption = rustls::client::Resumption::disabled();
+    Ok(client_config)
+}
+
 #[cfg(test)]
 mod http3_tests {
     use super::*;
@@ -1014,6 +1161,7 @@ mod http3_tests {
             provider: Arc::new(rustls::crypto::ring::default_provider()),
             system_roots: Arc::new(roots),
             pins: Vec::new(),
+            spki_pins: Vec::new(),
             verification_names: names.iter().map(|name| (*name).to_owned()).collect(),
         }
     }

@@ -36,7 +36,8 @@ v4 TCP 在建立预算内等待 `04 ff REP` 成功确认；v5 没有协议成功
 {
   "version": 5,
   "tls": {"certificate_file": "node.crt", "private_key_file": "node.key", "alpn": ["h3"]},
-  "congestion_control": "cubic"
+  "congestion_control": "cubic",
+  "multiplex": {"enabled": false, "padding": false}
 }
 ```
 

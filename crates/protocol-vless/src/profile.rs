@@ -27,6 +27,8 @@ pub(crate) struct Options {
     pub transport: TransportInput,
     #[serde(default)]
     pub flow: String,
+    #[serde(default)]
+    pub splice: Option<bool>,
     #[serde(default = "none")]
     pub encryption: String,
     #[serde(default)]
@@ -35,6 +37,95 @@ pub(crate) struct Options {
     pub packet_encoding: PacketEncoding,
     #[serde(default)]
     pub mux: Option<MuxOptions>,
+    #[serde(default, alias = "mux_option")]
+    pub multiplex: Option<kerlico_net::sing_mux::SingMuxOutboundConfig>,
+    #[serde(default, alias = "finalmask")]
+    pub fragment: Option<TcpFragmentInput>,
+    #[serde(default)]
+    pub brutal_down: Option<u64>,
+    #[serde(default)]
+    pub brutal_up: Option<u64>,
+    #[serde(default)]
+    pub udp_hop: Option<UdpHopInput>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TcpFragmentInput {
+    #[serde(default)]
+    pub packets: String,
+    #[serde(default, alias = "lengths")]
+    pub length: Option<RangeOrExactInput>,
+    #[serde(default, alias = "delays")]
+    pub delay: Option<RangeOrExactInput>,
+    #[serde(default)]
+    pub max_split: Option<RangeOrExactInput>,
+    #[serde(default)]
+    pub brutal_down: Option<u64>,
+    #[serde(default)]
+    pub brutal_up: Option<u64>,
+    #[serde(default)]
+    pub udp_hop: Option<UdpHopInput>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+pub(crate) struct UdpHopInput {
+    #[serde(default)]
+    pub remote_ports: Vec<u16>,
+    #[serde(default)]
+    pub remote_ips: Vec<std::net::IpAddr>,
+    #[serde(default)]
+    pub interval: Option<u64>,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(untagged)]
+pub(crate) enum RangeOrExactInput {
+    Exact(i32),
+    Range([i32; 2]),
+}
+
+impl RangeOrExactInput {
+    pub fn to_xhttp_range(self) -> xray_transport::stream::XhttpRange {
+        match self {
+            Self::Exact(v) => xray_transport::stream::XhttpRange::exact(v),
+            Self::Range([a, b]) => xray_transport::stream::XhttpRange { from: a, to: b },
+        }
+    }
+    pub fn to_u64_pair(self) -> Result<(u64, u64)> {
+        match self {
+            Self::Exact(v) => {
+                let u = u64::try_from(v).map_err(|_| Error::Config("分片范围不合法".into()))?;
+                Ok((u, u))
+            }
+            Self::Range([a, b]) => {
+                let ua = u64::try_from(a).map_err(|_| Error::Config("分片范围不合法".into()))?;
+                let ub = u64::try_from(b).map_err(|_| Error::Config("分片范围不合法".into()))?;
+                Ok((ua, ub))
+            }
+        }
+    }
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct XmuxSettings {
+    #[serde(default)]
+    pub max_concurrency: Option<RangeOrExactInput>,
+    #[serde(default)]
+    pub max_connections: Option<RangeOrExactInput>,
+    #[serde(default)]
+    pub c_max_reuse_times: Option<RangeOrExactInput>,
+    #[serde(default)]
+    pub h_max_request_times: Option<RangeOrExactInput>,
+    #[serde(default)]
+    pub h_max_reusable_secs: Option<RangeOrExactInput>,
+    #[serde(default)]
+    pub h_keep_alive_period: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +211,7 @@ impl TransportInput {
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Transport {
     #[serde(alias = "raw")]
     Tcp,
@@ -150,6 +242,8 @@ pub(crate) enum Transport {
         authority: Option<String>,
         #[serde(default)]
         multi_mode: bool,
+        #[serde(default, alias = "grpc-user-agent", alias = "grpc_user_agent")]
+        user_agent: Option<String>,
         #[serde(default)]
         idle_timeout_secs: u32,
         #[serde(default)]
@@ -182,14 +276,44 @@ pub(crate) struct XhttpSettings {
     pub headers: Vec<(String, String)>,
     #[serde(default)]
     pub no_grpc_header: bool,
-    #[serde(default)]
+    #[serde(default, alias = "sc_max_each_post_bytes")]
     pub max_post_bytes: Option<u32>,
-    #[serde(default)]
+    #[serde(default, alias = "sc_min_posts_interval_ms")]
     pub min_post_interval_ms: Option<u32>,
-    #[serde(default)]
+    #[serde(default, alias = "sc_max_buffered_posts")]
     pub max_buffered_posts: Option<u32>,
     #[serde(default)]
+    pub sc_stream_up_server_secs: Option<[u32; 2]>,
+    #[serde(default, alias = "x_padding_bytes")]
     pub padding_bytes: Option<[u32; 2]>,
+    #[serde(default)]
+    pub x_padding_obfs_mode: bool,
+    #[serde(default)]
+    pub x_padding_key: Option<String>,
+    #[serde(default)]
+    pub x_padding_header: Option<String>,
+    #[serde(default)]
+    pub x_padding_placement: Option<String>,
+    #[serde(default)]
+    pub x_padding_method: Option<String>,
+    #[serde(default)]
+    pub uplink_http_method: Option<String>,
+    #[serde(default)]
+    pub session_placement: Option<String>,
+    #[serde(default)]
+    pub session_key: Option<String>,
+    #[serde(default)]
+    pub seq_placement: Option<String>,
+    #[serde(default)]
+    pub seq_key: Option<String>,
+    #[serde(default)]
+    pub uplink_data_placement: Option<String>,
+    #[serde(default)]
+    pub uplink_data_key: Option<String>,
+    #[serde(default)]
+    pub uplink_chunk_size: Option<u32>,
+    #[serde(default, alias = "reuse_settings")]
+    pub xmux: Option<XmuxSettings>,
     #[serde(default)]
     pub download: Option<Box<Download>>,
 }
@@ -203,6 +327,8 @@ pub(crate) struct Download {
     #[serde(default)]
     pub security: Security,
     pub xhttp: XhttpSettings,
+    #[serde(default, alias = "reuse_settings")]
+    pub xmux: Option<XmuxSettings>,
 }
 
 #[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +358,28 @@ pub(crate) enum Security {
         server_name: Option<String>,
         #[serde(default)]
         ca_pem: Option<String>,
+        #[serde(default, alias = "ca_file")]
+        certificate_path: Option<String>,
+        #[serde(default)]
+        use_system_ca: Option<bool>,
+        #[serde(default, alias = "insecure", alias = "skip_cert_verify")]
+        allow_insecure: bool,
+        #[serde(default, alias = "certificate_sha256", alias = "cert_sha256")]
+        pinned_peer_cert_sha256: Vec<String>,
+        #[serde(default)]
+        certificate_public_key_sha256: Vec<String>,
+        #[serde(default, alias = "name_cert_verify")]
+        verify_peer_cert_by_name: Vec<String>,
+        #[serde(default, alias = "ech_config_list")]
+        ech_config: Option<String>,
+        #[serde(default)]
+        query_server_name: Option<String>,
+        #[serde(default)]
+        fragment: Option<bool>,
+        #[serde(default)]
+        record_fragment: Option<bool>,
+        #[serde(default)]
+        fragment_fallback_delay: Option<u64>,
         #[serde(default)]
         alpn: Vec<String>,
         #[serde(default)]
@@ -254,6 +402,17 @@ impl Default for Security {
         Self::Tls {
             server_name: None,
             ca_pem: None,
+            certificate_path: None,
+            use_system_ca: None,
+            allow_insecure: false,
+            pinned_peer_cert_sha256: Vec::new(),
+            certificate_public_key_sha256: Vec::new(),
+            verify_peer_cert_by_name: Vec::new(),
+            ech_config: None,
+            query_server_name: None,
+            fragment: None,
+            record_fragment: None,
+            fragment_fallback_delay: None,
             alpn: Vec::new(),
             fingerprint: None,
         }
@@ -268,6 +427,7 @@ struct ProfileOutbound {
     encoding: PacketEncoding,
     encryption: Option<xray_vless_encryption::ClientConfig>,
     mux: Option<(usize, usize)>,
+    sing_mux: Option<kerlico_net::sing_mux::SingMuxClient>,
     resources: Mutex<HashMap<kerlico_core::ResourceKey, Arc<Resources>>>,
     host: kerlico_core::ServiceContext,
     mux_tcp: bool,
@@ -278,9 +438,17 @@ pub(crate) fn compile(value: &Value) -> Result<OutboundPlan> {
     let options: Options = serde_json::from_value(value.clone())
         .map_err(|_| Error::Config("VLESS 配置字段不合法".into()))?;
     let user = UserId::parse(&options.uuid)?;
+    let _splice = options.splice.unwrap_or(false)
+        || matches!(
+            options.flow.as_str(),
+            "xtls-rprx-vision-splice" | "xtls-rprx-vision-udp443-splice"
+        );
     let vision = match options.flow.as_str() {
         "" => false,
-        "xtls-rprx-vision" | "xtls-rprx-vision-udp443" => true,
+        "xtls-rprx-vision"
+        | "xtls-rprx-vision-udp443"
+        | "xtls-rprx-vision-splice"
+        | "xtls-rprx-vision-udp443-splice" => true,
         _ => return Err(Error::Unsupported("VLESS flow")),
     };
     let encryption: Encryption = options
@@ -337,14 +505,38 @@ pub(crate) fn compile(value: &Value) -> Result<OutboundPlan> {
     if storage_carrier && (!mux_tcp || !mux_udp) {
         return Err(Error::Config("XDRIVE 必须显式启用 TCP/UDP Mux".into()));
     }
+    let sing_mux = options.multiplex.and_then(|cfg| {
+        if cfg.enabled {
+            Some(kerlico_net::sing_mux::SingMuxClient::new(cfg))
+        } else {
+            None
+        }
+    });
+    let mut fragment = options.fragment;
+    if options.brutal_down.is_some() || options.brutal_up.is_some() || options.udp_hop.is_some() {
+        let entry = fragment.get_or_insert_with(TcpFragmentInput::default);
+        if options.brutal_down.is_some() {
+            entry.brutal_down = options.brutal_down;
+        }
+        if options.brutal_up.is_some() {
+            entry.brutal_up = options.brutal_up;
+        }
+        if options.udp_hop.is_some() {
+            entry.udp_hop = options.udp_hop;
+        }
+    }
     let carrier = Carrier::build(
         options.server.destination()?,
         options.security,
         transport,
         !encryption.is_none(),
         options.server_family,
+        fragment,
     )?;
-    let udp443 = options.flow == "xtls-rprx-vision-udp443";
+    let udp443 = matches!(
+        options.flow.as_str(),
+        "xtls-rprx-vision-udp443" | "xtls-rprx-vision-udp443-splice"
+    );
     let encoding = if vision {
         PacketEncoding::Xudp
     } else {
@@ -369,6 +561,7 @@ pub(crate) fn compile(value: &Value) -> Result<OutboundPlan> {
                     encoding,
                     encryption,
                     mux,
+                    sing_mux,
                     mux_tcp,
                     mux_udp,
                     resources: Mutex::new(HashMap::new()),
@@ -461,6 +654,25 @@ impl Outbound for ProfileOutbound {
             let global_id = xudp_global_id(&resources.xudp_key, context.udp_source(), &target);
             context
                 .run(async {
+                    if let Some(sing_mux) = &self.sing_mux
+                        && !sing_mux.only_tcp()
+                    {
+                        return sing_mux
+                            .associate_udp(|mux_dest| async move {
+                                let carrier = self.carrier.open(context, &self.host).await?;
+                                payload::open(
+                                    carrier,
+                                    resources.encryption.as_ref(),
+                                    self.user,
+                                    &mux_dest,
+                                    self.vision,
+                                    false,
+                                    self.encoding,
+                                )
+                                .await
+                            })
+                            .await;
+                    }
                     if self.mux_udp {
                         return resources
                             .mux
@@ -519,6 +731,24 @@ impl Outbound for ProfileOutbound {
             let resources = self.resources(context)?;
             context
                 .run(async {
+                    if let Some(sing_mux) = &self.sing_mux {
+                        return sing_mux
+                            .connect_tcp(target, |mux_dest| async move {
+                                let carrier = self.carrier.open(context, &self.host).await?;
+                                payload::open(
+                                    carrier,
+                                    resources.encryption.as_ref(),
+                                    self.user,
+                                    &mux_dest,
+                                    self.vision,
+                                    false,
+                                    self.encoding,
+                                )
+                                .await
+                            })
+                            .await
+                            .map(|o| o.stream);
+                    }
                     if self.mux_tcp {
                         return resources
                             .mux
@@ -576,6 +806,25 @@ impl Outbound for ProfileOutbound {
             let global_id = xudp_global_id(&resources.xudp_key, context.udp_source(), target);
             context
                 .run(async {
+                    if let Some(sing_mux) = &self.sing_mux
+                        && !sing_mux.only_tcp()
+                    {
+                        return sing_mux
+                            .connect_udp(target, |mux_dest| async move {
+                                let carrier = self.carrier.open(context, &self.host).await?;
+                                payload::open(
+                                    carrier,
+                                    resources.encryption.as_ref(),
+                                    self.user,
+                                    &mux_dest,
+                                    self.vision,
+                                    false,
+                                    self.encoding,
+                                )
+                                .await
+                            })
+                            .await;
+                    }
                     if self.mux_udp {
                         return resources
                             .mux
@@ -638,5 +887,79 @@ mod tests {
             xudp_global_id(&key, None, &dns),
             xudp_global_id(&key, None, &dns)
         );
+    }
+
+    #[test]
+    fn vless_outbound_compiles_extended_m2_transport_tls_and_mux_options() {
+        let opts = serde_json::json!({
+            "server": {"host": "127.0.0.1", "port": 10443},
+            "uuid": "00000000-0000-4000-8000-000000000001",
+            "flow": "xtls-rprx-vision",
+            "splice": true,
+            "fragment": {
+                "packets": "tlshello",
+                "length": [50, 150],
+                "delay": [5, 15],
+                "max_split": [2, 8]
+            },
+            "security": {
+                "type": "tls",
+                "server_name": "example.com",
+                "allow_insecure": false,
+                "use_system_ca": true,
+                "pinned_peer_cert_sha256": ["0101010101010101010101010101010101010101010101010101010101010101"],
+                "certificate_public_key_sha256": ["0202020202020202020202020202020202020202020202020202020202020202"],
+                "verify_peer_cert_by_name": ["alt.example.com"],
+                "fragment": true,
+                "record_fragment": true,
+                "fragment_fallback_delay": 15
+            }
+        });
+        let plan = compile(&opts).unwrap();
+        assert!(plan.capabilities().tcp);
+
+        let xhttp_opts = serde_json::json!({
+            "server": {"host": "127.0.0.1", "port": 10443},
+            "uuid": "00000000-0000-4000-8000-000000000001",
+            "multiplex": {
+                "enabled": true,
+                "protocol": "yamux",
+                "max_connections": 2,
+                "padding": true
+            },
+            "security": {
+                "type": "tls",
+                "server_name": "example.com",
+                "allow_insecure": true
+            },
+            "transport": {
+                "type": "xhttp",
+                "settings": {
+                    "path": "/xhttp",
+                    "mode": "stream-up",
+                    "http_version": "h2",
+                    "x_padding_obfs_mode": true,
+                    "x_padding_key": "pad",
+                    "x_padding_placement": "query",
+                    "x_padding_method": "repeat-x",
+                    "uplink_http_method": "POST",
+                    "session_placement": "header",
+                    "session_key": "X-Session",
+                    "seq_placement": "header",
+                    "seq_key": "X-Seq",
+                    "uplink_data_placement": "body",
+                    "xmux": {
+                        "max_connections": 2,
+                        "c_max_reuse_times": 32,
+                        "h_max_request_times": [50, 100],
+                        "h_max_reusable_secs": [600, 1200],
+                        "h_keep_alive_period": 15
+                    }
+                }
+            }
+        });
+        let xhttp_plan = compile(&xhttp_opts).unwrap();
+        assert!(xhttp_plan.capabilities().tcp);
+        assert!(xhttp_plan.capabilities().udp);
     }
 }

@@ -676,6 +676,134 @@ pub trait InboundProtocol: Send + Sync {
     }
 }
 
+/// 按名称解析上游出站实例，供链式拨号（`detour` / `dialer-proxy`）在连接阶段调用。
+pub trait DetourResolver: Send + Sync {
+    fn resolve_outbound(&self, id: &OutId) -> Option<std::sync::Arc<dyn Outbound>>;
+}
+
+/// 线程安全的命名出站注册表，由引擎启动出站时填充，供链式拨号查询。
+#[derive(Default)]
+pub struct DetourTable {
+    services: std::sync::RwLock<std::collections::BTreeMap<OutId, std::sync::Arc<dyn Outbound>>>,
+}
+
+impl DetourTable {
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+    pub fn insert(&self, id: OutId, outbound: std::sync::Arc<dyn Outbound>) {
+        self.services
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, outbound);
+    }
+}
+
+impl DetourResolver for DetourTable {
+    fn resolve_outbound(&self, id: &OutId) -> Option<std::sync::Arc<dyn Outbound>> {
+        self.services
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+    }
+}
+
+/// 出站底层拨号与套接字选项（链式代理、路由标记、TCP Fast Open、TCP Keep-Alive）。
+#[derive(Clone, Default)]
+pub struct DialerOptions {
+    pub detour: Option<OutId>,
+    pub routing_mark: Option<u32>,
+    pub tcp_fast_open: bool,
+    pub disable_tcp_keep_alive: bool,
+    pub tcp_keep_alive_idle: Option<Duration>,
+    pub tcp_keep_alive_interval: Option<Duration>,
+    pub detour_resolver: Option<std::sync::Arc<dyn DetourResolver>>,
+}
+
+impl fmt::Debug for DialerOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DialerOptions")
+            .field("detour", &self.detour)
+            .field("routing_mark", &self.routing_mark)
+            .field("tcp_fast_open", &self.tcp_fast_open)
+            .field("disable_tcp_keep_alive", &self.disable_tcp_keep_alive)
+            .field("tcp_keep_alive_idle", &self.tcp_keep_alive_idle)
+            .field("tcp_keep_alive_interval", &self.tcp_keep_alive_interval)
+            .finish()
+    }
+}
+
+impl DialerOptions {
+    pub fn is_default(&self) -> bool {
+        self.detour.is_none()
+            && self.routing_mark.is_none()
+            && !self.tcp_fast_open
+            && !self.disable_tcp_keep_alive
+            && self.tcp_keep_alive_idle.is_none()
+            && self.tcp_keep_alive_interval.is_none()
+    }
+
+    pub fn has_detour(&self) -> bool {
+        self.detour.is_some()
+    }
+
+    /// 若配置了 `detour` 上游出站，经该上游出站建立到 `server` 的承载 TCP 流。
+    pub fn connect_via_detour(
+        &self,
+        server: &Destination,
+    ) -> Option<BoxFuture<'static, Result<BoxStream>>> {
+        let upstream_id = self.detour.clone()?;
+        let resolver = self.detour_resolver.clone();
+        let target = server.clone();
+        Some(Box::pin(async move {
+            let Some(resolver) = resolver else {
+                return Err(Error::Config("链式拨号缺少上游解析表".into()));
+            };
+            let Some(upstream) = resolver.resolve_outbound(&upstream_id) else {
+                return Err(Error::Config("链式拨号引用的上游出站不存在或未启动".into()));
+            };
+            let context = ConnectContext::new(Duration::from_secs(10));
+            match upstream.connect_tcp(&target, &context).await {
+                Ok(opened) => Ok(opened.stream),
+                Err(Error::Unsupported(_)) if matches!(target.address(), Address::Domain(_)) => {
+                    let host = target.host();
+                    let mut addrs = tokio::net::lookup_host((host.as_str(), target.port())).await?;
+                    let Some(addr) = addrs.next() else {
+                        return Err(Error::InvalidAddress);
+                    };
+                    let ip_target = Destination::new(&addr.ip().to_string(), addr.port())?;
+                    let opened = upstream.connect_tcp(&ip_target, &context).await?;
+                    Ok(opened.stream)
+                }
+                Err(err) => Err(err),
+            }
+        }))
+    }
+}
+
+std::thread_local! {
+    static COMPILE_DIALER: std::cell::RefCell<DialerOptions> = std::cell::RefCell::new(DialerOptions::default());
+}
+
+/// 在编译单个出站期间注入当前出站的拨号配置，使内部创建的连接器自动继承该配置。
+pub fn with_compile_dialer<T>(dialer: DialerOptions, f: impl FnOnce() -> T) -> T {
+    struct Reset(DialerOptions);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            COMPILE_DIALER.with(|cell| *cell.borrow_mut() = std::mem::take(&mut self.0));
+        }
+    }
+    let prev = COMPILE_DIALER.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), dialer));
+    let _reset = Reset(prev);
+    f()
+}
+
+/// 读取当前出站编译上下文中的拨号配置。
+pub fn current_compile_dialer() -> DialerOptions {
+    COMPILE_DIALER.with(|cell| cell.borrow().clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

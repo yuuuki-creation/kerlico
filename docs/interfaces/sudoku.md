@@ -39,7 +39,7 @@
 }
 ```
 
-认证节点protocol使用相同的公开参数，key取自外层members；http_mask可包含mode、path_root及TLS的cert_pem/key_pem。节点另有max_mux_streams（默认32）、max_http_sessions（64）、http_session_ttl_ms（30000）和可选cover_fallback。所有结构拒绝未知字段，不兼容Mihomo整份配置或其平铺别名。
+认证节点protocol使用相同的公开参数，key取自外层members；http_mask可包含mode、path_root及TLS的cert_pem/key_pem。节点另有max_mux_streams（默认32）、max_http_sessions（64）、http_session_ttl_ms（30000）、可选cover_fallback与可选multiplex / mux_option_padding配置。所有结构拒绝未知字段，不兼容Mihomo整份配置或其平铺别名。
 
 key按固定参考规则规范化，不能由名称“公钥”推断可公开：有效seed就是共享秘密。32字节hex先按压缩点解释，随后才尝试主标量；64字节拆分标量恢复共同点。实际seed的指纹用于跨节点隔离，客户端UserHash不获得独立鉴权或配额身份。
 

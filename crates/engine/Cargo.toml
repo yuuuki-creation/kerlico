@@ -10,12 +10,12 @@ publish.workspace = true
 kerlico-core.workspace = true
 kerlico-config.workspace = true
 kerlico-egress.workspace = true
+kerlico-net.workspace = true
 socket2.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 kerlico-egress = { workspace = true, features = ["test-support"] }
-kerlico-net.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 rusqlite = "=0.40.2"

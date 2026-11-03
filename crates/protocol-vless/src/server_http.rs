@@ -53,6 +53,7 @@ pub(crate) enum Input {
 }
 #[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Transport {
     #[serde(alias = "raw")]
     Tcp,
@@ -79,13 +80,58 @@ pub(crate) enum Transport {
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 pub(crate) struct XhttpSettings {
     #[serde(default = "path")]
     pub path: String,
+    #[serde(default)]
+    pub host: Option<String>,
     #[serde(default = "auto")]
     pub mode: String,
     #[serde(default = "auto")]
     pub http_version: String,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub no_grpc_header: bool,
+    #[serde(default, alias = "sc_max_each_post_bytes")]
+    pub max_post_bytes: Option<u32>,
+    #[serde(default, alias = "sc_min_posts_interval_ms")]
+    pub min_post_interval_ms: Option<u32>,
+    #[serde(default, alias = "sc_max_buffered_posts")]
+    pub max_buffered_posts: Option<u32>,
+    #[serde(default)]
+    pub sc_stream_up_server_secs: Option<[u32; 2]>,
+    #[serde(default, alias = "x_padding_bytes")]
+    pub padding_bytes: Option<[u32; 2]>,
+    #[serde(default)]
+    pub x_padding_obfs_mode: bool,
+    #[serde(default)]
+    pub x_padding_key: Option<String>,
+    #[serde(default)]
+    pub x_padding_header: Option<String>,
+    #[serde(default)]
+    pub x_padding_placement: Option<String>,
+    #[serde(default)]
+    pub x_padding_method: Option<String>,
+    #[serde(default)]
+    pub uplink_http_method: Option<String>,
+    #[serde(default)]
+    pub session_placement: Option<String>,
+    #[serde(default)]
+    pub session_key: Option<String>,
+    #[serde(default)]
+    pub seq_placement: Option<String>,
+    #[serde(default)]
+    pub seq_key: Option<String>,
+    #[serde(default)]
+    pub uplink_data_placement: Option<String>,
+    #[serde(default)]
+    pub uplink_data_key: Option<String>,
+    #[serde(default)]
+    pub uplink_chunk_size: Option<u32>,
+    #[serde(default, alias = "reuse_settings")]
+    pub xmux: Option<serde_json::Value>,
 }
 fn path() -> String {
     "/".into()
@@ -481,18 +527,47 @@ impl State {
                 if !rest.is_empty() && !rest.starts_with('/') {
                     return empty(StatusCode::NOT_FOUND);
                 }
-                let parts: Vec<_> = rest
+                let mut parts: Vec<String> = rest
                     .trim_matches('/')
                     .split('/')
                     .filter(|p| !p.is_empty())
+                    .map(str::to_owned)
                     .collect();
-                if parts.is_empty() && request.method() == http::Method::POST {
+                if parts.is_empty()
+                    && let Some(meta_id) = extract_metadata(
+                        &request,
+                        settings.session_placement.as_deref(),
+                        settings.session_key.as_deref(),
+                        "X-Session",
+                        "x_session",
+                    )
+                {
+                    parts.push(meta_id);
+                }
+                if parts.len() == 1
+                    && let Some(meta_seq) = extract_metadata(
+                        &request,
+                        settings.seq_placement.as_deref(),
+                        settings.seq_key.as_deref(),
+                        "X-Seq",
+                        "x_seq",
+                    )
+                {
+                    parts.push(meta_seq);
+                }
+                let uplink_method = settings.uplink_http_method.as_deref().unwrap_or("POST");
+                let is_uplink_method = request.method() == http::Method::POST
+                    || request
+                        .method()
+                        .as_str()
+                        .eq_ignore_ascii_case(uplink_method);
+                if parts.is_empty() && is_uplink_method {
                     if !matches!(settings.mode.as_str(), "auto" | "stream-one") {
                         return empty(StatusCode::METHOD_NOT_ALLOWED);
                     }
                     return self.direct(request.into_body(), payload, access, context, None);
                 }
-                let Some(id) = parts.first().copied() else {
+                let Some(id) = parts.first().map(String::as_str) else {
                     return empty(StatusCode::NOT_FOUND);
                 };
                 if id.len() > 128
@@ -506,15 +581,15 @@ impl State {
                 if settings.mode == "stream-one" {
                     return empty(StatusCode::METHOD_NOT_ALLOWED);
                 }
-                if request.method() == http::Method::POST
+                let is_download_get = request.method() == http::Method::GET && parts.len() == 1;
+                if is_uplink_method
+                    && !is_download_get
                     && ((parts.len() == 2 && settings.mode == "stream-up")
                         || (parts.len() == 1 && settings.mode == "packet-up"))
                 {
                     return empty(StatusCode::METHOD_NOT_ALLOWED);
                 }
-                if !matches!(*request.method(), http::Method::GET | http::Method::POST)
-                    || parts.len() > 2
-                {
+                if (!is_download_get && !is_uplink_method) || parts.len() > 2 {
                     return empty(StatusCode::METHOD_NOT_ALLOWED);
                 }
                 let id = id.to_owned();
@@ -538,12 +613,12 @@ impl State {
                     let time = ids
                         .entry(id.clone())
                         .or_insert_with(|| Some(tokio::time::Instant::now()));
-                    if request.method() == http::Method::GET {
+                    if is_download_get {
                         *time = None;
                     }
                 }
 
-                if request.method() == http::Method::GET && parts.len() == 1 {
+                if is_download_get {
                     let mut reader = match table.open_download(&id) {
                         OpenDownload::Opened(reader) => reader,
                         _ => return empty(StatusCode::CONFLICT),
@@ -560,18 +635,28 @@ impl State {
                     });
                     return response(body, false);
                 }
-                if request.method() != http::Method::POST {
+                if !is_uplink_method {
                     return empty(StatusCode::METHOD_NOT_ALLOWED);
                 }
                 if parts.len() == 2 {
                     let Ok(sequence) = parts[1].parse::<u64>() else {
                         return empty(StatusCode::BAD_REQUEST);
                     };
-                    let bytes = match collect(request.into_body(), self.input_budget.clone()).await
+                    let meta_payload = extract_uplink_data_from_headers(
+                        &request,
+                        settings.uplink_data_placement.as_deref(),
+                        settings.uplink_data_key.as_deref(),
+                    );
+                    let mut bytes =
+                        match collect(request.into_body(), self.input_budget.clone()).await {
+                            Ok(bytes) => bytes,
+                            Err(_) => return empty(StatusCode::PAYLOAD_TOO_LARGE),
+                        };
+                    if bytes.is_empty()
+                        && let Some(decoded) = meta_payload
                     {
-                        Ok(bytes) => bytes,
-                        Err(_) => return empty(StatusCode::PAYLOAD_TOO_LARGE),
-                    };
+                        bytes = Bytes::from(decoded);
+                    }
                     return match table.push_uplink(&id, sequence, bytes).await {
                         Some(PushResult::Accepted | PushResult::Duplicate) => empty(StatusCode::OK),
                         _ => empty(StatusCode::TOO_MANY_REQUESTS),
@@ -713,6 +798,97 @@ fn padding() -> String {
     use rand::Rng;
     let length = rand::thread_rng().gen_range(100..=1000);
     std::iter::repeat_n('X', length).collect()
+}
+
+fn extract_metadata<B>(
+    request: &Request<B>,
+    placement: Option<&str>,
+    key: Option<&str>,
+    default_header: &str,
+    default_param: &str,
+) -> Option<String> {
+    match placement {
+        Some("header") => {
+            let k = key.filter(|s| !s.is_empty()).unwrap_or(default_header);
+            request
+                .headers()
+                .get(k)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_owned())
+        }
+        Some("cookie") => {
+            let k = key.filter(|s| !s.is_empty()).unwrap_or(default_param);
+            request
+                .headers()
+                .get_all(http::header::COOKIE)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|s| s.split(';'))
+                .find_map(|pair| {
+                    let (ck, cv) = pair.trim().split_once('=')?;
+                    (ck.trim() == k).then(|| cv.trim().to_owned())
+                })
+        }
+        Some("query") => {
+            let k = key.filter(|s| !s.is_empty()).unwrap_or(default_param);
+            let q = request.uri().query()?;
+            q.split('&').find_map(|pair| {
+                let (qk, qv) = pair.split_once('=')?;
+                (qk == k).then(|| qv.to_owned())
+            })
+        }
+        _ => None,
+    }
+}
+
+fn extract_uplink_data_from_headers<B>(
+    request: &Request<B>,
+    placement: Option<&str>,
+    key: Option<&str>,
+) -> Option<Vec<u8>> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let k = key.filter(|s| !s.is_empty()).unwrap_or("X-Data");
+    match placement {
+        Some("header") => {
+            let mut combined = String::new();
+            for val in request.headers().get_all(k) {
+                if let Ok(s) = val.to_str() {
+                    combined.push_str(s.trim());
+                }
+            }
+            if combined.is_empty() {
+                None
+            } else {
+                URL_SAFE_NO_PAD
+                    .decode(combined.as_bytes())
+                    .or_else(|_| base64::engine::general_purpose::STANDARD.decode(combined))
+                    .ok()
+            }
+        }
+        Some("cookie") => {
+            let mut combined = String::new();
+            for val in request.headers().get_all(http::header::COOKIE) {
+                if let Ok(s) = val.to_str() {
+                    for pair in s.split(';') {
+                        if let Some((ck, cv)) = pair.trim().split_once('=')
+                            && (ck.trim() == k || ck.trim().starts_with(k))
+                        {
+                            combined.push_str(cv.trim());
+                        }
+                    }
+                }
+            }
+            if combined.is_empty() {
+                None
+            } else {
+                URL_SAFE_NO_PAD
+                    .decode(combined.as_bytes())
+                    .or_else(|_| base64::engine::general_purpose::STANDARD.decode(combined))
+                    .ok()
+            }
+        }
+        _ => None,
+    }
 }
 async fn collect<B>(mut body: B, budget: Arc<Semaphore>) -> Result<Bytes>
 where

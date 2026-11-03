@@ -153,7 +153,7 @@ impl EgressRuntime {
         budget: Duration,
         resolver: Arc<dyn Resolver>,
     ) -> Result<Self> {
-        let (plans, bindings, routes_table, max_flows) = plan.into_parts();
+        let (plans, bindings, routes_table, max_flows, detour_table) = plan.into_parts();
         let RuntimeOptions { device, language } = options;
         let run = NEXT_RUN
             .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -187,6 +187,7 @@ impl EgressRuntime {
                     let valid = backend.capabilities() == capabilities
                         && backend.supports_udp_association() == association
                         && !host.cancel().is_cancelled();
+                    detour_table.insert(named.id.clone(), backend.clone());
                     started.push(RunningService {
                         id: named.id,
                         backend,

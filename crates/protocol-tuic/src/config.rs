@@ -34,6 +34,10 @@ pub(crate) struct ServerOptions {
     pub tls: ServerTls,
     #[serde(default = "cubic")]
     pub congestion_control: String,
+    #[serde(default)]
+    pub multiplex: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
+    #[serde(default, alias = "mux-option-padding")]
+    pub mux_option_padding: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

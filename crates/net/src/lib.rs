@@ -1,7 +1,9 @@
 //! 共享 TCP/TLS 连接器与基础直连/拒绝处理器。
 
 pub mod fallback;
+pub mod sing_mux;
 pub mod transparent;
+pub mod uot;
 pub use transparent::{RedirectNodeFactory, TproxyNodeFactory};
 
 use kerlico_config::{OutboundFactory, OutboundPlan};
@@ -21,6 +23,42 @@ use tokio_rustls::TlsConnector;
 #[derive(Clone)]
 pub struct TcpConnector {
     tls: Option<(TlsConnector, ServerName<'static>)>,
+    dialer: kerlico_core::DialerOptions,
+}
+
+/// 为将要发起连接的 TCP socket 设置 `routing_mark`、`tcp_fast_open`、`tcp_keep_alive` 与绑定接口。
+pub fn apply_tcp_socket_options(
+    socket: &tokio::net::TcpSocket,
+    dialer: &kerlico_core::DialerOptions,
+    interface: Option<&str>,
+) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(name) = interface {
+        socket.bind_device(Some(name.as_bytes()))?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = interface;
+
+    let sock_ref = socket2::SockRef::from(socket);
+    #[cfg(target_os = "linux")]
+    if let Some(mark) = dialer.routing_mark {
+        let _ = sock_ref.set_mark(mark);
+    }
+    if dialer.disable_tcp_keep_alive {
+        let _ = sock_ref.set_keepalive(false);
+    } else if dialer.tcp_keep_alive_idle.is_some() || dialer.tcp_keep_alive_interval.is_some() {
+        let mut ka = socket2::TcpKeepalive::new().with_time(
+            dialer
+                .tcp_keep_alive_idle
+                .unwrap_or(std::time::Duration::from_secs(15)),
+        );
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        if let Some(interval) = dialer.tcp_keep_alive_interval {
+            ka = ka.with_interval(interval);
+        }
+        let _ = sock_ref.set_tcp_keepalive(&ka);
+    }
+    Ok(())
 }
 
 impl TcpConnector {
@@ -28,9 +66,19 @@ impl TcpConnector {
     pub fn is_tls(&self) -> bool {
         self.tls.is_some()
     }
+    pub fn with_dialer(mut self, dialer: kerlico_core::DialerOptions) -> Self {
+        self.dialer = dialer;
+        self
+    }
+    pub fn dialer(&self) -> &kerlico_core::DialerOptions {
+        &self.dialer
+    }
     /// 构造明文 TCP 连接器，不拨号。
     pub fn plain() -> Self {
-        Self { tls: None }
+        Self {
+            tls: None,
+            dialer: kerlico_core::current_compile_dialer(),
+        }
     }
     /// 构造校验服务端名称与证书链的 TLS 连接器，不拨号、不提供客户端证书。
     ///
@@ -85,18 +133,57 @@ impl TcpConnector {
             .map_err(|_| Error::Config("TLS 服务端名称不合法".into()))?;
         Ok(Self {
             tls: Some((TlsConnector::from(Arc::new(config)), name)),
+            dialer: kerlico_core::current_compile_dialer(),
         })
+    }
+    /// 按给定 `DialerOptions` 建立底层明文 TCP 流（支持 `detour` 链式代理与套接字选项）。
+    pub async fn connect_raw_with_dialer(
+        server: &Destination,
+        dialer: &kerlico_core::DialerOptions,
+    ) -> Result<BoxStream> {
+        if let Some(fut) = dialer.connect_via_detour(server) {
+            return fut.await;
+        }
+        if dialer.is_default() {
+            let tcp = TcpStream::connect((server.host().as_str(), server.port())).await?;
+            tcp.set_nodelay(true)?;
+            return Ok(Box::new(tcp));
+        }
+        let addrs: Vec<std::net::SocketAddr> = match server.address() {
+            Address::Ip(ip) => vec![std::net::SocketAddr::new(*ip, server.port())],
+            Address::Domain(host) => tokio::net::lookup_host((host.as_str(), server.port()))
+                .await?
+                .collect(),
+        };
+        let mut last_err = None;
+        for addr in addrs {
+            let socket = if addr.is_ipv4() {
+                tokio::net::TcpSocket::new_v4()?
+            } else {
+                tokio::net::TcpSocket::new_v6()?
+            };
+            apply_tcp_socket_options(&socket, dialer, None)?;
+            match socket.connect(addr).await {
+                Ok(tcp) => {
+                    tcp.set_nodelay(true)?;
+                    return Ok(Box::new(tcp));
+                }
+                Err(err) => last_err = Some(err),
+            }
+        }
+        Err(Error::Io(last_err.unwrap_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "未解析出可用目标地址")
+        })))
     }
     /// 连接端点，启用 TCP_NODELAY，并在配置 TLS 时完成客户端握手。
     ///
     /// 域名由底层连接过程解析；此方法没有内置超时或取消令牌，调用方须包装预算。
     /// [`StreamConnector`] 实现会使用传入的 [`ConnectContext::run`]。
     pub async fn connect(&self, server: &Destination) -> Result<BoxStream> {
-        let tcp = TcpStream::connect((server.host().as_str(), server.port())).await?;
-        tcp.set_nodelay(true)?;
+        let tcp = Self::connect_raw_with_dialer(server, &self.dialer).await?;
         match &self.tls {
             Some((connector, name)) => Ok(Box::new(connector.connect(name.clone(), tcp).await?)),
-            None => Ok(Box::new(tcp)),
+            None => Ok(tcp),
         }
     }
 }
@@ -121,12 +208,18 @@ struct Direct {
 #[derive(Default)]
 struct NativeDevice {
     interface: Option<String>,
+    dialer: kerlico_core::DialerOptions,
 }
 impl NativeDevice {
     fn bind_udp(&self, socket: &socket2::Socket) -> std::io::Result<()> {
         #[cfg(target_os = "linux")]
-        if let Some(name) = &self.interface {
-            socket.bind_device(Some(name.as_bytes()))?;
+        {
+            if let Some(name) = &self.interface {
+                socket.bind_device(Some(name.as_bytes()))?;
+            }
+            if let Some(mark) = self.dialer.routing_mark {
+                let _ = socket.set_mark(mark);
+            }
         }
         #[cfg(not(target_os = "linux"))]
         let _ = socket;
@@ -140,15 +233,26 @@ pub fn native_device() -> kerlico_core::DeviceLease {
 impl kerlico_core::DeviceNetwork for NativeDevice {
     fn connect_tcp(&self, target: std::net::SocketAddr) -> BoxFuture<'_, Result<OpenedTcp>> {
         Box::pin(async move {
+            if let Ok(dest) = Destination::new(&target.ip().to_string(), target.port())
+                && let Some(fut) = self.dialer.connect_via_detour(&dest)
+            {
+                let stream = fut.await?;
+                let bound = if target.is_ipv4() {
+                    std::net::SocketAddr::from(([0u8; 4], 0))
+                } else {
+                    std::net::SocketAddr::from(([0u16; 8], 0))
+                };
+                return Ok(OpenedTcp {
+                    stream,
+                    info: TcpConnectInfo::local_bound(bound),
+                });
+            }
             let socket = if target.is_ipv4() {
                 tokio::net::TcpSocket::new_v4()?
             } else {
                 tokio::net::TcpSocket::new_v6()?
             };
-            #[cfg(target_os = "linux")]
-            if let Some(name) = &self.interface {
-                socket.bind_device(Some(name.as_bytes()))?;
-            }
+            apply_tcp_socket_options(&socket, &self.dialer, self.interface.as_deref())?;
             let stream = socket.connect(target).await?;
             stream.set_nodelay(true)?;
             let info = TcpConnectInfo::local_bound(stream.local_addr()?);
@@ -319,6 +423,7 @@ impl OutboundFactory for DirectFactory {
             return Err(Error::Config("直连出站接口名不合法或平台不支持".into()));
         }
         let bound = interface.is_some();
+        let dialer = kerlico_core::current_compile_dialer();
         let plan = OutboundPlan::new(
             Capabilities {
                 tcp: true,
@@ -329,13 +434,13 @@ impl OutboundFactory for DirectFactory {
             TargetPolicy::Local,
             move |host| {
                 Box::pin(async move {
-                    let device = match interface {
-                        Some(interface) => {
-                            kerlico_core::DeviceLease::borrow(Arc::new(NativeDevice {
-                                interface: Some(interface),
-                            }))
-                        }
-                        None => host.device().unwrap_or_else(native_device),
+                    let device = if interface.is_some() || !dialer.is_default() {
+                        kerlico_core::DeviceLease::borrow(Arc::new(NativeDevice {
+                            interface,
+                            dialer,
+                        }))
+                    } else {
+                        host.device().unwrap_or_else(native_device)
                     };
                     Ok(Arc::new(Direct { device }) as Arc<dyn Outbound>)
                 })

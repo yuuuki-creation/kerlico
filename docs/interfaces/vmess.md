@@ -20,7 +20,7 @@
 
 `security` 接受 `auto`、`aes-128-gcm`、`chacha20-poly1305`；当前 `auto` 明确选择 AES-128-GCM。它是 VMess 内容算法，外层安全由 `tls` 配置，缺省为 `{"type":"none"}`。TLS 始终校验证书和名称，不提供 insecure 开关。未识别字段、非法 UUID、未知 cipher 和 padding 未启用 mask 均拒绝。
 
-`transport` 缺省为 `{"type":"tcp"}`，另有 `{"type":"ws","path":"/proxy","host":"node.invalid"}`、`{"type":"httpupgrade","path":"/proxy"}`、`{"type":"grpc","service_name":"proxy","authority":"node.invalid","multi_mode":false}`。WS/HTTPUpgrade 使用 H1，gRPC 使用 H2。Xray 两方向已验证这些载体与 none/TLS、两种 cipher 的限定矩阵；sing-box 目前仅登记 RAW 真实互通。
+`transport` 缺省为 `{"type":"tcp"}`，另有 `{"type":"ws","path":"/proxy","host":"node.invalid"}`、`{"type":"httpupgrade","path":"/proxy"}`、`{"type":"grpc","service_name":"proxy","authority":"node.invalid","multi_mode":false,"user_agent":"chrome"}`。出站与节点均支持 `multiplex`（`sing-mux` 多路复用，含 `h2mux`、`smux`、`yamux` 与 `padding`）以及节点 `mux_option_padding`。WS/HTTPUpgrade 使用 H1，gRPC 使用 H2。
 
 建立预算覆盖载体建立与请求头发送。返回流时服务端响应头仍延迟校验，不能据此声称目标已接纳。每个会话有独立随机 key/IV 和计数器；耗尽后结束，禁止复用 nonce。
 

@@ -74,6 +74,7 @@ pub struct PreparedNode {
     pub listen: SocketAddr,
     pub protocol: Arc<dyn InboundProtocol>,
     pub max_sessions: usize,
+    pub accept_proxy_protocol: bool,
 }
 
 /// 出站计划只能整体移动到运行所有者，不对应用暴露运行对象表。
@@ -83,13 +84,28 @@ pub struct EgressPlan {
     pub(crate) routes: RouteTable,
     pub(crate) dns: Option<DnsSpec>,
     pub(crate) max_flows: usize,
+    pub(crate) detour_table: Arc<kerlico_core::DetourTable>,
 }
 impl EgressPlan {
     pub fn dns(&self) -> Option<&DnsSpec> {
         self.dns.as_ref()
     }
-    pub fn into_parts(self) -> (Vec<NamedServicePlan>, Vec<IngressPlan>, RouteTable, usize) {
-        (self.services, self.bindings, self.routes, self.max_flows)
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<NamedServicePlan>,
+        Vec<IngressPlan>,
+        RouteTable,
+        usize,
+        Arc<kerlico_core::DetourTable>,
+    ) {
+        (
+            self.services,
+            self.bindings,
+            self.routes,
+            self.max_flows,
+            self.detour_table,
+        )
     }
 }
 

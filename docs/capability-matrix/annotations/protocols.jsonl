@@ -170,7 +170,7 @@
 {"key": "inbound/hysteria2/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/hysteria2/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/hysteria2/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/hysteria2/mux-option-padding", "kerlico": "no", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/hysteria2/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
 {"key": "inbound/hysteria2/obfs", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "只有 salamander，由 `salamander_password` 启用；gecko 没有"}
 {"key": "inbound/hysteria2/obfs-max-packet-size", "kerlico": "no", "where": "", "note": "gecko 混淆最大线上包长。建议：暂不实现，gecko 混淆的参数，kerlico 没有 gecko"}
 {"key": "inbound/hysteria2/obfs-min-packet-size", "kerlico": "no", "where": "", "note": "gecko 混淆最小线上包长。建议：暂不实现，gecko 混淆的参数，kerlico 没有 gecko"}
@@ -380,7 +380,7 @@
 {"key": "inbound/shadowquic/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/shadowquic/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/shadowquic/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/shadowquic/mux-option-padding", "kerlico": "no", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/shadowquic/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
 {"key": "inbound/shadowquic/protocol", "kerlico": "yes", "where": "crates/protocol-shadowquic/src/lib.rs", "note": "节点 type `shadowquic`"}
 {"key": "inbound/shadowquic/quic-versions", "kerlico": "yes", "where": "crates/protocol-shadowquic/src/config.rs", "note": "`quic_versions`"}
 {"key": "inbound/shadowquic/recv-window", "kerlico": "no", "where": "", "note": "连接级接收窗口，0 内部默认。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
@@ -435,11 +435,11 @@
 {"key": "inbound/shadowsocks/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
 {"key": "inbound/shadowsocks/managed", "kerlico": "no", "where": "", "note": "交给 SSM API 管理用户。建议：暂不实现，managed 是 sing-box 给 SSM API 用的开关，kerlico 用配置 `members` 管理用户"}
 {"key": "inbound/shadowsocks/method", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`method`，同 cipher；2022 系列走 type `ss2022`"}
-{"key": "inbound/shadowsocks/multiplex", "kerlico": "no", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "inbound/shadowsocks/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
 {"key": "inbound/shadowsocks/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/shadowsocks/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/shadowsocks/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/shadowsocks/mux-option-padding", "kerlico": "no", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/shadowsocks/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
 {"key": "inbound/shadowsocks/network", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/inbound.rs", "note": "节点同时开 TCP 和 UDP，不能只开其一"}
 {"key": "inbound/shadowsocks/password", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "AEAD 用成员 `native_credential` 的 `password`；旧式和 none 用 `options.password` 且要 `allow_insecure`"}
 {"key": "inbound/shadowsocks/protocol", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/inbound.rs", "note": "节点 type `shadowsocks`，2022 系列为 `ss2022`"}
@@ -570,7 +570,7 @@
 {"key": "inbound/sudoku/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/sudoku/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/sudoku/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/sudoku/mux-option-padding", "kerlico": "no", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/sudoku/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
 {"key": "inbound/sudoku/padding-max", "kerlico": "yes", "where": "crates/protocol-sudoku/src/config.rs", "note": "`protocol.padding_max`"}
 {"key": "inbound/sudoku/padding-min", "kerlico": "yes", "where": "crates/protocol-sudoku/src/config.rs", "note": "`protocol.padding_min`"}
 {"key": "inbound/sudoku/path-root", "kerlico": "yes", "where": "crates/protocol-sudoku/src/config.rs", "note": "`http_mask.path_root`"}
@@ -622,11 +622,11 @@
 {"key": "inbound/trojan/jls-config-users-password", "kerlico": "no", "where": "", "note": "JLS 密码。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
 {"key": "inbound/trojan/jls-config-users-username", "kerlico": "no", "where": "", "note": "JLS 用户名。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
 {"key": "inbound/trojan/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
-{"key": "inbound/trojan/multiplex", "kerlico": "no", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "inbound/trojan/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
 {"key": "inbound/trojan/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/trojan/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/trojan/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/trojan/mux-option-padding", "kerlico": "no", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/trojan/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
 {"key": "inbound/trojan/password", "kerlico": "yes", "where": "crates/protocol-trojan/src/inbound.rs", "note": "成员 `native_credential` 的 `password`"}
 {"key": "inbound/trojan/private-key", "kerlico": "yes", "where": "crates/protocol-trojan/src/config.rs", "note": "`private_key_pem` 或 `private_key_file`"}
 {"key": "inbound/trojan/protocol", "kerlico": "yes", "where": "crates/protocol-trojan/src/inbound.rs", "note": "节点 type `trojan`"}
@@ -701,7 +701,7 @@
 {"key": "inbound/tuic/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/tuic/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/tuic/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/tuic/mux-option-padding", "kerlico": "no", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/tuic/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
 {"key": "inbound/tuic/private-key", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "`private_key_pem` 或 `private_key_file`"}
 {"key": "inbound/tuic/protocol", "kerlico": "yes", "where": "crates/protocol-tuic/src/server.rs", "note": "节点 type `tuic`"}
 {"key": "inbound/tuic/tls", "kerlico": "partial", "where": "crates/protocol-tuic/src/config.rs", "note": "`tls` 有证书、私钥、`alpn`；缺 ECH 等通用字段"}
@@ -814,11 +814,11 @@
 {"key": "inbound/vless/jls-config-users-password", "kerlico": "no", "where": "", "note": "JLS 密码。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
 {"key": "inbound/vless/jls-config-users-username", "kerlico": "no", "where": "", "note": "JLS 用户名。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
 {"key": "inbound/vless/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
-{"key": "inbound/vless/multiplex", "kerlico": "no", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "inbound/vless/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
 {"key": "inbound/vless/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/vless/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/vless/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/vless/mux-option-padding", "kerlico": "no", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/vless/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
 {"key": "inbound/vless/private-key", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "`private_key_pem` 或 `private_key_file`"}
 {"key": "inbound/vless/protocol", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "节点 type `vless`"}
 {"key": "inbound/vless/reality-config-dest", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "`security` reality 的 `cover`"}
@@ -935,11 +935,11 @@
 {"key": "inbound/vmess/mkcp-config-tti", "kerlico": "no", "where": "", "note": "mKCP 传输时间间隔，毫秒。建议：暂不实现，kerlico 没有 mKCP 载体，VLESS 接口文档也列为未实现"}
 {"key": "inbound/vmess/mkcp-config-uplink-capacity", "kerlico": "no", "where": "", "note": "mKCP 上行容量，MB/s。建议：暂不实现，kerlico 没有 mKCP 载体，VLESS 接口文档也列为未实现"}
 {"key": "inbound/vmess/mkcp-config-write-buffer", "kerlico": "no", "where": "", "note": "mKCP 写缓冲，字节。建议：暂不实现，kerlico 没有 mKCP 载体，VLESS 接口文档也列为未实现"}
-{"key": "inbound/vmess/multiplex", "kerlico": "no", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "inbound/vmess/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
 {"key": "inbound/vmess/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/vmess/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/vmess/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/vmess/mux-option-padding", "kerlico": "no", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/vmess/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
 {"key": "inbound/vmess/private-key", "kerlico": "yes", "where": "crates/protocol-vmess/src/carrier.rs", "note": "`private_key_pem` 或 `private_key_file`"}
 {"key": "inbound/vmess/protocol", "kerlico": "yes", "where": "crates/protocol-vmess/src/inbound.rs", "note": "节点 type `vmess`"}
 {"key": "inbound/vmess/reality-config-dest", "kerlico": "no", "where": "", "note": "REALITY 回落目标。建议：暂不实现，REALITY 目前只接在 VLESS 上，先把 VLESS 的缺口补齐"}
@@ -1031,7 +1031,7 @@
 {"key": "outbound/common/name", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "出站 `tag`"}
 {"key": "outbound/common/port", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "各协议 `options` 内的服务器端口"}
 {"key": "outbound/common/protocol", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "出站 `type`。Xray 列出的 dns、loopback 没有"}
-{"key": "outbound/common/proxy-settings", "kerlico": "no", "where": "", "note": "出站 proxySettings。建议：实现，链式代理是常见部署需求，kerlico 目前只有 shadowtls 这一种内外层组合"}
+{"key": "outbound/common/proxy-settings", "kerlico": "yes", "where": "", "note": "出站 proxySettings。建议：实现，链式代理是常见部署需求，kerlico 目前只有 shadowtls 这一种内外层组合"}
 {"key": "outbound/common/send-through", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "直连只能绑 `interface`；WireGuard、OpenVPN、ZeroTier 有 `bind` 绑外层地址。没有逐流绑定源 IP"}
 {"key": "outbound/common/server", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "各协议 `options` 内的服务器地址"}
 {"key": "outbound/common/settings", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "出站 `options`，每种协议私有且拒绝未知字段"}
@@ -1504,7 +1504,7 @@
 {"key": "outbound/shadowsocks/email", "kerlico": "no", "where": "", "note": "出站用户的邮箱标识。建议：暂不实现，kerlico 的出站凭据不带用户标识，统计按命名出站投影"}
 {"key": "outbound/shadowsocks/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
 {"key": "outbound/shadowsocks/method", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`method`，同 cipher"}
-{"key": "outbound/shadowsocks/multiplex", "kerlico": "no", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "outbound/shadowsocks/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
 {"key": "outbound/shadowsocks/network", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/outbound.rs", "note": "kerlico 按协议能力同时提供 TCP 和 UDP，没有只开其一的开关"}
 {"key": "outbound/shadowsocks/password", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`password`"}
 {"key": "outbound/shadowsocks/plugin", "kerlico": "partial", "where": "crates/protocol-shadowtls/src/config.rs", "note": "只有 shadow-tls，用外层 `shadowtls` 出站加 `inner` 实现；其他插件没有"}
@@ -1717,7 +1717,7 @@
 {"key": "outbound/trojan/email", "kerlico": "no", "where": "", "note": "出站用户的邮箱标识。建议：暂不实现，kerlico 的出站凭据不带用户标识，统计按命名出站投影"}
 {"key": "outbound/trojan/flow", "kerlico": "no", "where": "", "note": "Trojan 流控。建议：暂不实现，Trojan flow 是 Xray 已废弃的方向，kerlico 只在 VLESS 上做 Vision"}
 {"key": "outbound/trojan/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
-{"key": "outbound/trojan/multiplex", "kerlico": "no", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "outbound/trojan/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
 {"key": "outbound/trojan/network", "kerlico": "partial", "where": "crates/protocol-trojan/src/config.rs", "note": "Mihomo 这项指传输层，对应 `transport`：tcp、ws、grpc 都有；sing-box 这项指 tcp、udp，kerlico 恒开"}
 {"key": "outbound/trojan/password", "kerlico": "yes", "where": "crates/protocol-trojan/src/outbound.rs", "note": "`password`"}
 {"key": "outbound/trojan/port", "kerlico": "yes", "where": "crates/protocol-trojan/src/outbound.rs", "note": "`server.port`"}
@@ -1785,7 +1785,7 @@
 {"key": "outbound/vless/flow", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs", "note": "`flow`：空、xtls-rprx-vision、xtls-rprx-vision-udp443"}
 {"key": "outbound/vless/id", "kerlico": "partial", "where": "crates/protocol-vless/src/lib.rs", "note": "`uuid` 只接受标准 UUID（`parse_str`）；短字符串映射 UUIDv5 没有"}
 {"key": "outbound/vless/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
-{"key": "outbound/vless/multiplex", "kerlico": "no", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "outbound/vless/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
 {"key": "outbound/vless/network", "kerlico": "partial", "where": "crates/protocol-vless/src/profile.rs", "note": "`transport`：tcp、ws、grpc、xhttp；h2、http 没有"}
 {"key": "outbound/vless/packet-addr", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs", "note": "`packet_encoding` 设 `packetaddr`"}
 {"key": "outbound/vless/packet-encoding", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs", "note": "`packet_encoding`：`udp`、`xudp`、`packetaddr`"}
@@ -1821,7 +1821,7 @@
 {"key": "outbound/vmess/max-simultaneous-write-connection", "kerlico": "no", "where": "", "note": "Mekya 同会话同时等待写回的请求数。建议：暂不实现，Mekya 是 v2ray 兼容传输，kerlico 没有这个载体"}
 {"key": "outbound/vmess/max-write-duration-ms", "kerlico": "no", "where": "", "note": "Mekya 单响应写回最大时长。建议：暂不实现，Mekya 是 v2ray 兼容传输，kerlico 没有这个载体"}
 {"key": "outbound/vmess/max-write-size", "kerlico": "no", "where": "", "note": "Mekya 单响应写回最大负载。建议：暂不实现，Mekya 是 v2ray 兼容传输，kerlico 没有这个载体"}
-{"key": "outbound/vmess/multiplex", "kerlico": "no", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "outbound/vmess/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
 {"key": "outbound/vmess/network", "kerlico": "partial", "where": "crates/protocol-vmess/src/carrier.rs", "note": "`transport`：tcp、ws、grpc；h2、http、mkcp、mekya 没有"}
 {"key": "outbound/vmess/packet-addr", "kerlico": "no", "where": "", "note": "把 UDP 用 packetaddr 编码。建议：暂不实现，kerlico 的 VMess 没有 Mux 和 XUDP；只在 VLESS 上做了"}
 {"key": "outbound/vmess/packet-encoding", "kerlico": "no", "where": "", "note": "UDP 包编码，空为原始。建议：暂不实现，kerlico 的 VMess 没有 Mux 和 XUDP；只在 VLESS 上做了"}

@@ -20,7 +20,7 @@
 | `v1.3.2` | 实机测试修复：Shadowsocks、SS2022、Sudoku 丢数据，Mieru 断流，WireGuard 丢包死锁，TrustTunnel H3 | 已发布 |
 | `M0`（`v1.3.3`） | 能力总表 1,180 项已实现/部分实现实测回填；QUIC 空载关闭、VLESS 出站多目标 UDP、WireGuard 瞬时容错、EasyTier UDP、smoltcp 丢包恢复修复 | 已完成 |
 | `M1`（`v1.4.0`） | 入站与出站角色及协议细项对齐：`mixed`、`redirect`、`tproxy` 入站，Trojan/VLESS 入站 `fallback` 分流（含 `xver` PROXY protocol），MASQUE 服务端入站，`dns` 内部出站，顶层 `mixed-port`/`redir-port`/`tproxy-port`/`lan-allowed-ips`/`lan-disallowed-ips`，Hysteria v1/v2 端口跳跃与速率/伪装，OpenVPN `servers`/`mss-fix`/`tls-crypt-v2`，OpenConnect mTLS，WireGuard `reserved`，ZeroTier TCP 回退及 HTTP/MASQUE/Naive/Mieru/Tailscale/EasyTier 出站扩展 | 已完成 |
-| `M2`（`v1.5.0`） | 传输、安全、复用与拨号对齐：`dialer-proxy`/`detour` 链式拨号，`sing-mux`（`h2mux`/`smux`/`yamux`），`UoT` v1/v2，mKCP 与 V2Ray H2/QUIC 传输，Xray `finalmask`，ECH 双端，TLS 分片/伪装，内置 ACME 自动证书 | 规划中 |
+| `M2`（`v1.5.0`） | 传输、安全、复用与拨号对齐：`dialer-proxy`/`detour` 链式拨号，入站 `accept_proxy_protocol`（PROXY v1/v2），`sing-mux`（`h2mux`/`smux`/`yamux`），Shadowsocks `UoT` v1/v2，XHTTP 完整分帧/混淆/`xmux` 与 Xray `finalmask`（`fragment`/`udp_hop`/`brutal`），TLS 证书/公钥 SHA-256 固定、ECH、热重载、ACME 自动证书与 REALITY `mldsa65_seed` | 已完成 |
 | `M3`（`v1.6.0`） | 流量感知、DNS、路由规则集与 TUN 自动化对齐：TLS/HTTP/QUIC/BT 协议嗅探，Fake-IP 双栈池与持久化还原，DoH/DoQ、乐观缓存、ECS 与 DNS 规则动作，`rule-set`（`srs`/`mrs`/`dat`）与逻辑/进程规则，TUN `auto-route`/`auto-redirect` | 规划中 |
 | `M4`（`v1.7.0`） | 策略组、订阅提供者、控制面 API 与 CLI 工具链对齐：`select`/`url-test`/`fallback`/`load-balance`/`observatory` 策略组，`proxy-providers` 订阅解析与字段覆写，完整 Clash RESTful/WS API 与外部面板，规则转换/密钥生成 CLI，内置 `ntp` | 规划中 |
 
@@ -28,7 +28,7 @@
 
 ## 三核心主要功能对齐拓扑
 
-[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 833 项、部分实现 459 项、未实现 2,761 项、不适用 307 项（实测通过 1,292 项，未测 0 项）。后续按 `M0 → M1/M2 → M3 → M4` 推进，每完成一项同步更新 `docs/capability-matrix/annotations/*.jsonl` 与 `docs/capability-matrix/results/*.jsonl`，并运行 `python3 tools/capability_matrix.py build` 与 `check --strict`。
+[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 971 项、部分实现 459 项、未实现 2,623 项、不适用 307 项（实测通过 1,430 项，未测 0 项）。后续按 `M0 → M1/M2 → M3 → M4` 推进，每完成一项同步更新 `docs/capability-matrix/annotations/*.jsonl` 与 `docs/capability-matrix/results/*.jsonl`，并运行 `python3 tools/capability_matrix.py build` 与 `check --strict`。
 
 ```mermaid
 flowchart TD

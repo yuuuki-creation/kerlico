@@ -72,6 +72,29 @@ impl PreparedRealityTlsConnection for DeferredRuntimeRealityConnection {
     ) -> Result<BoxedTransportStream, TransportError> {
         self.complete_inner(tcp_stream, Some(fragment)).await
     }
+    async fn complete_boxed(
+        self: Box<Self>,
+        stream: BoxedTransportStream,
+    ) -> Result<BoxedTransportStream, TransportError> {
+        let Self {
+            mut config,
+            session_provider,
+            context_provider,
+        } = *self;
+        let connector = RealityConnector::new(config.clone());
+        let session = session_provider.create_session(RealityClientHelloRequest {
+            server_name: &config.server_name,
+            fingerprint: &config.fingerprint,
+        })?;
+        let prepared_client_hello = session.prepared_client_hello()?;
+        let context = context_provider.context();
+        let prepared_handshake =
+            connector.prepare_handshake_with_client_hello(prepared_client_hello, context)?;
+        let mldsa65_verify = config.mldsa65_verify.take();
+        session
+            .complete_boxed(stream, prepared_handshake, mldsa65_verify)
+            .await
+    }
 }
 impl DeferredRuntimeRealityConnection {
     async fn complete_inner(

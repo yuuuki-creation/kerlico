@@ -47,6 +47,7 @@ impl TransportInput {
             Transport::Grpc {
                 service_name,
                 authority,
+                user_agent,
                 ..
             } => {
                 if service_name.len() > 1024
@@ -56,6 +57,8 @@ impl TransportInput {
                     || authority
                         .as_ref()
                         .is_some_and(|v| v.parse::<http::uri::Authority>().is_err())
+                    || xray_transport::stream::GrpcConfig::resolve_user_agent(user_agent.as_deref())
+                        .is_err()
                 {
                     return Err(invalid());
                 }
@@ -94,6 +97,8 @@ pub(crate) enum Transport {
         authority: Option<String>,
         #[serde(default)]
         multi_mode: bool,
+        #[serde(default, alias = "grpc-user-agent", alias = "user-agent")]
+        user_agent: Option<String>,
     },
 }
 impl Transport {

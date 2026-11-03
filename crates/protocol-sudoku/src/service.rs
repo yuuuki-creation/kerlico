@@ -129,6 +129,18 @@ impl Runtime {
         match intent.kind {
             kip::OPEN_TCP if negotiated.features & 1 != 0 => {
                 let (target, _) = address::decode(&intent.payload)?;
+                if kerlico_net::sing_mux::is_magic_target(&target) {
+                    let Some(mux_cfg) = &self.config.mux else {
+                        return Err(Error::Rejected);
+                    };
+                    return kerlico_net::sing_mux::serve_inbound(
+                        negotiated.stream,
+                        peer,
+                        mux_cfg,
+                        &context,
+                    )
+                    .await;
+                }
                 let stream = peer.connect_tcp(&target, &connecting).await?;
                 kerlico_core::relay_tcp(
                     negotiated.stream,

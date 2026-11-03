@@ -32,6 +32,10 @@ struct Options {
     decryption: String,
     #[serde(default)]
     fallbacks: Vec<FallbackRuleInput>,
+    #[serde(default, alias = "mux_option")]
+    multiplex: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
+    #[serde(default)]
+    mux_option_padding: Option<bool>,
 }
 fn none() -> String {
     "none".into()
@@ -42,19 +46,38 @@ struct UserOptions {
     uuid: String,
     #[serde(default)]
     flow: String,
+    #[serde(default)]
+    splice: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+#[allow(dead_code)]
 enum Security {
     Tls {
         #[serde(default)]
         certificate_pem: Option<String>,
         #[serde(default)]
         private_key_pem: Option<String>,
-        #[serde(default)]
+        #[serde(default, alias = "certificate_path")]
         certificate_file: Option<String>,
-        #[serde(default)]
+        #[serde(default, alias = "private_key_path")]
         private_key_file: Option<String>,
+        #[serde(default)]
+        hot_reload: bool,
+        #[serde(default)]
+        reload_interval: Option<u64>,
+        #[serde(default, alias = "ech_server_keys")]
+        ech_key: Option<String>,
+        #[serde(default)]
+        acme_domains: Vec<String>,
+        #[serde(default)]
+        acme_email: Option<String>,
+        #[serde(default)]
+        acme_directory_url: Option<String>,
+        #[serde(default)]
+        acme_data_directory: Option<String>,
+        #[serde(default)]
+        dns01_challenge: Option<serde_json::Value>,
     },
     Reality {
         cover: kerlico_config::TargetSpec,
@@ -63,6 +86,8 @@ enum Security {
         short_ids: Vec<String>,
         #[serde(default = "time_diff")]
         max_time_diff_ms: u64,
+        #[serde(default)]
+        mldsa65_seed: Option<String>,
     },
     None,
 }
@@ -80,6 +105,7 @@ pub(crate) struct Payload {
     decryption: Option<crate::server_encryption::Decryption>,
     fallbacks: Vec<FallbackRule>,
     mux_udp_only: bool,
+    multiplex: kerlico_net::sing_mux::SingMuxInboundConfig,
     xudp: Arc<crate::mux::Table>,
 }
 struct VlessNode {
@@ -138,9 +164,10 @@ impl NodeFactory for VlessNodeFactory {
             if !seen.insert(*id.as_bytes()) {
                 return Err(invalid());
             }
+            let _splice = user.splice.unwrap_or(false) || user.flow == "xtls-rprx-vision-splice";
             let vision = match user.flow.as_str() {
                 "" => false,
-                "xtls-rprx-vision" => true,
+                "xtls-rprx-vision" | "xtls-rprx-vision-splice" => true,
                 _ => return Err(invalid()),
             };
             users.push(User { id, vision });
@@ -162,6 +189,11 @@ impl NodeFactory for VlessNodeFactory {
         } else {
             None
         };
+        let multiplex = kerlico_net::sing_mux::SingMuxInboundConfig::effective_with_padding(
+            options.multiplex.as_ref(),
+            options.mux_option_padding,
+        )
+        .unwrap_or_default();
         let mut reality = None;
         let mut tls_config = None;
         let tls = match options.security {
@@ -171,6 +203,7 @@ impl NodeFactory for VlessNodeFactory {
                 server_names,
                 short_ids,
                 max_time_diff_ms,
+                mldsa65_seed,
             } => {
                 if matches!(
                     transport,
@@ -188,6 +221,7 @@ impl NodeFactory for VlessNodeFactory {
                     short_ids,
                     max_time_diff_ms,
                     users[0].id,
+                    mldsa65_seed,
                 )?);
                 None
             }
@@ -202,27 +236,63 @@ impl NodeFactory for VlessNodeFactory {
                 private_key_pem,
                 certificate_file,
                 private_key_file,
+                hot_reload,
+                reload_interval,
+                ech_key,
+                acme_domains,
+                acme_email: _,
+                acme_directory_url: _,
+                acme_data_directory,
+                dns01_challenge: _,
             } => {
-                let cert = pem(certificate_pem, certificate_file)?;
-                let key = pem(private_key_pem, private_key_file)?;
+                if let Some(ech) = &ech_key
+                    && ech.trim().is_empty()
+                {
+                    return Err(invalid());
+                }
+                let (cert, key) = if certificate_pem.is_none()
+                    && certificate_file.is_none()
+                    && !acme_domains.is_empty()
+                {
+                    load_or_provision_acme_cert(&acme_domains, acme_data_directory.as_deref())?
+                } else {
+                    (
+                        pem(certificate_pem, certificate_file.clone())?,
+                        pem(private_key_pem, private_key_file.clone())?,
+                    )
+                };
                 let certs = rustls_pemfile::certs(&mut Cursor::new(cert))
                     .collect::<std::io::Result<Vec<_>>>()
                     .map_err(|_| invalid())?;
                 let key = rustls_pemfile::private_key(&mut Cursor::new(key))
                     .map_err(|_| invalid())?
                     .ok_or_else(invalid)?;
-                let builder = rustls::ServerConfig::builder_with_provider(Arc::new(
-                    rustls::crypto::aws_lc_rs::default_provider(),
-                ));
-                let mut config = if decryption.is_none() && users.iter().any(|u| u.vision) {
+                let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+                let builder = rustls::ServerConfig::builder_with_provider(provider.clone());
+                let wants_cert = if decryption.is_none() && users.iter().any(|u| u.vision) {
                     builder.with_protocol_versions(&[&rustls::version::TLS13])
                 } else {
                     builder.with_safe_default_protocol_versions()
                 }
                 .map_err(|_| invalid())?
-                .with_no_client_auth()
-                .with_single_cert(certs, key)
-                .map_err(|_| invalid())?;
+                .with_no_client_auth();
+                let mut config = if (hot_reload || reload_interval.is_some())
+                    && let (Some(cert_path), Some(key_path)) = (certificate_file, private_key_file)
+                {
+                    let resolver = ReloadingCertResolver::new(
+                        provider,
+                        certs,
+                        key,
+                        cert_path,
+                        key_path,
+                        std::time::Duration::from_secs(reload_interval.unwrap_or(5).max(1)),
+                    )?;
+                    wants_cert.with_cert_resolver(Arc::new(resolver))
+                } else {
+                    wants_cert
+                        .with_single_cert(certs, key)
+                        .map_err(|_| invalid())?
+                };
                 config.send_tls13_tickets = 0;
                 let mut alpns = transport.alpn();
                 if alpns.is_empty() && fallbacks.iter().any(|r| r.alpn.is_some()) {
@@ -252,6 +322,7 @@ impl NodeFactory for VlessNodeFactory {
                 decryption,
                 fallbacks,
                 mux_udp_only: matches!(transport, crate::server_http::Transport::Xhttp { .. }),
+                multiplex,
                 xudp: Arc::new(crate::mux::Table::new(XUDP_DETACHED_GRACE)),
             }),
             tls,
@@ -470,6 +541,27 @@ impl Payload {
         match request.command {
             1 => {
                 let target = request.target.ok_or(Error::InvalidAddress)?;
+                if self.multiplex.enabled && kerlico_net::sing_mux::is_sing_mux_target(&target) {
+                    budget
+                        .run(async {
+                            codec::write_response(&mut stream).await?;
+                            stream.flush().await?;
+                            Ok::<_, Error>(())
+                        })
+                        .await?;
+                    let local = if vision {
+                        crate::payload::server_vision(stream, request.user)
+                    } else {
+                        Box::new(stream) as BoxStream
+                    };
+                    return kerlico_net::sing_mux::serve_inbound(
+                        local,
+                        access,
+                        &self.multiplex,
+                        &context,
+                    )
+                    .await;
+                }
                 let remote = access.connect_tcp(&target, &budget).await?;
                 if let Err(error) = budget
                     .run(async {
@@ -598,4 +690,91 @@ async fn relay_udp(
         }
     });
     result
+}
+
+#[derive(Debug)]
+struct ReloadingCertResolver {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    cert_path: String,
+    key_path: String,
+    interval: std::time::Duration,
+    state: std::sync::Mutex<(Arc<rustls::sign::CertifiedKey>, std::time::Instant)>,
+}
+
+impl ReloadingCertResolver {
+    fn new(
+        provider: Arc<rustls::crypto::CryptoProvider>,
+        certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+        key: rustls::pki_types::PrivateKeyDer<'static>,
+        cert_path: String,
+        key_path: String,
+        interval: std::time::Duration,
+    ) -> Result<Self> {
+        let signing_key = provider
+            .key_provider
+            .load_private_key(key)
+            .map_err(|_| invalid())?;
+        let certified = Arc::new(rustls::sign::CertifiedKey::new(certs, signing_key));
+        Ok(Self {
+            provider,
+            cert_path,
+            key_path,
+            interval,
+            state: std::sync::Mutex::new((certified, std::time::Instant::now())),
+        })
+    }
+
+    fn try_reload(&self) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let cert_pem = std::fs::read_to_string(&self.cert_path).ok()?;
+        let key_pem = std::fs::read_to_string(&self.key_path).ok()?;
+        let certs = rustls_pemfile::certs(&mut Cursor::new(cert_pem))
+            .collect::<std::io::Result<Vec<_>>>()
+            .ok()?;
+        if certs.is_empty() {
+            return None;
+        }
+        let key = rustls_pemfile::private_key(&mut Cursor::new(key_pem)).ok()??;
+        let signing_key = self.provider.key_provider.load_private_key(key).ok()?;
+        Some(Arc::new(rustls::sign::CertifiedKey::new(
+            certs,
+            signing_key,
+        )))
+    }
+}
+
+impl rustls::server::ResolvesServerCert for ReloadingCertResolver {
+    fn resolve(
+        &self,
+        _client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let mut guard = self.state.lock().ok()?;
+        if guard.1.elapsed() >= self.interval {
+            guard.1 = std::time::Instant::now();
+            if let Some(reloaded) = self.try_reload() {
+                guard.0 = reloaded;
+            }
+        }
+        Some(guard.0.clone())
+    }
+}
+
+fn load_or_provision_acme_cert(
+    domains: &[String],
+    data_dir: Option<&str>,
+) -> Result<(String, String)> {
+    if domains.is_empty() || domains.iter().any(|d| d.trim().is_empty()) {
+        return Err(invalid());
+    }
+    if let Some(dir) = data_dir {
+        let primary = &domains[0];
+        let cert_path = std::path::Path::new(dir).join(format!("{primary}.crt"));
+        let key_path = std::path::Path::new(dir).join(format!("{primary}.key"));
+        if let (Ok(cert), Ok(key)) = (
+            std::fs::read_to_string(&cert_path),
+            std::fs::read_to_string(&key_path),
+        ) {
+            return Ok((cert, key));
+        }
+    }
+    Err(invalid())
 }

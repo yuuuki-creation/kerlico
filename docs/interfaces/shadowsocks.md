@@ -1,21 +1,21 @@
 # Shadowsocks (AEAD / Legacy) 双端接口
 
-更新日期：2026-11-02（Asia/Shanghai）。对应总表 P-03/P-05，验证结果见 [Shadowsocks 测试记录](../testing/shadowsocks.md)。本模块采用配置 v2 与全局共享 `Dispatcher`（`TargetPolicy::Remote`）；AEAD 节点成员凭据 `members[].native_credential` 格式为 `{"password": "<协议密码>"}`。无报文认证的旧式流密码与 `none`/`plain` 仅允许作为回环 `local_inbounds`（`Source::Local`，密码保留在 `options.password` 并需显式设置 `allow_insecure: true`）。
+更新日期：2026-11-04（Asia/Shanghai）。对应总表 P-03/P-05，验证结果见 [Shadowsocks 测试记录](../testing/shadowsocks.md)。本模块采用配置 v2 与全局共享 `Dispatcher`（`TargetPolicy::Remote`）；AEAD 节点成员凭据 `members[].native_credential` 格式为 `{"password": "<协议密码>"}`。无报文认证的旧式流密码与 `none`/`plain` 仅允许作为回环 `local_inbounds`（`Source::Local`，密码保留在 `options.password` 并需显式设置 `allow_insecure: true`）。
 
 `kerlico-shadowsocks` 提供 `ShadowsocksFactory`、`ShadowsocksNodeFactory`，协议类型均为 `shadowsocks`。SS2022 使用独立的 `ss2022` 模块。
 
 ## 配置
 
-出站 `options`：
+出站 `options`（可选启用 `udp_over_tcp` / `udp_over_tcp_version` UoT v1/v2 与 `multiplex` 通用 `sing-mux` 多路复用）：
 
 ```json
-{"server":"127.0.0.1","port":8388,"method":"aes-128-gcm","password":"synthetic-shadowsocks-secret"}
+{"server":"127.0.0.1","port":8388,"method":"aes-128-gcm","password":"synthetic-shadowsocks-secret","udp_over_tcp":true,"udp_over_tcp_version":2}
 ```
 
-节点 `options`：
+节点 `options`（可选启用 `multiplex` 与 `mux_option_padding` 接纳 `sing-mux` 复用流，并自动识别 `sp.udp-over-tcp.arpa` 与 `sp.v2.udp-over-tcp.arpa` UoT 请求）：
 
 ```json
-{"method":"aes-128-gcm"}
+{"method":"aes-128-gcm","multiplex":{"enabled":true,"padding":false}}
 ```
 
 每个 IPv4/IPv6 节点独立配置，凭据隔离同时覆盖明文密码与实际派生 key，拒绝跨节点复用。非 `none` 密码不能为空，UTF-8 长度上限 4096 字节；未知字段（如 `plugin`、`transport`）直接拒绝。

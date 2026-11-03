@@ -37,6 +37,10 @@ pub(crate) struct ServerOptions {
     pub congestion_control: String,
     #[serde(default = "rate")]
     pub upstream_rate_bps: u64,
+    #[serde(default)]
+    pub multiplex: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
+    #[serde(default, alias = "mux-option-padding")]
+    pub mux_option_padding: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -103,15 +103,39 @@ impl Hysteria2Outbound {
             .map_err(|_| Error::Config("Hysteria2 出站字段不合法".into()))?;
         config::auth(&options.auth)?;
         options.limits.validate()?;
-        let port_ranges = match &options.ports {
+        let fm_quic = options.finalmask.as_ref().and_then(|fm| fm.quic.as_ref());
+        let fm_hop = options
+            .finalmask
+            .as_ref()
+            .and_then(|fm| fm.udp_hop.as_ref())
+            .or_else(|| fm_quic.and_then(|q| q.udp_hop.as_ref()));
+        if let Some(hop) = fm_hop
+            && let Some(mode) = &hop.mode
+            && !matches!(mode.as_str(), "packet" | "interval" | "auto")
+        {
+            return Err(invalid());
+        }
+        let ports_spec = options
+            .ports
+            .as_ref()
+            .or_else(|| fm_hop.and_then(|h| h.remote_ports.as_ref()));
+        let port_ranges = match ports_spec {
             Some(spec) => spec.parse()?,
             None => Vec::new(),
         };
-        let hop_interval = match &options.hop_interval {
+        let hop_interval_spec = options
+            .hop_interval
+            .as_ref()
+            .or_else(|| fm_hop.and_then(|h| h.interval.as_ref()));
+        let hop_interval = match hop_interval_spec {
             Some(spec) => spec.to_duration()?,
             None => Duration::from_secs(30),
         };
-        let hop_interval_max = match &options.hop_interval_max {
+        let hop_interval_max_spec = options
+            .hop_interval_max
+            .as_ref()
+            .or_else(|| fm_hop.and_then(|h| h.interval_max.as_ref()));
+        let hop_interval_max = match hop_interval_max_spec {
             Some(spec) => {
                 let max = spec.to_duration()?;
                 if max < hop_interval {
@@ -121,10 +145,30 @@ impl Hysteria2Outbound {
             }
             None => hop_interval,
         };
-        if let Some(up) = &options.up {
+        let up_spec = options
+            .up
+            .as_ref()
+            .or_else(|| {
+                options
+                    .finalmask
+                    .as_ref()
+                    .and_then(|fm| fm.brutal_up.as_ref())
+            })
+            .or_else(|| fm_quic.and_then(|q| q.brutal_up.as_ref()));
+        if let Some(up) = up_spec {
             up.to_bps()?;
         }
-        let down_bps = match &options.down {
+        let down_spec = options
+            .down
+            .as_ref()
+            .or_else(|| {
+                options
+                    .finalmask
+                    .as_ref()
+                    .and_then(|fm| fm.brutal_down.as_ref())
+            })
+            .or_else(|| fm_quic.and_then(|q| q.brutal_down.as_ref()));
+        let down_bps = match down_spec {
             Some(down) => down.to_bps()?,
             None => 0,
         };

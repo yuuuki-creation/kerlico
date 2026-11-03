@@ -356,6 +356,10 @@ pub(crate) struct NodeOptions {
     #[serde(default = "idle")]
     http_session_ttl_ms: u64,
     cover_fallback: Option<CoverFallback>,
+    #[serde(default)]
+    multiplex: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
+    #[serde(default, alias = "mux-option-padding")]
+    mux_option_padding: Option<bool>,
 }
 pub(crate) struct NodeConfig {
     pub protocol: Arc<Protocol>,
@@ -364,6 +368,7 @@ pub(crate) struct NodeConfig {
     pub max_http_sessions: usize,
     pub http_ttl: Duration,
     pub fallback: Option<CoverFallback>,
+    pub mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
 }
 impl NodeOptions {
     pub fn prepare(mut self) -> Result<NodeConfig> {
@@ -389,6 +394,10 @@ impl NodeOptions {
                     Some(crate::carrier::tls::PreparedTls::new(tls, &[b"http/1.1"])?);
             }
         }
+        let mux = kerlico_net::sing_mux::SingMuxInboundConfig::effective_with_padding(
+            self.multiplex.as_ref(),
+            self.mux_option_padding,
+        );
         Ok(NodeConfig {
             protocol,
             mask: self.http_mask,
@@ -396,6 +405,7 @@ impl NodeOptions {
             max_http_sessions: self.max_http_sessions,
             http_ttl: Duration::from_millis(self.http_session_ttl_ms),
             fallback: self.cover_fallback,
+            mux,
         })
     }
 }

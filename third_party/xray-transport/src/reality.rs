@@ -6,7 +6,10 @@ use aes_gcm::{
 };
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use ml_dsa::{EncodedVerifyingKey, MlDsa65, Signature, Verifier, VerifyingKey};
+use ml_dsa::{
+    EncodedVerifyingKey, Keypair, MlDsa65, Seed, Signature, Signer, SigningKey, Verifier,
+    VerifyingKey,
+};
 use sha2::{Sha256, Sha512};
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -751,6 +754,32 @@ pub fn verify_reality_certificate_der_with_mldsa65(
     } else {
         Ok(RealityCertificateVerification::NotReality)
     }
+}
+
+pub fn derive_reality_mldsa65_verifying_key(seed: &[u8; 32]) -> Vec<u8> {
+    let signing_key = SigningKey::<MlDsa65>::from_seed(&Seed::from(*seed));
+    signing_key.verifying_key().encode().as_slice().to_vec()
+}
+
+pub fn sign_reality_mldsa65_handshake(
+    seed: &[u8; 32],
+    auth_key: &[u8; 32],
+    ed25519_public_key: &[u8; 32],
+    client_hello: &[u8],
+    server_hello: &[u8],
+) -> Vec<u8> {
+    let signing_key = SigningKey::<MlDsa65>::from_seed(&Seed::from(*seed));
+    let mut mac =
+        <HmacSha512 as KeyInit>::new_from_slice(auth_key).expect("HMAC-SHA512 accepts any key");
+    mac.update(ed25519_public_key);
+    mac.update(client_hello);
+    mac.update(server_hello);
+    let message = mac.finalize().into_bytes();
+    signing_key
+        .sign(message.as_slice())
+        .encode()
+        .as_slice()
+        .to_vec()
 }
 
 /// Seals and patches the REALITY session id bytes into a raw ClientHello.

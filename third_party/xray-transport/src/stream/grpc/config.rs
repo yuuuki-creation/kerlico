@@ -257,6 +257,12 @@ pub fn resolve_keepalive(config: &GrpcConfig) -> Option<GrpcKeepalive> {
 /// in the masquerade block would trip. The signature is fallible because the one
 /// arm that reads a user-typed string is, and [`GrpcConfig::user_agent`] has why
 /// that arm is refused here instead of at the dial.
+impl GrpcConfig {
+    pub fn resolve_user_agent(configured: Option<&str>) -> Result<HeaderValue, InvalidHeaderValue> {
+        resolve_user_agent(configured)
+    }
+}
+
 pub fn resolve_user_agent(configured: Option<&str>) -> Result<HeaderValue, InvalidHeaderValue> {
     match configured.unwrap_or_default() {
         "chrome" | "" => HeaderValue::try_from(anchored_chrome_user_agent()),

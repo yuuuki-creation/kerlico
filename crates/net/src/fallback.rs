@@ -431,6 +431,211 @@ pub async fn try_fallback(
     Some(relay_fallback(client, &recorded, rule, context).await)
 }
 
+/// 剥离前导头部后保留残余预读字节的异步流包装器。
+pub struct PrefixedStream<S> {
+    prefix: Vec<u8>,
+    offset: usize,
+    inner: S,
+}
+
+impl<S> PrefixedStream<S> {
+    pub fn new(prefix: Vec<u8>, inner: S) -> Self {
+        Self {
+            prefix,
+            offset: 0,
+            inner,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PrefixedStream<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if this.offset < this.prefix.len() {
+            let remaining = &this.prefix[this.offset..];
+            let take = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..take]);
+            this.offset += take;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// 解析入站连接的 PROXY protocol v1 或 v2 头部，返回剥离头部后的流及解析出的 `(peer_addr, local_addr)`。
+pub async fn accept_proxy_protocol<S>(
+    mut stream: S,
+) -> Result<(PrefixedStream<S>, Option<SocketAddr>, Option<SocketAddr>)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    const V2_SIG: &[u8; 12] = b"\r\n\r\n\0\r\nQUIT\n";
+    let mut buf = Vec::with_capacity(128);
+    let mut scratch = [0u8; 128];
+    while buf.len() < 6 {
+        let n = stream.read(&mut scratch).await?;
+        if n == 0 {
+            return Err(Error::Protocol("PROXY protocol 头部未完整到达"));
+        }
+        buf.extend_from_slice(&scratch[..n]);
+    }
+    if buf.starts_with(b"PROXY ") {
+        loop {
+            if let Some(pos) = buf.windows(2).position(|w| w == b"\r\n") {
+                let header_end = pos + 2;
+                if header_end > 107 {
+                    return Err(Error::Protocol("PROXY protocol v1 头部超长"));
+                }
+                let line = std::str::from_utf8(&buf[..pos])
+                    .map_err(|_| Error::Protocol("PROXY protocol v1 编码不合法"))?;
+                let parts: Vec<&str> = line.split(' ').collect();
+                let (peer, local) = match parts.as_slice() {
+                    ["PROXY", "UNKNOWN", ..] => (None, None),
+                    [
+                        "PROXY",
+                        proto @ ("TCP4" | "TCP6"),
+                        src_ip,
+                        dst_ip,
+                        src_port,
+                        dst_port,
+                    ] => {
+                        let s_ip: IpAddr = src_ip
+                            .parse()
+                            .map_err(|_| Error::Protocol("PROXY protocol v1 源地址不合法"))?;
+                        let d_ip: IpAddr = dst_ip
+                            .parse()
+                            .map_err(|_| Error::Protocol("PROXY protocol v1 目标地址不合法"))?;
+                        if (*proto == "TCP4" && (!s_ip.is_ipv4() || !d_ip.is_ipv4()))
+                            || (*proto == "TCP6" && (!s_ip.is_ipv6() || !d_ip.is_ipv6()))
+                        {
+                            return Err(Error::Protocol("PROXY protocol v1 地址族不匹配"));
+                        }
+                        let s_port: u16 = src_port
+                            .parse()
+                            .map_err(|_| Error::Protocol("PROXY protocol v1 源端口不合法"))?;
+                        let d_port: u16 = dst_port
+                            .parse()
+                            .map_err(|_| Error::Protocol("PROXY protocol v1 目标端口不合法"))?;
+                        (
+                            Some(SocketAddr::new(s_ip, s_port)),
+                            Some(SocketAddr::new(d_ip, d_port)),
+                        )
+                    }
+                    _ => return Err(Error::Protocol("PROXY protocol v1 格式不合法")),
+                };
+                let rest = buf.split_off(header_end);
+                return Ok((PrefixedStream::new(rest, stream), peer, local));
+            }
+            if buf.len() >= 107 {
+                return Err(Error::Protocol("PROXY protocol v1 缺少行尾"));
+            }
+            let n = stream.read(&mut scratch).await?;
+            if n == 0 {
+                return Err(Error::Protocol("PROXY protocol v1 连接提前关闭"));
+            }
+            buf.extend_from_slice(&scratch[..n]);
+        }
+    }
+    while buf.len() < 16 {
+        let n = stream.read(&mut scratch).await?;
+        if n == 0 {
+            return Err(Error::Protocol("PROXY protocol v2 头部未完整到达"));
+        }
+        buf.extend_from_slice(&scratch[..n]);
+    }
+    if &buf[..12] != V2_SIG {
+        return Err(Error::Protocol("未识别的 PROXY protocol 头部签名"));
+    }
+    let ver_cmd = buf[12];
+    if (ver_cmd & 0xf0) != 0x20 {
+        return Err(Error::Protocol("PROXY protocol v2 版本不合法"));
+    }
+    let fam_proto = buf[13];
+    let addr_len = usize::from(u16::from_be_bytes([buf[14], buf[15]]));
+    if addr_len > 512 {
+        return Err(Error::Protocol("PROXY protocol v2 地址块超长"));
+    }
+    let total_len = 16 + addr_len;
+    while buf.len() < total_len {
+        let n = stream.read(&mut scratch).await?;
+        if n == 0 {
+            return Err(Error::Protocol("PROXY protocol v2 地址块未完整到达"));
+        }
+        buf.extend_from_slice(&scratch[..n]);
+    }
+    let addr_bytes = &buf[16..total_len];
+    let (peer, local) = match ver_cmd & 0x0f {
+        0x00 => (None, None),
+        0x01 => match fam_proto & 0xf0 {
+            0x10 => {
+                if addr_bytes.len() < 12 {
+                    return Err(Error::Protocol("PROXY protocol v2 IPv4 地址长度不足"));
+                }
+                let s_ip = IpAddr::V4(std::net::Ipv4Addr::new(
+                    addr_bytes[0],
+                    addr_bytes[1],
+                    addr_bytes[2],
+                    addr_bytes[3],
+                ));
+                let d_ip = IpAddr::V4(std::net::Ipv4Addr::new(
+                    addr_bytes[4],
+                    addr_bytes[5],
+                    addr_bytes[6],
+                    addr_bytes[7],
+                ));
+                let s_port = u16::from_be_bytes([addr_bytes[8], addr_bytes[9]]);
+                let d_port = u16::from_be_bytes([addr_bytes[10], addr_bytes[11]]);
+                (
+                    Some(SocketAddr::new(s_ip, s_port)),
+                    Some(SocketAddr::new(d_ip, d_port)),
+                )
+            }
+            0x20 => {
+                if addr_bytes.len() < 36 {
+                    return Err(Error::Protocol("PROXY protocol v2 IPv6 地址长度不足"));
+                }
+                let mut s_oct = [0u8; 16];
+                let mut d_oct = [0u8; 16];
+                s_oct.copy_from_slice(&addr_bytes[0..16]);
+                d_oct.copy_from_slice(&addr_bytes[16..32]);
+                let s_ip = IpAddr::V6(std::net::Ipv6Addr::from(s_oct));
+                let d_ip = IpAddr::V6(std::net::Ipv6Addr::from(d_oct));
+                let s_port = u16::from_be_bytes([addr_bytes[32], addr_bytes[33]]);
+                let d_port = u16::from_be_bytes([addr_bytes[34], addr_bytes[35]]);
+                (
+                    Some(SocketAddr::new(s_ip, s_port)),
+                    Some(SocketAddr::new(d_ip, d_port)),
+                )
+            }
+            _ => (None, None),
+        },
+        _ => return Err(Error::Protocol("PROXY protocol v2 命令不合法")),
+    };
+    let rest = buf.split_off(total_len);
+    Ok((PrefixedStream::new(rest, stream), peer, local))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,5 +683,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(matched_default.dest.port(), 8080);
+    }
+
+    #[tokio::test]
+    async fn proxy_protocol_v1_and_v2_roundtrip_and_preserve_payload() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for xver in [1u8, 2u8] {
+            for (src, dst) in [
+                (
+                    "198.51.100.7:54321".parse::<SocketAddr>().unwrap(),
+                    "203.0.113.9:443".parse::<SocketAddr>().unwrap(),
+                ),
+                (
+                    "[2001:db8::7]:54321".parse::<SocketAddr>().unwrap(),
+                    "[2001:db8::9]:443".parse::<SocketAddr>().unwrap(),
+                ),
+            ] {
+                let (mut client, server) = tokio::io::duplex(256);
+                let mut frame = encode_proxy_protocol(xver, Some(src), Some(dst));
+                frame.extend_from_slice(b"hello-world");
+                client.write_all(&frame).await.unwrap();
+                drop(client);
+                let (mut stripped, parsed_src, parsed_dst) =
+                    accept_proxy_protocol(server).await.unwrap();
+                assert_eq!(parsed_src, Some(src));
+                assert_eq!(parsed_dst, Some(dst));
+                let mut body = Vec::new();
+                stripped.read_to_end(&mut body).await.unwrap();
+                assert_eq!(body, b"hello-world");
+            }
+        }
     }
 }

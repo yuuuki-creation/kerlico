@@ -28,6 +28,57 @@ use xray_transport::stream::{
 };
 use xray_transport::{ConnectorConfig, TlsClientConfig, TlsConnector, TransportDialer};
 
+struct BridgedStream(BoxStream);
+
+impl tokio::io::AsyncRead for BridgedStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for BridgedStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+impl xray_transport::TransportStream for BridgedStream {
+    fn poll_read_direct(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        output: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        tokio::io::AsyncRead::poll_read(self, cx, output)
+    }
+    fn poll_write_direct(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        input: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        tokio::io::AsyncWrite::poll_write(self, cx, input)
+    }
+}
+
 pub(crate) struct Carrier {
     server: Destination,
     connector: ConnectorConfig,
@@ -36,6 +87,7 @@ pub(crate) struct Carrier {
         std::sync::Mutex<std::collections::HashMap<kerlico_core::ResourceKey, TransportLayer>>,
     owner: Option<xray_transport::lifecycle::TaskOwner>,
     dialer: TransportDialer,
+    has_detour: bool,
 }
 impl Carrier {
     pub fn start(mut self, host: &kerlico_core::ServiceContext) -> Result<Self> {
@@ -151,17 +203,65 @@ impl Carrier {
                 service_name,
                 authority: host,
                 multi_mode,
+                user_agent,
             } => LayerPlan::Grpc(GrpcConfig {
                 service_name,
                 authority: host.unwrap_or(authority).parse().map_err(|_| invalid())?,
                 multi_mode,
-                user_agent: http::HeaderValue::from_static("grpc-go/1.81.0"),
+                user_agent: GrpcConfig::resolve_user_agent(user_agent.as_deref())
+                    .map_err(|_| invalid())?,
                 idle_timeout_secs: 0,
                 health_check_timeout_secs: 0,
                 permit_without_stream: false,
                 initial_windows_size: 0,
             }),
         };
+        let compile_dialer = kerlico_core::current_compile_dialer();
+        let has_detour = compile_dialer.has_detour();
+        if !compile_dialer.is_default() {
+            let d = compile_dialer.clone();
+            dialer = dialer.with_resolved_tcp_connector(Arc::new(
+                xray_transport::FnResolvedTcpConnector(
+                    move |target: Target, candidates: Vec<std::net::SocketAddr>| {
+                        let d = d.clone();
+                        async move {
+                            let dest = if d.has_detour() {
+                                let host = match &target.addr {
+                                    TargetAddr::Ip(ip) => ip.to_string(),
+                                    TargetAddr::Domain(domain) => domain.clone(),
+                                };
+                                Destination::new(&host, target.port).map_err(|e| {
+                                    xray_transport::TransportError::ChainedOutbound(e.to_string())
+                                })?
+                            } else {
+                                let first = candidates.first().copied().ok_or_else(|| {
+                                    xray_transport::TransportError::ChainedOutbound(
+                                        "无可用候选地址".into(),
+                                    )
+                                })?;
+                                Destination::new(&first.ip().to_string(), first.port()).map_err(
+                                    |e| {
+                                        xray_transport::TransportError::ChainedOutbound(
+                                            e.to_string(),
+                                        )
+                                    },
+                                )?
+                            };
+                            let stream =
+                                kerlico_net::TcpConnector::connect_raw_with_dialer(&dest, &d)
+                                    .await
+                                    .map_err(|e| {
+                                        xray_transport::TransportError::ChainedOutbound(
+                                            e.to_string(),
+                                        )
+                                    })?;
+                            Ok(Box::new(BridgedStream(stream))
+                                as xray_transport::BoxedTransportStream)
+                        }
+                    },
+                ),
+            ));
+        }
         Ok(Self {
             server,
             connector,
@@ -169,6 +269,7 @@ impl Carrier {
             resources: std::sync::Mutex::new(std::collections::HashMap::new()),
             owner: None,
             dialer,
+            has_detour,
         })
     }
     pub async fn shutdown(&self) -> Result<()> {
@@ -207,13 +308,18 @@ impl Carrier {
             self.server.port(),
             Network::Tcp,
         );
-        let mut candidates: Vec<_> =
-            tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
-                .await?
-                .collect();
-        candidates.sort_by_key(|address| address.is_ipv6());
-        candidates.dedup();
-        candidates.truncate(32);
+        let candidates: Vec<_> = if self.has_detour {
+            Vec::new()
+        } else {
+            let mut list: Vec<_> =
+                tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
+                    .await?
+                    .collect();
+            list.sort_by_key(|address| address.is_ipv6());
+            list.dedup();
+            list.truncate(32);
+            list
+        };
         let stream = self
             .dialer
             .connect_stream(&self.connector, &layer, &target, &candidates, None)

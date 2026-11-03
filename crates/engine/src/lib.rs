@@ -833,11 +833,37 @@ async fn serve_node(
                     .with_original_dst(original_destination(&stream));
                 context.peer_lease = Some(lease.clone());
                 let stream = PeerIo::new(stream, lease.clone(), token.clone());
+                let accept_proxy_protocol = node.accept_proxy_protocol;
                 stats.accepted.fetch_add(1,Ordering::Relaxed);
                 local_stats.accepted.fetch_add(1,Ordering::Relaxed);
                 spawn_session(&cleanup.tasks, &mut sessions, async move {
                     let _peer_lease=lease;
-                    let result=tokio::select! {_=token.cancelled()=>Err(Error::Cancelled),r=protocol.handle(Box::new(stream),access,context)=>r};
+                    let (stream, context): (BoxStream, InboundContext) = if accept_proxy_protocol {
+                        match tokio::time::timeout(
+                            context.connect_timeout,
+                            kerlico_net::fallback::accept_proxy_protocol(stream),
+                        )
+                        .await
+                        {
+                            Ok(Ok((stripped, parsed_peer, parsed_local))) => {
+                                if let Some(p) = parsed_peer {
+                                    context.peer_addr = Some(p);
+                                }
+                                if let Some(l) = parsed_local {
+                                    context.local_addr = Some(l);
+                                }
+                                (Box::new(stripped), context)
+                            }
+                            _ => {
+                                stats.failed.fetch_add(1, Ordering::Relaxed);
+                                local_stats.failed.fetch_add(1, Ordering::Relaxed);
+                                return;
+                            }
+                        }
+                    } else {
+                        (Box::new(stream), context)
+                    };
+                    let result=tokio::select! {_=token.cancelled()=>Err(Error::Cancelled),r=protocol.handle(stream,access,context)=>r};
                     if result.is_ok(){stats.completed.fetch_add(1,Ordering::Relaxed);local_stats.completed.fetch_add(1,Ordering::Relaxed);}else{stats.failed.fetch_add(1,Ordering::Relaxed);local_stats.failed.fetch_add(1,Ordering::Relaxed);}
                 })?;
             }
