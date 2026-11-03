@@ -10,6 +10,8 @@ use zeroize::Zeroizing;
 
 const STATIC_KEY_BEGIN: &str = "-----BEGIN OpenVPN Static key V1-----";
 const STATIC_KEY_END: &str = "-----END OpenVPN Static key V1-----";
+const CRYPT_V2_KEY_BEGIN: &str = "-----BEGIN OpenVPN tls-crypt-v2 client key-----";
+const CRYPT_V2_KEY_END: &str = "-----END OpenVPN tls-crypt-v2 client key-----";
 const CRYPT_TAG: usize = 32;
 
 /// 静态密钥文件中的两组 `cipher[64] + hmac[64]`。
@@ -86,9 +88,13 @@ pub(crate) enum WrapKeys {
         receive_hmac: hmac::Key,
         send_cipher: Zeroizing<[u8; 32]>,
         receive_cipher: Zeroizing<[u8; 32]>,
+        wk: Option<Vec<u8>>,
     },
 }
 impl WrapKeys {
+    pub fn is_crypt_v2(&self) -> bool {
+        matches!(self, Self::Crypt { wk: Some(_), .. })
+    }
     /// `direction` 对应 `key-direction`；缺省时两方向共用第一组密钥。
     pub fn auth(key: &StaticKey, digest: AuthDigest, direction: Option<u8>) -> Self {
         let (send, receive) = match direction {
@@ -105,9 +111,28 @@ impl WrapKeys {
     }
     /// `tls-crypt` 的客户端方向固定为上游 `KEY_DIRECTION_INVERSE`。
     pub fn crypt(key: &StaticKey) -> Self {
-        Self::crypt_directed(key, 1, 0)
+        Self::crypt_directed(key, 1, 0, None)
     }
-    fn crypt_directed(key: &StaticKey, send: usize, receive: usize) -> Self {
+    pub fn parse_crypt_v2(text: &str) -> Result<Self> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let invalid = || Error::Config("OpenVPN tls-crypt-v2 客户端密钥不合法".into());
+        let (_, body) = text.split_once(CRYPT_V2_KEY_BEGIN).ok_or_else(invalid)?;
+        let (body, _) = body.split_once(CRYPT_V2_KEY_END).ok_or_else(invalid)?;
+        let cleaned: String = body.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        let raw = Zeroizing::new(STANDARD.decode(cleaned).map_err(|_| invalid())?);
+        if raw.len() < 256 + 2 || raw.len() > 256 + 1024 {
+            return Err(invalid());
+        }
+        let mut key_bytes = Zeroizing::new([0u8; 256]);
+        key_bytes.copy_from_slice(&raw[..256]);
+        let wk = raw[256..].to_vec();
+        let wk_len = usize::from(u16::from_be_bytes([wk[0], wk[1]]));
+        if wk_len != wk.len() {
+            return Err(invalid());
+        }
+        Ok(Self::crypt_directed(&StaticKey(key_bytes), 1, 0, Some(wk)))
+    }
+    fn crypt_directed(key: &StaticKey, send: usize, receive: usize, wk: Option<Vec<u8>>) -> Self {
         let cipher = |index| {
             let mut bytes = Zeroizing::new([0; 32]);
             bytes.copy_from_slice(&key.cipher(index)[..32]);
@@ -119,6 +144,7 @@ impl WrapKeys {
             receive_hmac: mac(receive),
             send_cipher: cipher(send),
             receive_cipher: cipher(receive),
+            wk,
         }
     }
 }
@@ -165,6 +191,7 @@ impl ControlWrap {
             WrapKeys::Crypt {
                 send_hmac,
                 send_cipher,
+                wk,
                 ..
             } => {
                 let tag = crypt_tag(send_hmac, header, session, &replay, body);
@@ -173,6 +200,11 @@ impl ControlWrap {
                 let start = wire.len();
                 wire.extend_from_slice(body);
                 apply_ctr(send_cipher, tag.as_ref(), &mut wire[start..]);
+                if header >> 3 == 10
+                    && let Some(wk) = wk
+                {
+                    wire.extend_from_slice(wk);
+                }
             }
         }
         self.next_id = self.next_id.wrapping_add(1);
@@ -375,7 +407,10 @@ mod tests {
     fn wrappers_accept_the_server_direction_and_reject_tamper_and_replay() {
         let key = StaticKey::parse(&key_text()).unwrap();
         for (client, server) in [
-            (WrapKeys::crypt(&key), WrapKeys::crypt_directed(&key, 0, 1)),
+            (
+                WrapKeys::crypt(&key),
+                WrapKeys::crypt_directed(&key, 0, 1, None),
+            ),
             (
                 WrapKeys::auth(&key, AuthDigest::Sha256, Some(1)),
                 WrapKeys::auth(&key, AuthDigest::Sha256, Some(0)),

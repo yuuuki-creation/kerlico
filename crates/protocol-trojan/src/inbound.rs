@@ -8,9 +8,16 @@ use kerlico_core::{
     BoxFuture, BoxStream, ConnectContext, CredentialManifest, CredentialSet, InboundContext,
     InboundProtocol, IngressBinding, Result,
 };
+use kerlico_net::fallback::{
+    FallbackDestInput, FallbackRule, FallbackRuleInput, RecordingStream, compile_trojan_fallbacks,
+    try_fallback,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 pub struct TrojanNodeFactory;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,9 +25,18 @@ struct Options {
     security: ServerSecurity,
     #[serde(default)]
     transport: TransportInput,
+    #[serde(default, alias = "fallback_server", alias = "fallback-server")]
+    fallback: Option<FallbackDestInput>,
+    #[serde(default, alias = "fallback-server-port")]
+    fallback_server_port: Option<u16>,
+    #[serde(default, alias = "fallback-for-alpn")]
+    fallback_for_alpn: BTreeMap<String, FallbackDestInput>,
+    #[serde(default)]
+    fallbacks: Vec<FallbackRuleInput>,
 }
 pub(crate) struct Payload {
     pub users: CredentialSet<[u8; 56]>,
+    pub fallbacks: Vec<FallbackRule>,
 }
 struct TrojanNode {
     payload: Arc<Payload>,
@@ -56,11 +72,19 @@ impl NodeFactory for TrojanNodeFactory {
             }
             users.push(value);
         }
+        let fallbacks = compile_trojan_fallbacks(
+            options.fallback,
+            options.fallback_server_port,
+            options.fallback_for_alpn,
+            options.fallbacks,
+        )?;
+        let fallback_alpns: Vec<String> = fallbacks.iter().filter_map(|r| r.alpn.clone()).collect();
         let transport = options.transport.normalize()?;
-        let tls = server_tls(options.security, &transport)?;
+        let tls = server_tls(options.security, &transport, &fallback_alpns)?;
         Ok(Arc::new(TrojanNode {
             payload: Arc::new(Payload {
                 users: input.credentials(users)?,
+                fallbacks,
             }),
             tls,
             transport,
@@ -90,18 +114,33 @@ impl InboundProtocol for TrojanNode {
         Box::pin(async move {
             let connect =
                 ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
-            let stream: BoxStream = connect
+            let (stream, sni, alpn): (BoxStream, Option<String>, Option<String>) = connect
                 .run(async {
                     match &self.tls {
-                        Some(tls) => Ok(Box::new(tls.accept(stream).await?) as BoxStream),
-                        None => Ok(stream),
+                        Some(tls) => {
+                            let tls_stream = tls.accept(stream).await?;
+                            let (_, conn) = tls_stream.get_ref();
+                            let sni = conn.server_name().map(str::to_owned);
+                            let alpn = conn
+                                .alpn_protocol()
+                                .and_then(|b| std::str::from_utf8(b).ok())
+                                .map(str::to_owned);
+                            Ok((Box::new(tls_stream) as BoxStream, sni, alpn))
+                        }
+                        None => Ok((stream, None, None)),
                     }
                 })
                 .await?;
             let (stream, activity) = crate::io::observe(stream);
             if self.transport.raw() {
                 crate::io::bounded(
-                    self.payload.serve(stream, access, context.clone()),
+                    self.payload.serve_with_meta(
+                        stream,
+                        access,
+                        context.clone(),
+                        sni.as_deref(),
+                        alpn.as_deref(),
+                    ),
                     activity,
                     context.idle_timeout,
                     context.cancel.clone(),
@@ -128,15 +167,39 @@ impl InboundProtocol for TrojanNode {
 impl Payload {
     pub async fn serve(
         &self,
-        mut stream: BoxStream,
+        stream: BoxStream,
         access: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
+        self.serve_with_meta(stream, access, context, None, None)
+            .await
+    }
+    pub async fn serve_with_meta(
+        &self,
+        stream: BoxStream,
+        access: IngressBinding,
+        context: InboundContext,
+        sni: Option<&str>,
+        alpn: Option<&str>,
+    ) -> Result<()> {
         let connect =
             ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
-        let (slot, target, udp) = connect
-            .run(codec::request(&mut stream, &self.users))
-            .await?;
+        let mut recorder = RecordingStream::new(stream, 4096);
+        let handshake = connect
+            .run(codec::request(&mut recorder, &self.users))
+            .await;
+        let (stream, recorded) = recorder.into_parts();
+        let (slot, target, udp) = match handshake {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                if let Some(res) =
+                    try_fallback(stream, recorded, &self.fallbacks, sni, alpn, &context).await
+                {
+                    return res;
+                }
+                return Err(err);
+            }
+        };
         let (access, (target, udp)) =
             access.authenticated(self.users.verified(&slot, (target, udp))?, &context)?;
         if udp {

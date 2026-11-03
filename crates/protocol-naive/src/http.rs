@@ -3,7 +3,8 @@ use crate::{
     config::{HEADER_LIMIT, User, malformed},
     padding,
 };
-use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
+pub use http::HeaderMap;
+use http::{HeaderValue, Method, Request, Response, StatusCode};
 use kerlico_core::{CredentialSet, Destination, Error, Result, Verified};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -60,15 +61,56 @@ fn bounded(headers: &HeaderMap) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) fn request(target: &Destination, user: &User) -> Result<Request<()>> {
-    Request::builder()
+pub(crate) fn parse_extra_headers(
+    raw: &std::collections::BTreeMap<String, String>,
+) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in raw {
+        if name.starts_with(':') {
+            return Err(crate::config::invalid());
+        }
+        let header_name = http::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| crate::config::invalid())?;
+        if matches!(
+            header_name.as_str(),
+            "host"
+                | "proxy-authorization"
+                | "padding"
+                | "padding-type-request"
+                | "connection"
+                | "proxy-connection"
+                | "upgrade"
+                | "transfer-encoding"
+                | "content-length"
+                | "-connect-authority"
+        ) {
+            return Err(crate::config::invalid());
+        }
+        let header_value =
+            http::HeaderValue::from_str(value).map_err(|_| crate::config::invalid())?;
+        headers.insert(header_name, header_value);
+    }
+    bounded(&headers).map_err(|_| crate::config::invalid())?;
+    Ok(headers)
+}
+pub(crate) fn request(
+    target: &Destination,
+    user: &User,
+    extra_headers: &HeaderMap,
+) -> Result<Request<()>> {
+    let mut request = Request::builder()
         .method(Method::CONNECT)
         .uri(target.to_string())
         .header("proxy-authorization", user.authorization())
         .header("padding", padding::header(false))
         .header("padding-type-request", "1")
         .body(())
-        .map_err(|_| malformed())
+        .map_err(|_| malformed())?;
+    for (name, value) in extra_headers {
+        request.headers_mut().insert(name.clone(), value.clone());
+    }
+    bounded(request.headers())?;
+    Ok(request)
 }
 pub(crate) fn check_request<T>(
     request: &Request<T>,
@@ -324,7 +366,7 @@ mod tests {
             events: Arc::new(Observer),
         };
         let target = Destination::new("example.invalid", 443).unwrap();
-        let mut request = request(&target, &user).unwrap();
+        let mut request = request(&target, &user, &HeaderMap::new()).unwrap();
         let (peer, decoded) = ingress
             .authenticated(check_request(&request, &users).unwrap(), &context)
             .unwrap();

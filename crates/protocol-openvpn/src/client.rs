@@ -163,8 +163,10 @@ async fn supervise(
     publish: watch::Sender<TunnelState>,
 ) {
     let mut backoff = MIN_BACKOFF;
+    let mut attempt = 0usize;
     loop {
-        let result = run_session(&prepared, &host, &cancel, &publish).await;
+        let result = run_session(&prepared, attempt, &host, &cancel, &publish).await;
+        attempt = attempt.wrapping_add(1);
         publish.send_modify(|state| {
             if let Some(tunnel) = state.tunnel.take() {
                 tunnel.close();
@@ -202,6 +204,7 @@ fn service_failure(error: Error) -> ServiceFailure {
 
 async fn run_session(
     prepared: &Prepared,
+    attempt: usize,
     host: &ServiceContext,
     cancel: &CancellationToken,
     publish: &watch::Sender<TunnelState>,
@@ -209,7 +212,7 @@ async fn run_session(
     let handshake = prepared.settings.handshake;
     let mut link = tokio::select! { biased;
         _ = cancel.cancelled() => return Ok(()),
-        link = tokio::time::timeout(handshake, Link::connect(prepared, host.clone())) => {
+        link = tokio::time::timeout(handshake, Link::connect(prepared, attempt, host.clone())) => {
             link.map_err(|_| Error::Timeout)??
         }
     };
@@ -231,7 +234,10 @@ async fn run_session(
                         state.failure = None;
                     });
                 }
-                Event::Packet(packet) => {
+                Event::Packet(mut packet) => {
+                    if let Some(mss) = prepared.mss_fix {
+                        clamp_tcp_mss(&mut packet, mss);
+                    }
                     if let Some(tunnel) = &tunnel {
                         let _ = tunnel.receive(&packet);
                     }
@@ -246,7 +252,11 @@ async fn run_session(
                 }
             }
             packet = next_packet(tunnel.as_ref()), if link.idle() => {
-                session.send_packet(Instant::now(), &packet?)?;
+                let mut packet = packet?;
+                if let Some(mss) = prepared.mss_fix {
+                    clamp_tcp_mss(&mut packet, mss);
+                }
+                session.send_packet(Instant::now(), &packet)?;
             }
             _ = timer.tick() => {
                 let now = Instant::now();
@@ -254,6 +264,58 @@ async fn run_session(
                     return Err(Error::Timeout);
                 }
                 session.tick(now)?;
+            }
+        }
+    }
+}
+
+fn clamp_tcp_mss(packet: &mut [u8], max_mss: u16) {
+    let version = packet.first().map(|b| b >> 4).unwrap_or(0);
+    let tcp_offset = match version {
+        4 if packet.len() >= 40 && packet[9] == 6 => {
+            let ihl = usize::from(packet[0] & 0x0f) * 4;
+            if ihl < 20 || packet.len() < ihl + 20 {
+                return;
+            }
+            ihl
+        }
+        6 if packet.len() >= 60 && packet[6] == 6 => 40,
+        _ => return,
+    };
+    let tcp = &mut packet[tcp_offset..];
+    if tcp[13] & 0x02 == 0 {
+        return;
+    }
+    let data_offset = usize::from(tcp[12] >> 4) * 4;
+    if data_offset <= 20 || tcp.len() < data_offset {
+        return;
+    }
+    let mut idx = 20;
+    while idx < data_offset {
+        match tcp[idx] {
+            0 => break,
+            1 => idx += 1,
+            kind => {
+                if idx + 1 >= data_offset {
+                    break;
+                }
+                let len = usize::from(tcp[idx + 1]);
+                if len < 2 || idx + len > data_offset {
+                    break;
+                }
+                if kind == 2 && len == 4 {
+                    let old_mss = u16::from_be_bytes([tcp[idx + 2], tcp[idx + 3]]);
+                    if old_mss > max_mss {
+                        tcp[idx + 2..idx + 4].copy_from_slice(&max_mss.to_be_bytes());
+                        let old_csum = u16::from_be_bytes([tcp[16], tcp[17]]);
+                        let sum = u32::from(!old_csum) + u32::from(!old_mss) + u32::from(max_mss);
+                        let folded = (sum & 0xffff) + (sum >> 16);
+                        let new_csum = !((folded + (folded >> 16)) as u16);
+                        tcp[16..18].copy_from_slice(&new_csum.to_be_bytes());
+                    }
+                    return;
+                }
+                idx += len;
             }
         }
     }
@@ -314,8 +376,9 @@ impl Link {
             host,
         }
     }
-    async fn connect(prepared: &Prepared, host: ServiceContext) -> Result<Self> {
-        let endpoint = resolve(&prepared.remote, prepared.bind).await?;
+    async fn connect(prepared: &Prepared, attempt: usize, host: ServiceContext) -> Result<Self> {
+        let (remote, proto) = &prepared.remotes[attempt % prepared.remotes.len()];
+        let endpoint = resolve(remote, prepared.bind).await?;
         let bind = prepared.bind.unwrap_or_else(|| {
             let any = if endpoint.is_ipv4() {
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED)
@@ -324,7 +387,7 @@ impl Link {
             };
             SocketAddr::new(any, 0)
         });
-        match prepared.proto {
+        match proto {
             Proto::Udp => {
                 let socket = UdpSocket::bind(bind).await?;
                 socket.connect(endpoint).await?;

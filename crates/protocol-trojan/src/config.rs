@@ -177,6 +177,7 @@ pub(crate) fn pem(inline: Option<String>, file: Option<String>) -> Result<String
 pub(crate) fn server_tls(
     security: ServerSecurity,
     transport: &Transport,
+    fallback_alpns: &[String],
 ) -> Result<Option<tokio_rustls::TlsAcceptor>> {
     let ServerSecurity::Tls {
         certificate_pem,
@@ -203,7 +204,19 @@ pub(crate) fn server_tls(
     .with_no_client_auth()
     .with_single_cert(certs, key)
     .map_err(|_| invalid())?;
-    config.alpn_protocols = transport.alpn();
+    let mut alpns = transport.alpn();
+    if alpns.is_empty() && !fallback_alpns.is_empty() {
+        for alpn in fallback_alpns {
+            let bytes = alpn.as_bytes().to_vec();
+            if !alpns.contains(&bytes) {
+                alpns.push(bytes);
+            }
+        }
+        if !alpns.iter().any(|a| a == b"http/1.1") {
+            alpns.push(b"http/1.1".to_vec());
+        }
+    }
+    config.alpn_protocols = alpns;
     config.send_tls13_tickets = 0;
     Ok(Some(tokio_rustls::TlsAcceptor::from(Arc::new(config))))
 }

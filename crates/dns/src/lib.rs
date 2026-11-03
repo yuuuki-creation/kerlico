@@ -143,6 +143,107 @@ impl DnsResolver {
             .map_err(|_| Error::Io(std::io::Error::other("DNS 查询失败")))?;
         Ok(lookup.iter().collect())
     }
+
+    pub async fn exchange_packet(&self, request: &[u8]) -> Result<Vec<u8>> {
+        exchange_wire_query(request, Some(self)).await
+    }
+}
+
+fn parse_question(packet: &[u8]) -> Result<(String, u16, usize)> {
+    if packet.len() < 12 || packet.len() > 4096 {
+        return Err(Error::Protocol("DNS 报文长度不合法"));
+    }
+    let qdcount = u16::from_be_bytes([packet[4], packet[5]]);
+    if qdcount == 0 {
+        return Err(Error::Protocol("DNS 查询缺少问题段"));
+    }
+    let mut cursor = 12usize;
+    let mut labels = Vec::new();
+    loop {
+        if cursor >= packet.len() {
+            return Err(Error::Protocol("DNS 域名标签截断"));
+        }
+        let len = usize::from(packet[cursor]);
+        cursor += 1;
+        if len == 0 {
+            break;
+        }
+        if (len & 0xc0) != 0 || len > 63 || cursor + len > packet.len() {
+            return Err(Error::Protocol("DNS 问题段标签不合法"));
+        }
+        let label = std::str::from_utf8(&packet[cursor..cursor + len])
+            .map_err(|_| Error::Protocol("DNS 域名标签非 ASCII"))?;
+        labels.push(label.to_ascii_lowercase());
+        cursor += len;
+    }
+    if cursor + 4 > packet.len() || labels.is_empty() {
+        return Err(Error::Protocol("DNS 问题尾部截断"));
+    }
+    let qtype = u16::from_be_bytes([packet[cursor], packet[cursor + 1]]);
+    let qclass = u16::from_be_bytes([packet[cursor + 2], packet[cursor + 3]]);
+    if qclass != 1 {
+        return Err(Error::Protocol("DNS 仅支持 IN 类查询"));
+    }
+    Ok((labels.join("."), qtype, cursor + 4))
+}
+
+pub async fn exchange_wire_query(
+    request: &[u8],
+    resolver: Option<&DnsResolver>,
+) -> Result<Vec<u8>> {
+    let (domain, qtype, question_end) = parse_question(request)?;
+    let rd = request[2] & 0x01;
+    let resolved = match qtype {
+        1 | 28 => match resolver {
+            Some(resolver) => resolver.resolve(&domain).await,
+            None => tokio::net::lookup_host((domain.as_str(), 0))
+                .await
+                .map(|iter| iter.map(|addr| addr.ip()).collect::<Vec<_>>())
+                .map_err(Error::Io),
+        },
+        _ => Ok(Vec::new()),
+    };
+    let mut reply = Vec::with_capacity(512);
+    reply.extend_from_slice(&request[0..2]);
+    match resolved {
+        Ok(ips) => {
+            let matched: Vec<IpAddr> = ips
+                .into_iter()
+                .filter(|ip| matches!((qtype, ip), (1, IpAddr::V4(_)) | (28, IpAddr::V6(_))))
+                .take(16)
+                .collect();
+            reply.push(0x80 | rd);
+            reply.push(0x80);
+            reply.extend_from_slice(&1u16.to_be_bytes());
+            reply.extend_from_slice(&(matched.len() as u16).to_be_bytes());
+            reply.extend_from_slice(&[0, 0, 0, 0]);
+            reply.extend_from_slice(&request[12..question_end]);
+            for ip in matched {
+                reply.extend_from_slice(&[0xc0, 0x0c]);
+                reply.extend_from_slice(&qtype.to_be_bytes());
+                reply.extend_from_slice(&1u16.to_be_bytes());
+                reply.extend_from_slice(&60u32.to_be_bytes());
+                match ip {
+                    IpAddr::V4(v4) => {
+                        reply.extend_from_slice(&4u16.to_be_bytes());
+                        reply.extend_from_slice(&v4.octets());
+                    }
+                    IpAddr::V6(v6) => {
+                        reply.extend_from_slice(&16u16.to_be_bytes());
+                        reply.extend_from_slice(&v6.octets());
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            reply.push(0x80 | rd);
+            reply.push(0x82);
+            reply.extend_from_slice(&1u16.to_be_bytes());
+            reply.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+            reply.extend_from_slice(&request[12..question_end]);
+        }
+    }
+    Ok(reply)
 }
 
 #[cfg(test)]
@@ -266,5 +367,19 @@ mod tests {
             resolver.resolve("www.example.com").await.unwrap(),
             vec!["192.0.2.7".parse::<IpAddr>().unwrap()]
         );
+    }
+
+    #[tokio::test]
+    async fn exchange_packet_answers_wire_query_from_hosts() {
+        let resolver =
+            DnsResolver::new(&spec(json!({"hosts":{"svc.internal":["10.0.0.5"]}}))).unwrap();
+        let query = [
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 3, b's', b'v',
+            b'c', 8, b'i', b'n', b't', b'e', b'r', b'n', b'a', b'l', 0, 0, 1, 0, 1,
+        ];
+        let reply = resolver.exchange_packet(&query).await.unwrap();
+        assert_eq!(&reply[0..2], &[0x12, 0x34]);
+        assert_eq!(&reply[6..8], &[0x00, 0x01]);
+        assert_eq!(&reply[reply.len() - 4..], &[10, 0, 0, 5]);
     }
 }

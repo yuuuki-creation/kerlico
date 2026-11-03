@@ -17,9 +17,14 @@ use std::{
 };
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Remote {
+    #[serde(alias = "server")]
     host: String,
+    #[serde(alias = "server_port", alias = "server-port")]
     port: u16,
+    #[serde(default, alias = "network")]
+    proto: Option<Proto>,
 }
 
 #[derive(Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -45,7 +50,9 @@ fn default_digest() -> String {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientOptions {
-    remote: Remote,
+    remote: Option<Remote>,
+    #[serde(default)]
+    servers: Vec<Remote>,
     #[serde(default)]
     proto: Proto,
     bind: Option<SocketAddr>,
@@ -56,11 +63,15 @@ pub(crate) struct ClientOptions {
     password: Option<String>,
     tls_auth: Option<TlsAuth>,
     tls_crypt_key: Option<String>,
+    #[serde(default, alias = "tls-crypt-v2", alias = "tls_crypt_v2_key")]
+    tls_crypt_v2: Option<String>,
     ciphers: Option<Vec<String>>,
     verify_x509_name: Option<String>,
     allowed_ips: Option<Vec<String>>,
     #[serde(default = "default_mtu")]
     mtu: usize,
+    #[serde(default, alias = "mss-fix")]
+    mss_fix: Option<u16>,
     #[serde(default = "default_ping")]
     ping_secs: u64,
     #[serde(default)]
@@ -85,12 +96,12 @@ fn default_handshake() -> u64 {
 const MAX_HANDSHAKE_SECS: u64 = 3600;
 
 pub(crate) struct Prepared {
-    pub remote: Destination,
-    pub proto: Proto,
+    pub remotes: Vec<(Destination, Proto)>,
     pub bind: Option<SocketAddr>,
     pub settings: Arc<Settings>,
     pub allowed_ips: Option<Vec<String>>,
     pub mtu: usize,
+    pub mss_fix: Option<u16>,
 }
 
 fn invalid() -> Error {
@@ -102,10 +113,26 @@ fn nonzero(seconds: u64) -> Option<Duration> {
 
 impl ClientOptions {
     pub fn prepare(self) -> Result<Prepared> {
-        let remote = Destination::new(&self.remote.host, self.remote.port)?;
-        if self.remote.port == 0
-            || self.bind.is_some_and(|bind| bind.ip().is_multicast())
+        let mut raw_remotes = Vec::new();
+        if let Some(remote) = self.remote {
+            raw_remotes.push(remote);
+        }
+        raw_remotes.extend(self.servers);
+        if raw_remotes.is_empty() || raw_remotes.len() > 16 {
+            return Err(invalid());
+        }
+        let mut remotes = Vec::with_capacity(raw_remotes.len());
+        for entry in raw_remotes {
+            if entry.port == 0 {
+                return Err(invalid());
+            }
+            let dest = Destination::new(&entry.host, entry.port)?;
+            remotes.push((dest, entry.proto.unwrap_or(self.proto)));
+        }
+        let (_, proto) = remotes[0].clone();
+        if self.bind.is_some_and(|bind| bind.ip().is_multicast())
             || !(1..=MAX_HANDSHAKE_SECS).contains(&self.handshake_timeout_secs)
+            || self.mss_fix.is_some_and(|mss| !(64..=9000).contains(&mss))
         {
             return Err(invalid());
         }
@@ -132,17 +159,18 @@ impl ClientOptions {
                 "OpenVPN 出站需要客户端证书或用户名密码".into(),
             ));
         }
-        let wrap = match (&self.tls_auth, &self.tls_crypt_key) {
-            (None, None) => WrapKeys::Plain,
-            (Some(auth), None) => {
+        let wrap = match (&self.tls_auth, &self.tls_crypt_key, &self.tls_crypt_v2) {
+            (None, None, None) => WrapKeys::Plain,
+            (Some(auth), None, None) => {
                 let digest = AuthDigest::parse(&auth.digest).ok_or_else(invalid)?;
                 if auth.direction.is_some_and(|direction| direction > 1) {
                     return Err(invalid());
                 }
                 WrapKeys::auth(&StaticKey::parse(&auth.key)?, digest, auth.direction)
             }
-            (None, Some(key)) => WrapKeys::crypt(&StaticKey::parse(key)?),
-            (Some(_), Some(_)) => return Err(invalid()),
+            (None, Some(key), None) => WrapKeys::crypt(&StaticKey::parse(key)?),
+            (None, None, Some(key)) => WrapKeys::parse_crypt_v2(key)?,
+            _ => return Err(invalid()),
         };
         let ciphers = match &self.ciphers {
             None => DataCipher::ALL.to_vec(),
@@ -158,11 +186,10 @@ impl ClientOptions {
         }
         let tls = client_config(&self.ca_pem, identity, self.verify_x509_name.as_deref())?;
         validate_stack(self.allowed_ips.as_deref(), self.mtu)?;
-        let options = options_string(self.proto, &wrap, ciphers[0], self.mtu);
+        let options = options_string(proto, &wrap, ciphers[0], self.mtu);
         let peer_info = peer_info(&ciphers);
         Ok(Prepared {
-            remote,
-            proto: self.proto,
+            remotes,
             bind: self.bind,
             settings: Arc::new(Settings {
                 tls,
@@ -178,6 +205,7 @@ impl ClientOptions {
             }),
             allowed_ips: self.allowed_ips,
             mtu: self.mtu,
+            mss_fix: self.mss_fix,
         })
     }
 }
@@ -256,7 +284,7 @@ mod tests {
             "password": "secret",
         }))
         .unwrap();
-        assert!(prepared.proto == Proto::Udp);
+        assert!(prepared.remotes[0].1 == Proto::Udp);
         assert_eq!(prepared.mtu, 1400);
         assert_eq!(
             prepared.settings.peer_info.lines().nth(4),

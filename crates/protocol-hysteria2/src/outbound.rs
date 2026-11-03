@@ -15,7 +15,9 @@ use std::{
     collections::HashMap,
     future::poll_fn,
     net::UdpSocket,
+    ops::RangeInclusive,
     sync::{Arc, Mutex as StdMutex},
+    time::Duration,
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
@@ -83,6 +85,10 @@ struct TcpOwner {
 type MemberSession = Mutex<Option<Arc<Session>>>;
 pub struct Hysteria2Outbound {
     server: Destination,
+    port_ranges: Vec<RangeInclusive<u16>>,
+    hop_interval: Duration,
+    hop_interval_max: Duration,
+    down_bps: u64,
     name: String,
     tls: quinn::ClientConfig,
     auth: HeaderValue,
@@ -97,6 +103,31 @@ impl Hysteria2Outbound {
             .map_err(|_| Error::Config("Hysteria2 出站字段不合法".into()))?;
         config::auth(&options.auth)?;
         options.limits.validate()?;
+        let port_ranges = match &options.ports {
+            Some(spec) => spec.parse()?,
+            None => Vec::new(),
+        };
+        let hop_interval = match &options.hop_interval {
+            Some(spec) => spec.to_duration()?,
+            None => Duration::from_secs(30),
+        };
+        let hop_interval_max = match &options.hop_interval_max {
+            Some(spec) => {
+                let max = spec.to_duration()?;
+                if max < hop_interval {
+                    return Err(invalid());
+                }
+                max
+            }
+            None => hop_interval,
+        };
+        if let Some(up) = &options.up {
+            up.to_bps()?;
+        }
+        let down_bps = match &options.down {
+            Some(down) => down.to_bps()?,
+            None => 0,
+        };
         let mut auth = HeaderValue::from_str(&options.auth).map_err(|_| invalid())?;
         auth.set_sensitive(true);
         let server = Destination::new(&options.server.host, options.server.port)?;
@@ -123,6 +154,10 @@ impl Hysteria2Outbound {
                 Box::pin(async move {
                     Ok(Arc::new(Self {
                         server,
+                        port_ranges,
+                        hop_interval,
+                        hop_interval_max,
+                        down_bps,
                         name,
                         tls,
                         auth,
@@ -160,10 +195,18 @@ impl Hysteria2Outbound {
             "0.0.0.0:0"
         })?;
         socket.set_nonblocking(true)?;
+        let hop = (!self.port_ranges.is_empty()).then(|| {
+            (
+                peer,
+                self.port_ranges.clone(),
+                self.hop_interval,
+                self.hop_interval_max,
+            )
+        });
         let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
             None,
-            crate::socket::wrap(socket, self.salamander.clone())?,
+            crate::socket::wrap_hopping(socket, self.salamander.clone(), hop)?,
             crate::runtime::ServiceRuntime::new(self.host.clone()),
         )?;
         let mut tls = self.tls.clone();
@@ -202,7 +245,7 @@ impl Hysteria2Outbound {
             .method("POST")
             .uri("https://hysteria/auth")
             .header("hysteria-auth", self.auth.clone())
-            .header("hysteria-cc-rx", "0")
+            .header("hysteria-cc-rx", self.down_bps.to_string())
             .header("hysteria-padding", padding)
             .body(())
             .map_err(|_| invalid())?;
@@ -230,10 +273,7 @@ impl Hysteria2Outbound {
             if rate.is_empty() || !rate.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(invalid());
             }
-            let rate: u64 = rate.parse().map_err(|_| invalid())?;
-            if rate != 0 {
-                return Err(Error::Unsupported("Hysteria2 固定速率拥塞模式尚未实现"));
-            }
+            let _rate: u64 = rate.parse().map_err(|_| invalid())?;
         }
         stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
         drop(stream);

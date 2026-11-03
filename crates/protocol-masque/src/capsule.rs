@@ -90,7 +90,7 @@ pub(crate) struct Address {
     pub prefix_len: u8,
 }
 impl Address {
-    fn unspecified(request_id: u64, ipv4: bool) -> Self {
+    pub(crate) fn unspecified(request_id: u64, ipv4: bool) -> Self {
         let ip = if ipv4 {
             IpAddr::V4(Ipv4Addr::UNSPECIFIED)
         } else {
@@ -164,9 +164,9 @@ fn parse_addresses(mut input: &[u8], request: bool) -> Result<Vec<Address>> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Route {
-    start: IpAddr,
-    end: IpAddr,
-    protocol: u8,
+    pub start: IpAddr,
+    pub end: IpAddr,
+    pub protocol: u8,
 }
 impl Route {
     pub fn allows(&self, ip: IpAddr, protocol: u8) -> bool {
@@ -246,6 +246,22 @@ fn encode(kind: u64, entries: &[Address]) -> Vec<u8> {
     capsule.extend(payload);
     capsule
 }
+fn encode_routes(routes: &[Route]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for route in routes {
+        put_ip(route.start, &mut payload);
+        match route.end {
+            IpAddr::V4(ip) => payload.extend(ip.octets()),
+            IpAddr::V6(ip) => payload.extend(ip.octets()),
+        }
+        payload.push(route.protocol);
+    }
+    let mut capsule = Vec::with_capacity(payload.len() + 4);
+    put_varint(ROUTE_ADVERTISEMENT, &mut capsule);
+    put_varint(payload.len() as u64, &mut capsule);
+    capsule.extend(payload);
+    capsule
+}
 async fn write<W: AsyncWrite + Unpin>(io: &mut W, bytes: &[u8]) -> Result<()> {
     io.write_all(bytes).await?;
     io.flush().await?;
@@ -258,6 +274,18 @@ pub(crate) async fn write_address_request<W: AsyncWrite + Unpin>(io: &mut W) -> 
         Address::unspecified(2, false),
     ];
     write(io, &encode(ADDRESS_REQUEST, &entries)).await
+}
+pub(crate) async fn write_address_assign<W: AsyncWrite + Unpin>(
+    io: &mut W,
+    entries: &[Address],
+) -> Result<()> {
+    write(io, &encode(ADDRESS_ASSIGN, entries)).await
+}
+pub(crate) async fn write_route_advertisement<W: AsyncWrite + Unpin>(
+    io: &mut W,
+    routes: &[Route],
+) -> Result<()> {
+    write(io, &encode_routes(routes)).await
 }
 /// 客户端不向代理提供地址，逐条按原请求 ID 拒绝。
 pub(crate) async fn write_rejection<W: AsyncWrite + Unpin>(

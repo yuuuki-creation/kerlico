@@ -177,6 +177,29 @@ pub(crate) fn key(value: &str) -> Result<[u8; 32]> {
     Ok(output)
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ReservedSpec {
+    Bytes([u8; 3]),
+    Base64(String),
+}
+impl ReservedSpec {
+    pub fn parse(&self) -> Result<[u8; 3]> {
+        match self {
+            Self::Bytes(bytes) => Ok(*bytes),
+            Self::Base64(text) => {
+                let mut out = [0u8; 3];
+                if text.len() != 4 || STANDARD.decode_slice(text, &mut out).ok() != Some(3) {
+                    return Err(Error::Config(
+                        "WireGuard reserved必须为3字节数组或4字符Base64".into(),
+                    ));
+                }
+                Ok(out)
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PeerOptions {
@@ -185,6 +208,8 @@ pub(crate) struct PeerOptions {
     pub allowed_ips: Vec<String>,
     #[serde(default)]
     pub persistent_keepalive: u16,
+    #[serde(default)]
+    pub reserved: Option<ReservedSpec>,
 }
 #[derive(Clone)]
 pub(crate) struct PeerConfig {
@@ -192,6 +217,7 @@ pub(crate) struct PeerConfig {
     pub preshared_key: Option<Zeroizing<[u8; 32]>>,
     pub allowed: Vec<Network>,
     pub keepalive: Option<u16>,
+    pub reserved: [u8; 3],
 }
 impl PeerOptions {
     pub fn prepare(self) -> Result<PeerConfig> {
@@ -210,6 +236,10 @@ impl PeerOptions {
                 ));
             }
         }
+        let reserved = match self.reserved {
+            Some(spec) => spec.parse()?,
+            None => [0; 3],
+        };
         Ok(PeerConfig {
             public_key: key(&self.public_key)?,
             preshared_key: self
@@ -220,6 +250,7 @@ impl PeerOptions {
                 .map(Zeroizing::new),
             allowed,
             keepalive: (self.persistent_keepalive != 0).then_some(self.persistent_keepalive),
+            reserved,
         })
     }
 }
@@ -290,6 +321,8 @@ pub(crate) struct ClientOptions {
     pub endpoint: Endpoint,
     pub peer: PeerOptions,
     pub bind: Option<SocketAddr>,
+    #[serde(default)]
+    pub reserved: Option<ReservedSpec>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

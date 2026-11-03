@@ -463,6 +463,102 @@ impl HttpNode {
     }
 }
 
+impl HttpNode {
+    async fn serve_http(
+        &self,
+        stream: BoxStream,
+        ingress: IngressBinding,
+        context: InboundContext,
+    ) -> Result<()> {
+        let tasks = Tasks(Arc::new(Mutex::new(JoinSet::new())));
+        let tracked = tasks.0.clone();
+        let (parent, ended) = watch::channel(None);
+        let flushed = FlushReceipts::new(context.max_streams);
+        let response_flush = flushed.clone();
+        let auth = self.auth.clone();
+        let request_context = context.clone();
+        let service = service_fn(move |request| {
+            let auth = auth.clone();
+            let ingress = ingress.clone();
+            let context = request_context.clone();
+            let tasks = tracked.clone();
+            let ended = ended.clone();
+            let flushed = response_flush.clone();
+            async move {
+                let response =
+                    match Self::request(auth, request, ingress, context, tasks, ended, flushed)
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(Error::InvalidAddress | Error::Protocol(_)) => {
+                            simple(StatusCode::BAD_REQUEST)
+                        }
+                        Err(Error::Timeout) => simple(StatusCode::GATEWAY_TIMEOUT),
+                        Err(_) => simple(StatusCode::BAD_GATEWAY),
+                    };
+                Ok::<_, Infallible>(response)
+            }
+        });
+        let (activity, mut observed) = watch::channel(Instant::now());
+        let stream = ActiveIo {
+            inner: stream,
+            activity,
+            flushed: flushed.clone(),
+        };
+        let mut builder = hyper::server::conn::http1::Builder::new();
+        builder
+            .timer(TokioTimer::new())
+            .header_read_timeout(context.connect_timeout)
+            .pipeline_flush(false)
+            .max_buf_size(16_384);
+        let connection = builder
+            .serve_connection(TokioIo::new(stream), service)
+            .with_upgrades();
+        tokio::pin!(connection);
+        let timer = tokio::time::sleep(context.idle_timeout);
+        tokio::pin!(timer);
+        let mut result = loop {
+            tokio::select! {
+                biased;
+                _=context.cancel.cancelled()=>break Err(Error::Cancelled),
+                result=&mut connection=>break result.map_err(|_|config::invalid()),
+                changed=observed.changed()=>{if changed.is_ok(){timer.as_mut().reset(*observed.borrow_and_update()+context.idle_timeout);}},
+                _=&mut timer=>break Err(Error::Timeout),
+            }
+        };
+        if let Err(error) = &result {
+            let outcome = FlowOutcome::Failed(FlowFailure::from_error(error));
+            flushed.failed(outcome);
+            parent.send_replace(Some(outcome));
+        }
+        let mut pending = {
+            let mut lock = tasks.0.lock().map_err(|_| config::invalid())?;
+            std::mem::take(&mut *lock)
+        };
+        if result.is_ok() {
+            while !pending.is_empty() {
+                tokio::select! {
+                    biased;
+                    _=context.cancel.cancelled()=>{result=Err(Error::Cancelled);parent.send_replace(Some(FlowOutcome::Failed(FlowFailure::Cancelled)));break;},
+                    joined=pending.join_next()=>{if joined.is_some_and(|joined|joined.is_err()){result=Err(config::invalid());parent.send_replace(Some(FlowOutcome::Failed(FlowFailure::Failed)));break;}},
+                }
+            }
+        }
+        let deadline = Instant::now() + context.drain_timeout;
+        while !pending.is_empty() {
+            match tokio::time::timeout_at(deadline, pending.join_next()).await {
+                Ok(Some(Err(_))) => return Err(config::invalid()),
+                Ok(_) => {}
+                Err(_) => {
+                    pending.abort_all();
+                    return result.and(Err(Error::Timeout));
+                }
+            }
+        }
+        result
+    }
+}
+
 impl InboundProtocol for HttpNode {
     fn credential_manifest(&self) -> CredentialManifest {
         let mut manifest = CredentialManifest::new();
@@ -488,92 +584,7 @@ impl InboundProtocol for HttpNode {
                         .await?,
                 );
             }
-            let tasks = Tasks(Arc::new(Mutex::new(JoinSet::new())));
-            let tracked = tasks.0.clone();
-            let (parent, ended) = watch::channel(None);
-            let flushed = FlushReceipts::new(context.max_streams);
-            let response_flush = flushed.clone();
-            let auth = self.auth.clone();
-            let request_context = context.clone();
-            let service = service_fn(move |request| {
-                let auth = auth.clone();
-                let ingress = ingress.clone();
-                let context = request_context.clone();
-                let tasks = tracked.clone();
-                let ended = ended.clone();
-                let flushed = response_flush.clone();
-                async move {
-                    let response =
-                        match Self::request(auth, request, ingress, context, tasks, ended, flushed)
-                            .await
-                        {
-                            Ok(response) => response,
-                            Err(Error::InvalidAddress | Error::Protocol(_)) => {
-                                simple(StatusCode::BAD_REQUEST)
-                            }
-                            Err(Error::Timeout) => simple(StatusCode::GATEWAY_TIMEOUT),
-                            Err(_) => simple(StatusCode::BAD_GATEWAY),
-                        };
-                    Ok::<_, Infallible>(response)
-                }
-            });
-            let (activity, mut observed) = watch::channel(Instant::now());
-            let stream = ActiveIo {
-                inner: stream,
-                activity,
-                flushed: flushed.clone(),
-            };
-            let mut builder = hyper::server::conn::http1::Builder::new();
-            builder
-                .timer(TokioTimer::new())
-                .header_read_timeout(context.connect_timeout)
-                .pipeline_flush(false)
-                .max_buf_size(16_384);
-            let connection = builder
-                .serve_connection(TokioIo::new(stream), service)
-                .with_upgrades();
-            tokio::pin!(connection);
-            let timer = tokio::time::sleep(context.idle_timeout);
-            tokio::pin!(timer);
-            let mut result = loop {
-                tokio::select! {
-                    biased;
-                    _=context.cancel.cancelled()=>break Err(Error::Cancelled),
-                    result=&mut connection=>break result.map_err(|_|config::invalid()),
-                    changed=observed.changed()=>{if changed.is_ok(){timer.as_mut().reset(*observed.borrow_and_update()+context.idle_timeout);}},
-                    _=&mut timer=>break Err(Error::Timeout),
-                }
-            };
-            if let Err(error) = &result {
-                let outcome = FlowOutcome::Failed(FlowFailure::from_error(error));
-                flushed.failed(outcome);
-                parent.send_replace(Some(outcome));
-            }
-            let mut pending = {
-                let mut lock = tasks.0.lock().map_err(|_| config::invalid())?;
-                std::mem::take(&mut *lock)
-            };
-            if result.is_ok() {
-                while !pending.is_empty() {
-                    tokio::select! {
-                        biased;
-                        _=context.cancel.cancelled()=>{result=Err(Error::Cancelled);parent.send_replace(Some(FlowOutcome::Failed(FlowFailure::Cancelled)));break;},
-                        joined=pending.join_next()=>{if joined.is_some_and(|joined|joined.is_err()){result=Err(config::invalid());parent.send_replace(Some(FlowOutcome::Failed(FlowFailure::Failed)));break;}},
-                    }
-                }
-            }
-            let deadline = Instant::now() + context.drain_timeout;
-            while !pending.is_empty() {
-                match tokio::time::timeout_at(deadline, pending.join_next()).await {
-                    Ok(Some(Err(_))) => return Err(config::invalid()),
-                    Ok(_) => {}
-                    Err(_) => {
-                        pending.abort_all();
-                        return result.and(Err(Error::Timeout));
-                    }
-                }
-            }
-            result
+            self.serve_http(stream, ingress, context).await
         })
     }
 }
@@ -661,6 +672,166 @@ impl NodeFactory for HttpNodeFactory {
         Ok(Arc::new(HttpNode {
             auth: input.credentials(rows)?,
             tls: options.tls.map(config::server_tls).transpose()?,
+        }))
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MixedOptions {
+    tls: Option<ServerTls>,
+    #[serde(default = "default_true")]
+    udp: bool,
+    #[serde(default)]
+    userid: String,
+    #[serde(default, alias = "allow-ips", alias = "ip-filter", alias = "ip_filter")]
+    allow_ips: Vec<String>,
+    #[serde(default, alias = "disallow-ips")]
+    disallow_ips: Vec<String>,
+}
+
+struct PrefixedStream {
+    prefix: Option<u8>,
+    inner: BoxStream,
+}
+
+impl AsyncRead for PrefixedStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if buffer.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        if let Some(byte) = this.prefix.take() {
+            buffer.put_slice(&[byte]);
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buffer)
+    }
+}
+
+impl AsyncWrite for PrefixedStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, bytes)
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+struct MixedNode {
+    http: HttpNode,
+    socks5: Arc<dyn InboundProtocol>,
+    socks4: Option<Arc<dyn InboundProtocol>>,
+    ip_filter: kerlico_core::IpFilter,
+}
+
+impl InboundProtocol for MixedNode {
+    fn credential_manifest(&self) -> CredentialManifest {
+        let mut manifest = CredentialManifest::new();
+        for (index, (_, auth)) in self.http.auth.rows().enumerate() {
+            manifest.authentication("mixed", index, auth.fingerprint());
+        }
+        manifest
+    }
+
+    fn requires_loopback(&self) -> bool {
+        self.http.auth.is_empty() && !self.ip_filter.has_allowed()
+    }
+
+    fn handle<'a>(
+        &'a self,
+        mut stream: BoxStream,
+        ingress: IngressBinding,
+        context: InboundContext,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if !self.ip_filter.is_empty()
+                && !context
+                    .peer_addr
+                    .is_some_and(|peer| self.ip_filter.allows(peer.ip()))
+            {
+                return Err(Error::Rejected);
+            }
+            if let Some(tls) = &self.http.tls {
+                stream = Box::new(
+                    connect(&context)
+                        .run(async { Ok(tls.accept(stream).await?) })
+                        .await?,
+                );
+            }
+            let mut first = [0u8; 1];
+            let read = connect(&context)
+                .run(async { Ok(tokio::io::AsyncReadExt::read(&mut stream, &mut first).await?) })
+                .await?;
+            if read == 0 {
+                return Ok(());
+            }
+            let stream: BoxStream = Box::new(PrefixedStream {
+                prefix: Some(first[0]),
+                inner: stream,
+            });
+            match first[0] {
+                5 => self.socks5.handle(stream, ingress, context).await,
+                4 => match &self.socks4 {
+                    Some(socks4) => socks4.handle(stream, ingress, context).await,
+                    None => Err(Error::Rejected),
+                },
+                _ => self.http.serve_http(stream, ingress, context).await,
+            }
+        })
+    }
+}
+
+pub struct MixedNodeFactory;
+
+impl NodeFactory for MixedNodeFactory {
+    fn kind(&self) -> &'static str {
+        "mixed"
+    }
+
+    fn allows_local_inbound(&self) -> bool {
+        true
+    }
+
+    fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+        let options: MixedOptions = serde_json::from_value(input.options().clone())
+            .map_err(|_| Error::Config("mixed 节点字段不合法".into()))?;
+        let ip_filter = kerlico_core::IpFilter::compile(&options.allow_ips, &options.disallow_ips)?;
+        let rows = input
+            .native_credentials()
+            .iter()
+            .map(|value| {
+                let auth: Auth = serde_json::from_value(value.clone())
+                    .map_err(|_| Error::Config("mixed 用户凭据字段不合法".into()))?;
+                auth.validate()?;
+                Ok(auth)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (socks5, socks4) =
+            kerlico_socks::build_mixed_socks(input, options.userid, options.udp)?;
+        Ok(Arc::new(MixedNode {
+            http: HttpNode {
+                auth: input.credentials(rows)?,
+                tls: options.tls.map(config::server_tls).transpose()?,
+            },
+            socks5,
+            socks4,
+            ip_filter,
         }))
     }
 }

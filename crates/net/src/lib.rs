@@ -1,5 +1,9 @@
 //! 共享 TCP/TLS 连接器与基础直连/拒绝处理器。
 
+pub mod fallback;
+pub mod transparent;
+pub use transparent::{RedirectNodeFactory, TproxyNodeFactory};
+
 use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     Address, BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation,
@@ -33,6 +37,15 @@ impl TcpConnector {
     /// `ca_pem` 是内存 PEM，存在时追加到内置公共根证书；`None` 仅使用内置根。
     /// 使用显式密码提供方，不修改进程全局提供方。
     pub fn tls(server_name: &str, ca_pem: Option<&str>) -> Result<Self> {
+        Self::tls_mtls(server_name, ca_pem, None, None)
+    }
+    /// 构造校验服务端名称与证书链、并可选提供客户端证书的 TLS 连接器。
+    pub fn tls_mtls(
+        server_name: &str,
+        ca_pem: Option<&str>,
+        client_cert_pem: Option<&str>,
+        client_key_pem: Option<&str>,
+    ) -> Result<Self> {
         let provider = rustls::crypto::ring::default_provider();
         let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         if let Some(pem) = ca_pem {
@@ -47,11 +60,26 @@ impl TcpConnector {
                     .map_err(|_| Error::Config("CA 证书不合法".into()))?;
             }
         }
-        let mut config = ClientConfig::builder_with_provider(Arc::new(provider))
+        let builder = ClientConfig::builder_with_provider(Arc::new(provider))
             .with_safe_default_protocol_versions()
             .map_err(|_| Error::Config("TLS 版本不可用".into()))?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+            .with_root_certificates(roots);
+        let mut config = match (client_cert_pem, client_key_pem) {
+            (None, None) => builder.with_no_client_auth(),
+            (Some(cert_pem), Some(key_pem)) => {
+                let certs = rustls_pemfile::certs(&mut Cursor::new(cert_pem.as_bytes()))
+                    .collect::<std::io::Result<Vec<_>>>()?;
+                if certs.is_empty() {
+                    return Err(Error::Config("客户端证书 PEM 不包含证书".into()));
+                }
+                let key = rustls_pemfile::private_key(&mut Cursor::new(key_pem.as_bytes()))?
+                    .ok_or_else(|| Error::Config("客户端私钥 PEM 不合法".into()))?;
+                builder
+                    .with_client_auth_cert(certs, key)
+                    .map_err(|_| Error::Config("客户端证书或私钥不匹配".into()))?
+            }
+            _ => return Err(Error::Config("客户端证书与私钥必须成对提供".into())),
+        };
         config.resumption = rustls::client::Resumption::disabled();
         let name = ServerName::try_from(server_name.to_owned())
             .map_err(|_| Error::Config("TLS 服务端名称不合法".into()))?;
@@ -335,6 +363,211 @@ impl OutboundFactory for RejectFactory {
             false,
             TargetPolicy::Remote,
             |_| Box::pin(async { Ok(Arc::new(Reject) as Arc<dyn Outbound>) }),
+        ))
+    }
+}
+
+/// 构造内置 DNS 出站的无网络工厂；将明文 UDP/TCP DNS 查询交给内部解析器处理。
+pub struct DnsFactory;
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DnsOutboundOptions {
+    #[serde(default)]
+    servers: Vec<String>,
+    #[serde(default)]
+    hosts: std::collections::BTreeMap<String, Vec<std::net::IpAddr>>,
+}
+
+struct DnsOutbound {
+    resolver: Option<Arc<kerlico_dns::DnsResolver>>,
+    host: kerlico_core::ServiceContext,
+}
+
+struct DnsFixedSender {
+    resolver: Option<Arc<kerlico_dns::DnsResolver>>,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+}
+
+impl kerlico_core::DatagramSender for DnsFixedSender {
+    fn send<'a>(&'a mut self, packet: &'a [u8]) -> BoxFuture<'a, Result<()>> {
+        let resolver = self.resolver.clone();
+        let tx = self.tx.clone();
+        Box::pin(async move {
+            let reply = kerlico_dns::exchange_wire_query(packet, resolver.as_deref()).await?;
+            tx.send(reply)
+                .await
+                .map_err(|_| Error::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
+        })
+    }
+}
+
+struct DnsFixedReceiver {
+    target: Destination,
+    rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+impl kerlico_core::DatagramReceiver for DnsFixedReceiver {
+    fn peer_addr(&self) -> Option<Destination> {
+        Some(self.target.clone())
+    }
+    fn recv(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>>> {
+        Box::pin(async move { Ok(self.rx.recv().await) })
+    }
+}
+
+struct DnsAssocSender {
+    resolver: Option<Arc<kerlico_dns::DnsResolver>>,
+    tx: tokio::sync::mpsc::Sender<(Destination, Vec<u8>)>,
+}
+
+impl kerlico_core::DatagramAssociationSender for DnsAssocSender {
+    fn send_to<'a>(
+        &'a mut self,
+        packet: &'a [u8],
+        target: &'a Destination,
+    ) -> BoxFuture<'a, Result<()>> {
+        let resolver = self.resolver.clone();
+        let tx = self.tx.clone();
+        let target = target.clone();
+        Box::pin(async move {
+            let reply = kerlico_dns::exchange_wire_query(packet, resolver.as_deref()).await?;
+            tx.send((target, reply))
+                .await
+                .map_err(|_| Error::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
+        })
+    }
+}
+
+struct DnsAssocReceiver {
+    rx: tokio::sync::mpsc::Receiver<(Destination, Vec<u8>)>,
+}
+
+impl kerlico_core::DatagramAssociationReceiver for DnsAssocReceiver {
+    fn recv_from(&mut self) -> BoxFuture<'_, Result<Option<kerlico_core::AddressedDatagram>>> {
+        Box::pin(async move { Ok(self.rx.recv().await) })
+    }
+}
+
+impl Outbound for DnsOutbound {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            tcp: true,
+            tcp_eof: true,
+            udp: true,
+        }
+    }
+    fn supports_udp_association(&self) -> bool {
+        true
+    }
+    fn connect_tcp<'a>(
+        &'a self,
+        _target: &'a Destination,
+        _context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<OpenedTcp>> {
+        let resolver = self.resolver.clone();
+        let host = self.host.clone();
+        Box::pin(async move {
+            let (client, mut server) = tokio::io::duplex(16 * 1024);
+            let _task = host.spawn_tracked(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut len_buf = [0u8; 2];
+                while server.read_exact(&mut len_buf).await.is_ok() {
+                    let frame_len = usize::from(u16::from_be_bytes(len_buf));
+                    if frame_len == 0 || frame_len > 4096 {
+                        break;
+                    }
+                    let mut query = vec![0u8; frame_len];
+                    if server.read_exact(&mut query).await.is_err() {
+                        break;
+                    }
+                    let Ok(reply) =
+                        kerlico_dns::exchange_wire_query(&query, resolver.as_deref()).await
+                    else {
+                        break;
+                    };
+                    if reply.len() > u16::MAX as usize {
+                        break;
+                    }
+                    let out_len = (reply.len() as u16).to_be_bytes();
+                    if server.write_all(&out_len).await.is_err()
+                        || server.write_all(&reply).await.is_err()
+                        || server.flush().await.is_err()
+                    {
+                        break;
+                    }
+                }
+            })?;
+            Ok(OpenedTcp {
+                stream: Box::new(client),
+                info: TcpConnectInfo::unknown(),
+            })
+        })
+    }
+    fn connect_udp<'a>(
+        &'a self,
+        target: &'a Destination,
+        _context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<DatagramChannel>> {
+        let resolver = self.resolver.clone();
+        let target = target.clone();
+        Box::pin(async move {
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            Ok(DatagramChannel {
+                sender: Box::new(DnsFixedSender { resolver, tx }),
+                receiver: Box::new(DnsFixedReceiver { target, rx }),
+            })
+        })
+    }
+    fn associate_udp<'a>(
+        &'a self,
+        _context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<DatagramAssociation>> {
+        let resolver = self.resolver.clone();
+        Box::pin(async move {
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            Ok(DatagramAssociation {
+                sender: Box::new(DnsAssocSender { resolver, tx }),
+                receiver: Box::new(DnsAssocReceiver { rx }),
+            })
+        })
+    }
+}
+
+impl OutboundFactory for DnsFactory {
+    fn kind(&self) -> &'static str {
+        "dns"
+    }
+    fn compile(&self, options: &Value) -> Result<OutboundPlan> {
+        let options: DnsOutboundOptions = serde_json::from_value(options.clone())
+            .map_err(|_| Error::Config("DNS 出站字段不合法".into()))?;
+        let spec = if options.servers.is_empty() && options.hosts.is_empty() {
+            None
+        } else {
+            let spec = kerlico_dns::DnsSpec {
+                servers: options.servers,
+                hosts: options.hosts,
+            };
+            spec.validate()?;
+            Some(spec)
+        };
+        Ok(OutboundPlan::new(
+            Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp: true,
+            },
+            true,
+            TargetPolicy::Remote,
+            move |host| {
+                Box::pin(async move {
+                    let resolver = match spec {
+                        Some(spec) => Some(Arc::new(kerlico_dns::DnsResolver::new(&spec)?)),
+                        None => None,
+                    };
+                    Ok(Arc::new(DnsOutbound { resolver, host }) as Arc<dyn Outbound>)
+                })
+            },
         ))
     }
 }

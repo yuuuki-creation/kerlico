@@ -121,6 +121,7 @@ type MemberPool = AsyncMutex<Vec<Arc<Session>>>;
 pub(crate) struct Client {
     server: Destination,
     user: Arc<User>,
+    extra_headers: http::HeaderMap,
     transport: Transport,
     tls: Arc<rustls::ClientConfig>,
     server_name: String,
@@ -162,6 +163,7 @@ impl Client {
         let config = tls::client(&options.tls, options.transport)?;
         let server = options.server.destination()?;
         let user = Arc::new(User::new(options.username, options.password)?);
+        let extra_headers = http::parse_extra_headers(&options.extra_headers)?;
         let capabilities = Capabilities {
             tcp: true,
             tcp_eof: false,
@@ -177,6 +179,7 @@ impl Client {
                     Ok(Arc::new(Self {
                         server,
                         user,
+                        extra_headers,
                         transport: options.transport,
                         tls: config,
                         server_name: options.tls.server_name,
@@ -354,7 +357,7 @@ impl Client {
             return Err(Error::Cancelled);
         }
         let owner = crate::runtime::BridgeOwner::Service(self.bridges.clone());
-        let request = http::request(target, &self.user)?;
+        let request = http::request(target, &self.user, &self.extra_headers)?;
         let raw = if self.transport == Transport::H1 {
             let permit = self
                 .h1

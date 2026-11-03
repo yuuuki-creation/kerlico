@@ -80,10 +80,53 @@ impl Limits {
         Ok(Arc::new(config))
     }
 }
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum PortHopSpec {
+    Text(String),
+    List(Vec<String>),
+}
+impl PortHopSpec {
+    pub fn parse(&self) -> Result<Vec<std::ops::RangeInclusive<u16>>> {
+        let mut ranges = Vec::new();
+        let items: Vec<&str> = match self {
+            Self::Text(text) => text.split(',').collect(),
+            Self::List(list) => list.iter().flat_map(|item| item.split(',')).collect(),
+        };
+        for raw in items {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return Err(invalid());
+            }
+            if let Some((start, end)) = raw.split_once(['-', ':']) {
+                let start = start.trim().parse::<u16>().map_err(|_| invalid())?;
+                let end = end.trim().parse::<u16>().map_err(|_| invalid())?;
+                if start == 0 || start > end {
+                    return Err(invalid());
+                }
+                ranges.push(start..=end);
+            } else {
+                let port = raw.parse::<u16>().map_err(|_| invalid())?;
+                if port == 0 {
+                    return Err(invalid());
+                }
+                ranges.push(port..=port);
+            }
+        }
+        if ranges.is_empty() || ranges.len() > 64 {
+            return Err(invalid());
+        }
+        Ok(ranges)
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientOptions {
     pub server: kerlico_config::TargetSpec,
+    #[serde(default, alias = "server_ports", alias = "server-ports")]
+    pub ports: Option<PortHopSpec>,
+    #[serde(default, alias = "hop-interval")]
+    pub hop_interval: Option<u64>,
     #[serde(default)]
     pub auth_str: Option<String>,
     #[serde(default)]

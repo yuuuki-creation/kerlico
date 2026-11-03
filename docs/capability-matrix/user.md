@@ -62,7 +62,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `credentials` | mixed 入站 users 条目的字段 |  | 有 |  | 未实现 | 未测 | 取值：`password`、`username`<br>约束：认证通过的用户名可用于 auth_user 规则和 V2Ray API stats.users |
+| `credentials` | mixed 入站 users 条目的字段 |  | 有 |  | 已实现 | 通过 | 取值：`password`、`username`<br>约束：认证通过的用户名可用于 auth_user 规则和 V2Ray API stats.users |
 
 ## naive
 

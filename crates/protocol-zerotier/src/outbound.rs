@@ -1,5 +1,5 @@
 use crate::{
-    config::{ClientOptions, Prepared, build_node_options},
+    config::{ClientOptions, Prepared, TcpFallbackMode, build_node_options},
     interface::{Interface, Plan},
 };
 use kerlico_config::{OutboundFactory, OutboundPlan};
@@ -166,6 +166,8 @@ async fn drive(
     host: &ServiceContext,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let tcp_fallback_mode = prepared.tcp_fallback_mode;
+    let tcp_fallback_relay = prepared.tcp_fallback_relay;
     let task = host.spawn_blocking_tracked(move || build_node_options(prepared))?;
     let (node_options, bind) = tokio::select! { biased;
         _ = cancel.cancelled() => return Err(Error::Cancelled),
@@ -179,6 +181,8 @@ async fn drive(
         clock: Clock::new(),
         node,
         sockets: Sockets::bind(bind, stable_port(node_address)).await?,
+        tcp_fallback_mode,
+        tcp_fallback_relay,
         interface: None,
         link,
         cancel,
@@ -294,6 +298,8 @@ struct Driver {
     clock: Clock,
     node: Node,
     sockets: Sockets,
+    tcp_fallback_mode: TcpFallbackMode,
+    tcp_fallback_relay: Option<SocketAddr>,
     interface: Option<Interface>,
     link: watch::Sender<Link>,
     cancel: CancellationToken,
@@ -359,8 +365,13 @@ impl Driver {
         while let Some(event) = self.node.poll_event() {
             match event {
                 Event::Datagram { to, data } => {
-                    if let Some(socket) = self.sockets.for_address(to)
-                        && let Ok(sent) = socket.send_to(&data, to).await
+                    let target = if self.tcp_fallback_mode == TcpFallbackMode::Always {
+                        self.tcp_fallback_relay.unwrap_or(to)
+                    } else {
+                        to
+                    };
+                    if let Some(socket) = self.sockets.for_address(target)
+                        && let Ok(sent) = socket.send_to(&data, target).await
                     {
                         self.host.record_carrier(sent as u64, 0);
                     }

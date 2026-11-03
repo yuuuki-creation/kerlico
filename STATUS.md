@@ -18,8 +18,8 @@
 | `v1.3.0` | MASQUE、OpenVPN、OpenConnect、Tailscale、ZeroTier、EasyTier；VLESS XUDP 迁移 | 已发布 |
 | `v1.3.1` | 复查修复：UDP 包让节点停止、Tailscale 直连握手、ZeroTier 入网、`require_remote_eof` | 已发布 |
 | `v1.3.2` | 实机测试修复：Shadowsocks、SS2022、Sudoku 丢数据，Mieru 断流，WireGuard 丢包死锁，TrustTunnel H3 | 已发布 |
-| `M0`（`v1.3.3`） | 能力总表 1,105 项已实现/部分实现实测回填；QUIC 空载关闭、VLESS 出站多目标 UDP、WireGuard 瞬时容错、EasyTier UDP、smoltcp 丢包恢复修复 | 已完成 |
-| `M1`（`v1.4.0`） | 入站与出站角色对齐：`mixed`、`redirect`、`tproxy` 入站，入站 `fallback` 分流，MASQUE 与 OpenVPN 服务端入站，`vless-reverse`，`dns`/`loopback`/`rematch` 内部出站，SS2022 Relay 与 SS SIP003 插件 | 规划中 |
+| `M0`（`v1.3.3`） | 能力总表 1,180 项已实现/部分实现实测回填；QUIC 空载关闭、VLESS 出站多目标 UDP、WireGuard 瞬时容错、EasyTier UDP、smoltcp 丢包恢复修复 | 已完成 |
+| `M1`（`v1.4.0`） | 入站与出站角色及协议细项对齐：`mixed`、`redirect`、`tproxy` 入站，Trojan/VLESS 入站 `fallback` 分流（含 `xver` PROXY protocol），MASQUE 服务端入站，`dns` 内部出站，顶层 `mixed-port`/`redir-port`/`tproxy-port`/`lan-allowed-ips`/`lan-disallowed-ips`，Hysteria v1/v2 端口跳跃与速率/伪装，OpenVPN `servers`/`mss-fix`/`tls-crypt-v2`，OpenConnect mTLS，WireGuard `reserved`，ZeroTier TCP 回退及 HTTP/MASQUE/Naive/Mieru/Tailscale/EasyTier 出站扩展 | 已完成 |
 | `M2`（`v1.5.0`） | 传输、安全、复用与拨号对齐：`dialer-proxy`/`detour` 链式拨号，`sing-mux`（`h2mux`/`smux`/`yamux`），`UoT` v1/v2，mKCP 与 V2Ray H2/QUIC 传输，Xray `finalmask`，ECH 双端，TLS 分片/伪装，内置 ACME 自动证书 | 规划中 |
 | `M3`（`v1.6.0`） | 流量感知、DNS、路由规则集与 TUN 自动化对齐：TLS/HTTP/QUIC/BT 协议嗅探，Fake-IP 双栈池与持久化还原，DoH/DoQ、乐观缓存、ECS 与 DNS 规则动作，`rule-set`（`srs`/`mrs`/`dat`）与逻辑/进程规则，TUN `auto-route`/`auto-redirect` | 规划中 |
 | `M4`（`v1.7.0`） | 策略组、订阅提供者、控制面 API 与 CLI 工具链对齐：`select`/`url-test`/`fallback`/`load-balance`/`observatory` 策略组，`proxy-providers` 订阅解析与字段覆写，完整 Clash RESTful/WS API 与外部面板，规则转换/密钥生成 CLI，内置 `ntp` | 规划中 |
@@ -28,7 +28,7 @@
 
 ## 三核心主要功能对齐拓扑
 
-[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 697 项、部分实现 408 项、未实现 2,948 项、不适用 307 项。后续按 `M0 → M1/M2 → M3 → M4` 推进，每完成一项同步更新 `docs/capability-matrix/annotations/*.jsonl` 与 `docs/capability-matrix/results/*.jsonl`，并运行 `python3 tools/capability_matrix.py build` 与 `check --strict`。
+[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 833 项、部分实现 459 项、未实现 2,761 项、不适用 307 项（实测通过 1,292 项，未测 0 项）。后续按 `M0 → M1/M2 → M3 → M4` 推进，每完成一项同步更新 `docs/capability-matrix/annotations/*.jsonl` 与 `docs/capability-matrix/results/*.jsonl`，并运行 `python3 tools/capability_matrix.py build` 与 `check --strict`。
 
 ```mermaid
 flowchart TD
@@ -94,7 +94,7 @@ flowchart TD
 
 | 能力 | 现状 |
 | --- | --- |
-| 协议模块 | 30 个进入默认构建。双端 20 个；仅入站：TUN；仅出站：SSH、Gost Relay、Tor、MASQUE、OpenVPN、OpenConnect、Tailscale、EasyTier、ZeroTier |
+| 协议模块 | 30 个进入默认构建。双端 21 个（含 MASQUE）；仅入站：TUN、Mixed、Redirect、TProxy；仅出站：SSH、Gost Relay、Tor、OpenVPN、OpenConnect、Tailscale、EasyTier、ZeroTier、DNS |
 | 节点与出站 | 独立节点；单一 `EgressRuntime`/`Dispatcher`；`Local`/`Remote` 分支；`FamilyMode` |
 | 路由 | `routes` 按域名、CIDR、端口、网络、节点和用户选择出站；多目标 UDP 关联走节点绑定的出站 |
 | DNS | `dns` 配置 UDP、TCP、TLS 上游和 hosts；暂无 Fake-IP |

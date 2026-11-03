@@ -188,6 +188,7 @@
 {"key": "user/identity/level-email", "test": "pass", "evidence": "crates/config/src/users.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
 {"key": "user/inbound/in-user-match", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
 {"key": "user/inbound/users-override", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
+{"key": "user/mixed/credentials", "test": "pass", "evidence": "crates/protocol-http/src/inbound.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "user/naive/credentials", "test": "pass", "evidence": "crates/protocol-naive/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "user/policy/conn-idle", "test": "pass", "evidence": "crates/core-api/src/relay.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
 {"key": "user/policy/downlink-only", "test": "pass", "evidence": "crates/core-api/src/relay.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}

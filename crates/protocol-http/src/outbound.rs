@@ -16,11 +16,14 @@ struct Options {
     server: TargetSpec,
     auth: Option<Auth>,
     tls: Option<ClientTls>,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
 }
 struct HttpOutbound {
     server: Destination,
     connector: TcpConnector,
     auth: Option<Auth>,
+    headers: Vec<(String, String)>,
 }
 impl Outbound for HttpOutbound {
     fn capabilities(&self) -> Capabilities {
@@ -45,6 +48,12 @@ impl Outbound for HttpOutbound {
                         if let Some(auth) = &self.auth {
                             request.push_str("Proxy-Authorization: ");
                             request.push_str(&auth.header());
+                            request.push_str("\r\n");
+                        }
+                        for (name, value) in &self.headers {
+                            request.push_str(name);
+                            request.push_str(": ");
+                            request.push_str(value);
                             request.push_str("\r\n");
                         }
                         request.push_str("\r\n");
@@ -122,6 +131,29 @@ impl OutboundFactory for HttpFactory {
         if let Some(auth) = &options.auth {
             auth.validate()?;
         }
+        let mut headers = Vec::with_capacity(options.headers.len());
+        for (name, value) in options.headers {
+            let parsed_name = http::header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| Error::Config("HTTP 出站自定义请求头名不合法".into()))?;
+            if name.starts_with(':')
+                || matches!(
+                    parsed_name.as_str(),
+                    "host"
+                        | "proxy-authorization"
+                        | "connection"
+                        | "proxy-connection"
+                        | "content-length"
+                        | "transfer-encoding"
+                        | "upgrade"
+                )
+            {
+                return Err(Error::Config("HTTP 出站不允许覆盖保留请求头".into()));
+            }
+            if http::HeaderValue::from_str(&value).is_err() || value.contains(['\r', '\n', '\0']) {
+                return Err(Error::Config("HTTP 出站自定义请求头值不合法".into()));
+            }
+            headers.push((name, value));
+        }
         let connector = if let Some(tls) = options.tls {
             TcpConnector::tls(&tls.server_name, tls.ca_pem.as_deref())?
         } else {
@@ -142,6 +174,7 @@ impl OutboundFactory for HttpFactory {
                         server,
                         connector,
                         auth: options.auth,
+                        headers,
                     }) as Arc<dyn Outbound>)
                 })
             },

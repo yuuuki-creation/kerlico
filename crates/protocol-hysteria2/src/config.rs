@@ -69,10 +69,244 @@ impl Limits {
         Ok(Arc::new(value))
     }
 }
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum PortHopSpec {
+    Text(String),
+    List(Vec<String>),
+}
+impl PortHopSpec {
+    pub fn parse(&self) -> Result<Vec<std::ops::RangeInclusive<u16>>> {
+        let mut ranges = Vec::new();
+        let items: Vec<&str> = match self {
+            Self::Text(text) => text.split(',').collect(),
+            Self::List(list) => list.iter().flat_map(|item| item.split(',')).collect(),
+        };
+        for raw in items {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return Err(invalid());
+            }
+            if let Some((start, end)) = raw.split_once(['-', ':']) {
+                let start = start.trim().parse::<u16>().map_err(|_| invalid())?;
+                let end = end.trim().parse::<u16>().map_err(|_| invalid())?;
+                if start == 0 || start > end {
+                    return Err(invalid());
+                }
+                ranges.push(start..=end);
+            } else {
+                let port = raw.parse::<u16>().map_err(|_| invalid())?;
+                if port == 0 {
+                    return Err(invalid());
+                }
+                ranges.push(port..=port);
+            }
+        }
+        if ranges.is_empty() || ranges.len() > 64 {
+            return Err(invalid());
+        }
+        Ok(ranges)
+    }
+}
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum BandwidthSpec {
+    Mbps(u64),
+    Text(String),
+}
+impl BandwidthSpec {
+    pub fn to_bps(&self) -> Result<u64> {
+        match self {
+            Self::Mbps(mbps) => mbps.checked_mul(125_000).ok_or_else(invalid),
+            Self::Text(text) => {
+                let text = text.trim().to_ascii_lowercase();
+                if text.is_empty() {
+                    return Err(invalid());
+                }
+                let split = text
+                    .find(|ch: char| !ch.is_ascii_digit())
+                    .unwrap_or(text.len());
+                let number: u64 = text[..split].trim().parse().map_err(|_| invalid())?;
+                let unit = text[split..].trim();
+                let multiplier = match unit {
+                    "" | "mbps" | "m" => 125_000u64,
+                    "bps" | "b" => 1u64,
+                    "kbps" | "k" => 125u64,
+                    "gbps" | "g" => 125_000_000u64,
+                    _ => return Err(invalid()),
+                };
+                number.checked_mul(multiplier).ok_or_else(invalid)
+            }
+        }
+    }
+}
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum HopIntervalSpec {
+    Secs(u64),
+    Text(String),
+}
+impl HopIntervalSpec {
+    pub fn to_duration(&self) -> Result<Duration> {
+        let secs = match self {
+            Self::Secs(secs) => *secs,
+            Self::Text(text) => {
+                let text = text.trim();
+                let digits = text.strip_suffix('s').unwrap_or(text).trim();
+                digits.parse::<u64>().map_err(|_| invalid())?
+            }
+        };
+        if !(5..=86_400).contains(&secs) {
+            return Err(invalid());
+        }
+        Ok(Duration::from_secs(secs))
+    }
+}
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum MasqueradeSpec {
+    Url(String),
+    Object(MasqueradeObject),
+}
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct MasqueradeObject {
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub content: Option<String>,
+    pub directory: Option<String>,
+    pub url: Option<String>,
+    #[serde(alias = "rewrite-host")]
+    pub rewrite_host: bool,
+    pub insecure: bool,
+    #[serde(alias = "status-code")]
+    pub status_code: Option<u16>,
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+#[derive(Clone)]
+pub(crate) enum MasqueradePlan {
+    Default404,
+    String {
+        status_code: http::StatusCode,
+        headers: Vec<(http::HeaderName, http::HeaderValue)>,
+        content: bytes::Bytes,
+    },
+    File {
+        directory: std::path::PathBuf,
+        headers: Vec<(http::HeaderName, http::HeaderValue)>,
+    },
+    Proxy {
+        url: String,
+        rewrite_host: bool,
+        headers: Vec<(http::HeaderName, http::HeaderValue)>,
+    },
+}
+fn compile_headers(
+    raw: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<(http::HeaderName, http::HeaderValue)>> {
+    let mut out = Vec::with_capacity(raw.len());
+    for (k, v) in raw {
+        let name = http::HeaderName::from_bytes(k.trim().as_bytes()).map_err(|_| invalid())?;
+        let val = http::HeaderValue::from_str(v).map_err(|_| invalid())?;
+        out.push((name, val));
+    }
+    Ok(out)
+}
+impl NodeOptions {
+    pub(crate) fn masquerade_plan(&self) -> Result<MasqueradePlan> {
+        let obj = match &self.masquerade {
+            Some(MasqueradeSpec::Url(url)) => {
+                if let Some(dir) = url.strip_prefix("file://") {
+                    MasqueradeObject {
+                        kind: Some("file".into()),
+                        directory: Some(dir.into()),
+                        ..Default::default()
+                    }
+                } else if url.starts_with("http://") || url.starts_with("https://") {
+                    MasqueradeObject {
+                        kind: Some("proxy".into()),
+                        url: Some(url.clone()),
+                        ..Default::default()
+                    }
+                } else {
+                    return Err(invalid());
+                }
+            }
+            Some(MasqueradeSpec::Object(obj)) => obj.clone(),
+            None => MasqueradeObject {
+                kind: self.masquerade_type.clone(),
+                content: self.masquerade_content.clone(),
+                directory: self.masquerade_directory.clone(),
+                url: self.masquerade_url.clone(),
+                rewrite_host: self.masquerade_rewrite_host.unwrap_or(false),
+                status_code: self.masquerade_status_code,
+                headers: self.masquerade_headers.clone().unwrap_or_default(),
+                insecure: false,
+            },
+        };
+        let headers = compile_headers(&obj.headers)?;
+        let kind = obj.kind.as_deref().unwrap_or({
+            if obj.content.is_some() || obj.status_code.is_some() {
+                "string"
+            } else if obj.directory.is_some() {
+                "file"
+            } else if obj.url.is_some() {
+                "proxy"
+            } else {
+                ""
+            }
+        });
+        match kind {
+            "" => Ok(MasqueradePlan::Default404),
+            "string" => {
+                let code = http::StatusCode::from_u16(obj.status_code.unwrap_or(200))
+                    .map_err(|_| invalid())?;
+                let content = bytes::Bytes::from(obj.content.unwrap_or_default());
+                Ok(MasqueradePlan::String {
+                    status_code: code,
+                    headers,
+                    content,
+                })
+            }
+            "file" => {
+                let dir = obj.directory.ok_or_else(invalid)?;
+                if dir.trim().is_empty() {
+                    return Err(invalid());
+                }
+                Ok(MasqueradePlan::File {
+                    directory: std::path::PathBuf::from(dir),
+                    headers,
+                })
+            }
+            "proxy" => {
+                let url = obj.url.ok_or_else(invalid)?;
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return Err(invalid());
+                }
+                Ok(MasqueradePlan::Proxy {
+                    url,
+                    rewrite_host: obj.rewrite_host,
+                    headers,
+                })
+            }
+            _ => Err(invalid()),
+        }
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientOptions {
     pub server: Server,
+    #[serde(default, alias = "server_ports", alias = "server-ports")]
+    pub ports: Option<PortHopSpec>,
+    #[serde(default, alias = "hop-interval")]
+    pub hop_interval: Option<HopIntervalSpec>,
+    #[serde(default, alias = "hop-interval-max")]
+    pub hop_interval_max: Option<HopIntervalSpec>,
+    #[serde(default, alias = "up_mbps", alias = "up-mbps")]
+    pub up: Option<BandwidthSpec>,
+    #[serde(default, alias = "down_mbps", alias = "down-mbps")]
+    pub down: Option<BandwidthSpec>,
     pub auth: String,
     pub tls: ClientTls,
     #[serde(default)]
@@ -101,6 +335,26 @@ pub(crate) struct NodeOptions {
     pub salamander_password: Option<String>,
     #[serde(default = "yes")]
     pub udp: bool,
+    #[serde(default, alias = "up_mbps", alias = "up-mbps")]
+    pub up: Option<BandwidthSpec>,
+    #[serde(default, alias = "down_mbps", alias = "down-mbps")]
+    pub down: Option<BandwidthSpec>,
+    #[serde(default)]
+    pub masquerade: Option<MasqueradeSpec>,
+    #[serde(default, alias = "masquerade-type")]
+    pub masquerade_type: Option<String>,
+    #[serde(default, alias = "masquerade-content")]
+    pub masquerade_content: Option<String>,
+    #[serde(default, alias = "masquerade-directory")]
+    pub masquerade_directory: Option<String>,
+    #[serde(default, alias = "masquerade-url")]
+    pub masquerade_url: Option<String>,
+    #[serde(default, alias = "masquerade-rewrite-host")]
+    pub masquerade_rewrite_host: Option<bool>,
+    #[serde(default, alias = "masquerade-status-code")]
+    pub masquerade_status_code: Option<u16>,
+    #[serde(default, alias = "masquerade-headers")]
+    pub masquerade_headers: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default)]
     pub limits: Limits,
 }

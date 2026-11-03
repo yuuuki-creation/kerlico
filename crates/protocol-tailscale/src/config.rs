@@ -25,6 +25,8 @@ pub struct Options {
     ca_pem: Option<String>,
     #[serde(default = "default_start_timeout")]
     start_timeout_ms: u64,
+    #[serde(default, alias = "advertise-tags")]
+    advertise_tags: Vec<String>,
 }
 fn default_hostname() -> String {
     "kerlico".into()
@@ -60,6 +62,7 @@ pub struct Prepared {
     pub direct: bool,
     pub ca_pem: Option<String>,
     pub start_timeout: Duration,
+    pub advertise_tags: Vec<String>,
 }
 
 impl Options {
@@ -82,6 +85,20 @@ impl Options {
         if !(1000..=600_000).contains(&self.start_timeout_ms) {
             return Err(Error::Config("Tailscale start_timeout_ms不合法".into()));
         }
+        if self.advertise_tags.len() > 64
+            || self.advertise_tags.iter().any(|tag| {
+                let Some(rest) = tag.strip_prefix("tag:") else {
+                    return true;
+                };
+                rest.is_empty()
+                    || rest.len() > 63
+                    || !rest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+        {
+            return Err(Error::Config("Tailscale advertise_tags不合法".into()));
+        }
         let control = parse_control(&self.control_url, self.ca_pem.as_deref())?;
         Ok(Prepared {
             control,
@@ -96,6 +113,7 @@ impl Options {
             direct: self.direct,
             ca_pem: self.ca_pem,
             start_timeout: Duration::from_millis(self.start_timeout_ms),
+            advertise_tags: self.advertise_tags,
         })
     }
 }

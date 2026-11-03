@@ -22,8 +22,8 @@
 | 3. 本地接入协议 | 本地固定转发、SOCKS 4/4a/5 双端与 HTTP 代理双端 | `K-L` 系列 | 已完成并验证 |
 | 4. 主力代理协议 | VLESS、VMess、Trojan、Shadowsocks、SS2022、SSR、AnyTLS、ShadowTLS、Snell、TUIC、Hysteria v1/v2、ShadowQUIC、Mieru、Naive、TrustTunnel、Sudoku、SSH、Gost Relay | `K-S` / `K-T` / `K-V` / `K-R` / `K-A` 系列 | 19 个协议模块已合入 |
 | 5. 匿名网络与 IP 隧道端点 | Tor（TCP 出站）、WireGuard（原生双端）、OpenVPN、OpenConnect、EasyTier、Tailscale、ZeroTier、MASQUE | `K-E` / `K-B` 系列 | 已合入 |
-| 6. M0 基线回填与底盘修障 | 回填 1,105 项已实现/部分实现实测记录；修复 QUIC 空载关闭、VLESS 出站多目标 UDP、WireGuard 瞬时容错、EasyTier UDP、smoltcp 丢包恢复 | `results/*.jsonl`；`v1.3.3` | 待开始 |
-| 7. M1 入站/出站角色与协议细项对齐 | `mixed`、`redirect`、`tproxy` 入站，入站 `fallback` 分流，MASQUE/OpenVPN 服务端入站，`vless-reverse`，`dns`/`loopback`/`rematch` 内部出站，SS2022 Relay 与 SS SIP003 插件 | `inbound`、`outbound`（`v1.4.0`） | 规划中 |
+| 6. M0 基线回填与底盘修障 | 回填 1,180 项已实现/部分实现实测记录；修复 QUIC 空载关闭、VLESS 出站多目标 UDP、WireGuard 瞬时容错、EasyTier UDP、smoltcp 丢包恢复 | `results/*.jsonl`；`v1.3.3` | 已完成 |
+| 7. M1 入站/出站角色与协议细项对齐 | `mixed`、`redirect`、`tproxy` 入站，Trojan/VLESS 入站 `fallback` 分流，MASQUE 服务端入站，`dns` 内部出站，Hysteria v1/v2 端口跳跃与速率/伪装，OpenVPN `servers`/`mss-fix`/`tls-crypt-v2`，OpenConnect mTLS，WireGuard `reserved`，ZeroTier TCP 回退等 112 项 | `inbound`、`outbound`（`v1.4.0`） | 已完成 |
 | 8. M2 传输、安全、多路复用与拨号对齐 | `dialer-proxy`/`detour` 链式拨号，`sing-mux`（`h2mux`/`smux`/`yamux`），`UoT` v1/v2，mKCP 与 V2Ray H2/QUIC 传输，Xray `finalmask`，ECH 双端，TLS 分片/伪装，内置 ACME 自动证书 | `transport`、`security`、`cert`、`mux`、`udp`、`dialer`（`v1.5.0`） | 规划中 |
 | 9. M3 流量感知、DNS、路由规则集与 TUN 自动化 | TLS/HTTP/QUIC/BT 嗅探，Fake-IP 双栈池与持久化还原，DoH/DoQ、乐观缓存、ECS 与 DNS 规则动作，`rule-set`（`srs`/`mrs`/`dat`）与逻辑/进程规则，TUN `auto-route`/`auto-redirect` | `sniff`、`dns`、`route`、`ruleset`、`tun`、`cache`（`v1.6.0`） | 规划中 |
 | 10. M4 策略组、订阅提供者、控制面 API 与 CLI 工具链 | `select`/`url-test`/`fallback`/`load-balance`/`observatory` 策略组，`proxy-providers` 订阅解析与覆写，完整 Clash RESTful/WS API 与外部面板，规则转换/密钥生成 CLI，内置 `ntp` | `group`、`provider`、`api`、`cli`、`config`、`ntp`（`v1.7.0`） | 规划中 |

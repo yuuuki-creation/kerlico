@@ -3,8 +3,9 @@
 use kerlico_config::{ForwardKind, ForwardSpec, Limits, PreparedConfig, PreparedNode};
 use kerlico_core::{
     BoxStream, CancellationToken, ConnectContext, DatagramReceiver, DatagramSender, Destination,
-    Diagnostic, Error, FlowFailure, FlowOutcome, InboundContext, IngressBinding, Language, NodeId,
-    NodeTasks, PeerSession, Result, RuntimeOptions, ServiceRetirement, ShutdownReport,
+    Diagnostic, Error, FlowFailure, FlowOutcome, InboundContext, IngressBinding, IpFilter,
+    Language, NodeId, NodeTasks, PeerSession, Result, RuntimeOptions, ServiceRetirement,
+    ShutdownReport,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, hash_map::Entry},
@@ -172,6 +173,7 @@ struct NodeCleanup {
     forced: Arc<AtomicBool>,
     global: Arc<Stats>,
     local: Option<Arc<Stats>>,
+    lan_filter: IpFilter,
 }
 impl NodeCleanup {
     fn new(
@@ -187,7 +189,12 @@ impl NodeCleanup {
             forced: Arc::new(AtomicBool::new(false)),
             global,
             local,
+            lan_filter: IpFilter::default(),
         }
+    }
+    fn with_lan_filter(mut self, lan_filter: IpFilter) -> Self {
+        self.lan_filter = lan_filter;
+        self
     }
     fn start(&self, proposed: Instant) -> Instant {
         self.ingress.stop_admission();
@@ -211,7 +218,7 @@ impl NodeCleanup {
         report
     }
 }
-fn node_socket(address: SocketAddr, udp: bool) -> Result<socket2::Socket> {
+fn node_socket(address: SocketAddr, udp: bool, transparent: bool) -> Result<socket2::Socket> {
     let socket = socket2::Socket::new(
         if address.is_ipv6() {
             socket2::Domain::IPV6
@@ -232,10 +239,34 @@ fn node_socket(address: SocketAddr, udp: bool) -> Result<socket2::Socket> {
     if address.is_ipv6() {
         socket.set_only_v6(true)?;
     }
+    #[cfg(target_os = "linux")]
+    if transparent && address.is_ipv4() {
+        let _ = socket.set_ip_transparent_v4(true);
+    }
     socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&address.into())?;
     Ok(socket)
+}
+
+fn original_destination(stream: &TcpStream) -> Option<SocketAddr> {
+    #[cfg(target_os = "linux")]
+    {
+        let sock = socket2::SockRef::from(stream);
+        let original = if stream.local_addr().ok().is_some_and(|addr| addr.is_ipv6()) {
+            sock.original_dst_v6()
+                .ok()
+                .and_then(|addr| addr.as_socket())
+        } else {
+            sock.original_dst_v4()
+                .ok()
+                .and_then(|addr| addr.as_socket())
+        };
+        if original.is_some() {
+            return original;
+        }
+    }
+    stream.local_addr().ok()
 }
 
 /// 已持有监听器的运行实例；通过统一出口调度固定入口和独立协议节点。
@@ -248,6 +279,7 @@ pub struct Engine {
     nodes: Vec<BoundNode>,
     node_stats: BTreeMap<String, Arc<Stats>>,
     limits: Limits,
+    lan_filter: IpFilter,
     stats: Arc<Stats>,
     failed: FailedNodes,
 }
@@ -276,6 +308,7 @@ impl Engine {
             return Err(Error::Config("没有配置入站".into()));
         }
         let limits = config.limits;
+        let lan_filter = config.lan_filter;
         let language = options.language;
         let egress = kerlico_egress::EgressRuntime::start_with_options(
             config.egress,
@@ -306,7 +339,11 @@ impl Engine {
             }
             let mut inbounds = Vec::new();
             for spec in config.inbounds {
-                let target = spec.target.destination()?;
+                let target = if spec.follow_redirect && spec.target.is_empty() {
+                    Destination::new("127.0.0.1", 65535)?
+                } else {
+                    spec.target.destination()?
+                };
                 let ingress = egress.ingress(&NodeId::parse(&spec.tag)?)?;
                 let socket = match spec.kind {
                     ForwardKind::Tcp => Socket::Tcp(TcpListener::bind(spec.listen).await?),
@@ -323,8 +360,9 @@ impl Engine {
             let mut node_stats = BTreeMap::new();
             for mut node in config.nodes {
                 let ingress = egress.ingress(&NodeId::parse(&node.tag)?)?;
+                let transparent = node.protocol.transparent();
                 let tcp = if node.protocol.supports_tcp() {
-                    let socket = node_socket(node.listen, false)?;
+                    let socket = node_socket(node.listen, false, transparent)?;
                     socket.listen(1024)?;
                     let listener = TcpListener::from_std(socket.into())?;
                     node.listen = listener.local_addr()?;
@@ -333,8 +371,9 @@ impl Engine {
                     None
                 };
                 let udp = if node.protocol.supports_udp() {
-                    let socket =
-                        Arc::new(UdpSocket::from_std(node_socket(node.listen, true)?.into())?);
+                    let socket = Arc::new(UdpSocket::from_std(
+                        node_socket(node.listen, true, transparent)?.into(),
+                    )?);
                     if tcp.is_none() {
                         node.listen = socket.local_addr()?;
                     }
@@ -363,6 +402,7 @@ impl Engine {
                 nodes,
                 node_stats,
                 limits,
+                lan_filter,
                 stats: Arc::new(Stats::default()),
                 failed: FailedNodes::default(),
             }),
@@ -461,7 +501,8 @@ impl Engine {
                 bound.ingress.clone(),
                 self.stats.clone(),
                 Some(local_stats.clone()),
-            );
+            )
+            .with_lan_filter(self.lan_filter.clone());
             let resources = NodeResources {
                 language: self.language,
                 global: semaphore.clone(),
@@ -488,12 +529,15 @@ impl Engine {
                 inbound.ingress.clone(),
                 stats.clone(),
                 None,
-            );
+            )
+            .with_lan_filter(self.lan_filter.clone());
             let owned = cleanup.clone();
+            let follow_redirect = inbound.spec.follow_redirect;
+            let has_explicit_target = !inbound.spec.target.is_empty();
             let worker = workers.spawn(async move {
                 match inbound.socket {
                     Socket::Tcp(listener) => {
-                        serve_tcp(
+                        serve_tcp_with_options(
                             listener,
                             inbound.target,
                             inbound.ingress,
@@ -501,6 +545,8 @@ impl Engine {
                             token,
                             slots,
                             owned,
+                            follow_redirect,
+                            has_explicit_target,
                         )
                         .await
                     }
@@ -773,12 +819,18 @@ async fn serve_node(
             result=sessions.join_next(),if !sessions.is_empty()=>{if result.is_some_and(|r|r.is_err()){stats.failed.fetch_add(1,Ordering::Relaxed);local_stats.failed.fetch_add(1,Ordering::Relaxed);}},
             accepted=listener.accept()=>{
                 let (stream,peer_addr)=match accepted {Ok(v)=>v,Err(error) if accept_retryable(&error)=>{tokio::time::sleep(ACCEPT_BACKOFF).await;continue;},Err(error)=>{failure=Some(Error::Io(error));break;}};
+                if !cleanup.lan_filter.is_empty() && !cleanup.lan_filter.allows(peer_addr.ip()) {
+                    stats.dropped.fetch_add(1,Ordering::Relaxed);
+                    local_stats.dropped.fetch_add(1,Ordering::Relaxed);
+                    continue;
+                }
                 let Ok(budget)=kerlico_core::StreamBudget::new(global.clone(),slots.clone()).try_acquire() else {stats.dropped.fetch_add(1,Ordering::Relaxed);local_stats.dropped.fetch_add(1,Ordering::Relaxed);continue;};
                 let _=stream.set_nodelay(true);
                 let protocol=node.protocol.clone();let access=access.clone();let token=force.child_token();let stats=stats.clone();let local_stats=local_stats.clone();
                 let mut context=node_context(&limits,&node,token.clone(),&shared);
                 context.peer_addr=Some(peer_addr);context.local_addr=stream.local_addr().ok();
-                let lease = kerlico_core::PeerLease::new(token.clone(), budget);
+                let lease = kerlico_core::PeerLease::new(token.clone(), budget)
+                    .with_original_dst(original_destination(&stream));
                 context.peer_lease = Some(lease.clone());
                 let stream = PeerIo::new(stream, lease.clone(), token.clone());
                 stats.accepted.fetch_add(1,Ordering::Relaxed);
@@ -861,7 +913,8 @@ async fn drain<T: Send + 'static>(
     }
 }
 
-async fn serve_tcp(
+#[allow(clippy::too_many_arguments)]
+async fn serve_tcp_with_options(
     listener: TcpListener,
     target: Destination,
     ingress: IngressBinding,
@@ -869,6 +922,8 @@ async fn serve_tcp(
     stop: CancellationToken,
     slots: Arc<Semaphore>,
     cleanup: NodeCleanup,
+    follow_redirect: bool,
+    has_explicit_target: bool,
 ) -> Result<()> {
     let stats = cleanup.global.clone();
     let force = ingress.node_cancel();
@@ -883,8 +938,24 @@ async fn serve_tcp(
             result=sessions.join_next(),if !sessions.is_empty()=>{ if result.is_some_and(|result|result.is_err()) { stats.failed.fetch_add(1,Ordering::Relaxed); } },
             accepted=listener.accept()=>{
                 let (stream,peer)=match accepted { Ok(value)=>value, Err(error) if accept_retryable(&error)=>{ tokio::time::sleep(ACCEPT_BACKOFF).await; continue; }, Err(error)=>{failure=Some(Error::Io(error));break;} };
+                if !cleanup.lan_filter.is_empty() && !cleanup.lan_filter.allows(peer.ip()) {
+                    stats.dropped.fetch_add(1,Ordering::Relaxed);
+                    continue;
+                }
                 let permit=match slots.clone().try_acquire_owned() { Ok(value)=>value,Err(_)=>{stats.dropped.fetch_add(1,Ordering::Relaxed);continue;} };
-                let target=target.clone();let ingress=ingress.clone();let limits=limits.clone();let token=force.child_token();let stats=stats.clone();
+                let effective_target = if follow_redirect {
+                    let local = stream.local_addr().ok();
+                    match original_destination(&stream) {
+                        Some(orig) if Some(orig) != local || !has_explicit_target => {
+                            Destination::new(&orig.ip().to_string(), orig.port())
+                                .unwrap_or_else(|_| target.clone())
+                        }
+                        _ => target.clone(),
+                    }
+                } else {
+                    target.clone()
+                };
+                let ingress=ingress.clone();let limits=limits.clone();let token=force.child_token();let stats=stats.clone();
                 stats.accepted.fetch_add(1,Ordering::Relaxed);
                 let task_owner = cleanup.tasks.clone();
                 spawn_session(&cleanup.tasks, &mut sessions, async move {
@@ -893,7 +964,7 @@ async fn serve_tcp(
                     let mut context = forward_context(&limits,token.clone(), task_owner);
                     context.peer_addr=Some(peer);context.local_addr=stream.local_addr().ok();
                     let result=match ingress.local(&context) {
-                        Ok(outbound)=>tcp_session(stream,&target,&outbound,&limits,token).await,
+                        Ok(outbound)=>tcp_session(stream,&effective_target,&outbound,&limits,token).await,
                         Err(error)=>Err(error),
                     };
                     if result.is_ok() { stats.completed.fetch_add(1,Ordering::Relaxed); } else { stats.failed.fetch_add(1,Ordering::Relaxed); }
@@ -979,6 +1050,10 @@ async fn serve_udp(
                     Err(error) if kerlico_core::is_peer_path_error(&error)=>{stats.dropped.fetch_add(1,Ordering::Relaxed);continue;}
                     Err(error)=>{failure=Some(Error::Io(error));break;}
                 };
+                if !cleanup.lan_filter.is_empty() && !cleanup.lan_filter.allows(peer.ip()) {
+                    stats.dropped.fetch_add(1,Ordering::Relaxed);
+                    continue;
+                }
                 if count>limits.max_datagram_size {stats.dropped.fetch_add(1,Ordering::Relaxed);continue;}
                 if senders.get(&peer).is_some_and(|(_,sender)|sender.is_closed()) {senders.remove(&peer);}
                 if let Entry::Vacant(entry)=senders.entry(peer) {

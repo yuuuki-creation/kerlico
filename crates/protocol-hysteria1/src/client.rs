@@ -127,9 +127,24 @@ impl OutboundFactory for Hysteria1Factory {
         let auth = Arc::from(config::auth(options.auth_str, options.auth)?);
         let transport = options.limits.transport(0, options.udp)?;
         let (tls, name) = config::client_tls(options.tls, transport)?;
+        let hop = match (options.ports, options.hop_interval) {
+            (None, None) => None,
+            (None, Some(_)) => return Err(crate::invalid()),
+            (Some(spec), interval) => {
+                let secs = interval.unwrap_or(10);
+                if !(5..=86400).contains(&secs) {
+                    return Err(crate::invalid());
+                }
+                Some(crate::socket::PortHop {
+                    ranges: spec.parse()?,
+                    interval: std::time::Duration::from_secs(secs),
+                })
+            }
+        };
         let socket = Arc::new(crate::socket::Settings {
             carrier: options.transport,
             key: config::obfs(options.obfs)?,
+            hop,
         });
         let server = options.server.destination()?;
         let capabilities = Capabilities {

@@ -94,6 +94,9 @@ fn request(prepared: &Prepared) -> Result<http::Request<()>> {
         builder = builder.header(http::header::AUTHORIZATION, authorization);
     }
     let mut request = builder.body(()).map_err(|_| invalid())?;
+    for (name, value) in &prepared.headers {
+        request.headers_mut().insert(name.clone(), value.clone());
+    }
     request
         .extensions_mut()
         .insert(h3::ext::Protocol::CONNECT_IP);

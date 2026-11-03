@@ -84,7 +84,20 @@ pub(crate) async fn request<R: AsyncRead + Unpin>(
 ) -> Result<(kerlico_core::CredentialSlot, Destination, bool)> {
     use subtle::ConstantTimeEq;
     let mut key = [0; 56];
-    reader.read_exact(&mut key).await?;
+    let mut filled = 0;
+    while filled < 56 {
+        let count = reader.read(&mut key[filled..]).await?;
+        if count == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+        }
+        if !key[filled..filled + count]
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(protocol());
+        }
+        filled += count;
+    }
     let slot = users
         .rows()
         .filter(|(_, user)| bool::from(user.ct_eq(&key)))

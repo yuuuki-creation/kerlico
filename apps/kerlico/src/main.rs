@@ -2,7 +2,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use kerlico_config::{Registry, parse};
 use kerlico_core::{CancellationToken, Error, Language, Result};
 use kerlico_engine::Engine;
-use kerlico_net::{DirectFactory, RejectFactory};
+use kerlico_net::{
+    DirectFactory, DnsFactory, RedirectNodeFactory, RejectFactory, TproxyNodeFactory,
+};
 use std::path::PathBuf;
 mod cli;
 
@@ -84,6 +86,9 @@ fn registry() -> Result<Registry> {
     let mut registry = Registry::default();
     registry.register(DirectFactory)?;
     registry.register(RejectFactory)?;
+    registry.register(DnsFactory)?;
+    registry.register_node(RedirectNodeFactory)?;
+    registry.register_node(TproxyNodeFactory)?;
     #[cfg(feature = "protocol-tor")]
     registry.register(kerlico_tor::TorFactory)?;
     #[cfg(feature = "protocol-openconnect")]
@@ -96,7 +101,10 @@ fn registry() -> Result<Registry> {
         registry.register_node(kerlico_wireguard::WireGuardNodeFactory)?;
     }
     #[cfg(feature = "protocol-masque")]
-    registry.register(kerlico_masque::MasqueFactory)?;
+    {
+        registry.register(kerlico_masque::MasqueFactory)?;
+        registry.register_node(kerlico_masque::MasqueNodeFactory)?;
+    }
     #[cfg(feature = "protocol-openvpn")]
     registry.register(kerlico_openvpn::OpenVpnFactory)?;
     #[cfg(feature = "protocol-easytier")]
@@ -138,6 +146,7 @@ fn registry() -> Result<Registry> {
     {
         registry.register(kerlico_http::HttpFactory)?;
         registry.register_node(kerlico_http::HttpNodeFactory)?;
+        registry.register_node(kerlico_http::MixedNodeFactory)?;
     }
     #[cfg(feature = "protocol-snell")]
     {

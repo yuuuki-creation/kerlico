@@ -15,6 +15,18 @@ pub(crate) struct Options {
     tls: Tls,
     #[serde(default = "default_mtu")]
     mtu: usize,
+    #[serde(default, alias = "dtls-local-port")]
+    dtls_local_port: Option<u16>,
+    #[serde(default, alias = "tls-client-certificate")]
+    tls_client_certificate: Option<String>,
+    #[serde(default, alias = "tls-client-certificate-path")]
+    tls_client_certificate_path: Option<std::path::PathBuf>,
+    #[serde(default, alias = "tls-client-key")]
+    tls_client_key: Option<String>,
+    #[serde(default, alias = "tls-client-key-path")]
+    tls_client_key_path: Option<std::path::PathBuf>,
+    #[serde(default, alias = "tls-client-key-password")]
+    tls_client_key_password: Option<String>,
 }
 fn default_mtu() -> usize {
     DEFAULT_MTU
@@ -25,6 +37,20 @@ fn default_mtu() -> usize {
 struct Tls {
     server_name: Option<String>,
     ca_pem: Option<String>,
+    #[serde(default, alias = "certificate_pem", alias = "tls-client-certificate")]
+    client_certificate: Option<String>,
+    #[serde(
+        default,
+        alias = "certificate_path",
+        alias = "tls-client-certificate-path"
+    )]
+    client_certificate_path: Option<std::path::PathBuf>,
+    #[serde(default, alias = "private_key_pem", alias = "tls-client-key")]
+    client_key: Option<String>,
+    #[serde(default, alias = "private_key_path", alias = "tls-client-key-path")]
+    client_key_path: Option<std::path::PathBuf>,
+    #[serde(default, alias = "tls-client-key-password")]
+    client_key_password: Option<String>,
 }
 
 pub(crate) struct Credentials {
@@ -43,6 +69,23 @@ fn credential_field(value: &str) -> bool {
     (1..=255).contains(&value.len()) && !value.chars().any(char::is_control)
 }
 
+fn load_pem_source(
+    inline: Option<String>,
+    path: Option<std::path::PathBuf>,
+    label: &str,
+) -> Result<Option<String>> {
+    match (inline, path) {
+        (Some(_), Some(_)) => Err(Error::Config(format!(
+            "OpenConnect {label}不能同时提供内联内容与文件路径"
+        ))),
+        (Some(pem), None) => Ok(Some(pem)),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .map(Some)
+            .map_err(|_| Error::Config(format!("OpenConnect {label}文件读取失败"))),
+        (None, None) => Ok(None),
+    }
+}
+
 impl Options {
     pub fn prepare(self) -> Result<Config> {
         let server = self.server.destination()?;
@@ -54,9 +97,34 @@ impl Options {
         if !(1280..=9000).contains(&self.mtu) {
             return Err(Error::Config("OpenConnect MTU 须在1280至9000之间".into()));
         }
+        if self.dtls_local_port == Some(0) {
+            return Err(Error::Config("OpenConnect dtls_local_port 不能为0".into()));
+        }
+        let cert_pem = load_pem_source(
+            self.tls_client_certificate.or(self.tls.client_certificate),
+            self.tls_client_certificate_path
+                .or(self.tls.client_certificate_path),
+            "客户端证书",
+        )?;
+        let key_pem = load_pem_source(
+            self.tls_client_key.or(self.tls.client_key),
+            self.tls_client_key_path.or(self.tls.client_key_path),
+            "客户端私钥",
+        )?;
+        let key_password = self
+            .tls_client_key_password
+            .or(self.tls.client_key_password);
+        if key_password.as_deref().is_some_and(str::is_empty) {
+            return Err(Error::Config("OpenConnect 客户端私钥口令不能为空".into()));
+        }
         let host = server.host();
         let server_name = self.tls.server_name.as_deref().unwrap_or(host.as_str());
-        let connector = TcpConnector::tls(server_name, self.tls.ca_pem.as_deref())?;
+        let connector = TcpConnector::tls_mtls(
+            server_name,
+            self.tls.ca_pem.as_deref(),
+            cert_pem.as_deref(),
+            key_pem.as_deref(),
+        )?;
         Ok(Config {
             server,
             credentials: Credentials {

@@ -90,15 +90,15 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `dns` | DNS 出站，接收路由送入的明文 DNS 查询 |  |  | 有 | 未实现 | 未测 | 取值：`dns`<br>约束：只支持 UDP 和 TCP 明文 DNS；DoH、DoT、DoQ 不适用 |
-| `protocol` | DNS 出站，请求在内部 DNS 模块处理 | 有 | 已移除 |  | 未实现 | 未测 | 取值：`dns`<br>约束：1.11.0 废弃，1.13.0 移除；配置后启动报错（source:option/outbound.go）<br>约束：用 hijack-dns 规则动作替代 |
-| `combo` | dns 出站维度 | 有 |  | 有 | 未实现 | 未测 | network：`tcp`、`udp`<br>约束：udp 默认开启<br>action：`direct`、`drop`、`hijack`、`return`<br>match：`domain`、`none`、`qType`<br>network：`tcp`、`udp`、`保持来源`<br>source：`tproxy`、`tun`、`tunnel`<br>约束：hijack 仅 A/AAAA<br>约束：rCode 仅 return 生效<br>约束：规则各条件为与关系 |
+| `dns` | DNS 出站，接收路由送入的明文 DNS 查询 |  |  | 有 | 已实现 | 通过 | 取值：`dns`<br>约束：只支持 UDP 和 TCP 明文 DNS；DoH、DoT、DoQ 不适用 |
+| `protocol` | DNS 出站，请求在内部 DNS 模块处理 | 有 | 已移除 |  | 已实现 | 通过 | 取值：`dns`<br>约束：1.11.0 废弃，1.13.0 移除；配置后启动报错（source:option/outbound.go）<br>约束：用 hijack-dns 规则动作替代 |
+| `combo` | dns 出站维度 | 有 |  | 有 | 已实现 | 通过 | network：`tcp`、`udp`<br>约束：udp 默认开启<br>action：`direct`、`drop`、`hijack`、`return`<br>match：`domain`、`none`、`qType`<br>network：`tcp`、`udp`、`保持来源`<br>source：`tproxy`、`tun`、`tunnel`<br>约束：hijack 仅 A/AAAA<br>约束：rCode 仅 return 生效<br>约束：规则各条件为与关系 |
 | `address` | rewriteAddress 旧名 |  |  | 有 | 不适用 | 未测 |  |
 | `block-types` | 旧字段 |  |  | 废弃 | 不适用 | 未测 | 约束：不能与 rules 混用，改用 rules |
 | `direct` | 放行到目标 DNS 服务器，按 rewrite 转发 |  |  | 有 | 未实现 | 未测 |  |
 | `domain` | 匹配域名列表，写法同路由 domain |  |  | 有 | 未实现 | 未测 |  |
 | `drop` | 丢弃请求，不返回响应 |  |  | 有 | 未实现 | 未测 |  |
-| `hijack` | 导入内置 DNS 处理 |  |  | 有 | 未实现 | 未测 | 约束：目前仅 A 和 AAAA |
+| `hijack` | 导入内置 DNS 处理 |  |  | 有 | 已实现 | 通过 | 约束：目前仅 A 和 AAAA |
 | `network` | rewriteNetwork 旧名 |  |  | 有 | 不适用 | 未测 |  |
 | `non-ipquery` | 旧字段 |  |  | 废弃 | 不适用 | 未测 | 取值：`drop`、`reject`、`skip`<br>约束：不能与 rules 混用，改用 rules |
 | `port` | rewritePort 旧名 |  |  | 有 | 不适用 | 未测 |  |
@@ -127,7 +127,7 @@
 | `enable-kcp-proxy` | TCP 经 KCP 转发，默认 false | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `enable-quic-proxy` | TCP 经 QUIC 转发，默认 false | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `encryption-algorithm` | 加密算法，默认 aes-gcm | 有 |  |  | 已实现 | 通过 | 取值：`aes-gcm` |
-| `exit-nodes` | 要用的 exit node overlay IPv4 | 有 |  |  | 未实现 | 未测 | 取值：`IP 列表` |
+| `exit-nodes` | 要用的 exit node overlay IPv4 | 有 |  |  | 已实现 | 通过 | 取值：`IP 列表` |
 | `hostname` | overlay 主机名 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
 | `instance-name` | 实例名，默认代理名 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `ipv4` | overlay IPv4 CIDR | 有 |  |  | 已实现 | 通过 | 取值：`CIDR` |
@@ -143,7 +143,7 @@
 | `peers` | 入口节点 URI；可加 peer-public-key 查询参数锁公钥 | 有 |  |  | 部分 | 通过 | 取值：`tcp://`、`udp://`<br>约束：listeners 为空时至少配一个<br>约束：默认不隐式连 public.easytier.top |
 | `private-mode` | 隐私模式，默认 false | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `proxy-networks` | 经网络代理访问的子网 | 有 |  |  | 未实现 | 未测 | 取值：`CIDR 列表` |
-| `secure-mode` | Noise 端到端加密 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true`<br>约束：配置 local-private-key、local-public-key 或 peer-public-key 时自动开启 |
+| `secure-mode` | Noise 端到端加密 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true`<br>约束：配置 local-private-key、local-public-key 或 peer-public-key 时自动开启 |
 | `state-dir` | 状态目录，默认 easytier/<代理名称> | 有 |  |  | 未实现 | 未测 | 取值：`路径` |
 | `tld-dns-zone` | MagicDNS TLD，默认 et.net. | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 
@@ -173,7 +173,7 @@
 | `disable-version-fallback` | 禁用自动回退到更低的 HTTP 版本。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.15.0 起 |
 | `email` | 邮箱 |  |  | 有 | 未实现 | 未测 |  |
 | `fingerprint` | 协议独立证书指纹，忽略 experimental.fingerprints | 有 |  |  | 未实现 | 未测 | 取值：`sha256` |
-| `headers` | 附加请求头 | 有 | 有 | 有 | 未实现 | 未测 | 取值：`映射` |
+| `headers` | 附加请求头 | 有 | 有 | 有 | 已实现 | 通过 | 取值：`映射` |
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
 | `pass` | 密码，需认证时必填 |  |  | 有 | 已实现 | 通过 |  |
 | `password` | 密码 | 有 | 有 |  | 已实现 | 通过 | 取值：`字符串` |
@@ -203,17 +203,17 @@
 | `down-mbps` | 以 Mbps 为单位的 `up, down`。 |  | 有 |  | 部分 | 通过 | 约束：必填 |
 | `down-speed` | hysteria 出站字段 down-speed（文档页未写，配置结构存在） | 有 |  |  | 部分 | 通过 |  |
 | `fast-open` | Fast Open，默认 false | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `hop-interval` | hysteria 出站字段 hop-interval（文档页未写，配置结构存在） | 有 | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.12.0 起<br>约束：默认使用 `30s`。 |
+| `hop-interval` | hysteria 出站字段 hop-interval（文档页未写，配置结构存在） | 有 | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.12.0 起<br>约束：默认使用 `30s`。 |
 | `network` | 启用的网络协议。 |  | 有 |  | 部分 | 通过 | 取值：`tcp`、`udp`<br>约束：默认所有。 |
 | `obfs` | 混淆字符串 | 有 | 有 |  | 已实现 | 通过 | 取值：`字符串` |
 | `obfs-protocol` | hysteria 出站字段 obfs-protocol（文档页未写，配置结构存在） | 有 |  |  | 部分 | 通过 |  |
 | `port` | 服务器端口，必填 |  |  | 有 | 已实现 | 通过 |  |
-| `ports` | 端口跳跃范围 | 有 |  |  | 未实现 | 未测 | 取值：`1000,2000-3000,4000`<br>约束：port 不可省略 |
+| `ports` | 端口跳跃范围 | 有 |  |  | 已实现 | 通过 | 取值：`1000,2000-3000,4000`<br>约束：port 不可省略 |
 | `recv-window` | 连接窗口 | 有 | 废弃 |  | 未实现 | 未测 | 取值：`整数` |
 | `recv-window-conn` | 流窗口 | 有 | 废弃 |  | 未实现 | 未测 | 取值：`整数` |
 | `server` | 服务器地址。 |  | 有 |  | 已实现 | 通过 | 约束：必填 |
 | `server-port` | 服务器端口。 |  | 有 |  | 已实现 | 通过 | 约束：必填 |
-| `server-ports` | 服务器端口范围列表。 |  | 有 |  | 未实现 | 未测 | 约束：与 `server_port` 冲突。<br>约束：自 sing-box 1.12.0 起 |
+| `server-ports` | 服务器端口范围列表。 |  | 有 |  | 已实现 | 通过 | 约束：与 `server_port` 冲突。<br>约束：自 sing-box 1.12.0 起 |
 | `tls` | TLS 配置, 参阅 TLS。 |  | 有 |  | 部分 | 通过 | 约束：必填 |
 | `up` | 上行，不写单位默认 Mbps | 有 | 有 |  | 部分 | 通过 | 取值：`30 Mbps`<br>约束：单位区分大小写：bps Bps Kbps KBps Mbps MBps Gbps GBps Tbps TBps<br>约束：必填 |
 | `up-mbps` | 以 Mbps 为单位的 `up, down`。 |  | 有 |  | 部分 | 通过 | 约束：必填 |
@@ -230,11 +230,11 @@
 | `brutal-debug` | 启用 Hysteria Brutal CC 的调试信息日志记录。 |  | 有 |  | 未实现 | 未测 |  |
 | `cwnd` | hysteria2 出站字段 cwnd（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `disable-chrome-parrot` | 禁用 Chrome QUIC 指纹模仿。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `down` | brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`200 Mbps` |
-| `down-mbps` | 最大带宽。 |  | 有 |  | 未实现 | 未测 |  |
+| `down` | brutal 下行，默认 Mbps | 有 |  |  | 已实现 | 通过 | 取值：`200 Mbps` |
+| `down-mbps` | 最大带宽。 |  | 有 |  | 已实现 | 通过 |  |
 | `handshake-timeout` | 握手超时秒，默认 0 仅用外层 | 有 |  |  | 部分 | 通过 | 取值：`整数` |
-| `hop-interval` | 跳跃间隔秒，默认 30；可写 15-30 | 有 | 有 |  | 未实现 | 未测 | 取值：`15-30`、`整数`<br>约束：仅一个范围，不允许逗号<br>约束：自 sing-box 1.11.0 起<br>约束：默认使用 `30s`。 |
-| `hop-interval-max` | 最大端口跳跃间隔，用于随机化。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
+| `hop-interval` | 跳跃间隔秒，默认 30；可写 15-30 | 有 | 有 |  | 已实现 | 通过 | 取值：`15-30`、`整数`<br>约束：仅一个范围，不允许逗号<br>约束：自 sing-box 1.11.0 起<br>约束：默认使用 `30s`。 |
+| `hop-interval-max` | 最大端口跳跃间隔，用于随机化。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
 | `initial-connection-receive-window` | quic-go 初始连接窗口 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `initial-stream-receive-window` | quic-go 初始流窗口 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `max-connection-receive-window` | quic-go 最大连接窗口 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
@@ -246,7 +246,7 @@
 | `obfs-password` | 混淆密码 | 有 | 有 |  | 已实现 | 通过 | 取值：`字符串` |
 | `obfs-type` | QUIC 流量混淆器类型，可选 `salamander` `gecko`。 |  | 有 |  | 部分 | 通过 | 取值：`gecko`、`salamander` |
 | `password` | 认证密码 | 有 | 有 |  | 已实现 | 通过 | 取值：`字符串` |
-| `ports` | 端口跳跃，配置后忽略 port | 有 |  |  | 未实现 | 未测 | 取值：`443-8443` |
+| `ports` | 端口跳跃，配置后忽略 port | 有 |  |  | 已实现 | 通过 | 取值：`443-8443` |
 | `realm` | 通过 Hysteria Realm 会合服务连接 Hysteria2 服务器。 |  | 有 |  | 未实现 | 未测 | 约束：TLS SNI 默认使用 `server_url` 中的主机名。<br>约束：与 `server`、`server_port` 和 `server_ports` 冲突。<br>约束：自 sing-box 1.14.0 起 |
 | `realm-http-client` | 与 realm 通信使用的 HTTP 客户端。 |  | 有 |  | 未实现 | 未测 |  |
 | `realm-ip-version` | 将 realm 连接（STUN、打洞与最终的 QUIC 路径）限制为单一 IP 版本。 |  | 有 |  | 未实现 | 未测 | 取值：`4`、`6`<br>约束：默认使用两者。 |
@@ -272,11 +272,11 @@
 | `realm-token` | Realm 的 Bearer 令牌，需与 realm 上配置的 `users[].token` 之一匹配。 |  | 有 |  | 未实现 | 未测 |  |
 | `server` | 服务器地址。 |  | 有 |  | 已实现 | 通过 | 约束：与 `realm` 冲突。<br>约束：必填 |
 | `server-port` | 服务器端口。 |  | 有 |  | 已实现 | 通过 | 约束：与 `realm` 冲突。<br>约束：如果设置了 `server_ports`，则忽略此项。<br>约束：必填 |
-| `server-ports` | 服务器端口范围列表。 |  | 有 |  | 未实现 | 未测 | 约束：与 `server_port` 和 `realm` 冲突。<br>约束：自 sing-box 1.11.0 起 |
+| `server-ports` | 服务器端口范围列表。 |  | 有 |  | 已实现 | 通过 | 约束：与 `server_port` 和 `realm` 冲突。<br>约束：自 sing-box 1.11.0 起 |
 | `tls` | TLS 配置, 参阅 TLS。 |  | 有 |  | 部分 | 通过 | 约束：必填 |
 | `udp-mtu` | hysteria2 出站字段 udp-mtu（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `up` | brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`30 Mbps` |
-| `up-mbps` | 最大带宽。 |  | 有 |  | 未实现 | 未测 |  |
+| `up` | brutal 上行，默认 Mbps | 有 |  |  | 已实现 | 通过 | 取值：`30 Mbps` |
+| `up-mbps` | 最大带宽。 |  | 有 |  | 已实现 | 通过 |  |
 
 ## list
 
@@ -308,7 +308,7 @@
 | `disable-version-fallback` | 禁用自动回退到更低的 HTTP 版本。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.15.0 起 |
 | `dns` | 远程 DNS，remote-dns-resolve 启用时生效 | 有 |  |  | 未实现 | 未测 | 取值：`上游列表` |
 | `handshake-timeout` | 握手超时秒，默认 0 | 有 |  |  | 部分 | 通过 | 取值：`整数` |
-| `headers` | HTTP 请求的额外标头。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.15.0 起 |
+| `headers` | HTTP 请求的额外标头。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.15.0 起 |
 | `ip` | 本地 IPv4 CIDR | 有 |  |  | 未实现 | 未测 | 取值：`CIDR` |
 | `ip-stack-congestion-controller` | TCP 拥塞控制，默认 cubic | 有 |  |  | 未实现 | 未测 | 取值：`bbr`、`bbr3`、`cubic`、`reno`<br>约束：gVisor 下不生效 |
 | `ip-stack-mode` | IP 协议栈，默认 auto | 有 |  |  | 未实现 | 未测 | 取值：`auto`、`gvisor`、`mips`<br>约束：auto 用 MIPS<br>约束：gvisor 需 -tags with_gvisor |
@@ -342,7 +342,7 @@
 | `handshake-mode` | 握手模式 | 有 |  |  | 已实现 | 通过 | 取值：`HANDSHAKE_NO_WAIT`、`HANDSHAKE_STANDARD` |
 | `multiplexing` | 多路复用，默认 LOW | 有 |  |  | 部分 | 通过 | 取值：`MULTIPLEXING_HIGH`、`MULTIPLEXING_LOW`、`MULTIPLEXING_MIDDLE`、`MULTIPLEXING_OFF` |
 | `password` | 密码 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
-| `port-range` | 端口范围 | 有 |  |  | 未实现 | 未测 | 取值：`2090-2099`<br>约束：不可与 port 同写 |
+| `port-range` | 端口范围 | 有 |  |  | 已实现 | 通过 | 取值：`2090-2099`<br>约束：不可与 port 同写 |
 | `traffic-pattern` | base64 微调网络行为 | 有 |  |  | 部分 | 通过 | 取值：`base64` |
 | `transport` | 协议 | 有 |  |  | 部分 | 通过 | 取值：`TCP`、`UDP` |
 | `username` | 用户名 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
@@ -353,7 +353,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `protocol` | NaiveProxy 出站 |  | 有 |  | 已实现 | 通过 | 取值：`naive`<br>约束：仅 Apple、Android、Windows 和部分 Linux 构建可用<br>约束：自 sing-box 1.13.0 起<br>约束：需要 with_naive_outbound 构建标签 |
 | `combo` | NaiveProxy 出站的载体、拥塞控制和 UDP 组合 |  | 有 |  | 部分 | 通过 | carrier：`http2`、`quic`<br>quic_congestion_control：`bbr`、`bbr2`、`cubic`、`reno`<br>udp_over_tcp：`off`、`v1`、`v2`<br>tls_option：`certificate`、`certificate_path`、`ech`、`server_name`<br>约束：UDP 只在开 udp_over_tcp 时可用（source:protocol/naive/outbound.go）<br>约束：quic_session_receive_window 只在 quic 开启时生效<br>约束：stream_receive_window 在 quic 下是初始 QUIC 流窗口（默认 6 MB），否则是 HTTP/2 会话窗口<br>约束：tls 必填，只支持 server_name、certificate、certificate_path、ech |
-| `extra-headers` | HTTP 请求中发送的额外头部。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.13.0 起 |
+| `extra-headers` | HTTP 请求中发送的额外头部。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.13.0 起 |
 | `insecure-concurrency` | 并发隧道连接数。 |  | 有 |  | 部分 | 通过 | 约束：自 sing-box 1.13.0 起 |
 | `password` | 认证密码。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.13.0 起 |
 | `quic` | 使用 QUIC 代替 HTTP/2。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.13.0 起 |
@@ -381,7 +381,7 @@
 | `csd` | AnyConnect CSD/host scan 合规性选项。 |  | 有 |  | 未实现 | 未测 | 约束：服务器请求 CSD 时，默认使用内置 CSD 处理。<br>约束：自 sing-box 1.14.0 起 |
 | `csd-wrapper-path` | 外部 AnyConnect CSD wrapper 可执行文件的路径。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
 | `dpd-interval` | 覆盖 Dead Peer Detection 间隔。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用服务器提供或 flavor 特定的间隔。 |
-| `dtls-local-port` | 直连 DTLS 或 ESP 辅助数据通道使用的本地 UDP 端口。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认自动选择临时端口。 |
+| `dtls-local-port` | 直连 DTLS 或 ESP 辅助数据通道使用的本地 UDP 端口。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：默认自动选择临时端口。 |
 | `external-auth-disabled` | 禁用 AnyConnect、GlobalProtect 和 Fortinet 的 SSO、SAML 等外部浏览器认证。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
 | `flavor` | OpenConnect 协议 flavor，可选值为 `anyconnect`、`gp`、`fortinet`、`f5`、`pulse` 或 `nc`。 |  | 有 |  | 部分 | 通过 | 取值：`anyconnect`、`f5`、`fortinet`、`gp`、`nc`、`pulse`<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `anyconnect`。 |
 | `form-entries` | 认证表单字段覆盖。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
@@ -418,11 +418,11 @@
 | `tls` | OpenConnect TLS 配置。 |  | 有 |  | 部分 | 通过 | 约束：自 sing-box 1.14.0 起 |
 | `tls-certificate-authority` | PEM 格式的附加受信任 CA 证书内容。 |  | 有 |  | 已实现 | 通过 | 约束：与 `tls.certificate_authority_path` 冲突。<br>约束：自 sing-box 1.14.0 起 |
 | `tls-certificate-authority-path` | PEM 格式的附加受信任 CA 证书路径。 |  | 有 |  | 未实现 | 未测 | 约束：与 `tls.certificate_authority` 冲突。<br>约束：自 sing-box 1.14.0 起 |
-| `tls-client-certificate` | PEM 格式的客户端证书链内容。 |  | 有 |  | 未实现 | 未测 | 约束：与 `tls.client_certificate_path` 冲突。<br>约束：自 sing-box 1.14.0 起 |
-| `tls-client-certificate-path` | PEM 格式的客户端证书链路径。 |  | 有 |  | 未实现 | 未测 | 约束：与 `tls.client_certificate` 冲突。<br>约束：自 sing-box 1.14.0 起 |
-| `tls-client-key` | PEM 格式的客户端私钥内容。 |  | 有 |  | 未实现 | 未测 | 约束：与 `tls.client_key_path` 冲突。<br>约束：自 sing-box 1.14.0 起 |
-| `tls-client-key-password` | 加密客户端私钥的密码。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `tls-client-key-path` | PEM 格式的客户端私钥路径。 |  | 有 |  | 未实现 | 未测 | 约束：与 `tls.client_key` 冲突。<br>约束：客户端证书和私钥必须同时设置或同时为空。<br>约束：自 sing-box 1.14.0 起 |
+| `tls-client-certificate` | PEM 格式的客户端证书链内容。 |  | 有 |  | 已实现 | 通过 | 约束：与 `tls.client_certificate_path` 冲突。<br>约束：自 sing-box 1.14.0 起 |
+| `tls-client-certificate-path` | PEM 格式的客户端证书链路径。 |  | 有 |  | 已实现 | 通过 | 约束：与 `tls.client_certificate` 冲突。<br>约束：自 sing-box 1.14.0 起 |
+| `tls-client-key` | PEM 格式的客户端私钥内容。 |  | 有 |  | 已实现 | 通过 | 约束：与 `tls.client_key_path` 冲突。<br>约束：自 sing-box 1.14.0 起 |
+| `tls-client-key-password` | 加密客户端私钥的密码。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
+| `tls-client-key-path` | PEM 格式的客户端私钥路径。 |  | 有 |  | 已实现 | 通过 | 约束：与 `tls.client_key` 冲突。<br>约束：客户端证书和私钥必须同时设置或同时为空。<br>约束：自 sing-box 1.14.0 起 |
 | `tls-insecure` | 禁用 VPN 服务器证书和主机名验证。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
 | `tls-mca-certificate` | PEM 格式的 AnyConnect 多证书认证（MCA）证书链内容。 |  | 有 |  | 未实现 | 未测 | 约束：与 `tls.mca_certificate_path` 冲突。<br>约束：自 sing-box 1.14.0 起 |
 | `tls-mca-certificate-path` | PEM 格式的 AnyConnect 多证书认证（MCA）证书链路径。 |  | 有 |  | 未实现 | 未测 | 约束：与 `tls.mca_certificate` 冲突。<br>约束：自 sing-box 1.14.0 起 |
@@ -484,7 +484,7 @@
 | `key` | 可选，客户端私钥 | 有 |  |  | 已实现 | 通过 | 取值：`PEM` |
 | `key-direction` | tls-auth 方向，空为双向 | 有 | 有 |  | 已实现 | 通过 | 取值：``、`0`、`1`、`client`、`server`<br>约束：仅在 `static_key` 模式下可用。<br>约束：自 sing-box 1.14.0 起 |
 | `mode` | OpenVPN 会话模式，可选值为 `tls` 或 `static_key`。 |  | 有 |  | 部分 | 通过 | 取值：`static_key`、`tls`<br>约束：`static_key` 是已弃用的 OpenVPN 模式，不使用 TLS 控制通道且不提供前向保密。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `tls`。 |
-| `mss-fix` | OpenVPN UDP packet 的最大大小，用于限制通过隧道发送的 TCP 连接 MSS。 |  | 有 |  | 未实现 | 未测 | 约束：为空时使用上游 OpenVPN 默认值：配置了 `fragment` 时使用其值；否则默认 tunnel MTU 使用 `1492`，自定义 tunnel MTU 使用该 MTU。<br>约束：自 sing-box 1.14.0 起 |
+| `mss-fix` | OpenVPN UDP packet 的最大大小，用于限制通过隧道发送的 TCP 连接 MSS。 |  | 有 |  | 已实现 | 通过 | 约束：为空时使用上游 OpenVPN 默认值：配置了 `fragment` 时使用其值；否则默认 tunnel MTU 使用 `1492`，自定义 tunnel MTU 使用该 MTU。<br>约束：自 sing-box 1.14.0 起 |
 | `mss-fix-disabled` | 禁用 MSS 限制，包括默认限制。 |  | 有 |  | 未实现 | 未测 | 约束：与 `mss_fix` 和 `mss_fix_mode` 冲突。<br>约束：自 sing-box 1.14.0 起 |
 | `mss-fix-mode` | 显式 `mss_fix` 的 OpenVPN MSS 计算模式，`mtu` 或 `fixed` 之一。 |  | 有 |  | 未实现 | 未测 | 取值：`fixed`、`mtu`<br>约束：自 sing-box 1.14.0 起<br>约束：需要 `mss_fix`。 |
 | `mtu` | MTU，默认 1500 | 有 | 有 |  | 已实现 | 通过 | 取值：`整数`<br>约束：自 sing-box 1.14.0 起 |
@@ -520,10 +520,10 @@
 | `routes` | sing-box 路由优先选择此 OpenVPN endpoint 的 IPv4 和 IPv6 前缀。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
 | `server` | OpenVPN 服务器地址。 |  | 有 |  | 已实现 | 通过 | 约束：`server` 和 `servers` 之一必填。<br>约束：与 `servers` 冲突。<br>约束：自 sing-box 1.14.0 起 |
 | `server-port` | OpenVPN 服务器端口。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：设置 `server` 时必填。 |
-| `servers` | OpenVPN 服务器列表。 |  | 有 |  | 未实现 | 未测 | 约束：`server` 和 `servers` 之一必填。<br>约束：与 `server` 冲突。<br>约束：自 sing-box 1.14.0 起 |
-| `servers-network` | 该服务器的 OpenVPN 传输网络，可选值为 `udp` 或 `tcp`。 |  | 有 |  | 未实现 | 未测 | 取值：`tcp`、`udp`<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用顶层 `network`。 |
-| `servers-server` | OpenVPN 服务器地址。 |  | 有 |  | 未实现 | 未测 | 约束：必填<br>约束：自 sing-box 1.14.0 起 |
-| `servers-server-port` | OpenVPN 服务器端口。 |  | 有 |  | 未实现 | 未测 | 约束：必填<br>约束：自 sing-box 1.14.0 起 |
+| `servers` | OpenVPN 服务器列表。 |  | 有 |  | 已实现 | 通过 | 约束：`server` 和 `servers` 之一必填。<br>约束：与 `server` 冲突。<br>约束：自 sing-box 1.14.0 起 |
+| `servers-network` | 该服务器的 OpenVPN 传输网络，可选值为 `udp` 或 `tcp`。 |  | 有 |  | 已实现 | 通过 | 取值：`tcp`、`udp`<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用顶层 `network`。 |
+| `servers-server` | OpenVPN 服务器地址。 |  | 有 |  | 已实现 | 通过 | 约束：必填<br>约束：自 sing-box 1.14.0 起 |
+| `servers-server-port` | OpenVPN 服务器端口。 |  | 有 |  | 已实现 | 通过 | 约束：必填<br>约束：自 sing-box 1.14.0 起 |
 | `static-challenge` | 请求认证响应时显示的静态质询文本。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
 | `static-challenge-echo` | 以明文显示静态质询响应。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
 | `static-key` | OpenVPN 静态密钥内容。 |  | 有 |  | 未实现 | 未测 | 约束：与 `static_key_path` 冲突。<br>约束：在 `static_key` 模式下必填。<br>约束：自 sing-box 1.14.0 起 |
@@ -546,7 +546,7 @@
 | `tls-control-wrap-type` | 控制通道封装类型，可选值为 `tls_auth`、`tls_crypt` 或 `tls_crypt_v2`。 |  | 有 |  | 部分 | 通过 | 取值：`tls_auth`、`tls_crypt`、`tls_crypt_v2`<br>约束：自 sing-box 1.14.0 起 |
 | `tls-crl-path` | 用于拒绝已吊销服务器证书的 PEM 或 DER CRL 文件路径。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
 | `tls-crypt` | 可选，TLS 加密密钥 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`<br>约束：与 tls-auth、tls-crypt-v2 互斥 |
-| `tls-crypt-v2` | 可选，客户端密钥 | 有 |  |  | 未实现 | 未测 | 取值：`PEM`<br>约束：与 tls-auth、tls-crypt 互斥 |
+| `tls-crypt-v2` | 可选，客户端密钥 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`<br>约束：与 tls-auth、tls-crypt 互斥 |
 | `tls-groups` | 按偏好顺序排列的 TLS key exchange group，以冒号分隔。 |  | 有 |  | 未实现 | 未测 | 约束：为空时使用默认 TLS group。<br>约束：自 sing-box 1.14.0 起 |
 | `tls-ns-certificate-type` | 已弃用的 Netscape 证书类型检查，`server` 或 `client` 之一。 |  | 废弃 |  | 未实现 | 未测 | 取值：`client`、`server`<br>约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
 | `tls-peer-fingerprint` | 允许的服务器 leaf certificate 的 SHA-256 fingerprint。 |  | 有 |  | 未实现 | 未测 | 约束：每个 fingerprint 必须是不带分隔符的 64 字符小写十六进制字符串。<br>约束：自 sing-box 1.14.0 起 |
@@ -826,7 +826,7 @@
 | `accept-routes` | 接受 Tailnet subnet routes | 有 | 有 |  | 已实现 | 通过 | 取值：`false`、`true`<br>约束：自 sing-box 1.12.0 起 |
 | `advertise-exit-node` | 指示节点是否应将自己通告为出口节点。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.12.0 起 |
 | `advertise-routes` | 通告到 Tailscale 网络的 CIDR 前缀，作为可通过当前节点访问的路由。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.12.0 起 |
-| `advertise-tags` | 为此节点通告的标签，用于 ACL 执行。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.13.0 起 |
+| `advertise-tags` | 为此节点通告的标签，用于 ACL 执行。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.13.0 起 |
 | `auth-key` | 登录密钥；不填时日志输出交互式登录 URL | 有 | 有 |  | 已实现 | 通过 | 取值：`字符串`<br>约束：自 sing-box 1.12.0 起<br>约束：认证密钥不是必需的。<br>约束：默认情况下，sing-box 将记录登录 URL。 |
 | `control-url` | control server 或 Headscale 地址 | 有 | 有 |  | 已实现 | 通过 | 取值：`URL`<br>约束：自 sing-box 1.12.0 起<br>约束：默认使用 `https://controlplane.tailscale.com`。 |
 | `ephemeral` | ephemeral node，默认 false | 有 | 有 |  | 已实现 | 通过 | 取值：`false`、`true`<br>约束：自 sing-box 1.12.0 起 |
@@ -1074,7 +1074,7 @@
 | `peers-port` | 对等方的 WireGuard 端口。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.11.0 起 |
 | `peers-pre-shared-key` | 对等方的预共享密钥。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.11.0 起 |
 | `peers-public-key` | 对等方的 WireGuard 公钥。 |  | 有 |  | 已实现 | 通过 | 约束：必填<br>约束：自 sing-box 1.11.0 起 |
-| `peers-reserved` | 对等方的保留字段字节。 |  | 有 |  | 未实现 | 未测 | 约束：`$outbound.reserved` will be used if empty.<br>约束：自 sing-box 1.11.0 起 |
+| `peers-reserved` | 对等方的保留字段字节。 |  | 有 |  | 已实现 | 通过 | 约束：`$outbound.reserved` will be used if empty.<br>约束：自 sing-box 1.11.0 起 |
 | `peers-server` | 服务器地址 |  | 已移除 |  | 已实现 | 通过 |  |
 | `peers-server-port` | 服务器端口 |  | 已移除 |  | 已实现 | 通过 |  |
 | `persistent-keepalive` | 可选，保活 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
@@ -1084,7 +1084,7 @@
 | `refresh-server-ip-interval` | wireguard 出站字段 refresh-server-ip-interval（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `remote-dns` | 解析被代理域名的 DNS，默认 1.1.1.1、1.0.0.1、2606:4700:4700::1111、2606:4700:4700::1001 |  |  | 有 | 未实现 | 未测 | 约束：双栈优先 IPv4<br>约束：必须为 IP<br>约束：请求直接走隧道；接入内置 DNS 用 targetStrategy |
 | `remote-dns-resolve` | 可选，强制远程解析，默认 false | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `reserved` | 可选，保留字段 | 有 | 已移除 | 有 | 未实现 | 未测 | 取值：`U4An`、`[209,98,59]`<br>约束：为空或 3 字节，否则报错（source:infra/conf/wireguard.go） |
+| `reserved` | 可选，保留字段 | 有 | 已移除 | 有 | 已实现 | 通过 | 取值：`U4An`、`[209,98,59]`<br>约束：为空或 3 字节，否则报错（source:infra/conf/wireguard.go） |
 | `secret-key` | 客户端私钥，必填 |  |  | 有 | 已实现 | 通过 |  |
 | `server` | 服务器地址。 |  | 已移除 |  | 已实现 | 通过 | 约束：必填 |
 | `server-port` | 服务器端口。 |  | 已移除 |  | 已实现 | 通过 | 约束：必填 |
@@ -1117,6 +1117,6 @@
 | `remote-trace-target` | 接收诊断的节点 ID | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `secondary-port` | 第二 UDP 端口，0 自动，-1 禁用 | 有 |  |  | 未实现 | 未测 | 取值：`-1`、`0`、`端口` |
 | `state-dir` | 节点状态与默认身份目录 | 有 |  |  | 部分 | 通过 | 取值：`路径` |
-| `tcp-fallback-mode` | TCP 回退，默认 auto | 有 |  |  | 未实现 | 未测 | 取值：`auto`、`disable`、`force` |
-| `tcp-fallback-relay` | TCP 回退中继 | 有 |  |  | 未实现 | 未测 | 取值：`host:port` |
+| `tcp-fallback-mode` | TCP 回退，默认 auto | 有 |  |  | 已实现 | 通过 | 取值：`auto`、`disable`、`force` |
+| `tcp-fallback-relay` | TCP 回退中继 | 有 |  |  | 已实现 | 通过 | 取值：`host:port` |
 | `udp` | UDP，默认 true | 有 |  |  | 部分 | 通过 | 取值：`false`、`true` |

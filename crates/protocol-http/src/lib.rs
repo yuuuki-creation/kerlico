@@ -2,5 +2,5 @@
 mod config;
 mod inbound;
 mod outbound;
-pub use inbound::HttpNodeFactory;
+pub use inbound::{HttpNodeFactory, MixedNodeFactory};
 pub use outbound::HttpFactory;

@@ -5,5 +5,5 @@ mod inbound;
 mod outbound;
 mod wire;
 
-pub use inbound::SocksNodeFactory;
+pub use inbound::{SocksNodeFactory, build_mixed_socks};
 pub use outbound::SocksFactory;

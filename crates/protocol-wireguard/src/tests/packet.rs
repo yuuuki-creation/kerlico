@@ -46,7 +46,8 @@ fn factory_is_pure_local_policy_and_rejects_ambiguous_peers() {
             public_key: public(1),
             preshared_key: None,
             persistent_keepalive: 0,
-            allowed_ips: vec!["10.77.0.1/24".into()]
+            allowed_ips: vec!["10.77.0.1/24".into()],
+            reserved: None,
         }
         .prepare()
         .is_err()

@@ -101,6 +101,7 @@ pub struct PreparedConfig {
     pub(crate) inbounds: Vec<ForwardSpec>,
     pub(crate) limits: Limits,
     pub(crate) nodes: Vec<PreparedNode>,
+    pub(crate) lan_filter: kerlico_core::IpFilter,
 }
 pub struct EnginePlanParts {
     pub history: Option<HistorySpec>,
@@ -108,6 +109,7 @@ pub struct EnginePlanParts {
     pub inbounds: Vec<ForwardSpec>,
     pub limits: Limits,
     pub nodes: Vec<PreparedNode>,
+    pub lan_filter: kerlico_core::IpFilter,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -130,6 +132,7 @@ impl PreparedConfig {
             inbounds: self.inbounds,
             limits: self.limits,
             nodes: self.nodes,
+            lan_filter: self.lan_filter,
         }
     }
     pub fn ingress_count(&self) -> usize {

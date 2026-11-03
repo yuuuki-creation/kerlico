@@ -8,6 +8,16 @@ use std::{
 };
 use zerotier_node::{Address, Identity, NodeOptions, Seed, default_planet_roots};
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TcpFallbackMode {
+    #[default]
+    Auto,
+    Always,
+    #[serde(alias = "off", alias = "false")]
+    Never,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientOptions {
@@ -24,6 +34,10 @@ pub(crate) struct ClientOptions {
     public_planet: bool,
     #[serde(default)]
     pub bind: Option<SocketAddr>,
+    #[serde(default, alias = "tcp-fallback-mode")]
+    pub tcp_fallback_mode: TcpFallbackMode,
+    #[serde(default, alias = "tcp-fallback-relay")]
+    pub tcp_fallback_relay: Option<SocketAddr>,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +59,8 @@ pub(crate) struct Prepared {
     pub roots: Vec<Seed>,
     pub peers: Vec<Seed>,
     pub bind: Option<SocketAddr>,
+    pub tcp_fallback_mode: TcpFallbackMode,
+    pub tcp_fallback_relay: Option<SocketAddr>,
 }
 
 fn parse_seeds(seeds: Vec<SeedOptions>) -> Result<Vec<Seed>> {
@@ -108,6 +124,12 @@ impl ClientOptions {
         if self
             .bind
             .is_some_and(|bind| bind.ip().is_multicast() || bind.ip().to_canonical() != bind.ip())
+            || self.tcp_fallback_relay.is_some_and(|relay| {
+                relay.port() == 0
+                    || relay.ip().is_unspecified()
+                    || relay.ip().is_multicast()
+                    || relay.ip().to_canonical() != relay.ip()
+            })
         {
             return Err(Error::Config("ZeroTier载体绑定地址不合法".into()));
         }
@@ -117,6 +139,8 @@ impl ClientOptions {
             roots,
             peers,
             bind: self.bind,
+            tcp_fallback_mode: self.tcp_fallback_mode,
+            tcp_fallback_relay: self.tcp_fallback_relay,
         })
     }
 }

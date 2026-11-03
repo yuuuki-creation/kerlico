@@ -54,6 +54,8 @@ pub(crate) struct ClientOptions {
     pub idle_session_timeout_ms: u64,
     #[serde(default = "congestion")]
     pub congestion_control: String,
+    #[serde(default, alias = "extra-headers")]
+    pub extra_headers: std::collections::BTreeMap<String, String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

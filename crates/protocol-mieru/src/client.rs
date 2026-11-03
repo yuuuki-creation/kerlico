@@ -26,6 +26,7 @@ use tokio::{
 type MemberPool = Mutex<Vec<Arc<Link>>>;
 pub(crate) struct Client {
     server: Destination,
+    ports: std::ops::RangeInclusive<u16>,
     user: Arc<User>,
     transport: Transport,
     traffic: config::Traffic,
@@ -41,7 +42,7 @@ pub(crate) struct Client {
 impl Client {
     pub fn compile(options: ClientOptions) -> Result<OutboundPlan> {
         let transport = Transport::parse(&options.transport, options.unsafe_udp_compatibility)?;
-        let server = options.server.destination()?;
+        let (server, ports) = options.server.destination_and_ports(options.port_range)?;
         if transport == Transport::LocalUnsafeUdp {
             config::require_literal_loopback(&server)?;
         }
@@ -61,6 +62,7 @@ impl Client {
                 Box::pin(async move {
                     Ok(Arc::new(Self {
                         server,
+                        ports,
                         user,
                         transport,
                         traffic: options.traffic,
@@ -93,10 +95,16 @@ impl Client {
         if pool.len() >= 128 || self.cancel.is_cancelled() {
             return Err(Error::ResourceLimit);
         }
+        let port = if self.ports.start() == self.ports.end() {
+            *self.ports.start()
+        } else {
+            let span = u32::from(self.ports.end() - self.ports.start()) + 1;
+            *self.ports.start() + (rand::random::<u32>() % span) as u16
+        };
         let endpoint = match self.server.address() {
-            Address::Ip(ip) => SocketAddr::new(*ip, self.server.port()),
+            Address::Ip(ip) => SocketAddr::new(*ip, port),
             Address::Domain(name) => {
-                let mut addresses = tokio::net::lookup_host((name.as_str(), self.server.port()))
+                let mut addresses = tokio::net::lookup_host((name.as_str(), port))
                     .await?
                     .take(32)
                     .collect::<Vec<_>>();

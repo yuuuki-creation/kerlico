@@ -22,6 +22,10 @@ pub(crate) struct ClientOptions {
     hostname: String,
     #[serde(default)]
     encryption: Encryption,
+    #[serde(default, alias = "exit-nodes")]
+    exit_nodes: Vec<IpAddr>,
+    #[serde(default, alias = "secure-mode")]
+    secure_mode: bool,
 }
 fn default_hostname() -> String {
     "kerlico".into()
@@ -57,6 +61,7 @@ pub(crate) struct Prepared {
     pub ipv6: Option<Ipv6Inet>,
     pub hostname: String,
     pub encryption: Encryption,
+    pub exit_nodes: Vec<IpAddr>,
 }
 
 impl ClientOptions {
@@ -66,6 +71,9 @@ impl ClientOptions {
             || self.hostname.is_empty()
             || self.peers.is_empty()
             || self.peers.len() > MAX_PEERS
+            || self.exit_nodes.len() > MAX_PEERS
+            || self.exit_nodes.iter().any(|ip| !unicast(*ip))
+            || (self.secure_mode && matches!(self.encryption, Encryption::None))
         {
             return Err(invalid());
         }
@@ -95,6 +103,7 @@ impl ClientOptions {
             ipv6,
             hostname: self.hostname,
             encryption: self.encryption,
+            exit_nodes: self.exit_nodes,
         })
     }
 }
@@ -128,6 +137,7 @@ impl Prepared {
         config.set_ipv4(self.ipv4);
         config.set_ipv6(self.ipv6);
         config.set_dhcp(self.ipv4.is_none());
+        config.set_exit_nodes(self.exit_nodes.clone());
         let mut flags = config.get_flags();
         flags.no_tun = true;
         flags.bind_device = false;

@@ -178,13 +178,19 @@ impl Control {
     }
 
     fn hostinfo(&self, local: &LocalState) -> Value {
-        json!({
+        let mut info = json!({
             "IPNVersion": concat!("kerlico-", env!("CARGO_PKG_VERSION")),
             "OS": std::env::consts::OS,
             "Hostname": self.prepared.hostname,
             "Userspace": true,
             "NetInfo": {"PreferredDERP": local.home_derp},
-        })
+        });
+        if !self.prepared.advertise_tags.is_empty()
+            && let Some(obj) = info.as_object_mut()
+        {
+            obj.insert("RequestTags".into(), json!(self.prepared.advertise_tags));
+        }
+        info
     }
 
     async fn register(&self, send: &SendRequest<Bytes>) -> std::result::Result<(), Failure> {

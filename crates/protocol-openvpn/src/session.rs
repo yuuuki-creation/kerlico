@@ -177,7 +177,12 @@ impl Session {
     pub fn new(settings: Arc<Settings>, now: Instant) -> Result<Self> {
         let mut local = [0; 8];
         OsRng.fill_bytes(&mut local);
-        let negotiation = Negotiation::new(&settings, 0, Opcode::HardResetClient, now)?;
+        let reset_opcode = if settings.wrap.is_crypt_v2() {
+            Opcode::HardResetClientV3
+        } else {
+            Opcode::HardResetClient
+        };
+        let negotiation = Negotiation::new(&settings, 0, reset_opcode, now)?;
         let mut session = Self {
             wrap: ControlWrap::new(settings.wrap.clone()),
             local,

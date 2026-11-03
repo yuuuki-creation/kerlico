@@ -34,6 +34,16 @@ pub struct Config {
     pub nodes: Vec<NodeSpec>,
     #[serde(default)]
     pub local_inbounds: Vec<NodeSpec>,
+    #[serde(default, alias = "lan-allowed-ips")]
+    pub lan_allowed_ips: Vec<String>,
+    #[serde(default, alias = "lan-disallowed-ips")]
+    pub lan_disallowed_ips: Vec<String>,
+    #[serde(default, alias = "mixed-port")]
+    pub mixed_port: Option<u16>,
+    #[serde(default, alias = "redir-port")]
+    pub redir_port: Option<u16>,
+    #[serde(default, alias = "tproxy-port")]
+    pub tproxy_port: Option<u16>,
     #[serde(default)]
     pub limits: Limits,
     #[serde(default)]
@@ -272,27 +282,33 @@ pub struct ForwardSpec {
     #[serde(rename = "type")]
     pub kind: ForwardKind,
     pub listen: SocketAddr,
+    #[serde(default)]
     pub target: TargetSpec,
+    #[serde(default, alias = "follow-redirect")]
+    pub follow_redirect: bool,
     pub outbound: String,
     #[serde(default)]
     pub mode: NodeMode,
     #[serde(default)]
     pub require_remote_eof: bool,
 }
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub enum ForwardKind {
     #[serde(rename = "tcp-forward")]
     Tcp,
     #[serde(rename = "udp-forward")]
     Udp,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetSpec {
     pub host: String,
     pub port: u16,
 }
 impl TargetSpec {
+    pub fn is_empty(&self) -> bool {
+        self.host.is_empty() && self.port == 0
+    }
     pub fn destination(&self) -> Result<Destination> {
         Destination::new(&self.host, self.port)
     }
@@ -377,7 +393,7 @@ impl Registry {
     }
 
     /// 只校验与编译计划，不启动后端、创建状态文件、监听或配置设备。
-    pub fn prepare(&self, config: Config) -> Result<PreparedConfig> {
+    pub fn prepare(&self, mut config: Config) -> Result<PreparedConfig> {
         if config.version != 2 {
             return Err(Error::Config(
                 "仅支持配置版本 2；请按 docs/config-v2-migration.md 迁移账户、成员和原生凭据"
@@ -388,6 +404,35 @@ impl Registry {
             return Err(Error::Config("配置代次必须大于零".into()));
         }
         config.limits.validate()?;
+        let lan_filter =
+            kerlico_core::IpFilter::compile(&config.lan_allowed_ips, &config.lan_disallowed_ips)?;
+        let default_outbound = config.outbounds.first().map(|spec| spec.tag.clone());
+        for (port_opt, tag, kind) in [
+            (config.mixed_port, "mixed-in", "mixed"),
+            (config.redir_port, "redir-in", "redirect"),
+            (config.tproxy_port, "tproxy-in", "tproxy"),
+        ] {
+            if let Some(port) = port_opt {
+                if port == 0 {
+                    return Err(Error::Config("快捷入站端口不能为 0".into()));
+                }
+                let Some(outbound) = default_outbound.clone() else {
+                    return Err(Error::Config(
+                        "启用快捷入站端口时必须至少配置一个出站".into(),
+                    ));
+                };
+                config.local_inbounds.push(NodeSpec {
+                    tag: tag.into(),
+                    kind: kind.into(),
+                    listen: SocketAddr::from(([127, 0, 0, 1], port)),
+                    outbound,
+                    mode: NodeMode::Dual,
+                    options: empty_object(),
+                    members: Vec::new(),
+                    max_sessions: None,
+                });
+            }
+        }
         if let Some(history) = &config.telemetry {
             history.validate()?;
         }
@@ -447,14 +492,21 @@ impl Registry {
             if !tags.insert(node.clone()) {
                 return Err(Error::Config("入站标签重复".into()));
             }
-            if !spec.listen.ip().is_loopback() {
+            if !spec.listen.ip().is_loopback() && !lan_filter.has_allowed() {
                 return Err(Error::Config("固定转发入口只允许回环地址".into()));
             }
             let tcp = matches!(spec.kind, ForwardKind::Tcp);
+            if spec.follow_redirect && !tcp {
+                return Err(Error::Config("follow_redirect 仅支持 TCP 转发入口".into()));
+            }
             if spec.listen.port() != 0 && !listeners.insert((spec.listen, tcp)) {
                 return Err(Error::Config("监听地址重复".into()));
             }
-            let target = spec.target.destination()?;
+            let target = if spec.follow_redirect && spec.target.is_empty() {
+                Destination::new("127.0.0.1", 65535)?
+            } else {
+                spec.target.destination()?
+            };
             let outbound = OutId::parse(&spec.outbound)?;
             let (
                 Capabilities {
@@ -512,7 +564,10 @@ impl Registry {
                 .node_factories
                 .get(spec.kind.as_str())
                 .ok_or_else(|| Error::Config("节点协议未注册或未编译".into()))?;
-            if local && (!spec.listen.ip().is_loopback() || !factory.allows_local_inbound()) {
+            if local
+                && ((!spec.listen.ip().is_loopback() && !lan_filter.has_allowed())
+                    || !factory.allows_local_inbound())
+            {
                 return Err(Error::Config(
                     "本地代理入口必须回环监听，且模块须明确允许".into(),
                 ));
@@ -550,7 +605,10 @@ impl Registry {
                     "节点会话上限必须大于入口常驻占用的会话数".into(),
                 ));
             }
-            if protocol.requires_loopback() && !spec.listen.ip().is_loopback() {
+            if protocol.requires_loopback()
+                && !spec.listen.ip().is_loopback()
+                && !(local && lan_filter.has_allowed())
+            {
                 return Err(Error::Config("当前节点组合仅允许回环监听".into()));
             }
             if !protocol.supports_tcp() && !protocol.supports_udp() && !protocol.supports_virtual()
@@ -635,6 +693,7 @@ impl Registry {
             inbounds: config.inbounds,
             limits: config.limits,
             nodes,
+            lan_filter,
         })
     }
 }

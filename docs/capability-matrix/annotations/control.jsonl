@@ -1615,7 +1615,7 @@
 {"key": "user/inbound/in-user-match", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`routes[].user` 匹配 `members` 绑定的管理账户"}
 {"key": "user/inbound/users-override", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "`nodes` 必须有 `members`；`local_inbounds` 回环监听可无认证；没有全局用户可继承"}
 {"key": "user/masque/credentials", "kerlico": "no", "note": "MASQUE 服务端 users 条目的字段；建议暂不实现：kerlico 的 MASQUE 只有客户端出站，先把服务端需求排出来再做"}
-{"key": "user/mixed/credentials", "kerlico": "no", "note": "mixed 入站 users 条目的字段；建议实现：kerlico 的 SOCKS 和 HTTP 是分开的入站，没有 mixed；本地客户端一个端口同时接两种协议很常用"}
+{"key": "user/mixed/credentials", "kerlico": "yes", "note": "`mixed` 入站同时支持节点级 `users` 与内联 `{username, password}` 凭据", "where": "crates/protocol-http/src/inbound.rs"}
 {"key": "user/naive/credentials", "kerlico": "yes", "where": "crates/protocol-naive/src/config.rs", "note": "`members[].native_credential` 的 `username`、`password`"}
 {"key": "user/openvpn/credentials", "kerlico": "no", "note": "OpenVPN 服务端 users 条目的字段；建议暂不实现：kerlico 的 OpenVPN 只有客户端出站"}
 {"key": "user/policy/buffer-size", "kerlico": "no", "note": "每请求内部缓存 KB；建议暂不实现：kerlico 中继缓冲由实现固定，暂无调优需求"}

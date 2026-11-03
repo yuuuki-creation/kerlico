@@ -440,6 +440,105 @@ pub struct InboundContext {
     pub events: std::sync::Arc<dyn NodeObserver>,
 }
 
+impl InboundContext {
+    /// 返回透明代理或 NAT 重定向还原出的原始目标地址，未设置时回退到 `local_addr`。
+    pub fn original_dst(&self) -> Option<std::net::SocketAddr> {
+        self.peer_lease
+            .as_ref()
+            .and_then(PeerLease::original_dst)
+            .or(self.local_addr)
+    }
+}
+
+/// IPv4 或 IPv6 CIDR 网段。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Cidr {
+    network: IpAddr,
+    prefix: u8,
+}
+
+impl Cidr {
+    /// 解析字面 IP 或 CIDR 网段（拒绝 IPv4-mapped IPv6）。
+    pub fn parse(text: &str) -> Result<Self> {
+        let (address, prefix) = match text.split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix)),
+            None => (text, None),
+        };
+        let network: IpAddr = address.parse().map_err(|_| Error::InvalidAddress)?;
+        if network.to_canonical() != network {
+            return Err(Error::InvalidAddress);
+        }
+        let bits = if network.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            Some(prefix) => prefix.parse().map_err(|_| Error::InvalidAddress)?,
+            None => bits,
+        };
+        if prefix > bits {
+            return Err(Error::InvalidAddress);
+        }
+        Ok(Self { network, prefix })
+    }
+
+    /// 判断给定 IP 是否落在本网段内。
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match (self.network, ip.to_canonical()) {
+            (IpAddr::V4(network), IpAddr::V4(ip)) => {
+                let shift = 32 - u32::from(self.prefix);
+                shift >= 32 || (network.to_bits() ^ ip.to_bits()) >> shift == 0
+            }
+            (IpAddr::V6(network), IpAddr::V6(ip)) => {
+                let shift = 128 - u32::from(self.prefix);
+                shift >= 128 || (network.to_bits() ^ ip.to_bits()) >> shift == 0
+            }
+            _ => false,
+        }
+    }
+}
+
+/// 来源 IP 允许/拒绝过滤表：先检查 `disallowed`，再检查 `allowed`（为空表示不限制）。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IpFilter {
+    allowed: Vec<Cidr>,
+    disallowed: Vec<Cidr>,
+}
+
+impl IpFilter {
+    /// 编译允许与拒绝 CIDR 列表。
+    pub fn compile(allowed: &[String], disallowed: &[String]) -> Result<Self> {
+        let allowed = allowed
+            .iter()
+            .map(|text| Cidr::parse(text).map_err(|_| Error::Config("IP 过滤网段不合法".into())))
+            .collect::<Result<Vec<_>>>()?;
+        let disallowed = disallowed
+            .iter()
+            .map(|text| Cidr::parse(text).map_err(|_| Error::Config("IP 过滤网段不合法".into())))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            allowed,
+            disallowed,
+        })
+    }
+
+    /// 过滤表是否未配置任何规则。
+    pub fn is_empty(&self) -> bool {
+        self.allowed.is_empty() && self.disallowed.is_empty()
+    }
+
+    /// 是否允许了非空 `allowed` 列表。
+    pub fn has_allowed(&self) -> bool {
+        !self.allowed.is_empty()
+    }
+
+    /// 判断来源 IP 是否允许接入。
+    pub fn allows(&self, ip: IpAddr) -> bool {
+        let ip = ip.to_canonical();
+        if self.disallowed.iter().any(|cidr| cidr.contains(ip)) {
+            return false;
+        }
+        self.allowed.is_empty() || self.allowed.iter().any(|cidr| cidr.contains(ip))
+    }
+}
+
 /// 累计观测事件；物理会话与逻辑流可分别计数，不构成活跃连接快照。
 #[derive(Clone, Copy)]
 pub enum NodeEvent {
@@ -537,6 +636,10 @@ pub trait InboundProtocol: Send + Sync {
     fn supports_udp(&self) -> bool {
         false
     }
+    /// 是否需要为监听 socket 启用透明代理选项（如 Linux `IP_TRANSPARENT`）。
+    fn transparent(&self) -> bool {
+        false
+    }
     /// 是否自行管理虚拟载体入口；默认不支持。
     fn supports_virtual(&self) -> bool {
         false
@@ -592,6 +695,18 @@ mod tests {
             assert!(Destination::new(name, 1).is_err());
         }
         assert!(Destination::new("127.0.0.1", 0).is_err());
+    }
+
+    #[test]
+    fn ip_filter_checks_disallow_before_allow() {
+        let filter = IpFilter::compile(
+            &["192.168.0.0/16".to_string()],
+            &["192.168.1.10/32".to_string()],
+        )
+        .unwrap();
+        assert!(filter.allows("192.168.1.5".parse().unwrap()));
+        assert!(!filter.allows("192.168.1.10".parse().unwrap()));
+        assert!(!filter.allows("10.0.0.1".parse().unwrap()));
     }
 
     #[tokio::test]

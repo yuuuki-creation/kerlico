@@ -93,14 +93,14 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | 回落组合 |  |  | 有 | 未实现 | 未测 | protocol：`trojan`、`vless`<br>transport：`raw`<br>security：`tls`<br>match：`alpn`、`default`、`name`、`path`<br>dest：`tcp`、`uds`<br>xver：`0`、`1`、`2`<br>约束：gRPC 不支持回落到其他服务<br>约束：其他传输必须删掉 fallbacks<br>约束：只能用于 TCP+TLS<br>约束：有子元素时 Inbound TLS 需 alpn ["http/1.1"]<br>约束：被分流的 WS 入站无需 TLS<br>约束：通常先配一个默认回落 |
-| `alpn` | 匹配协商出的 ALPN，默认任意 |  |  | 有 | 未实现 | 未测 | 约束：fallbacks alpn 有 h2 时 Inbound TLS 须 alpn ["h2","http/1.1"] |
-| `dest` | 回落目标，必填 |  |  | 有 | 未实现 | 未测 | 取值：`"80"`、`/dev/shm/domain.socket`、`80`、`@@padded`、`@abstract`、`addr:port`<br>约束：只写端口时 addr 为 localhost（v25.7.26 起，之前 127.0.0.1）<br>约束：域名直接发 TCP，不走内置 DNS |
-| `match-priority` | 匹配最精确子元素，与顺序无关；alpn 和 path 相同时以最后为准 |  |  | 有 | 未实现 | 未测 |  |
-| `name` | 匹配 TLS SNI，默认任意 |  |  | 有 | 未实现 | 未测 |  |
-| `overview` | VLESS/Trojan 回落：解密后首包不合法或认证失败时转发到 dest |  |  | 有 | 未实现 | 未测 | 约束：VLESS 触发：解密后首包长度小于 18、版本无效或认证失败 |
-| `path` | 匹配首包 HTTP PATH，默认任意 |  |  | 有 | 未实现 | 未测 | 约束：alpn h2 不支持 path（source:infra/conf/vless.go）<br>约束：不支持 h2c<br>约束：最多看 55 字节<br>约束：非空必须以 / 开头 |
-| `type` | 回落网络类型，文档未写 |  |  | 有 | 未实现 | 未测 |  |
+| `combo` | 回落组合 |  |  | 有 | 已实现 | 通过 | protocol：`trojan`、`vless`<br>transport：`raw`<br>security：`tls`<br>match：`alpn`、`default`、`name`、`path`<br>dest：`tcp`、`uds`<br>xver：`0`、`1`、`2`<br>约束：gRPC 不支持回落到其他服务<br>约束：其他传输必须删掉 fallbacks<br>约束：只能用于 TCP+TLS<br>约束：有子元素时 Inbound TLS 需 alpn ["http/1.1"]<br>约束：被分流的 WS 入站无需 TLS<br>约束：通常先配一个默认回落 |
+| `alpn` | 匹配协商出的 ALPN，默认任意 |  |  | 有 | 已实现 | 通过 | 约束：fallbacks alpn 有 h2 时 Inbound TLS 须 alpn ["h2","http/1.1"] |
+| `dest` | 回落目标，必填 |  |  | 有 | 已实现 | 通过 | 取值：`"80"`、`/dev/shm/domain.socket`、`80`、`@@padded`、`@abstract`、`addr:port`<br>约束：只写端口时 addr 为 localhost（v25.7.26 起，之前 127.0.0.1）<br>约束：域名直接发 TCP，不走内置 DNS |
+| `match-priority` | 匹配最精确子元素，与顺序无关；alpn 和 path 相同时以最后为准 |  |  | 有 | 已实现 | 通过 |  |
+| `name` | 匹配 TLS SNI，默认任意 |  |  | 有 | 已实现 | 通过 |  |
+| `overview` | VLESS/Trojan 回落：解密后首包不合法或认证失败时转发到 dest |  |  | 有 | 已实现 | 通过 | 约束：VLESS 触发：解密后首包长度小于 18、版本无效或认证失败 |
+| `path` | 匹配首包 HTTP PATH，默认任意 |  |  | 有 | 已实现 | 通过 | 约束：alpn h2 不支持 path（source:infra/conf/vless.go）<br>约束：不支持 h2c<br>约束：最多看 55 字节<br>约束：非空必须以 / 开头 |
+| `type` | 回落网络类型，文档未写 |  |  | 有 | 已实现 | 通过 |  |
 | `xver` | 发送 PROXY protocol 版本，默认 0 |  |  | 有 | 未实现 | 未测 | 取值：`0`、`1`、`2` |
 
 ## global
@@ -111,14 +111,14 @@
 | `bind-address` | 绑定地址，仅允许经此地址访问 | 有 |  |  | 已实现 | 通过 | 取值：`*`、`IPv4 地址`、`[IPv6 地址]`<br>约束：仅 allow-lan 为 true 时有意义 |
 | `inbound-mptcp` | 入站 MPTCP（文档未写） | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `inbound-tfo` | 入站 TCP Fast Open（文档未写） | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `lan-allowed-ips` | 允许连接的地址段白名单，默认 0.0.0.0/0 与 ::/0 | 有 |  |  | 未实现 | 未测 | 取值：`CIDR 列表`<br>约束：仅作用于 allow-lan 为 true |
-| `lan-disallowed-ips` | 禁止连接的地址段黑名单，默认空 | 有 |  |  | 未实现 | 未测 | 取值：`CIDR 列表`<br>约束：黑名单优先级高于白名单 |
+| `lan-allowed-ips` | 允许连接的地址段白名单，默认 0.0.0.0/0 与 ::/0 | 有 |  |  | 已实现 | 通过 | 取值：`CIDR 列表`<br>约束：仅作用于 allow-lan 为 true |
+| `lan-disallowed-ips` | 禁止连接的地址段黑名单，默认空 | 有 |  |  | 已实现 | 通过 | 取值：`CIDR 列表`<br>约束：黑名单优先级高于白名单 |
 | `listeners` | 多入站列表，可同时建多个类型、地址、端口的入站并单独设 rule、proxy | 有 |  |  | 已实现 | 通过 | 取值：`数组`<br>约束：listen: 0.0.0.0 监听所有接口，未启用 TLS 的 HTTP、SOCKS、Mixed 不应直接暴露公网<br>约束：listener 中的 tun 面向高级场景 |
-| `mixed-port` | 混合端口，同时支持 HTTP(S) 与 SOCKS5 | 有 |  |  | 未实现 | 未测 | 取值：`端口` |
+| `mixed-port` | 混合端口，同时支持 HTTP(S) 与 SOCKS5 | 有 |  |  | 已实现 | 通过 | 取值：`端口` |
 | `port` | http(s) 代理端口 | 有 |  |  | 已实现 | 通过 | 取值：`端口` |
-| `redir-port` | redirect 透明代理端口 | 有 |  |  | 未实现 | 未测 | 取值：`端口`<br>约束：仅 Linux(Android)、macOS<br>约束：仅代理 TCP |
+| `redir-port` | redirect 透明代理端口 | 有 |  |  | 已实现 | 通过 | 取值：`端口`<br>约束：仅 Linux(Android)、macOS<br>约束：仅代理 TCP |
 | `socks-port` | socks4/4a/5 代理端口 | 有 |  |  | 已实现 | 通过 | 取值：`端口` |
-| `tproxy-port` | tproxy 透明代理端口 | 有 |  |  | 未实现 | 未测 | 取值：`端口`<br>约束：仅 Linux(Android)<br>约束：代理 TCP 与 UDP |
+| `tproxy-port` | tproxy 透明代理端口 | 有 |  |  | 已实现 | 通过 | 取值：`端口`<br>约束：仅 Linux(Android)<br>约束：代理 TCP 与 UDP |
 
 ## http
 
@@ -186,20 +186,20 @@
 | `client-auth-cert` | mTLS 客户端证书 | 有 |  |  | 未实现 | 未测 | 取值：`PEM`、`路径` |
 | `client-auth-type` | mTLS 类型 | 有 |  |  | 未实现 | 未测 | 取值：``、`request`、`require-and-verify`、`require-any`、`verify-if-given`<br>约束：verify-if-given、require-and-verify 时 client-auth-cert 必填 |
 | `cwnd` | hysteria2 入站字段 cwnd（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `down` | 速率，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `down-mbps` | 支持的速率，默认不限制。 |  | 有 |  | 未实现 | 未测 | 约束：与 `ignore_client_bandwidth` 冲突。 |
+| `down` | 速率，默认 Mbps | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `down-mbps` | 支持的速率，默认不限制。 |  | 有 |  | 已实现 | 通过 | 约束：与 `ignore_client_bandwidth` 冲突。 |
 | `ech-key` | ECH 密钥，填写即开启；可由 mihomo generate ech-keypair 生成 | 有 |  |  | 未实现 | 未测 | 取值：`PEM` |
 | `ignore-client-bandwidth` | 忽略客户端带宽，永远用传统拥塞控制 BBR | 有 | 有 |  | 部分 | 通过 | 取值：`false`、`true` |
 | `initial-connection-receive-window` | hysteria2 入站字段 initial-connection-receive-window（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `initial-stream-receive-window` | hysteria2 入站字段 initial-stream-receive-window（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `masquerade` | 伪装 HTTP/3，为空始终返回 404 | 有 | 有 |  | 未实现 | 未测 | 取值：`file:///path`、`file:///var/www`、`http://127.0.0.1:8080`、`http://host`、`https://`、`https://host`<br>约束：仅支持 file、http/https<br>约束：与 `masquerade.type` 冲突。 |
-| `masquerade-content` | 固定响应内容。 |  | 有 |  | 未实现 | 未测 |  |
-| `masquerade-directory` | 文件服务器根目录。 |  | 有 |  | 未实现 | 未测 |  |
-| `masquerade-headers` | 固定响应头。 |  | 有 |  | 未实现 | 未测 |  |
-| `masquerade-rewrite-host` | 重写请求头中的 Host 字段到目标 URL。 |  | 有 |  | 未实现 | 未测 |  |
-| `masquerade-status-code` | 固定响应状态码。 |  | 有 |  | 未实现 | 未测 |  |
-| `masquerade-type` | HTTP3 服务器认证失败时的行为 （对象配置）。 |  | 有 |  | 未实现 | 未测 | 取值：`file`、`proxy`、`string`<br>约束：与 `masquerade` 冲突。 |
-| `masquerade-url` | 反向代理目标 URL。 |  | 有 |  | 未实现 | 未测 |  |
+| `masquerade` | 伪装 HTTP/3，为空始终返回 404 | 有 | 有 |  | 已实现 | 通过 | 取值：`file:///path`、`file:///var/www`、`http://127.0.0.1:8080`、`http://host`、`https://`、`https://host`<br>约束：仅支持 file、http/https<br>约束：与 `masquerade.type` 冲突。 |
+| `masquerade-content` | 固定响应内容。 |  | 有 |  | 已实现 | 通过 |  |
+| `masquerade-directory` | 文件服务器根目录。 |  | 有 |  | 已实现 | 通过 |  |
+| `masquerade-headers` | 固定响应头。 |  | 有 |  | 已实现 | 通过 |  |
+| `masquerade-rewrite-host` | 重写请求头中的 Host 字段到目标 URL。 |  | 有 |  | 已实现 | 通过 |  |
+| `masquerade-status-code` | 固定响应状态码。 |  | 有 |  | 已实现 | 通过 |  |
+| `masquerade-type` | HTTP3 服务器认证失败时的行为 （对象配置）。 |  | 有 |  | 已实现 | 通过 | 取值：`file`、`proxy`、`string`<br>约束：与 `masquerade` 冲突。 |
+| `masquerade-url` | 反向代理目标 URL。 |  | 有 |  | 已实现 | 通过 |  |
 | `max-connection-receive-window` | hysteria2 入站字段 max-connection-receive-window（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `max-idle-time` | hysteria2 入站字段 max-idle-time（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `max-stream-receive-window` | hysteria2 入站字段 max-stream-receive-window（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
@@ -240,8 +240,8 @@
 | `realm-token` | Realm 的 Bearer 令牌，需与 realm 上配置的 `users[].token` 之一匹配。 |  | 有 |  | 未实现 | 未测 |  |
 | `tls` | TLS 配置, 参阅 TLS。 |  | 有 |  | 部分 | 通过 | 约束：必填 |
 | `udp-mtu` | hysteria2 入站字段 udp-mtu（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `up` | 速率，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `up-mbps` | 支持的速率，默认不限制。 |  | 有 |  | 未实现 | 未测 | 约束：与 `ignore_client_bandwidth` 冲突。 |
+| `up` | 速率，默认 Mbps | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `up-mbps` | 支持的速率，默认不限制。 |  | 有 |  | 已实现 | 通过 | 约束：与 `ignore_client_bandwidth` 冲突。 |
 | `users` | 用户映射；用户名不参与认证，仅用于 IN-USER | 有 | 有 |  | 已实现 | 通过 | 取值：`username: password` |
 | `users-name` | 用户名称，用于日志和 auth_user 匹配 |  | 有 |  | 已实现 | 通过 |  |
 | `users-password` | 认证密码。 |  | 有 |  | 已实现 | 通过 |  |
@@ -301,23 +301,23 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `masque` | MASQUE CONNECT-IP（RFC 9484）服务端 |  |  | 有 | 未实现 | 未测 | 取值：`masque`<br>约束：只能配 masque 传输且必须 tls<br>约束：每条隧道 HTTP Basic 认证，失败 401<br>约束：隧道内 TCP/UDP 还原后进路由；发往其他隧道地址的包直接转发 |
-| `protocol` | MASQUE（CONNECT-IP，RFC 9484）服务端端点 |  | 有 |  | 未实现 | 未测 | 取值：`masque-server`<br>约束：自 sing-box 1.15.0 起<br>约束：配置在顶层 endpoints，同时具备入站和出站行为 |
-| `combo` | MASQUE 服务端端点的版本、安全层和路由通告组合 |  | 有 | 有 | 未实现 | 未测 | version：`1`、`2`、`3`<br>security：`none(behind-tls-terminator)`、`tls`<br>auth：`none`、`users`<br>interface：`internal`、`system`<br>advertise_routes：`all`、`custom`<br>约束：IP 代理必须跑在 TLS 或 QUIC 上，只有前置终止 TLS 时才能不配<br>约束：address 必填，每个 IP 版本至多一个前缀<br>约束：发往未通告目标的客户端流量被拒绝<br>约束：默认提供全部 HTTP 版本，3 必须配 TLS<br>transport：`masque`<br>security：`tls`<br>http_version：`h2`、`h2+h3`、`h3`<br>ip_family：`dual`、`ipv4`、`ipv6`<br>约束：alpn 含 h2 时 TCP 提供 HTTP/2；含 h3 或不含 h2 时 UDP 提供 HTTP/3；都有时同端口同时提供<br>约束：不支持 REALITY |
-| `address` | 隧道网络的 IP 前缀列表，每个 IP 版本最多一个。 |  | 有 | 有 | 未实现 | 未测 | 约束：必填<br>约束：自 sing-box 1.15.0 起<br>约束：IPv4 前缀最大 30，IPv6 最大 126<br>约束：地址耗尽时只发另一地址族；都耗尽返回 503<br>约束：最多一个 IPv4 和一个 IPv6 前缀 |
-| `advertise-routes` | 除隧道网络外，向客户端声明的 IP 前缀列表。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.15.0 起<br>约束：默认声明全部地址。 |
-| `email` | 用户名，必填 |  |  | 有 | 未实现 | 未测 | 约束：不区分大小写不能重复<br>约束：不能含 : |
-| `level` | 用户等级，只使用其流量统计设置 |  |  | 有 | 未实现 | 未测 |  |
-| `mtu` | 隧道 MTU。 |  | 有 | 有 | 未实现 | 未测 | 取值：`1280-65535`<br>约束：自 sing-box 1.15.0 起<br>约束：默认使用 `1280`。 |
+| `masque` | MASQUE CONNECT-IP（RFC 9484）服务端 |  |  | 有 | 已实现 | 通过 | 取值：`masque`<br>约束：只能配 masque 传输且必须 tls<br>约束：每条隧道 HTTP Basic 认证，失败 401<br>约束：隧道内 TCP/UDP 还原后进路由；发往其他隧道地址的包直接转发 |
+| `protocol` | MASQUE（CONNECT-IP，RFC 9484）服务端端点 |  | 有 |  | 已实现 | 通过 | 取值：`masque-server`<br>约束：自 sing-box 1.15.0 起<br>约束：配置在顶层 endpoints，同时具备入站和出站行为 |
+| `combo` | MASQUE 服务端端点的版本、安全层和路由通告组合 |  | 有 | 有 | 已实现 | 通过 | version：`1`、`2`、`3`<br>security：`none(behind-tls-terminator)`、`tls`<br>auth：`none`、`users`<br>interface：`internal`、`system`<br>advertise_routes：`all`、`custom`<br>约束：IP 代理必须跑在 TLS 或 QUIC 上，只有前置终止 TLS 时才能不配<br>约束：address 必填，每个 IP 版本至多一个前缀<br>约束：发往未通告目标的客户端流量被拒绝<br>约束：默认提供全部 HTTP 版本，3 必须配 TLS<br>transport：`masque`<br>security：`tls`<br>http_version：`h2`、`h2+h3`、`h3`<br>ip_family：`dual`、`ipv4`、`ipv6`<br>约束：alpn 含 h2 时 TCP 提供 HTTP/2；含 h3 或不含 h2 时 UDP 提供 HTTP/3；都有时同端口同时提供<br>约束：不支持 REALITY |
+| `address` | 隧道网络的 IP 前缀列表，每个 IP 版本最多一个。 |  | 有 | 有 | 已实现 | 通过 | 约束：必填<br>约束：自 sing-box 1.15.0 起<br>约束：IPv4 前缀最大 30，IPv6 最大 126<br>约束：地址耗尽时只发另一地址族；都耗尽返回 503<br>约束：最多一个 IPv4 和一个 IPv6 前缀 |
+| `advertise-routes` | 除隧道网络外，向客户端声明的 IP 前缀列表。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.15.0 起<br>约束：默认声明全部地址。 |
+| `email` | 用户名，必填 |  |  | 有 | 已实现 | 通过 | 约束：不区分大小写不能重复<br>约束：不能含 : |
+| `level` | 用户等级，只使用其流量统计设置 |  |  | 有 | 已实现 | 通过 |  |
+| `mtu` | 隧道 MTU。 |  | 有 | 有 | 已实现 | 通过 | 取值：`1280-65535`<br>约束：自 sing-box 1.15.0 起<br>约束：默认使用 `1280`。 |
 | `name` | 系统接口的自定义接口名称。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.15.0 起<br>约束：默认使用自动生成的 `masque` 接口名称。 |
-| `pass` | 密码，必填 |  |  | 有 | 未实现 | 未测 |  |
-| `path` | IP 代理资源的 URI 模板路径，可以包含 `target` 和 `ipproto` 变量。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.15.0 起<br>约束：默认使用 `/.well-known/masque/ip/{target}/{ipproto}/`。 |
+| `pass` | 密码，必填 |  |  | 有 | 已实现 | 通过 |  |
+| `path` | IP 代理资源的 URI 模板路径，可以包含 `target` 和 `ipproto` 变量。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.15.0 起<br>约束：默认使用 `/.well-known/masque/ip/{target}/{ipproto}/`。 |
 | `system` | 使用系统接口。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.15.0 起<br>约束：需要特权且不能与已有系统接口冲突。 |
-| `tls` | TLS 配置，参阅 TLS。 |  | 有 |  | 未实现 | 未测 | 约束：IP 代理必须运行在 TLS 或 QUIC 之上。<br>约束：仅当服务器位于终止 TLS 的 HTTP 中间层之后时才可以不启用。<br>约束：自 sing-box 1.15.0 起 |
-| `users` | HTTP 用户，通过 `Authorization` 标头验证。 |  | 有 | 有 | 未实现 | 未测 | 约束：如果为空则不需要验证。<br>约束：自 sing-box 1.15.0 起<br>约束：API 删除用户时立即关闭其隧道<br>约束：没有用户时所有连接被拒绝 |
-| `users-password` | 密码 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.15.0 起 |
-| `users-username` | 用户名 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.15.0 起 |
-| `version` | 提供的 HTTP 版本列表。 |  | 有 |  | 未实现 | 未测 | 取值：`1`、`2`、`3`<br>约束：`3` 需要 TLS。<br>约束：自 sing-box 1.15.0 起<br>约束：默认提供全部版本。 |
+| `tls` | TLS 配置，参阅 TLS。 |  | 有 |  | 已实现 | 通过 | 约束：IP 代理必须运行在 TLS 或 QUIC 之上。<br>约束：仅当服务器位于终止 TLS 的 HTTP 中间层之后时才可以不启用。<br>约束：自 sing-box 1.15.0 起 |
+| `users` | HTTP 用户，通过 `Authorization` 标头验证。 |  | 有 | 有 | 已实现 | 通过 | 约束：如果为空则不需要验证。<br>约束：自 sing-box 1.15.0 起<br>约束：API 删除用户时立即关闭其隧道<br>约束：没有用户时所有连接被拒绝 |
+| `users-password` | 密码 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.15.0 起 |
+| `users-username` | 用户名 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.15.0 起 |
+| `version` | 提供的 HTTP 版本列表。 |  | 有 |  | 已实现 | 通过 | 取值：`1`、`2`、`3`<br>约束：`3` 需要 TLS。<br>约束：自 sing-box 1.15.0 起<br>约束：默认提供全部版本。 |
 
 ## mieru
 
@@ -334,9 +334,9 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `mixed` | socks 配置的协议别名，Socks 入站同时接受 HTTP |  |  | 有 | 未实现 | 未测 | 取值：`mixed` |
-| `protocol` | Mixed 入站 | 有 | 有 |  | 未实现 | 未测 | 取值：`mixed`<br>约束：可作 detour 注入目标（Injectable：TCP） |
-| `combo` | Mixed 入站组合 | 有 | 有 |  | 未实现 | 未测 | tls：`mtls`、`none`、`tls`<br>ech：`off`、`on`<br>auth：`global`、`users`、`users: []`<br>udp：`false`、`true`<br>protocol：`http`、`socks5`<br>约束：ech 依赖 tls<br>约束：source:listener/inbound/mixed.go 另有 reality-config<br>protocol：`http`、`socks4`、`socks4a`、`socks5`<br>auth：`none`、`users`<br>set_system_proxy：`off`、`on`<br>约束：Android 和 Apple 无特权时用 tun.platform.http_proxy<br>约束：set_system_proxy 仅支持 Linux、Android、Windows、macOS |
+| `mixed` | socks 配置的协议别名，Socks 入站同时接受 HTTP |  |  | 有 | 已实现 | 通过 | 取值：`mixed` |
+| `protocol` | Mixed 入站 | 有 | 有 |  | 已实现 | 通过 | 取值：`mixed`<br>约束：可作 detour 注入目标（Injectable：TCP） |
+| `combo` | Mixed 入站组合 | 有 | 有 |  | 已实现 | 通过 | tls：`mtls`、`none`、`tls`<br>ech：`off`、`on`<br>auth：`global`、`users`、`users: []`<br>udp：`false`、`true`<br>protocol：`http`、`socks5`<br>约束：ech 依赖 tls<br>约束：source:listener/inbound/mixed.go 另有 reality-config<br>protocol：`http`、`socks4`、`socks4a`、`socks5`<br>auth：`none`、`users`<br>set_system_proxy：`off`、`on`<br>约束：Android 和 Apple 无特权时用 tun.platform.http_proxy<br>约束：set_system_proxy 仅支持 Linux、Android、Windows、macOS |
 | `certificate` | TLS 证书，PEM 或路径 | 有 |  |  | 未实现 | 未测 | 取值：`PEM`、`路径`<br>约束：与 private-key 同时填写才开启 tls |
 | `client-auth-cert` | mTLS 客户端证书 | 有 |  |  | 未实现 | 未测 | 取值：`PEM`、`路径` |
 | `client-auth-type` | mTLS 类型 | 有 |  |  | 未实现 | 未测 | 取值：``、`request`、`require-and-verify`、`require-any`、`verify-if-given`<br>约束：verify-if-given、require-and-verify 时 client-auth-cert 必填 |
@@ -346,10 +346,10 @@
 | `reality-config` | mixed 入站字段 reality-config（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `set-system-proxy` | 启动时自动设置系统代理，停止时自动清理。 |  | 有 |  | 未实现 | 未测 | 约束：仅支持 Linux、Android、Windows 和 macOS。 |
 | `tls` | mixed 入站的 TLS 字段，配置文档未列 |  | 有 |  | 未实现 | 未测 |  |
-| `udp` | 是否监听 UDP | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `users` | SOCKS 和 HTTP 用户如果为空则不需要验证。 |  | 有 |  | 未实现 | 未测 |  |
-| `users-password` | 密码 | 有 | 有 |  | 未实现 | 未测 | 取值：`字符串` |
-| `users-username` | 用户名 | 有 | 有 |  | 未实现 | 未测 | 取值：`字符串`<br>约束：不填 users 遵从全局验证；填写忽略全局；users: [] 跳过该入站验证 |
+| `udp` | 是否监听 UDP | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `users` | SOCKS 和 HTTP 用户如果为空则不需要验证。 |  | 有 |  | 已实现 | 通过 |  |
+| `users-password` | 密码 | 有 | 有 |  | 已实现 | 通过 | 取值：`字符串` |
+| `users-username` | 用户名 | 有 | 有 |  | 已实现 | 通过 | 取值：`字符串`<br>约束：不填 users 遵从全局验证；填写忽略全局；users: [] 跳过该入站验证 |
 
 ## naive
 
@@ -454,8 +454,8 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | Redirect 透明代理入站，type 写 redir | 有 |  |  | 未实现 | 未测 | 取值：`redir`<br>约束：仅 Linux(Android)、macOS<br>约束：仅 TCP |
-| `combo` | Redirect 入站组合 | 有 |  |  | 未实现 | 未测 | network：`tcp`<br>platform：`android`、`linux`、`macos`<br>约束：不代理 UDP |
+| `protocol` | Redirect 透明代理入站，type 写 redir | 有 |  |  | 已实现 | 通过 | 取值：`redir`<br>约束：仅 Linux(Android)、macOS<br>约束：仅 TCP |
+| `combo` | Redirect 入站组合 | 有 |  |  | 已实现 | 通过 | network：`tcp`<br>platform：`android`、`linux`、`macos`<br>约束：不代理 UDP |
 
 ## shadowquic
 
@@ -736,9 +736,9 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | TProxy 透明代理入站 | 有 |  |  | 未实现 | 未测 | 约束：仅 Linux(Android) |
-| `combo` | TProxy 入站组合 | 有 |  |  | 未实现 | 未测 | network：`tcp`、`udp`<br>约束：DSCP 规则仅限 tproxy udp 入站 |
-| `udp` | 是否监听 UDP | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `protocol` | TProxy 透明代理入站 | 有 |  |  | 已实现 | 通过 | 约束：仅 Linux(Android) |
+| `combo` | TProxy 入站组合 | 有 |  |  | 已实现 | 通过 | network：`tcp`、`udp`<br>约束：DSCP 规则仅限 tproxy udp 入站 |
+| `udp` | 是否监听 UDP | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 
 ## trojan
 
@@ -754,13 +754,13 @@
 | `clients` | users 的别名 |  |  | 有 | 已实现 | 通过 |  |
 | `ech-key` | ECH 密钥，填写即开启；可由 mihomo generate ech-keypair 生成 | 有 |  |  | 未实现 | 未测 | 取值：`PEM` |
 | `email` | 邮箱 |  |  | 有 | 已实现 | 通过 | 约束：多用户时不可重复 |
-| `fallback` | 回退服务器配置。 |  | 有 |  | 未实现 | 未测 |  |
-| `fallback-for-alpn` | 为 ALPN 指定回退服务器配置。 |  | 有 |  | 未实现 | 未测 |  |
-| `fallback-for-alpn-server` | 服务器地址 |  | 有 |  | 未实现 | 未测 |  |
-| `fallback-for-alpn-server-port` | 服务器端口 |  | 有 |  | 未实现 | 未测 |  |
-| `fallback-server` | 服务器地址 |  | 有 |  | 未实现 | 未测 |  |
-| `fallback-server-port` | 服务器端口 |  | 有 |  | 未实现 | 未测 |  |
-| `fallbacks` | 回落配置数组 |  |  | 有 | 未实现 | 未测 | 约束：触发条件：首包长度小于 58、第 57 字节不是 \r 或认证失败 |
+| `fallback` | 回退服务器配置。 |  | 有 |  | 已实现 | 通过 |  |
+| `fallback-for-alpn` | 为 ALPN 指定回退服务器配置。 |  | 有 |  | 已实现 | 通过 |  |
+| `fallback-for-alpn-server` | 服务器地址 |  | 有 |  | 已实现 | 通过 |  |
+| `fallback-for-alpn-server-port` | 服务器端口 |  | 有 |  | 已实现 | 通过 |  |
+| `fallback-server` | 服务器地址 |  | 有 |  | 已实现 | 通过 |  |
+| `fallback-server-port` | 服务器端口 |  | 有 |  | 已实现 | 通过 |  |
+| `fallbacks` | 回落配置数组 |  |  | 有 | 已实现 | 通过 | 约束：触发条件：首包长度小于 58、第 57 字节不是 \r 或认证失败 |
 | `flow` | Trojan flow |  |  | 已移除 | 未实现 | 未测 | 约束：配置时报错 |
 | `grpc-service-name` | 不为空开启 gRPC 传输 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
 | `jls-config-alpn` | ALPN | 有 |  |  | 未实现 | 未测 | 取值：`列表` |
@@ -941,7 +941,7 @@
 | `address` | rewriteAddress 的旧名 |  |  | 有 | 不适用 | 未测 |  |
 | `allowed-network` | 可接收的网络类型，默认 tcp |  |  | 有 | 部分 | 通过 | 取值：`tcp`、`tcp,udp`、`udp` |
 | `dokodemo-door` | 协议名别名 dokodemo-door，指向 Tunnel 页 |  |  | 有 | 不适用 | 未测 |  |
-| `follow-redirect` | 识别 iptables 转发数据并转发到原目标 |  |  | 有 | 未实现 | 未测 | 取值：`false`、`true`<br>约束：sockopt.tproxy 为空时被设为 redirect |
+| `follow-redirect` | 识别 iptables 转发数据并转发到原目标 |  |  | 有 | 已实现 | 通过 | 取值：`false`、`true`<br>约束：sockopt.tproxy 为空时被设为 redirect |
 | `network` | 转发的网络 | 有 |  | 有 | 已实现 | 通过 | 取值：`tcp`、`udp` |
 | `port` | rewritePort 的旧名 |  |  | 有 | 不适用 | 未测 |  |
 | `port-map` | 本地端口到远端地址/端口映射，未命中按 rewrite 处理 |  |  | 有 | 未实现 | 未测 | 取值：`"5555":"1.1.1.1:7777"`、`"5556":":8888"`、`"5557":"example.com:"` |
@@ -980,7 +980,7 @@
 | `decryption-ticket` | 第 3 块会话恢复票据有效时间 |  |  | 有 | 部分 | 通过 | 取值：`100-500s`、`600s`<br>约束：600s 表示 300-600s 随机 |
 | `ech-key` | ECH 密钥，填写即开启；可由 mihomo generate ech-keypair 生成 | 有 |  |  | 未实现 | 未测 | 取值：`PEM` |
 | `email` | 用户邮箱，用于日志和统计 |  |  | 有 | 已实现 | 通过 |  |
-| `fallbacks` | 回落配置数组 |  |  | 有 | 未实现 | 未测 |  |
+| `fallbacks` | 回落配置数组 |  |  | 有 | 已实现 | 通过 |  |
 | `flow` | 单用户流控 |  |  | 有 | 已实现 | 通过 | 取值：``、`xtls-rprx-vision`<br>约束：XTLS 仅在 TCP+TLS/REALITY 或 VLESS Encryption 下可用<br>约束：非空时无法把单用户 flow 设为空 |
 | `grpc-service-name` | 不为空开启 gRPC 传输 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
 | `id` | 用户 ID：UUID 或小于 30 字节字符串（映射 UUIDv5） |  |  | 有 | 部分 | 通过 |  |

@@ -13,9 +13,28 @@ use std::{
     },
     task::{Context, Poll, Wake, Waker},
 };
+#[derive(Clone)]
+pub(crate) struct PortHop {
+    pub ranges: Vec<std::ops::RangeInclusive<u16>>,
+    pub interval: std::time::Duration,
+}
+impl PortHop {
+    fn pick(&self) -> u16 {
+        let range = &self.ranges[rand::rngs::OsRng.next_u32() as usize % self.ranges.len()];
+        let span = u32::from(range.end() - range.start()) + 1;
+        *range.start() + (rand::rngs::OsRng.next_u32() % span) as u16
+    }
+}
+struct HopState {
+    nominal_port: u16,
+    active_port: u16,
+    next_hop: std::time::Instant,
+    config: PortHop,
+}
 pub(crate) struct Settings {
     pub carrier: Carrier,
     pub key: Option<Arc<[u8]>>,
+    pub hop: Option<PortHop>,
 }
 impl Settings {
     fn overhead(&self) -> usize {
@@ -125,6 +144,7 @@ impl Wake for Writers {
 struct Raw {
     socket: Mutex<Option<tokio::net::UdpSocket>>,
     address: SocketAddr,
+    hop: Option<Mutex<HopState>>,
     reader: Mutex<Option<Waker>>,
     writer: Arc<Writers>,
 }
@@ -207,7 +227,21 @@ impl AsyncUdpSocket for Raw {
             .lock()
             .map_err(|_| io::Error::other("Hysteria v1 UDP 状态不可用"))?;
         let socket = guard.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-        let sent = socket.try_send_to(transmit.contents, transmit.destination)?;
+        let mut destination = transmit.destination;
+        if let Some(hop) = &self.hop
+            && let Ok(mut state) = hop.lock()
+        {
+            if state.nominal_port == 0 {
+                state.nominal_port = destination.port();
+            }
+            let now = std::time::Instant::now();
+            if now >= state.next_hop {
+                state.active_port = state.config.pick();
+                state.next_hop = now + state.config.interval;
+            }
+            destination.set_port(state.active_port);
+        }
+        let sent = socket.try_send_to(transmit.contents, destination)?;
         if sent != transmit.contents.len() {
             return Err(io::ErrorKind::WriteZero.into());
         }
@@ -235,7 +269,13 @@ impl AsyncUdpSocket for Raw {
         loop {
             std::task::ready!(socket.poll_recv_ready(cx))?;
             match socket.try_recv_from(&mut output[0]) {
-                Ok((len, addr)) => {
+                Ok((len, mut addr)) => {
+                    if let Some(hop) = &self.hop
+                        && let Ok(state) = hop.lock()
+                        && state.nominal_port != 0
+                    {
+                        addr.set_port(state.nominal_port);
+                    }
                     meta[0] = udp::RecvMeta {
                         addr,
                         len,
@@ -272,9 +312,19 @@ pub(crate) fn wrap(
     settings: Arc<Settings>,
 ) -> io::Result<(Arc<dyn AsyncUdpSocket>, Close)> {
     let address = socket.local_addr()?;
+    let hop = settings.hop.clone().map(|config| {
+        let initial = config.pick();
+        Mutex::new(HopState {
+            nominal_port: 0,
+            active_port: initial,
+            next_hop: std::time::Instant::now() + config.interval,
+            config,
+        })
+    });
     let raw = Arc::new(Raw {
         socket: Mutex::new(Some(tokio::net::UdpSocket::from_std(socket)?)),
         address,
+        hop,
         reader: Mutex::new(None),
         writer: Arc::new(Writers(Mutex::new(Vec::new()))),
     });
@@ -399,7 +449,11 @@ mod tests {
         assert_eq!(mask(b"a", b"bc"), expected);
         for carrier in [Carrier::Udp, Carrier::WechatVideo] {
             for key in [None, Some(Arc::from(b"xplus-test-only-key".as_slice()))] {
-                let settings = Settings { carrier, key };
+                let settings = Settings {
+                    carrier,
+                    key,
+                    hop: None,
+                };
                 let payload = vec![17; 1200];
                 let bytes = pack(&settings, 0x01020304, &payload);
                 assert_eq!(unpack(&settings, &bytes).unwrap(), payload);

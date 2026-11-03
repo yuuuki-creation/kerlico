@@ -71,6 +71,7 @@ impl NodeFactory for Hysteria1NodeFactory {
             socket: Arc::new(crate::socket::Settings {
                 carrier: options.transport,
                 key: config::obfs(options.obfs)?,
+                hop: None,
             }),
             udp: options.udp,
             limits: options.limits,

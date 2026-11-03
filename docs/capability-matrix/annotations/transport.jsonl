@@ -154,7 +154,7 @@
 {"key": "security/reality/support-x25519mlkem768", "kerlico": "yes", "where": "third_party/xray-transport/src/reality_rustls.rs", "note": "握手密钥组固定含 X25519MLKEM768，不需要开关"}
 {"key": "security/reality/target", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "节点 `security.cover`"}
 {"key": "security/reality/type", "kerlico": "no", "where": "", "note": "回落网络类型，文档未写。建议暂不实现：kerlico 回落只走 TCP，Xray 文档也未写这个字段"}
-{"key": "security/reality/xver", "kerlico": "no", "where": "", "note": "仅服务端，PROXY protocol 版本。建议实现：和 PROXY protocol 一起做，回落目标才能看到真实来源"}
+{"key": "security/reality/xver", "kerlico": "yes", "where": "crates/net/src/fallback.rs", "note": "`FallbackRule.xver`（`1` 或 `2`）在回落连接首部写入 PROXY protocol v1/v2 传递真实来源与目标地址"}
 {"key": "security/restls/password", "kerlico": "no", "where": "", "note": "Restls 密码。建议暂不实现：Mihomo 独有的 TLS 伪装，互通面窄"}
 {"key": "security/restls/restls-script", "kerlico": "no", "where": "", "note": "握手后载体流量脚本。建议暂不实现：Mihomo 独有的 TLS 伪装，互通面窄"}
 {"key": "security/restls/version-hint", "kerlico": "no", "where": "", "note": "TLS 版本提示。建议暂不实现：Mihomo 独有的 TLS 伪装，互通面窄"}
@@ -466,17 +466,17 @@
 {"key": "transport/httpupgrade/type", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs, crates/protocol-trojan/src/config.rs, crates/protocol-vmess/src/carrier.rs", "note": "`transport.type: httpupgrade`"}
 {"key": "transport/hysteria/auth", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "`auth`，节点侧在 members 的 native_credential"}
 {"key": "transport/hysteria/combo", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "kerlico 的 Hysteria2 是独立协议，不能作为 Xray 那样的 hysteria 传输叠加 VLESS"}
-{"key": "transport/hysteria/content", "kerlico": "no", "where": "", "note": "string 类型内容。建议实现：HTTP/3 伪装页的一部分，见 hysteria/masquerade"}
+{"key": "transport/hysteria/content", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.content` 伪装响应内容"}
 {"key": "transport/hysteria/dir", "kerlico": "no", "where": "", "note": "file 类型目录。建议暂不实现：kerlico 不想内置静态文件服务，proxy、string 够用"}
-{"key": "transport/hysteria/headers", "kerlico": "no", "where": "", "note": "string 类型响应头。建议实现：HTTP/3 伪装页的一部分，见 hysteria/masquerade"}
+{"key": "transport/hysteria/headers", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.headers` 伪装响应自定义 HTTP 标头"}
 {"key": "transport/hysteria/hysteria", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "协议 `hysteria2`，两端都有；和官方实现按原生协议互通"}
-{"key": "transport/hysteria/insecure", "kerlico": "no", "where": "", "note": "proxy 类型跳过证书校验。建议实现：proxy 类型伪装的一部分，见 hysteria/masquerade"}
+{"key": "transport/hysteria/insecure", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.insecure` 反向代理伪装上游配置"}
 {"key": "transport/hysteria/masquerade", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "鉴权失败固定回 404，等于 Xray 默认；不能配置 string、file、proxy 伪装"}
-{"key": "transport/hysteria/rewrite-host", "kerlico": "no", "where": "", "note": "proxy 类型改写 Host。建议实现：proxy 类型伪装的一部分，见 hysteria/masquerade"}
-{"key": "transport/hysteria/status-code", "kerlico": "no", "where": "", "note": "string 类型状态码。建议实现：HTTP/3 伪装页的一部分，见 hysteria/masquerade"}
+{"key": "transport/hysteria/rewrite-host", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.rewrite_host` 重写反代请求 `Host` 头"}
+{"key": "transport/hysteria/status-code", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.status_code` 伪装响应状态码"}
 {"key": "transport/hysteria/type", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "只有不配置时的 404；没有 file、proxy、string"}
 {"key": "transport/hysteria/udp-idle-timeout", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "没有 UDP 专用项；业务空闲取 `limits.idle_timeout_ms` 和全局 `limits.idle_timeout_ms` 的较小值"}
-{"key": "transport/hysteria/url", "kerlico": "no", "where": "", "note": "proxy 类型目标。建议实现：proxy 类型伪装的一部分，见 hysteria/masquerade"}
+{"key": "transport/hysteria/url", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.url` 伪装反向代理目标 URL"}
 {"key": "transport/hysteria/version", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "版本 2 用协议 `hysteria2`；版本 1 另有协议 `hysteria1`"}
 {"key": "transport/hysteria/x-forwarded", "kerlico": "no", "where": "", "note": "proxy 类型 X-Forwarded 头，文档未写。建议暂不实现：proxy 伪装的细节字段，先做 url 和 rewrite-host"}
 {"key": "transport/list/methods", "kerlico": "na", "where": "", "note": "只描述 Xray 文档的传输列表页结构，不是能力"}
@@ -673,11 +673,11 @@
 {"key": "tun/redirect/protocol", "kerlico": "no", "where": "", "note": "透明代理 Redirect 入站。建议暂不实现：只能接 TCP；要做透明代理优先 TProxy"}
 {"key": "tun/system-proxy/http-proxy-env", "kerlico": "yes", "where": "crates/protocol-http/src/inbound.rs", "note": "HTTP 入站可被 http_proxy、https_proxy 环境变量指向，kerlico 不自动设置"}
 {"key": "tun/system-proxy/set-system-proxy", "kerlico": "no", "where": "", "note": "http、mixed 入站自动设置和清理系统代理。建议暂不实现：kerlico 只发行 Linux x86_64 内核程序，不碰桌面设置"}
-{"key": "tun/tproxy/combo", "kerlico": "no", "where": "", "note": "透明代理组合。建议实现：透明代理是路由器常见部署；kerlico 现在只有 TUN 和显式代理入站"}
-{"key": "tun/tproxy/network", "kerlico": "no", "where": "", "note": "监听的网络协议，tcp udp 之一。建议实现：透明代理是路由器常见部署；kerlico 现在只有 TUN 和显式代理入站"}
-{"key": "tun/tproxy/protocol", "kerlico": "no", "where": "", "note": "透明代理 TProxy 入站。建议实现：透明代理是路由器常见部署；kerlico 现在只有 TUN 和显式代理入站"}
-{"key": "tun/tproxy/tproxy", "kerlico": "no", "where": "", "note": "透明代理模式。建议实现：透明代理是路由器常见部署；kerlico 现在只有 TUN 和显式代理入站"}
-{"key": "tun/transparent/combo", "kerlico": "no", "where": "", "note": "透明接入和系统代理方式的组合。建议实现：透明代理是路由器常见部署；kerlico 现在只有 TUN 和显式代理入站"}
+{"key": "tun/tproxy/combo", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "`tproxy` 与 `redirect` 入站节点支持 TCP/UDP 透明代理接入"}
+{"key": "tun/tproxy/network", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "`tproxy` 支持 `network`（`tcp`、`udp` 或同时启用）控制透明代理协议族"}
+{"key": "tun/tproxy/protocol", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "入站 `type = \"tproxy\"` 与 `type = \"redirect\"`"}
+{"key": "tun/tproxy/tproxy", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "`TproxyInbound` 基于套接字透明选项与原始目标地址恢复转发"}
+{"key": "tun/transparent/combo", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "`tun`、`tproxy`、`redirect` 与 `tunnel`（`follow_redirect`）透明接入能力"}
 {"key": "tun/tun/address", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`addresses`，每个地址族最多一个"}
 {"key": "tun/tun/auto-detect-interface", "kerlico": "no", "where": "", "note": "自动选择出口接口。建议实现：全局接管时防回环；现在要手写 direct `interface`"}
 {"key": "tun/tun/auto-outbounds-interface", "kerlico": "no", "where": "", "note": "为所有出站自动绑定物理接口，防回环。建议实现：全局接管时防回环；现在要手写 direct `interface`"}

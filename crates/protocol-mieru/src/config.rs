@@ -29,11 +29,44 @@ fn padding() -> u8 {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Endpoint {
     pub host: String,
-    pub port: u16,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default, alias = "port-range")]
+    pub port_range: Option<String>,
 }
 impl Endpoint {
-    pub fn destination(self) -> Result<Destination> {
-        Destination::new(&self.host, self.port)
+    pub fn destination_and_ports(
+        self,
+        outer_port_range: Option<String>,
+    ) -> Result<(Destination, std::ops::RangeInclusive<u16>)> {
+        if self.port_range.is_some() && outer_port_range.is_some() {
+            return Err(invalid());
+        }
+        let range_spec = self.port_range.or(outer_port_range);
+        let ports = match (self.port, range_spec) {
+            (Some(port), None) if port > 0 => port..=port,
+            (None, Some(raw)) => parse_port_range(&raw)?,
+            _ => return Err(invalid()),
+        };
+        let dest = Destination::new(&self.host, *ports.start())?;
+        Ok((dest, ports))
+    }
+}
+fn parse_port_range(raw: &str) -> Result<std::ops::RangeInclusive<u16>> {
+    let raw = raw.trim();
+    if let Some((start, end)) = raw.split_once('-') {
+        let start = start.trim().parse::<u16>().map_err(|_| invalid())?;
+        let end = end.trim().parse::<u16>().map_err(|_| invalid())?;
+        if start == 0 || start > end {
+            return Err(invalid());
+        }
+        Ok(start..=end)
+    } else {
+        let port = raw.parse::<u16>().map_err(|_| invalid())?;
+        if port == 0 {
+            return Err(invalid());
+        }
+        Ok(port..=port)
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -87,6 +120,8 @@ impl Traffic {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientOptions {
     pub server: Endpoint,
+    #[serde(default, alias = "port-range")]
+    pub port_range: Option<String>,
     pub username: String,
     pub password: String,
     #[serde(default = "transport_default")]

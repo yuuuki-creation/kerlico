@@ -23,6 +23,7 @@ struct SocksNode {
     version: Version,
     auth: CredentialSet<Auth>,
     userid: String,
+    allow_udp: bool,
 }
 
 fn budget(context: &InboundContext) -> ConnectContext {
@@ -150,6 +151,10 @@ impl SocksNode {
             })
             .await?;
         if command == 3 {
+            if !self.allow_udp {
+                response(&mut stream, 7, SocketAddr::from(([0, 0, 0, 0], 0))).await?;
+                return Err(Error::Unsupported("SOCKS UDP关联未启用"));
+            }
             return self
                 .udp(stream, &host, port, access, handshake, context)
                 .await;
@@ -431,6 +436,45 @@ impl NodeFactory for SocksNodeFactory {
             version: options.version,
             auth: input.credentials(rows)?,
             userid: options.userid,
+            allow_udp: true,
         }))
     }
+}
+
+/// 为 `mixed` 入站构造内部 SOCKS5 与 SOCKS4/4a 处理器。
+pub type MixedSocksNodes = (Arc<dyn InboundProtocol>, Option<Arc<dyn InboundProtocol>>);
+
+pub fn build_mixed_socks(
+    input: &NodeBuildContext,
+    userid: String,
+    allow_udp: bool,
+) -> Result<MixedSocksNodes> {
+    config::validate(Version::FourA, &None, &userid)?;
+    let rows = input
+        .native_credentials()
+        .iter()
+        .map(|value| {
+            let auth: Auth = serde_json::from_value(value.clone())
+                .map_err(|_| Error::Config("SOCKS 用户凭据字段不合法".into()))?;
+            auth.validate()?;
+            Ok(auth)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let socks4 = if rows.is_empty() {
+        Some(Arc::new(SocksNode {
+            version: Version::FourA,
+            auth: input.credentials(Vec::new())?,
+            userid,
+            allow_udp: false,
+        }) as Arc<dyn InboundProtocol>)
+    } else {
+        None
+    };
+    let socks5 = Arc::new(SocksNode {
+        version: Version::Five,
+        auth: input.credentials(rows)?,
+        userid: String::new(),
+        allow_udp,
+    }) as Arc<dyn InboundProtocol>;
+    Ok((socks5, socks4))
 }

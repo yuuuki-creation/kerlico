@@ -10,6 +10,7 @@ use kerlico_core::{
     BoxFuture, BoxStream, ConnectContext, CredentialManifest, CredentialSet, Error, InboundContext,
     InboundProtocol, IngressBinding, Result,
 };
+use kerlico_net::fallback::{FallbackRule, FallbackRuleInput, RecordingStream, try_fallback};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, io::Cursor, sync::Arc};
@@ -29,6 +30,8 @@ struct Options {
     transport: crate::server_http::Input,
     #[serde(default = "none")]
     decryption: String,
+    #[serde(default)]
+    fallbacks: Vec<FallbackRuleInput>,
 }
 fn none() -> String {
     "none".into()
@@ -75,6 +78,7 @@ const XUDP_DETACHED_GRACE: std::time::Duration = std::time::Duration::from_secs(
 pub(crate) struct Payload {
     users: CredentialSet<User>,
     decryption: Option<crate::server_encryption::Decryption>,
+    fallbacks: Vec<FallbackRule>,
     mux_udp_only: bool,
     xudp: Arc<crate::mux::Table>,
 }
@@ -112,6 +116,11 @@ impl NodeFactory for VlessNodeFactory {
         let options: Options =
             serde_json::from_value(input.options().clone()).map_err(|_| invalid())?;
         let transport = options.transport.normalize()?;
+        let fallbacks = options
+            .fallbacks
+            .into_iter()
+            .map(FallbackRuleInput::compile)
+            .collect::<Result<Vec<_>>>()?;
         let credentials = input
             .native_credentials()
             .iter()
@@ -215,7 +224,19 @@ impl NodeFactory for VlessNodeFactory {
                 .with_single_cert(certs, key)
                 .map_err(|_| invalid())?;
                 config.send_tls13_tickets = 0;
-                config.alpn_protocols = transport.alpn();
+                let mut alpns = transport.alpn();
+                if alpns.is_empty() && fallbacks.iter().any(|r| r.alpn.is_some()) {
+                    for alpn in fallbacks.iter().filter_map(|r| r.alpn.as_ref()) {
+                        let bytes = alpn.as_bytes().to_vec();
+                        if !alpns.contains(&bytes) {
+                            alpns.push(bytes);
+                        }
+                    }
+                    if !alpns.iter().any(|a| a == b"http/1.1") {
+                        alpns.push(b"http/1.1".to_vec());
+                    }
+                }
+                config.alpn_protocols = alpns;
                 let config = Arc::new(config);
                 tls_config = Some(config.clone());
                 Some(TlsAcceptor::from(config))
@@ -229,6 +250,7 @@ impl NodeFactory for VlessNodeFactory {
             payload: Arc::new(Payload {
                 users: input.credentials(users)?,
                 decryption,
+                fallbacks,
                 mux_udp_only: matches!(transport, crate::server_http::Transport::Xhttp { .. }),
                 xudp: Arc::new(crate::mux::Table::new(XUDP_DETACHED_GRACE)),
             }),
@@ -273,16 +295,24 @@ impl InboundProtocol for VlessNode {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let deadline = Instant::now() + context.connect_timeout;
-            let accepted = tokio::time::timeout(context.connect_timeout, async {
+            let (accepted, sni, alpn) = tokio::time::timeout(context.connect_timeout, async {
                 if let Some(reality) = &self.reality {
-                    return reality.accept(stream, &context).await;
+                    return Ok::<_, Error>((reality.accept(stream, &context).await?, None, None));
                 }
-                let stream: BoxedTransportStream = if let Some(tls) = &self.tls {
-                    Box::new(ServerTls(tls.accept(RecordAligned::new(stream)).await?))
+                if let Some(tls) = &self.tls {
+                    let tls_stream = tls.accept(RecordAligned::new(stream)).await?;
+                    let (_, conn) = tls_stream.get_ref();
+                    let sni = conn.server_name().map(str::to_owned);
+                    let alpn = conn
+                        .alpn_protocol()
+                        .and_then(|b| std::str::from_utf8(b).ok())
+                        .map(str::to_owned);
+                    let stream: BoxedTransportStream = Box::new(ServerTls(tls_stream));
+                    Ok((crate::server_reality::Accepted::Stream(stream), sni, alpn))
                 } else {
-                    Box::new(Plain(stream))
-                };
-                Ok(crate::server_reality::Accepted::Stream(stream))
+                    let stream: BoxedTransportStream = Box::new(Plain(stream));
+                    Ok((crate::server_reality::Accepted::Stream(stream), None, None))
+                }
             })
             .await
             .map_err(|_| Error::Timeout)??;
@@ -290,7 +320,15 @@ impl InboundProtocol for VlessNode {
                 crate::server_reality::Accepted::Stream(stream) => {
                     context.connect_timeout = deadline.saturating_duration_since(Instant::now());
                     if self.transport.raw() {
-                        self.payload.serve(stream, access, context).await
+                        self.payload
+                            .serve_with_meta(
+                                stream,
+                                access,
+                                context,
+                                sni.as_deref(),
+                                alpn.as_deref(),
+                            )
+                            .await
                     } else {
                         self.http
                             .clone()
@@ -366,23 +404,67 @@ impl Payload {
     }
     pub(crate) async fn serve(
         &self,
-        mut stream: BoxedTransportStream,
+        stream: BoxedTransportStream,
         access: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
+        self.serve_with_meta(stream, access, context, None, None)
+            .await
+    }
+    pub(crate) async fn serve_with_meta(
+        &self,
+        mut stream: BoxedTransportStream,
+        access: IngressBinding,
+        context: InboundContext,
+        sni: Option<&str>,
+        alpn: Option<&str>,
+    ) -> Result<()> {
         let deadline = Instant::now() + context.connect_timeout;
         let binding = access;
-        let (mut stream, request, vision, access) =
-            tokio::time::timeout(context.connect_timeout, async {
-                if let Some(decryption) = &self.decryption {
-                    stream = decryption.accept(stream).await?;
+        let handshake = tokio::time::timeout(context.connect_timeout, async {
+            if let Some(decryption) = &self.decryption {
+                stream = decryption.accept(stream).await.map_err(|e| (e, None))?;
+            }
+            let mut recorder = RecordingStream::new(stream, 4096);
+            let parsed = inbound_wire::read(&mut recorder).await;
+            let (stream, recorded) = recorder.into_parts();
+            let request = match parsed {
+                Ok(req) => req,
+                Err(err) => return Err((err, Some((stream, recorded)))),
+            };
+            match self.verify(&request) {
+                Ok(verified) => {
+                    let (access, vision) = binding
+                        .authenticated(verified, &context)
+                        .map_err(|e| (e, None))?;
+                    Ok((stream, request, vision, access))
                 }
-                let request = inbound_wire::read(&mut stream).await?;
-                let (access, vision) = binding.authenticated(self.verify(&request)?, &context)?;
-                Ok::<_, Error>((stream, request, vision, access))
-            })
-            .await
-            .map_err(|_| Error::Timeout)??;
+                Err(err) => Err((err, Some((stream, recorded)))),
+            }
+        })
+        .await
+        .map_err(|_| Error::Timeout)?;
+
+        let (mut stream, request, vision, access) = match handshake {
+            Ok(tuple) => tuple,
+            Err((err, Some((stream, recorded)))) => {
+                if let Some(res) = try_fallback(
+                    Box::new(stream),
+                    recorded,
+                    &self.fallbacks,
+                    sni,
+                    alpn,
+                    &context,
+                )
+                .await
+                {
+                    return res;
+                }
+                return Err(err);
+            }
+            Err((err, None)) => return Err(err),
+        };
+
         let budget = ConnectContext::new(deadline.saturating_duration_since(Instant::now()))
             .with_cancel(context.cancel.clone());
         match request.command {
@@ -474,40 +556,41 @@ async fn relay_udp(
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (mut sender, mut receiver, completion) = channel.into_parts();
     let result = async {
-    let (activity, mut changes) = watch::channel(Instant::now());
-    let incoming = async {
-        while let Some(packet) =
-            codec::read_datagram(&mut reader, context.max_datagram_size).await?
-        {
-            sender.send(&packet).await?;
-            activity.send_replace(Instant::now());
-        }
-        Ok::<_, Error>(())
-    };
-    let outgoing = async {
-        while let Some(packet) = receiver.recv().await? {
-            if packet.len() > context.max_datagram_size {
-                return Err(Error::ResourceLimit);
+        let (activity, mut changes) = watch::channel(Instant::now());
+        let incoming = async {
+            while let Some(packet) =
+                codec::read_datagram(&mut reader, context.max_datagram_size).await?
+            {
+                sender.send(&packet).await?;
+                activity.send_replace(Instant::now());
             }
-            codec::write_datagram(&mut writer, &packet).await?;
-            activity.send_replace(Instant::now());
-        }
-        Ok::<_, Error>(())
-    };
-    tokio::pin!(incoming, outgoing);
-    let timer = tokio::time::sleep(context.idle_timeout);
-    tokio::pin!(timer);
-    loop {
-        tokio::select! {
-            biased;
-            _=context.cancel.cancelled()=>return Err(Error::Cancelled),
-            r=&mut incoming=>return r,
-            r=&mut outgoing=>return r,
-            _=&mut timer=>return Err(Error::Timeout),
-            changed=changes.changed()=>{if changed.is_ok(){timer.as_mut().reset(*changes.borrow_and_update()+context.idle_timeout);}},
+            Ok::<_, Error>(())
+        };
+        let outgoing = async {
+            while let Some(packet) = receiver.recv().await? {
+                if packet.len() > context.max_datagram_size {
+                    return Err(Error::ResourceLimit);
+                }
+                codec::write_datagram(&mut writer, &packet).await?;
+                activity.send_replace(Instant::now());
+            }
+            Ok::<_, Error>(())
+        };
+        tokio::pin!(incoming, outgoing);
+        let timer = tokio::time::sleep(context.idle_timeout);
+        tokio::pin!(timer);
+        loop {
+            tokio::select! {
+                biased;
+                _=context.cancel.cancelled()=>return Err(Error::Cancelled),
+                r=&mut incoming=>return r,
+                r=&mut outgoing=>return r,
+                _=&mut timer=>return Err(Error::Timeout),
+                changed=changes.changed()=>{if changed.is_ok(){timer.as_mut().reset(*changes.borrow_and_update()+context.idle_timeout);}},
+            }
         }
     }
-    }.await;
+    .await;
     completion.finish(match &result {
         Ok(()) => kerlico_core::FlowOutcome::ProtocolEnd,
         Err(error) => {

@@ -15,6 +15,14 @@ pub(crate) struct CryptoPeer {
     tunnel: Tunn,
     pub endpoint: Option<SocketAddr>,
     ready: bool,
+    reserved: [u8; 3],
+}
+fn with_reserved(bytes: &[u8], reserved: [u8; 3]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    if out.len() >= 4 {
+        out[1..4].copy_from_slice(&reserved);
+    }
+    out
 }
 impl CryptoPeer {
     pub fn new(
@@ -35,6 +43,7 @@ impl CryptoPeer {
             ),
             endpoint,
             ready: false,
+            reserved: peer.reserved,
         }
     }
     /// 对端路径由调用方维护的会话。`limiter` 必须与收包路径前面的分类器共用同一个：
@@ -49,6 +58,7 @@ impl CryptoPeer {
             tunnel: Tunn::new(private, public, None, None, index, Some(limiter)),
             endpoint: None,
             ready: false,
+            reserved: [0; 3],
         }
     }
     pub fn ready(&self) -> bool {
@@ -56,6 +66,14 @@ impl CryptoPeer {
     }
     pub fn receive(&mut self, source: SocketAddr, packet: &[u8]) -> Result<Received> {
         let kind = packet.first().copied().unwrap_or(0);
+        let mut normalized;
+        let packet = if packet.len() >= 4 && packet[1..4] != [0, 0, 0] {
+            normalized = packet.to_vec();
+            normalized[1..4].fill(0);
+            normalized.as_slice()
+        } else {
+            packet
+        };
         let mut output = vec![0; 65536];
         let result = self
             .tunnel
@@ -83,7 +101,7 @@ impl CryptoPeer {
                 if kind == 2 && received.authenticated {
                     self.ready = true;
                 }
-                received.network.push(bytes.to_vec());
+                received.network.push(with_reserved(bytes, self.reserved));
             }
         }
         if received.authenticated {
@@ -91,7 +109,9 @@ impl CryptoPeer {
         }
         for _ in 0..257 {
             match self.tunnel.decapsulate(None, &[], &mut output) {
-                TunnResult::WriteToNetwork(bytes) => received.network.push(bytes.to_vec()),
+                TunnResult::WriteToNetwork(bytes) => {
+                    received.network.push(with_reserved(bytes, self.reserved));
+                }
                 TunnResult::Done => return Ok(received),
                 TunnResult::Err(_) => return Err(Error::Rejected),
                 _ => return Err(Error::Protocol("WireGuard排空产生了意外内部包")),
@@ -109,7 +129,7 @@ impl CryptoPeer {
     pub fn encapsulate(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
         let mut output = vec![0; packet.len().saturating_add(32).max(148)];
         match self.tunnel.encapsulate(packet, &mut output) {
-            TunnResult::WriteToNetwork(bytes) => Ok(Some(bytes.to_vec())),
+            TunnResult::WriteToNetwork(bytes) => Ok(Some(with_reserved(bytes, self.reserved))),
             TunnResult::Done => Ok(None),
             TunnResult::Err(_) => Err(Error::Protocol("WireGuard加密失败")),
             _ => Err(Error::Protocol("WireGuard加密产生了意外内部包")),
@@ -118,14 +138,14 @@ impl CryptoPeer {
     pub fn initiate(&mut self) -> Option<Vec<u8>> {
         let mut output = [0; 148];
         match self.tunnel.format_handshake_initiation(&mut output, false) {
-            TunnResult::WriteToNetwork(bytes) => Some(bytes.to_vec()),
+            TunnResult::WriteToNetwork(bytes) => Some(with_reserved(bytes, self.reserved)),
             _ => None,
         }
     }
     pub fn tick(&mut self) -> Option<Vec<u8>> {
         let mut output = [0; 148];
         match self.tunnel.update_timers(&mut output) {
-            TunnResult::WriteToNetwork(bytes) => Some(bytes.to_vec()),
+            TunnResult::WriteToNetwork(bytes) => Some(with_reserved(bytes, self.reserved)),
             TunnResult::Err(_) => {
                 self.ready = false;
                 None
@@ -159,6 +179,14 @@ impl PeerIndex {
         }
     }
     pub fn identify(&self, source: SocketAddr, bytes: &[u8]) -> Result<Identified> {
+        let mut normalized;
+        let bytes = if bytes.len() >= 4 && bytes[1..4] != [0, 0, 0] {
+            normalized = bytes.to_vec();
+            normalized[1..4].fill(0);
+            normalized.as_slice()
+        } else {
+            bytes
+        };
         let mut cookie = [0; 64];
         let packet = match self
             .limiter

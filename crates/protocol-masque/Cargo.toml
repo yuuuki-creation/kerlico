@@ -24,6 +24,9 @@ quinn.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 webpki-roots.workspace = true
+socket2.workspace = true
+sha2.workspace = true
+subtle = "2"
 
 [lints]
 workspace = true

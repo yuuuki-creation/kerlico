@@ -28,16 +28,16 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | 透明代理 TProxy 入站 |  | 有 |  | 未实现 | 未测 | 取值：`tproxy`<br>约束：不可作 detour 注入目标<br>约束：仅支持 Linux |
-| `combo` | 透明代理组合 |  |  | 有 | 未实现 | 未测 | mode：`redirect`、`tproxy`<br>network：`tcp`、`udp`<br>ip：`ipv4`、`ipv6`<br>inbound：`tunnel`<br>domain_recover：`fakedns`、`sniffing`<br>约束：redirect 不支持 UDP<br>约束：tunnel 须 followRedirect 才取原目标<br>约束：仅 Linux<br>约束：透明代理教程见 docs/document/level-2/tproxy.md |
-| `network` | 监听的网络协议，`tcp` `udp` 之一。 |  | 有 |  | 未实现 | 未测 | 取值：`tcp`、`udp`<br>约束：默认所有。 |
-| `tproxy` | 透明代理模式 |  |  | 有 | 未实现 | 未测 | 取值：`off`、`redirect`、`tproxy`<br>约束：redirect 支持 IPv4/6 TCP<br>约束：tproxy 支持 IPv4/6 TCP 和 UDP<br>约束：tunnel.followRedirect=true 且 tproxy 为空时设为 redirect<br>约束：仅 Linux<br>约束：需 Root 或 CAP_NET_ADMIN |
+| `protocol` | 透明代理 TProxy 入站 |  | 有 |  | 已实现 | 通过 | 取值：`tproxy`<br>约束：不可作 detour 注入目标<br>约束：仅支持 Linux |
+| `combo` | 透明代理组合 |  |  | 有 | 已实现 | 通过 | mode：`redirect`、`tproxy`<br>network：`tcp`、`udp`<br>ip：`ipv4`、`ipv6`<br>inbound：`tunnel`<br>domain_recover：`fakedns`、`sniffing`<br>约束：redirect 不支持 UDP<br>约束：tunnel 须 followRedirect 才取原目标<br>约束：仅 Linux<br>约束：透明代理教程见 docs/document/level-2/tproxy.md |
+| `network` | 监听的网络协议，`tcp` `udp` 之一。 |  | 有 |  | 已实现 | 通过 | 取值：`tcp`、`udp`<br>约束：默认所有。 |
+| `tproxy` | 透明代理模式 |  |  | 有 | 已实现 | 通过 | 取值：`off`、`redirect`、`tproxy`<br>约束：redirect 支持 IPv4/6 TCP<br>约束：tproxy 支持 IPv4/6 TCP 和 UDP<br>约束：tunnel.followRedirect=true 且 tproxy 为空时设为 redirect<br>约束：仅 Linux<br>约束：需 Root 或 CAP_NET_ADMIN |
 
 ## transparent
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | 透明接入和系统代理方式的组合 |  | 有 |  | 未实现 | 未测 | inbound：`redirect`、`tproxy`、`tun`<br>network：`tcp`、`tcp+udp`、`udp`<br>system_proxy：`set_system_proxy`、`tun.platform.http_proxy`<br>约束：platform.http_proxy.match_domain 仅 Apple 图形客户端<br>约束：redirect 仅 Linux、macOS<br>约束：tproxy 仅 Linux<br>约束：tproxy 有 network 和 UDP NAT 字段（udp_mapping、udp_filtering、udp_nat_max 自 1.14.0） |
+| `combo` | 透明接入和系统代理方式的组合 |  | 有 |  | 已实现 | 通过 | inbound：`redirect`、`tproxy`、`tun`<br>network：`tcp`、`tcp+udp`、`udp`<br>system_proxy：`set_system_proxy`、`tun.platform.http_proxy`<br>约束：platform.http_proxy.match_domain 仅 Apple 图形客户端<br>约束：redirect 仅 Linux、macOS<br>约束：tproxy 仅 Linux<br>约束：tproxy 有 network 和 UDP NAT 字段（udp_mapping、udp_filtering、udp_nat_max 自 1.14.0） |
 
 ## tun
 

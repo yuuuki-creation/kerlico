@@ -18,6 +18,8 @@ pub(crate) struct ClientOptions {
     server: TargetSpec,
     uri: Option<String>,
     auth: Option<Auth>,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
     tls: ClientTls,
     #[serde(default)]
     limits: Limits,
@@ -70,6 +72,7 @@ pub(crate) struct Prepared {
     pub quic: quinn::ClientConfig,
     pub uri: http::Uri,
     pub authorization: Option<http::HeaderValue>,
+    pub headers: http::HeaderMap,
     pub max_tunnels: usize,
     pub idle: Duration,
 }
@@ -83,6 +86,28 @@ impl ClientOptions {
         let server = self.server.destination()?;
         let uri = request_uri(self.uri.as_deref(), &self.tls.server_name, self.server.port)?;
         let authorization = self.auth.as_ref().map(Auth::header).transpose()?;
+        let mut headers = http::HeaderMap::new();
+        for (name, value) in self.headers {
+            if name.starts_with(':') {
+                return Err(invalid());
+            }
+            let header_name =
+                http::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| invalid())?;
+            if matches!(
+                header_name.as_str(),
+                "capsule-protocol"
+                    | "authorization"
+                    | "host"
+                    | "connection"
+                    | "transfer-encoding"
+                    | "content-length"
+                    | "upgrade"
+            ) {
+                return Err(invalid());
+            }
+            let header_value = http::HeaderValue::from_str(&value).map_err(|_| invalid())?;
+            headers.insert(header_name, header_value);
+        }
         let server_name = self.tls.server_name.clone();
         let quic = quic_config(self.tls)?;
         Ok(Prepared {
@@ -91,6 +116,7 @@ impl ClientOptions {
             quic,
             uri,
             authorization,
+            headers,
             max_tunnels: self.limits.max_tunnels,
             idle: Duration::from_millis(self.limits.idle_timeout_ms),
         })

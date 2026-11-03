@@ -12,6 +12,7 @@ pub(crate) enum Opcode {
     HardResetClient,
     HardResetServer,
     DataV2,
+    HardResetClientV3,
 }
 impl Opcode {
     pub fn parse(byte: u8) -> Option<(Self, u8)> {
@@ -22,6 +23,7 @@ impl Opcode {
             7 => Self::HardResetClient,
             8 => Self::HardResetServer,
             9 => Self::DataV2,
+            10 => Self::HardResetClientV3,
             _ => return None,
         };
         Some((opcode, byte & 7))
@@ -34,6 +36,7 @@ impl Opcode {
             Self::HardResetClient => 7,
             Self::HardResetServer => 8,
             Self::DataV2 => 9,
+            Self::HardResetClientV3 => 10,
         };
         code << 3 | key_id & 7
     }

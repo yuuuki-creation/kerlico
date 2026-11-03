@@ -118,7 +118,15 @@ impl OutboundFactory for WireGuardFactory {
         let options: ClientOptions = serde_json::from_value(options.clone())
             .map_err(|_| Error::Config("WireGuard出站字段不合法".into()))?;
         let prepared = options.tunnel.prepare()?;
-        let peer = options.peer.prepare()?;
+        let peer_has_reserved = options.peer.reserved.is_some();
+        let mut peer = options.peer.prepare()?;
+        if let Some(outer_reserved) = options.reserved {
+            let parsed = outer_reserved.parse()?;
+            if peer_has_reserved && peer.reserved != parsed {
+                return Err(Error::Config("WireGuard顶层与peer的reserved不一致".into()));
+            }
+            peer.reserved = parsed;
+        }
         prepared.validate_peer(&peer)?;
         let endpoint = Destination::new(&options.endpoint.host, options.endpoint.port)?;
         if matches!(endpoint.address(), Address::Ip(ip) if !crate::config::unicast(*ip)) {

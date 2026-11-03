@@ -1,5 +1,5 @@
 use crate::{
-    config::{self, Limits, NodeOptions},
+    config::{self, Limits, MasqueradePlan, NodeOptions},
     dispatch, invalid, udp, wire,
 };
 use bytes::Bytes;
@@ -14,6 +14,7 @@ use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::{
     future::Future,
+    path::Component,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -31,6 +32,8 @@ pub struct Hysteria2Node {
     tls: Arc<rustls::ServerConfig>,
     salamander: Option<Arc<String>>,
     udp: bool,
+    up_bps: Option<u64>,
+    masquerade: Arc<MasqueradePlan>,
     limits: Limits,
 }
 impl Hysteria2Node {
@@ -38,6 +41,16 @@ impl Hysteria2Node {
         let options: NodeOptions = serde_json::from_value(input.options().clone())
             .map_err(|_| Error::Config("Hysteria2 节点字段不合法".into()))?;
         options.limits.validate()?;
+        if let Some(down) = &options.down {
+            down.to_bps()?;
+        }
+        let up_bps = options
+            .up
+            .as_ref()
+            .map(|up| up.to_bps())
+            .transpose()?
+            .filter(|bps| *bps > 0);
+        let masquerade = Arc::new(options.masquerade_plan()?);
         Ok(Self {
             auth: input.credentials(
                 input
@@ -53,6 +66,8 @@ impl Hysteria2Node {
             tls: config::server_tls(options.tls)?,
             salamander: config::obfs(options.salamander_password)?,
             udp: options.udp,
+            up_bps,
+            masquerade,
             limits: options.limits,
         })
     }
@@ -101,11 +116,12 @@ impl Hysteria2Node {
                 incoming=endpoint.accept()=>{
                     let Some(incoming)=incoming else{break};let Ok(lease)=context.stream_budget.try_acquire() else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};
                     let mut context=context.clone();let access=access.clone();let limits=self.limits.clone();let auth=self.auth.clone();let udp=self.udp;
+                    let up_bps=self.up_bps;let masquerade=self.masquerade.clone();
                     crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut connections, async move{
                         let _lease=lease;context.events.record(NodeEvent::Accepted);
                         let result=async {
                             let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|invalid())?;
-                            context.peer_addr=Some(connection.remote_address());connection_loop(connection,access,context.clone(),limits,auth,udp).await
+                            context.peer_addr=Some(connection.remote_address());connection_loop(connection,access,context.clone(),limits,auth,udp,up_bps,masquerade).await
                         }.await;
                         context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});
                     }, |_| ())?;
@@ -215,6 +231,84 @@ impl H3Control {
         }
     }
 }
+fn resolve_masquerade(
+    plan: &MasqueradePlan,
+    request_path: &str,
+) -> (
+    http::StatusCode,
+    Vec<(http::HeaderName, http::HeaderValue)>,
+    Bytes,
+) {
+    match plan {
+        MasqueradePlan::Default404 => (
+            http::StatusCode::NOT_FOUND,
+            vec![(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/plain; charset=utf-8"),
+            )],
+            Bytes::from_static("资源不存在".as_bytes()),
+        ),
+        MasqueradePlan::String {
+            status_code,
+            headers,
+            content,
+        } => (*status_code, headers.clone(), content.clone()),
+        MasqueradePlan::File { directory, headers } => {
+            let trimmed = request_path.trim_start_matches('/');
+            let relative = if trimmed.is_empty() {
+                "index.html"
+            } else {
+                trimmed
+            };
+            let rel_path = std::path::Path::new(relative);
+            if rel_path
+                .components()
+                .any(|comp| !matches!(comp, Component::Normal(_)))
+            {
+                return (
+                    http::StatusCode::NOT_FOUND,
+                    headers.clone(),
+                    Bytes::from_static(b"Not Found"),
+                );
+            }
+            let full_path = directory.join(rel_path);
+            let final_path = if full_path.is_dir() {
+                full_path.join("index.html")
+            } else {
+                full_path
+            };
+            match std::fs::read(&final_path) {
+                Ok(bytes) if bytes.len() <= 4 * 1024 * 1024 => {
+                    (http::StatusCode::OK, headers.clone(), Bytes::from(bytes))
+                }
+                _ => (
+                    http::StatusCode::NOT_FOUND,
+                    headers.clone(),
+                    Bytes::from_static(b"Not Found"),
+                ),
+            }
+        }
+        MasqueradePlan::Proxy {
+            url,
+            rewrite_host,
+            headers,
+        } => {
+            let mut resp_headers = headers.clone();
+            if *rewrite_host
+                && let Ok(parsed) = url.parse::<http::Uri>()
+                && let Some(host) = parsed.authority()
+                && let Ok(val) = http::HeaderValue::from_str(host.as_str())
+            {
+                resp_headers.push((http::header::HOST, val));
+            }
+            if let Ok(loc) = http::HeaderValue::from_str(url) {
+                resp_headers.push((http::header::LOCATION, loc));
+            }
+            (http::StatusCode::OK, resp_headers, Bytes::new())
+        }
+    }
+}
+#[allow(clippy::too_many_arguments)]
 async fn connection_loop(
     connection: quinn::Connection,
     access: IngressBinding,
@@ -222,6 +316,8 @@ async fn connection_loop(
     limits: Limits,
     auth: CredentialSet<[u8; 32]>,
     udp_enabled: bool,
+    up_bps: Option<u64>,
+    masquerade: Arc<MasqueradePlan>,
 ) -> Result<()> {
     let _guard = ConnectionGuard(connection.clone());
     let authenticated = Arc::new(AtomicBool::new(false));
@@ -292,6 +388,7 @@ async fn connection_loop(
                     ControlEvent::NativeProgress=>continue,
                 };
                 let authenticated=authenticated.clone();let ready=ready.clone();let context=context.clone();let auth=auth.clone();let ingress=access.clone();let peer=peer.clone();
+                let masquerade=masquerade.clone();
                 crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move{
                     let operation=async {
                         let (request,mut stream)=resolver.resolve_request().await.map_err(|_|invalid())?;
@@ -311,10 +408,23 @@ async fn connection_loop(
                             }
                             authenticated.store(true,Ordering::Release);if udp_enabled{ready.notify_one();}
                             let padding:String=rand::thread_rng().sample_iter(rand::distributions::Alphanumeric).take(256).map(char::from).collect();
-                            let response=Response::builder().status(233).header("hysteria-udp",if udp_enabled{"true"}else{"false"}).header("hysteria-cc-rx","auto").header("hysteria-padding",padding).body(()).map_err(|_|invalid())?;
+                            let cc_rx = match up_bps {
+                                Some(bps) => bps.to_string(),
+                                None => "auto".into(),
+                            };
+                            let response=Response::builder().status(233).header("hysteria-udp",if udp_enabled{"true"}else{"false"}).header("hysteria-cc-rx",cc_rx).header("hysteria-padding",padding).body(()).map_err(|_|invalid())?;
                             stream.send_response(response).await.map_err(|_|invalid())?;
                         } else {
-                            let response=Response::builder().status(404).header("content-type","text/plain; charset=utf-8").body(()).map_err(|_|invalid())?;stream.send_response(response).await.map_err(|_|invalid())?;stream.send_data(Bytes::from_static("资源不存在".as_bytes())).await.map_err(|_|invalid())?;
+                            let (status, headers, body) = resolve_masquerade(&masquerade, request.uri().path());
+                            let mut builder = Response::builder().status(status);
+                            for (name, val) in headers {
+                                builder = builder.header(name, val);
+                            }
+                            let response = builder.body(()).map_err(|_|invalid())?;
+                            stream.send_response(response).await.map_err(|_|invalid())?;
+                            if !body.is_empty() {
+                                stream.send_data(body).await.map_err(|_|invalid())?;
+                            }
                         }
                         stream.finish().await.map_err(|_|invalid())?;Ok(())
                     };
