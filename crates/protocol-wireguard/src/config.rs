@@ -210,6 +210,8 @@ pub(crate) struct PeerOptions {
     pub persistent_keepalive: u16,
     #[serde(default)]
     pub reserved: Option<ReservedSpec>,
+    #[serde(default)]
+    pub level: u32,
 }
 #[derive(Clone)]
 pub(crate) struct PeerConfig {
@@ -218,6 +220,7 @@ pub(crate) struct PeerConfig {
     pub allowed: Vec<Network>,
     pub keepalive: Option<u16>,
     pub reserved: [u8; 3],
+    pub level: u32,
 }
 impl PeerOptions {
     pub fn prepare(self) -> Result<PeerConfig> {
@@ -251,6 +254,7 @@ impl PeerOptions {
             allowed,
             keepalive: (self.persistent_keepalive != 0).then_some(self.persistent_keepalive),
             reserved,
+            level: self.level,
         })
     }
 }

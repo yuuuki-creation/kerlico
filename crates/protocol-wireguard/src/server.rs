@@ -45,12 +45,15 @@ impl NodeFactory for WireGuardNodeFactory {
         #[serde(deny_unknown_fields)]
         struct Options {
             tunnel: CommonOptions,
+            #[serde(default)]
+            level: u32,
         }
         if input.is_local() || input.native_credentials().is_empty() {
             return Err(Error::Config("WireGuard节点必须配置独立认证成员".into()));
         }
         let options: Options = serde_json::from_value(input.options().clone())
             .map_err(|_| Error::Config("WireGuard节点字段不合法".into()))?;
+        let _ = options.level;
         let prepared = options.tunnel.prepare()?;
         let mut peers: Vec<PeerConfig> = Vec::new();
         let mut keys = HashSet::new();
@@ -58,6 +61,7 @@ impl NodeFactory for WireGuardNodeFactory {
             let options: PeerOptions = serde_json::from_value(value.clone())
                 .map_err(|_| Error::Config("WireGuard成员字段不合法".into()))?;
             let peer = options.prepare()?;
+            let _ = peer.level;
             prepared.validate_peer(&peer)?;
             if !keys.insert(peer.public_key)
                 || peers.iter().any(|other| {

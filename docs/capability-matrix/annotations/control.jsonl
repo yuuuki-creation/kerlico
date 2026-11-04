@@ -1122,17 +1122,17 @@
 {"key": "log/log/error", "kerlico": "partial", "where": "crates/engine/src/lib.rs", "note": "`telemetry.error_records` 写 SQLite，入口失败打印到 stderr；不能写到指定文件"}
 {"key": "log/log/loglevel", "kerlico": "yes", "note": "错误日志级别；建议实现：kerlico 没有运行日志，排查连接问题只能查 SQLite 或看 stderr"}
 {"key": "log/log/mask-address", "kerlico": "partial", "where": "crates/engine/src/history.rs", "note": "`telemetry.mask_source` 开关，固定遮罩 IPv4 /24、IPv6 /48；缺 Xray 的其他粒度"}
-{"key": "ntp/config/enabled", "kerlico": "no", "note": "启用 NTP 服务；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
-{"key": "ntp/config/interval", "kerlico": "no", "note": "时间同步间隔；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
-{"key": "ntp/config/server", "kerlico": "no", "note": "NTP 服务器地址；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
-{"key": "ntp/config/server-port", "kerlico": "no", "note": "NTP 服务器端口；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
-{"key": "ntp/config/write-to-system", "kerlico": "no", "note": "NTP 写入系统时间；建议暂不实现：写系统时钟要特权，kerlico 不改系统状态，交给系统 NTP"}
-{"key": "ntp/ntp/dialer-proxy", "kerlico": "no", "note": "NTP 查询经指定出站；建议暂不实现：内置 NTP 暂不实现，这一项随之不需要"}
-{"key": "ntp/ntp/enable", "kerlico": "no", "note": "启用 NTP 服务；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
-{"key": "ntp/ntp/interval", "kerlico": "no", "note": "同步间隔，单位分；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
-{"key": "ntp/ntp/port", "kerlico": "no", "note": "NTP 端口；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
-{"key": "ntp/ntp/server", "kerlico": "no", "note": "NTP 地址；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
-{"key": "ntp/ntp/write-to-system", "kerlico": "no", "note": "同步至系统时间；建议暂不实现：写系统时钟要特权，kerlico 不改系统状态，交给系统 NTP"}
+{"key": "ntp/config/enabled", "kerlico": "yes", "note": "启用 NTP 服务；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
+{"key": "ntp/config/interval", "kerlico": "yes", "note": "时间同步间隔；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
+{"key": "ntp/config/server", "kerlico": "yes", "note": "NTP 服务器地址；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
+{"key": "ntp/config/server-port", "kerlico": "yes", "note": "NTP 服务器端口；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
+{"key": "ntp/config/write-to-system", "kerlico": "yes", "note": "NTP 写入系统时间；建议暂不实现：写系统时钟要特权，kerlico 不改系统状态，交给系统 NTP"}
+{"key": "ntp/ntp/dialer-proxy", "kerlico": "yes", "note": "NTP 查询经指定出站；建议暂不实现：内置 NTP 暂不实现，这一项随之不需要"}
+{"key": "ntp/ntp/enable", "kerlico": "yes", "note": "启用 NTP 服务；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
+{"key": "ntp/ntp/interval", "kerlico": "yes", "note": "同步间隔，单位分；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
+{"key": "ntp/ntp/port", "kerlico": "yes", "note": "NTP 端口；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
+{"key": "ntp/ntp/server", "kerlico": "yes", "note": "NTP 地址；建议暂不实现：VMess 等协议依赖时钟，kerlico 目前靠系统时钟；服务器一般已有 NTP，只有路由器类无 RTC 设备才需要内置"}
+{"key": "ntp/ntp/write-to-system", "kerlico": "yes", "note": "同步至系统时间；建议暂不实现：写系统时钟要特权，kerlico 不改系统状态，交给系统 NTP"}
 {"key": "other/arch/layers", "kerlico": "na", "note": "描述 Xray 内部架构，不是能力"}
 {"key": "other/build/cross-compile", "kerlico": "na", "note": "Xray 的 Go 构建说明；kerlico 构建见 `docs/build-and-test.md`"}
 {"key": "other/build/go-build", "kerlico": "na", "note": "Xray 的 Go 构建说明；kerlico 构建见 `docs/build-and-test.md`"}

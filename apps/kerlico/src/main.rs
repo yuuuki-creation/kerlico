@@ -302,7 +302,10 @@ fn registry() -> Result<Registry> {
         registry.register_node(kerlico_masque::MasqueNodeFactory)?;
     }
     #[cfg(feature = "protocol-openvpn")]
-    registry.register(kerlico_openvpn::OpenVpnFactory)?;
+    {
+        registry.register(kerlico_openvpn::OpenVpnFactory)?;
+        registry.register_node(kerlico_openvpn::OpenVpnNodeFactory)?;
+    }
     #[cfg(feature = "protocol-easytier")]
     registry.register(kerlico_easytier::EasyTierFactory)?;
     #[cfg(feature = "protocol-zerotier")]

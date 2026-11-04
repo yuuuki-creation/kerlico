@@ -47,6 +47,8 @@ pub(crate) struct Options {
     pub brutal_up: Option<u64>,
     #[serde(default)]
     pub udp_hop: Option<UdpHopInput>,
+    #[serde(default)]
+    pub reverse: Option<crate::inbound::ReverseConfig>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -437,6 +439,11 @@ struct ProfileOutbound {
 pub(crate) fn compile(value: &Value) -> Result<OutboundPlan> {
     let options: Options = serde_json::from_value(value.clone())
         .map_err(|_| Error::Config("VLESS 配置字段不合法".into()))?;
+    if let Some(rev) = &options.reverse
+        && rev.tag.trim().is_empty()
+    {
+        return Err(Error::Config("VLESS reverse tag 不能为空".into()));
+    }
     let user = UserId::parse(&options.uuid)?;
     let _splice = options.splice.unwrap_or(false)
         || matches!(

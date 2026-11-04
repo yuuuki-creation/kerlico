@@ -24,14 +24,14 @@
 | `M3`（`v1.6.0`） | 流量感知、DNS、路由规则集与 TUN 自动化对齐：TLS/HTTP/QUIC/BT 协议嗅探，Fake-IP 双栈池与持久化还原，DoH/DoQ、乐观缓存、ECS 与 DNS 规则动作，`rule-set`（`srs`/`mrs`/`dat`）与逻辑/进程规则，TUN `auto-route`/`auto-redirect` | 已完成 |
 | `M4`（`v1.7.0`） | 策略组、订阅提供者、控制面 API 与 CLI 工具链对齐：`select`/`url-test`/`fallback`/`load-balance`/`balancer` 策略组，`proxy-providers` 订阅解析与字段覆写，Clash/Xray/SSM RESTful & WS 控制面 API，YAML/JSONC 配置解析与密钥/证书生成 CLI，`SIGHUP` 热重载与 systemd 服务单元 | 已完成 |
 | `M5`（`v1.8.0`） | Web 面板与跨域支持、多配置合并与离线规则集 CLI：`external-ui`/`/ui` 静态面板托管与 CORS/PNA 响应头，`-C` 多配置文件深度合并与受控环境变量注入，`rule-set compile/decompile/convert/match` 与 `geoip`/`geosite` 离线 CLI 工具链（151 项） | 已完成 |
-| `M6`（`v1.9.0`） | 内置 NTP、Shadowsocks SIP003 插件与 VLESS 反向代理：内置 SNTP/NTPv4 时钟偏移校准客户端（支持代理拨号），Shadowsocks SIP003 子进程托管与 `obfs-local`/`v2ray-plugin` 原生兼容，VLESS Reverse 内网穿透反向代理（67 项） | 待开始 |
-| `M7`（`v1.10.0`） | OpenVPN 服务端入站与隧道双端闭环：`inbound/openvpn` TCP/UDP 服务端入站、TLS 控制通道与 `tls-auth`/`tls-crypt`/`tls-crypt-v2`、子网地址池分配、`PUSH_REPLY` 路由下发与多客户端会话管理（82 项） | 待开始 |
+| `M6`（`v1.9.0`） | 内置 NTP、Shadowsocks SIP003 插件与 VLESS 反向代理：内置 SNTP/NTPv4 时钟偏移校准客户端（支持代理拨号），Shadowsocks SIP003 子进程托管与 `obfs-local`/`v2ray-plugin` 原生兼容，VLESS Reverse 内网穿透反向代理（67 项） | 已完成 |
+| `M7`（`v1.10.0`） | OpenVPN 服务端入站与隧道双端闭环：`inbound/openvpn` TCP/UDP 服务端入站、TLS 控制通道与 `tls-auth`/`tls-crypt`/`tls-crypt-v2`、子网地址池分配、`PUSH_REPLY` 路由下发与多客户端会话管理（82 项） | 已完成 |
 
 验证规则见 [0012](docs/decisions/0012-simplified-delivery-and-verification.md)。跨进程设备 daemon/IPC 不在计划内，出现多进程部署需求时再排。
 
 ## 三核心主要功能对齐拓扑
 
-[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 1,472 项、部分实现 459 项、未实现 2,122 项、不适用 307 项（实测通过 1,931 项，未测 0 项）。`M0 → M1/M2 → M3 → M4 → M5` 阶段已完成并同步更新 `docs/capability-matrix/annotations/*.jsonl` 与 `docs/capability-matrix/results/*.jsonl`，通过 `python3 tools/capability_matrix.py build` 与 `check --strict` 校验。
+[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 1,621 项、部分实现 459 项、未实现 1,973 项、不适用 307 项（实测通过 2,080 项，未测 0 项）。`M0 → M1/M2 → M3 → M4 → M5 → M6 → M7` 全部阶段已完成并同步更新 `docs/capability-matrix/annotations/*.jsonl` 与 `docs/capability-matrix/results/*.jsonl`，通过 `python3 tools/capability_matrix.py build` 与 `check --strict` 校验。
 
 ```mermaid
 flowchart TD
@@ -121,7 +121,7 @@ flowchart TD
 
 | 能力 | 现状 |
 | --- | --- |
-| 协议模块 | 30 个进入默认构建。双端 21 个（含 MASQUE）；仅入站：TUN、Mixed、Redirect、TProxy；仅出站：SSH、Gost Relay、Tor、OpenVPN、OpenConnect、Tailscale、EasyTier、ZeroTier、DNS |
+| 协议模块 | 30 个进入默认构建。双端 22 个（含 MASQUE、OpenVPN）；仅入站：TUN、Mixed、Redirect、TProxy；仅出站：SSH、Gost Relay、Tor、OpenConnect、Tailscale、EasyTier、ZeroTier、DNS |
 | 节点与出站 | 独立节点；单一 `EgressRuntime`/`Dispatcher`；`Local`/`Remote` 分支；`FamilyMode`；`select`/`url-test`/`fallback`/`load-balance`/`balancer` 策略组与 `proxy-providers` 订阅提供者 |
 | 路由 | `routes` / `route` 按域名、正则、GeoIP/GeoSite、`rule-set`/`rule-providers`、CIDR、来源 IP/端口、网络、协议、入站、用户与逻辑规则（`and`/`or`）选择出站或策略组，或执行 `sniff`/`resolve`/`hijack-dns`/`reject` |
 | DNS | `dns` 配置 UDP、TCP、TLS、DoH（HTTPS）上游、Fake-IP 双栈池与持久化、反向映射、DNS 规则表与 `hosts` |

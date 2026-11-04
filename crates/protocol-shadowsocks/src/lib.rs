@@ -4,6 +4,7 @@ mod config;
 mod credential_io;
 mod inbound;
 mod outbound;
+pub mod plugin;
 mod replay;
 mod udp;
 

@@ -28,8 +28,8 @@
 | 9. M3 流量感知、DNS、路由规则集与 TUN 自动化 | TLS/HTTP/QUIC/BT 嗅探，Fake-IP 双栈池与持久化还原，DoH/DoQ、乐观缓存、ECS 与 DNS 规则动作，`rule-set`（`srs`/`mrs`/`dat`）与逻辑/进程规则，TUN `auto-route`/`auto-redirect` | `sniff`、`dns`、`route`、`ruleset`、`tun`、`cache`（`v1.6.0`） | 已完成 |
 | 10. M4 策略组、订阅提供者、控制面 API 与 CLI 工具链 | `select`/`url-test`/`fallback`/`load-balance`/`balancer` 策略组，`proxy-providers` 订阅解析与覆写，Clash/Xray/SSM RESTful/WS 控制面 API，YAML/JSONC 配置解析与密钥/证书生成 CLI，`SIGHUP` 热重载 | `group`、`provider`、`api`、`cli`、`config`（`v1.7.0`） | 已完成 |
 | 11. M5 Web 面板、多配置合并与离线规则集 CLI | `external-ui`/`/ui` 静态面板托管与 CORS/PNA 响应头，`/cache/dns/flush`、`/dns/query`、`/memory`、`/restart` 与 `PATCH /configs`，`-C` 多文件配置合并与环境变量覆盖，`rule-set` 编译/转换与 `geoip`/`geosite` 离线 CLI（151 项） | `api`、`config`、`cli`（`v1.8.0`） | 已完成 |
-| 12. M6 内置 NTP、SIP003 插件与 VLESS 反向代理 | 内置 SNTP/NTPv4 时间同步客户端（支持 `dialer-proxy`），Shadowsocks SIP003 插件进程托管与 `obfs`/`v2ray-plugin` 选项兼容，VLESS Reverse 入站/出站反向代理桥接（67 项） | `ntp`、`outbound/shadowsocks`、`inbound/vless`、`outbound/vless`（`v1.9.0`） | 待开始 |
-| 13. M7 OpenVPN 服务端入站与隧道双端闭环 | `inbound/openvpn` 服务端入站（TCP/UDP、TLS 控制通道、`tls-auth`/`tls-crypt`/`tls-crypt-v2`、客户端证书/口令校验、子网池分配与 `PUSH_REPLY`）（82 项） | `inbound/openvpn`、`inbound/wireguard`（`v1.10.0`） | 待开始 |
+| 12. M6 内置 NTP、SIP003 插件与 VLESS 反向代理 | 内置 SNTP/NTPv4 时间同步客户端（支持 `dialer-proxy`），Shadowsocks SIP003 插件进程托管与 `obfs`/`v2ray-plugin` 选项兼容，VLESS Reverse 入站/出站反向代理桥接（67 项） | `ntp`、`outbound/shadowsocks`、`inbound/vless`、`outbound/vless`（`v1.9.0`） | 已完成 |
+| 13. M7 OpenVPN 服务端入站与隧道双端闭环 | `inbound/openvpn` 服务端入站（TCP/UDP、TLS 控制通道、`tls-auth`/`tls-crypt`/`tls-crypt-v2`、客户端证书/口令校验、子网池分配与 `PUSH_REPLY`）（82 项） | `inbound/openvpn`、`inbound/wireguard`（`v1.10.0`） | 已完成 |
 
 ## 三核心能力对齐推进顺序
 

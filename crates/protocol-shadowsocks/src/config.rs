@@ -53,7 +53,6 @@ pub const LEGACY_METHODS: &[&str] = &[
     "table",
 ];
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct ClientOptions {
     pub server: String,
     pub port: u16,
@@ -67,6 +66,12 @@ pub(crate) struct ClientOptions {
     pub udp_over_tcp_version: Option<u8>,
     #[serde(default)]
     pub multiplex: Option<kerlico_net::sing_mux::SingMuxOutboundConfig>,
+    #[serde(default)]
+    pub plugin: Option<String>,
+    #[serde(default, alias = "plugin-opts")]
+    pub plugin_opts: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub extra_plugin_opts: std::collections::BTreeMap<String, serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,8 +127,29 @@ pub(crate) struct PreparedClient {
     pub target: Destination,
     pub uot_version: Option<u8>,
     pub multiplex: Option<kerlico_net::sing_mux::SingMuxOutboundConfig>,
+    pub plugin: Option<(String, crate::plugin::PluginOpts)>,
 }
 pub(crate) fn client(options: ClientOptions) -> Result<PreparedClient> {
+    for k in options.extra_plugin_opts.keys() {
+        if !k.starts_with("plugin-opts-") && !k.starts_with("plugin_opts_") {
+            return Err(Error::Config("Shadowsocks 出站字段不合法".into()));
+        }
+    }
+    let plugin = if let Some(plugin_name) = options.plugin {
+        let opts = crate::plugin::PluginOpts::from_value_and_flattened(
+            options.plugin_opts.as_ref(),
+            &options.extra_plugin_opts,
+        )?;
+        Some((plugin_name, opts))
+    } else if options.plugin_opts.is_some() || !options.extra_plugin_opts.is_empty() {
+        let opts = crate::plugin::PluginOpts::from_value_and_flattened(
+            options.plugin_opts.as_ref(),
+            &options.extra_plugin_opts,
+        )?;
+        Some(("obfs".to_owned(), opts))
+    } else {
+        None
+    };
     let target = Destination::new(&options.server, options.port)?;
     let config = server(
         ServerAddr::DomainName(target.host(), target.port()),
@@ -153,6 +179,7 @@ pub(crate) fn client(options: ClientOptions) -> Result<PreparedClient> {
         target,
         uot_version,
         multiplex,
+        plugin,
     })
 }
 pub(crate) fn node(options: NodeOptions) -> Result<(ServerConfig, Vec<[u8; 32]>)> {

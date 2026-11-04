@@ -23,12 +23,12 @@
 
 | 文档 | 角色与能力范围 |
 | --- | --- |
-| [VLESS](vless.md) | 双端 TCP/UDP，支持 RAW/WS/HTTPUpgrade/gRPC/XHTTP、TLS/REALITY、Vision、Encryption 混合密钥链、ML-DSA-65 校验、Mux、XUDP 跨载体迁移、XDRIVE、packetaddr |
+| [VLESS](vless.md) | 双端 TCP/UDP，支持 RAW/WS/HTTPUpgrade/gRPC/XHTTP、TLS/REALITY、Vision、Encryption 混合密钥链、ML-DSA-65 校验、Mux、XUDP 跨载体迁移、XDRIVE、packetaddr 与 Reverse 反向代理 |
 | [AnyTLS](anytls.md) | 原生 Rust TLS 双端、会话复用、padding 与 TCP/UoT v2 |
 | [SS2022](ss2022.md) | 三算法双端 TCP/UDP、AES EIH 多用户与客户端身份链 |
 | [SOCKS](socks.md) | SOCKS 4/4a/5 双端与 SOCKS5 UDP 关联 |
 | [HTTP 代理](http-proxy.md) | HTTP CONNECT 双端、普通 HTTP 转发、Basic 认证与 TLS |
-| [Shadowsocks](shadowsocks.md) | AEAD / legacy / none 双端 TCP/UDP |
+| [Shadowsocks](shadowsocks.md) | AEAD / legacy / none 双端 TCP/UDP、UoT v1/v2、sing-mux 与 SIP003/plugin-opts 插件包装 |
 | [Trojan](trojan.md) | 双端传输与 TCP/UDP |
 | [VMess](vmess.md) | AEAD 双端 TCP/UDP 与防重放边界 |
 | [Snell](snell.md) | v4 出站、v5 节点与 v6 双端 |
@@ -46,8 +46,8 @@
 | [Sudoku](sudoku.md) | 记录/表/流/UoT/多路复用与六类载体双端 |
 | [Tor](tor.md) | 基于 `arti-client` 的原生客户端 TCP 出站、目录权限校验与电路隔离 |
 | [WireGuard](wireguard.md) | 基于 Boringtun + smoltcp 的原生双端 TCP/UDP 隧道与多用户 peer 隔离 |
-| [MASQUE](masque.md) | HTTP/3 CONNECT-IP 客户端出站，经用户态 IP 数据面提供 TCP/UDP |
-| [OpenVPN](openvpn.md) | 原生 2.x 客户端出站：UDP/TCP、tls-auth/tls-crypt、AEAD P_DATA_V2、推送配置与换钥 |
+| [MASQUE](masque.md) | HTTP/3 CONNECT-IP 双端，经用户态 IP 数据面提供 TCP/UDP |
+| [OpenVPN](openvpn.md) | 原生 2.x 双端：UDP/TCP、tls-auth/tls-crypt/tls-crypt-v2、AEAD P_DATA_V2、推送配置与换钥 |
 | [OpenConnect](openconnect.md) | 原生 AnyConnect 客户端出站：XML 口令认证、TLS 上的 CSTP 隧道、DPD 与 keepalive（无 DTLS） |
 | [Tailscale](tailscale.md) | pre-auth key 原生加入 tailnet 的客户端出站：TS2021 控制面、DERP、直连 UDP、出口节点与子网路由 |
 | [EasyTier](easytier.md) | 以 peer 身份加入 EasyTier 网络，经用户态栈访问虚拟 IP 与子网代理的客户端出站 |

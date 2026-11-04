@@ -1,6 +1,6 @@
-# OpenVPN 客户端出站接口
+# OpenVPN 双端接口
 
-`kerlico-openvpn` 注册机器标识为 `openvpn` 的出站，用 Rust 原生实现 OpenVPN 2.x 客户端，不启动 `openvpn` 进程，不创建系统 TUN，不修改设备路由或 DNS。IP 包由 `kerlico_wireguard::ip::ClientTunnel` 这一用户态 IP 数据面处理，详见 [IP 隧道](ip-tunnel.md)。
+`kerlico-openvpn` 注册机器标识为 `openvpn` 的客户端出站（`OpenVpnFactory`）与服务端入站节点（`OpenVpnNodeFactory`），用 Rust 原生实现 OpenVPN 2.x 双端，不启动 `openvpn` 进程，不创建系统 TUN，不修改设备路由或 DNS。IP 包由 `kerlico_wireguard::ip::ClientTunnel` 这一用户态 IP 数据面处理，详见 [IP 隧道](ip-tunnel.md)。
 
 ## 实现范围
 

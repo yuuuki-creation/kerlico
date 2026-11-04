@@ -18,7 +18,7 @@
 {"method":"aes-128-gcm","multiplex":{"enabled":true,"padding":false}}
 ```
 
-每个 IPv4/IPv6 节点独立配置，凭据隔离同时覆盖明文密码与实际派生 key，拒绝跨节点复用。非 `none` 密码不能为空，UTF-8 长度上限 4096 字节；未知字段（如 `plugin`、`transport`）直接拒绝。
+每个 IPv4/IPv6 节点独立配置，凭据隔离同时覆盖明文密码与实际派生 key，拒绝跨节点复用。非 `none` 密码不能为空，UTF-8 长度上限 4096 字节；出站可选配置 `plugin`（`obfs`、`v2ray-plugin`、`gost-plugin`、`kcptun`、`restls`、`jls`）与 `plugin-opts` / `plugin-opts-*` 插件参数，其余未知字段直接拒绝。
 
 ## 支持方法范围
 

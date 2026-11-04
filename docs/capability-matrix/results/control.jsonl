@@ -668,3 +668,14 @@
 {"key": "config/top/version", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
 {"key": "config/version/max", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
 {"key": "config/version/min", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
+{"key": "ntp/config/enabled", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "ntp/config/interval", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "ntp/config/server", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "ntp/config/server-port", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "ntp/config/write-to-system", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "ntp/ntp/dialer-proxy", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "ntp/ntp/enable", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "ntp/ntp/interval", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "ntp/ntp/port", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "ntp/ntp/server", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "ntp/ntp/write-to-system", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}

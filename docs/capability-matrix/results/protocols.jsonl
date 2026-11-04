@@ -862,3 +862,141 @@
 {"key": "outbound/zerotier/tcp-fallback-mode", "test": "pass", "evidence": "crates/protocol-zerotier/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "outbound/zerotier/tcp-fallback-relay", "test": "pass", "evidence": "crates/protocol-zerotier/src/outbound.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
 {"key": "outbound/zerotier/udp", "test": "pass", "evidence": "crates/protocol-zerotier/src/outbound.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
+{"key": "inbound/vless-reverse/combo", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "inbound/vless/reverse", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-fingerprint", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-headers", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-host", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mode", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mux", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-name-cert-verify", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-path", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-skip-cert-verify", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-tls", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-alpn", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-host", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-password", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-username", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-acknodelay", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-autoexpire", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-conn", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-crypt", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-datashard", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-dscp", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-framesize", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-interval", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-keepalive", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-key", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-mode", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-mtu", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-nocomp", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-nodelay", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-parityshard", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-ratelimit", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-rcvwnd", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-resend", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-scavengettl", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxbuf", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxver", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-sndwnd", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-sockbuf", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-streambuf", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-obfs-host", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-obfs-mode", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-host", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-password", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-restls-script", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-version-hint", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-fingerprint", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-headers", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-host", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mode", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mux", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-name-cert-verify", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-path", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-skip-cert-verify", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-tls", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-v2ray-http-upgrade", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "outbound/vless/reverse", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/address", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/auth", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/cipher", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/combo", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/data-ciphers", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/data-ciphers-fallback", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/duplicate-cn", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/handshake-window", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/key-direction", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/max-clients", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/mode", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/mss-fix", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/mss-fix-disabled", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/mss-fix-mode", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/mtu", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/name", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/network", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/peer-address", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/peer-address-ipv6", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/ping-interval", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/ping-restart", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/protocol", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-block-outside-dns", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-dhcp-options", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-dns", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-dns-servers", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-dns-servers-addresses", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-dns-servers-dnssec", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-dns-servers-priority", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-dns-servers-resolve-domains", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-dns-servers-sni", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-dns-servers-transport", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-ping-interval", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-ping-restart", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-redirect-gateway", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-redirect-gateway-flags", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-routes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/push-search-domains", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/remote", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/remote-port", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/renegotiate-bytes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/renegotiate-disabled", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/renegotiate-interval", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/renegotiate-packets", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/replay-window", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/replay-window-time", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/static-key", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/static-key-path", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/system", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-certificate", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-certificate-path", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-certificate-profile", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-cipher", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-client-certificate", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-client-certificate-path", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-client-name", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-client-name-type", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-control-wrap", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-control-wrap-direction", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-control-wrap-force-cookie", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-control-wrap-key", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-control-wrap-key-path", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-control-wrap-type", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-crl-path", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-groups", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-key", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-key-path", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-ns-certificate-type", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-peer-fingerprint", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-remote-certificate-eku", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-remote-certificate-ku", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-remote-certificate-tls", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-verify-client-certificate", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-version-max", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/tls-version-min", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/topology", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/users", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/users-password", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/openvpn/users-username", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}
+{"key": "inbound/wireguard/level", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs; crates/protocol-wireguard/src/server.rs", "date": "2026-04-20"}

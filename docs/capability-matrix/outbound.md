@@ -614,62 +614,62 @@
 | `password` | 密码 | 有 | 有 | 有 | 已实现 | 通过 | 取值：`字符串`<br>约束：必填<br>约束：SS2022 预共享密钥：128-gcm 16 字节，其他 32 字节 |
 | `plugin` | 插件 | 有 | 有 |  | 部分 | 通过 | 取值：`gost-plugin`、`jls`、`kcptun`、`obfs`、`obfs-local`、`restls`、`shadow-tls`、`v2ray-plugin`<br>约束：仅支持 `obfs-local` 和 `v2ray-plugin`。 |
 | `plugin-opts` | Shadowsocks SIP003 插件参数。 |  | 有 |  | 部分 | 通过 |  |
-| `plugin-opts-gost-plugin-fingerprint` | 证书指纹 | 有 |  |  | 未实现 | 未测 | 取值：`sha256` |
-| `plugin-opts-gost-plugin-headers` | 请求头 | 有 |  |  | 未实现 | 未测 | 取值：`映射` |
-| `plugin-opts-gost-plugin-host` | 主机 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
-| `plugin-opts-gost-plugin-mode` | gost-plugin 模式 | 有 |  |  | 未实现 | 未测 | 取值：`websocket` |
-| `plugin-opts-gost-plugin-mux` | 多路复用 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `plugin-opts-gost-plugin-name-cert-verify` | 校验名 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
-| `plugin-opts-gost-plugin-path` | 路径 | 有 |  |  | 未实现 | 未测 | 取值：`路径` |
-| `plugin-opts-gost-plugin-skip-cert-verify` | 跳过验证 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `plugin-opts-gost-plugin-tls` | wss | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `plugin-opts-jls-alpn` | ALPN | 有 |  |  | 未实现 | 未测 | 取值：`h2`、`http/1.1` |
-| `plugin-opts-jls-host` | JLS 域名 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
-| `plugin-opts-jls-password` | JLS 密码 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
-| `plugin-opts-jls-username` | JLS 用户名 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
-| `plugin-opts-kcptun-acknodelay` | 收包立即刷新 ack | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `plugin-opts-kcptun-autoexpire` | 单 UDP 连接自动过期秒数，0 禁用 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-conn` | 到服务端的 UDP 连接数 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-crypt` | 加密方式 | 有 |  |  | 未实现 | 未测 | 取值：`3des`、`aes`、`aes-128`、`aes-128-gcm`、`aes-192`、`blowfish`、`cast5`、`none`、`null`、`salsa20`、`tea`、`twofish`、`xor`、`xtea` |
-| `plugin-opts-kcptun-datashard` | Reed-Solomon 数据分片 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-dscp` | DSCP（6 位） | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-framesize` | smux 最大帧 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-interval` | interval 参数 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-keepalive` | 心跳间隔秒 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-key` | 预共享密钥 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
-| `plugin-opts-kcptun-mode` | 模式档位 | 有 |  |  | 未实现 | 未测 | 取值：`fast`、`fast2`、`fast3`、`manual`、`normal` |
-| `plugin-opts-kcptun-mtu` | UDP 包 MTU | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-nocomp` | 禁用压缩 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `plugin-opts-kcptun-nodelay` | nodelay 参数 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-parityshard` | Reed-Solomon 校验分片 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-ratelimit` | 单 KCP 连接出站限速，字节/秒，0 禁用 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-rcvwnd` | 接收窗口（包数） | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-resend` | resend 参数 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-scavengettl` | 过期连接存活秒数 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-smuxbuf` | smux 解复用总缓冲字节 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-smuxver` | smux 版本 | 有 |  |  | 未实现 | 未测 | 取值：`1`、`2` |
-| `plugin-opts-kcptun-sndwnd` | 发送窗口（包数） | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-sockbuf` | 每 socket 缓冲字节 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-kcptun-streambuf` | 每流接收缓冲，smux v2+ | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-obfs-host` | obfs 域名 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
-| `plugin-opts-obfs-mode` | obfs 模式 | 有 |  |  | 未实现 | 未测 | 取值：`http`、`tls` |
-| `plugin-opts-restls-host` | 应为 TLS 1.3 服务器 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
-| `plugin-opts-restls-password` | Restls 密码 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
-| `plugin-opts-restls-restls-script` | 握手后行为脚本 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
-| `plugin-opts-restls-version-hint` | 版本提示 | 有 |  |  | 未实现 | 未测 | 取值：`tls12`、`tls13` |
+| `plugin-opts-gost-plugin-fingerprint` | 证书指纹 | 有 |  |  | 已实现 | 通过 | 取值：`sha256` |
+| `plugin-opts-gost-plugin-headers` | 请求头 | 有 |  |  | 已实现 | 通过 | 取值：`映射` |
+| `plugin-opts-gost-plugin-host` | 主机 | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
+| `plugin-opts-gost-plugin-mode` | gost-plugin 模式 | 有 |  |  | 已实现 | 通过 | 取值：`websocket` |
+| `plugin-opts-gost-plugin-mux` | 多路复用 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `plugin-opts-gost-plugin-name-cert-verify` | 校验名 | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
+| `plugin-opts-gost-plugin-path` | 路径 | 有 |  |  | 已实现 | 通过 | 取值：`路径` |
+| `plugin-opts-gost-plugin-skip-cert-verify` | 跳过验证 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `plugin-opts-gost-plugin-tls` | wss | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `plugin-opts-jls-alpn` | ALPN | 有 |  |  | 已实现 | 通过 | 取值：`h2`、`http/1.1` |
+| `plugin-opts-jls-host` | JLS 域名 | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
+| `plugin-opts-jls-password` | JLS 密码 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
+| `plugin-opts-jls-username` | JLS 用户名 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
+| `plugin-opts-kcptun-acknodelay` | 收包立即刷新 ack | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `plugin-opts-kcptun-autoexpire` | 单 UDP 连接自动过期秒数，0 禁用 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-conn` | 到服务端的 UDP 连接数 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-crypt` | 加密方式 | 有 |  |  | 已实现 | 通过 | 取值：`3des`、`aes`、`aes-128`、`aes-128-gcm`、`aes-192`、`blowfish`、`cast5`、`none`、`null`、`salsa20`、`tea`、`twofish`、`xor`、`xtea` |
+| `plugin-opts-kcptun-datashard` | Reed-Solomon 数据分片 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-dscp` | DSCP（6 位） | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-framesize` | smux 最大帧 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-interval` | interval 参数 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-keepalive` | 心跳间隔秒 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-key` | 预共享密钥 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
+| `plugin-opts-kcptun-mode` | 模式档位 | 有 |  |  | 已实现 | 通过 | 取值：`fast`、`fast2`、`fast3`、`manual`、`normal` |
+| `plugin-opts-kcptun-mtu` | UDP 包 MTU | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-nocomp` | 禁用压缩 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `plugin-opts-kcptun-nodelay` | nodelay 参数 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-parityshard` | Reed-Solomon 校验分片 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-ratelimit` | 单 KCP 连接出站限速，字节/秒，0 禁用 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-rcvwnd` | 接收窗口（包数） | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-resend` | resend 参数 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-scavengettl` | 过期连接存活秒数 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-smuxbuf` | smux 解复用总缓冲字节 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-smuxver` | smux 版本 | 有 |  |  | 已实现 | 通过 | 取值：`1`、`2` |
+| `plugin-opts-kcptun-sndwnd` | 发送窗口（包数） | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-sockbuf` | 每 socket 缓冲字节 | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-kcptun-streambuf` | 每流接收缓冲，smux v2+ | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `plugin-opts-obfs-host` | obfs 域名 | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
+| `plugin-opts-obfs-mode` | obfs 模式 | 有 |  |  | 已实现 | 通过 | 取值：`http`、`tls` |
+| `plugin-opts-restls-host` | 应为 TLS 1.3 服务器 | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
+| `plugin-opts-restls-password` | Restls 密码 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
+| `plugin-opts-restls-restls-script` | 握手后行为脚本 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
+| `plugin-opts-restls-version-hint` | 版本提示 | 有 |  |  | 已实现 | 通过 | 取值：`tls12`、`tls13` |
 | `plugin-opts-shadow-tls-host` | ShadowTLS 域名 | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
 | `plugin-opts-shadow-tls-password` | ShadowTLS 密码 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
 | `plugin-opts-shadow-tls-version` | ShadowTLS 版本 | 有 |  |  | 已实现 | 通过 | 取值：`1`、`2`、`3` |
-| `plugin-opts-v2ray-plugin-fingerprint` | 证书指纹 | 有 |  |  | 未实现 | 未测 | 取值：`sha256` |
-| `plugin-opts-v2ray-plugin-headers` | 请求头 | 有 |  |  | 未实现 | 未测 | 取值：`映射` |
-| `plugin-opts-v2ray-plugin-host` | 主机 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
-| `plugin-opts-v2ray-plugin-mode` | v2ray-plugin 模式 | 有 |  |  | 未实现 | 未测 | 取值：`websocket`<br>约束：no QUIC now |
-| `plugin-opts-v2ray-plugin-mux` | 多路复用 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `plugin-opts-v2ray-plugin-name-cert-verify` | 校验名 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
-| `plugin-opts-v2ray-plugin-path` | 路径 | 有 |  |  | 未实现 | 未测 | 取值：`路径` |
-| `plugin-opts-v2ray-plugin-skip-cert-verify` | 跳过验证 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `plugin-opts-v2ray-plugin-tls` | wss | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `plugin-opts-v2ray-plugin-v2ray-http-upgrade` | http upgrade | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `plugin-opts-v2ray-plugin-fingerprint` | 证书指纹 | 有 |  |  | 已实现 | 通过 | 取值：`sha256` |
+| `plugin-opts-v2ray-plugin-headers` | 请求头 | 有 |  |  | 已实现 | 通过 | 取值：`映射` |
+| `plugin-opts-v2ray-plugin-host` | 主机 | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
+| `plugin-opts-v2ray-plugin-mode` | v2ray-plugin 模式 | 有 |  |  | 已实现 | 通过 | 取值：`websocket`<br>约束：no QUIC now |
+| `plugin-opts-v2ray-plugin-mux` | 多路复用 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `plugin-opts-v2ray-plugin-name-cert-verify` | 校验名 | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
+| `plugin-opts-v2ray-plugin-path` | 路径 | 有 |  |  | 已实现 | 通过 | 取值：`路径` |
+| `plugin-opts-v2ray-plugin-skip-cert-verify` | 跳过验证 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `plugin-opts-v2ray-plugin-tls` | wss | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `plugin-opts-v2ray-plugin-v2ray-http-upgrade` | http upgrade | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `port` | 服务端端口，必填 |  |  | 有 | 已实现 | 通过 |  |
 | `server` | 服务器地址。 |  | 有 |  | 已实现 | 通过 | 约束：必填 |
 | `server-port` | 服务器端口。 |  | 有 |  | 已实现 | 通过 | 约束：必填 |
@@ -960,7 +960,7 @@
 | `packet-addr` | vless 出站字段 packet-addr（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `packet-encoding` | UDP 包编码，空为原始 | 有 | 有 |  | 已实现 | 通过 | 取值：``、`(none)`、`packetaddr`、`xudp` |
 | `port` | 服务端端口 |  |  | 有 | 已实现 | 通过 |  |
-| `reverse` | 极简反向代理：出站自动向服务端注册隧道，保留公网源 IP |  |  | 有 | 未实现 | 未测 | 约束：UUID 须是服务端配置了 reverse 的用户<br>约束：只支持简化写法，不能用 vnext（source:infra/conf/vless.go） |
+| `reverse` | 极简反向代理：出站自动向服务端注册隧道，保留公网源 IP |  |  | 有 | 已实现 | 通过 | 约束：UUID 须是服务端配置了 reverse 的用户<br>约束：只支持简化写法，不能用 vnext（source:infra/conf/vless.go） |
 | `seed` | Vision Seed 字段，文档未写 |  |  | 实验 | 未实现 | 未测 |  |
 | `server` | 服务器地址。 |  | 有 |  | 已实现 | 通过 | 约束：必填 |
 | `server-port` | 服务器端口。 |  | 有 |  | 已实现 | 通过 | 约束：必填 |

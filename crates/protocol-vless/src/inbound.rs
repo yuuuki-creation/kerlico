@@ -22,6 +22,12 @@ use xray_transport::BoxedTransportStream;
 
 pub struct VlessNodeFactory;
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReverseConfig {
+    pub tag: String,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Options {
@@ -36,6 +42,8 @@ struct Options {
     multiplex: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
     #[serde(default)]
     mux_option_padding: Option<bool>,
+    #[serde(default)]
+    reverse: Option<ReverseConfig>,
 }
 fn none() -> String {
     "none".into()
@@ -48,6 +56,8 @@ struct UserOptions {
     flow: String,
     #[serde(default)]
     splice: Option<bool>,
+    #[serde(default)]
+    reverse: Option<ReverseConfig>,
 }
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
@@ -106,6 +116,7 @@ pub(crate) struct Payload {
     fallbacks: Vec<FallbackRule>,
     mux_udp_only: bool,
     multiplex: kerlico_net::sing_mux::SingMuxInboundConfig,
+    reverse_tag: Option<String>,
     xudp: Arc<crate::mux::Table>,
 }
 struct VlessNode {
@@ -159,10 +170,20 @@ impl NodeFactory for VlessNodeFactory {
         }
         let mut seen = BTreeSet::new();
         let mut users = Vec::new();
+        let mut reverse_tag = options.reverse.map(|r| r.tag);
+        if reverse_tag.as_deref().is_some_and(|t| t.trim().is_empty()) {
+            return Err(invalid());
+        }
         for user in credentials {
             let id = UserId::parse(&user.uuid)?;
             if !seen.insert(*id.as_bytes()) {
                 return Err(invalid());
+            }
+            if let Some(rev) = user.reverse {
+                if rev.tag.trim().is_empty() {
+                    return Err(invalid());
+                }
+                reverse_tag = Some(rev.tag);
             }
             let _splice = user.splice.unwrap_or(false) || user.flow == "xtls-rprx-vision-splice";
             let vision = match user.flow.as_str() {
@@ -323,6 +344,7 @@ impl NodeFactory for VlessNodeFactory {
                 fallbacks,
                 mux_udp_only: matches!(transport, crate::server_http::Transport::Xhttp { .. }),
                 multiplex,
+                reverse_tag,
                 xudp: Arc::new(crate::mux::Table::new(XUDP_DETACHED_GRACE)),
             }),
             tls,
@@ -541,6 +563,32 @@ impl Payload {
         match request.command {
             1 => {
                 let target = request.target.ok_or(Error::InvalidAddress)?;
+                if self.reverse_tag.is_some() && target.host() == "reverse.internal.v2fly.arpa" {
+                    budget
+                        .run(async {
+                            codec::write_response(&mut stream).await?;
+                            stream.flush().await?;
+                            Ok::<_, Error>(())
+                        })
+                        .await?;
+                    let mut local: BoxStream = if vision {
+                        crate::payload::server_vision(stream, request.user)
+                    } else {
+                        Box::new(stream)
+                    };
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = context.cancel.cancelled() => return Err(Error::Cancelled),
+                            res = tokio::io::AsyncReadExt::read(&mut local, &mut buf) => {
+                                if res? == 0 {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
                 if self.multiplex.enabled && kerlico_net::sing_mux::is_sing_mux_target(&target) {
                     budget
                         .run(async {
