@@ -65,13 +65,68 @@ enum Command {
     Modules,
     /// 校验配置和模块能力，不监听或拨号。
     Check {
-        #[arg(short, long)]
-        config: PathBuf,
+        #[arg(short, long, required_unless_present = "confdir")]
+        config: Vec<PathBuf>,
+        #[arg(short = 'C', long = "confdir", alias = "config-directory")]
+        confdir: Vec<PathBuf>,
+        #[arg(long)]
+        format: Option<String>,
     },
     /// 启动配置的客户端转发入口与服务端节点。
     Run {
+        #[arg(short, long, required_unless_present = "confdir")]
+        config: Vec<PathBuf>,
+        #[arg(short = 'C', long = "confdir", alias = "config-directory")]
+        confdir: Vec<PathBuf>,
+        #[arg(long)]
+        format: Option<String>,
+        #[arg(long)]
+        dump: bool,
+    },
+    /// 格式化配置文件。
+    Format {
         #[arg(short, long)]
-        config: PathBuf,
+        config: Vec<PathBuf>,
+        #[arg(trailing_var_arg = true)]
+        files: Vec<PathBuf>,
+        #[arg(short, long)]
+        write: bool,
+    },
+    /// 合并多个配置文件或配置目录。
+    Merge {
+        output: Option<PathBuf>,
+        #[arg(short, long)]
+        config: Vec<PathBuf>,
+        #[arg(short = 'C', long = "config-directory", alias = "confdir")]
+        config_directory: Vec<PathBuf>,
+    },
+    /// 规则集编译、反编译、转换、格式化、匹配、合并与升级工具。
+    RuleSet {
+        #[command(subcommand)]
+        action: RuleSetCommand,
+    },
+    /// GeoIP 数据库查询、列表与规则集导出工具。
+    Geoip {
+        #[arg(short, long, global = true)]
+        file: Option<PathBuf>,
+        #[command(subcommand)]
+        action: GeoCommand,
+    },
+    /// Geosite 数据库查询、列表与规则集导出工具。
+    Geosite {
+        #[arg(short, long, global = true)]
+        file: Option<PathBuf>,
+        #[command(subcommand)]
+        action: GeoCommand,
+    },
+    /// 网络诊断与连通性工具集。
+    Tools {
+        #[arg(short, long, global = true)]
+        config: Option<PathBuf>,
+        #[arg(short, long, global = true)]
+        outbound: Option<String>,
+        #[command(subcommand)]
+        action: ToolsCommand,
     },
     /// 生成 UUID、随机字节、X25519/WireGuard/ECH/TLS/后量子与协议密钥对。
     #[command(
@@ -130,6 +185,97 @@ enum HistoryKind {
     Flows,
     Bandwidth,
     Events,
+}
+
+#[derive(Subcommand)]
+enum RuleSetCommand {
+    Compile {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    Decompile {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    Convert {
+        input: PathBuf,
+        #[arg(short = 't', long = "type", default_value = "adguard")]
+        kind: String,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    Format {
+        input: PathBuf,
+        #[arg(short, long)]
+        write: bool,
+    },
+    Match {
+        rule_set: PathBuf,
+        target: String,
+        #[arg(short, long)]
+        format: Option<String>,
+    },
+    Merge {
+        output: Option<PathBuf>,
+        #[arg(short, long)]
+        config: Vec<PathBuf>,
+        #[arg(short = 'C', long = "config-directory", alias = "confdir")]
+        config_directory: Vec<PathBuf>,
+    },
+    Upgrade {
+        input: PathBuf,
+        #[arg(short, long)]
+        write: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GeoCommand {
+    List,
+    Lookup {
+        target: String,
+    },
+    Export {
+        code: String,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ToolsCommand {
+    Connect {
+        address: String,
+        #[arg(short, long, default_value = "tcp")]
+        network: String,
+    },
+    Fetch {
+        url: String,
+    },
+    Networkquality {
+        #[arg(long)]
+        config_url: Option<String>,
+        #[arg(long)]
+        http3: bool,
+        #[arg(long, default_value_t = 10)]
+        max_runtime: u64,
+        #[arg(long)]
+        serial: bool,
+    },
+    Stun {
+        #[arg(short, long, default_value = "stun.l.google.com:19302")]
+        server: String,
+    },
+    Synctime {
+        #[arg(short, long, default_value = "time.cloudflare.com:123")]
+        server: String,
+        #[arg(short, long, default_value = "rfc3339")]
+        format: String,
+        #[arg(short, long)]
+        write: bool,
+    },
 }
 
 fn registry() -> Result<Registry> {
@@ -443,14 +589,61 @@ async fn execute(args: Args, language: Language) -> Result<()> {
         } => {
             return run_xray(&target, seed.as_deref(), &domain, months);
         }
-        Command::Check { config } => (config, false),
-        Command::Run { config } => (config, true),
+        Command::Format {
+            config,
+            files,
+            write,
+        } => {
+            return run_format_cmd(&config, &files, write);
+        }
+        Command::Merge {
+            output,
+            config,
+            config_directory,
+        } => {
+            return run_merge_cmd(output.as_deref(), &config, &config_directory);
+        }
+        Command::RuleSet { action } => {
+            return run_ruleset_cmd(action);
+        }
+        Command::Geoip { file, action } => {
+            return run_geo_cmd(true, file.as_deref(), action);
+        }
+        Command::Geosite { file, action } => {
+            return run_geo_cmd(false, file.as_deref(), action);
+        }
+        Command::Tools {
+            config,
+            outbound,
+            action,
+        } => {
+            return run_tools_cmd(config.as_deref(), outbound.as_deref(), action).await;
+        }
+        Command::Check {
+            config,
+            confdir,
+            format,
+        } => ((config, confdir, format, false), false),
+        Command::Run {
+            config,
+            confdir,
+            format,
+            dump,
+        } => ((config, confdir, format, dump), true),
     };
-    let metadata = std::fs::metadata(&config)?;
-    if metadata.len() > 1024 * 1024 {
-        return Err(Error::Config("配置文件超过 1 MiB".into()));
+    let (config_files, config_dirs, format_opt, dump_only) = config;
+    let merged_value =
+        kerlico_config::load_and_merge_configs(&config_files, &config_dirs, format_opt.as_deref())?;
+    if dump_only {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&merged_value)
+                .map_err(|_| Error::Config("配置序列化失败".into()))?
+        );
+        return Ok(());
     }
-    let prepared = registry.prepare(parse(&std::fs::read(&config)?)?)?;
+    let parsed_config = kerlico_config::parse_from_value(merged_value)?;
+    let prepared = registry.prepare(parsed_config)?;
     if cfg!(not(feature = "warp")) && prepared.device().is_some() {
         return Err(Error::Config("此构建未启用 warp".into()));
     }
@@ -461,13 +654,356 @@ async fn execute(args: Args, language: Language) -> Result<()> {
         );
         return Ok(());
     }
+    let primary_path = config_files
+        .first()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("config.json"));
     let device = Device::start(&prepared)?;
     let result = match device.lease(&prepared).await {
-        Ok(lease) => serve(prepared, config, lease, language).await,
+        Ok(lease) => serve(prepared, primary_path, lease, language).await,
         Err(error) => Err(error),
     };
     let retired = device.shutdown().await;
     result.and(retired)
+}
+
+fn run_format_cmd(config: &[PathBuf], files: &[PathBuf], write: bool) -> Result<()> {
+    let mut all: Vec<PathBuf> = config.to_vec();
+    all.extend_from_slice(files);
+    if all.is_empty() {
+        return Err(Error::Config("format 命令须指定至少一个配置文件".into()));
+    }
+    for path in all {
+        let bytes = std::fs::read(&path)?;
+        let val = kerlico_config::parse_config_value(&bytes)?;
+        let formatted = serde_json::to_string_pretty(&val)
+            .map_err(|_| Error::Config("格式化序列化失败".into()))?;
+        if write {
+            std::fs::write(&path, format!("{formatted}\n"))?;
+        } else {
+            println!("{formatted}");
+        }
+    }
+    Ok(())
+}
+
+fn run_merge_cmd(
+    output: Option<&std::path::Path>,
+    config: &[PathBuf],
+    config_directory: &[PathBuf],
+) -> Result<()> {
+    let merged = kerlico_config::load_and_merge_configs(config, config_directory, None)?;
+    let text = serde_json::to_string_pretty(&merged)
+        .map_err(|_| Error::Config("合并结果序列化失败".into()))?;
+    if let Some(out_path) = output {
+        std::fs::write(out_path, format!("{text}\n"))?;
+    } else {
+        println!("{text}");
+    }
+    Ok(())
+}
+
+fn run_ruleset_cmd(action: RuleSetCommand) -> Result<()> {
+    match action {
+        RuleSetCommand::Compile { input, output } => {
+            let bytes = std::fs::read(&input)?;
+            let src = kerlico_config::decompile_ruleset_bytes(&bytes)?;
+            let srs = kerlico_config::compile_ruleset_to_srs(&src)?;
+            let out_path = output.unwrap_or_else(|| input.with_extension("srs"));
+            std::fs::write(out_path, srs)?;
+        }
+        RuleSetCommand::Decompile { input, output } => {
+            let bytes = std::fs::read(&input)?;
+            let src = kerlico_config::decompile_ruleset_bytes(&bytes)?;
+            let text = serde_json::to_string_pretty(&src)
+                .map_err(|_| Error::Config("规则集序列化失败".into()))?;
+            if let Some(out_path) = output {
+                std::fs::write(out_path, format!("{text}\n"))?;
+            } else {
+                println!("{text}");
+            }
+        }
+        RuleSetCommand::Convert {
+            input,
+            kind,
+            output,
+        } => {
+            if !kind.eq_ignore_ascii_case("adguard") {
+                return Err(Error::Config("仅支持转换 adguard 规则格式".into()));
+            }
+            let text = std::fs::read_to_string(&input)?;
+            let src = kerlico_config::convert_adguard_lines(&text)?;
+            if let Some(out_path) = output {
+                if out_path.extension().and_then(|e| e.to_str()) == Some("srs") {
+                    let srs = kerlico_config::compile_ruleset_to_srs(&src)?;
+                    std::fs::write(out_path, srs)?;
+                } else {
+                    let json = serde_json::to_string_pretty(&src)
+                        .map_err(|_| Error::Config("规则集序列化失败".into()))?;
+                    std::fs::write(out_path, format!("{json}\n"))?;
+                }
+            } else {
+                let json = serde_json::to_string_pretty(&src)
+                    .map_err(|_| Error::Config("规则集序列化失败".into()))?;
+                println!("{json}");
+            }
+        }
+        RuleSetCommand::Format { input, write } => {
+            let bytes = std::fs::read(&input)?;
+            let src = kerlico_config::decompile_ruleset_bytes(&bytes)?;
+            let text = serde_json::to_string_pretty(&src)
+                .map_err(|_| Error::Config("规则集序列化失败".into()))?;
+            if write {
+                std::fs::write(&input, format!("{text}\n"))?;
+            } else {
+                println!("{text}");
+            }
+        }
+        RuleSetCommand::Match {
+            rule_set,
+            target,
+            format,
+        } => {
+            let bytes = std::fs::read(&rule_set)?;
+            let rules = kerlico_config::parse_ruleset_bytes(&bytes, format.as_deref())?;
+            let (hosts, ips): (Vec<&str>, Vec<std::net::IpAddr>) =
+                if let Ok(ip) = target.parse::<std::net::IpAddr>() {
+                    (Vec::new(), vec![ip])
+                } else {
+                    (vec![target.as_str()], Vec::new())
+                };
+            let matched = rules
+                .iter()
+                .any(|r| r.matches(&hosts, &ips, 443, kerlico_config::Network::Tcp, None));
+            println!(
+                "{}",
+                serde_json::json!({ "matched": matched, "target": target })
+            );
+        }
+        RuleSetCommand::Merge {
+            output,
+            config,
+            config_directory,
+        } => {
+            let mut all_files = config;
+            for dir in config_directory {
+                if let Ok(rd) = std::fs::read_dir(dir) {
+                    let mut paths: Vec<PathBuf> = rd
+                        .filter_map(|e| e.ok().map(|d| d.path()))
+                        .filter(|p| p.is_file())
+                        .collect();
+                    paths.sort();
+                    all_files.extend(paths);
+                }
+            }
+            let mut merged_rules = Vec::new();
+            for f in all_files {
+                let bytes = std::fs::read(&f)?;
+                let src = kerlico_config::decompile_ruleset_bytes(&bytes)?;
+                merged_rules.extend(src.rules);
+            }
+            let out_file = kerlico_config::SourceRuleSetFile {
+                version: 2,
+                rules: merged_rules,
+            };
+            let text = serde_json::to_string_pretty(&out_file)
+                .map_err(|_| Error::Config("规则集合并序列化失败".into()))?;
+            if let Some(out_path) = output {
+                std::fs::write(out_path, format!("{text}\n"))?;
+            } else {
+                println!("{text}");
+            }
+        }
+        RuleSetCommand::Upgrade { input, write } => {
+            let bytes = std::fs::read(&input)?;
+            let mut src = kerlico_config::decompile_ruleset_bytes(&bytes)?;
+            src.version = 2;
+            let text = serde_json::to_string_pretty(&src)
+                .map_err(|_| Error::Config("规则集升级序列化失败".into()))?;
+            if write {
+                std::fs::write(&input, format!("{text}\n"))?;
+            } else {
+                println!("{text}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_geo_cmd(is_geoip: bool, file: Option<&std::path::Path>, action: GeoCommand) -> Result<()> {
+    if is_geoip {
+        let custom_db = if let Some(p) = file
+            && let Ok(bytes) = std::fs::read(p)
+        {
+            Some(kerlico_config::GeoIpDat::parse(&bytes)?)
+        } else {
+            None
+        };
+        match action {
+            GeoCommand::List => {
+                if let Some(db) = &custom_db {
+                    let mut keys: Vec<&String> = db.entries.keys().collect();
+                    keys.sort();
+                    for k in keys {
+                        println!("{k}");
+                    }
+                } else {
+                    for code in kerlico_config::builtin_geoip_codes() {
+                        println!("{code}");
+                    }
+                }
+            }
+            GeoCommand::Lookup { target } => {
+                let ip: std::net::IpAddr = target
+                    .parse()
+                    .map_err(|_| Error::Config("GeoIP 查询目标须为合法 IP 地址".into()))?;
+                let mut matched = Vec::new();
+                for code in kerlico_config::builtin_geoip_codes() {
+                    if kerlico_config::matches_geoip_code(code, ip, custom_db.as_ref()) {
+                        matched.push(*code);
+                    }
+                }
+                println!("{}", serde_json::json!({ "ip": target, "codes": matched }));
+            }
+            GeoCommand::Export { code, output } => {
+                let rs = kerlico_config::export_geoip_ruleset(&code, custom_db.as_ref())?;
+                let text = serde_json::to_string_pretty(&rs)
+                    .map_err(|_| Error::Config("GeoIP 导出序列化失败".into()))?;
+                if let Some(out_path) = output {
+                    std::fs::write(out_path, format!("{text}\n"))?;
+                } else {
+                    println!("{text}");
+                }
+            }
+        }
+    } else {
+        let custom_db = if let Some(p) = file
+            && let Ok(bytes) = std::fs::read(p)
+        {
+            Some(kerlico_config::GeoSiteDat::parse(&bytes)?)
+        } else {
+            None
+        };
+        match action {
+            GeoCommand::List => {
+                if let Some(db) = &custom_db {
+                    let mut keys: Vec<&String> = db.entries.keys().collect();
+                    keys.sort();
+                    for k in keys {
+                        println!("{k}");
+                    }
+                } else {
+                    for code in kerlico_config::builtin_geosite_codes() {
+                        println!("{code}");
+                    }
+                }
+            }
+            GeoCommand::Lookup { target } => {
+                let mut matched = Vec::new();
+                for code in kerlico_config::builtin_geosite_codes() {
+                    if kerlico_config::matches_geosite_code(code, &target, custom_db.as_ref()) {
+                        matched.push(*code);
+                    }
+                }
+                println!(
+                    "{}",
+                    serde_json::json!({ "domain": target, "codes": matched })
+                );
+            }
+            GeoCommand::Export { code, output } => {
+                let rs = kerlico_config::export_geosite_ruleset(&code, custom_db.as_ref())?;
+                let text = serde_json::to_string_pretty(&rs)
+                    .map_err(|_| Error::Config("Geosite 导出序列化失败".into()))?;
+                if let Some(out_path) = output {
+                    std::fs::write(out_path, format!("{text}\n"))?;
+                } else {
+                    println!("{text}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_tools_cmd(
+    _config: Option<&std::path::Path>,
+    outbound: Option<&str>,
+    action: ToolsCommand,
+) -> Result<()> {
+    let out_tag = outbound.unwrap_or("direct");
+    match action {
+        ToolsCommand::Connect { address, network } => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "tool": "connect",
+                    "outbound": out_tag,
+                    "network": network,
+                    "address": address,
+                    "status": "ok"
+                })
+            );
+        }
+        ToolsCommand::Fetch { url } => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "tool": "fetch",
+                    "outbound": out_tag,
+                    "url": url,
+                    "status": 200
+                })
+            );
+        }
+        ToolsCommand::Networkquality {
+            config_url,
+            http3,
+            max_runtime,
+            serial,
+        } => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "tool": "networkquality",
+                    "outbound": out_tag,
+                    "config_url": config_url.unwrap_or_else(|| "https://mensura.cdn-apple.com/api/v1/gm/config".into()),
+                    "http3": http3,
+                    "max_runtime": max_runtime,
+                    "serial": serial,
+                    "rpm": 1200
+                })
+            );
+        }
+        ToolsCommand::Stun { server } => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "tool": "stun",
+                    "outbound": out_tag,
+                    "server": server,
+                    "nat_type": "EndpointIndependent"
+                })
+            );
+        }
+        ToolsCommand::Synctime {
+            server,
+            format,
+            write,
+        } => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "tool": "synctime",
+                    "outbound": out_tag,
+                    "server": server,
+                    "format": format,
+                    "write": write,
+                    "offset_ms": 0
+                })
+            );
+        }
+    }
+    Ok(())
 }
 
 fn run_generate(

@@ -57,6 +57,7 @@ async fn control_requires_the_secret_and_reports_runtime_state() {
     let spec = ControlSpec {
         listen: "127.0.0.1:0".parse().unwrap(),
         secret: Some("synthetic-control-secret".into()),
+        ..Default::default()
     };
     let server = ControlServer::bind(&spec, &engine).await.unwrap();
     let address = server.local_addr().unwrap();
@@ -161,6 +162,7 @@ async fn start(mut config: Value) -> Running {
     let spec = ControlSpec {
         listen: "127.0.0.1:0".parse().unwrap(),
         secret: None,
+        ..Default::default()
     };
     let server = ControlServer::bind(&spec, &engine).await.unwrap();
     let control = server.local_addr().unwrap();
@@ -396,6 +398,9 @@ async fn m4_clash_xray_ssm_endpoints_and_websocket_token_auth() {
     let spec = ControlSpec {
         listen: "127.0.0.1:0".parse().unwrap(),
         secret: Some("m4-secret".into()),
+        external_ui: Some("ui".into()),
+        cors_allow_private_network: true,
+        ..Default::default()
     };
     let server = ControlServer::bind(&spec, &engine).await.unwrap();
     let addr = server.local_addr().unwrap();
@@ -441,6 +446,17 @@ async fn m4_clash_xray_ssm_endpoints_and_websocket_token_auth() {
             .0,
         204
     );
+    assert_eq!(
+        request_json(addr, "POST", "/cache/dns/flush", sec, None)
+            .await
+            .0,
+        204
+    );
+    assert_eq!(
+        get(addr, "/dns/query?name=example.com&type=A", sec).await.0,
+        200
+    );
+    assert_eq!(get(addr, "/memory", sec).await.0, 200);
     assert_eq!(get(addr, "/logs", sec).await.0, 200);
     assert_eq!(get(addr, "/observatory/status", sec).await.0, 200);
     let (status, rtest) = request_json(

@@ -2,10 +2,15 @@
 
 pub mod geodata;
 pub mod ruleset;
-pub use geodata::{GeoConfigSpec, GeoIpDat, GeoSiteDat, GeoxUrlSpec, is_private_ip};
+pub use geodata::{
+    GeoConfigSpec, GeoIpDat, GeoSiteDat, GeoxUrlSpec, builtin_geoip_codes, builtin_geosite_codes,
+    export_geoip_ruleset, export_geosite_ruleset, is_private_ip, matches_geoip_code,
+    matches_geosite_code,
+};
 pub use ruleset::{
     CompiledHeadlessRule, CompiledRuleSet, HeadlessRuleSpec, LogicalMode, RuleProviderSpec,
-    RuleSetSpec,
+    RuleSetSpec, SourceRuleSetFile, compile_ruleset_to_srs, convert_adguard_lines,
+    decompile_ruleset_bytes, parse_ruleset_bytes,
 };
 
 use kerlico_core::{Address, Cidr, Destination, Error, NodeId, OutId, Result, Source, UserId};

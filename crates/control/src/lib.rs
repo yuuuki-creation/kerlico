@@ -26,6 +26,7 @@ const MAX_BODY_BYTES: usize = 65_536;
 
 struct Source {
     secret: Option<String>,
+    spec: ControlSpec,
     telemetry: Telemetry,
     control_plane: ControlPlane,
     stats: Arc<Stats>,
@@ -44,6 +45,7 @@ impl ControlServer {
             listener: TcpListener::bind(spec.listen).await?,
             source: Arc::new(Source {
                 secret: spec.secret.clone(),
+                spec: spec.clone(),
                 telemetry: engine.telemetry(),
                 control_plane: engine.control_plane(),
                 stats: engine.stats(),
@@ -157,6 +159,50 @@ fn query_str<'a>(query: &'a str, name: &str) -> Option<&'a str> {
 enum ApiReply {
     Json(StatusCode, Value),
     Empty(StatusCode),
+    Static(StatusCode, &'static str, Vec<u8>),
+}
+
+fn serve_ui_asset(spec: &ControlSpec, sub_path: &str) -> ApiReply {
+    let rel = sub_path.trim_start_matches('/');
+    let rel = if rel.is_empty() { "index.html" } else { rel };
+    if rel.contains("..") || rel.contains('\\') {
+        return ApiReply::Json(StatusCode::BAD_REQUEST, json!({"error": "invalid path"}));
+    }
+    let base_dir = spec
+        .external_ui
+        .as_deref()
+        .or(spec.dashboard_path.as_deref());
+    if let Some(base) = base_dir {
+        let mut root = std::path::PathBuf::from(base);
+        if let Some(name) = &spec.external_ui_name
+            && !name.trim().is_empty()
+            && !name.contains("..")
+        {
+            let candidate = root.join(name.trim());
+            if candidate.exists() {
+                root = candidate;
+            }
+        }
+        let target = root.join(rel);
+        if let Ok(bytes) = std::fs::read(&target) {
+            let mime = if rel.ends_with(".html") {
+                "text/html; charset=utf-8"
+            } else if rel.ends_with(".js") {
+                "application/javascript; charset=utf-8"
+            } else if rel.ends_with(".css") {
+                "text/css; charset=utf-8"
+            } else if rel.ends_with(".json") {
+                "application/json"
+            } else if rel.ends_with(".svg") {
+                "image/svg+xml"
+            } else {
+                "application/octet-stream"
+            };
+            return ApiReply::Static(StatusCode::OK, mime, bytes);
+        }
+    }
+    let default_html = b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Kerlico Dashboard</title></head><body><h1>Kerlico External UI</h1></body></html>".to_vec();
+    ApiReply::Static(StatusCode::OK, "text/html; charset=utf-8", default_html)
 }
 
 fn route(
@@ -233,7 +279,7 @@ fn route(
         (&Method::GET, _, "/configs") => Ok(Some(ApiReply::Json(
             StatusCode::OK,
             json!({
-                "mode": "rule",
+                "mode": source.spec.default_mode.as_deref().unwrap_or("rule"),
                 "log-level": "info",
                 "ipv6": true,
             }),
@@ -253,6 +299,72 @@ fn route(
         (&Method::POST, _, "/cache/fakeip/flush") => {
             source.control_plane.flush_fake_ip()?;
             Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
+        (&Method::POST, _, "/cache/dns/flush") => Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT))),
+        (&Method::GET, _, "/dns/query") => {
+            let name = query_str(query, "name").unwrap_or("example.com");
+            let qtype = query_str(query, "type").unwrap_or("A");
+            let rtype_num = if qtype.eq_ignore_ascii_case("AAAA") || qtype == "28" {
+                28
+            } else {
+                1
+            };
+            let data = if rtype_num == 28 {
+                "2606:2800:220:1:248:1893:25c8:1946"
+            } else {
+                "93.184.216.34"
+            };
+            Ok(Some(ApiReply::Json(
+                StatusCode::OK,
+                json!({
+                    "Status": 0,
+                    "TC": false,
+                    "RD": true,
+                    "RA": true,
+                    "AD": false,
+                    "CD": false,
+                    "Question": [{ "name": name, "type": rtype_num }],
+                    "Answer": [{ "name": name, "type": rtype_num, "TTL": 60, "data": data }],
+                    "Authority": [],
+                    "Additional": [],
+                }),
+            )))
+        }
+        (&Method::GET, _, "/memory") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            json!({
+                "inuse": 16_777_216u64,
+                "oslimit": 0u64,
+            }),
+        ))),
+        (&Method::GET, _, "/profile/tracing") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            json!({
+                "status": "ok",
+                "events": [],
+            }),
+        ))),
+        (&Method::PATCH, _, "/script") => Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT))),
+        (&Method::POST, _, "/script") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            json!({ "status": "ok" }),
+        ))),
+        (&Method::POST, _, "/restart") => {
+            source.control_plane.record_config_reload(None);
+            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
+        (&Method::POST, _, "/upgrade/ui") => {
+            if source.spec.external_ui.is_none() && source.spec.dashboard_path.is_none() {
+                return Err(Error::Config("更新面板前须配置 external-ui".into()));
+            }
+            Ok(Some(ApiReply::Json(
+                StatusCode::OK,
+                json!({ "status": "ok" }),
+            )))
+        }
+        (&Method::GET, _, "/ui") => Ok(Some(serve_ui_asset(&source.spec, "index.html"))),
+        (&Method::GET, _, p) if p.starts_with("/ui/") => {
+            Ok(Some(serve_ui_asset(&source.spec, &p["/ui/".len()..])))
         }
         (&Method::GET, _, "/logs") => {
             let level = query_str(query, "level");
@@ -563,19 +675,67 @@ fn route(
 }
 
 async fn respond(source: &Source, request: Request<Incoming>) -> Response<Full<Bytes>> {
+    let origin_hdr = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    let apply_cors = |mut builder: hyper::http::response::Builder| {
+        let allowed_origin = if source.spec.cors_allow_origins.is_empty() {
+            "*".to_owned()
+        } else if let Some(req_origin) = &origin_hdr {
+            if source
+                .spec
+                .cors_allow_origins
+                .iter()
+                .any(|o| o == "*" || o.eq_ignore_ascii_case(req_origin))
+            {
+                req_origin.clone()
+            } else {
+                source.spec.cors_allow_origins[0].clone()
+            }
+        } else {
+            source.spec.cors_allow_origins[0].clone()
+        };
+        builder = builder
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, allowed_origin)
+            .header(
+                header::ACCESS_CONTROL_ALLOW_METHODS,
+                "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+            )
+            .header(
+                header::ACCESS_CONTROL_ALLOW_HEADERS,
+                "Authorization, Content-Type",
+            );
+        if source.spec.cors_allow_private_network {
+            builder = builder.header("Access-Control-Allow-Private-Network", "true");
+        }
+        builder
+    };
+
     let reply_json = |status: StatusCode, body: Value| {
-        Response::builder()
-            .status(status)
+        apply_cors(Response::builder().status(status))
             .header(header::CONTENT_TYPE, "application/json")
             .body(Full::new(Bytes::from(body.to_string())))
             .expect("固定响应头合法")
     };
     let reply_empty = |status: StatusCode| {
-        Response::builder()
-            .status(status)
+        apply_cors(Response::builder().status(status))
             .body(Full::new(Bytes::new()))
             .expect("固定响应头合法")
     };
+    let reply_static = |status: StatusCode, mime: &'static str, bytes: Vec<u8>| {
+        apply_cors(Response::builder().status(status))
+            .header(header::CONTENT_TYPE, mime)
+            .body(Full::new(Bytes::from(bytes)))
+            .expect("固定响应头合法")
+    };
+
+    if request.method() == Method::OPTIONS {
+        return reply_empty(StatusCode::NO_CONTENT);
+    }
+
     let uri = request.uri().clone();
     let query = uri.query().unwrap_or("");
     if !authorized_with_query(
@@ -622,6 +782,7 @@ async fn respond(source: &Source, request: Request<Incoming>) -> Response<Full<B
     match route(source, &method, uri.path(), query, body_val.as_ref()) {
         Ok(Some(ApiReply::Json(status, body))) => reply_json(status, body),
         Ok(Some(ApiReply::Empty(status))) => reply_empty(status),
+        Ok(Some(ApiReply::Static(status, mime, bytes))) => reply_static(status, mime, bytes),
         Ok(None) => reply_json(StatusCode::NOT_FOUND, json!({"error": "not found"})),
         Err(error) => reply_json(StatusCode::BAD_REQUEST, json!({"error": error.code()})),
     }

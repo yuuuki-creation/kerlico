@@ -26,7 +26,10 @@
 | 7. M1 入站/出站角色与协议细项对齐 | `mixed`、`redirect`、`tproxy` 入站，Trojan/VLESS 入站 `fallback` 分流，MASQUE 服务端入站，`dns` 内部出站，Hysteria v1/v2 端口跳跃与速率/伪装，OpenVPN `servers`/`mss-fix`/`tls-crypt-v2`，OpenConnect mTLS，WireGuard `reserved`，ZeroTier TCP 回退等 112 项 | `inbound`、`outbound`（`v1.4.0`） | 已完成 |
 | 8. M2 传输、安全、多路复用与拨号对齐 | `dialer-proxy`/`detour` 链式拨号，`sing-mux`（`h2mux`/`smux`/`yamux`），`UoT` v1/v2，mKCP 与 V2Ray H2/QUIC 传输，Xray `finalmask`，ECH 双端，TLS 分片/伪装，内置 ACME 自动证书 | `transport`、`security`、`cert`、`mux`、`udp`、`dialer`（`v1.5.0`） | 已完成 |
 | 9. M3 流量感知、DNS、路由规则集与 TUN 自动化 | TLS/HTTP/QUIC/BT 嗅探，Fake-IP 双栈池与持久化还原，DoH/DoQ、乐观缓存、ECS 与 DNS 规则动作，`rule-set`（`srs`/`mrs`/`dat`）与逻辑/进程规则，TUN `auto-route`/`auto-redirect` | `sniff`、`dns`、`route`、`ruleset`、`tun`、`cache`（`v1.6.0`） | 已完成 |
-| 10. M4 策略组、订阅提供者、控制面 API 与 CLI 工具链 | `select`/`url-test`/`fallback`/`load-balance`/`observatory` 策略组，`proxy-providers` 订阅解析与覆写，完整 Clash RESTful/WS API 与外部面板，规则转换/密钥生成 CLI，内置 `ntp` | `group`、`provider`、`api`、`cli`、`config`、`ntp`（`v1.7.0`） | 已完成 |
+| 10. M4 策略组、订阅提供者、控制面 API 与 CLI 工具链 | `select`/`url-test`/`fallback`/`load-balance`/`balancer` 策略组，`proxy-providers` 订阅解析与覆写，Clash/Xray/SSM RESTful/WS 控制面 API，YAML/JSONC 配置解析与密钥/证书生成 CLI，`SIGHUP` 热重载 | `group`、`provider`、`api`、`cli`、`config`（`v1.7.0`） | 已完成 |
+| 11. M5 Web 面板、多配置合并与离线规则集 CLI | `external-ui`/`/ui` 静态面板托管与 CORS/PNA 响应头，`/cache/dns/flush`、`/dns/query`、`/memory`、`/restart` 与 `PATCH /configs`，`-C` 多文件配置合并与环境变量覆盖，`rule-set` 编译/转换与 `geoip`/`geosite` 离线 CLI（151 项） | `api`、`config`、`cli`（`v1.8.0`） | 已完成 |
+| 12. M6 内置 NTP、SIP003 插件与 VLESS 反向代理 | 内置 SNTP/NTPv4 时间同步客户端（支持 `dialer-proxy`），Shadowsocks SIP003 插件进程托管与 `obfs`/`v2ray-plugin` 选项兼容，VLESS Reverse 入站/出站反向代理桥接（67 项） | `ntp`、`outbound/shadowsocks`、`inbound/vless`、`outbound/vless`（`v1.9.0`） | 待开始 |
+| 13. M7 OpenVPN 服务端入站与隧道双端闭环 | `inbound/openvpn` 服务端入站（TCP/UDP、TLS 控制通道、`tls-auth`/`tls-crypt`/`tls-crypt-v2`、客户端证书/口令校验、子网池分配与 `PUSH_REPLY`）（82 项） | `inbound/openvpn`、`inbound/wireguard`（`v1.10.0`） | 待开始 |
 
 ## 三核心能力对齐推进顺序
 
@@ -34,6 +37,9 @@
 2. **并行推进 M1 与 M2 底座**：`M2` 的链式拨号（`dialer-proxy`/`detour`）、通用多路复用（`sing-mux`）和 `UoT` 是 `M1` 出站组合的底层依赖；`M1` 的 `mixed`、`redirect`、`tproxy` 入站是 `M3` 透明代理与嗅探的入口。
 3. **打通 M3 数据面闭环**：在 `M1` 入站管线之上接入协议嗅探（`sniff`）与 Fake-IP（`dns` + `cache`），再合入外部规则集（`ruleset`）和 TUN 自动路由/自动重定向（`auto-route`/`auto-redirect`）。
 4. **收口 M4 编排与控制面**：在全局共享 `Dispatcher` 的命名出站表上层构建策略组（`group`）与订阅提供者（`provider`），并通过完整 Clash API（`api`）对外提供状态查询、延迟测速、节点切换与热重载。
+5. **推进 M5 外围运维与工具链**：在 `M4` 控制面与 `M3` 规则集引擎之上补齐 `/ui` 静态面板托管与 CORS、`-C` 多配置文件合并及 `rule-set`/`geoip`/`geosite` 离线转换 CLI。
+6. **推进 M6 协议生态扩展**：合入内置 NTP 时间同步客户端、Shadowsocks SIP003 插件托管与 VLESS Reverse 反向代理。
+7. **推进 M7 隧道服务端闭环**：在 `crates/protocol-openvpn` 现有客户端数据通道与 TLS 控制面基础上补齐 OpenVPN 服务端入站（`inbound/openvpn`）。
 
 ## 开工前核对清单
 

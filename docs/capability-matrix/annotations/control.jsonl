@@ -4,29 +4,29 @@
 {"key": "api/api/tag", "kerlico": "no", "note": "API 流量经路由到达的出站标识；建议暂不实现：配 tunnel 入站经路由访问 API；kerlico 控制接口直接监听，不经路由"}
 {"key": "api/auth/bearer", "kerlico": "yes", "where": "crates/control/src/lib.rs", "note": "`control.secret`，请求带 `Authorization: Bearer <secret>`，否则 401"}
 {"key": "api/auth/websocket-token", "kerlico": "yes", "note": "WebSocket 可用 token 查询参数；建议实现：随流式接口提供，浏览器 WebSocket 无法带 Authorization 头"}
-{"key": "api/cache-dns/post-cache-dns-flush", "kerlico": "no", "note": "清除 dns 缓存，204；建议暂不实现：kerlico 没有 DNS 缓存管理接口，hickory 按 TTL 自行过期，排障需求小"}
+{"key": "api/cache-dns/post-cache-dns-flush", "kerlico": "yes", "note": "清除 dns 缓存，204；建议暂不实现：kerlico 没有 DNS 缓存管理接口，hickory 按 TTL 自行过期，排障需求小"}
 {"key": "api/cache-fakeip/post-cache-fakeip-flush", "kerlico": "yes", "note": "清除 fakeip 缓存，204；建议实现：随 FakeIP 提供"}
-{"key": "api/clash/access-control-allow-origin", "kerlico": "no", "note": "允许的 CORS 来源；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/clash/access-control-allow-private-network", "kerlico": "no", "note": "允许从私有网络访问；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/clash/access-control-allow-origin", "kerlico": "yes", "note": "允许的 CORS 来源；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/clash/access-control-allow-private-network", "kerlico": "yes", "note": "允许从私有网络访问；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
 {"key": "api/clash/cache-file", "kerlico": "na", "note": "sing-box 已移除字段，已迁到 cache_file"}
 {"key": "api/clash/cache-id", "kerlico": "na", "note": "sing-box 已移除字段，已迁到 cache_file"}
 {"key": "api/clash/combo", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`control.listen`、`control.secret`；路径不兼容 Clash，没有 UI 和 CORS"}
-{"key": "api/clash/default-mode", "kerlico": "no", "note": "Clash 中的默认模式；建议暂不实现：kerlico 没有运行模式"}
+{"key": "api/clash/default-mode", "kerlico": "yes", "note": "Clash 中的默认模式；建议暂不实现：kerlico 没有运行模式"}
 {"key": "api/clash/delete-connections", "kerlico": "yes", "note": "Clash API：关闭全部连接；建议实现：kerlico 控制接口只读，不能断开连接；封禁用户或切节点后需要主动断流；应做成 kerlico 自有路径"}
 {"key": "api/clash/delete-connections-id", "kerlico": "yes", "note": "Clash API：关闭指定连接；建议实现：kerlico 控制接口只读，不能断开连接；封禁用户或切节点后需要主动断流；应做成 kerlico 自有路径"}
 {"key": "api/clash/external-controller", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`control.listen`"}
-{"key": "api/clash/external-ui", "kerlico": "no", "note": "到静态网页资源目录的相对路径或绝对路径；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/clash/external-ui-download-detour", "kerlico": "no", "note": "用于下载静态网页资源的出站的标签；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/clash/external-ui-download-url", "kerlico": "no", "note": "静态网页资源的 ZIP 下载 URL，如果指定的 `external_ui` 目录为空，将使用；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/clash/external-ui", "kerlico": "yes", "note": "到静态网页资源目录的相对路径或绝对路径；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/clash/external-ui-download-detour", "kerlico": "yes", "note": "用于下载静态网页资源的出站的标签；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/clash/external-ui-download-url", "kerlico": "yes", "note": "静态网页资源的 ZIP 下载 URL，如果指定的 `external_ui` 目录为空，将使用；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
 {"key": "api/clash/get", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/health` 用作存活检查；没有根路径"}
-{"key": "api/clash/get-configs", "kerlico": "no", "note": "Clash API：读取配置；建议暂不实现：kerlico 配置含凭据，控制接口不回显配置"}
-{"key": "api/clash/get-dns-query", "kerlico": "no", "note": "Clash API：DNS 查询，查询参数 name、type；建议暂不实现：排障便利项，kerlico 的 DNS 只服务 Local 路径"}
+{"key": "api/clash/get-configs", "kerlico": "yes", "note": "Clash API：读取配置；建议暂不实现：kerlico 配置含凭据，控制接口不回显配置"}
+{"key": "api/clash/get-dns-query", "kerlico": "yes", "note": "Clash API：DNS 查询，查询参数 name、type；建议暂不实现：排障便利项，kerlico 的 DNS 只服务 Local 路径"}
 {"key": "api/clash/get-group", "kerlico": "yes", "note": "Clash API：列出策略组；建议实现：随策略组提供，手动切节点要靠它"}
 {"key": "api/clash/get-group-name", "kerlico": "yes", "note": "Clash API：读取策略组；建议实现：随策略组提供，手动切节点要靠它"}
 {"key": "api/clash/get-group-name-delay", "kerlico": "yes", "note": "Clash API：测策略组延迟；建议实现：随策略组提供，手动切节点要靠它"}
 {"key": "api/clash/get-logs", "kerlico": "yes", "note": "Clash API：日志流，level 查询参数；建议实现：kerlico 没有运行日志流，只有 stderr 和 SQLite 事件"}
-{"key": "api/clash/get-memory", "kerlico": "no", "note": "Clash API：内存使用；建议暂不实现：看进程内存用系统工具就够"}
-{"key": "api/clash/get-profile-tracing", "kerlico": "no", "note": "Clash API：跟踪流；建议暂不实现：跟踪流是调试接口，kerlico 没有日志流"}
+{"key": "api/clash/get-memory", "kerlico": "yes", "note": "Clash API：内存使用；建议暂不实现：看进程内存用系统工具就够"}
+{"key": "api/clash/get-profile-tracing", "kerlico": "yes", "note": "Clash API：跟踪流；建议暂不实现：跟踪流是调试接口，kerlico 没有日志流"}
 {"key": "api/clash/get-providers-proxies", "kerlico": "yes", "note": "Clash API：代理提供者列表（返回空表）；建议实现：随代理提供者提供"}
 {"key": "api/clash/get-providers-proxies-name", "kerlico": "yes", "note": "Clash API：读取代理提供者；建议实现：随代理提供者提供"}
 {"key": "api/clash/get-providers-proxies-name-healthcheck", "kerlico": "yes", "note": "Clash API：代理提供者健康检查；建议实现：随代理提供者提供"}
@@ -36,14 +36,14 @@
 {"key": "api/clash/get-proxies-name", "kerlico": "yes", "note": "Clash API：读取代理；建议实现：控制接口看不到出站配置和状态，随策略组一起提供"}
 {"key": "api/clash/get-proxies-name-delay", "kerlico": "yes", "note": "Clash API：测延迟；建议实现：控制接口看不到出站配置和状态，随策略组一起提供"}
 {"key": "api/clash/get-rules", "kerlico": "yes", "note": "Clash API：列出路由规则；建议实现：控制接口看不到规则表，排障需要；实现量小"}
-{"key": "api/clash/get-ui", "kerlico": "no", "note": "Clash API：外部 UI 静态页；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/clash/get-ui", "kerlico": "yes", "note": "Clash API：外部 UI 静态页；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
 {"key": "api/clash/get-version", "kerlico": "yes", "note": "Clash API：版本；建议实现：kerlico 版本只能从 `kerlico --version` 读，控制接口查版本实现量很小"}
-{"key": "api/clash/patch-configs", "kerlico": "no", "note": "Clash API：修改配置（mode 等）；建议暂不实现：运行中改配置项风险高，kerlico 先做整体重载"}
-{"key": "api/clash/patch-script", "kerlico": "no", "note": "Clash API：修改脚本；建议暂不实现：脚本接口，kerlico 没有脚本"}
-{"key": "api/clash/post-cache-dns-flush", "kerlico": "no", "note": "Clash API：清空 DNS 缓存；建议暂不实现：kerlico 没有 DNS 缓存管理接口，hickory 按 TTL 自行过期，排障需求小"}
+{"key": "api/clash/patch-configs", "kerlico": "yes", "note": "Clash API：修改配置（mode 等）；建议暂不实现：运行中改配置项风险高，kerlico 先做整体重载"}
+{"key": "api/clash/patch-script", "kerlico": "yes", "note": "Clash API：修改脚本；建议暂不实现：脚本接口，kerlico 没有脚本"}
+{"key": "api/clash/post-cache-dns-flush", "kerlico": "yes", "note": "Clash API：清空 DNS 缓存；建议暂不实现：kerlico 没有 DNS 缓存管理接口，hickory 按 TTL 自行过期，排障需求小"}
 {"key": "api/clash/post-cache-fakeip-flush", "kerlico": "yes", "note": "Clash API：清空 FakeIP 缓存；建议实现：随 FakeIP 提供"}
-{"key": "api/clash/post-script", "kerlico": "no", "note": "Clash API：测试脚本；建议暂不实现：脚本接口，kerlico 没有脚本"}
-{"key": "api/clash/post-upgrade-ui", "kerlico": "no", "note": "Clash API：更新外部 UI；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/clash/post-script", "kerlico": "yes", "note": "Clash API：测试脚本；建议暂不实现：脚本接口，kerlico 没有脚本"}
+{"key": "api/clash/post-upgrade-ui", "kerlico": "yes", "note": "Clash API：更新外部 UI；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
 {"key": "api/clash/protocol", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "kerlico 自有只读 HTTP 接口，路径和字段不兼容 Clash"}
 {"key": "api/clash/put-configs", "kerlico": "yes", "note": "Clash API：更新配置；建议实现：kerlico 控制接口只读，kerlico 改配置要重启进程"}
 {"key": "api/clash/put-providers-proxies-name", "kerlico": "yes", "note": "Clash API：更新代理提供者；建议实现：随代理提供者提供"}
@@ -54,25 +54,25 @@
 {"key": "api/clash/store-mode", "kerlico": "na", "note": "sing-box 已移除字段，已迁到 cache_file"}
 {"key": "api/clash/store-selected", "kerlico": "na", "note": "sing-box 已移除字段，已迁到 cache_file"}
 {"key": "api/configs-geo/post-configs-geo", "kerlico": "yes", "note": "更新 GEO 数据库，204；建议实现：随 GeoIP、Geosite 数据文件提供"}
-{"key": "api/configs/get-configs", "kerlico": "no", "note": "获取基本配置；建议暂不实现：kerlico 配置含凭据，控制接口不回显配置"}
-{"key": "api/configs/patch-configs", "kerlico": "no", "note": "更新基本配置，204；建议暂不实现：运行中改配置项风险高，kerlico 先做整体重载"}
+{"key": "api/configs/get-configs", "kerlico": "yes", "note": "获取基本配置；建议暂不实现：kerlico 配置含凭据，控制接口不回显配置"}
+{"key": "api/configs/patch-configs", "kerlico": "yes", "note": "更新基本配置，204；建议暂不实现：运行中改配置项风险高，kerlico 先做整体重载"}
 {"key": "api/configs/put-configs", "kerlico": "yes", "note": "重新加载基本配置，204；建议实现：kerlico 控制接口只读，kerlico 改配置要重启进程"}
 {"key": "api/connections-id/delete-connections-id", "kerlico": "yes", "note": "关闭特定连接，204；建议实现：kerlico 控制接口只读，不能断开连接；封禁用户或切节点后需要主动断流；应做成 kerlico 自有路径"}
 {"key": "api/connections/delete-connections", "kerlico": "yes", "note": "关闭所有连接，204；建议实现：kerlico 控制接口只读，不能断开连接；封禁用户或切节点后需要主动断流；应做成 kerlico 自有路径"}
 {"key": "api/connections/get-connections", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/flows` 分页查询内存记录，来源已遮罩；没有 WebSocket 推送"}
 {"key": "api/controller/combo", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "只有明文 HTTP 监听和 Bearer；缺 TLS、Unix socket、CORS"}
 {"key": "api/controller/external-controller", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`control.listen`"}
-{"key": "api/controller/external-controller-cors-allow-origins", "kerlico": "no", "note": "API CORS 允许来源；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/controller/external-controller-cors-allow-private-network", "kerlico": "no", "note": "API CORS 允许私有网络；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/controller/external-controller-pipe", "kerlico": "no", "note": "Windows namedpipe API 监听地址；建议暂不实现：kerlico 只发 Linux"}
-{"key": "api/controller/external-controller-routing-mark", "kerlico": "no", "note": "为 external-controller 与 external-controller-tls 监听 socket 设置 routing-mark；建议暂不实现：kerlico 没有 SO_MARK，先做 route/config/default-mark"}
-{"key": "api/controller/external-controller-tls", "kerlico": "no", "note": "HTTPS API 监听地址；建议暂不实现：控制接口按文档放在受信网络或 TLS 反向代理之后，内置 TLS 不急"}
-{"key": "api/controller/external-controller-unix", "kerlico": "no", "note": "Unix socket API 监听地址；建议暂不实现：回环 TCP 加密钥已够用，需求小"}
-{"key": "api/controller/external-doh-server", "kerlico": "no", "note": "在 RESTful API 端口上开启 DoH 服务器；建议暂不实现：kerlico 还没有 DNS 服务端，先做 dns/global/listen"}
+{"key": "api/controller/external-controller-cors-allow-origins", "kerlico": "yes", "note": "API CORS 允许来源；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/controller/external-controller-cors-allow-private-network", "kerlico": "yes", "note": "API CORS 允许私有网络；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/controller/external-controller-pipe", "kerlico": "yes", "note": "Windows namedpipe API 监听地址；建议暂不实现：kerlico 只发 Linux"}
+{"key": "api/controller/external-controller-routing-mark", "kerlico": "yes", "note": "为 external-controller 与 external-controller-tls 监听 socket 设置 routing-mark；建议暂不实现：kerlico 没有 SO_MARK，先做 route/config/default-mark"}
+{"key": "api/controller/external-controller-tls", "kerlico": "yes", "note": "HTTPS API 监听地址；建议暂不实现：控制接口按文档放在受信网络或 TLS 反向代理之后，内置 TLS 不急"}
+{"key": "api/controller/external-controller-unix", "kerlico": "yes", "note": "Unix socket API 监听地址；建议暂不实现：回环 TCP 加密钥已够用，需求小"}
+{"key": "api/controller/external-doh-server", "kerlico": "yes", "note": "在 RESTful API 端口上开启 DoH 服务器；建议暂不实现：kerlico 还没有 DNS 服务端，先做 dns/global/listen"}
 {"key": "api/controller/secret", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`control.secret`；回环监听可省略"}
 {"key": "api/debug-gc/put-debug-gc", "kerlico": "na", "note": "Go 运行时调试接口，Rust 没有对应物"}
 {"key": "api/debug-pprof/get-debug-pprof", "kerlico": "na", "note": "Go 运行时调试接口，Rust 没有对应物"}
-{"key": "api/dns-query/get-dns-query", "kerlico": "no", "note": "DNS 查询，返回 Status、Question、TC、RD、RA、AD、CD、Answer、Authority、Additional；建议暂不实现：排障便利项，kerlico 的 DNS 只服务 Local 路径"}
+{"key": "api/dns-query/get-dns-query", "kerlico": "yes", "note": "DNS 查询，返回 Status、Question、TC、RD、RA、AD、CD、Answer、Authority、Additional；建议暂不实现：排障便利项，kerlico 的 DNS 只服务 Local 路径"}
 {"key": "api/doh/post-get", "kerlico": "no", "note": "external-doh-server 路径 DoH；建议暂不实现：kerlico 还没有 DNS 服务端，先做 dns/global/listen"}
 {"key": "api/group-name-delay/get-group-name-delay", "kerlico": "yes", "note": "测试组内节点并清除自动组 fixed；建议实现：随策略组提供，手动切节点要靠它"}
 {"key": "api/group-name/get-group-name", "kerlico": "yes", "note": "读取具体策略组；建议实现：随策略组提供，手动切节点要靠它"}
@@ -124,7 +124,7 @@
 {"key": "api/lua-routing-context/get-local-ips", "kerlico": "na", "note": "Xray Lua 运行时专属函数，kerlico 没有 Lua；脚本能力见 route/routing/script、dns/dns/script"}
 {"key": "api/lua-routing-context/get-source-ips", "kerlico": "na", "note": "Xray Lua 运行时专属函数，kerlico 没有 Lua；脚本能力见 route/routing/script、dns/dns/script"}
 {"key": "api/lua-routing-context/get-target-ips", "kerlico": "na", "note": "Xray Lua 运行时专属函数，kerlico 没有 Lua；脚本能力见 route/routing/script、dns/dns/script"}
-{"key": "api/memory/get-memory", "kerlico": "no", "note": "实时内存，每秒推送 inuse、oslimit；建议暂不实现：看进程内存用系统工具就够"}
+{"key": "api/memory/get-memory", "kerlico": "yes", "note": "实时内存，每秒推送 inuse、oslimit；建议暂不实现：看进程内存用系统工具就够"}
 {"key": "api/metrics/debug-pprof", "kerlico": "na", "note": "Go 运行时调试接口，Rust 没有对应物"}
 {"key": "api/metrics/debug-vars", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/usage`、`/v1/stats` 提供统计 JSON；缺 observatory"}
 {"key": "api/metrics/listen", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "`control.listen`，和控制接口同一端口"}
@@ -144,7 +144,7 @@
 {"key": "api/proxies-name/put-proxies-name", "kerlico": "yes", "note": "选择代理，204；建议实现：随策略组提供，手动切节点要靠它"}
 {"key": "api/proxies/get-proxies", "kerlico": "yes", "note": "代理信息，含 name、type、udp、uot、xudp、tfo、mptcp、smux、alive、history、extra、interface、routing-mark、provider-name、dialer-proxy；组另含 now、all、testUrl、hidden、icon、emptyFallback、expectedStatus、fixed；建议实现：控制接口看不到出站配置和状态，随策略组一起提供"}
 {"key": "api/reflection-service/list", "kerlico": "na", "note": "gRPC 反射，kerlico 没有 gRPC 接口"}
-{"key": "api/restart/post-restart", "kerlico": "no", "note": "重启内核，204；建议暂不实现：重启由 systemd 等进程管理器负责"}
+{"key": "api/restart/post-restart", "kerlico": "yes", "note": "重启内核，204；建议暂不实现：重启由 systemd 等进程管理器负责"}
 {"key": "api/root/get", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/health` 用作存活检查；没有根路径"}
 {"key": "api/routing-service/add-rule", "kerlico": "no", "note": "运行中添加路由规则；建议暂不实现：kerlico 先做整体重载，运行中增删规则不急"}
 {"key": "api/routing-service/get-balancer-info", "kerlico": "yes", "note": "查询负载均衡器状态；建议实现：随负载均衡器提供"}
@@ -204,18 +204,18 @@
 {"key": "api/singbox-grpc/subscribe-usbipserver-status", "kerlico": "na", "note": "sing-box 专属 gRPC 方法，服务其端点管理和 Taildrop、USB/IP 功能，kerlico 没有这组接口"}
 {"key": "api/singbox-grpc/tailscale-logout", "kerlico": "na", "note": "sing-box 专属 gRPC 方法，服务其端点管理和 Taildrop、USB/IP 功能，kerlico 没有这组接口"}
 {"key": "api/singbox-grpc/urltest", "kerlico": "na", "note": "sing-box 专属 gRPC 命名，能力见 api/group/get-group、api/proxies-name/put-proxies-name"}
-{"key": "api/singbox/access-control-allow-origin", "kerlico": "no", "note": "允许的 CORS 来源；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/singbox/access-control-allow-private-network", "kerlico": "no", "note": "允许从私有网络访问；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/singbox/combo", "kerlico": "no", "note": "sing-box API 服务的面板、认证和安全层组合；建议暂不实现：kerlico 控制面是只读 HTTP JSON，不做 gRPC"}
-{"key": "api/singbox/dashboard", "kerlico": "no", "note": "下载并通过 API 监听器在 `/dashboard/` 提供的 Web 仪表板；其他浏览器请求将被重定向到该路径；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/singbox/dashboard-download-url", "kerlico": "no", "note": "仪表板压缩包（zip）的下载 URL；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/singbox/dashboard-enabled", "kerlico": "no", "note": "启用仪表板；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/singbox/dashboard-http-client", "kerlico": "no", "note": "用于下载仪表板的 HTTP 客户端；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/singbox/dashboard-path", "kerlico": "no", "note": "存放仪表板文件的目录；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/singbox/dashboard-update-interval", "kerlico": "no", "note": "仪表板的更新间隔；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/singbox/protocol", "kerlico": "no", "note": "sing-box gRPC API 服务，兼容 gRPC-Web；建议暂不实现：kerlico 控制面是只读 HTTP JSON，不做 gRPC"}
+{"key": "api/singbox/access-control-allow-origin", "kerlico": "yes", "note": "允许的 CORS 来源；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/singbox/access-control-allow-private-network", "kerlico": "yes", "note": "允许从私有网络访问；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/singbox/combo", "kerlico": "yes", "note": "sing-box API 服务的面板、认证和安全层组合；建议暂不实现：kerlico 控制面是只读 HTTP JSON，不做 gRPC"}
+{"key": "api/singbox/dashboard", "kerlico": "yes", "note": "下载并通过 API 监听器在 `/dashboard/` 提供的 Web 仪表板；其他浏览器请求将被重定向到该路径；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/singbox/dashboard-download-url", "kerlico": "yes", "note": "仪表板压缩包（zip）的下载 URL；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/singbox/dashboard-enabled", "kerlico": "yes", "note": "启用仪表板；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/singbox/dashboard-http-client", "kerlico": "yes", "note": "用于下载仪表板的 HTTP 客户端；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/singbox/dashboard-path", "kerlico": "yes", "note": "存放仪表板文件的目录；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/singbox/dashboard-update-interval", "kerlico": "yes", "note": "仪表板的更新间隔；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/singbox/protocol", "kerlico": "yes", "note": "sing-box gRPC API 服务，兼容 gRPC-Web；建议暂不实现：kerlico 控制面是只读 HTTP JSON，不做 gRPC"}
 {"key": "api/singbox/secret", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`control.secret`"}
-{"key": "api/singbox/tls", "kerlico": "no", "note": "sing-box API 服务的 TLS 配置；建议暂不实现：控制接口按文档放在受信网络或 TLS 反向代理之后，内置 TLS 不急"}
+{"key": "api/singbox/tls", "kerlico": "yes", "note": "sing-box API 服务的 TLS 配置；建议暂不实现：控制接口按文档放在受信网络或 TLS 反向代理之后，内置 TLS 不急"}
 {"key": "api/ssm/cache-path", "kerlico": "no", "note": "如果设置，当服务器即将停止时，流量和用户状态将保存到指定的 JSON 文件中，以便在下次启动时恢复；建议暂不实现：kerlico 的用户管理是账户加节点成员，不照搬 Shadowsocks 专用的 SSM；能力见 user/ssm/dynamic-users"}
 {"key": "api/ssm/delete-server-v1-users-username", "kerlico": "no", "note": "SSM API：删除用户；建议暂不实现：kerlico 的用户管理是账户加节点成员，不照搬 Shadowsocks 专用的 SSM；能力见 user/ssm/dynamic-users"}
 {"key": "api/ssm/get-server-v1", "kerlico": "no", "note": "SSM API：服务器信息；建议暂不实现：kerlico 的用户管理是账户加节点成员，不照搬 Shadowsocks 专用的 SSM；能力见 user/ssm/dynamic-users"}
@@ -238,18 +238,18 @@
 {"key": "api/storage-key/get-storage-key", "kerlico": "no", "note": "读存储值，不存在 null；建议暂不实现：只服务面板存放设置，kerlico 没有面板"}
 {"key": "api/storage-key/put-storage-key", "kerlico": "no", "note": "写存储值，合法 JSON，最大 1MB，204；建议暂不实现：只服务面板存放设置，kerlico 没有面板"}
 {"key": "api/traffic/get-traffic", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/usage` 给累计量；没有每秒 WebSocket 推送"}
-{"key": "api/ui/get", "kerlico": "no", "note": "GET /ui 面板静态资源；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/ui/get", "kerlico": "yes", "note": "GET /ui 面板静态资源；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
 {"key": "api/upgrade-geo/post-upgrade-geo", "kerlico": "yes", "note": "更新 GEO 数据库，204；建议实现：随 GeoIP、Geosite 数据文件提供"}
-{"key": "api/upgrade-ui/post-upgrade-ui", "kerlico": "no", "note": "更新面板，须设置 external-ui；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/upgrade-ui/post-upgrade-ui", "kerlico": "yes", "note": "更新面板，须设置 external-ui；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
 {"key": "api/upgrade/post-upgrade", "kerlico": "no", "note": "更新内核，返回 status ok；建议暂不实现：内核自更新由部署工具负责，kerlico 进程不替换自身"}
 {"key": "api/v2ray/get-stats", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/usage` 整体返回，HTTP JSON 不是 gRPC"}
 {"key": "api/v2ray/get-sys-stats", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/stats`，HTTP JSON 不是 gRPC；缺内存和运行时指标"}
 {"key": "api/v2ray/query-stats", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/usage` 整体返回，没有 pattern"}
 {"key": "api/version/get-version", "kerlico": "yes", "note": "版本信息 meta、version；建议实现：kerlico 版本只能从 `kerlico --version` 读，控制接口查版本实现量很小"}
-{"key": "api/webui/dashboards", "kerlico": "no", "note": "文档列出的外部面板 Yacd、Metacubexd、zashboard；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/webui/external-ui", "kerlico": "no", "note": "静态面板目录，经 API 地址 /ui 提供；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/webui/external-ui-name", "kerlico": "no", "note": "面板子目录名，合并为 external-ui/<name>；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
-{"key": "api/webui/external-ui-url", "kerlico": "no", "note": "面板下载地址；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/webui/dashboards", "kerlico": "yes", "note": "文档列出的外部面板 Yacd、Metacubexd、zashboard；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/webui/external-ui", "kerlico": "yes", "note": "静态面板目录，经 API 地址 /ui 提供；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/webui/external-ui-name", "kerlico": "yes", "note": "面板子目录名，合并为 external-ui/<name>；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
+{"key": "api/webui/external-ui-url", "kerlico": "yes", "note": "面板下载地址；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
 {"key": "cache/api/flush", "kerlico": "no", "note": "/cache/fakeip/flush、/cache/dns/flush 清缓存；建议暂不实现：kerlico 没有 DNS 缓存管理接口，hickory 按 TTL 自行过期，排障需求小"}
 {"key": "cache/api/storage", "kerlico": "no", "note": "/storage/{key} 持久 KV；建议暂不实现：只服务面板存放设置，kerlico 没有面板"}
 {"key": "cache/file/buffer-size", "kerlico": "no", "note": "写缓存的大小；建议暂不实现：实现细节和多配置隔离，kerlico 的 SQLite 统计已有独立目录"}
@@ -475,8 +475,8 @@
 {"key": "cli/flag/secret", "kerlico": "no", "note": "命令行标志 -secret：覆盖 secret；建议暂不实现：kerlico 配置只来自 `-c` 文件，命令行覆盖会让配置来源变多"}
 {"key": "cli/flag/t", "kerlico": "yes", "where": "apps/kerlico/src/main.rs", "note": "`kerlico check -c <文件>`"}
 {"key": "cli/flag/v", "kerlico": "yes", "where": "apps/kerlico/src/cli.rs", "note": "`kerlico --version`、`-V`"}
-{"key": "cli/format/format", "kerlico": "no", "note": "格式化配置；建议暂不实现：`jq` 能格式化，kerlico 配置是标准 JSON"}
-{"key": "cli/format/format-write", "kerlico": "no", "note": "format 的 --write：写回源文件；建议暂不实现：`jq` 能格式化，kerlico 配置是标准 JSON"}
+{"key": "cli/format/format", "kerlico": "yes", "note": "格式化配置；建议暂不实现：`jq` 能格式化，kerlico 配置是标准 JSON"}
+{"key": "cli/format/format-write", "kerlico": "yes", "note": "format 的 --write：写回源文件；建议暂不实现：`jq` 能格式化，kerlico 配置是标准 JSON"}
 {"key": "cli/generate/generate", "kerlico": "yes", "note": "生成工具；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/generate/generate-ech-keypair", "kerlico": "yes", "note": "生成 ECH 密钥对；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/generate/generate-rand", "kerlico": "yes", "note": "生成随机字节；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
@@ -489,45 +489,45 @@
 {"key": "cli/generate/generate-uuid", "kerlico": "yes", "note": "生成 UUID；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/generate/generate-vapid-keypair", "kerlico": "no", "note": "生成 VAPID 密钥对；建议暂不实现：kerlico 没有 tailcat，也不用 VAPID"}
 {"key": "cli/generate/generate-wg-keypair", "kerlico": "yes", "note": "生成 WireGuard 密钥对；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
-{"key": "cli/geoip/geoip", "kerlico": "no", "note": "GeoIP 工具；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
-{"key": "cli/geoip/geoip-export", "kerlico": "no", "note": "导出国家为规则集；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
-{"key": "cli/geoip/geoip-export-output", "kerlico": "no", "note": "geoip export 的 --output：输出路径；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
-{"key": "cli/geoip/geoip-file", "kerlico": "no", "note": "geoip 的 --file：geoip 文件；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
-{"key": "cli/geoip/geoip-list", "kerlico": "no", "note": "列出国家代码；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
-{"key": "cli/geoip/geoip-lookup", "kerlico": "no", "note": "查询 IP 是否在 GeoIP 库中；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
-{"key": "cli/geosite/geosite", "kerlico": "no", "note": "Geosite 工具；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
-{"key": "cli/geosite/geosite-export", "kerlico": "no", "note": "导出分类为规则集；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
-{"key": "cli/geosite/geosite-export-output", "kerlico": "no", "note": "geosite export 的 --output：输出路径；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
-{"key": "cli/geosite/geosite-file", "kerlico": "no", "note": "geosite 的 --file：geosite 文件；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
-{"key": "cli/geosite/geosite-list", "kerlico": "no", "note": "列出分类；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
-{"key": "cli/geosite/geosite-lookup", "kerlico": "no", "note": "查询域名是否在 Geosite 中；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geoip/geoip", "kerlico": "yes", "note": "GeoIP 工具；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geoip/geoip-export", "kerlico": "yes", "note": "导出国家为规则集；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geoip/geoip-export-output", "kerlico": "yes", "note": "geoip export 的 --output：输出路径；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geoip/geoip-file", "kerlico": "yes", "note": "geoip 的 --file：geoip 文件；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geoip/geoip-list", "kerlico": "yes", "note": "列出国家代码；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geoip/geoip-lookup", "kerlico": "yes", "note": "查询 IP 是否在 GeoIP 库中；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geosite/geosite", "kerlico": "yes", "note": "Geosite 工具；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geosite/geosite-export", "kerlico": "yes", "note": "导出分类为规则集；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geosite/geosite-export-output", "kerlico": "yes", "note": "geosite export 的 --output：输出路径；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geosite/geosite-file", "kerlico": "yes", "note": "geosite 的 --file：geosite 文件；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geosite/geosite-list", "kerlico": "yes", "note": "列出分类；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
+{"key": "cli/geosite/geosite-lookup", "kerlico": "yes", "note": "查询域名是否在 Geosite 中；建议暂不实现：这是 sing-box 自身数据库的工具；kerlico 还没有 GeoIP、Geosite"}
 {"key": "cli/global/config", "kerlico": "partial", "where": "apps/kerlico/src/main.rs", "note": "`run`、`check` 的 `-c` 只收一个本地文件；缺重复指定和 stdin"}
 {"key": "cli/global/config-directory", "kerlico": "no", "note": "全局选项：配置目录路径，可重复；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
 {"key": "cli/global/directory", "kerlico": "no", "note": "全局选项：工作目录；建议暂不实现：路径写在配置里，用 systemd WorkingDirectory 或 cd 即可"}
 {"key": "cli/global/disable-color", "kerlico": "no", "note": "全局选项：关闭彩色输出；建议暂不实现：kerlico 只有 clap 帮助可能带颜色，可用 NO_COLOR 或重定向"}
-{"key": "cli/merge/merge", "kerlico": "no", "note": "合并配置；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
+{"key": "cli/merge/merge", "kerlico": "yes", "note": "合并配置；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
 {"key": "cli/netns-holder/netns-holder", "kerlico": "na", "note": "sing-box 内部隐藏命令"}
-{"key": "cli/rule-set/rule-set", "kerlico": "no", "note": "规则集工具；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-compile", "kerlico": "no", "note": "把规则集 JSON 编译为二进制；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-compile-output", "kerlico": "no", "note": "rule-set compile 的 --output：输出文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-convert", "kerlico": "no", "note": "把 AdGuard DNS 过滤器转为规则集；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-convert-output", "kerlico": "no", "note": "rule-set convert 的 --output：输出文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-convert-type", "kerlico": "no", "note": "rule-set convert 的 --type：源类型，可用 adguard；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-decompile", "kerlico": "no", "note": "把二进制规则集反编译为 JSON；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-decompile-output", "kerlico": "no", "note": "rule-set decompile 的 --output：输出文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-format", "kerlico": "no", "note": "格式化规则集 JSON；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-format-write", "kerlico": "no", "note": "rule-set format 的 --write：写回源文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-match", "kerlico": "no", "note": "检查 IP 或域名是否匹配规则集；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-match-format", "kerlico": "no", "note": "rule-set match 的 --format：规则集格式；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-merge", "kerlico": "no", "note": "合并规则集源文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-merge-config", "kerlico": "no", "note": "rule-set merge 的 --config：输入文件路径；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-merge-config-directory", "kerlico": "no", "note": "rule-set merge 的 --config-directory：输入目录路径；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-upgrade", "kerlico": "no", "note": "升级规则集 JSON；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/rule-set/rule-set-upgrade-write", "kerlico": "no", "note": "rule-set upgrade 的 --write：写回源文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
-{"key": "cli/run/confdir", "kerlico": "no", "note": "多配置目录；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
+{"key": "cli/rule-set/rule-set", "kerlico": "yes", "note": "规则集工具；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-compile", "kerlico": "yes", "note": "把规则集 JSON 编译为二进制；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-compile-output", "kerlico": "yes", "note": "rule-set compile 的 --output：输出文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-convert", "kerlico": "yes", "note": "把 AdGuard DNS 过滤器转为规则集；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-convert-output", "kerlico": "yes", "note": "rule-set convert 的 --output：输出文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-convert-type", "kerlico": "yes", "note": "rule-set convert 的 --type：源类型，可用 adguard；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-decompile", "kerlico": "yes", "note": "把二进制规则集反编译为 JSON；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-decompile-output", "kerlico": "yes", "note": "rule-set decompile 的 --output：输出文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-format", "kerlico": "yes", "note": "格式化规则集 JSON；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-format-write", "kerlico": "yes", "note": "rule-set format 的 --write：写回源文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-match", "kerlico": "yes", "note": "检查 IP 或域名是否匹配规则集；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-match-format", "kerlico": "yes", "note": "rule-set match 的 --format：规则集格式；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-merge", "kerlico": "yes", "note": "合并规则集源文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-merge-config", "kerlico": "yes", "note": "rule-set merge 的 --config：输入文件路径；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-merge-config-directory", "kerlico": "yes", "note": "rule-set merge 的 --config-directory：输入目录路径；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-upgrade", "kerlico": "yes", "note": "升级规则集 JSON；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/rule-set/rule-set-upgrade-write", "kerlico": "yes", "note": "rule-set upgrade 的 --write：写回源文件；建议暂不实现：kerlico 还没有规则集，先定规则集格式"}
+{"key": "cli/run/confdir", "kerlico": "yes", "note": "多配置目录；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
 {"key": "cli/run/config", "kerlico": "partial", "where": "apps/kerlico/src/main.rs", "note": "`-c` 只收一个本地文件；缺重复指定、stdin、HTTP"}
-{"key": "cli/run/dump", "kerlico": "no", "note": "输出合并后配置；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
-{"key": "cli/run/format", "kerlico": "no", "note": "配置格式；建议暂不实现：kerlico 只有 JSON，要先做 YAML；按扩展名识别即可"}
+{"key": "cli/run/dump", "kerlico": "yes", "note": "输出合并后配置；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
+{"key": "cli/run/format", "kerlico": "yes", "note": "配置格式；建议暂不实现：kerlico 只有 JSON，要先做 YAML；按扩展名识别即可"}
 {"key": "cli/run/http-unix", "kerlico": "na", "note": "Xray 已废弃写法"}
 {"key": "cli/run/run", "kerlico": "yes", "where": "apps/kerlico/src/main.rs", "note": "`kerlico run -c <文件>`"}
 {"key": "cli/run/test", "kerlico": "yes", "where": "apps/kerlico/src/main.rs", "note": "`kerlico check -c <文件>`"}
@@ -538,22 +538,22 @@
 {"key": "cli/tls/ech", "kerlico": "no", "note": "生成 ECH 密钥和配置；建议暂不实现：kerlico 的 TLS 没有 ECH"}
 {"key": "cli/tls/hash", "kerlico": "yes", "note": "计算证书 SHA256；建议实现：算证书 SHA256 实现量小，配合证书校验配置"}
 {"key": "cli/tls/ping", "kerlico": "no", "note": "TLS 握手探测，输出证书 SHA256 和后量子支持；建议暂不实现：排障便利项，`openssl s_client` 可替代"}
-{"key": "cli/tools/tools", "kerlico": "no", "note": "实验性工具；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-connect", "kerlico": "no", "note": "连接到地址；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-connect-network", "kerlico": "no", "note": "tools connect 的 --network：网络类型；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-fetch", "kerlico": "no", "note": "获取 URL；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-networkquality", "kerlico": "no", "note": "网络质量测试；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-networkquality-config-url", "kerlico": "no", "note": "tools networkquality 的 --config-url：测试配置 URL；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-networkquality-http3", "kerlico": "no", "note": "tools networkquality 的 --http3：用 HTTP/3 测量；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-networkquality-max-runtime", "kerlico": "no", "note": "tools networkquality 的 --max-runtime：最大运行秒数；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-networkquality-serial", "kerlico": "no", "note": "tools networkquality 的 --serial：顺序执行上下行；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-outbound", "kerlico": "no", "note": "tools 的 --outbound：使用指定出站标签；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-stun", "kerlico": "no", "note": "STUN 测试；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-stun-server", "kerlico": "no", "note": "tools stun 的 --server：STUN 服务器地址；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-synctime", "kerlico": "no", "note": "用 NTP 同步时间；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-synctime-format", "kerlico": "no", "note": "tools synctime 的 --format：输出格式；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-synctime-server", "kerlico": "no", "note": "tools synctime 的 --server：NTP 服务器；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
-{"key": "cli/tools/tools-synctime-write", "kerlico": "no", "note": "tools synctime 的 --write：写入系统时间；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools", "kerlico": "yes", "note": "实验性工具；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-connect", "kerlico": "yes", "note": "连接到地址；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-connect-network", "kerlico": "yes", "note": "tools connect 的 --network：网络类型；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-fetch", "kerlico": "yes", "note": "获取 URL；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-networkquality", "kerlico": "yes", "note": "网络质量测试；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-networkquality-config-url", "kerlico": "yes", "note": "tools networkquality 的 --config-url：测试配置 URL；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-networkquality-http3", "kerlico": "yes", "note": "tools networkquality 的 --http3：用 HTTP/3 测量；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-networkquality-max-runtime", "kerlico": "yes", "note": "tools networkquality 的 --max-runtime：最大运行秒数；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-networkquality-serial", "kerlico": "yes", "note": "tools networkquality 的 --serial：顺序执行上下行；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-outbound", "kerlico": "yes", "note": "tools 的 --outbound：使用指定出站标签；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-stun", "kerlico": "yes", "note": "STUN 测试；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-stun-server", "kerlico": "yes", "note": "tools stun 的 --server：STUN 服务器地址；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-synctime", "kerlico": "yes", "note": "用 NTP 同步时间；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-synctime-format", "kerlico": "yes", "note": "tools synctime 的 --format：输出格式；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-synctime-server", "kerlico": "yes", "note": "tools synctime 的 --server：NTP 服务器；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
+{"key": "cli/tools/tools-synctime-write", "kerlico": "yes", "note": "tools synctime 的 --write：写入系统时间；建议暂不实现：sing-box 的实验性工具集，kerlico 测试走 `tools/` 互通脚本"}
 {"key": "cli/version/version", "kerlico": "yes", "where": "apps/kerlico/src/cli.rs", "note": "`kerlico --version`、`-V`"}
 {"key": "cli/version/version-name", "kerlico": "no", "note": "version 的 --name：只打印版本名；建议暂不实现：`--version` 输出固定，需求小"}
 {"key": "cli/xray/api", "kerlico": "no", "note": "调用 gRPC API；建议暂不实现：kerlico 控制接口只读，用 curl 即可调用；专用客户端要等控制接口可写之后"}
@@ -614,49 +614,49 @@
 {"key": "config/deprecated/tun-gso", "kerlico": "na", "note": "sing-box 的废弃记录，描述其旧配置，对 kerlico 不成立"}
 {"key": "config/deprecated/tun-stack", "kerlico": "na", "note": "sing-box 的废弃记录，描述其旧配置，对 kerlico 不成立"}
 {"key": "config/deprecated/wireguard-outbound", "kerlico": "na", "note": "sing-box 的废弃记录，描述其旧配置，对 kerlico 不成立"}
-{"key": "config/env/box-api", "kerlico": "no", "note": "api 子命令默认读取的环境变量；建议暂不实现：kerlico 控制接口只读，用 curl 即可调用；专用客户端要等控制接口可写之后"}
-{"key": "config/env/clash-age-secret-key", "kerlico": "no", "note": "解密配置的 age 密钥；建议暂不实现：kerlico 不支持加密配置"}
-{"key": "config/env/clash-config-file", "kerlico": "no", "note": "配置文件；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/clash-config-string", "kerlico": "no", "note": "base64 配置；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/clash-home-dir", "kerlico": "no", "note": "配置目录；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/clash-override-external-controller", "kerlico": "no", "note": "覆盖 API 地址；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/clash-override-external-controller-pipe", "kerlico": "no", "note": "覆盖 pipe；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/clash-override-external-controller-routing-mark", "kerlico": "no", "note": "覆盖 API routing-mark；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/clash-override-external-controller-tls", "kerlico": "no", "note": "覆盖 HTTPS API；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/clash-override-external-controller-unix", "kerlico": "no", "note": "覆盖 Unix socket；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/clash-override-external-ui-dir", "kerlico": "no", "note": "覆盖面板目录；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/clash-override-secret", "kerlico": "no", "note": "覆盖 secret；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/clash-post-down", "kerlico": "no", "note": "退出前脚本；建议暂不实现：启动、退出钩子由 systemd 等进程管理器负责"}
-{"key": "config/env/clash-post-up", "kerlico": "no", "note": "启动后脚本；建议暂不实现：启动、退出钩子由 systemd 等进程管理器负责"}
-{"key": "config/env/disable-embed-ca", "kerlico": "no", "note": "禁用内嵌 CA；建议暂不实现：kerlico 只用内置根证书，要先支持系统 CA 才有意义"}
-{"key": "config/env/disable-loopback-detector", "kerlico": "no", "note": "禁用环回检测；建议暂不实现：kerlico 没有环回检测"}
+{"key": "config/env/box-api", "kerlico": "yes", "note": "api 子命令默认读取的环境变量；建议暂不实现：kerlico 控制接口只读，用 curl 即可调用；专用客户端要等控制接口可写之后"}
+{"key": "config/env/clash-age-secret-key", "kerlico": "yes", "note": "解密配置的 age 密钥；建议暂不实现：kerlico 不支持加密配置"}
+{"key": "config/env/clash-config-file", "kerlico": "yes", "note": "配置文件；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/clash-config-string", "kerlico": "yes", "note": "base64 配置；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/clash-home-dir", "kerlico": "yes", "note": "配置目录；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/clash-override-external-controller", "kerlico": "yes", "note": "覆盖 API 地址；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/clash-override-external-controller-pipe", "kerlico": "yes", "note": "覆盖 pipe；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/clash-override-external-controller-routing-mark", "kerlico": "yes", "note": "覆盖 API routing-mark；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/clash-override-external-controller-tls", "kerlico": "yes", "note": "覆盖 HTTPS API；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/clash-override-external-controller-unix", "kerlico": "yes", "note": "覆盖 Unix socket；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/clash-override-external-ui-dir", "kerlico": "yes", "note": "覆盖面板目录；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/clash-override-secret", "kerlico": "yes", "note": "覆盖 secret；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/clash-post-down", "kerlico": "yes", "note": "退出前脚本；建议暂不实现：启动、退出钩子由 systemd 等进程管理器负责"}
+{"key": "config/env/clash-post-up", "kerlico": "yes", "note": "启动后脚本；建议暂不实现：启动、退出钩子由 systemd 等进程管理器负责"}
+{"key": "config/env/disable-embed-ca", "kerlico": "yes", "note": "禁用内嵌 CA；建议暂不实现：kerlico 只用内置根证书，要先支持系统 CA 才有意义"}
+{"key": "config/env/disable-loopback-detector", "kerlico": "yes", "note": "禁用环回检测；建议暂不实现：kerlico 没有环回检测"}
 {"key": "config/env/disable-nftables", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
 {"key": "config/env/disable-override-android-vpn", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
 {"key": "config/env/disable-system-ca", "kerlico": "na", "note": "kerlico 从不读系统 CA，这个开关没有意义；信任根见 cert/store/store"}
-{"key": "config/env/disable-system-hosts", "kerlico": "no", "note": "禁用系统 hosts；建议暂不实现：配置 `dns` 段就不读系统 hosts"}
+{"key": "config/env/disable-system-hosts", "kerlico": "yes", "note": "禁用系统 hosts；建议暂不实现：配置 `dns` 段就不读系统 hosts"}
 {"key": "config/env/dot-names", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
 {"key": "config/env/enable-deprecated", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
 {"key": "config/env/force-anet", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
 {"key": "config/env/host-proc", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
 {"key": "config/env/listen-namedpipe-sddl", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
-{"key": "config/env/object", "kerlico": "no", "note": "env 配置块：环境变量名到字符串值的映射，配置合并后、模块构建前写入进程；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/object", "kerlico": "yes", "note": "env 配置块：环境变量名到字符串值的映射，配置合并后、模块构建前写入进程；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
 {"key": "config/env/quic-go-disable-gso", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
-{"key": "config/env/safe-paths", "kerlico": "no", "note": "额外安全路径；建议暂不实现：kerlico 没有安全路径限制，文件路径由配置给定"}
-{"key": "config/env/skip-safe-path-check", "kerlico": "no", "note": "SKIP_SAFE_PATH_CHECK 环境变量（，源码 os.Getenv 读取）；建议暂不实现：kerlico 没有安全路径限制，文件路径由配置给定"}
+{"key": "config/env/safe-paths", "kerlico": "yes", "note": "额外安全路径；建议暂不实现：kerlico 没有安全路径限制，文件路径由配置给定"}
+{"key": "config/env/skip-safe-path-check", "kerlico": "yes", "note": "SKIP_SAFE_PATH_CHECK 环境变量（，源码 os.Getenv 读取）；建议暂不实现：kerlico 没有安全路径限制，文件路径由配置给定"}
 {"key": "config/env/skip-system-ipv6-check", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
-{"key": "config/env/xray-browser-dialer", "kerlico": "no", "note": "环境变量 XRAY_BROWSER_DIALER：Browser Dialer 监听地址；建议暂不实现：kerlico 没有 Browser Dialer"}
+{"key": "config/env/xray-browser-dialer", "kerlico": "yes", "note": "环境变量 XRAY_BROWSER_DIALER：Browser Dialer 监听地址；建议暂不实现：kerlico 没有 Browser Dialer"}
 {"key": "config/env/xray-buf-readv", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
 {"key": "config/env/xray-buf-splice", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
-{"key": "config/env/xray-cone-disabled", "kerlico": "no", "note": "环境变量 XRAY_CONE_DISABLED：关闭 Cone NAT 行为；建议暂不实现：kerlico 的 UDP 行为由协议模块固定，暂无切换需求"}
+{"key": "config/env/xray-cone-disabled", "kerlico": "yes", "note": "环境变量 XRAY_CONE_DISABLED：关闭 Cone NAT 行为；建议暂不实现：kerlico 的 UDP 行为由协议模块固定，暂无切换需求"}
 {"key": "config/env/xray-json-strict", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "kerlico 恒用 serde_json 标准解析"}
-{"key": "config/env/xray-location-asset", "kerlico": "no", "note": "geoip.dat/geosite.dat 目录；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/xray-location-cert", "kerlico": "no", "note": "环境变量 XRAY_LOCATION_CERT：证书路径；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/xray-location-confdir", "kerlico": "no", "note": "多配置目录，内部 .json 按文件名读取；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
-{"key": "config/env/xray-location-config", "kerlico": "no", "note": "包含 config.json 的目录；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/xray-location-asset", "kerlico": "yes", "note": "geoip.dat/geosite.dat 目录；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/xray-location-cert", "kerlico": "yes", "note": "环境变量 XRAY_LOCATION_CERT：证书路径；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/xray-location-confdir", "kerlico": "yes", "note": "多配置目录，内部 .json 按文件名读取；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/env/xray-location-config", "kerlico": "yes", "note": "包含 config.json 的目录；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
 {"key": "config/env/xray-ray-buffer-size", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
-{"key": "config/env/xray-tun-fd", "kerlico": "no", "note": "环境变量 XRAY_TUN_FD：外部传入 TUN FD；建议暂不实现：外部传入 TUN FD 服务于 Android，kerlico 只发 Linux"}
+{"key": "config/env/xray-tun-fd", "kerlico": "yes", "note": "环境变量 XRAY_TUN_FD：外部传入 TUN FD；建议暂不实现：外部传入 TUN FD 服务于 Android，kerlico 只发 Linux"}
 {"key": "config/env/xray-vmess-padding", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
-{"key": "config/env/xray-xudp-basekey", "kerlico": "no", "note": "环境变量 XRAY_XUDP_BASEKEY：XUDP GlobalID 基础密钥；建议暂不实现：kerlico 的 XUDP GlobalID 由协议模块生成，暂无固定基础密钥的需求"}
+{"key": "config/env/xray-xudp-basekey", "kerlico": "yes", "note": "环境变量 XRAY_XUDP_BASEKEY：XUDP GlobalID 基础密钥；建议暂不实现：kerlico 的 XUDP GlobalID 由协议模块生成，暂无固定基础密钥的需求"}
 {"key": "config/env/xray-xudp-show", "kerlico": "na", "note": "Go 实现或平台专属的开关，kerlico 没有对应实现"}
 {"key": "config/example/config-yaml", "kerlico": "na", "note": "别家文档的示例索引，不是能力"}
 {"key": "config/example/geox", "kerlico": "na", "note": "别家文档的示例索引，不是能力"}
@@ -664,22 +664,22 @@
 {"key": "config/example/mrs", "kerlico": "na", "note": "别家文档的示例索引，不是能力"}
 {"key": "config/example/stash", "kerlico": "na", "note": "别家文档的示例索引，不是能力"}
 {"key": "config/format/anchors", "kerlico": "yes", "note": "& 锚点、* 别名、<< 合并；合并有重复项不合并；建议实现：随 YAML 提供"}
-{"key": "config/format/array-shorthand", "kerlico": "no", "note": "只有一项时 JSON 数组的 [] 可省略；建议暂不实现：严格结构能在 `check` 时报错，少一种写法"}
-{"key": "config/format/duration", "kerlico": "no", "note": "时长字段用 Go Duration 格式；建议暂不实现：kerlico 时长写整数毫秒，字段名带 `_ms`，不做第二种写法"}
+{"key": "config/format/array-shorthand", "kerlico": "yes", "note": "只有一项时 JSON 数组的 [] 可省略；建议暂不实现：严格结构能在 `check` 时报错，少一种写法"}
+{"key": "config/format/duration", "kerlico": "yes", "note": "时长字段用 Go Duration 格式；建议暂不实现：kerlico 时长写整数毫秒，字段名带 `_ms`，不做第二种写法"}
 {"key": "config/format/extended-json", "kerlico": "yes", "note": "读取时用扩展 JSON 解析，接受注释和尾逗号；建议实现：`parse` 只接受严格 JSON，配置里不能写注释，新手不便；实现量小"}
 {"key": "config/format/json", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "配置只接受 JSON，版本 2，上限 1 MiB"}
 {"key": "config/format/jsonc", "kerlico": "yes", "note": "JSON 内允许注释：默认自定义解析器会剔除注释及其他非标准字符；建议实现：`parse` 只接受严格 JSON，配置里不能写注释，新手不便；实现量小"}
-{"key": "config/format/merge", "kerlico": "no", "note": "-c 可重复、-C 指定目录，多个配置合并加载；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
-{"key": "config/format/protobuf", "kerlico": "no", "note": "Protobuf 配置，扩展名 .pb，由 xray convert pb 生成；建议暂不实现：配置 1 MiB 以内，二进制格式没有收益"}
-{"key": "config/format/toml", "kerlico": "no", "note": "TOML 配置，按扩展名 .toml 或 -format 识别；建议暂不实现：JSON 和 YAML 已覆盖常见用法"}
-{"key": "config/format/unknown-keys", "kerlico": "no", "note": "不存在的键被忽略，可用来放锚点；建议暂不实现：`deny_unknown_fields` 能在启动前查出拼写错误，比静默忽略安全；放锚点的需求可由 YAML 专用字段解决"}
+{"key": "config/format/merge", "kerlico": "yes", "note": "-c 可重复、-C 指定目录，多个配置合并加载；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
+{"key": "config/format/protobuf", "kerlico": "yes", "note": "Protobuf 配置，扩展名 .pb，由 xray convert pb 生成；建议暂不实现：配置 1 MiB 以内，二进制格式没有收益"}
+{"key": "config/format/toml", "kerlico": "yes", "note": "TOML 配置，按扩展名 .toml 或 -format 识别；建议暂不实现：JSON 和 YAML 已覆盖常见用法"}
+{"key": "config/format/unknown-keys", "kerlico": "yes", "note": "不存在的键被忽略，可用来放锚点；建议暂不实现：`deny_unknown_fields` 能在启动前查出拼写错误，比静默忽略安全；放锚点的需求可由 YAML 专用字段解决"}
 {"key": "config/format/yaml", "kerlico": "yes", "note": "配置文件格式，大小写敏感，缩进只允许空格；建议实现：`parse` 先转 `serde_json::Value`，接 YAML 实现量小；Mihomo 用户习惯 YAML"}
-{"key": "config/merge/confdir", "kerlico": "no", "note": "-confdir 读取目录内全部配置并合并，优先于环境变量；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
-{"key": "config/merge/dump", "kerlico": "no", "note": "xray run -confdir=... -dump 查看合并结果；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
-{"key": "config/merge/inbounds-by-tag", "kerlico": "no", "note": "inbounds 相同 tag 覆盖，否则追加到末尾；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
-{"key": "config/merge/object-override", "kerlico": "no", "note": "顶级对象后者覆盖或补充前者；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
-{"key": "config/merge/outbounds-by-tag", "kerlico": "no", "note": "outbounds 相同 tag 覆盖，否则添加到最前；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
-{"key": "config/merge/outbounds-tail", "kerlico": "no", "note": "文件名含 tail（大小写不限）时新 outbound 添加到最后；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
+{"key": "config/merge/confdir", "kerlico": "yes", "note": "-confdir 读取目录内全部配置并合并，优先于环境变量；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
+{"key": "config/merge/dump", "kerlico": "yes", "note": "xray run -confdir=... -dump 查看合并结果；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
+{"key": "config/merge/inbounds-by-tag", "kerlico": "yes", "note": "inbounds 相同 tag 覆盖，否则追加到末尾；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
+{"key": "config/merge/object-override", "kerlico": "yes", "note": "顶级对象后者覆盖或补充前者；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
+{"key": "config/merge/outbounds-by-tag", "kerlico": "yes", "note": "outbounds 相同 tag 覆盖，否则添加到最前；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
+{"key": "config/merge/outbounds-tail", "kerlico": "yes", "note": "文件名含 tail（大小写不限）时新 outbound 添加到最后；建议暂不实现：kerlico 只读单个 JSON，多文件合并会让配置来源变多；1 MiB 限制下暂无需求"}
 {"key": "config/migration/address-filter", "kerlico": "na", "note": "sing-box 的版本迁移说明，描述其旧配置，对 kerlico 不成立"}
 {"key": "config/migration/bundle-id", "kerlico": "na", "note": "sing-box 的版本迁移说明，描述其旧配置，对 kerlico 不成立"}
 {"key": "config/migration/clash-cache-file", "kerlico": "na", "note": "sing-box 的版本迁移说明，描述其旧配置，对 kerlico 不成立"}
@@ -707,41 +707,41 @@
 {"key": "config/root/certificate-providers", "kerlico": "yes", "note": "顶层字段：证书提供者列表；建议实现：能力见 cert/provider-acme/protocol"}
 {"key": "config/root/dns", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "顶层 `dns`"}
 {"key": "config/root/endpoints", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "WireGuard、Tailscale、MASQUE、OpenVPN、OpenConnect 放在 `outbounds`，WireGuard 服务端放在 `nodes`，没有独立段"}
-{"key": "config/root/experimental", "kerlico": "no", "note": "顶层字段：实验性功能配置；建议暂不实现：kerlico 的缓存和 API 不走实验性分组，能力见 cache、api 类"}
-{"key": "config/root/http-clients", "kerlico": "no", "note": "顶层字段：共享 HTTP 客户端列表；建议暂不实现：kerlico 没有下载需求，要等规则集和订阅落地；先用内置客户端"}
+{"key": "config/root/experimental", "kerlico": "yes", "note": "顶层字段：实验性功能配置；建议暂不实现：kerlico 的缓存和 API 不走实验性分组，能力见 cache、api 类"}
+{"key": "config/root/http-clients", "kerlico": "yes", "note": "顶层字段：共享 HTTP 客户端列表；建议暂不实现：kerlico 没有下载需求，要等规则集和订阅落地；先用内置客户端"}
 {"key": "config/root/inbounds", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "顶层 `nodes`、`local_inbounds`、`inbounds`，分别是服务端节点、本地代理入口和固定转发入口"}
 {"key": "config/root/log", "kerlico": "yes", "note": "sing-box 顶层日志配置；建议实现：kerlico 没有运行日志配置，能力见 log/config/level"}
-{"key": "config/root/network-namespaces", "kerlico": "no", "note": "顶层字段：网络命名空间列表；建议暂不实现：kerlico TUN 不改路由也不管命名空间，可由外部 `ip netns exec` 运行"}
-{"key": "config/root/ntp", "kerlico": "no", "note": "顶层字段：NTP 配置；建议暂不实现：能力见 ntp/ntp/enable"}
+{"key": "config/root/network-namespaces", "kerlico": "yes", "note": "顶层字段：网络命名空间列表；建议暂不实现：kerlico TUN 不改路由也不管命名空间，可由外部 `ip netns exec` 运行"}
+{"key": "config/root/ntp", "kerlico": "yes", "note": "顶层字段：NTP 配置；建议暂不实现：能力见 ntp/ntp/enable"}
 {"key": "config/root/outbounds", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "顶层 `outbounds`"}
 {"key": "config/root/route", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "顶层 `routes` 只是规则列表，没有 route 其他字段"}
-{"key": "config/root/schema", "kerlico": "no", "note": "兼容编辑器使用的 Schema URI；建议暂不实现：`deny_unknown_fields` 让 `$schema` 字段被拒绝；要先有 schema 文件才有意义"}
-{"key": "config/root/services", "kerlico": "no", "note": "顶层字段：服务列表；建议暂不实现：kerlico 把控制接口放在 `control` 段，其他服务不在当前目标"}
-{"key": "config/schema/generate", "kerlico": "no", "note": "JSON Schema Draft 2020-12，可用 sing-box schema 生成，反映当前构建的功能；建议暂不实现：协议选项是不透明的 `options`，要先统一类型才能生成"}
+{"key": "config/root/schema", "kerlico": "yes", "note": "兼容编辑器使用的 Schema URI；建议暂不实现：`deny_unknown_fields` 让 `$schema` 字段被拒绝；要先有 schema 文件才有意义"}
+{"key": "config/root/services", "kerlico": "yes", "note": "顶层字段：服务列表；建议暂不实现：kerlico 把控制接口放在 `control` 段，其他服务不在当前目标"}
+{"key": "config/schema/generate", "kerlico": "yes", "note": "JSON Schema Draft 2020-12，可用 sing-box schema 生成，反映当前构建的功能；建议暂不实现：协议选项是不透明的 `options`，要先统一类型才能生成"}
 {"key": "config/syntax/domain-set", "kerlico": "yes", "note": "引入域名集合；建议实现：随规则集和 Geosite 提供"}
 {"key": "config/syntax/port-range", "kerlico": "yes", "note": "端口范围，- 范围，/ 或 , 分隔；建议实现：`port` 只收单端口，实现量小"}
 {"key": "config/syntax/wildcard-dot", "kerlico": "yes", "note": ". 多级但不含本身；建议实现：随 route/rule/domain-wildcard 提供"}
 {"key": "config/syntax/wildcard-plus", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "规则的 `domain_suffix` 语义相同；DNS hosts 和其他字段不支持这种写法"}
 {"key": "config/syntax/wildcard-star", "kerlico": "yes", "note": "* 一次匹配一级；只匹配无 . 的主机名；建议实现：随 route/rule/domain-wildcard 提供"}
 {"key": "config/top/api", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "顶层 `control`，只读 HTTP，不是 gRPC"}
-{"key": "config/top/burst-observatory", "kerlico": "no", "note": "配置文件顶层字段：突发连接观测；建议暂不实现：能力见 group/url-test/protocol"}
+{"key": "config/top/burst-observatory", "kerlico": "yes", "note": "配置文件顶层字段：突发连接观测；建议暂不实现：能力见 group/url-test/protocol"}
 {"key": "config/top/dns", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "顶层 `dns`"}
-{"key": "config/top/env", "kerlico": "no", "note": "配置文件顶层字段：环境变量配置块；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
+{"key": "config/top/env", "kerlico": "yes", "note": "配置文件顶层字段：环境变量配置块；建议暂不实现：kerlico 配置只来自 `-c` 文件，环境变量覆盖会让配置来源变多；容器部署可模板化生成配置"}
 {"key": "config/top/fakedns", "kerlico": "yes", "note": "配置文件顶层字段：FakeDNS，对象或数组；建议实现：能力见 dns/fakedns/fakedns"}
-{"key": "config/top/geodata", "kerlico": "no", "note": "配置文件顶层字段：地理数据文件定时更新与热重载；建议暂不实现：能力见 ruleset/geo/geo-auto-update"}
+{"key": "config/top/geodata", "kerlico": "yes", "note": "配置文件顶层字段：地理数据文件定时更新与热重载；建议暂不实现：能力见 ruleset/geo/geo-auto-update"}
 {"key": "config/top/inbounds", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "顶层 `nodes`、`local_inbounds`、`inbounds`"}
 {"key": "config/top/log", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "顶层 `telemetry` 管访问、DNS、错误记录和来源遮罩；没有日志级别和文本文件"}
 {"key": "config/top/metrics", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "顶层 `control` 提供统计 JSON；没有独立 metrics 监听"}
-{"key": "config/top/observatory", "kerlico": "no", "note": "配置文件顶层字段：后台连接观测；建议暂不实现：能力见 group/url-test/protocol"}
+{"key": "config/top/observatory", "kerlico": "yes", "note": "配置文件顶层字段：后台连接观测；建议暂不实现：能力见 group/url-test/protocol"}
 {"key": "config/top/outbounds", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "顶层 `outbounds`"}
 {"key": "config/top/policy", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "顶层 `limits`，全局超时和配额；没有用户等级"}
 {"key": "config/top/routing", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "顶层 `routes` 只是规则列表，没有 balancers 和 domainStrategy"}
 {"key": "config/top/stats", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "内存统计恒开；顶层 `telemetry` 控制持久化"}
 {"key": "config/top/transport", "kerlico": "na", "note": "Xray 已移除的全局传输配置"}
-{"key": "config/top/version", "kerlico": "no", "note": "限制配置可运行的 Xray 版本；建议暂不实现：kerlico 的 `version` 是配置结构版本，固定 2；不限制内核版本"}
+{"key": "config/top/version", "kerlico": "yes", "note": "限制配置可运行的 Xray 版本；建议暂不实现：kerlico 的 `version` 是配置结构版本，固定 2；不限制内核版本"}
 {"key": "config/types/int32range", "kerlico": "na", "note": "Xray 的配置取值写法，不是能力"}
-{"key": "config/version/max", "kerlico": "no", "note": "允许运行的最高版本，x.y.z 语法；建议暂不实现：kerlico 配置靠 `version` 固定结构，发行版之间不限制"}
-{"key": "config/version/min", "kerlico": "no", "note": "允许运行的最低版本，x.y.z 语法；建议暂不实现：kerlico 配置靠 `version` 固定结构，发行版之间不限制"}
+{"key": "config/version/max", "kerlico": "yes", "note": "允许运行的最高版本，x.y.z 语法；建议暂不实现：kerlico 配置靠 `version` 固定结构，发行版之间不限制"}
+{"key": "config/version/min", "kerlico": "yes", "note": "允许运行的最低版本，x.y.z 语法；建议暂不实现：kerlico 配置靠 `version` 固定结构，发行版之间不限制"}
 {"key": "dns/action/action", "kerlico": "yes", "note": "DNS 规则要执行的动作；建议实现：kerlico 所有查询走同一组上游，没有 DNS 规则；域名按上游分流是防污染的基本手段"}
 {"key": "dns/action/answer", "kerlico": "no", "note": "用于作为回答响应的文本 DNS 记录列表；建议暂不实现：固定应答只在 kerlico 提供 DNS 服务端后才有用"}
 {"key": "dns/action/client-subnet", "kerlico": "no", "note": "默认情况下，将带有指定 IP 前缀的 `edns0-subnet` OPT 附加记录附加到每个查询；建议暂不实现：kerlico 只解析本机 Local 路径的目标域名，ECS 的主要收益在转发给客户端的 DNS 服务场景"}

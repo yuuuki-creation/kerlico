@@ -21,8 +21,11 @@ pub use plan::*;
 mod users;
 pub use kerlico_dns::DnsSpec;
 pub use kerlico_routing::{
-    CompiledRuleSet, GeoConfigSpec, GeoxUrlSpec, Network, RouteTable, RuleProviderSpec,
-    RuleSetSpec, RuleSpec,
+    CompiledHeadlessRule, CompiledRuleSet, GeoConfigSpec, GeoIpDat, GeoSiteDat, GeoxUrlSpec,
+    HeadlessRuleSpec, Network, RouteTable, RuleProviderSpec, RuleSetSpec, RuleSpec,
+    SourceRuleSetFile, builtin_geoip_codes, builtin_geosite_codes, compile_ruleset_to_srs,
+    convert_adguard_lines, decompile_ruleset_bytes, export_geoip_ruleset, export_geosite_ruleset,
+    matches_geoip_code, matches_geosite_code, parse_ruleset_bytes,
 };
 pub use users::AccountSpec;
 
@@ -127,14 +130,123 @@ pub struct Config {
     pub etag_support: Option<bool>,
     #[serde(default)]
     pub control: Option<ControlSpec>,
+    #[serde(default, rename = "$schema")]
+    pub schema: Option<String>,
+    #[serde(default)]
+    pub geodata: Option<GeoConfigSpec>,
+    #[serde(default)]
+    pub ntp: Option<NtpSpec>,
+    #[serde(default)]
+    pub services: Vec<Value>,
+    #[serde(default, alias = "http-clients")]
+    pub http_clients: Vec<Value>,
+    #[serde(default, alias = "network-namespaces")]
+    pub network_namespaces: Vec<Value>,
+    #[serde(default)]
+    pub observatory: Option<Value>,
+    #[serde(default, alias = "burst-observatory", alias = "burstObservatory")]
+    pub burst_observatory: Option<Value>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
-/// 只读控制接口。非回环地址必须配置 `secret`。
-#[derive(Clone, Deserialize)]
+/// 控制接口与外部面板配置。非回环地址必须配置 `secret`。
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControlSpec {
     pub listen: SocketAddr,
     #[serde(default)]
     pub secret: Option<String>,
+    #[serde(default, alias = "external-ui")]
+    pub external_ui: Option<String>,
+    #[serde(default, alias = "external-ui-name")]
+    pub external_ui_name: Option<String>,
+    #[serde(default, alias = "external-ui-url", alias = "external-ui-download-url")]
+    pub external_ui_url: Option<String>,
+    #[serde(default, alias = "external-ui-download-detour")]
+    pub external_ui_download_detour: Option<String>,
+    #[serde(default, alias = "default-mode")]
+    pub default_mode: Option<String>,
+    #[serde(
+        default,
+        alias = "access-control-allow-origin",
+        alias = "access_control_allow_origin",
+        alias = "external-controller-cors-allow-origins"
+    )]
+    pub cors_allow_origins: Vec<String>,
+    #[serde(
+        default,
+        alias = "access-control-allow-private-network",
+        alias = "access_control_allow_private_network",
+        alias = "external-controller-cors-allow-private-network"
+    )]
+    pub cors_allow_private_network: bool,
+    #[serde(default)]
+    pub dashboard: Option<Value>,
+    #[serde(default, alias = "dashboard-enabled")]
+    pub dashboard_enabled: Option<bool>,
+    #[serde(default, alias = "dashboard-path")]
+    pub dashboard_path: Option<String>,
+    #[serde(default, alias = "dashboard-download-url")]
+    pub dashboard_download_url: Option<String>,
+    #[serde(default, alias = "dashboard-http-client")]
+    pub dashboard_http_client: Option<String>,
+    #[serde(default, alias = "dashboard-update-interval")]
+    pub dashboard_update_interval: Option<String>,
+    #[serde(default)]
+    pub tls: Option<Value>,
+    #[serde(default, alias = "external-controller-tls")]
+    pub tls_listen: Option<String>,
+    #[serde(default, alias = "external-controller-unix")]
+    pub unix_path: Option<String>,
+    #[serde(default, alias = "external-controller-pipe")]
+    pub pipe_path: Option<String>,
+    #[serde(default, alias = "external-controller-routing-mark")]
+    pub routing_mark: Option<u32>,
+    #[serde(default, alias = "external-doh-server")]
+    pub doh_server: Option<String>,
+}
+
+impl Default for ControlSpec {
+    fn default() -> Self {
+        Self {
+            listen: SocketAddr::from(([127, 0, 0, 1], 9090)),
+            secret: None,
+            external_ui: None,
+            external_ui_name: None,
+            external_ui_url: None,
+            external_ui_download_detour: None,
+            default_mode: None,
+            cors_allow_origins: Vec::new(),
+            cors_allow_private_network: false,
+            dashboard: None,
+            dashboard_enabled: None,
+            dashboard_path: None,
+            dashboard_download_url: None,
+            dashboard_http_client: None,
+            dashboard_update_interval: None,
+            tls: None,
+            tls_listen: None,
+            unix_path: None,
+            pipe_path: None,
+            routing_mark: None,
+            doh_server: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NtpSpec {
+    #[serde(alias = "enable")]
+    pub enabled: Option<bool>,
+    pub server: Option<String>,
+    #[serde(alias = "server-port", alias = "port")]
+    pub server_port: Option<u16>,
+    pub interval: Option<DurationSpec>,
+    #[serde(alias = "write-to-system")]
+    pub write_to_system: bool,
+    #[serde(alias = "dialer-proxy", alias = "detour")]
+    pub dialer_proxy: Option<String>,
 }
 /// 配置后，`dual-stack` 节点缺原生地址族时经 WARP 补齐；未配置则只用原生地址族。
 #[derive(Clone, Deserialize)]
@@ -406,7 +518,7 @@ impl TargetSpec {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum DurationSpec {
     Seconds(u64),
@@ -423,21 +535,7 @@ impl DurationSpec {
             }
             Self::Text(raw) => {
                 let s = raw.trim();
-                let (num, scale_ms) = if let Some(v) = s.strip_suffix("ms") {
-                    (v.trim(), 1u64)
-                } else if let Some(v) = s.strip_suffix('s') {
-                    (v.trim(), 1000u64)
-                } else if let Some(v) = s.strip_suffix('m') {
-                    (v.trim(), 60_000u64)
-                } else if let Some(v) = s.strip_suffix('h') {
-                    (v.trim(), 3_600_000u64)
-                } else {
-                    (s, 1000u64)
-                };
-                let parsed: u64 = num
-                    .parse()
-                    .map_err(|_| Error::Config("时长格式不合法".into()))?;
-                let ms = parsed.saturating_mul(scale_ms);
+                let ms = parse_go_duration_ms(s)?;
                 if !(1..=86_400_000).contains(&ms) {
                     return Err(Error::Config("时长须在 1ms 至 24h 之间".into()));
                 }
@@ -445,6 +543,57 @@ impl DurationSpec {
             }
         }
     }
+}
+
+pub fn parse_go_duration_ms(s: &str) -> Result<u64> {
+    if s.is_empty() {
+        return Err(Error::Config("时长格式不合法".into()));
+    }
+    if let Ok(plain_secs) = s.parse::<u64>() {
+        return Ok(plain_secs.saturating_mul(1000));
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut total_ms = 0u64;
+    let mut matched_any = false;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let num_start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+            i += 1;
+        }
+        if i == num_start {
+            return Err(Error::Config("时长格式不合法".into()));
+        }
+        let num_str = &s[num_start..i];
+        let val: f64 = num_str
+            .parse()
+            .map_err(|_| Error::Config("时长数值不合法".into()))?;
+        let unit_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        let unit = &s[unit_start..i];
+        let scale_ms = match unit {
+            "ms" => 1.0,
+            "s" | "" => 1000.0,
+            "m" => 60_000.0,
+            "h" => 3_600_000.0,
+            "d" => 86_400_000.0,
+            _ => return Err(Error::Config("时长单位不合法".into())),
+        };
+        total_ms = total_ms.saturating_add((val * scale_ms).round() as u64);
+        matched_any = true;
+    }
+    if !matched_any {
+        return Err(Error::Config("时长格式不合法".into()));
+    }
+    Ok(total_ms)
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -496,6 +645,28 @@ pub struct RouteConfigSpec {
 pub struct ExperimentalSpec {
     #[serde(alias = "cache-file")]
     pub cache_file: Option<kerlico_dns::CacheFileSpec>,
+    #[serde(alias = "clash-api")]
+    pub clash_api: Option<ClashApiSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClashApiSpec {
+    #[serde(alias = "external-controller")]
+    pub external_controller: Option<SocketAddr>,
+    #[serde(alias = "external-ui")]
+    pub external_ui: Option<String>,
+    #[serde(alias = "external-ui-download-url")]
+    pub external_ui_download_url: Option<String>,
+    #[serde(alias = "external-ui-download-detour")]
+    pub external_ui_download_detour: Option<String>,
+    pub secret: Option<String>,
+    #[serde(alias = "default-mode")]
+    pub default_mode: Option<String>,
+    #[serde(alias = "access-control-allow-origin")]
+    pub access_control_allow_origin: Vec<String>,
+    #[serde(alias = "access-control-allow-private-network")]
+    pub access_control_allow_private_network: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1755,6 +1926,48 @@ impl Registry {
         if routes.nodes().any(|id| !tags.contains(id)) {
             return Err(Error::Config("路由规则引用的入站不存在".into()));
         }
+        if config.control.is_none()
+            && let Some(clash_api) = config
+                .experimental
+                .as_ref()
+                .and_then(|e| e.clash_api.as_ref())
+            && let Some(listen) = clash_api.external_controller
+        {
+            config.control = Some(ControlSpec {
+                listen,
+                secret: clash_api.secret.clone(),
+                external_ui: clash_api.external_ui.clone(),
+                external_ui_name: None,
+                external_ui_url: clash_api.external_ui_download_url.clone(),
+                external_ui_download_detour: clash_api.external_ui_download_detour.clone(),
+                default_mode: clash_api.default_mode.clone(),
+                cors_allow_origins: clash_api.access_control_allow_origin.clone(),
+                cors_allow_private_network: clash_api.access_control_allow_private_network,
+                dashboard: None,
+                dashboard_enabled: None,
+                dashboard_path: None,
+                dashboard_download_url: None,
+                dashboard_http_client: None,
+                dashboard_update_interval: None,
+                tls: None,
+                tls_listen: None,
+                unix_path: None,
+                pipe_path: None,
+                routing_mark: None,
+                doh_server: None,
+            });
+        }
+        if let Some(ntp) = &config.ntp {
+            if let Some(interval) = &ntp.interval {
+                interval.to_duration()?;
+            }
+            if let Some(dp) = &ntp.dialer_proxy {
+                let id = OutId::parse(dp)?;
+                if !profiles.contains_key(&id) {
+                    return Err(Error::Config("ntp.dialer_proxy 引用的出站不存在".into()));
+                }
+            }
+        }
         if let Some(control) = &config.control
             && listeners.contains(&(control.listen, true))
         {
@@ -1822,12 +2035,25 @@ impl Registry {
 
 pub fn parse(bytes: &[u8]) -> Result<Config> {
     let value = parse_config_value(bytes)?;
+    parse_from_value(value)
+}
+
+pub fn parse_from_value(value: Value) -> Result<Config> {
     if value.get("version").and_then(Value::as_u64) != Some(2) {
         return Err(Error::Config(
             "仅支持配置版本 2；迁移说明见 docs/config-v2-migration.md".into(),
         ));
     }
     serde_json::from_value(value).map_err(|_| Error::Config("JSON 结构或字段不合法".into()))
+}
+
+pub fn parse_merged(
+    files: &[std::path::PathBuf],
+    dirs: &[std::path::PathBuf],
+    format: Option<&str>,
+) -> Result<Config> {
+    let value = load_and_merge_configs(files, dirs, format)?;
+    parse_from_value(value)
 }
 
 #[cfg(test)]

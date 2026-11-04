@@ -74,6 +74,12 @@ pub(super) fn command(language: Language) -> Command {
             "generate" => language.select("生成 UUID、随机串与各类协议密钥对。", "Generate UUIDs, random strings, and protocol keypairs."),
             "tls" => language.select("生成自签名 TLS 证书或计算证书哈希。", "Generate self-signed TLS certificates or compute certificate hashes."),
             "xray" => language.select("兼容 Xray 工具链的密钥与加密参数生成命令。", "Xray-compatible keypair and encryption generator subcommands."),
+            "format" => language.select("格式化配置文件。", "Format configuration files."),
+            "merge" => language.select("合并多个配置文件或配置目录。", "Merge multiple configuration files or directories."),
+            "rule-set" => language.select("编译、反编译、转换、匹配与合并规则集。", "Compile, decompile, convert, match, and merge rule-sets."),
+            "geoip" => language.select("查询、列出或导出 GeoIP 数据库。", "Query, list, or export GeoIP databases."),
+            "geosite" => language.select("查询、列出或导出 Geosite 数据库。", "Query, list, or export Geosite databases."),
+            "tools" => language.select("网络连通性、STUN、测速与时间同步工具集。", "Network connectivity, STUN, quality, and time sync tools."),
             _ => continue,
         };
         let mut localized = subcommand.clone().about(about).disable_help_flag(true).arg(
@@ -83,9 +89,14 @@ pub(super) fn command(language: Language) -> Command {
                 .action(ArgAction::Help)
                 .help(language.select("显示帮助", "Print help")),
         );
+        if localized.has_subcommands() {
+            localized = localized.disable_help_subcommand(true);
+        }
         if language == Language::ZhCn {
             let template = if localized.get_name() == "help" {
                 "{about-with-newline}\n用法：{usage}\n\n参数：\n{positionals}\n选项：\n{options}\n{after-help}"
+            } else if localized.has_subcommands() {
+                "{about-with-newline}\n用法：{usage}\n\n命令：\n{subcommands}\n选项：\n{options}\n{after-help}"
             } else {
                 "{about-with-newline}\n用法：{usage}\n\n选项：\n{options}\n{after-help}"
             };

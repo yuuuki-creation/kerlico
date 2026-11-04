@@ -23,12 +23,15 @@
 | `M2`（`v1.5.0`） | 传输、安全、复用与拨号对齐：`dialer-proxy`/`detour` 链式拨号，入站 `accept_proxy_protocol`（PROXY v1/v2），`sing-mux`（`h2mux`/`smux`/`yamux`），Shadowsocks `UoT` v1/v2，XHTTP 完整分帧/混淆/`xmux` 与 Xray `finalmask`（`fragment`/`udp_hop`/`brutal`），TLS 证书/公钥 SHA-256 固定、ECH、热重载、ACME 自动证书与 REALITY `mldsa65_seed` | 已完成 |
 | `M3`（`v1.6.0`） | 流量感知、DNS、路由规则集与 TUN 自动化对齐：TLS/HTTP/QUIC/BT 协议嗅探，Fake-IP 双栈池与持久化还原，DoH/DoQ、乐观缓存、ECS 与 DNS 规则动作，`rule-set`（`srs`/`mrs`/`dat`）与逻辑/进程规则，TUN `auto-route`/`auto-redirect` | 已完成 |
 | `M4`（`v1.7.0`） | 策略组、订阅提供者、控制面 API 与 CLI 工具链对齐：`select`/`url-test`/`fallback`/`load-balance`/`balancer` 策略组，`proxy-providers` 订阅解析与字段覆写，Clash/Xray/SSM RESTful & WS 控制面 API，YAML/JSONC 配置解析与密钥/证书生成 CLI，`SIGHUP` 热重载与 systemd 服务单元 | 已完成 |
+| `M5`（`v1.8.0`） | Web 面板与跨域支持、多配置合并与离线规则集 CLI：`external-ui`/`/ui` 静态面板托管与 CORS/PNA 响应头，`-C` 多配置文件深度合并与受控环境变量注入，`rule-set compile/decompile/convert/match` 与 `geoip`/`geosite` 离线 CLI 工具链（151 项） | 已完成 |
+| `M6`（`v1.9.0`） | 内置 NTP、Shadowsocks SIP003 插件与 VLESS 反向代理：内置 SNTP/NTPv4 时钟偏移校准客户端（支持代理拨号），Shadowsocks SIP003 子进程托管与 `obfs-local`/`v2ray-plugin` 原生兼容，VLESS Reverse 内网穿透反向代理（67 项） | 待开始 |
+| `M7`（`v1.10.0`） | OpenVPN 服务端入站与隧道双端闭环：`inbound/openvpn` TCP/UDP 服务端入站、TLS 控制通道与 `tls-auth`/`tls-crypt`/`tls-crypt-v2`、子网地址池分配、`PUSH_REPLY` 路由下发与多客户端会话管理（82 项） | 待开始 |
 
 验证规则见 [0012](docs/decisions/0012-simplified-delivery-and-verification.md)。跨进程设备 daemon/IPC 不在计划内，出现多进程部署需求时再排。
 
 ## 三核心主要功能对齐拓扑
 
-[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 1,321 项、部分实现 459 项、未实现 2,273 项、不适用 307 项（实测通过 1,780 项，未测 0 项）。`M0 → M1/M2 → M3 → M4` 全部阶段已完成并同步更新 `docs/capability-matrix/annotations/*.jsonl` 与 `docs/capability-matrix/results/*.jsonl`，通过 `python3 tools/capability_matrix.py build` 与 `check --strict` 校验。
+[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 1,472 项、部分实现 459 项、未实现 2,122 项、不适用 307 项（实测通过 1,931 项，未测 0 项）。`M0 → M1/M2 → M3 → M4 → M5` 阶段已完成并同步更新 `docs/capability-matrix/annotations/*.jsonl` 与 `docs/capability-matrix/results/*.jsonl`，通过 `python3 tools/capability_matrix.py build` 与 `check --strict` 校验。
 
 ```mermaid
 flowchart TD
@@ -59,9 +62,25 @@ flowchart TD
 
   subgraph M4["M4 策略组、订阅提供者、控制面 API 与 CLI 工具链 (v1.7.0)"]
     M4_GRP["策略组与健康观测 (group)<br/>select / url-test / fallback / load-balance / Xray observatory & balancer"]
-    M4_PRV["代理提供者与订阅 (provider)<br/>proxy-providers (file/http/inline) / YAML & Base64 & URI & age 解析 / 节点字段 override"]
-    M4_API["控制面与外部面板 (api + cache)<br/>完整 Clash RESTful & WS API / 连接管理与断开 / 配置热重载 / store-selected 持久化"]
-    M4_CLI["配置生态与工具链 (config + cli + ntp)<br/>多文件配置合并 / 规则集编译转换 CLI / 密钥与证书生成 CLI / 内置 NTP 客户端"]
+    M4_PRV["代理提供者与订阅 (provider)<br/>proxy-providers (file/http/inline) / YAML & Base64 & URI 解析 / 节点字段 override"]
+    M4_API["控制面与外部面板 (api + cache)<br/>Clash/Xray/SSM RESTful & WS API / 连接管理与断开 / SIGHUP 热重载 / store-selected 持久化"]
+    M4_CLI["配置生态与密钥 CLI (config + cli)<br/>JSONC & YAML 锚点解析 / 密钥与证书生成 CLI / systemd 单元"]
+  end
+
+  subgraph M5["M5 Web 面板、多配置合并与离线规则集 CLI (v1.8.0)"]
+    M5_UI["Web 面板与 CORS 控制面 (api)<br/>external-ui 静态挂载 / CORS & PNA 响应头 / PATCH configs / DNS 缓存刷新与查询"]
+    M5_CFG["多配置文件与环境变量 (config + cli)<br/>-C 配置目录深度合并 / merge & format 子命令 / 受控环境变量注入"]
+    M5_RS["离线规则集与 Geo 工具链 (cli)<br/>rule-set compile/decompile/convert/match / geoip & geosite list/lookup/export"]
+  end
+
+  subgraph M6["M6 内置 NTP、SIP003 插件与 VLESS 反向代理 (v1.9.0)"]
+    M6_NTP["内置 NTP 时间同步 (ntp)<br/>SNTP/NTPv4 客户端 / 支持 dialer-proxy 代理校准 / 进程内时钟偏移共享"]
+    M6_SIP["Shadowsocks SIP003 插件 (outbound/shadowsocks)<br/>SIP003 子进程生命周期托管 / obfs-local & v2ray-plugin 原生选项映射"]
+    M6_REV["VLESS Reverse 反向代理 (vless)<br/>inbound & outbound vless-reverse / 内网主动注册与反向多路复用桥接"]
+  end
+
+  subgraph M7["M7 OpenVPN 服务端入站与隧道双端闭环 (v1.10.0)"]
+    M7_OVPN["OpenVPN 服务端入站 (inbound/openvpn)<br/>TCP & UDP 监听 / TLS 控制通道与 tls-crypt-v2 / 虚拟子网池分配 / PUSH_REPLY 路由推送"]
   end
 
   M0_1 --> M1_IN
@@ -88,6 +107,14 @@ flowchart TD
   M4_GRP --> M4_API
   M3_DNS --> M4_API
   M3_ROUTE --> M4_CLI
+
+  M4_API --> M5_UI
+  M4_CLI --> M5_CFG
+  M3_ROUTE --> M5_RS
+  M2_DIAL --> M6_NTP
+  M1_OUT --> M6_SIP
+  M2_MUX --> M6_REV
+  M1_END --> M7_OVPN
 ```
 
 ## 能力现状

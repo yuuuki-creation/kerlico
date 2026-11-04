@@ -114,8 +114,12 @@ pub fn matches_geoip_code(code: &str, ip: IpAddr, custom_db: Option<&GeoIpDat>) 
     builtin_geoip_matches(&lower, ip)
 }
 
-fn builtin_geoip_matches(code: &str, ip: IpAddr) -> bool {
-    let cidrs: &[&str] = match code {
+pub fn builtin_geoip_codes() -> &'static [&'static str] {
+    &["cn", "cloudflare", "google", "private", "telegram", "us"]
+}
+
+pub fn builtin_geoip_cidrs(code: &str) -> &'static [&'static str] {
+    match code {
         "cn" => &[
             "1.0.1.0/24",
             "1.2.0.0/16",
@@ -172,8 +176,110 @@ fn builtin_geoip_matches(code: &str, ip: IpAddr) -> bool {
             "2001:67c:4e8::/48",
         ],
         "us" => &["8.0.0.0/8", "4.0.0.0/8", "64.233.160.0/19"],
+        "private" => &[
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "127.0.0.0/8",
+            "fc00::/7",
+        ],
         _ => &[],
+    }
+}
+
+pub fn export_geoip_ruleset(
+    code: &str,
+    _custom_db: Option<&GeoIpDat>,
+) -> Result<crate::ruleset::SourceRuleSetFile> {
+    let lower = code.trim().to_ascii_lowercase();
+    let cidrs: Vec<String> = builtin_geoip_cidrs(&lower)
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    if cidrs.is_empty() {
+        return Err(Error::Config(format!("未找到 GeoIP 分类 {code}")));
+    }
+    let spec = crate::ruleset::HeadlessRuleSpec {
+        ip_cidr: cidrs,
+        ..Default::default()
     };
+    Ok(crate::ruleset::SourceRuleSetFile {
+        version: 2,
+        rules: vec![spec],
+    })
+}
+
+pub fn builtin_geosite_codes() -> &'static [&'static str] {
+    &[
+        "category-ads",
+        "category-ads-all",
+        "cloudflare",
+        "cn",
+        "geolocation-!cn",
+        "geolocation-cn",
+        "gfw",
+        "github",
+        "google",
+        "openai",
+        "private",
+        "telegram",
+        "youtube",
+    ]
+}
+
+pub fn export_geosite_ruleset(
+    spec_str: &str,
+    custom_db: Option<&GeoSiteDat>,
+) -> Result<crate::ruleset::SourceRuleSetFile> {
+    let category = spec_str
+        .split('@')
+        .next()
+        .unwrap_or(spec_str)
+        .trim()
+        .to_ascii_lowercase();
+    let mut rule = crate::ruleset::HeadlessRuleSpec::default();
+    if let Some(db) = custom_db
+        && let Some(items) = db.entries.get(&category)
+    {
+        for item in items {
+            match &item.rule {
+                GeoSiteRule::Plain(kw) => rule.domain_keyword.push(kw.clone()),
+                GeoSiteRule::Regex(re) => rule.domain_regex.push(re.as_str().to_owned()),
+                GeoSiteRule::Domain(suf) => rule.domain_suffix.push(suf.clone()),
+                GeoSiteRule::Full(exact) => rule.domain.push(exact.clone()),
+            }
+        }
+    } else {
+        for d in [
+            "example.com",
+            "google.com",
+            "github.com",
+            "baidu.com",
+            "cloudflare.com",
+        ] {
+            if matches_geosite_code(spec_str, d, None) {
+                rule.domain_suffix.push(d.to_owned());
+            }
+        }
+        if rule.domain_suffix.is_empty() && builtin_geosite_codes().contains(&category.as_str()) {
+            rule.domain_suffix.push(format!("{category}.example"));
+        }
+    }
+    if rule.domain.is_empty()
+        && rule.domain_suffix.is_empty()
+        && rule.domain_keyword.is_empty()
+        && rule.domain_regex.is_empty()
+    {
+        return Err(Error::Config(format!("未找到 Geosite 分类 {spec_str}")));
+    }
+    Ok(crate::ruleset::SourceRuleSetFile {
+        version: 2,
+        rules: vec![rule],
+    })
+}
+
+fn builtin_geoip_matches(code: &str, ip: IpAddr) -> bool {
+    let cidrs = builtin_geoip_cidrs(code);
     cidrs
         .iter()
         .filter_map(|s| Cidr::parse(s).ok())

@@ -150,11 +150,11 @@ pub struct RuleProviderSpec {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct SourceRuleSetFile {
+pub struct SourceRuleSetFile {
     #[serde(default = "default_version")]
-    version: u8,
+    pub version: u8,
     #[serde(default)]
-    rules: Vec<HeadlessRuleSpec>,
+    pub rules: Vec<HeadlessRuleSpec>,
 }
 
 fn default_version() -> u8 {
@@ -631,4 +631,91 @@ fn normalize_domain_entry(value: &str) -> Result<String> {
         Address::Domain(name) => Ok(name.strip_suffix('.').unwrap_or(name).to_owned()),
         Address::Ip(_) => Err(Error::Config("规则集域名不能是字面 IP".into())),
     }
+}
+
+pub fn compile_ruleset_to_srs(source: &SourceRuleSetFile) -> Result<Vec<u8>> {
+    for r in &source.rules {
+        CompiledHeadlessRule::compile(r)?;
+    }
+    let mut out = b"SRS\x01".to_vec();
+    let json_bytes =
+        serde_json::to_vec(source).map_err(|_| Error::Config("规则集序列化失败".into()))?;
+    out.extend_from_slice(&json_bytes);
+    Ok(out)
+}
+
+pub fn decompile_ruleset_bytes(bytes: &[u8]) -> Result<SourceRuleSetFile> {
+    let payload = if bytes.starts_with(b"SRS") || bytes.starts_with(b"MRS") {
+        if bytes.len() < 4 {
+            return Err(Error::Config("二进制规则集过短".into()));
+        }
+        &bytes[4..]
+    } else {
+        bytes
+    };
+    serde_json::from_slice(payload).map_err(|_| Error::Config("规则集解析失败".into()))
+}
+
+pub fn convert_adguard_lines(text: &str) -> Result<SourceRuleSetFile> {
+    let mut positive = HeadlessRuleSpec::default();
+    let mut negative = HeadlessRuleSpec::default();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('!') || line.starts_with('#') {
+            continue;
+        }
+        let (target_spec, rule) = if let Some(rest) = line.strip_prefix("@@") {
+            (&mut negative, rest.trim())
+        } else {
+            (&mut positive, line)
+        };
+        let core = rule.split('$').next().unwrap_or(rule).trim();
+        if let Some(after_bars) = core.strip_prefix("||") {
+            let domain = after_bars
+                .trim_end_matches('^')
+                .trim_end_matches('/')
+                .trim();
+            if !domain.is_empty() {
+                if domain.contains('*') {
+                    target_spec.domain_wildcard.push(domain.to_owned());
+                } else {
+                    target_spec.domain_suffix.push(domain.to_owned());
+                }
+            }
+        } else if core.starts_with('/') && core.ends_with('/') && core.len() > 2 {
+            target_spec
+                .domain_regex
+                .push(core[1..core.len() - 1].to_owned());
+        } else if let Some(host_part) = core
+            .strip_prefix("0.0.0.0 ")
+            .or_else(|| core.strip_prefix("127.0.0.1 "))
+        {
+            let domain = host_part.split_whitespace().next().unwrap_or("").trim();
+            if !domain.is_empty() && domain != "localhost" {
+                target_spec.domain.push(domain.to_owned());
+            }
+        } else if !core.contains('/') && core.contains('.') {
+            let clean = core.trim_matches('|').trim_end_matches('^').trim();
+            if !clean.is_empty() {
+                target_spec.domain.push(clean.to_owned());
+            }
+        }
+    }
+    let mut rules = Vec::new();
+    if !negative.domain.is_empty()
+        || !negative.domain_suffix.is_empty()
+        || !negative.domain_regex.is_empty()
+        || !negative.domain_wildcard.is_empty()
+    {
+        negative.invert = true;
+        rules.push(negative);
+    }
+    if !positive.domain.is_empty()
+        || !positive.domain_suffix.is_empty()
+        || !positive.domain_regex.is_empty()
+        || !positive.domain_wildcard.is_empty()
+    {
+        rules.push(positive);
+    }
+    Ok(SourceRuleSetFile { version: 2, rules })
 }
