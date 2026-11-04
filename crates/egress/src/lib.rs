@@ -2,10 +2,11 @@
 
 use kerlico_config::{EgressPlan, IngressPlan, Network, RouteTable};
 use kerlico_core::{
-    Address, BoxFuture, Capabilities, ConnectContext, DatagramAssociationSender, DatagramReceiver,
-    Destination, Error, FamilyMode, FixedUdpFlow, FlowOpen, IngressBinding, NodeId, OpenedTcp,
-    OriginalTarget, OutId, Outbound, Result, RuntimeOptions, ServiceContext, ServiceRetirement,
-    SessionDispatcher, SessionIdentity, ShutdownReport, TargetPolicy, TcpFlow, UdpAssociation,
+    Address, AddressedDatagram, BoxFuture, Capabilities, ConnectContext,
+    DatagramAssociationReceiver, DatagramAssociationSender, DatagramReceiver, Destination, Error,
+    FamilyMode, FixedUdpFlow, FlowOpen, IngressBinding, NodeId, OpenedTcp, OriginalTarget, OutId,
+    Outbound, Result, RuntimeOptions, ServiceContext, ServiceRetirement, SessionDispatcher,
+    SessionIdentity, ShutdownReport, TargetPolicy, TcpConnectInfo, TcpFlow, UdpAssociation,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -20,6 +21,7 @@ use tokio::time::{Instant, timeout_at};
 mod group;
 mod history;
 mod meter;
+pub mod process;
 mod telemetry;
 pub use group::{
     ActiveConnection, ControlPlane, DelaySample, ProxyRuntimeInfo, StructuredLogEntry,
@@ -478,6 +480,11 @@ impl Dispatcher {
         let Some((original, network)) = request else {
             return (kerlico_routing::RouteDecision::default(), binding_out);
         };
+        let proc_info = if self.routes.has_process_rules() {
+            process::resolve_local_process(identity.observed_source(), network)
+        } else {
+            None
+        };
         let ctx = kerlico_routing::RouteContext {
             target: original.target(),
             resolved_ips: &[],
@@ -486,6 +493,10 @@ impl Dispatcher {
             source_addr: identity.observed_source(),
             protocol: original.sniffed_protocol(),
             sniffed_domain: original.sniffed_domain(),
+            process_name: proc_info.as_ref().map(|(n, _)| n.as_str()),
+            process_path: proc_info
+                .as_ref()
+                .and_then(|(_, p)| (!p.is_empty()).then_some(p.as_str())),
         };
         let decision = self.routes.evaluate(&ctx);
         let selected = if let Some(btag) = &decision.balancer_tag
@@ -609,6 +620,45 @@ impl Dispatcher {
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, TcpFlow>> {
         let original = self.enrich_original(original);
+        let (decision_pre, _) = self.evaluate_route(identity, Some((&original, Network::Tcp)));
+        if decision_pre.hijack_dns {
+            let resolver = self.resolver.clone();
+            return Ok(FlowOpen::tcp(
+                Box::pin(async move {
+                    let (client, mut server) = tokio::io::duplex(16384);
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut len_buf = [0u8; 2];
+                        while server.read_exact(&mut len_buf).await.is_ok() {
+                            let qlen = u16::from_be_bytes(len_buf) as usize;
+                            if qlen == 0 || qlen > 8192 {
+                                break;
+                            }
+                            let mut qbuf = vec![0u8; qlen];
+                            if server.read_exact(&mut qbuf).await.is_err() {
+                                break;
+                            }
+                            let Ok(reply) = resolver.exchange_dns_packet(&qbuf).await else {
+                                break;
+                            };
+                            let Ok(rlen) = u16::try_from(reply.len()) else {
+                                break;
+                            };
+                            if server.write_all(&rlen.to_be_bytes()).await.is_err()
+                                || server.write_all(&reply).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                    Ok(OpenedTcp {
+                        stream: Box::new(client),
+                        info: TcpConnectInfo::unknown(),
+                    })
+                }),
+                |_outcome| {},
+            ));
+        }
         let (service, mode, ledger, decision) = self.admit(
             identity,
             context,
@@ -862,6 +912,21 @@ impl Dispatcher {
                                 ledger: ledger.clone(),
                             });
                         }
+                        if self.routes.has_hijack_dns() {
+                            let (tx, rx) = tokio::sync::mpsc::channel(16);
+                            channel.sender = Box::new(DnsHijackAssociationSender {
+                                inner: channel.sender,
+                                routes: self.routes.clone(),
+                                resolver: self.resolver.clone(),
+                                source: identity.source().clone(),
+                                source_addr: identity.observed_source(),
+                                tx,
+                            });
+                            channel.receiver = Box::new(DnsHijackAssociationReceiver {
+                                inner: channel.receiver,
+                                rx,
+                            });
+                        }
                         ledger.ready(service.policy == TargetPolicy::Local, None);
                         Ok(meter::association(channel, lease.clone()))
                     }
@@ -931,6 +996,66 @@ impl DatagramReceiver for DnsHijackReceiver {
     }
     fn recv(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>>> {
         Box::pin(async move { Ok(self.rx.recv().await) })
+    }
+}
+
+struct DnsHijackAssociationSender {
+    inner: Box<dyn DatagramAssociationSender>,
+    routes: RouteTable,
+    resolver: Arc<dyn Resolver>,
+    source: kerlico_core::Source,
+    source_addr: Option<std::net::SocketAddr>,
+    tx: tokio::sync::mpsc::Sender<AddressedDatagram>,
+}
+impl DatagramAssociationSender for DnsHijackAssociationSender {
+    fn send_to<'a>(
+        &'a mut self,
+        packet: &'a [u8],
+        target: &'a Destination,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let ctx = kerlico_routing::RouteContext {
+                target,
+                resolved_ips: &[],
+                network: Network::Udp,
+                source: &self.source,
+                source_addr: self.source_addr,
+                protocol: Some("dns"),
+                sniffed_domain: None,
+                process_name: None,
+                process_path: None,
+            };
+            if self.routes.evaluate(&ctx).hijack_dns {
+                let reply = self.resolver.exchange_dns_packet(packet).await?;
+                let _ = self.tx.send((target.clone(), reply)).await;
+                return Ok(());
+            }
+            self.inner.send_to(packet, target).await
+        })
+    }
+}
+
+struct DnsHijackAssociationReceiver {
+    inner: Box<dyn DatagramAssociationReceiver>,
+    rx: tokio::sync::mpsc::Receiver<AddressedDatagram>,
+}
+impl DatagramAssociationReceiver for DnsHijackAssociationReceiver {
+    fn recv_from(&mut self) -> BoxFuture<'_, Result<Option<AddressedDatagram>>> {
+        Box::pin(async move {
+            if let Ok(item) = self.rx.try_recv() {
+                return Ok(Some(item));
+            }
+            tokio::select! {
+                biased;
+                some_hijack = self.rx.recv() => {
+                    match some_hijack {
+                        Some(item) => Ok(Some(item)),
+                        None => self.inner.recv_from().await,
+                    }
+                }
+                res = self.inner.recv_from() => res,
+            }
+        })
     }
 }
 

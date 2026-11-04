@@ -576,10 +576,12 @@ fn normalize_yaml_root(root: &mut Value) {
                 let tag = m
                     .remove("tag")
                     .unwrap_or_else(|| Value::String("proxy".into()));
-                let kind = m
+                let kind_raw = m
                     .remove("type")
                     .or_else(|| m.remove("protocol"))
-                    .unwrap_or_else(|| Value::String("direct".into()));
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "direct".into());
+                let kind = Value::String(crate::group::normalize_outbound_kind(&kind_raw));
                 let options = if let Some(opts) = m.remove("options") {
                     opts
                 } else {
@@ -941,6 +943,69 @@ pub fn normalize_config_value(root: &mut Value) -> Result<()> {
         apply_env_map(obj, &env_map);
     }
 
+    // Normalize top-level Clash `rules` array into `routes` and `route.final`
+    if let Some(Value::Array(clash_rules)) = obj.remove("rules") {
+        let mut parsed_routes = obj
+            .remove("routes")
+            .and_then(|v| match v {
+                Value::Array(a) => Some(a),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let mut final_outbound: Option<String> = None;
+        for item in clash_rules {
+            match item {
+                Value::String(line) => {
+                    let (spec_opt, fin_opt) = kerlico_routing::parse_clash_rule_line(&line)?;
+                    if let Some(spec) = spec_opt
+                        && let Ok(val) = serde_json::to_value(spec)
+                    {
+                        parsed_routes.push(val);
+                    }
+                    if let Some(fin) = fin_opt {
+                        final_outbound = Some(fin);
+                    }
+                }
+                obj_val @ Value::Object(_) => parsed_routes.push(obj_val),
+                _ => return Err(Error::Config("rules 元素须为字符串或规则对象".into())),
+            }
+        }
+        obj.insert("routes".into(), Value::Array(parsed_routes));
+        if let Some(fin) = final_outbound {
+            let route_obj = obj
+                .entry("route".to_owned())
+                .or_insert_with(|| Value::Object(Map::new()));
+            if let Some(rmap) = route_obj.as_object_mut() {
+                rmap.entry("final".to_owned()).or_insert(Value::String(fin));
+            }
+        }
+    }
+
+    // Normalize Clash string rules inside `sub-rules` / `sub_rules`
+    for sub_key in ["sub-rules", "sub_rules"] {
+        if let Some(Value::Object(sub_map)) = obj.get_mut(sub_key) {
+            for (_name, arr_val) in sub_map.iter_mut() {
+                if let Value::Array(items) = arr_val {
+                    let mut converted = Vec::with_capacity(items.len());
+                    for item in items.drain(..) {
+                        match item {
+                            Value::String(line) => {
+                                let (spec_opt, _) = kerlico_routing::parse_clash_rule_line(&line)?;
+                                if let Some(spec) = spec_opt
+                                    && let Ok(val) = serde_json::to_value(spec)
+                                {
+                                    converted.push(val);
+                                }
+                            }
+                            other => converted.push(other),
+                        }
+                    }
+                    *items = converted;
+                }
+            }
+        }
+    }
+
     // Strip unknown top-level anchor helper keys (e.g. `.anchor` or `common_*`) so `unknown-keys` holds
     let known_top_keys = [
         "$schema",
@@ -955,12 +1020,23 @@ pub fn normalize_config_value(root: &mut Value) -> Result<()> {
         "lan-allowed-ips",
         "lan_disallowed_ips",
         "lan-disallowed-ips",
+        "port",
+        "http-port",
+        "socks_port",
+        "socks-port",
         "mixed_port",
         "mixed-port",
         "redir_port",
         "redir-port",
         "tproxy_port",
         "tproxy-port",
+        "allow_lan",
+        "allow-lan",
+        "bind_address",
+        "bind-address",
+        "mode",
+        "sub_rules",
+        "sub-rules",
         "tun",
         "dialer",
         "interface_name",
@@ -1367,5 +1443,47 @@ type = "direct"
         merge_config_values(&mut base, overlay, false);
         assert_eq!(base["outbounds"][0]["tag"], "proxy-a");
         assert_eq!(base["outbounds"][1]["tag"], "direct");
+    }
+
+    #[test]
+    fn normalizes_mihomo_yaml_rules_sub_rules_and_ports() {
+        let yaml_raw = r#"
+port: 7890
+socks-port: 7891
+mixed-port: 7892
+allow-lan: true
+bind-address: "*"
+mode: rule
+
+proxies:
+  - name: hk-ss
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+    cipher: aes-256-gcm
+    password: secret
+
+sub-rules:
+  sub-tcp:
+    - DOMAIN-SUFFIX,internal.example.com,hk-ss
+
+rules:
+  - PROCESS-NAME,curl,DIRECT
+  - SUB-RULE,(NETWORK,tcp),sub-tcp
+  - DOMAIN-SUFFIX,google.com,hk-ss
+  - MATCH,DIRECT
+"#;
+        let val = parse_config_value(yaml_raw.as_bytes()).expect("parse mihomo yaml");
+        assert_eq!(val["port"], 7890);
+        assert_eq!(val["socks-port"], 7891);
+        assert_eq!(val["mixed-port"], 7892);
+        assert_eq!(val["outbounds"][0]["tag"], "hk-ss");
+        assert_eq!(val["outbounds"][0]["type"], "shadowsocks");
+        assert_eq!(val["routes"].as_array().unwrap().len(), 3);
+        assert_eq!(val["route"]["final"], "DIRECT");
+        let parsed = crate::parse(yaml_raw.as_bytes()).expect("deserialize into Config");
+        assert_eq!(parsed.port, Some(7890));
+        assert_eq!(parsed.socks_port, Some(7891));
+        assert_eq!(parsed.sub_rules.get("sub-tcp").unwrap().len(), 1);
     }
 }

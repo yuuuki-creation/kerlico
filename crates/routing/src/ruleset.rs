@@ -71,6 +71,24 @@ pub struct HeadlessRuleSpec {
     pub source_port_range: Vec<String>,
     #[serde(default)]
     pub network: StringOrVec,
+    #[serde(default, alias = "process-name")]
+    pub process_name: Vec<String>,
+    #[serde(default, alias = "process-path")]
+    pub process_path: Vec<String>,
+    #[serde(
+        default,
+        alias = "process-name-regex",
+        alias = "process_name_regexp",
+        alias = "process-name-regexp"
+    )]
+    pub process_name_regex: Vec<String>,
+    #[serde(
+        default,
+        alias = "process-path-regex",
+        alias = "process_path_regexp",
+        alias = "process-path-regexp"
+    )]
+    pub process_path_regex: Vec<String>,
     #[serde(default, alias = "not")]
     pub invert: bool,
     #[serde(
@@ -191,6 +209,10 @@ pub struct CompiledHeadlessRule {
     pub source_port: Vec<u16>,
     pub source_port_range: Vec<PortRange>,
     pub networks: Vec<Network>,
+    pub process_name: Vec<String>,
+    pub process_path: Vec<String>,
+    pub process_name_regex: Vec<Regex>,
+    pub process_path_regex: Vec<Regex>,
     pub invert: bool,
     pub logical: Option<(LogicalMode, Vec<CompiledHeadlessRule>)>,
 }
@@ -227,6 +249,10 @@ impl CompiledHeadlessRule {
                 source_port: Vec::new(),
                 source_port_range: Vec::new(),
                 networks: Vec::new(),
+                process_name: Vec::new(),
+                process_path: Vec::new(),
+                process_name_regex: Vec::new(),
+                process_path_regex: Vec::new(),
                 invert: spec.invert,
                 logical: Some((mode, children)),
             });
@@ -289,6 +315,30 @@ impl CompiledHeadlessRule {
                 _ => return Err(Error::Config("无头规则 network 仅支持 tcp 或 udp".into())),
             }
         }
+        let process_name = spec
+            .process_name
+            .iter()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .collect();
+        let process_path = spec
+            .process_path
+            .iter()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+            .collect();
+        let mut process_name_regex = Vec::with_capacity(spec.process_name_regex.len());
+        for re_str in &spec.process_name_regex {
+            let re = Regex::new(re_str)
+                .map_err(|_| Error::Config("无头规则 process_name_regex 不合法".into()))?;
+            process_name_regex.push(re);
+        }
+        let mut process_path_regex = Vec::with_capacity(spec.process_path_regex.len());
+        for re_str in &spec.process_path_regex {
+            let re = Regex::new(re_str)
+                .map_err(|_| Error::Config("无头规则 process_path_regex 不合法".into()))?;
+            process_path_regex.push(re);
+        }
 
         Ok(Self {
             domain,
@@ -303,6 +353,10 @@ impl CompiledHeadlessRule {
             source_port: spec.source_port.clone(),
             source_port_range,
             networks,
+            process_name,
+            process_path,
+            process_name_regex,
+            process_path_regex,
             invert: spec.invert,
             logical: None,
         })
@@ -316,14 +370,44 @@ impl CompiledHeadlessRule {
         network: Network,
         source_addr: Option<SocketAddr>,
     ) -> bool {
+        self.matches_with_process(hosts, ips, port, network, source_addr, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn matches_with_process(
+        &self,
+        hosts: &[&str],
+        ips: &[IpAddr],
+        port: u16,
+        network: Network,
+        source_addr: Option<SocketAddr>,
+        process_name: Option<&str>,
+        process_path: Option<&str>,
+    ) -> bool {
         if let Some((mode, children)) = &self.logical {
             let hit = match mode {
-                LogicalMode::And => children
-                    .iter()
-                    .all(|c| c.matches(hosts, ips, port, network, source_addr)),
-                LogicalMode::Or => children
-                    .iter()
-                    .any(|c| c.matches(hosts, ips, port, network, source_addr)),
+                LogicalMode::And => children.iter().all(|c| {
+                    c.matches_with_process(
+                        hosts,
+                        ips,
+                        port,
+                        network,
+                        source_addr,
+                        process_name,
+                        process_path,
+                    )
+                }),
+                LogicalMode::Or => children.iter().any(|c| {
+                    c.matches_with_process(
+                        hosts,
+                        ips,
+                        port,
+                        network,
+                        source_addr,
+                        process_name,
+                        process_path,
+                    )
+                }),
             };
             return if self.invert { !hit } else { hit };
         }
@@ -373,9 +457,40 @@ impl CompiledHeadlessRule {
                 self.source_port.contains(&sa.port())
                     || self.source_port_range.iter().any(|r| r.contains(sa.port()))
             });
+        let proc_name_ok = (self.process_name.is_empty() && self.process_name_regex.is_empty())
+            || process_name.is_some_and(|pn| {
+                let lower = pn.to_ascii_lowercase();
+                self.process_name.iter().any(|item| item == &lower)
+                    || self.process_name_regex.iter().any(|re| re.is_match(pn))
+            });
+        let proc_path_ok = (self.process_path.is_empty() && self.process_path_regex.is_empty())
+            || process_path.is_some_and(|pp| {
+                self.process_path.iter().any(|item| item == pp)
+                    || self.process_path_regex.iter().any(|re| re.is_match(pp))
+            });
 
-        let raw = target_ok && port_ok && net_ok && src_ip_ok && src_port_ok;
+        let raw = target_ok
+            && port_ok
+            && net_ok
+            && src_ip_ok
+            && src_port_ok
+            && proc_name_ok
+            && proc_path_ok;
         if self.invert { !raw } else { raw }
+    }
+
+    pub fn has_process_rules(&self) -> bool {
+        if !self.process_name.is_empty()
+            || !self.process_path.is_empty()
+            || !self.process_name_regex.is_empty()
+            || !self.process_path_regex.is_empty()
+        {
+            return true;
+        }
+        if let Some((_, children)) = &self.logical {
+            return children.iter().any(Self::has_process_rules);
+        }
+        false
     }
 }
 
@@ -386,6 +501,12 @@ pub struct CompiledRuleSet {
 }
 
 impl CompiledRuleSet {
+    pub fn has_process_rules(&self) -> bool {
+        self.rules
+            .iter()
+            .any(CompiledHeadlessRule::has_process_rules)
+    }
+
     pub fn compile_spec(spec: &RuleSetSpec) -> Result<Self> {
         if spec.tag.trim().is_empty() {
             return Err(Error::Config("rule_set tag 不能为空".into()));
@@ -491,9 +612,31 @@ impl CompiledRuleSet {
         network: Network,
         source_addr: Option<SocketAddr>,
     ) -> bool {
-        self.rules
-            .iter()
-            .any(|r| r.matches(hosts, ips, port, network, source_addr))
+        self.matches_with_process(hosts, ips, port, network, source_addr, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn matches_with_process(
+        &self,
+        hosts: &[&str],
+        ips: &[IpAddr],
+        port: u16,
+        network: Network,
+        source_addr: Option<SocketAddr>,
+        process_name: Option<&str>,
+        process_path: Option<&str>,
+    ) -> bool {
+        self.rules.iter().any(|r| {
+            r.matches_with_process(
+                hosts,
+                ips,
+                port,
+                network,
+                source_addr,
+                process_name,
+                process_path,
+            )
+        })
     }
 
     pub fn cidr_strings(&self) -> Vec<String> {
@@ -608,6 +751,15 @@ fn compile_provider_lines(lines: &[String], behavior: &str) -> Result<CompiledHe
                                 .map_err(|_| Error::Config("SRC-PORT 端口不合法".into()))?;
                             spec.source_port.push(p);
                         }
+                    }
+                    "PROCESS-NAME" => spec.process_name.push(val.to_owned()),
+                    "PROCESS-PATH" => spec.process_path.push(val.to_owned()),
+                    "PROCESS-NAME-REGEX" => spec.process_name_regex.push(val.to_owned()),
+                    "PROCESS-PATH-REGEX" => spec.process_path_regex.push(val.to_owned()),
+                    "NETWORK" => {
+                        let mut v = spec.network.as_vec();
+                        v.push(val.to_owned());
+                        spec.network = StringOrVec::List(v);
                     }
                     "RULE-SET" | "SUB-RULE" => {
                         return Err(Error::Config(

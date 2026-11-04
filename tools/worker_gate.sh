@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # 发行门禁：在 worker 上对一个提交执行 fmt、clippy、全量测试与 release 构建。
-# 用法：tools/worker_gate.sh [别名=perf-01] [提交=HEAD]
+# 用法：tools/worker_gate.sh [别名=perf-02] [提交=HEAD]
 set -euo pipefail
 
-alias="${1:-perf-01}"
+alias="${1:-perf-02}"
 rev="$(git rev-parse "${2:-HEAD}")"
 root="${KERLICO_WORKER_ROOT:-/srv/build/kerlico}/gate"
 run() { ssh -F "${KERLICO_SSH_CONFIG:-.private/machines/ssh_config}" -o BatchMode=yes -o ServerAliveInterval=30 "$alias" "$@"; }
 
-git -c core.autocrlf=false archive "$rev" | gzip | run "mkdir -p '$root' && rm -rf '$root/new' && mkdir '$root/new' \
+git -c core.autocrlf=false archive "$rev" | gzip | run "pkill -f '[b]ash job.sh' 2>/dev/null || true; mkdir -p '$root' && rm -rf '$root/new' && mkdir '$root/new' \
   && tar -xz -C '$root/new' && mkdir -p '$root/src' && rsync -rc --delete '$root/new/' '$root/src/'"
 
 run "cat > '$root/job.sh'" <<EOF

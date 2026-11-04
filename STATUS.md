@@ -4,7 +4,7 @@
 
 ## 版本
 
-最新发布：[v1.10.0](docs/releases/1.10.0.md)（首轮跨机发行版为 [v1.3.2](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.3.2)），带 Linux `x86_64` 二进制。首轮完成计划与 `M0`–`M7` 三核心（Mihomo、sing-box、Xray）主要功能对齐已全部完成并经实测核销（见[能力总表](docs/capability-matrix/README.md)与 [M1–M7 验证记录](docs/testing/m1-m7-verification-2026-11-04.md)）。
+最新发布：[v1.11.0](docs/releases/1.11.0.md)（首轮跨机发行版为 [v1.3.2](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.3.2)），带 Linux `x86_64` 二进制。首轮完成计划、`M0`–`M7` 三核心（Mihomo、sing-box、Xray）主要功能对齐与 `M8`–`M10` Mihomo 深度体验对标已全部完成并经实测核销（见[能力总表](docs/capability-matrix/README.md)与 [M1–M10 验证记录](docs/testing/m1-m7-verification-2026-11-04.md)）。
 
 构建基线：Rust `1.99.1`，Linux `x86_64`。
 
@@ -26,6 +26,9 @@
 | `M5`（`v1.8.0`） | Web 面板与跨域支持、多配置合并与离线规则集 CLI：`external-ui`/`/ui` 静态面板托管与 CORS/PNA 响应头，`-C` 多配置文件深度合并与受控环境变量注入，`rule-set compile/decompile/convert/match` 与 `geoip`/`geosite` 离线 CLI 工具链（151 项） | 已完成 |
 | `M6`（`v1.9.0`） | 内置 NTP、Shadowsocks SIP003 插件与 VLESS 反向代理：内置 SNTP/NTPv4 时钟偏移校准客户端（支持代理拨号），Shadowsocks SIP003 子进程托管与 `obfs-local`/`v2ray-plugin` 原生兼容，VLESS Reverse 内网穿透反向代理（67 项） | 已完成 |
 | `M7`（`v1.10.0`） | OpenVPN 服务端入站与隧道双端闭环：`inbound/openvpn` TCP/UDP 服务端入站、TLS 控制通道与 `tls-auth`/`tls-crypt`/`tls-crypt-v2`、子网地址池分配、`PUSH_REPLY` 路由下发与多客户端会话管理（82 项） | 已完成 |
+| `M8`（`v1.11.0`） | Mihomo YAML 原生直通与全协议订阅解析：顶层 `port`/`socks-port`/`allow-lan`/`bind-address`/`mode`/`rules`/`sub-rules`、内置 `DIRECT`/`REJECT`/`PASS` 自动注入、`proxy-providers` 字段 `override` 及 `vmess`/`ss`/`ssr`/`vless`/`trojan`/`hy2`/`tuic`/`anytls`/`wg` URI 分享链接解析 | 已完成 |
+| `M9`（`v1.11.0`） | TUN 自动路由守卫、UDP/TCP DNS 劫持与本机进程匹配：`TunRouteGuard` 生命周期路由安装回滚与 `route-address-set` 展开、多目标 UDP 与 TCP DNS 劫持自动注入、跨平台本机套接字进程解析与 `PROCESS-NAME*`/`PROCESS-PATH*` 规则匹配 | 已完成 |
+| `M10`（`v1.11.0`） | Hysteria2 / TUIC 动态 UDP 端口跳跃与 `SUB-RULE`：TUIC `HoppingSocket`（`ports`/`mport`/`hop_interval`/`hop_interval_max`）、Hysteria2 毫秒级跳跃间隔与 `mport`、`RouteTable` 命名子规则表递归求值 | 已完成 |
 
 验证规则见 [0012](docs/decisions/0012-simplified-delivery-and-verification.md)。跨进程设备 daemon/IPC 不在计划内，出现多进程部署需求时再排。
 
@@ -134,7 +137,7 @@ flowchart TD
 
 ## 最新门禁
 
-`v1.10.0`（`perf-01`）：fmt、严格 Clippy、zerotier-node 测试、release、许可通知、能力总表与站点检查全部通过；全量单元与回环集成测试 0 失败（见 [M1–M7 验证记录](docs/testing/m1-m7-verification-2026-11-04.md)）。门禁只含回环与单元测试。
+`v1.11.0`（`perf-02`）：fmt、严格 Clippy、zerotier-node 测试、release、许可通知、能力总表与站点检查全部通过；全量单元与回环集成测试 0 失败（见 [M1–M10 验证记录](docs/testing/m1-m7-verification-2026-11-04.md)）。门禁只含回环与单元测试。
 
 ## 实机测试
 

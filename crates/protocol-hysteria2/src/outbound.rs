@@ -123,13 +123,20 @@ impl Hysteria2Outbound {
             Some(spec) => spec.parse()?,
             None => Vec::new(),
         };
-        let hop_interval_spec = options
-            .hop_interval
-            .as_ref()
-            .or_else(|| fm_hop.and_then(|h| h.interval.as_ref()));
-        let hop_interval = match hop_interval_spec {
-            Some(spec) => spec.to_duration()?,
-            None => Duration::from_secs(30),
+        let hop_interval = if let Some(ms) = options.hop_interval_ms {
+            if !(10..=86_400_000).contains(&ms) {
+                return Err(invalid());
+            }
+            Duration::from_millis(ms)
+        } else {
+            let hop_interval_spec = options
+                .hop_interval
+                .as_ref()
+                .or_else(|| fm_hop.and_then(|h| h.interval.as_ref()));
+            match hop_interval_spec {
+                Some(spec) => spec.to_duration()?,
+                None => Duration::from_secs(30),
+            }
         };
         let hop_interval_max_spec = options
             .hop_interval_max

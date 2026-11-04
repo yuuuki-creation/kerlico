@@ -14,6 +14,7 @@
 | `M5` | `v1.8.0` | +151 | 1,931 | `/ui`（`external-ui`）静态面板托管与 CORS/PNA 响应头；`-C` 多配置文件深度合并与受控环境变量注入；`rule-set compile/decompile/convert/match`、`geoip`/`geosite` 与 `tools` CLI |
 | `M6` | `v1.9.0` | +67 | 1,998 | 内置 SNTP/NTPv4 时钟偏移校准客户端（支持代理拨号）；Shadowsocks SIP003 子进程托管与 `obfs-local`/`v2ray-plugin` 原生兼容；VLESS Reverse 内网穿透反向代理（Portal <-> Bridge 隧道派发） |
 | `M7` | `v1.10.0` | +82 | 2,080 | `inbound/openvpn` TCP/UDP 服务端入站（TLS 握手、`key_method_2`、`PUSH_REPLY`、`tls-auth`/`tls-crypt`/`tls-crypt-v2`、AEAD `DataV2` 与 `ServerTunnel` 用户态 IP 栈转发）及 WireGuard 接口级参数对齐 |
+| `M8`–`M10` | `v1.11.0` | 深度对齐 | 2,080 | Mihomo YAML 顶层配置与 `rules`/`sub-rules` 直通、全协议 URI 分享链接与 `override`、TUN `TunRouteGuard` 与双栈 UDP/TCP DNS 劫持、跨平台本机套接字进程匹配、Hysteria2/TUIC 动态 UDP 端口跳跃 |
 
 ## 重点新能力端到端验证
 

@@ -48,12 +48,24 @@ pub struct Config {
     pub lan_allowed_ips: Vec<String>,
     #[serde(default, alias = "lan-disallowed-ips")]
     pub lan_disallowed_ips: Vec<String>,
+    #[serde(default, alias = "http-port")]
+    pub port: Option<u16>,
+    #[serde(default, alias = "socks-port")]
+    pub socks_port: Option<u16>,
     #[serde(default, alias = "mixed-port")]
     pub mixed_port: Option<u16>,
     #[serde(default, alias = "redir-port")]
     pub redir_port: Option<u16>,
     #[serde(default, alias = "tproxy-port")]
     pub tproxy_port: Option<u16>,
+    #[serde(default, alias = "allow-lan")]
+    pub allow_lan: Option<bool>,
+    #[serde(default, alias = "bind-address")]
+    pub bind_address: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default, alias = "sub-rules")]
+    pub sub_rules: BTreeMap<String, Vec<RuleSpec>>,
     #[serde(default)]
     pub tun: Option<Value>,
     #[serde(default)]
@@ -634,6 +646,8 @@ pub struct RouteConfigSpec {
     pub rule_set: Vec<RuleSetSpec>,
     #[serde(default)]
     pub rules: Vec<RuleSpec>,
+    #[serde(default, alias = "sub-rules")]
+    pub sub_rules: BTreeMap<String, Vec<RuleSpec>>,
     #[serde(default)]
     pub balancers: Vec<BalancerSpec>,
     #[serde(rename = "final", alias = "final_outbound", alias = "final-outbound")]
@@ -1299,10 +1313,28 @@ impl Registry {
             Some(sniffer) => sniffer.to_policy()?,
             None => kerlico_core::SniffPolicy::default(),
         };
+        if config.allow_lan == Some(true) && config.lan_allowed_ips.is_empty() {
+            config.lan_allowed_ips.push("0.0.0.0/0".into());
+            config.lan_allowed_ips.push("::/0".into());
+        }
         let lan_filter =
             kerlico_core::IpFilter::compile(&config.lan_allowed_ips, &config.lan_disallowed_ips)?;
-        let default_outbound = config.outbounds.first().map(|spec| spec.tag.clone());
+        let shortcut_ip: std::net::IpAddr = match config.bind_address.as_deref().map(str::trim) {
+            Some("*" | "0.0.0.0") => std::net::IpAddr::from([0, 0, 0, 0]),
+            Some(addr) if !addr.is_empty() => addr
+                .parse()
+                .map_err(|_| Error::Config("bind-address 地址不合法".into()))?,
+            _ if config.allow_lan == Some(true) => std::net::IpAddr::from([0, 0, 0, 0]),
+            _ => std::net::IpAddr::from([127, 0, 0, 1]),
+        };
+        let default_outbound = config
+            .outbounds
+            .first()
+            .map(|spec| spec.tag.clone())
+            .or_else(|| config.proxy_groups.first().map(|g| g.name.clone()));
         for (port_opt, tag, kind) in [
+            (config.port, "http-in", "http"),
+            (config.socks_port, "socks-in", "socks"),
             (config.mixed_port, "mixed-in", "mixed"),
             (config.redir_port, "redir-in", "redirect"),
             (config.tproxy_port, "tproxy-in", "tproxy"),
@@ -1319,7 +1351,7 @@ impl Registry {
                 config.local_inbounds.push(NodeSpec {
                     tag: tag.into(),
                     kind: kind.into(),
-                    listen: SocketAddr::from(([127, 0, 0, 1], port)),
+                    listen: SocketAddr::new(shortcut_ip, port),
                     outbound,
                     mode: NodeMode::Dual,
                     options: empty_object(),
@@ -1548,11 +1580,51 @@ impl Registry {
             }
             provider_outbounds.extend(specs);
         }
-        let existing_tags: BTreeSet<String> =
+        let mut existing_tags: BTreeSet<String> =
             config.outbounds.iter().map(|s| s.tag.clone()).collect();
         for spec in provider_outbounds {
-            if !existing_tags.contains(&spec.tag) {
+            if existing_tags.insert(spec.tag.clone()) {
                 config.outbounds.push(spec);
+            }
+        }
+        let group_tags: BTreeSet<String> =
+            config.proxy_groups.iter().map(|g| g.name.clone()).collect();
+        for (builtin_tag, builtin_kind) in [
+            ("DIRECT", "direct"),
+            ("REJECT", "block"),
+            ("REJECT-DROP", "block"),
+            ("PASS", "direct"),
+        ] {
+            let referenced = config
+                .proxy_groups
+                .iter()
+                .any(|g| g.proxies.iter().any(|p| p == builtin_tag))
+                || config.routes.iter().any(|r| r.outbound == builtin_tag)
+                || config.route.as_ref().is_some_and(|rb| {
+                    rb.rules.iter().any(|r| r.outbound == builtin_tag)
+                        || rb.final_outbound.as_deref() == Some(builtin_tag)
+                        || rb
+                            .sub_rules
+                            .values()
+                            .flatten()
+                            .any(|r| r.outbound == builtin_tag)
+                })
+                || config
+                    .sub_rules
+                    .values()
+                    .flatten()
+                    .any(|r| r.outbound == builtin_tag);
+            if referenced
+                && !existing_tags.contains(builtin_tag)
+                && !group_tags.contains(builtin_tag)
+                && self.factories.contains_key(builtin_kind)
+            {
+                existing_tags.insert(builtin_tag.to_owned());
+                config.outbounds.push(OutboundSpec {
+                    tag: builtin_tag.to_owned(),
+                    kind: builtin_kind.to_owned(),
+                    options: empty_object(),
+                });
             }
         }
         let mut inline_groups = Vec::new();
@@ -1656,8 +1728,47 @@ impl Registry {
             }
         }
         let mut all_rules = config.routes.clone();
+        let mut all_sub_rules = config.sub_rules.clone();
         if let Some(route_block) = &config.route {
             all_rules.extend(route_block.rules.iter().cloned());
+            for (k, v) in &route_block.sub_rules {
+                all_sub_rules
+                    .entry(k.clone())
+                    .or_default()
+                    .extend(v.iter().cloned());
+            }
+        }
+        let tun_wants_dns_hijack =
+            config
+                .nodes
+                .iter()
+                .chain(config.local_inbounds.iter())
+                .any(|n| {
+                    n.kind == "tun"
+                        && n.options.as_object().is_some_and(|m| {
+                            m.get("dns_hijack")
+                                .or_else(|| m.get("dns-hijack"))
+                                .and_then(Value::as_array)
+                                .is_some_and(|a| !a.is_empty())
+                                || m.get("dns_mode")
+                                    .or_else(|| m.get("dns-mode"))
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|s| s.eq_ignore_ascii_case("hijack"))
+                        })
+                });
+        if tun_wants_dns_hijack
+            && !all_rules
+                .iter()
+                .any(|r| r.action.as_deref() == Some("hijack-dns"))
+        {
+            all_rules.insert(
+                0,
+                RuleSpec {
+                    action: Some("hijack-dns".into()),
+                    port: vec![53],
+                    ..Default::default()
+                },
+            );
         }
         let final_outbound = match config
             .route
@@ -1668,6 +1779,7 @@ impl Registry {
             None => None,
         };
         let routes = RouteTable::compile_with_sets(&all_rules, compiled_rule_sets.clone())?
+            .with_sub_rules(&all_sub_rules)?
             .with_final_outbound(final_outbound);
         if routes
             .referenced_rule_sets()
@@ -1776,24 +1888,49 @@ impl Registry {
             if spec.kind == "tun"
                 && let Some(map) = spec.options.as_object_mut()
             {
-                for key in [
-                    "route_address_set",
-                    "route-address-set",
-                    "route_exclude_address_set",
-                    "route-exclude-address-set",
+                let mut inc_cidrs = Vec::new();
+                let mut exc_cidrs = Vec::new();
+                for (key, is_exclude) in [
+                    ("route_address_set", false),
+                    ("route-address-set", false),
+                    ("route_exclude_address_set", true),
+                    ("route-exclude-address-set", true),
                 ] {
                     if let Some(arr) = map.get(key).and_then(Value::as_array) {
                         for item in arr {
                             let set_tag = item.as_str().ok_or_else(|| {
                                 Error::Config("TUN 路由规则集标签须为字符串".into())
                             })?;
-                            if !compiled_rule_sets.contains_key(set_tag.trim()) {
+                            let Some(set) = compiled_rule_sets.get(set_tag.trim()) else {
                                 return Err(Error::Config(
                                     "TUN 引用的 route_address_set/route_exclude_address_set 不存在"
                                         .into(),
                                 ));
+                            };
+                            for cidr in set.cidr_strings() {
+                                if is_exclude {
+                                    exc_cidrs.push(Value::String(cidr));
+                                } else {
+                                    inc_cidrs.push(Value::String(cidr));
+                                }
                             }
                         }
+                    }
+                }
+                if !inc_cidrs.is_empty() {
+                    let entry = map
+                        .entry("route_address".to_owned())
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if let Some(arr) = entry.as_array_mut() {
+                        arr.extend(inc_cidrs);
+                    }
+                }
+                if !exc_cidrs.is_empty() {
+                    let entry = map
+                        .entry("route_exclude_address".to_owned())
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if let Some(arr) = entry.as_array_mut() {
+                        arr.extend(exc_cidrs);
                     }
                 }
             }

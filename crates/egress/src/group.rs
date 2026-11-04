@@ -857,6 +857,8 @@ impl ControlPlane {
             source_addr: None,
             protocol: None,
             sniffed_domain: None,
+            process_name: None,
+            process_path: None,
         };
         let dec = routes.evaluate(&ctx);
         drop(routes);

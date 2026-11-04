@@ -41,10 +41,10 @@ cargo build --locked --release -p kerlico
 支持 JSON v2、带注释 JSONC、YAML（含锚点别名 `&`/`*`/`<<`）与 TOML，也兼容直接加载 Mihomo（`proxies`/`proxy-groups`/`rules`）与 sing-box（`inbounds`/`outbounds`/`route`）风格配置。主结构包含：
 
 - `outbounds`：命名出站与策略组（`select`、`url-test`、`fallback`、`load-balance`、`balancer`），支持 `dialer-proxy` / `detour` 链式代理。
-- `proxy_providers`：外部或内联节点订阅提供者（支持 Mihomo YAML、Base64 订阅与 URI 行解析及字段 `override`）。
+- `proxy_providers`：外部或内联节点订阅提供者（支持 Mihomo YAML、Base64 订阅与 `vmess://`/`ss://`/`ssr://`/`vless://`/`trojan://`/`hy2://`/`tuic://`/`anytls://`/`wg://` 分享链接解析及字段 `override`）。
 - `nodes`：对外服务的协议节点，用 `members` 鉴权；支持 `mixed`、`redirect`、`tproxy`、`tun`、`masque`、`openvpn` 等 26 种入站。
-- `local_inbounds` / `inbounds`：只监听回环地址的本地协议入口与固定目标转发。
-- `routes` / `rule_providers`：按域名、CIDR、GeoIP/GeoSite、`rule-set`（`.srs`/`.mrs`/JSON/YAML）、进程、协议嗅探结果或逻辑组合（`and`/`or`）选择出站或执行 `sniff`/`resolve`/`hijack-dns`/`reject`。
+- `local_inbounds` / `inbounds`：只监听回环地址的本地协议入口与固定目标转发，也支持 Mihomo 顶层 `port`、`socks-port`、`mixed-port`、`allow-lan`、`bind-address`。
+- `routes` / `rule_providers` / `sub_rules`：按域名、CIDR、GeoIP/GeoSite、`rule-set`（`.srs`/`.mrs`/JSON/YAML）、本机进程（`PROCESS-NAME*`/`PROCESS-PATH*`）、协议嗅探结果、`SUB-RULE` 子规则表或逻辑组合（`and`/`or`/`not`）选择出站或执行 `sniff`/`resolve`/`hijack-dns`/`reject`。
 - `accounts`、`telemetry`、`device`、`dns`、`ntp`、`control`、`limits`：账户、统计、WARP、DNS（含 Fake-IP 与 DoH/DoQ）、内置 NTP、控制面接口和限额。
 
 字段细节见[配置接口](interfaces/config.md)，各协议的 `options` 见[接口文档](interfaces/README.md)。

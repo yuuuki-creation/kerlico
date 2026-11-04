@@ -13,6 +13,7 @@ use kerlico_core::{
 };
 use std::{
     collections::HashMap,
+    ops::RangeInclusive,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU32, AtomicUsize, Ordering},
@@ -24,6 +25,9 @@ use tokio::{sync::mpsc, time::Instant};
 type MemberConnection = tokio::sync::Mutex<Option<Arc<Connection>>>;
 pub(crate) struct Client {
     server: Destination,
+    port_ranges: Vec<RangeInclusive<u16>>,
+    hop_interval: Duration,
+    hop_interval_max: Duration,
     tls: quinn::ClientConfig,
     server_name: String,
     credential: Credential,
@@ -297,6 +301,31 @@ impl Client {
         )?;
         let (tls, server_name) = config::client_tls(options.tls, transport)?;
         let server = options.server.destination()?;
+        let port_ranges = match &options.ports {
+            Some(spec) => spec.parse()?,
+            None => Vec::new(),
+        };
+        let hop_interval = if let Some(ms) = options.hop_interval_ms {
+            if !(10..=86_400_000).contains(&ms) {
+                return Err(config::invalid());
+            }
+            Duration::from_millis(ms)
+        } else {
+            match &options.hop_interval {
+                Some(spec) => spec.to_duration()?,
+                None => Duration::from_secs(30),
+            }
+        };
+        let hop_interval_max = match &options.hop_interval_max {
+            Some(spec) => {
+                let max = spec.to_duration()?;
+                if max < hop_interval {
+                    return Err(config::invalid());
+                }
+                max
+            }
+            None => hop_interval,
+        };
         let credential = Credential::parse(
             options.version,
             options.token,
@@ -317,6 +346,9 @@ impl Client {
                 Box::pin(async move {
                     Ok(Arc::new(Self {
                         server,
+                        port_ranges,
+                        hop_interval,
+                        hop_interval_max,
                         tls,
                         server_name,
                         credential,
@@ -361,10 +393,20 @@ impl Client {
                 "0.0.0.0:0"
             })?;
             socket.set_nonblocking(true)?;
-            let endpoint = quinn::Endpoint::new(
+            let hop = if self.port_ranges.is_empty() {
+                None
+            } else {
+                Some((
+                    peer,
+                    self.port_ranges.clone(),
+                    self.hop_interval,
+                    self.hop_interval_max,
+                ))
+            };
+            let endpoint = quinn::Endpoint::new_with_abstract_socket(
                 quinn::EndpointConfig::default(),
                 None,
-                socket,
+                crate::socket::wrap_hopping(socket, hop)?,
                 crate::runtime::ServiceRuntime::new(self.host.clone()),
             )?;
             let mut tls = self.tls.clone();

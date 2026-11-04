@@ -289,6 +289,34 @@ pub struct RuleSpec {
     pub node: Vec<String>,
     #[serde(default)]
     pub user: Vec<String>,
+    #[serde(default, alias = "process-name")]
+    pub process_name: Vec<String>,
+    #[serde(default, alias = "process-path")]
+    pub process_path: Vec<String>,
+    #[serde(
+        default,
+        alias = "process-name-regex",
+        alias = "process_name_regexp",
+        alias = "process-name-regexp"
+    )]
+    pub process_name_regex: Vec<String>,
+    #[serde(
+        default,
+        alias = "process-path-regex",
+        alias = "process_path_regexp",
+        alias = "process-path-regexp"
+    )]
+    pub process_path_regex: Vec<String>,
+    #[serde(default, alias = "sub-rule")]
+    pub sub_rule: Option<String>,
+    #[serde(default, alias = "in-type", alias = "inbound-type")]
+    pub in_type: Vec<String>,
+    #[serde(default, alias = "in-port", alias = "inbound-port")]
+    pub in_port: Vec<u16>,
+    #[serde(default)]
+    pub dscp: Vec<u8>,
+    #[serde(default)]
+    pub uid: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -309,6 +337,9 @@ pub enum RouteAction {
     Sniff {
         sniffer: Vec<String>,
         timeout: Duration,
+    },
+    SubRule {
+        name: String,
     },
     HijackDns,
     Reject,
@@ -335,6 +366,14 @@ struct Rule {
     network: Option<Network>,
     protocol: Vec<String>,
     rule_set: Vec<String>,
+    process_name: Vec<String>,
+    process_path: Vec<String>,
+    process_name_regex: Vec<Regex>,
+    process_path_regex: Vec<Regex>,
+    in_type: Vec<String>,
+    in_port: Vec<u16>,
+    dscp: Vec<u8>,
+    uid: Vec<u32>,
     invert: bool,
     logical: Option<(LogicalMode, Vec<Rule>)>,
     node: Vec<NodeId>,
@@ -380,6 +419,15 @@ impl Rule {
                 override_address: None,
                 override_port: None,
             }
+        } else if let Some(sub) = spec
+            .sub_rule
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            RouteAction::SubRule {
+                name: sub.to_owned(),
+            }
         } else {
             let act_name = spec.action.as_deref().unwrap_or("route");
             match act_name {
@@ -409,6 +457,17 @@ impl Rule {
                         override_address: spec.override_address.clone(),
                         override_port: spec.override_port,
                     }
+                }
+                "sub-rule" => {
+                    let name = spec
+                        .sub_rule
+                        .as_deref()
+                        .or((!spec.outbound.is_empty()).then_some(spec.outbound.as_str()))
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(invalid)?
+                        .to_owned();
+                    RouteAction::SubRule { name }
                 }
                 "route-options" => {
                     if spec.override_address.is_none() && spec.override_port.is_none() {
@@ -476,6 +535,14 @@ impl Rule {
                 network: spec.network,
                 protocol: Vec::new(),
                 rule_set: Vec::new(),
+                process_name: Vec::new(),
+                process_path: Vec::new(),
+                process_name_regex: Vec::new(),
+                process_path_regex: Vec::new(),
+                in_type: Vec::new(),
+                in_port: Vec::new(),
+                dscp: Vec::new(),
+                uid: Vec::new(),
                 invert: spec.invert,
                 logical: Some((mode, children)),
                 node: spec
@@ -584,6 +651,49 @@ impl Rule {
                 .map(|v| v.trim().to_ascii_lowercase())
                 .collect(),
             rule_set: spec.rule_set.clone(),
+            process_name: spec
+                .process_name
+                .iter()
+                .map(|v| {
+                    let t = v.trim();
+                    if t.is_empty() {
+                        Err(invalid())
+                    } else {
+                        Ok(t.to_ascii_lowercase())
+                    }
+                })
+                .collect::<Result<_>>()?,
+            process_path: spec
+                .process_path
+                .iter()
+                .map(|v| {
+                    let t = v.trim();
+                    if t.is_empty() {
+                        Err(invalid())
+                    } else {
+                        Ok(t.to_owned())
+                    }
+                })
+                .collect::<Result<_>>()?,
+            process_name_regex: spec
+                .process_name_regex
+                .iter()
+                .map(|v| Regex::new(v).map_err(|_| invalid()))
+                .collect::<Result<_>>()?,
+            process_path_regex: spec
+                .process_path_regex
+                .iter()
+                .map(|v| Regex::new(v).map_err(|_| invalid()))
+                .collect::<Result<_>>()?,
+            in_type: spec
+                .in_type
+                .iter()
+                .map(|v| v.trim().to_ascii_lowercase())
+                .filter(|v| !v.is_empty())
+                .collect(),
+            in_port: spec.in_port.clone(),
+            dscp: spec.dscp.clone(),
+            uid: spec.uid.clone(),
             invert: spec.invert,
             logical: None,
             node: spec
@@ -615,11 +725,21 @@ impl Rule {
             && rule.network.is_none()
             && rule.protocol.is_empty()
             && rule.rule_set.is_empty()
+            && rule.process_name.is_empty()
+            && rule.process_path.is_empty()
+            && rule.process_name_regex.is_empty()
+            && rule.process_path_regex.is_empty()
+            && rule.in_type.is_empty()
+            && rule.in_port.is_empty()
+            && rule.dscp.is_empty()
+            && rule.uid.is_empty()
             && rule.node.is_empty()
             && rule.user.is_empty()
             && !matches!(
                 rule.action,
-                RouteAction::Sniff { .. } | RouteAction::Resolve { .. }
+                RouteAction::Sniff { .. }
+                    | RouteAction::Resolve { .. }
+                    | RouteAction::SubRule { .. }
             );
         if empty
             || rule
@@ -630,6 +750,20 @@ impl Rule {
             return Err(invalid());
         }
         Ok(rule)
+    }
+
+    fn has_process_rules(&self) -> bool {
+        if !self.process_name.is_empty()
+            || !self.process_path.is_empty()
+            || !self.process_name_regex.is_empty()
+            || !self.process_path_regex.is_empty()
+        {
+            return true;
+        }
+        if let Some((_, children)) = &self.logical {
+            return children.iter().any(Self::has_process_rules);
+        }
+        false
     }
 
     fn matches_ctx(&self, ctx: &RouteContext<'_>, sets: &HashMap<String, CompiledRuleSet>) -> bool {
@@ -720,12 +854,14 @@ impl Rule {
 
         let ruleset_hit = self.rule_set.iter().any(|tag| {
             sets.get(tag).is_some_and(|set| {
-                set.matches(
+                set.matches_with_process(
                     &candidate_hosts,
                     &candidate_ips,
                     ctx.target.port(),
                     ctx.network,
                     ctx.source_addr,
+                    ctx.process_name,
+                    ctx.process_path,
                 )
             })
         });
@@ -763,11 +899,32 @@ impl Rule {
                     .any(|item| item == &p.to_ascii_lowercase())
             });
 
+        let proc_name_ok = (self.process_name.is_empty() && self.process_name_regex.is_empty())
+            || ctx
+                .process_name
+                .or_else(|| {
+                    ctx.process_path
+                        .and_then(|p| p.rsplit(['/', '\\']).next().filter(|s| !s.is_empty()))
+                })
+                .is_some_and(|pn| {
+                    let lower = pn.to_ascii_lowercase();
+                    self.process_name.iter().any(|item| item == &lower)
+                        || self.process_name_regex.iter().any(|re| re.is_match(pn))
+                });
+
+        let proc_path_ok = (self.process_path.is_empty() && self.process_path_regex.is_empty())
+            || ctx.process_path.is_some_and(|pp| {
+                self.process_path.iter().any(|item| item == pp)
+                    || self.process_path_regex.iter().any(|re| re.is_match(pp))
+            });
+
         let core_match = target_ok
             && port_ok
             && src_ip_ok
             && src_port_ok
             && proto_ok
+            && proc_name_ok
+            && proc_path_ok
             && self.network.is_none_or(|value| value == ctx.network)
             && (self.node.is_empty() || self.node.contains(ctx.source.node()))
             && (self.user.is_empty()
@@ -799,6 +956,8 @@ pub struct RouteContext<'a> {
     pub source_addr: Option<SocketAddr>,
     pub protocol: Option<&'a str>,
     pub sniffed_domain: Option<&'a str>,
+    pub process_name: Option<&'a str>,
+    pub process_path: Option<&'a str>,
 }
 
 impl<'a> RouteContext<'a> {
@@ -811,6 +970,8 @@ impl<'a> RouteContext<'a> {
             source_addr: None,
             protocol: None,
             sniffed_domain: None,
+            process_name: None,
+            process_path: None,
         }
     }
 }
@@ -832,6 +993,7 @@ pub struct RouteDecision {
 pub struct RouteTable {
     rules: Vec<Rule>,
     sets: HashMap<String, CompiledRuleSet>,
+    sub_rules: HashMap<String, Vec<Rule>>,
     final_outbound: Option<OutId>,
 }
 
@@ -847,8 +1009,36 @@ impl RouteTable {
         Ok(Self {
             rules: specs.iter().map(Rule::compile).collect::<Result<_>>()?,
             sets,
+            sub_rules: HashMap::new(),
             final_outbound: None,
         })
+    }
+
+    pub fn with_sub_rules(
+        mut self,
+        sub_rules: &std::collections::BTreeMap<String, Vec<RuleSpec>>,
+    ) -> Result<Self> {
+        for (name, specs) in sub_rules {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(invalid());
+            }
+            let compiled = specs
+                .iter()
+                .map(Rule::compile)
+                .collect::<Result<Vec<_>>>()?;
+            self.sub_rules.insert(trimmed.to_owned(), compiled);
+        }
+        for rule in &self.rules {
+            if let RouteAction::SubRule { name } = &rule.action
+                && !self.sub_rules.contains_key(name)
+            {
+                return Err(Error::Config(format!(
+                    "路由规则引用的 sub-rule 不存在：{name}"
+                )));
+            }
+        }
+        Ok(self)
     }
 
     pub fn with_final_outbound(mut self, final_outbound: Option<OutId>) -> Self {
@@ -863,7 +1053,23 @@ impl RouteTable {
     pub fn has_sniff_rules(&self) -> bool {
         self.rules
             .iter()
+            .chain(self.sub_rules.values().flatten())
             .any(|r| matches!(r.action, RouteAction::Sniff { .. }))
+    }
+
+    pub fn has_hijack_dns(&self) -> bool {
+        self.rules
+            .iter()
+            .chain(self.sub_rules.values().flatten())
+            .any(|r| matches!(r.action, RouteAction::HijackDns))
+    }
+
+    pub fn has_process_rules(&self) -> bool {
+        self.rules
+            .iter()
+            .chain(self.sub_rules.values().flatten())
+            .any(Rule::has_process_rules)
+            || self.sets.values().any(CompiledRuleSet::has_process_rules)
     }
 
     pub fn referenced_rule_sets(&self) -> Vec<&str> {
@@ -878,7 +1084,7 @@ impl RouteTable {
             }
         }
         let mut out = Vec::new();
-        for rule in &self.rules {
+        for rule in self.rules.iter().chain(self.sub_rules.values().flatten()) {
             collect(rule, &mut out);
         }
         out
@@ -898,25 +1104,61 @@ impl RouteTable {
         source: &Source,
     ) -> Option<&OutId> {
         let ctx = RouteContext::simple(target, network, source);
-        for rule in &self.rules {
-            if rule.matches_ctx(&ctx, &self.sets) {
+        self.select_in_slice(&self.rules, &ctx, 0)
+            .or(self.final_outbound.as_ref())
+    }
+
+    fn select_in_slice<'a>(
+        &'a self,
+        rules: &'a [Rule],
+        ctx: &RouteContext<'_>,
+        depth: usize,
+    ) -> Option<&'a OutId> {
+        if depth > 8 {
+            return None;
+        }
+        for rule in rules {
+            if rule.matches_ctx(ctx, &self.sets) {
                 match &rule.action {
                     RouteAction::Route {
                         outbound: Some(out),
                         ..
                     } => return Some(out),
+                    RouteAction::SubRule { name } => {
+                        if let Some(sub) = self.sub_rules.get(name)
+                            && let Some(out) = self.select_in_slice(sub, ctx, depth + 1)
+                        {
+                            return Some(out);
+                        }
+                    }
                     RouteAction::HijackDns | RouteAction::Reject => return None,
                     _ => {}
                 }
             }
         }
-        self.final_outbound.as_ref()
+        None
     }
 
     pub fn evaluate(&self, ctx: &RouteContext<'_>) -> RouteDecision {
         let mut decision = RouteDecision::default();
-        let mut matched_terminal = false;
-        for rule in &self.rules {
+        let matched_terminal = self.evaluate_slice(&self.rules, ctx, &mut decision, 0);
+        if !matched_terminal && decision.outbound.is_none() {
+            decision.outbound = self.final_outbound.clone();
+        }
+        decision
+    }
+
+    fn evaluate_slice(
+        &self,
+        rules: &[Rule],
+        ctx: &RouteContext<'_>,
+        decision: &mut RouteDecision,
+        depth: usize,
+    ) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        for rule in rules {
             if !rule.matches_ctx(ctx, &self.sets) {
                 continue;
             }
@@ -942,15 +1184,20 @@ impl RouteTable {
                         decision.override_port = *override_port;
                     }
                 }
+                RouteAction::SubRule { name } => {
+                    if let Some(sub) = self.sub_rules.get(name)
+                        && self.evaluate_slice(sub, ctx, decision, depth + 1)
+                    {
+                        return true;
+                    }
+                }
                 RouteAction::HijackDns => {
                     decision.hijack_dns = true;
-                    matched_terminal = true;
-                    break;
+                    return true;
                 }
                 RouteAction::Reject => {
                     decision.reject = true;
-                    matched_terminal = true;
-                    break;
+                    return true;
                 }
                 RouteAction::Route {
                     outbound,
@@ -966,20 +1213,17 @@ impl RouteTable {
                     if override_port.is_some() {
                         decision.override_port = *override_port;
                     }
-                    matched_terminal = true;
-                    break;
+                    return true;
                 }
             }
         }
-        if !matched_terminal && decision.outbound.is_none() {
-            decision.outbound = self.final_outbound.clone();
-        }
-        decision
+        false
     }
 
     pub fn outbounds(&self) -> impl Iterator<Item = &OutId> {
         self.rules
             .iter()
+            .chain(self.sub_rules.values().flatten())
             .filter_map(|rule| match &rule.action {
                 RouteAction::Route {
                     outbound: Some(out),
@@ -991,11 +1235,167 @@ impl RouteTable {
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = &NodeId> {
-        self.rules.iter().flat_map(|rule| &rule.node)
+        self.rules
+            .iter()
+            .chain(self.sub_rules.values().flatten())
+            .flat_map(|rule| &rule.node)
     }
 
     pub fn users(&self) -> impl Iterator<Item = &UserId> {
-        self.rules.iter().flat_map(|rule| &rule.user)
+        self.rules
+            .iter()
+            .chain(self.sub_rules.values().flatten())
+            .flat_map(|rule| &rule.user)
+    }
+}
+
+/// 将 Clash / Mihomo 经典规则字符串解析为 `RuleSpec` 或默认出站（`MATCH` / `FINAL`）。
+pub fn parse_clash_rule_line(line: &str) -> Result<(Option<RuleSpec>, Option<String>)> {
+    let trimmed = line.trim().trim_start_matches('-').trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Ok((None, None));
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if upper.starts_with("AND,") || upper.starts_with("OR,") || upper.starts_with("NOT,") {
+        let (mode_raw, rest) = trimmed.split_once(',').ok_or_else(invalid)?;
+        let (cond_part, target) = rest.rsplit_once(',').ok_or_else(invalid)?;
+        let mode_upper = mode_raw.trim().to_ascii_uppercase();
+        let inner = cond_part
+            .trim()
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or(cond_part.trim());
+        let mut child_specs = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0usize;
+        for (idx, ch) in inner.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    let seg = inner[start..idx].trim();
+                    if !seg.is_empty() {
+                        child_specs.push(parse_clash_condition_expr(seg)?);
+                    }
+                    start = idx + 1;
+                }
+                _ => {}
+            }
+        }
+        let tail = inner[start..].trim();
+        if !tail.is_empty() {
+            child_specs.push(parse_clash_condition_expr(tail)?);
+        }
+        let mut spec = RuleSpec {
+            logical_type: Some("logical".into()),
+            logical_mode: Some(if mode_upper == "OR" {
+                "or".into()
+            } else {
+                "and".into()
+            }),
+            invert: mode_upper == "NOT",
+            logical_rules: child_specs,
+            ..Default::default()
+        };
+        apply_clash_target(&mut spec, target.trim());
+        return Ok((Some(spec), None));
+    }
+    if upper.starts_with("SUB-RULE,") {
+        let (_, rest) = trimmed.split_once(',').ok_or_else(invalid)?;
+        let (cond_part, sub_name) = rest.rsplit_once(',').ok_or_else(invalid)?;
+        let mut spec = parse_clash_condition_expr(cond_part.trim())?;
+        spec.action = Some("sub-rule".into());
+        spec.sub_rule = Some(sub_name.trim().to_owned());
+        return Ok((Some(spec), None));
+    }
+    let parts: Vec<&str> = trimmed.split(',').map(str::trim).collect();
+    if parts.len() < 2 {
+        return Err(invalid());
+    }
+    let kind = parts[0].to_ascii_uppercase();
+    if matches!(kind.as_str(), "MATCH" | "FINAL") {
+        return Ok((None, Some(parts[1].to_owned())));
+    }
+    if parts.len() < 3 {
+        return Err(invalid());
+    }
+    let val = parts[1];
+    let target = parts[2];
+    let mut spec = build_clash_single_condition(&kind, val)?;
+    apply_clash_target(&mut spec, target);
+    Ok((Some(spec), None))
+}
+
+fn parse_clash_condition_expr(expr: &str) -> Result<RuleSpec> {
+    let inner = expr
+        .trim()
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(expr.trim());
+    let (kind, val) = inner.split_once(',').ok_or_else(invalid)?;
+    build_clash_single_condition(&kind.trim().to_ascii_uppercase(), val.trim())
+}
+
+fn build_clash_single_condition(kind: &str, val: &str) -> Result<RuleSpec> {
+    let mut spec = RuleSpec::default();
+    match kind {
+        "DOMAIN" => spec.domain.push(val.to_owned()),
+        "DOMAIN-SUFFIX" => spec.domain_suffix.push(val.to_owned()),
+        "DOMAIN-KEYWORD" => spec.domain_keyword.push(val.to_owned()),
+        "DOMAIN-REGEX" => spec.domain_regex.push(val.to_owned()),
+        "DOMAIN-WILDCARD" => spec.domain_wildcard.push(val.to_owned()),
+        "GEOSITE" => spec.geosite.push(val.to_owned()),
+        "GEOIP" => {
+            if val.eq_ignore_ascii_case("private") || val.eq_ignore_ascii_case("lan") {
+                spec.ip_is_private = true;
+            } else {
+                spec.geoip.push(val.to_owned());
+            }
+        }
+        "IP-CIDR" | "IP-CIDR6" => spec.ip_cidr.push(val.to_owned()),
+        "SRC-IP-CIDR" => spec.source_ip_cidr.push(val.to_owned()),
+        "DST-PORT" => {
+            if val.contains('-') || val.contains(':') {
+                spec.port_range.push(val.replace('-', ":"));
+            } else {
+                spec.port.push(val.parse().map_err(|_| invalid())?);
+            }
+        }
+        "SRC-PORT" => {
+            if val.contains('-') || val.contains(':') {
+                spec.source_port_range.push(val.replace('-', ":"));
+            } else {
+                spec.source_port.push(val.parse().map_err(|_| invalid())?);
+            }
+        }
+        "IN-PORT" => spec.in_port.push(val.parse().map_err(|_| invalid())?),
+        "IN-TYPE" => spec.in_type.push(val.to_owned()),
+        "IN-NAME" => spec.node.push(val.to_owned()),
+        "IN-USER" => spec.user.push(val.to_owned()),
+        "PROCESS-NAME" => spec.process_name.push(val.to_owned()),
+        "PROCESS-PATH" => spec.process_path.push(val.to_owned()),
+        "PROCESS-NAME-REGEX" => spec.process_name_regex.push(val.to_owned()),
+        "PROCESS-PATH-REGEX" => spec.process_path_regex.push(val.to_owned()),
+        "RULE-SET" => spec.rule_set.push(val.to_owned()),
+        "NETWORK" => {
+            spec.network = Some(match val.to_ascii_lowercase().as_str() {
+                "tcp" => Network::Tcp,
+                "udp" => Network::Udp,
+                _ => return Err(invalid()),
+            });
+        }
+        "UID" => spec.uid.push(val.parse().map_err(|_| invalid())?),
+        "DSCP" => spec.dscp.push(val.parse().map_err(|_| invalid())?),
+        _ => return Err(invalid()),
+    }
+    Ok(spec)
+}
+
+fn apply_clash_target(spec: &mut RuleSpec, target: &str) {
+    if target.eq_ignore_ascii_case("REJECT") || target.eq_ignore_ascii_case("REJECT-DROP") {
+        spec.action = Some("reject".into());
+    } else {
+        spec.outbound = target.to_owned();
     }
 }
 
@@ -1233,6 +1633,8 @@ mod tests {
             source_addr: None,
             protocol: Some("tls"),
             sniffed_domain: None,
+            process_name: None,
+            process_path: None,
         });
         assert_eq!(
             google_dec
@@ -1253,6 +1655,8 @@ mod tests {
             source_addr: None,
             protocol: None,
             sniffed_domain: Some("api.corp.internal"),
+            process_name: None,
+            process_path: None,
         });
         assert_eq!(corp_dec.override_address.as_deref(), Some("10.0.0.254"));
         assert_eq!(corp_dec.override_port, Some(8443));
@@ -1275,6 +1679,8 @@ mod tests {
             source_addr: Some("192.168.1.50:55000".parse().unwrap()),
             protocol: None,
             sniffed_domain: None,
+            process_name: None,
+            process_path: None,
         });
         assert_eq!(
             wild_dec
@@ -1283,6 +1689,79 @@ mod tests {
                 .map(ToString::to_string)
                 .as_deref(),
             Some("wild-out")
+        );
+    }
+
+    #[test]
+    fn process_rules_sub_rules_and_clash_rule_parser_work() {
+        let lines = [
+            "PROCESS-NAME,curl,direct-curl",
+            "PROCESS-PATH,/usr/bin/git,git-proxy",
+            "SUB-RULE,(NETWORK,tcp),tcp-sub",
+            "AND,((DOMAIN-SUFFIX,github.com),(DST-PORT,443)),gh-out",
+            "MATCH,final-out",
+        ];
+        let mut rules = Vec::new();
+        let mut final_out = None;
+        for line in lines {
+            let (r, f) = parse_clash_rule_line(line).unwrap();
+            if let Some(spec) = r {
+                rules.push(spec);
+            }
+            if let Some(fin) = f {
+                final_out = Some(OutId::parse(&fin).unwrap());
+            }
+        }
+        let mut sub_rules = std::collections::BTreeMap::new();
+        let (sub1, _) = parse_clash_rule_line("DOMAIN-SUFFIX,sub.example.com,sub-out").unwrap();
+        sub_rules.insert("tcp-sub".to_owned(), vec![sub1.unwrap()]);
+
+        let table = RouteTable::compile(&rules)
+            .unwrap()
+            .with_sub_rules(&sub_rules)
+            .unwrap()
+            .with_final_outbound(final_out);
+        let source = local("n");
+        let target = Destination::new("sub.example.com", 443).unwrap();
+
+        let dec_curl = table.evaluate(&RouteContext {
+            target: &target,
+            resolved_ips: &[],
+            network: Network::Tcp,
+            source: &source,
+            source_addr: None,
+            protocol: None,
+            sniffed_domain: None,
+            process_name: Some("CURL"),
+            process_path: None,
+        });
+        assert_eq!(
+            dec_curl
+                .outbound
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("direct-curl")
+        );
+
+        let dec_sub = table.evaluate(&RouteContext {
+            target: &target,
+            resolved_ips: &[],
+            network: Network::Tcp,
+            source: &source,
+            source_addr: None,
+            protocol: None,
+            sniffed_domain: None,
+            process_name: Some("other"),
+            process_path: None,
+        });
+        assert_eq!(
+            dec_sub
+                .outbound
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("sub-out")
         );
     }
 }

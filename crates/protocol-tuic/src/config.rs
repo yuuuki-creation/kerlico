@@ -2,12 +2,103 @@
 use crate::codec::{Mode, malformed};
 use kerlico_core::{Error, Result};
 use serde::Deserialize;
-use std::{io::Cursor, sync::Arc, time::Duration};
+use std::{io::Cursor, ops::RangeInclusive, sync::Arc, time::Duration};
 use zeroize::Zeroizing;
+
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum PortHopSpec {
+    Text(String),
+    List(Vec<String>),
+}
+
+impl PortHopSpec {
+    pub fn parse(&self) -> Result<Vec<RangeInclusive<u16>>> {
+        let mut ranges = Vec::new();
+        let items: Vec<&str> = match self {
+            Self::Text(t) => t.split(',').collect(),
+            Self::List(list) => list.iter().flat_map(|s| s.split(',')).collect(),
+        };
+        for raw in items {
+            let item = raw.trim();
+            if item.is_empty() {
+                continue;
+            }
+            if let Some((start_s, end_s)) = item.split_once('-').or_else(|| item.split_once(':')) {
+                let start: u16 = start_s.trim().parse().map_err(|_| invalid())?;
+                let end: u16 = end_s.trim().parse().map_err(|_| invalid())?;
+                if start == 0 || end < start {
+                    return Err(invalid());
+                }
+                ranges.push(start..=end);
+            } else {
+                let port: u16 = item.parse().map_err(|_| invalid())?;
+                if port == 0 {
+                    return Err(invalid());
+                }
+                ranges.push(port..=port);
+            }
+        }
+        if ranges.is_empty() || ranges.len() > 64 {
+            return Err(invalid());
+        }
+        Ok(ranges)
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum HopIntervalSpec {
+    Secs(u64),
+    Text(String),
+}
+
+impl HopIntervalSpec {
+    pub fn to_duration(&self) -> Result<Duration> {
+        match self {
+            Self::Secs(secs) => {
+                if !(5..=86_400).contains(secs) {
+                    return Err(invalid());
+                }
+                Ok(Duration::from_secs(*secs))
+            }
+            Self::Text(text) => {
+                let text = text.trim();
+                if let Some(ms_str) = text.strip_suffix("ms") {
+                    let ms = ms_str.trim().parse::<u64>().map_err(|_| invalid())?;
+                    if !(10..=86_400_000).contains(&ms) {
+                        return Err(invalid());
+                    }
+                    return Ok(Duration::from_millis(ms));
+                }
+                let digits = text.strip_suffix('s').unwrap_or(text).trim();
+                let secs = digits.parse::<u64>().map_err(|_| invalid())?;
+                if !(5..=86_400).contains(&secs) {
+                    return Err(invalid());
+                }
+                Ok(Duration::from_secs(secs))
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientOptions {
     pub server: kerlico_config::TargetSpec,
+    #[serde(
+        default,
+        alias = "server_ports",
+        alias = "server-ports",
+        alias = "mport"
+    )]
+    pub ports: Option<PortHopSpec>,
+    #[serde(default, alias = "hop-interval")]
+    pub hop_interval: Option<HopIntervalSpec>,
+    #[serde(default, alias = "hop-interval-ms")]
+    pub hop_interval_ms: Option<u64>,
+    #[serde(default, alias = "hop-interval-max")]
+    pub hop_interval_max: Option<HopIntervalSpec>,
     #[serde(default = "version")]
     pub version: u8,
     #[serde(default)]

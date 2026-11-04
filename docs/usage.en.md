@@ -41,10 +41,10 @@ The global `--lang zh-CN` or `--lang en` option selects the output language. Env
 `kerlico` accepts JSON v2, JSONC (with comments), YAML (including anchors `&`/`*`/`<<`), and TOML, and can also load Mihomo (`proxies`/`proxy-groups`/`rules`) and sing-box (`inbounds`/`outbounds`/`route`) configurations directly:
 
 - `outbounds`: named outbounds and proxy groups (`select`, `url-test`, `fallback`, `load-balance`, `balancer`), with `dialer-proxy` / `detour` chaining.
-- `proxy_providers`: file, HTTP, or inline subscription providers (Mihomo YAML, Base64 subscriptions, and URI lines with field `override`).
+- `proxy_providers`: file, HTTP, or inline subscription providers (Mihomo YAML, Base64 subscriptions, and `vmess://`/`ss://`/`ssr://`/`vless://`/`trojan://`/`hy2://`/`tuic://`/`anytls://`/`wg://` share links with field `override`).
 - `nodes`: public or local protocol nodes (`mixed`, `redirect`, `tproxy`, `tun`, `masque`, `openvpn`, and 20 other protocols) authenticated via `members`.
-- `local_inbounds` / `inbounds`: loopback-bound protocol entries and fixed-target port forwards.
-- `routes` / `rule_providers`: rules matching domain, CIDR, GeoIP/GeoSite, `rule-set` (`.srs`/`.mrs`/JSON/YAML), process, sniffed protocol, or boolean logic (`and`/`or`) with actions (`route`, `sniff`, `resolve`, `hijack-dns`, `reject`).
+- `local_inbounds` / `inbounds`: loopback-bound protocol entries and fixed-target port forwards, plus top-level Mihomo `port`, `socks-port`, `mixed-port`, `allow-lan`, and `bind-address`.
+- `routes` / `rule_providers` / `sub_rules`: rules matching domain, CIDR, GeoIP/GeoSite, `rule-set` (`.srs`/`.mrs`/JSON/YAML), local process (`PROCESS-NAME*`/`PROCESS-PATH*`), sniffed protocol, `SUB-RULE`, or boolean logic (`and`/`or`/`not`) with actions (`route`, `sniff`, `resolve`, `hijack-dns`, `reject`).
 - `accounts`, `telemetry`, `device`, `dns`, `ntp`, `control`, `limits`: accounts, statistics, WARP, DNS (including Fake-IP and DoH/DoQ), built-in NTP, control interface, and limits.
 
 Field details are in the [configuration interface](interfaces/config.md) (Chinese). Protocol `options` are in the [interface documents](interfaces/README.md).

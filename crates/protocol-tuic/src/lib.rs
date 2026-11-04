@@ -6,6 +6,7 @@ mod flow;
 mod io;
 mod runtime;
 mod server;
+mod socket;
 mod wire;
 use kerlico_config::{NodeBuildContext, NodeFactory, OutboundFactory, OutboundPlan};
 use kerlico_core::{InboundProtocol, Result};

@@ -148,18 +148,30 @@ pub(crate) enum HopIntervalSpec {
 }
 impl HopIntervalSpec {
     pub fn to_duration(&self) -> Result<Duration> {
-        let secs = match self {
-            Self::Secs(secs) => *secs,
+        match self {
+            Self::Secs(secs) => {
+                if !(5..=86_400).contains(secs) {
+                    return Err(invalid());
+                }
+                Ok(Duration::from_secs(*secs))
+            }
             Self::Text(text) => {
                 let text = text.trim();
+                if let Some(ms_str) = text.strip_suffix("ms") {
+                    let ms = ms_str.trim().parse::<u64>().map_err(|_| invalid())?;
+                    if !(10..=86_400_000).contains(&ms) {
+                        return Err(invalid());
+                    }
+                    return Ok(Duration::from_millis(ms));
+                }
                 let digits = text.strip_suffix('s').unwrap_or(text).trim();
-                digits.parse::<u64>().map_err(|_| invalid())?
+                let secs = digits.parse::<u64>().map_err(|_| invalid())?;
+                if !(5..=86_400).contains(&secs) {
+                    return Err(invalid());
+                }
+                Ok(Duration::from_secs(secs))
             }
-        };
-        if !(5..=86_400).contains(&secs) {
-            return Err(invalid());
         }
-        Ok(Duration::from_secs(secs))
     }
 }
 #[derive(Clone, Deserialize)]
@@ -330,10 +342,17 @@ pub(crate) struct Hysteria2FinalmaskSpec {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientOptions {
     pub server: Server,
-    #[serde(default, alias = "server_ports", alias = "server-ports")]
+    #[serde(
+        default,
+        alias = "server_ports",
+        alias = "server-ports",
+        alias = "mport"
+    )]
     pub ports: Option<PortHopSpec>,
     #[serde(default, alias = "hop-interval")]
     pub hop_interval: Option<HopIntervalSpec>,
+    #[serde(default, alias = "hop-interval-ms")]
+    pub hop_interval_ms: Option<u64>,
     #[serde(default, alias = "hop-interval-max")]
     pub hop_interval_max: Option<HopIntervalSpec>,
     #[serde(default, alias = "up_mbps", alias = "up-mbps")]

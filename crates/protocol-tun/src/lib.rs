@@ -264,10 +264,10 @@ impl InboundProtocol for TunNode {
         mut context: InboundContext,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let _ = &self.route_plan;
             // Engine 的 max_streams 是单条多路复用连接的上限；TUN 的流由 max_flows 和会话配额约束。
             context.max_streams = self.max_flows;
             let device = self.create()?;
+            let _route_guard = self.route_plan.activate();
             let access = ingress.local(&context)?;
             let cancel = context.cancel.clone();
             let events = context.events.clone();

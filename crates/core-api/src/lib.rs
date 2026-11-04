@@ -479,6 +479,11 @@ impl Cidr {
         Ok(Self { network, prefix })
     }
 
+    /// 判断该网段是否为 IPv6。
+    pub fn is_ipv6(&self) -> bool {
+        self.network.is_ipv6()
+    }
+
     /// 判断给定 IP 是否落在本网段内。
     pub fn contains(&self, ip: IpAddr) -> bool {
         match (self.network, ip.to_canonical()) {
@@ -492,6 +497,12 @@ impl Cidr {
             }
             _ => false,
         }
+    }
+}
+
+impl fmt::Display for Cidr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.network, self.prefix)
     }
 }
 

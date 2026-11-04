@@ -162,6 +162,135 @@ impl TunRoutePlan {
         }
         false
     }
+
+    /// 生成激活 TUN 路由表、策略路由与系统 DNS 的幂等命令序列。
+    pub fn setup_commands(&self) -> Vec<(String, Vec<String>)> {
+        let mut cmds = Vec::new();
+        if self.auto_route {
+            let table = self.table_index.to_string();
+            let pref = self.rule_index.to_string();
+            cmds.push((
+                "ip".into(),
+                vec![
+                    "route".into(),
+                    "replace".into(),
+                    "default".into(),
+                    "dev".into(),
+                    self.interface_name.clone(),
+                    "table".into(),
+                    table.clone(),
+                ],
+            ));
+            for cidr in &self.exclude_cidrs {
+                let flag = if cidr.is_ipv6() { "-6" } else { "-4" };
+                cmds.push((
+                    "ip".into(),
+                    vec![
+                        flag.into(),
+                        "rule".into(),
+                        "add".into(),
+                        "to".into(),
+                        cidr.to_string(),
+                        "lookup".into(),
+                        "main".into(),
+                        "pref".into(),
+                        pref.clone(),
+                    ],
+                ));
+            }
+            if self.include_cidrs.is_empty() {
+                cmds.push((
+                    "ip".into(),
+                    vec![
+                        "rule".into(),
+                        "add".into(),
+                        "lookup".into(),
+                        table,
+                        "pref".into(),
+                        pref,
+                    ],
+                ));
+            } else {
+                for cidr in &self.include_cidrs {
+                    let flag = if cidr.is_ipv6() { "-6" } else { "-4" };
+                    cmds.push((
+                        "ip".into(),
+                        vec![
+                            flag.into(),
+                            "rule".into(),
+                            "add".into(),
+                            "to".into(),
+                            cidr.to_string(),
+                            "lookup".into(),
+                            table.clone(),
+                            "pref".into(),
+                            pref.clone(),
+                        ],
+                    ));
+                }
+            }
+        }
+        if self.auto_system_dns_to_gateway && !self.dns_addresses.is_empty() {
+            let mut args = vec!["dns".into(), self.interface_name.clone()];
+            for ip in &self.dns_addresses {
+                args.push(ip.to_string());
+            }
+            cmds.push(("resolvectl".into(), args));
+        }
+        cmds
+    }
+
+    /// 生成卸载 TUN 路由表与策略路由的幂等恢复命令序列。
+    pub fn teardown_commands(&self) -> Vec<(String, Vec<String>)> {
+        let mut cmds = Vec::new();
+        if self.auto_system_dns_to_gateway && !self.dns_addresses.is_empty() {
+            cmds.push((
+                "resolvectl".into(),
+                vec!["revert".into(), self.interface_name.clone()],
+            ));
+        }
+        if self.auto_route {
+            let table = self.table_index.to_string();
+            let pref = self.rule_index.to_string();
+            cmds.push((
+                "ip".into(),
+                vec!["rule".into(), "del".into(), "pref".into(), pref],
+            ));
+            cmds.push((
+                "ip".into(),
+                vec!["route".into(), "flush".into(), "table".into(), table],
+            ));
+        }
+        cmds
+    }
+
+    /// 激活路由与 DNS 计划，返回在 Drop 时自动清理的守卫。
+    pub fn activate(&self) -> TunRouteGuard {
+        for (prog, args) in self.setup_commands() {
+            let _ = std::process::Command::new(&prog)
+                .args(&args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        TunRouteGuard { plan: self.clone() }
+    }
+}
+
+pub struct TunRouteGuard {
+    plan: TunRoutePlan,
+}
+
+impl Drop for TunRouteGuard {
+    fn drop(&mut self) {
+        for (prog, args) in self.plan.teardown_commands() {
+            let _ = std::process::Command::new(&prog)
+                .args(&args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
 }
 
 /// 从 Linux `/proc/net/route` 与 `/proc/net/ipv6_route` 文本解析系统默认物理出网网卡。
@@ -408,5 +537,11 @@ eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
         assert_eq!(plan.exclude_cidrs.len(), 3);
         assert!(plan.matches_dns_hijack(true, "8.8.8.8".parse().unwrap(), 53));
         assert!(plan.matches_dns_hijack(false, "1.1.1.1".parse().unwrap(), 53));
+        let setup = plan.setup_commands();
+        let teardown = plan.teardown_commands();
+        assert!(!setup.is_empty());
+        assert!(!teardown.is_empty());
+        assert_eq!(setup[0].0, "ip");
+        assert_eq!(teardown.last().unwrap().0, "ip");
     }
 }
