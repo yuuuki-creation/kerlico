@@ -434,14 +434,14 @@ struct ProfileOutbound {
     host: kerlico_core::ServiceContext,
     mux_tcp: bool,
     mux_udp: bool,
+    reverse_tag: Option<String>,
 }
 
 pub(crate) fn compile(value: &Value) -> Result<OutboundPlan> {
     let options: Options = serde_json::from_value(value.clone())
         .map_err(|_| Error::Config("VLESS 配置字段不合法".into()))?;
-    if let Some(rev) = &options.reverse
-        && rev.tag.trim().is_empty()
-    {
+    let reverse_tag = options.reverse.map(|r| r.tag);
+    if reverse_tag.as_deref().is_some_and(|t| t.trim().is_empty()) {
         return Err(Error::Config("VLESS reverse tag 不能为空".into()));
     }
     let user = UserId::parse(&options.uuid)?;
@@ -571,6 +571,7 @@ pub(crate) fn compile(value: &Value) -> Result<OutboundPlan> {
                     sing_mux,
                     mux_tcp,
                     mux_udp,
+                    reverse_tag,
                     resources: Mutex::new(HashMap::new()),
                     host,
                 }) as Arc<dyn Outbound>)
@@ -738,6 +739,11 @@ impl Outbound for ProfileOutbound {
             let resources = self.resources(context)?;
             context
                 .run(async {
+                    if let Some(rev_tag) = &self.reverse_tag
+                        && let Some(claimed) = crate::inbound::claim_reverse_stream(rev_tag).await
+                    {
+                        return Ok(claimed);
+                    }
                     if let Some(sing_mux) = &self.sing_mux {
                         return sing_mux
                             .connect_tcp(target, |mux_dest| async move {

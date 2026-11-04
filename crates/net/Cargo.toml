@@ -14,15 +14,13 @@ kerlico-core.workspace = true
 kerlico-config.workspace = true
 kerlico-dns.workspace = true
 tokio.workspace = true
+rcgen.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
 webpki-roots.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-rcgen.workspace = true
 
 [lints]
 workspace = true

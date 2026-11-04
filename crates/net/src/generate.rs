@@ -481,98 +481,29 @@ pub struct TlsKeypairOutput {
 
 /// 生成自签名 X.509 v3 证书与 PKCS#8 私钥（支持 `--months` 有效期设置）及 SHA-256 指纹。
 pub fn generate_tls_keypair(domain: &str, months: u32) -> TlsKeypairOutput {
+    use rcgen::PublicKeyData;
     let months = months.clamp(1, 1200);
     let domain = if domain.trim().is_empty() {
         "localhost"
     } else {
         domain.trim()
     };
-    let mut priv_seed = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut priv_seed);
-    let pub_digest = sha256(&priv_seed);
-    let pub_bytes = &pub_digest;
-
-    // Ed25519 OID: 1.3.101.112 -> 06 03 2b 65 70
-    let ed25519_alg = asn1_tlv(0x30, &[0x06, 0x03, 0x2b, 0x65, 0x70]);
-
-    // SubjectPublicKeyInfo: SEQUENCE { AlgorithmIdentifier, BIT STRING (0x00 || 32-byte pubkey) }
-    let mut bit_string_body = Vec::with_capacity(33);
-    bit_string_body.push(0x00);
-    bit_string_body.extend_from_slice(pub_bytes);
-    let spki_bit_string = asn1_tlv(0x03, &bit_string_body);
-    let mut spki_seq = Vec::new();
-    spki_seq.extend_from_slice(&ed25519_alg);
-    spki_seq.extend_from_slice(&spki_bit_string);
-    let spki_der = asn1_tlv(0x30, &spki_seq);
-
-    // PKCS#8 OneAsymmetricKey: SEQUENCE { INTEGER 0, AlgorithmIdentifier, OCTET STRING (OCTET STRING 32-byte seed) }
-    let inner_key_octet = asn1_tlv(0x04, &priv_seed);
-    let outer_key_octet = asn1_tlv(0x04, &inner_key_octet);
-    let mut pkcs8_seq = vec![0x02, 0x01, 0x00];
-    pkcs8_seq.extend_from_slice(&ed25519_alg);
-    pkcs8_seq.extend_from_slice(&outer_key_octet);
-    let pkcs8_der = asn1_tlv(0x30, &pkcs8_seq);
-
-    // Subject / Issuer CN=<domain> (OID 2.5.4.3 = 55 04 03)
-    let mut atv = vec![0x06, 0x03, 0x55, 0x04, 0x03];
-    atv.extend_from_slice(&asn1_tlv(0x0c, domain.as_bytes()));
-    let rdn_set = asn1_tlv(0x31, &asn1_tlv(0x30, &atv));
-    let name_der = asn1_tlv(0x30, &rdn_set);
-
-    // Validity: UTCTime "250101000000Z" to GeneralizedTime computed from months
-    let not_before = asn1_tlv(0x17, b"250101000000Z");
-    let end_year = 2026 + (months / 12);
-    let end_month = 1 + (months % 12);
-    let not_after_str = format!("{end_year:04}{end_month:02}01000000Z");
-    let not_after = asn1_tlv(0x18, not_after_str.as_bytes());
-    let mut validity_seq = Vec::new();
-    validity_seq.extend_from_slice(&not_before);
-    validity_seq.extend_from_slice(&not_after);
-    let validity_der = asn1_tlv(0x30, &validity_seq);
-
-    // Serial number (16 random positive bytes)
-    let mut serial = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut serial);
-    serial[0] &= 0x7f;
-    serial[0] |= 0x01;
-    let serial_der = asn1_tlv(0x02, &serial);
-
-    // TBSCertificate
-    let mut tbs = Vec::new();
-    // [0] EXPLICIT Version v3 (2)
-    tbs.extend_from_slice(&[0xa0, 0x03, 0x02, 0x01, 0x02]);
-    tbs.extend_from_slice(&serial_der);
-    tbs.extend_from_slice(&ed25519_alg);
-    tbs.extend_from_slice(&name_der);
-    tbs.extend_from_slice(&validity_der);
-    tbs.extend_from_slice(&name_der);
-    tbs.extend_from_slice(&spki_der);
-    let tbs_der = asn1_tlv(0x30, &tbs);
-
-    // Signature BIT STRING (64 bytes derived from SHA256(tbs || priv_seed))
-    let mut sig_input = tbs_der.clone();
-    sig_input.extend_from_slice(&priv_seed);
-    let sig_a = sha256(&sig_input);
-    sig_input.extend_from_slice(&sig_a);
-    let sig_b = sha256(&sig_input);
-    let mut sig_bits = Vec::with_capacity(65);
-    sig_bits.push(0x00);
-    sig_bits.extend_from_slice(&sig_a);
-    sig_bits.extend_from_slice(&sig_b);
-    let sig_der = asn1_tlv(0x03, &sig_bits);
-
-    let mut cert_seq = Vec::new();
-    cert_seq.extend_from_slice(&tbs_der);
-    cert_seq.extend_from_slice(&ed25519_alg);
-    cert_seq.extend_from_slice(&sig_der);
-    let cert_der = asn1_tlv(0x30, &cert_seq);
-
-    let cert_digest = sha256(&cert_der);
+    let mut params = rcgen::CertificateParams::new(vec![domain.to_owned()])
+        .unwrap_or_else(|_| rcgen::CertificateParams::new(Vec::<String>::new()).unwrap());
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    let key_pair = rcgen::KeyPair::generate().expect("rcgen keypair generation");
+    let cert = params
+        .self_signed(&key_pair)
+        .expect("rcgen self-signed certificate");
+    let cert_der = cert.der().as_ref();
+    let spki_der = key_pair.subject_public_key_info();
+    let cert_digest = sha256(cert_der);
     let spki_digest = sha256(&spki_der);
+    let _ = (asn1_len, asn1_tlv, format_pem);
 
     TlsKeypairOutput {
-        cert_pem: format_pem("CERTIFICATE", &cert_der),
-        key_pem: format_pem("PRIVATE KEY", &pkcs8_der),
+        cert_pem: cert.pem(),
+        key_pem: key_pair.serialize_pem(),
         cert_sha256_hex: encode_hex(&cert_digest),
         cert_sha256_base64: encode_base64_std(&cert_digest),
         spki_sha256_hex: encode_hex(&spki_digest),

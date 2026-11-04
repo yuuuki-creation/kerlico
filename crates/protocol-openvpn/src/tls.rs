@@ -92,6 +92,59 @@ impl ServerCertVerifier for Verifier {
     }
 }
 
+pub(crate) fn server_config(
+    cert_pem: Option<&str>,
+    key_pem: Option<&str>,
+) -> Result<(Arc<rustls::ServerConfig>, [u8; 32])> {
+    let invalid = || Error::Config("OpenVPN 服务端证书或私钥不合法".into());
+    let (chain, key) = match (cert_pem, key_pem) {
+        (Some(cert), Some(key)) => {
+            let chain = rustls_pemfile::certs(&mut Cursor::new(cert))
+                .collect::<std::io::Result<Vec<_>>>()
+                .map_err(|_| invalid())?;
+            if chain.is_empty() {
+                return Err(invalid());
+            }
+            let key = rustls_pemfile::private_key(&mut Cursor::new(key))
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?;
+            (chain, key)
+        }
+        _ => {
+            let mut params = rcgen::CertificateParams::new(vec!["openvpn.invalid".to_owned()])
+                .map_err(|_| invalid())?;
+            params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+            let key_pair = rcgen::KeyPair::generate().map_err(|_| invalid())?;
+            let cert = params.self_signed(&key_pair).map_err(|_| invalid())?;
+            let cert_pem = cert.pem();
+            let key_pem = key_pair.serialize_pem();
+            let chain = rustls_pemfile::certs(&mut Cursor::new(cert_pem))
+                .collect::<std::io::Result<Vec<_>>>()
+                .map_err(|_| invalid())?;
+            let key = rustls_pemfile::private_key(&mut Cursor::new(key_pem))
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?;
+            (chain, key)
+        }
+    };
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    ctx.update(b"kerlico/openvpn/server-cert/");
+    ctx.update(chain[0].as_ref());
+    let d = ctx.finish();
+    let mut fp = [0u8; 32];
+    fp.copy_from_slice(d.as_ref());
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| invalid())?
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .map_err(|_| invalid())?;
+    config.send_tls13_tickets = 0;
+    Ok((Arc::new(config), fp))
+}
+
 /// `identity` 为客户端证书与私钥的 PEM 文本。
 pub(crate) fn client_config(
     ca_pem: &str,

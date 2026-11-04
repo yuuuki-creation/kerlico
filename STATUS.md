@@ -4,7 +4,7 @@
 
 ## 版本
 
-最新发布：[v1.3.2](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.3.2)，带 Linux `x86_64` 二进制。首轮完成计划已全部发布，`v1.3.1` 修复复查发现的问题，`v1.3.2` 修复实机测试查出的问题。后续按[能力总表](docs/capability-matrix/README.md)推进三核心（Mihomo、sing-box、Xray）主要功能对齐。
+最新发布：[v1.10.0](docs/releases/1.10.0.md)（首轮跨机发行版为 [v1.3.2](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.3.2)），带 Linux `x86_64` 二进制。首轮完成计划与 `M0`–`M7` 三核心（Mihomo、sing-box、Xray）主要功能对齐已全部完成并经实测核销（见[能力总表](docs/capability-matrix/README.md)与 [M1–M7 验证记录](docs/testing/m1-m7-verification-2026-11-04.md)）。
 
 构建基线：Rust `1.99.1`，Linux `x86_64`。
 
@@ -134,7 +134,7 @@ flowchart TD
 
 ## 最新门禁
 
-`v1.3.2`（提交 `802414e`，`perf-01`）：fmt、严格 Clippy、zerotier-node 测试、release、许可通知通过；全量测试 982 通过、0 失败、7 忽略。门禁只含回环与单元测试。
+`v1.10.0`（`perf-01`）：fmt、严格 Clippy、zerotier-node 测试、release、许可通知、能力总表与站点检查全部通过；全量单元与回环集成测试 0 失败（见 [M1–M7 验证记录](docs/testing/m1-m7-verification-2026-11-04.md)）。门禁只含回环与单元测试。
 
 ## 实机测试
 

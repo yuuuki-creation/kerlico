@@ -127,6 +127,38 @@ fn nonce(id: [u8; 4], implicit_iv: &[u8; 8]) -> Nonce {
     Nonce::assume_unique_for_key(bytes)
 }
 
+/// 服务端方向的数据通道密钥：服务端以第二组发送、第一组接收。
+pub(crate) fn server_data_keys(
+    cipher: DataCipher,
+    key2: &[u8; 256],
+    key_id: u8,
+    peer_id: u32,
+) -> Result<(SealKey, OpenKey)> {
+    let part = |index: usize| {
+        let group = &key2[index * 128..index * 128 + 128];
+        let mut implicit_iv = [0; 8];
+        implicit_iv.copy_from_slice(&group[64..72]);
+        (&group[..64], implicit_iv)
+    };
+    let (seal_material, seal_iv) = part(1);
+    let (open_material, open_iv) = part(0);
+    let id = peer_id.to_be_bytes();
+    Ok((
+        SealKey {
+            key: cipher.key(seal_material)?,
+            implicit_iv: seal_iv,
+            header: [Opcode::DataV2.byte(key_id), id[1], id[2], id[3]],
+            next: 1,
+        },
+        OpenKey {
+            key: cipher.key(open_material)?,
+            implicit_iv: open_iv,
+            key_id,
+            replay: ReplayWindow::default(),
+        },
+    ))
+}
+
 /// `key2` 为两组 `cipher[64] + hmac[64]`；客户端以第一组发送、第二组接收，
 /// AEAD 模式下 hmac 段的前 8 字节是隐式 IV。
 pub(crate) fn data_keys(

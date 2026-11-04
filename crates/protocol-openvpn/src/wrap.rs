@@ -113,6 +113,10 @@ impl WrapKeys {
     pub fn crypt(key: &StaticKey) -> Self {
         Self::crypt_directed(key, 1, 0, None)
     }
+    /// `tls-crypt` 的服务端方向固定为上游 `KEY_DIRECTION_NORMAL`（0 发 1 收）。
+    pub fn crypt_server(key: &StaticKey) -> Self {
+        Self::crypt_directed(key, 0, 1, None)
+    }
     pub fn parse_crypt_v2(text: &str) -> Result<Self> {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
         let invalid = || Error::Config("OpenVPN tls-crypt-v2 客户端密钥不合法".into());

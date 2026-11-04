@@ -40,6 +40,95 @@ pub(crate) struct ServerKeySource {
     random2: [u8; 32],
 }
 
+impl ServerKeySource {
+    pub fn generate() -> Self {
+        let mut source = Self {
+            random1: [0; 32],
+            random2: [0; 32],
+        };
+        OsRng.fill_bytes(&mut source.random1);
+        OsRng.fill_bytes(&mut source.random2);
+        source
+    }
+}
+
+pub(crate) struct ClientKeyMessage {
+    pub source: ClientKeySource,
+    pub options: String,
+    pub username: String,
+    pub password: String,
+    pub peer_info: String,
+}
+
+pub(crate) fn write_server_key_method(source: &ServerKeySource, options: &str) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(72 + options.len());
+    out.extend_from_slice(&[0; 4]);
+    out.push(KEY_METHOD_2);
+    out.extend_from_slice(&source.random1);
+    out.extend_from_slice(&source.random2);
+    write_string(&mut out, Some(options))?;
+    Ok(out)
+}
+
+fn read_string(bytes: &[u8], cursor: &mut usize) -> Result<Option<String>> {
+    if *cursor + 2 > bytes.len() {
+        return Ok(None);
+    }
+    let len = usize::from(u16::from_be_bytes([bytes[*cursor], bytes[*cursor + 1]]));
+    *cursor += 2;
+    if len == 0 {
+        return Ok(Some(String::new()));
+    }
+    if *cursor + len > bytes.len() {
+        return Ok(None);
+    }
+    let slice = &bytes[*cursor..*cursor + len];
+    *cursor += len;
+    let trimmed = slice.strip_suffix(&[0]).unwrap_or(slice);
+    Ok(Some(String::from_utf8_lossy(trimmed).into_owned()))
+}
+
+pub(crate) fn read_client_key_method(bytes: &[u8]) -> Result<Option<(usize, ClientKeyMessage)>> {
+    const FIXED: usize = 4 + 1 + 48 + 32 + 32;
+    if bytes.len() < FIXED + 2 {
+        return Ok(None);
+    }
+    if bytes[..4] != [0; 4] || bytes[4] & 0x0f != KEY_METHOD_2 {
+        return Err(Error::Protocol("OpenVPN 客户端密钥交换消息不合法"));
+    }
+    let mut cursor = FIXED;
+    let Some(options) = read_string(bytes, &mut cursor)? else {
+        return Ok(None);
+    };
+    let Some(username) = read_string(bytes, &mut cursor)? else {
+        return Ok(None);
+    };
+    let Some(password) = read_string(bytes, &mut cursor)? else {
+        return Ok(None);
+    };
+    let Some(peer_info) = read_string(bytes, &mut cursor)? else {
+        return Ok(None);
+    };
+    let mut source = ClientKeySource {
+        pre_master: [0; 48],
+        random1: [0; 32],
+        random2: [0; 32],
+    };
+    source.pre_master.copy_from_slice(&bytes[5..53]);
+    source.random1.copy_from_slice(&bytes[53..85]);
+    source.random2.copy_from_slice(&bytes[85..117]);
+    Ok(Some((
+        cursor,
+        ClientKeyMessage {
+            source,
+            options,
+            username,
+            password,
+            peer_info,
+        },
+    )))
+}
+
 pub(crate) struct KeyMessage<'a> {
     pub options: &'a str,
     pub username: Option<&'a str>,

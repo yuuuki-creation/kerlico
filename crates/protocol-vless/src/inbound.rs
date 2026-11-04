@@ -255,8 +255,8 @@ impl NodeFactory for VlessNodeFactory {
             Security::Tls {
                 certificate_pem,
                 private_key_pem,
-                certificate_file,
-                private_key_file,
+                mut certificate_file,
+                mut private_key_file,
                 hot_reload,
                 reload_interval,
                 ech_key,
@@ -275,7 +275,13 @@ impl NodeFactory for VlessNodeFactory {
                     && certificate_file.is_none()
                     && !acme_domains.is_empty()
                 {
-                    load_or_provision_acme_cert(&acme_domains, acme_data_directory.as_deref())?
+                    let provisioned =
+                        load_or_provision_acme_cert(&acme_domains, acme_data_directory.as_deref())?;
+                    if let Some((cp, kp)) = provisioned.paths {
+                        certificate_file = Some(cp);
+                        private_key_file = Some(kp);
+                    }
+                    (provisioned.cert_pem, provisioned.key_pem)
                 } else {
                     (
                         pem(certificate_pem, certificate_file.clone())?,
@@ -563,7 +569,9 @@ impl Payload {
         match request.command {
             1 => {
                 let target = request.target.ok_or(Error::InvalidAddress)?;
-                if self.reverse_tag.is_some() && target.host() == "reverse.internal.v2fly.arpa" {
+                if let Some(rev_tag) = &self.reverse_tag
+                    && target.host() == "reverse.internal.v2fly.arpa"
+                {
                     budget
                         .run(async {
                             codec::write_response(&mut stream).await?;
@@ -571,23 +579,12 @@ impl Payload {
                             Ok::<_, Error>(())
                         })
                         .await?;
-                    let mut local: BoxStream = if vision {
+                    let local: BoxStream = if vision {
                         crate::payload::server_vision(stream, request.user)
                     } else {
                         Box::new(stream)
                     };
-                    let mut buf = [0u8; 1024];
-                    loop {
-                        tokio::select! {
-                            biased;
-                            _ = context.cancel.cancelled() => return Err(Error::Cancelled),
-                            res = tokio::io::AsyncReadExt::read(&mut local, &mut buf) => {
-                                if res? == 0 {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
+                    return serve_reverse_portal(rev_tag, local, &context.cancel).await;
                 }
                 if self.multiplex.enabled && kerlico_net::sing_mux::is_sing_mux_target(&target) {
                     budget
@@ -806,23 +803,216 @@ impl rustls::server::ResolvesServerCert for ReloadingCertResolver {
     }
 }
 
+type ReverseClaimReply =
+    tokio::sync::oneshot::Sender<(BoxStream, tokio::sync::oneshot::Sender<()>)>;
+
+static REVERSE_PORTALS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            std::collections::VecDeque<tokio::sync::oneshot::Sender<ReverseClaimReply>>,
+        >,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) async fn serve_reverse_portal(
+    tag: &str,
+    mut local: BoxStream,
+    cancel: &kerlico_core::CancellationToken,
+) -> Result<()> {
+    let (claim_tx, mut claim_rx) = tokio::sync::oneshot::channel::<ReverseClaimReply>();
+    if let Ok(mut map) = REVERSE_PORTALS.lock() {
+        map.entry(tag.to_owned()).or_default().push_back(claim_tx);
+    }
+    let mut buf = [0u8; 1024];
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(Error::Cancelled),
+            Ok(reply_tx) = &mut claim_rx => {
+                let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                if reply_tx.send((local, done_tx)).is_ok() {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Err(Error::Cancelled),
+                        _ = done_rx => return Ok(()),
+                    }
+                }
+                return Ok(());
+            }
+            res = tokio::io::AsyncReadExt::read(&mut local, &mut buf) => {
+                if res? == 0 {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+pub(crate) async fn claim_reverse_stream(tag: &str) -> Option<BoxStream> {
+    loop {
+        let waiter = {
+            let mut map = REVERSE_PORTALS.lock().ok()?;
+            let queue = map.get_mut(tag)?;
+            let next = queue.pop_front();
+            if queue.is_empty() {
+                map.remove(tag);
+            }
+            next
+        }?;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if waiter.send(reply_tx).is_ok()
+            && let Ok((stream, done_tx)) = reply_rx.await
+        {
+            return Some(Box::new(ReverseClaimedStream {
+                inner: stream,
+                _done: done_tx,
+            }));
+        }
+    }
+}
+
+struct ReverseClaimedStream {
+    inner: BoxStream,
+    _done: tokio::sync::oneshot::Sender<()>,
+}
+
+impl tokio::io::AsyncRead for ReverseClaimedStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for ReverseClaimedStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+struct ProvisionedAcmeCert {
+    cert_pem: String,
+    key_pem: String,
+    paths: Option<(String, String)>,
+}
+
 fn load_or_provision_acme_cert(
     domains: &[String],
     data_dir: Option<&str>,
-) -> Result<(String, String)> {
+) -> Result<ProvisionedAcmeCert> {
     if domains.is_empty() || domains.iter().any(|d| d.trim().is_empty()) {
         return Err(invalid());
     }
+    let primary = domains[0].trim();
     if let Some(dir) = data_dir {
-        let primary = &domains[0];
         let cert_path = std::path::Path::new(dir).join(format!("{primary}.crt"));
         let key_path = std::path::Path::new(dir).join(format!("{primary}.key"));
-        if let (Ok(cert), Ok(key)) = (
+        let paths = Some((
+            cert_path.to_string_lossy().into_owned(),
+            key_path.to_string_lossy().into_owned(),
+        ));
+        if let (Ok(cert_pem), Ok(key_pem)) = (
             std::fs::read_to_string(&cert_path),
             std::fs::read_to_string(&key_path),
         ) {
-            return Ok((cert, key));
+            return Ok(ProvisionedAcmeCert {
+                cert_pem,
+                key_pem,
+                paths,
+            });
         }
+        let generated = kerlico_net::generate::generate_tls_keypair(primary, 3);
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(&cert_path, &generated.cert_pem);
+        let _ = std::fs::write(&key_path, &generated.key_pem);
+        return Ok(ProvisionedAcmeCert {
+            cert_pem: generated.cert_pem,
+            key_pem: generated.key_pem,
+            paths,
+        });
     }
-    Err(invalid())
+    let generated = kerlico_net::generate::generate_tls_keypair(primary, 3);
+    Ok(ProvisionedAcmeCert {
+        cert_pem: generated.cert_pem,
+        key_pem: generated.key_pem,
+        paths: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn acme_auto_provisions_and_persists_domain_cert_in_data_directory() {
+        let tmp = std::env::temp_dir().join(format!(
+            "kerlico_acme_test_{}",
+            kerlico_net::generate::generate_rand_hex(6)
+        ));
+        let dir_str = tmp.to_string_lossy().into_owned();
+        let domains = vec!["acme.example.com".to_owned()];
+        let p1 =
+            load_or_provision_acme_cert(&domains, Some(&dir_str)).expect("provision acme cert");
+        assert!(p1.cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(p1.key_pem.contains("BEGIN PRIVATE KEY"));
+        assert!(p1.paths.is_some());
+
+        let p2 =
+            load_or_provision_acme_cert(&domains, Some(&dir_str)).expect("reload persisted cert");
+        assert_eq!(p1.cert_pem, p2.cert_pem);
+        assert_eq!(p1.key_pem, p2.key_pem);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn reverse_portal_registers_and_dispatches_tunnel_stream() {
+        let tag = format!("rev-test-{}", kerlico_net::generate::generate_rand_hex(4));
+        let (mut bridge_side, portal_side) = tokio::io::duplex(4096);
+        let cancel = kerlico_core::CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let tag_clone = tag.clone();
+        let portal_task = tokio::spawn(async move {
+            serve_reverse_portal(&tag_clone, Box::new(portal_side), &cancel_clone).await
+        });
+
+        tokio::task::yield_now().await;
+        let mut claimed = claim_reverse_stream(&tag)
+            .await
+            .expect("claim reverse stream from portal");
+
+        claimed.write_all(b"request-over-reverse").await.unwrap();
+        let mut req_buf = [0u8; 20];
+        bridge_side.read_exact(&mut req_buf).await.unwrap();
+        assert_eq!(&req_buf, b"request-over-reverse");
+
+        bridge_side.write_all(b"reply-from-bridge").await.unwrap();
+        let mut resp_buf = [0u8; 17];
+        claimed.read_exact(&mut resp_buf).await.unwrap();
+        assert_eq!(&resp_buf, b"reply-from-bridge");
+
+        drop(claimed);
+        assert!(portal_task.await.unwrap().is_ok());
+    }
 }
