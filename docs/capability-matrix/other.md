@@ -66,7 +66,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `etag-support` | 外部资源下载的 ETag 支持，默认 true | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `etag-support` | 外部资源下载的 ETag 支持，默认 true | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `global-ua` | 外部资源下载 UA，默认 clash.meta | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `ipv6` | 是否允许内核接受 IPv6 流量，默认 true | 有 |  |  | 部分 | 通过 | 取值：`false`、`true` |
 | `unified-delay` | 统一延迟，计算 RTT 以消除握手差异 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
@@ -207,7 +207,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `systemd` | systemd 单元：Type=simple，ExecStart -d /etc/mihomo，ExecReload HUP，能力集 CAP_NET_ADMIN 等 | 有 |  |  | 未实现 | 未测 | 取值：`enable`、`reload`、`start`、`status` |
+| `systemd` | systemd 单元：Type=simple，ExecStart -d /etc/mihomo，ExecReload HUP，能力集 CAP_NET_ADMIN 等 | 有 |  |  | 已实现 | 通过 | 取值：`enable`、`reload`、`start`、`status` |
 
 ## service-ccm
 

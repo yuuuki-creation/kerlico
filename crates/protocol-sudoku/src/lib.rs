@@ -19,6 +19,7 @@ mod service;
 mod udp;
 
 pub use client::SudokuFactory;
+pub use key::generate_keypair;
 pub use node::SudokuNodeFactory;
 mod wire;
 

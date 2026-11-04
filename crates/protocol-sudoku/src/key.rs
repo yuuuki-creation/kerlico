@@ -151,6 +151,17 @@ pub(crate) fn exchange() -> Result<(StaticSecret, [u8; 32])> {
     let public = PublicKey::from(&secret).to_bytes();
     Ok((secret, public))
 }
+pub fn generate_keypair() -> Result<(String, String)> {
+    let r = Scalar::from_bytes_mod_order(random::<32>()?);
+    let k = Scalar::from_bytes_mod_order(random::<32>()?);
+    let point = curve25519_dalek::edwards::EdwardsPoint::mul_base(&(r + k))
+        .compress()
+        .to_bytes();
+    let mut split = [0u8; 64];
+    split[..32].copy_from_slice(&r.to_bytes());
+    split[32..].copy_from_slice(&k.to_bytes());
+    Ok((hex(&split), hex(&point)))
+}
 
 #[cfg(test)]
 mod tests {

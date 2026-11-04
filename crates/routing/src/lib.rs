@@ -309,7 +309,7 @@ pub enum RouteAction {
     Reject,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Rule {
     action: RouteAction,
     domain: Vec<String>,
@@ -823,7 +823,7 @@ pub struct RouteDecision {
 }
 
 /// 按配置顺序匹配，非终结动作（`sniff`、`resolve`、`route-options`）累积后继续，首条终结动作生效。
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct RouteTable {
     rules: Vec<Rule>,
     sets: HashMap<String, CompiledRuleSet>,

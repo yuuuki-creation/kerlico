@@ -86,10 +86,30 @@ pub struct EgressPlan {
     pub(crate) dns: Option<DnsSpec>,
     pub(crate) max_flows: usize,
     pub(crate) detour_table: Arc<kerlico_core::DetourTable>,
+    pub(crate) groups: Vec<crate::CompiledProxyGroup>,
+    pub(crate) providers: Vec<crate::CompiledProxyProvider>,
+    pub(crate) rule_providers: std::collections::BTreeMap<String, usize>,
+    pub(crate) store_selected_path: Option<String>,
+    pub(crate) log: crate::LogSpec,
 }
 impl EgressPlan {
     pub fn dns(&self) -> Option<&DnsSpec> {
         self.dns.as_ref()
+    }
+    pub fn groups(&self) -> &[crate::CompiledProxyGroup] {
+        &self.groups
+    }
+    pub fn providers(&self) -> &[crate::CompiledProxyProvider] {
+        &self.providers
+    }
+    pub fn rule_providers(&self) -> &std::collections::BTreeMap<String, usize> {
+        &self.rule_providers
+    }
+    pub fn store_selected_path(&self) -> Option<&str> {
+        self.store_selected_path.as_deref()
+    }
+    pub fn log(&self) -> &crate::LogSpec {
+        &self.log
     }
     pub fn into_parts(
         self,

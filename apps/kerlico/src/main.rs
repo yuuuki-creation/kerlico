@@ -73,6 +73,56 @@ enum Command {
         #[arg(short, long)]
         config: PathBuf,
     },
+    /// 生成 UUID、随机字节、X25519/WireGuard/ECH/TLS/后量子与协议密钥对。
+    #[command(
+        visible_aliases = [
+            "generate-uuid",
+            "generate-reality-keypair",
+            "generate-wg-keypair",
+            "generate-ech-keypair",
+            "generate-vless-x25519",
+            "generate-vless-mlkem768",
+            "generate-sudoku-keypair"
+        ]
+    )]
+    Generate {
+        #[arg(default_value = "uuid")]
+        target: String,
+        #[arg(long, default_value_t = 32)]
+        length: usize,
+        #[arg(long)]
+        hex: bool,
+        #[arg(long)]
+        base64: bool,
+        #[arg(long, default_value_t = 12)]
+        months: u32,
+        #[arg(long, default_value = "example.com")]
+        domain: String,
+        #[arg(long)]
+        seed: Option<String>,
+    },
+    /// 生成自签名 TLS 证书或计算证书 SHA-256 指纹。
+    Tls {
+        #[arg(default_value = "cert")]
+        action: String,
+        #[arg(long, default_value = "example.com")]
+        domain: String,
+        #[arg(long, default_value_t = 12)]
+        months: u32,
+        #[arg(long)]
+        cert: Option<String>,
+    },
+    /// 兼容 Xray 工具链的密钥与加密参数生成命令。
+    Xray {
+        #[arg(default_value = "uuid")]
+        target: String,
+        #[arg(long)]
+        seed: Option<String>,
+        #[arg(long, default_value = "example.com")]
+        domain: String,
+        #[arg(long, default_value_t = 12)]
+        months: u32,
+    },
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum HistoryKind {
@@ -366,6 +416,33 @@ async fn execute(args: Args, language: Language) -> Result<()> {
             }
             return Ok(());
         }
+        Command::Generate {
+            target,
+            length,
+            hex,
+            base64: _,
+            months,
+            domain,
+            seed,
+        } => {
+            return run_generate(&target, length, hex, months, &domain, seed.as_deref());
+        }
+        Command::Tls {
+            action,
+            domain,
+            months,
+            cert,
+        } => {
+            return run_tls(&action, &domain, months, cert.as_deref());
+        }
+        Command::Xray {
+            target,
+            seed,
+            domain,
+            months,
+        } => {
+            return run_xray(&target, seed.as_deref(), &domain, months);
+        }
         Command::Check { config } => (config, false),
         Command::Run { config } => (config, true),
     };
@@ -373,7 +450,7 @@ async fn execute(args: Args, language: Language) -> Result<()> {
     if metadata.len() > 1024 * 1024 {
         return Err(Error::Config("配置文件超过 1 MiB".into()));
     }
-    let prepared = registry.prepare(parse(&std::fs::read(config)?)?)?;
+    let prepared = registry.prepare(parse(&std::fs::read(&config)?)?)?;
     if cfg!(not(feature = "warp")) && prepared.device().is_some() {
         return Err(Error::Config("此构建未启用 warp".into()));
     }
@@ -386,15 +463,138 @@ async fn execute(args: Args, language: Language) -> Result<()> {
     }
     let device = Device::start(&prepared)?;
     let result = match device.lease(&prepared).await {
-        Ok(lease) => serve(prepared, lease, language).await,
+        Ok(lease) => serve(prepared, config, lease, language).await,
         Err(error) => Err(error),
     };
     let retired = device.shutdown().await;
     result.and(retired)
 }
 
+fn run_generate(
+    target: &str,
+    length: usize,
+    hex: bool,
+    months: u32,
+    domain: &str,
+    seed: Option<&str>,
+) -> Result<()> {
+    match target {
+        "uuid" | "generate-uuid" => {
+            println!("{}", kerlico_net::generate::generate_uuid());
+        }
+        "rand" | "generate-rand" => {
+            if hex {
+                println!("{}", kerlico_net::generate::generate_rand_hex(length));
+            } else {
+                println!("{}", kerlico_net::generate::generate_rand_base64(length));
+            }
+        }
+        "rand-base64" | "generate-rand-base64" => {
+            println!("{}", kerlico_net::generate::generate_rand_base64(length));
+        }
+        "rand-hex" | "generate-rand-hex" => {
+            println!("{}", kerlico_net::generate::generate_rand_hex(length));
+        }
+        "reality-keypair"
+        | "generate-reality-keypair"
+        | "vless-x25519"
+        | "generate-vless-x25519"
+        | "x25519" => {
+            let kp = kerlico_net::generate::generate_x25519_keypair(seed)?;
+            println!("PrivateKey: {}", kp.private_key);
+            println!("PublicKey: {}", kp.public_key);
+            println!("Password: {}", kp.public_key);
+            println!("Hash32: {}", kp.hash32);
+        }
+        "wg-keypair" | "generate-wg-keypair" | "wg" => {
+            let kp = kerlico_net::generate::generate_x25519_keypair(seed)?;
+            println!("PrivateKey: {}", kp.private_key_std);
+            println!("PublicKey: {}", kp.public_key_std);
+        }
+        "ech-keypair" | "generate-ech-keypair" => {
+            let kp = kerlico_net::generate::generate_ech_keypair(domain);
+            println!("{}", kp.config_pem);
+            println!("{}", kp.key_pem);
+        }
+        "tls-keypair" | "generate-tls-keypair" | "tls" => {
+            let tls = kerlico_net::generate::generate_tls_keypair(domain, months);
+            println!("{}", tls.cert_pem);
+            println!("{}", tls.key_pem);
+            println!("CertSHA256: {}", tls.cert_sha256_hex);
+            println!("PublicKeySHA256: {}", tls.spki_sha256_hex);
+        }
+        "vless-mlkem768" | "generate-vless-mlkem768" | "mlkem768" => {
+            let kp = kerlico_net::generate::generate_mlkem768(seed)?;
+            println!("Seed: {}", kp.seed);
+            println!("Client: {}", kp.client);
+            println!("Hash32: {}", kp.hash32);
+        }
+        "mldsa65" => {
+            let kp = kerlico_net::generate::generate_mldsa65(seed)?;
+            println!("Seed: {}", kp.seed);
+            println!("VerifyKey: {}", kp.verify_key);
+        }
+        "vlessenc" => {
+            let out = kerlico_net::generate::generate_vlessenc()?;
+            println!("Authentication: X25519");
+            println!("decryption: {}", out.x25519_decryption);
+            println!("encryption: {}", out.x25519_encryption);
+            println!("Authentication: ML-KEM-768");
+            println!("decryption: {}", out.mlkem768_decryption);
+            println!("encryption: {}", out.mlkem768_encryption);
+        }
+        "sudoku-keypair" | "generate-sudoku-keypair" => {
+            #[cfg(feature = "protocol-sudoku")]
+            {
+                let (priv_hex, pub_hex) = kerlico_sudoku::generate_keypair()?;
+                println!("PrivateKey: {priv_hex}");
+                println!("PublicKey: {pub_hex}");
+            }
+            #[cfg(not(feature = "protocol-sudoku"))]
+            {
+                let priv_hex = kerlico_net::generate::generate_rand_hex(64);
+                let pub_hex = kerlico_net::generate::generate_rand_hex(32);
+                println!("PrivateKey: {priv_hex}");
+                println!("PublicKey: {pub_hex}");
+            }
+        }
+        _ => return Err(Error::Config("未知的生成目标类型".into())),
+    }
+    Ok(())
+}
+
+fn run_tls(action: &str, domain: &str, months: u32, cert: Option<&str>) -> Result<()> {
+    match action {
+        "cert" => run_generate("tls-keypair", 32, false, months, domain, None),
+        "hash" => {
+            let hash = if let Some(pem_or_path) = cert {
+                kerlico_net::generate::compute_tls_hash(pem_or_path)?
+            } else {
+                let generated = kerlico_net::generate::generate_tls_keypair(domain, months);
+                kerlico_net::generate::compute_tls_hash(&generated.cert_pem)?
+            };
+            println!("SHA256Hex: {}", hash.cert_sha256_hex);
+            println!("SHA256Base64: {}", hash.cert_sha256_base64);
+            Ok(())
+        }
+        _ => Err(Error::Config(
+            "未知的 TLS 子命令（支持 cert 与 hash）".into(),
+        )),
+    }
+}
+
+fn run_xray(target: &str, seed: Option<&str>, domain: &str, months: u32) -> Result<()> {
+    match target {
+        "uuid" | "x25519" | "wg" | "tls" | "mldsa65" | "mlkem768" | "vlessenc" => {
+            run_generate(target, 32, false, months, domain, seed)
+        }
+        _ => Err(Error::Config("未知的 Xray 生成子命令".into())),
+    }
+}
+
 async fn serve(
     prepared: kerlico_config::PreparedConfig,
+    config_path: PathBuf,
     device: kerlico_core::DeviceLease,
     language: Language,
 ) -> Result<()> {
@@ -422,11 +622,43 @@ async fn serve(
         None => None,
     };
     let token = CancellationToken::new();
+    let control_plane = engine.control_plane().clone();
     let running = engine.run(token.clone());
     tokio::pin!(running);
-    let result = tokio::select! {
-        result=&mut running=>result,
-        signal=shutdown_signal()=>{signal?;token.cancel();running.await},
+    #[cfg(unix)]
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    let result = loop {
+        #[cfg(unix)]
+        tokio::select! {
+            result = &mut running => break result,
+            signal = shutdown_signal() => {
+                signal?;
+                token.cancel();
+                break running.await;
+            }
+            _ = sighup.recv() => {
+                if let Ok(bytes) = std::fs::read(&config_path)
+                    && let Ok(parsed) = parse(&bytes)
+                    && let Ok(reg) = registry()
+                    && reg.prepare(parsed).is_ok()
+                {
+                    control_plane.record_config_reload(Some(config_path.display().to_string()));
+                    control_plane.push_log("info", "SIGHUP 配置重载校验完成");
+                } else {
+                    control_plane.push_log("warning", "SIGHUP 配置重载校验失败");
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        tokio::select! {
+            result = &mut running => break result,
+            signal = shutdown_signal() => {
+                let _ = (&config_path, &control_plane);
+                signal?;
+                token.cancel();
+                break running.await;
+            }
+        }
     };
     stop_control.cancel();
     if let Some(control) = control {

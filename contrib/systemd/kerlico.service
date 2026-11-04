@@ -1,0 +1,21 @@
+[Unit]
+Description=Kerlico Modular Client and Server Proxy Service
+Documentation=https://github.com/yuuuki-creation/kerlico
+After=network.target nss-lookup.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+ExecStartPre=/usr/local/bin/kerlico check -c /etc/kerlico/config.json
+ExecStart=/usr/local/bin/kerlico run -c /etc/kerlico/config.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

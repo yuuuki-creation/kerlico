@@ -17,9 +17,13 @@ use std::{
     time::Duration,
 };
 use tokio::time::{Instant, timeout_at};
+mod group;
 mod history;
 mod meter;
 mod telemetry;
+pub use group::{
+    ActiveConnection, ControlPlane, DelaySample, ProxyRuntimeInfo, StructuredLogEntry,
+};
 pub use history::{
     BandwidthSample, HistoryQuery, HistoryReader, HistoryScope, HistoryWriter, OnlineSource,
     StoredFlow, StoredUsage,
@@ -44,6 +48,9 @@ pub trait Resolver: Send + Sync {
         Box::pin(async {
             Err(Error::Unsupported("当前解析器不支持原始 DNS 报文转发"))
         })
+    }
+    fn flush_fake_ip(&self) -> Result<()> {
+        Ok(())
     }
 }
 struct SystemResolver;
@@ -73,6 +80,9 @@ impl Resolver for kerlico_dns::DnsResolver {
     }
     fn exchange_dns_packet<'a>(&'a self, packet: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>>> {
         Box::pin(kerlico_dns::DnsResolver::exchange_packet(self, packet))
+    }
+    fn flush_fake_ip(&self) -> Result<()> {
+        kerlico_dns::DnsResolver::flush_fake_ip(self)
     }
 }
 
@@ -113,6 +123,7 @@ struct Dispatcher {
     routes: RouteTable,
     resolver: Arc<dyn Resolver>,
     telemetry: Telemetry,
+    control_plane: ControlPlane,
     closed: AtomicBool,
     shutdown: tokio::sync::Mutex<Option<RuntimeDrain>>,
     _device: DeviceLease,
@@ -173,6 +184,11 @@ impl EgressRuntime {
         budget: Duration,
         resolver: Arc<dyn Resolver>,
     ) -> Result<Self> {
+        let compiled_groups = plan.groups().to_vec();
+        let compiled_providers = plan.providers().to_vec();
+        let rule_providers = plan.rule_providers().clone();
+        let store_selected_path = plan.store_selected_path().map(str::to_owned);
+        let log_spec = plan.log().clone();
         let (plans, bindings, routes_table, max_flows, detour_table) = plan.into_parts();
         let RuntimeOptions { device, language } = options;
         let run = NEXT_RUN
@@ -233,6 +249,10 @@ impl EgressRuntime {
             }
         }
         let service_order = started.iter().map(|service| service.id.clone()).collect();
+        let static_meta: Vec<(OutId, String, bool)> = started
+            .iter()
+            .map(|s| (s.id.clone(), "Outbound".to_owned(), s.capabilities.udp))
+            .collect();
         let mut services = BTreeMap::new();
         for service in started {
             services.insert(service.id.clone(), service);
@@ -249,6 +269,16 @@ impl EgressRuntime {
                 )
             })
             .collect();
+        let control_plane = ControlPlane::new(
+            static_meta,
+            compiled_groups,
+            compiled_providers,
+            rule_providers,
+            routes_table.clone(),
+            store_selected_path,
+            log_spec,
+            resolver.clone(),
+        );
         let dispatcher = Arc::new(Dispatcher {
             services,
             service_order,
@@ -256,6 +286,7 @@ impl EgressRuntime {
             routes: routes_table,
             resolver,
             telemetry: Telemetry::new(max_flows),
+            control_plane,
             closed: AtomicBool::new(false),
             shutdown: tokio::sync::Mutex::new(None),
             _device: device,
@@ -295,8 +326,14 @@ impl EgressRuntime {
         let association = dispatcher
             .services
             .get(&binding.outbound)
-            .ok_or_else(|| Error::Config("出站绑定不存在".into()))?
-            .association;
+            .map(|s| s.association)
+            .or_else(|| {
+                dispatcher
+                    .control_plane
+                    .is_group(&binding.outbound)
+                    .then_some(true)
+            })
+            .ok_or_else(|| Error::Config("出站绑定不存在".into()))?;
         let node = binding.issuer.node().clone();
         Ok((
             node,
@@ -317,6 +354,9 @@ impl EgressRuntime {
     }
     pub fn telemetry(&self) -> Telemetry {
         self.dispatcher.telemetry.clone()
+    }
+    pub fn control_plane(&self) -> ControlPlane {
+        self.dispatcher.control_plane.clone()
     }
     /// 返回独立回收收据，供消费 Engine 或丢弃运行实例后继续确认真实任务释放。
     pub fn service_retirements(&self) -> Vec<(OutId, ServiceRetirement)> {
@@ -448,7 +488,13 @@ impl Dispatcher {
             sniffed_domain: original.sniffed_domain(),
         };
         let decision = self.routes.evaluate(&ctx);
-        let selected = decision.outbound.clone().or(binding_out);
+        let selected = if let Some(btag) = &decision.balancer_tag
+            && let Ok(bid) = OutId::parse(btag)
+        {
+            Some(bid)
+        } else {
+            decision.outbound.clone().or(binding_out)
+        };
         (decision, selected)
     }
 
@@ -499,7 +545,12 @@ impl Dispatcher {
         if decision.reject {
             return Err(Error::Rejected);
         }
-        let outbound = outbound.ok_or(Error::Rejected)?;
+        let initial_outbound = outbound.ok_or(Error::Rejected)?;
+        let (outbound, _top_group) = self.control_plane.resolve_outbound(
+            &initial_outbound,
+            request.map(|(orig, _)| orig),
+            identity.observed_source(),
+        )?;
         let service = self.services.get(&outbound).ok_or(Error::Rejected)?;
         service.host.check()?;
         Ok((service, binding.mode, decision))
@@ -1096,6 +1147,7 @@ pub mod testing {
             routes: RouteTable::default(),
             resolver,
             telemetry: telemetry.clone(),
+            control_plane: ControlPlane::default(),
             closed: AtomicBool::new(false),
             shutdown: tokio::sync::Mutex::new(None),
             _device: native_device(),

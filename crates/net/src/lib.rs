@@ -1,6 +1,7 @@
 //! 共享 TCP/TLS 连接器与基础直连/拒绝处理器。
 
 pub mod fallback;
+pub mod generate;
 pub mod sing_mux;
 pub mod sniff;
 pub mod transparent;

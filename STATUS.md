@@ -22,13 +22,13 @@
 | `M1`（`v1.4.0`） | 入站与出站角色及协议细项对齐：`mixed`、`redirect`、`tproxy` 入站，Trojan/VLESS 入站 `fallback` 分流（含 `xver` PROXY protocol），MASQUE 服务端入站，`dns` 内部出站，顶层 `mixed-port`/`redir-port`/`tproxy-port`/`lan-allowed-ips`/`lan-disallowed-ips`，Hysteria v1/v2 端口跳跃与速率/伪装，OpenVPN `servers`/`mss-fix`/`tls-crypt-v2`，OpenConnect mTLS，WireGuard `reserved`，ZeroTier TCP 回退及 HTTP/MASQUE/Naive/Mieru/Tailscale/EasyTier 出站扩展 | 已完成 |
 | `M2`（`v1.5.0`） | 传输、安全、复用与拨号对齐：`dialer-proxy`/`detour` 链式拨号，入站 `accept_proxy_protocol`（PROXY v1/v2），`sing-mux`（`h2mux`/`smux`/`yamux`），Shadowsocks `UoT` v1/v2，XHTTP 完整分帧/混淆/`xmux` 与 Xray `finalmask`（`fragment`/`udp_hop`/`brutal`），TLS 证书/公钥 SHA-256 固定、ECH、热重载、ACME 自动证书与 REALITY `mldsa65_seed` | 已完成 |
 | `M3`（`v1.6.0`） | 流量感知、DNS、路由规则集与 TUN 自动化对齐：TLS/HTTP/QUIC/BT 协议嗅探，Fake-IP 双栈池与持久化还原，DoH/DoQ、乐观缓存、ECS 与 DNS 规则动作，`rule-set`（`srs`/`mrs`/`dat`）与逻辑/进程规则，TUN `auto-route`/`auto-redirect` | 已完成 |
-| `M4`（`v1.7.0`） | 策略组、订阅提供者、控制面 API 与 CLI 工具链对齐：`select`/`url-test`/`fallback`/`load-balance`/`observatory` 策略组，`proxy-providers` 订阅解析与字段覆写，完整 Clash RESTful/WS API 与外部面板，规则转换/密钥生成 CLI，内置 `ntp` | 进行中 |
+| `M4`（`v1.7.0`） | 策略组、订阅提供者、控制面 API 与 CLI 工具链对齐：`select`/`url-test`/`fallback`/`load-balance`/`balancer` 策略组，`proxy-providers` 订阅解析与字段覆写，Clash/Xray/SSM RESTful & WS 控制面 API，YAML/JSONC 配置解析与密钥/证书生成 CLI，`SIGHUP` 热重载与 systemd 服务单元 | 已完成 |
 
 验证规则见 [0012](docs/decisions/0012-simplified-delivery-and-verification.md)。跨进程设备 daemon/IPC 不在计划内，出现多进程部署需求时再排。
 
 ## 三核心主要功能对齐拓扑
 
-[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 1,151 项、部分实现 459 项、未实现 2,443 项、不适用 307 项（实测通过 1,610 项，未测 0 项）。后续按 `M0 → M1/M2 → M3 → M4` 推进，每完成一项同步更新 `docs/capability-matrix/annotations/*.jsonl` 与 `docs/capability-matrix/results/*.jsonl`，并运行 `python3 tools/capability_matrix.py build` 与 `check --strict`。
+[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 1,321 项、部分实现 459 项、未实现 2,273 项、不适用 307 项（实测通过 1,780 项，未测 0 项）。`M0 → M1/M2 → M3 → M4` 全部阶段已完成并同步更新 `docs/capability-matrix/annotations/*.jsonl` 与 `docs/capability-matrix/results/*.jsonl`，通过 `python3 tools/capability_matrix.py build` 与 `check --strict` 校验。
 
 ```mermaid
 flowchart TD
@@ -95,11 +95,11 @@ flowchart TD
 | 能力 | 现状 |
 | --- | --- |
 | 协议模块 | 30 个进入默认构建。双端 21 个（含 MASQUE）；仅入站：TUN、Mixed、Redirect、TProxy；仅出站：SSH、Gost Relay、Tor、OpenVPN、OpenConnect、Tailscale、EasyTier、ZeroTier、DNS |
-| 节点与出站 | 独立节点；单一 `EgressRuntime`/`Dispatcher`；`Local`/`Remote` 分支；`FamilyMode` |
-| 路由 | `routes` / `route` 按域名、正则、GeoIP/GeoSite、`rule-set`/`rule-providers`、CIDR、来源 IP/端口、网络、协议、入站、用户与逻辑规则（`and`/`or`）选择出站或执行 `sniff`/`resolve`/`hijack-dns`/`reject` |
+| 节点与出站 | 独立节点；单一 `EgressRuntime`/`Dispatcher`；`Local`/`Remote` 分支；`FamilyMode`；`select`/`url-test`/`fallback`/`load-balance`/`balancer` 策略组与 `proxy-providers` 订阅提供者 |
+| 路由 | `routes` / `route` 按域名、正则、GeoIP/GeoSite、`rule-set`/`rule-providers`、CIDR、来源 IP/端口、网络、协议、入站、用户与逻辑规则（`and`/`or`）选择出站或策略组，或执行 `sniff`/`resolve`/`hijack-dns`/`reject` |
 | DNS | `dns` 配置 UDP、TCP、TLS、DoH（HTTPS）上游、Fake-IP 双栈池与持久化、反向映射、DNS 规则表与 `hosts` |
 | TUN | Linux 系统接口，支持 `auto-route`/`auto-redirect`/`strict-route` 规划与 Fake-IP/反向映射/首包嗅探还原域名 |
-| 控制 | 只读 HTTP 接口：健康、用量、在线、访问记录、计数 |
+| 控制 | HTTP 控制面接口：只读 `/v1/*` 统计、Clash/Mihomo 兼容策略切换/测速/连接断开/Fake-IP 刷新/日志与规则查询、Xray `observatory`/`balancers`/`handler` 与 Shadowsocks `ssm/v1/users` |
 | 用户与统计 | 管理账户与原生凭据分离；唯一计量边界；SQLite 用量、带宽、访问记录、DNS 与错误事件；`history` 查询 |
 | WARP | `device` 配置启用；数据面用已保存身份在双栈机器上验证过，CLI 在真实单栈机器上的自动补齐未实测 |
 | 双语 | CLI 帮助、错误和诊断完成；使用指南中英齐全；接口文档为中文 |

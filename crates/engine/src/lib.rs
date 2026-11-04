@@ -424,6 +424,9 @@ impl Engine {
     pub fn telemetry(&self) -> kerlico_egress::Telemetry {
         self.egress.telemetry()
     }
+    pub fn control_plane(&self) -> kerlico_egress::ControlPlane {
+        self.egress.control_plane()
+    }
     /// 历史存储独立于命名出站；超时后仅收据完成才证明原生写者真实释放。
     pub fn history_retirement(&self) -> Option<ServiceRetirement> {
         self.history_owner.as_ref().map(HistoryOwner::retirement)

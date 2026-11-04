@@ -12,6 +12,10 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+mod format;
+pub use format::*;
+mod group;
+pub use group::*;
 mod plan;
 pub use plan::*;
 mod users;
@@ -111,6 +115,16 @@ pub struct Config {
     pub cache_file: Option<kerlico_dns::CacheFileSpec>,
     #[serde(default)]
     pub profile: Option<ProfileCacheSpec>,
+    #[serde(default, alias = "proxy-groups")]
+    pub proxy_groups: Vec<ProxyGroupSpec>,
+    #[serde(default, alias = "proxy-providers")]
+    pub proxy_providers: BTreeMap<String, ProxyProviderSpec>,
+    #[serde(default)]
+    pub log: LogSpec,
+    #[serde(default, alias = "log-level")]
+    pub log_level: Option<String>,
+    #[serde(default, alias = "etag-support")]
+    pub etag_support: Option<bool>,
     #[serde(default)]
     pub control: Option<ControlSpec>,
 }
@@ -471,6 +485,8 @@ pub struct RouteConfigSpec {
     pub rule_set: Vec<RuleSetSpec>,
     #[serde(default)]
     pub rules: Vec<RuleSpec>,
+    #[serde(default)]
+    pub balancers: Vec<BalancerSpec>,
     #[serde(rename = "final", alias = "final_outbound", alias = "final-outbound")]
     pub final_outbound: Option<String>,
 }
@@ -1348,7 +1364,45 @@ impl Registry {
         let mut services = Vec::new();
         let mut profiles = BTreeMap::new();
         let mut detours = BTreeMap::new();
-        for mut spec in config.outbounds {
+        let _ = config.log.normalized_level(config.log_level.as_deref())?;
+        let mut compiled_providers = BTreeMap::new();
+        let mut provider_outbounds = Vec::new();
+        for (prov_key, prov_spec) in &config.proxy_providers {
+            let (compiled, specs) = prov_spec.compile(prov_key)?;
+            if compiled_providers
+                .insert(compiled.name.clone(), compiled)
+                .is_some()
+            {
+                return Err(Error::Config("proxy-providers 名称重复".into()));
+            }
+            provider_outbounds.extend(specs);
+        }
+        let existing_tags: BTreeSet<String> =
+            config.outbounds.iter().map(|s| s.tag.clone()).collect();
+        for spec in provider_outbounds {
+            if !existing_tags.contains(&spec.tag) {
+                config.outbounds.push(spec);
+            }
+        }
+        let mut inline_groups = Vec::new();
+        let mut concrete_outbounds = Vec::with_capacity(config.outbounds.len());
+        for spec in config.outbounds {
+            if ProxyGroupKind::parse(&spec.kind).is_some() {
+                let mut map = match spec.options {
+                    Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                map.insert("name".into(), Value::String(spec.tag));
+                map.insert("type".into(), Value::String(spec.kind));
+                let gspec: ProxyGroupSpec = serde_json::from_value(Value::Object(map))
+                    .map_err(|_| Error::Config("内联策略组出站配置不合法".into()))?;
+                inline_groups.push(gspec);
+            } else {
+                concrete_outbounds.push(spec);
+            }
+        }
+        let mut static_outbound_kinds = Vec::with_capacity(concrete_outbounds.len());
+        for mut spec in concrete_outbounds {
             let id = OutId::parse(&spec.tag)?;
             if profiles.contains_key(&id) {
                 return Err(Error::Config("出站标签重复".into()));
@@ -1367,7 +1421,51 @@ impl Registry {
                 id.clone(),
                 (plan.capabilities(), plan.supports_udp_association()),
             );
+            static_outbound_kinds.push((id.clone(), spec.kind.clone()));
             services.push(NamedServicePlan { id, plan });
+        }
+        let mut all_group_specs = inline_groups;
+        all_group_specs.extend(config.proxy_groups.iter().cloned());
+        if let Some(route_block) = &config.route {
+            for bal in &route_block.balancers {
+                all_group_specs.push(bal.to_group_spec());
+            }
+        }
+        let mut compiled_groups = Vec::with_capacity(all_group_specs.len());
+        for gspec in &all_group_specs {
+            let cg = gspec.compile(&static_outbound_kinds, &compiled_providers)?;
+            if profiles.contains_key(&cg.id) {
+                return Err(Error::Config("策略组标签与出站重复".into()));
+            }
+            profiles.insert(
+                cg.id.clone(),
+                (
+                    Capabilities {
+                        tcp: true,
+                        tcp_eof: true,
+                        udp: !cg.disable_udp,
+                    },
+                    !cg.disable_udp,
+                ),
+            );
+            compiled_groups.push(cg);
+        }
+        for cg in &compiled_groups {
+            for cand in &cg.candidates {
+                if !profiles.contains_key(cand) {
+                    return Err(Error::Config(format!(
+                        "策略组 {} 引用的候选出站 {} 不存在",
+                        cg.id, cand
+                    )));
+                }
+            }
+            if let Some(fb) = &cg.fallback_outbound
+                && !profiles.contains_key(fb)
+            {
+                return Err(Error::Config(
+                    "负载均衡 fallback_tag 引用的出站不存在".into(),
+                ));
+            }
         }
         for (from, target) in &detours {
             let Some((caps, _)) = profiles.get(target) else {
@@ -1662,6 +1760,41 @@ impl Registry {
         {
             return Err(Error::Config("控制接口与入站监听地址重复".into()));
         }
+        let rule_providers_counts: BTreeMap<String, usize> = compiled_rule_sets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.rules.len()))
+            .collect();
+        let store_selected_enabled = config
+            .cache_file
+            .as_ref()
+            .is_some_and(|c| c.enabled && c.store_selected)
+            || config
+                .profile
+                .as_ref()
+                .is_some_and(|p| p.store_selected == Some(true))
+            || config
+                .experimental
+                .as_ref()
+                .and_then(|e| e.cache_file.as_ref())
+                .is_some_and(|c| c.enabled && c.store_selected);
+        let store_selected_path = if store_selected_enabled {
+            Some(
+                config
+                    .cache_file
+                    .as_ref()
+                    .and_then(|c| c.path.clone())
+                    .or_else(|| {
+                        config
+                            .experimental
+                            .as_ref()
+                            .and_then(|e| e.cache_file.as_ref())
+                            .and_then(|c| c.path.clone())
+                    })
+                    .unwrap_or_else(|| "cache.db".into()),
+            )
+        } else {
+            None
+        };
         Ok(PreparedConfig {
             history: config.telemetry,
             device: config.device,
@@ -1673,6 +1806,11 @@ impl Registry {
                 dns: config.dns,
                 max_flows: config.limits.max_flow_records,
                 detour_table,
+                groups: compiled_groups,
+                providers: compiled_providers.into_values().collect(),
+                rule_providers: rule_providers_counts,
+                store_selected_path,
+                log: config.log,
             },
             inbounds: config.inbounds,
             limits: config.limits,
@@ -1683,11 +1821,7 @@ impl Registry {
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Config> {
-    if bytes.len() > 1024 * 1024 {
-        return Err(Error::Config("配置文件超过 1 MiB".into()));
-    }
-    let value: Value =
-        serde_json::from_slice(bytes).map_err(|_| Error::Config("JSON 结构或字段不合法".into()))?;
+    let value = parse_config_value(bytes)?;
     if value.get("version").and_then(Value::as_u64) != Some(2) {
         return Err(Error::Config(
             "仅支持配置版本 2；迁移说明见 docs/config-v2-migration.md".into(),

@@ -117,17 +117,17 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `anchors` | & 锚点、* 别名、<< 合并；合并有重复项不合并 | 有 |  |  | 未实现 | 未测 | 取值：`&`、`*`、`<<` |
+| `anchors` | & 锚点、* 别名、<< 合并；合并有重复项不合并 | 有 |  |  | 已实现 | 通过 | 取值：`&`、`*`、`<<` |
 | `array-shorthand` | 只有一项时 JSON 数组的 [] 可省略 |  | 有 |  | 未实现 | 未测 | 约束：适用于文档标注该说明的字段 |
 | `duration` | 时长字段用 Go Duration 格式 |  | 有 |  | 未实现 | 未测 | 取值：`h`、`m`、`ms`、`ns`、`s`、`us`<br>约束：DNS optimistic、cache rdrc 等示例也用 d 单位，如 3d、7d |
-| `extended-json` | 读取时用扩展 JSON 解析，接受注释和尾逗号 |  | 有 |  | 未实现 | 未测 | 约束：UnmarshalExtendedContext；具体语法以 sing/common/json 为准，需实测 |
+| `extended-json` | 读取时用扩展 JSON 解析，接受注释和尾逗号 |  | 有 |  | 已实现 | 通过 | 约束：UnmarshalExtendedContext；具体语法以 sing/common/json 为准，需实测 |
 | `json` | YAML 为 JSON 超集，可写多行、单行或全 JSON | 有 | 有 | 有 | 已实现 | 通过 | 取值：`JSON`、`json`<br>约束：文档只写 JSON，未提供 YAML |
-| `jsonc` | JSON 内允许注释：默认自定义解析器会剔除注释及其他非标准字符 |  |  | 有 | 未实现 | 未测 | 约束：XRAY_JSON_STRICT=true 时改用标准 JSON 解析器，不再容忍注释 |
+| `jsonc` | JSON 内允许注释：默认自定义解析器会剔除注释及其他非标准字符 |  |  | 有 | 已实现 | 通过 | 约束：XRAY_JSON_STRICT=true 时改用标准 JSON 解析器，不再容忍注释 |
 | `merge` | -c 可重复、-C 指定目录，多个配置合并加载 |  | 有 |  | 未实现 | 未测 | 取值：`-C`、`-c`<br>约束：-c stdin 从标准输入读取 |
 | `protobuf` | Protobuf 配置，扩展名 .pb，由 xray convert pb 生成 |  |  | 有 | 未实现 | 未测 | 约束：只读取第一个配置源 |
 | `toml` | TOML 配置，按扩展名 .toml 或 -format 识别 |  |  | 有 | 未实现 | 未测 |  |
 | `unknown-keys` | 不存在的键被忽略，可用来放锚点 | 有 |  |  | 未实现 | 未测 |  |
-| `yaml` | 配置文件格式，大小写敏感，缩进只允许空格 | 有 |  | 有 | 未实现 | 未测 | 取值：`YAML` |
+| `yaml` | 配置文件格式，大小写敏感，缩进只允许空格 | 有 |  | 有 | 已实现 | 通过 | 取值：`YAML` |
 
 ## merge
 
@@ -176,20 +176,20 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `sighup` | systemd ExecReload 发 SIGHUP 让 mihomo 重载 | 有 |  |  | 未实现 | 未测 | 取值：`SIGHUP` |
+| `sighup` | systemd ExecReload 发 SIGHUP 让 mihomo 重载 | 有 |  |  | 已实现 | 通过 | 取值：`SIGHUP` |
 
 ## root
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `certificate` | 顶层字段：证书信任配置 |  | 有 |  | 未实现 | 未测 |  |
-| `certificate-providers` | 顶层字段：证书提供者列表 |  | 有 |  | 未实现 | 未测 |  |
+| `certificate` | 顶层字段：证书信任配置 |  | 有 |  | 已实现 | 通过 |  |
+| `certificate-providers` | 顶层字段：证书提供者列表 |  | 有 |  | 已实现 | 通过 |  |
 | `dns` | 顶层字段：DNS 配置 |  | 有 |  | 已实现 | 通过 |  |
 | `endpoints` | 顶层字段：端点列表 |  | 有 |  | 部分 | 通过 |  |
 | `experimental` | 顶层字段：实验性功能配置 |  | 有 |  | 未实现 | 未测 |  |
 | `http-clients` | 顶层字段：共享 HTTP 客户端列表 |  | 有 |  | 未实现 | 未测 |  |
 | `inbounds` | 顶层字段：入站列表 |  | 有 |  | 已实现 | 通过 |  |
-| `log` | 顶层字段：日志配置 |  | 有 |  | 未实现 | 未测 |  |
+| `log` | 顶层字段：日志配置 |  | 有 |  | 已实现 | 通过 |  |
 | `network-namespaces` | 顶层字段：网络命名空间列表 |  | 有 |  | 未实现 | 未测 |  |
 | `ntp` | 顶层字段：NTP 配置 |  | 有 |  | 未实现 | 未测 |  |
 | `outbounds` | 顶层字段：出站列表 |  | 有 |  | 已实现 | 通过 |  |
@@ -207,11 +207,11 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `domain-set` | 引入域名集合 | 有 |  |  | 未实现 | 未测 | 取值：`geosite:xxx`、`rule-set:xxx`<br>约束：rule-set 仅 behavior 为 domain、classical |
-| `port-range` | 端口范围，- 范围，/ 或 , 分隔 | 有 |  |  | 未实现 | 未测 | 取值：`114-514/810-1919,65530` |
-| `wildcard-dot` | . 多级但不含本身 | 有 |  |  | 未实现 | 未测 | 取值：`.baidu.com`<br>约束：只能用于域名前缀 |
+| `domain-set` | 引入域名集合 | 有 |  |  | 已实现 | 通过 | 取值：`geosite:xxx`、`rule-set:xxx`<br>约束：rule-set 仅 behavior 为 domain、classical |
+| `port-range` | 端口范围，- 范围，/ 或 , 分隔 | 有 |  |  | 已实现 | 通过 | 取值：`114-514/810-1919,65530` |
+| `wildcard-dot` | . 多级但不含本身 | 有 |  |  | 已实现 | 通过 | 取值：`.baidu.com`<br>约束：只能用于域名前缀 |
 | `wildcard-plus` | + 类似 DOMAIN-SUFFIX，多级且含本身 | 有 |  |  | 部分 | 通过 | 取值：`+.baidu.com`<br>约束：只能用于域名前缀 |
-| `wildcard-star` | * 一次匹配一级；只匹配无 . 的主机名 | 有 |  |  | 未实现 | 未测 | 取值：`*`、`*.baidu.com`<br>约束：使用通配符应加引号 |
+| `wildcard-star` | * 一次匹配一级；只匹配无 . 的主机名 | 有 |  |  | 已实现 | 通过 | 取值：`*`、`*.baidu.com`<br>约束：使用通配符应加引号 |
 
 ## top
 
@@ -221,7 +221,7 @@
 | `burst-observatory` | 配置文件顶层字段：突发连接观测 |  |  | 有 | 未实现 | 未测 |  |
 | `dns` | 配置文件顶层字段：内置 DNS 配置 |  |  | 有 | 已实现 | 通过 |  |
 | `env` | 配置文件顶层字段：环境变量配置块 |  |  | 有 | 未实现 | 未测 |  |
-| `fakedns` | 配置文件顶层字段：FakeDNS，对象或数组 |  |  | 有 | 未实现 | 未测 | 约束：源码 JSON 键为 fakeDns，Go JSON 解析大小写不敏感，文档写法 fakedns 可用（source:infra/conf/xray.go） |
+| `fakedns` | 配置文件顶层字段：FakeDNS，对象或数组 |  |  | 有 | 已实现 | 通过 | 约束：源码 JSON 键为 fakeDns，Go JSON 解析大小写不敏感，文档写法 fakedns 可用（source:infra/conf/xray.go） |
 | `geodata` | 配置文件顶层字段：地理数据文件定时更新与热重载 |  |  | 有 | 未实现 | 未测 |  |
 | `inbounds` | 配置文件顶层字段：入站配置数组 |  |  | 有 | 已实现 | 通过 |  |
 | `log` | 配置文件顶层字段：日志配置 |  |  | 有 | 部分 | 通过 |  |

@@ -2,7 +2,7 @@
 
 更新日期：2026-11-02（Asia/Shanghai）
 
-当前源码使用 **JSON 配置版本 2（v2）**，旧版 v1 配置迁移方式见 [配置 v2 迁移指南](../config-v2-migration.md)。
+当前源码使用 **配置版本 2（v2）**，同时支持标准 JSON、带单行/多行注释与尾随逗号的 JSONC，以及支持锚点（`&anchor`）、引用（`*alias`）与合并键（`<<:`）的 YAML。旧版 v1 配置迁移方式见 [配置 v2 迁移指南](../config-v2-migration.md)。
 
 ## 根配置结构
 
@@ -11,7 +11,9 @@
 | `version` | 必填，固定为 `2`（v1 直接拒绝） |
 | `epoch` | 默认 `1`，非零正整数，标识配置代次 |
 | `accounts` | 管理账户数组，`user_id` 与 `username` 分别全局唯一 |
-| `outbounds` | 命名出站数组（`tag` / `type` / `options`）；每条配置编译一次、运行期启动一次 |
+| `outbounds` | 命名出站数组（`tag` / `type` / `options`）；支持直接声明内联 `selector` 与 `urltest` 策略组出站 |
+| `proxy_groups` | 策略组数组（`select`、`url-test`、`fallback`、`load-balance`、`balancer`），支持 `proxies`、`use`、`filter`/`exclude-filter`/`exclude-type`、`tolerance`、`lazy`、`expected-status`、`hash-key`、`fallback-tag` 与 `store-selected` |
+| `proxy_providers` | 外部与内联代理提供者映射（`file`、`http`、`inline`），支持 JSON/YAML/Base64/URI 订阅解析、`header`、`size-limit`、`etag-support` 与整组健康检查 |
 | `inbounds` | 回环固定目标转发入口，默认空 |
 | `nodes` | 服务端协议节点（需配置真实鉴别成员 `members`），默认空 |
 | `local_inbounds` | 协议工厂显式允许的本地回环入口，默认空 |
@@ -19,13 +21,14 @@
 | `routes` | 路由规则数组，默认空，见下文 |
 | `device` | 设备级 WARP 补齐，默认关闭，见下文 |
 | `dns` | 网站域名解析的上游与 hosts，默认用系统解析器，见 [DNS](dns.md) |
-| `control` | 只读 HTTP 控制接口，默认关闭，见[控制接口](control.md) |
+| `control` | HTTP 控制接口，默认关闭，见[控制接口](control.md) |
 | `telemetry` | SQLite 统计历史，默认关闭，见[统计历史](history.md) |
+| `log` / `log_level` | 全局日志级别（`trace`/`debug`/`info`/`warning`/`error`/`fatal`/`panic`/`silent`）、访问与错误日志路径、时间戳及结构化开关 |
 | `certificate` | 根级附加信任证书配置（`certificate_path`），默认空 |
 | `certificate_providers` | 命名证书提供者数组（支持 `acme` 及 Cloudflare DNS-01 质询配置），默认空 |
-| `route` / `rule_providers` | 扩展路由对象（含 `rules`、`rule_set`、`final`、`auto_detect_interface`、`default_interface`、`default_mark`）与外部/内联规则集提供者映射 |
-| `sniffer` / `fakedns` / `tun` / `cache_file` / `profile` / `experimental` | 全局首包协议嗅探、顶层 FakeDNS 池、顶层 TUN 入口与 Fake-IP 缓存持久化配置 |
-| `geodata_mode` / `geodata_loader` / `geosite_matcher` / `geo_auto_update` / `geo_update_interval` / `geox_url` | GeoIP / GeoSite 数据库加载模式与自动更新配置 |
+| `route` / `rule_providers` | 扩展路由对象（含 `rules`、`rule_set`、`balancers`、`final`、`auto_detect_interface`、`default_interface`、`default_mark`）与外部/内联规则集提供者映射 |
+| `sniffer` / `fakedns` / `tun` / `cache_file` / `profile` / `experimental` | 全局首包协议嗅探、顶层 FakeDNS 池、顶层 TUN 入口、选中节点（`store-selected`）与 Fake-IP 缓存持久化配置 |
+| `geodata_mode` / `geodata_loader` / `geosite_matcher` / `geo_auto_update` / `geo_update_interval` / `geox_url` / `etag_support` | GeoIP / GeoSite 数据库加载模式、自动更新与 HTTP ETag 缓存配置 |
 | `interface_name` / `routing_mark` / `disable_keep_alive` / `keep_alive_idle` / `keep_alive_interval` | 全局默认出站绑定网卡与套接字选项，可被单条出站 `dialer` / `sockopt` 覆盖 |
 
 - **标签与校验**：`tag` 为 1–64 个 ASCII 字母、数字、`-` 或 `_`；出站拥有独立标签命名空间，所有入站（`inbounds` / `nodes` / `local_inbounds`）共用另一命名空间。未知字段、缺失类型、无效引用或能力不匹配在编译期直接拒绝。
@@ -98,9 +101,12 @@
 | --- | --- |
 | `kerlico modules` | 按 `outbound/<kind>` 与 `inbound/<kind>` 列出当前构建实际注册的模块 |
 | `kerlico check -c <file>` | 校验配置文件（上限 1 MiB）并编译装配计划，不绑定端口、不拨号或创建状态目录 |
-| `kerlico run -c <file>` | 启动唯一共享出站服务并绑定全部入站入口；收到 `Ctrl-C` 或 Unix `SIGTERM` 时停止准入并有限排空 |
+| `kerlico run -c <file>` | 启动唯一共享出站服务并绑定全部入站入口；收到 `Ctrl-C` 或 Unix `SIGTERM` 时停止准入并有限排空，收到 Unix `SIGHUP` 时校验并记录配置热重载 |
 | `kerlico account-new --prefix <name>` | 从标准输入读取 12–1024 字节管理密码，输出带 `<prefix>_<uuid>` 用户名与 Argon2id 摘要的账户 JSON |
 | `kerlico history --kind <usage\|flows\|bandwidth\|events>` | 只读查询统计历史，输出 JSON，见[统计历史](history.md) |
+| `kerlico generate <target>` | 生成 `uuid`、`rand`/`rand-base64`/`rand-hex`、`reality-keypair`/`vless-x25519`、`wg-keypair`、`ech-keypair`、`tls-keypair`（含 `--months`）、`vless-mlkem768`、`mldsa65`、`vlessenc` 与 `sudoku-keypair` |
+| `kerlico tls <cert\|hash>` | 生成自签名 TLS 证书与私钥 PEM，或计算证书 SHA-256 指纹 |
+| `kerlico xray <target>` | 兼容 Xray CLI 的 `uuid`、`x25519`、`wg`、`tls`、`mldsa65`、`mlkem768` 与 `vlessenc` 生成子命令 |
 
 默认构建注册全部 **30 个协议模块**，另有基础出站 `direct`、`reject`：
 

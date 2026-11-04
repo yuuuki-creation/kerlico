@@ -312,3 +312,160 @@ async fn silent_connection_is_closed_by_the_total_timeout() {
     assert!(started.elapsed() >= Duration::from_secs(30));
     running.stop().await.unwrap();
 }
+
+async fn request_json(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    secret: Option<&str>,
+    body: Option<Value>,
+) -> (u16, Value) {
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let authorization = secret
+        .map(|s| format!("Authorization: Bearer {s}\r\n"))
+        .unwrap_or_default();
+    let payload = body
+        .map(|v| serde_json::to_vec(&v).unwrap())
+        .unwrap_or_default();
+    let headers = format!(
+        "{method} {path} HTTP/1.1\r\nHost: control\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{authorization}\r\n",
+        payload.len()
+    );
+    stream.write_all(headers.as_bytes()).await.unwrap();
+    if !payload.is_empty() {
+        stream.write_all(&payload).await.unwrap();
+    }
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).await.unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    let status = text.split(' ').nth(1).unwrap().parse().unwrap();
+    let resp_body = text.split_once("\r\n\r\n").unwrap().1;
+    let val = if resp_body.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(resp_body).unwrap()
+    };
+    (status, val)
+}
+
+#[tokio::test]
+async fn m4_clash_xray_ssm_endpoints_and_websocket_token_auth() {
+    let mut registry = Registry::default();
+    registry.register(DirectFactory).unwrap();
+    let config = json!({
+        "version": 2,
+        "outbounds": [
+            {"tag": "exit-a", "type": "direct"},
+            {"tag": "exit-b", "type": "direct"}
+        ],
+        "proxy_groups": [
+            {
+                "name": "SelectorGroup",
+                "type": "select",
+                "proxies": ["exit-a", "exit-b"],
+                "default": "exit-a"
+            }
+        ],
+        "route": {
+            "final": "SelectorGroup",
+            "balancers": [
+                {
+                    "tag": "bal-1",
+                    "selector": ["exit-a", "exit-b"],
+                    "strategy": {"type": "round-robin"}
+                }
+            ]
+        },
+        "inbounds": [
+            {
+                "tag": "entry",
+                "type": "tcp-forward",
+                "listen": "127.0.0.1:0",
+                "target": {"host": "127.0.0.1", "port": 9},
+                "outbound": "SelectorGroup"
+            }
+        ]
+    });
+    let engine = Engine::bind(
+        registry
+            .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let spec = ControlSpec {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        secret: Some("m4-secret".into()),
+    };
+    let server = ControlServer::bind(&spec, &engine).await.unwrap();
+    let addr = server.local_addr().unwrap();
+    let stop = CancellationToken::new();
+    let serving = tokio::spawn(server.serve(stop.clone()));
+
+    let (status, ver) = get(addr, "/version?token=m4-secret", None).await;
+    assert_eq!(status, 200);
+    assert!(ver["version"].is_string());
+
+    let sec = Some("m4-secret");
+    let (status, proxies) = get(addr, "/proxies", sec).await;
+    assert_eq!(status, 200);
+    assert_eq!(proxies["proxies"]["SelectorGroup"]["now"], "exit-a");
+
+    let (status, _) = request_json(
+        addr,
+        "PUT",
+        "/proxies/SelectorGroup",
+        sec,
+        Some(json!({"name": "exit-b"})),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (_, group) = get(addr, "/group/SelectorGroup", sec).await;
+    assert_eq!(group["now"], "exit-b");
+
+    let (status, _) = request_json(
+        addr,
+        "PUT",
+        "/routing/balancers/bal-1",
+        sec,
+        Some(json!({"target": "exit-b"})),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (_, bals) = get(addr, "/routing/balancers", sec).await;
+    assert_eq!(bals["balancers"]["bal-1"]["override_target"], "exit-b");
+
+    assert_eq!(
+        request_json(addr, "POST", "/cache/fakeip/flush", sec, None)
+            .await
+            .0,
+        204
+    );
+    assert_eq!(get(addr, "/logs", sec).await.0, 200);
+    assert_eq!(get(addr, "/observatory/status", sec).await.0, 200);
+    let (status, rtest) = request_json(
+        addr,
+        "POST",
+        "/routing/test",
+        sec,
+        Some(json!({"domain": "example.com"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(rtest["outbound"], "exit-b");
+
+    let (status, _) = request_json(
+        addr,
+        "POST",
+        "/ssm/users",
+        sec,
+        Some(json!({"username": "u1", "password": "p1"})),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (_, ssm_list) = get(addr, "/ssm/users", sec).await;
+    assert_eq!(ssm_list["users"].as_array().unwrap().len(), 1);
+
+    stop.cancel();
+    serving.await.unwrap();
+}

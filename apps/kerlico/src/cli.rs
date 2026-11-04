@@ -71,6 +71,9 @@ pub(super) fn command(language: Language) -> Command {
             "check" => language.select("校验配置和模块能力，不监听或拨号。", "Validate configuration and module capabilities without listening or dialing."),
             "run" => language.select("启动客户端转发入口与服务端节点。", "Start client forwarding inbounds and server nodes."),
             "history" => language.select("只读查询统计历史，输出 JSON。", "Query statistics history read-only and print JSON."),
+            "generate" => language.select("生成 UUID、随机串与各类协议密钥对。", "Generate UUIDs, random strings, and protocol keypairs."),
+            "tls" => language.select("生成自签名 TLS 证书或计算证书哈希。", "Generate self-signed TLS certificates or compute certificate hashes."),
+            "xray" => language.select("兼容 Xray 工具链的密钥与加密参数生成命令。", "Xray-compatible keypair and encryption generator subcommands."),
             _ => continue,
         };
         let mut localized = subcommand.clone().about(about).disable_help_flag(true).arg(
@@ -196,7 +199,19 @@ pub(super) fn command(language: Language) -> Command {
 pub(super) fn parse_args(raw: &[OsString], language: Language) -> Result<Args, clap::Error> {
     let mut command = command(language);
     let matches = command.try_get_matches_from_mut(raw)?;
-    let args = Args::from_arg_matches(&matches)?;
+    let mut args = Args::from_arg_matches(&matches)?;
+    if let super::Command::Generate { target, .. } = &mut args.command
+        && target == "uuid"
+    {
+        for os in raw.iter().skip(1) {
+            if let Some(s) = os.to_str()
+                && s.starts_with("generate-")
+            {
+                *target = s.to_owned();
+                break;
+            }
+        }
+    }
     if let super::Command::Help {
         command: Some(name),
     } = &args.command

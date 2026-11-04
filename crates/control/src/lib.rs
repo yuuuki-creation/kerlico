@@ -1,6 +1,6 @@
-//! 运行期只读 HTTP 控制接口：健康状态、用量、在线来源、访问记录和入口计数。
+//! 运行期 HTTP 控制接口：健康状态、用量、在线来源、访问记录、策略组、提供者、连接与动态用户管理。
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::{
     Method, Request, Response, StatusCode, body::Incoming, header, server::conn::http1,
     service::service_fn,
@@ -8,7 +8,7 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use kerlico_config::ControlSpec;
 use kerlico_core::{CancellationToken, Error, Result};
-use kerlico_egress::{StoredFlow, Telemetry};
+use kerlico_egress::{ControlPlane, StoredFlow, Telemetry};
 use kerlico_engine::{Engine, FailedNodes, Stats};
 use serde_json::{Value, json};
 use std::{
@@ -22,10 +22,12 @@ use tokio::{net::TcpListener, task::JoinSet};
 const MAX_CONNECTIONS: usize = 64;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+const MAX_BODY_BYTES: usize = 65_536;
 
 struct Source {
     secret: Option<String>,
     telemetry: Telemetry,
+    control_plane: ControlPlane,
     stats: Arc<Stats>,
     nodes: BTreeMap<String, Arc<Stats>>,
     failed: FailedNodes,
@@ -43,6 +45,7 @@ impl ControlServer {
             source: Arc::new(Source {
                 secret: spec.secret.clone(),
                 telemetry: engine.telemetry(),
+                control_plane: engine.control_plane(),
                 stats: engine.stats(),
                 nodes: engine.node_stats(),
                 failed: engine.failed_nodes(),
@@ -76,7 +79,7 @@ impl ControlServer {
                     connections.spawn(async move {
                         let service = service_fn(move |request| {
                             let source = source.clone();
-                            async move { Ok::<_, std::convert::Infallible>(respond(&source, &request)) }
+                            async move { Ok::<_, std::convert::Infallible>(respond(&source, request).await) }
                         });
                         let _ = tokio::time::timeout(
                             CONNECTION_TIMEOUT,
@@ -92,6 +95,15 @@ impl ControlServer {
     }
 }
 
+fn constant_time_eq(secret: &str, provided: &[u8]) -> bool {
+    provided.len() == secret.len()
+        && provided
+            .iter()
+            .zip(secret.as_bytes())
+            .fold(0, |difference, (a, b)| difference | (a ^ b))
+            == 0
+}
+
 fn authorized(secret: Option<&str>, header: Option<&[u8]>) -> bool {
     let Some(secret) = secret else {
         return true;
@@ -99,12 +111,20 @@ fn authorized(secret: Option<&str>, header: Option<&[u8]>) -> bool {
     let Some(provided) = header.and_then(|value| value.strip_prefix(b"Bearer ")) else {
         return false;
     };
-    provided.len() == secret.len()
-        && provided
-            .iter()
-            .zip(secret.as_bytes())
-            .fold(0, |difference, (a, b)| difference | (a ^ b))
-            == 0
+    constant_time_eq(secret, provided)
+}
+
+fn authorized_with_query(secret: Option<&str>, header: Option<&[u8]>, query: &str) -> bool {
+    if authorized(secret, header) {
+        return true;
+    }
+    let Some(secret) = secret else {
+        return true;
+    };
+    if let Some(token) = query_str(query, "token") {
+        return constant_time_eq(secret, token.as_bytes());
+    }
+    false
 }
 
 fn stats_json(stats: &Stats) -> Value {
@@ -126,79 +146,484 @@ fn query_number(query: &str, name: &str) -> Option<u64> {
         .and_then(|(_, value)| value.parse().ok())
 }
 
-fn route(source: &Source, path: &str, query: &str) -> Result<Option<Value>> {
-    Ok(Some(match path {
-        "/v1/health" => {
+fn query_str<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value)
+}
+
+enum ApiReply {
+    Json(StatusCode, Value),
+    Empty(StatusCode),
+}
+
+fn route(
+    source: &Source,
+    method: &Method,
+    path: &str,
+    query: &str,
+    body: Option<&Value>,
+) -> Result<Option<ApiReply>> {
+    let clean_path = path.strip_prefix("/v1").unwrap_or(path);
+    match (method, path, clean_path) {
+        (&Method::GET, "/v1/health", _) => {
             let failed = source.failed.tags();
-            json!({
-                "status": if failed.is_empty() { "ok" } else { "degraded" },
-                "run": source.telemetry.run_id().to_string(),
-                "failed_nodes": failed,
-            })
+            Ok(Some(ApiReply::Json(
+                StatusCode::OK,
+                json!({
+                    "status": if failed.is_empty() { "ok" } else { "degraded" },
+                    "run": source.telemetry.run_id().to_string(),
+                    "failed_nodes": failed,
+                }),
+            )))
         }
-        "/v1/usage" => {
+        (&Method::GET, "/v1/usage", _) => {
             let usage = source.telemetry.usage()?;
-            json!({
-                "engine": usage.engine,
-                "users": usage.users.iter().map(|(id, usage)| (id.to_string(), *usage)).collect::<BTreeMap<_, _>>(),
-                "nodes": usage.nodes.iter().map(|(id, usage)| (id.to_string(), *usage)).collect::<BTreeMap<_, _>>(),
-                "outbounds": usage.outbounds.iter().map(|(id, usage)| (id.to_string(), *usage)).collect::<BTreeMap<_, _>>(),
-                "active_flows": usage.active_flows,
-                "retained_records": usage.retained_records,
-                "evicted_records": usage.evicted_records,
-            })
+            Ok(Some(ApiReply::Json(
+                StatusCode::OK,
+                json!({
+                    "engine": usage.engine,
+                    "users": usage.users.iter().map(|(id, usage)| (id.to_string(), *usage)).collect::<BTreeMap<_, _>>(),
+                    "nodes": usage.nodes.iter().map(|(id, usage)| (id.to_string(), *usage)).collect::<BTreeMap<_, _>>(),
+                    "outbounds": usage.outbounds.iter().map(|(id, usage)| (id.to_string(), *usage)).collect::<BTreeMap<_, _>>(),
+                    "active_flows": usage.active_flows,
+                    "retained_records": usage.retained_records,
+                    "evicted_records": usage.evicted_records,
+                }),
+            )))
         }
-        "/v1/online" => json!(source.telemetry.online()?),
-        "/v1/flows" => {
+        (&Method::GET, "/v1/online", _) => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            json!(source.telemetry.online()?),
+        ))),
+        (&Method::GET, "/v1/flows", _) => {
             let after = query_number(query, "after").unwrap_or(0);
             let limit = query_number(query, "limit").unwrap_or(1000);
             let records = source.telemetry.records(
                 after,
                 usize::try_from(limit).map_err(|_| Error::ResourceLimit)?,
             )?;
-            json!(
-                records
-                    .iter()
-                    .map(|record| StoredFlow::from_record(record, true))
-                    .collect::<Vec<_>>()
-            )
+            Ok(Some(ApiReply::Json(
+                StatusCode::OK,
+                json!(
+                    records
+                        .iter()
+                        .map(|record| StoredFlow::from_record(record, true))
+                        .collect::<Vec<_>>()
+                ),
+            )))
         }
-        "/v1/stats" => json!({
-            "engine": stats_json(&source.stats),
-            "nodes": source.nodes.iter().map(|(tag, stats)| (tag.clone(), stats_json(stats))).collect::<BTreeMap<_, _>>(),
-        }),
-        _ => return Ok(None),
-    }))
+        (&Method::GET, "/v1/stats", _) => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            json!({
+                "engine": stats_json(&source.stats),
+                "nodes": source.nodes.iter().map(|(tag, stats)| (tag.clone(), stats_json(stats))).collect::<BTreeMap<_, _>>(),
+            }),
+        ))),
+        (&Method::GET, _, "/version") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "meta": true,
+                "premium": true,
+            }),
+        ))),
+        (&Method::GET, _, "/configs") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            json!({
+                "mode": "rule",
+                "log-level": "info",
+                "ipv6": true,
+            }),
+        ))),
+        (&Method::PUT | &Method::PATCH, _, "/configs") => {
+            let log_level = body
+                .and_then(|b| b.get("log-level").or_else(|| b.get("level")))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            source.control_plane.record_config_reload(log_level);
+            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
+        (&Method::POST, _, "/configs/geo" | "/upgrade/geo") => {
+            source.control_plane.record_geo_update();
+            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
+        (&Method::POST, _, "/cache/fakeip/flush") => {
+            source.control_plane.flush_fake_ip()?;
+            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
+        (&Method::GET, _, "/logs") => {
+            let level = query_str(query, "level");
+            Ok(Some(ApiReply::Json(
+                StatusCode::OK,
+                source.control_plane.logs_json(level),
+            )))
+        }
+        (&Method::GET, _, "/rules" | "/routing/rules") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            source.control_plane.rules_json(),
+        ))),
+        (&Method::GET, _, "/connections") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            source.control_plane.active_connections_json(),
+        ))),
+        (&Method::DELETE, _, "/connections") => {
+            source.control_plane.close_all_connections();
+            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
+        (&Method::DELETE, _, p) if p.starts_with("/connections/") => {
+            let id_str = &p["/connections/".len()..];
+            if let Ok(id) = id_str.parse::<u64>() {
+                source.control_plane.close_connection(id);
+            } else {
+                source.control_plane.close_all_connections();
+            }
+            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
+        (&Method::GET, _, "/proxies") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            source.control_plane.proxies_json(),
+        ))),
+        (&Method::GET, _, p) if p.starts_with("/proxies/") && p.ends_with("/delay") => {
+            let name = &p["/proxies/".len()..p.len() - "/delay".len()];
+            match source.control_plane.probe_proxy_delay(name, 12) {
+                Some(delay) => Ok(Some(ApiReply::Json(
+                    StatusCode::OK,
+                    json!({ "delay": delay }),
+                ))),
+                None => Ok(None),
+            }
+        }
+        (&Method::GET, _, p) if p.starts_with("/proxies/") => {
+            let name = &p["/proxies/".len()..];
+            Ok(source
+                .control_plane
+                .proxy_by_name_json(name)
+                .map(|v| ApiReply::Json(StatusCode::OK, v)))
+        }
+        (&Method::PUT, _, p) if p.starts_with("/proxies/") => {
+            let group_name = &p["/proxies/".len()..];
+            let target = body
+                .and_then(|b| b.get("name"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error::Config("PUT /proxies/{name} 须包含 name 字段".into()))?;
+            source.control_plane.select_in_group(group_name, target)?;
+            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
+        (&Method::DELETE, _, p) if p.starts_with("/proxies/") => {
+            let group_name = &p["/proxies/".len()..];
+            source.control_plane.clear_group_fixed(group_name)?;
+            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
+        (&Method::GET, _, "/group") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            source.control_plane.groups_json(),
+        ))),
+        (&Method::GET, _, p) if p.starts_with("/group/") && p.ends_with("/delay") => {
+            let name = &p["/group/".len()..p.len() - "/delay".len()];
+            Ok(source
+                .control_plane
+                .probe_group_delays(name, 12)
+                .map(|v| ApiReply::Json(StatusCode::OK, v)))
+        }
+        (&Method::GET, _, p) if p.starts_with("/group/") => {
+            let name = &p["/group/".len()..];
+            Ok(source
+                .control_plane
+                .group_by_name_json(name)
+                .map(|v| ApiReply::Json(StatusCode::OK, v)))
+        }
+        (&Method::GET, _, "/providers/proxies") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            source.control_plane.proxy_providers_json(),
+        ))),
+        (&Method::GET, _, p) if p.starts_with("/providers/proxies/") => {
+            let rest = &p["/providers/proxies/".len()..];
+            if let Some(prov_name) = rest.strip_suffix("/healthcheck") {
+                if let Some((prov, proxy)) = prov_name.split_once('/') {
+                    if source
+                        .control_plane
+                        .proxy_provider_member_json(prov, proxy)
+                        .is_some()
+                    {
+                        let delay = source
+                            .control_plane
+                            .probe_proxy_delay(proxy, 15)
+                            .unwrap_or(15);
+                        return Ok(Some(ApiReply::Json(
+                            StatusCode::OK,
+                            json!({ "delay": delay }),
+                        )));
+                    }
+                    return Ok(None);
+                }
+                if source.control_plane.healthcheck_proxy_provider(prov_name) {
+                    return Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)));
+                }
+                return Ok(None);
+            }
+            if let Some((prov, proxy)) = rest.split_once('/') {
+                return Ok(source
+                    .control_plane
+                    .proxy_provider_member_json(prov, proxy)
+                    .map(|v| ApiReply::Json(StatusCode::OK, v)));
+            }
+            Ok(source
+                .control_plane
+                .proxy_provider_by_name_json(rest)
+                .map(|v| ApiReply::Json(StatusCode::OK, v)))
+        }
+        (&Method::PUT, _, p) if p.starts_with("/providers/proxies/") => {
+            let name = &p["/providers/proxies/".len()..];
+            if source
+                .control_plane
+                .proxy_provider_by_name_json(name)
+                .is_some()
+            {
+                Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+            } else {
+                Ok(None)
+            }
+        }
+        (&Method::GET, _, "/providers/rules") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            source.control_plane.rule_providers_json(),
+        ))),
+        (&Method::GET, _, p) if p.starts_with("/providers/rules/") => {
+            let name = &p["/providers/rules/".len()..];
+            Ok(source
+                .control_plane
+                .rule_provider_by_name_json(name)
+                .map(|v| ApiReply::Json(StatusCode::OK, v)))
+        }
+        (&Method::PUT, _, p) if p.starts_with("/providers/rules/") => {
+            let name = &p["/providers/rules/".len()..];
+            if source
+                .control_plane
+                .rule_provider_by_name_json(name)
+                .is_some()
+            {
+                Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+            } else {
+                Ok(None)
+            }
+        }
+        (&Method::GET, _, "/observatory/status") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            source.control_plane.observatory_status_json(),
+        ))),
+        (&Method::GET, _, "/routing/balancers") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            source.control_plane.balancers_info_json(),
+        ))),
+        (&Method::POST | &Method::PUT, _, p) if p.starts_with("/routing/balancers/") => {
+            let raw_tag = &p["/routing/balancers/".len()..];
+            let tag = raw_tag.strip_suffix("/override").unwrap_or(raw_tag);
+            let target = body
+                .and_then(|b| b.get("target").or_else(|| b.get("name")))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if target.is_empty() {
+                source.control_plane.clear_group_fixed(tag)?;
+            } else {
+                source.control_plane.select_in_group(tag, target)?;
+            }
+            if method == Method::PUT {
+                Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+            } else {
+                Ok(Some(ApiReply::Json(
+                    StatusCode::OK,
+                    json!({ "status": "ok" }),
+                )))
+            }
+        }
+        (&Method::POST, _, "/routing/test") => {
+            let host = body
+                .and_then(|b| {
+                    b.get("host")
+                        .or_else(|| b.get("target"))
+                        .or_else(|| b.get("domain"))
+                })
+                .and_then(Value::as_str)
+                .unwrap_or("example.com");
+            let port = body
+                .and_then(|b| b.get("port"))
+                .and_then(Value::as_u64)
+                .and_then(|p| u16::try_from(p).ok())
+                .unwrap_or(443);
+            let network = body
+                .and_then(|b| b.get("network"))
+                .and_then(Value::as_str)
+                .unwrap_or("tcp");
+            let inbound = body
+                .and_then(|b| b.get("inbound"))
+                .and_then(Value::as_str)
+                .unwrap_or("entry");
+            let res = source
+                .control_plane
+                .test_route(host, port, network, inbound)?;
+            Ok(Some(ApiReply::Json(StatusCode::OK, res)))
+        }
+        (&Method::GET, _, "/handler/overview") => {
+            let node_tags: Vec<String> = source.nodes.keys().cloned().collect();
+            Ok(Some(ApiReply::Json(
+                StatusCode::OK,
+                source.control_plane.handler_overview_json(&node_tags),
+            )))
+        }
+        (&Method::GET, _, p)
+            if p.strip_prefix("/handler/inbounds/")
+                .and_then(|s| s.strip_suffix("/count"))
+                .and_then(|s| s.strip_suffix("/users"))
+                .is_some() =>
+        {
+            let tag = p
+                .strip_prefix("/handler/inbounds/")
+                .and_then(|s| s.strip_suffix("/count"))
+                .and_then(|s| s.strip_suffix("/users"))
+                .unwrap_or("default");
+            let info = source.control_plane.inbound_users_json(tag);
+            Ok(Some(ApiReply::Json(
+                StatusCode::OK,
+                json!({ "tag": tag, "count": info["count"] }),
+            )))
+        }
+        (&Method::GET, _, p) if p.starts_with("/handler/inbounds/") && p.ends_with("/users") => {
+            let tag = &p["/handler/inbounds/".len()..p.len() - "/users".len()];
+            Ok(Some(ApiReply::Json(
+                StatusCode::OK,
+                source.control_plane.inbound_users_json(tag),
+            )))
+        }
+        (&Method::POST, _, p) if p.starts_with("/handler/inbounds/") && p.ends_with("/alter") => {
+            let tag = &p["/handler/inbounds/".len()..p.len() - "/alter".len()];
+            let action = body
+                .and_then(|b| b.get("action").or_else(|| b.get("operation")))
+                .and_then(Value::as_str)
+                .unwrap_or("add");
+            let user_obj = body
+                .and_then(|b| b.get("user"))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let user_key = user_obj
+                .get("email")
+                .or_else(|| user_obj.get("username"))
+                .and_then(Value::as_str)
+                .unwrap_or("default-user")
+                .to_owned();
+            source
+                .control_plane
+                .alter_inbound_user(tag, action, &user_key, user_obj);
+            Ok(Some(ApiReply::Json(
+                StatusCode::OK,
+                json!({ "status": "ok" }),
+            )))
+        }
+        (&Method::GET, _, "/ssm/users") => {
+            let tag = query_str(query, "inbound").unwrap_or("default");
+            Ok(Some(ApiReply::Json(
+                StatusCode::OK,
+                source.control_plane.inbound_users_json(tag),
+            )))
+        }
+        (&Method::POST, _, "/ssm/users") => {
+            let tag = body
+                .and_then(|b| b.get("inbound"))
+                .and_then(Value::as_str)
+                .unwrap_or("default");
+            let username = body
+                .and_then(|b| b.get("username"))
+                .and_then(Value::as_str)
+                .unwrap_or("user");
+            let payload = body.cloned().unwrap_or_else(|| json!({}));
+            source
+                .control_plane
+                .alter_inbound_user(tag, "add", username, payload);
+            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
+        (&Method::DELETE, _, p)
+            if p.strip_prefix("/ssm/users")
+                .and_then(|s| s.strip_prefix('/'))
+                .is_some() =>
+        {
+            let username = p
+                .strip_prefix("/ssm/users")
+                .and_then(|s| s.strip_prefix('/'))
+                .unwrap_or("");
+            let tag = query_str(query, "inbound").unwrap_or("default");
+            source
+                .control_plane
+                .alter_inbound_user(tag, "remove", username, Value::Null);
+            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
+        _ => Ok(None),
+    }
 }
 
-fn respond(source: &Source, request: &Request<Incoming>) -> Response<Full<Bytes>> {
-    let reply = |status: StatusCode, body: Value| {
+async fn respond(source: &Source, request: Request<Incoming>) -> Response<Full<Bytes>> {
+    let reply_json = |status: StatusCode, body: Value| {
         Response::builder()
             .status(status)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Full::new(Bytes::from(body.to_string())))
             .expect("固定响应头合法")
     };
-    if !authorized(
+    let reply_empty = |status: StatusCode| {
+        Response::builder()
+            .status(status)
+            .body(Full::new(Bytes::new()))
+            .expect("固定响应头合法")
+    };
+    let uri = request.uri().clone();
+    let query = uri.query().unwrap_or("");
+    if !authorized_with_query(
         source.secret.as_deref(),
         request
             .headers()
             .get(header::AUTHORIZATION)
             .map(|value| value.as_bytes()),
+        query,
     ) {
-        return reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
+        return reply_json(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
     }
-    if request.method() != Method::GET {
-        return reply(
+    let method = request.method().clone();
+    if !matches!(
+        method,
+        Method::GET | Method::PUT | Method::POST | Method::DELETE | Method::PATCH
+    ) {
+        return reply_json(
             StatusCode::METHOD_NOT_ALLOWED,
             json!({"error": "method not allowed"}),
         );
     }
-    let uri = request.uri();
-    match route(source, uri.path(), uri.query().unwrap_or("")) {
-        Ok(Some(body)) => reply(StatusCode::OK, body),
-        Ok(None) => reply(StatusCode::NOT_FOUND, json!({"error": "not found"})),
-        Err(error) => reply(StatusCode::BAD_REQUEST, json!({"error": error.code()})),
+    let body_val = if matches!(method, Method::PUT | Method::POST | Method::PATCH) {
+        match request.into_body().collect().await {
+            Ok(collected) => {
+                let bytes = collected.to_bytes();
+                if bytes.len() > MAX_BODY_BYTES {
+                    return reply_json(
+                        StatusCode::BAD_REQUEST,
+                        json!({"error": "payload too large"}),
+                    );
+                }
+                if bytes.is_empty() {
+                    None
+                } else {
+                    serde_json::from_slice::<Value>(&bytes).ok()
+                }
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    match route(source, &method, uri.path(), query, body_val.as_ref()) {
+        Ok(Some(ApiReply::Json(status, body))) => reply_json(status, body),
+        Ok(Some(ApiReply::Empty(status))) => reply_empty(status),
+        Ok(None) => reply_json(StatusCode::NOT_FOUND, json!({"error": "not found"})),
+        Err(error) => reply_json(StatusCode::BAD_REQUEST, json!({"error": error.code()})),
     }
 }
 
@@ -214,6 +639,8 @@ mod tests {
         assert!(!authorized(Some("abc"), Some(b"Bearer abd")));
         assert!(!authorized(Some("abc"), Some(b"Bearer abcd")));
         assert!(!authorized(Some("abc"), Some(b"abc")));
+        assert!(authorized_with_query(Some("abc"), None, "token=abc"));
+        assert!(!authorized_with_query(Some("abc"), None, "token=abd"));
     }
 
     #[test]

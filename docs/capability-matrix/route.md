@@ -118,7 +118,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `balancers` | 负载均衡器数组 |  |  | 有 | 未实现 | 未测 |  |
+| `balancers` | 负载均衡器数组 |  |  | 有 | 已实现 | 通过 |  |
 | `domain-strategy` | 路由域名解析策略，默认 AsIs |  |  | 有 | 部分 | 通过 | 取值：`AsIs`、`IPIfNonMatch`、`IPOnDemand`<br>约束：IPIfNonMatch：一轮未命中且含域名时第二轮解析<br>约束：IPOnDemand：遇 ip 规则即解析，失败用原始 IP<br>约束：不能与 script 同用（source:infra/conf/router.go）<br>约束：解析结果受 dns.queryStrategy 限制<br>约束：路由不改变真实目标 |
 | `rules` | 规则数组，从上到下第一条生效 |  |  | 有 | 已实现 | 通过 | 约束：未命中由第一个 outbound 发出 |
 | `script` | Lua 路由脚本路径，设置后接管路由选择 |  |  | 有 | 未实现 | 未测 | 约束：balancers 仍可用<br>约束：rules、domainStrategy 不生效，同配报错 |
