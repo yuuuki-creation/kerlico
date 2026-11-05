@@ -9,16 +9,17 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicU32, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker},
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
     sync::mpsc,
     time::Instant,
 };
+use tokio_util::sync::PollSender;
 
 struct Entry {
     data: mpsc::Sender<Vec<u8>>,
@@ -65,24 +66,32 @@ struct QueuedFrame {
     delivery: Option<FrameDelivery>,
 }
 impl Delivery {
-    fn poll_write(
-        &self,
-        io: &mut DuplexStream,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    fn check_writable(&self, len: usize) -> io::Result<()> {
+        let state = self.0.lock().unwrap();
+        if let Some(reason) = state.ending {
+            return Err(Self::error(reason));
+        }
+        if state.submitted.checked_add(len as u64).is_none() {
+            return Err(io::Error::other("AnyTLS 流字节序号耗尽"));
+        }
+        Ok(())
+    }
+    fn commit_write(&self, len: usize) -> io::Result<u64> {
         let mut state = self.0.lock().unwrap();
         if let Some(reason) = state.ending {
-            return Poll::Ready(Err(Self::error(reason)));
+            return Err(Self::error(reason));
         }
-        if state.submitted.checked_add(buf.len() as u64).is_none() {
-            return Poll::Ready(Err(io::Error::other("AnyTLS 流字节序号耗尽")));
-        }
-        let result = Pin::new(io).poll_write(cx, buf);
-        if let Poll::Ready(Ok(n)) = &result {
-            state.submitted += *n as u64;
-        }
-        result
+        state.submitted = state
+            .submitted
+            .checked_add(len as u64)
+            .ok_or_else(|| io::Error::other("AnyTLS 流字节序号耗尽"))?;
+        Ok(state.submitted)
+    }
+    fn closed_error(&self) -> io::Error {
+        let state = self.0.lock().unwrap();
+        state.ending.map(Self::error).unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "AnyTLS 流在物理交付前结束")
+        })
     }
     fn poll_flush(&self, cx: &mut Context<'_>, fin: bool) -> Poll<io::Result<()>> {
         let mut state = self.0.lock().unwrap();
@@ -186,24 +195,92 @@ pub struct Incoming {
     pub ending: tokio::sync::watch::Receiver<Option<kerlico_core::FlowOutcome>>,
 }
 struct LogicalStream {
-    io: DuplexStream,
+    id: u32,
+    session: Arc<Session>,
+    frames: PollSender<QueuedFrame>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    read_buf: Vec<u8>,
+    read_pos: usize,
     cancel: CancellationToken,
     delivery: Arc<Delivery>,
+    fin_sent: Arc<AtomicBool>,
     client: bool,
     write_closed: bool,
 }
 impl Drop for LogicalStream {
     fn drop(&mut self) {
+        if let Some(entry) = self.session.streams.lock().unwrap().remove(&self.id) {
+            entry.end(kerlico_core::FlowOutcome::ClosedByCaller);
+        }
+        self.session.active.fetch_sub(1, Ordering::AcqRel);
+        *self.session.idle_since.lock().unwrap() = Instant::now();
         self.cancel.cancel();
     }
 }
 impl AsyncRead for LogicalStream {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.io).poll_read(cx, buf)
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        if this.read_pos < this.read_buf.len() {
+            let avail = &this.read_buf[this.read_pos..];
+            let n = avail.len().min(buf.remaining());
+            buf.put_slice(&avail[..n]);
+            this.read_pos += n;
+            if this.read_pos >= this.read_buf.len() {
+                this.read_buf = Vec::new();
+                this.read_pos = 0;
+            } else {
+                return Poll::Ready(Ok(()));
+            }
+        }
+        if buf.filled().len() == before {
+            loop {
+                match this.rx.poll_recv(cx) {
+                    Poll::Ready(Some(data)) => {
+                        if data.is_empty() {
+                            continue;
+                        }
+                        if buf.remaining() >= data.len() {
+                            buf.put_slice(&data);
+                            break;
+                        } else {
+                            let n = buf.remaining();
+                            buf.put_slice(&data[..n]);
+                            this.read_buf = data;
+                            this.read_pos = n;
+                            return Poll::Ready(Ok(()));
+                        }
+                    }
+                    Poll::Ready(None) => return Poll::Ready(Ok(())),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        }
+        while buf.remaining() > 0 {
+            match this.rx.try_recv() {
+                Ok(data) => {
+                    if data.is_empty() {
+                        continue;
+                    }
+                    if buf.remaining() >= data.len() {
+                        buf.put_slice(&data);
+                    } else {
+                        this.read_buf = data;
+                        this.read_pos = 0;
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        Poll::Ready(Ok(()))
     }
 }
 impl AsyncWrite for LogicalStream {
@@ -216,21 +293,80 @@ impl AsyncWrite for LogicalStream {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
         let this = self.get_mut();
-        this.delivery.poll_write(&mut this.io, cx, buf)
+        if let Err(err) = this.delivery.check_writable(buf.len()) {
+            return Poll::Ready(Err(err));
+        }
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        match this.frames.poll_reserve(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(_)) => return Poll::Ready(Err(this.delivery.closed_error())),
+            Poll::Pending => return Poll::Pending,
+        }
+        let n = buf.len().min(16384);
+        let position = match this.delivery.commit_write(n) {
+            Ok(pos) => pos,
+            Err(err) => {
+                this.frames.abort_send();
+                return Poll::Ready(Err(err));
+            }
+        };
+        let frame = Frame::new(codec::PSH, this.id, buf[..n].to_vec());
+        let delivery = Some(FrameDelivery {
+            stream: this.delivery.clone(),
+            mark: WriteMark::Bytes(position),
+        });
+        if this
+            .frames
+            .send_item(QueuedFrame { frame, delivery })
+            .is_err()
+        {
+            return Poll::Ready(Err(this.delivery.closed_error()));
+        }
+        Poll::Ready(Ok(n))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.delivery.poll_flush(cx, false)
     }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.write_closed = true;
-        std::task::ready!(self.delivery.poll_flush(cx, false))?;
-        if self.client {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.write_closed = true;
+        std::task::ready!(this.delivery.poll_flush(cx, false))?;
+        if this.client {
             // AnyTLS FIN 会结束全流；本地停写只禁写并保留回包，不向目标承诺 EOF。
             Poll::Ready(Ok(()))
         } else {
-            self.delivery.request_fin()?;
-            std::task::ready!(Pin::new(&mut self.io).poll_shutdown(cx))?;
-            self.delivery.poll_flush(cx, true)
+            if !this.fin_sent.load(Ordering::Acquire) {
+                this.delivery.request_fin()?;
+                match this.frames.poll_reserve(cx) {
+                    Poll::Ready(Ok(())) => {}
+                    Poll::Ready(Err(_)) => return Poll::Ready(Err(this.delivery.closed_error())),
+                    Poll::Pending => return Poll::Pending,
+                }
+                let (delivered, _confirmed) = tokio::sync::oneshot::channel();
+                this.fin_sent.store(true, Ordering::Release);
+                if this
+                    .frames
+                    .send_item(QueuedFrame {
+                        frame: Frame::new(codec::FIN, this.id, Vec::new()),
+                        delivery: Some(FrameDelivery {
+                            stream: this.delivery.clone(),
+                            mark: WriteMark::Fin(delivered),
+                        }),
+                    })
+                    .is_err()
+                {
+                    return Poll::Ready(Err(this.delivery.closed_error()));
+                }
+            }
+            let res = std::task::ready!(this.delivery.poll_flush(cx, true));
+            if res.is_ok()
+                && let Some(entry) = this.session.streams.lock().unwrap().remove(&this.id)
+            {
+                entry.end(kerlico_core::FlowOutcome::ProtocolEnd);
+            }
+            Poll::Ready(res)
         }
     }
 }
@@ -244,7 +380,7 @@ impl Session {
         incoming: Option<mpsc::Sender<Incoming>>,
         host: Owner,
     ) -> Result<Arc<Self>> {
-        let (tx, mut rx) = mpsc::channel::<QueuedFrame>(64);
+        let (tx, mut rx) = mpsc::channel::<QueuedFrame>(128);
         let session = Arc::new(Self {
             frames: tx,
             streams: Mutex::new(HashMap::new()),
@@ -260,17 +396,25 @@ impl Session {
             tasks: Mutex::new(Vec::new()),
             permit: Mutex::new(None),
         });
-        let (mut reader, mut writer) = tokio::io::split(stream);
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut reader = BufReader::with_capacity(131072, reader);
         let write_session = session.clone();
         session.spawn(async move {
             let result = async {
                 let mut packet = 0u32;
+                let mut write_buf = Vec::with_capacity(65536 + 1024);
+                let mut pending_deliveries = Vec::with_capacity(16);
                 loop {
                     let QueuedFrame { frame, delivery } = tokio::select! {_ = write_session.closed.cancelled()=>return Ok::<_,Error>(()), frame=rx.recv()=>match frame {Some(f)=>f,None=>return Ok(())}};
-                    let mut bytes = frame.encode()?;
                     packet = packet.saturating_add(1);
-                    let scheme = write_session.padding.read().unwrap().clone();
-                    if client && packet < scheme.stop {
+                    let stop = if client {
+                        write_session.padding.read().unwrap().stop
+                    } else {
+                        0
+                    };
+                    if client && packet < stop {
+                        let mut bytes = frame.encode()?;
+                        let scheme = write_session.padding.read().unwrap().clone();
                         for size in scheme.sizes(packet) {
                             let Some(size) = size else {
                                 if bytes.is_empty() { break } else { continue }
@@ -298,13 +442,38 @@ impl Session {
                                     .await?;
                             }
                         }
-                    }
-                    if !bytes.is_empty() {
-                        writer.write_all(&bytes).await?;
-                    }
-                    writer.flush().await?;
-                    if let Some(delivery) = delivery {
-                        delivery.stream.confirm(delivery.mark);
+                        if !bytes.is_empty() {
+                            writer.write_all(&bytes).await?;
+                        }
+                        writer.flush().await?;
+                        if let Some(delivery) = delivery {
+                            delivery.stream.confirm(delivery.mark);
+                        }
+                    } else {
+                        write_buf.clear();
+                        frame.encode_into(&mut write_buf)?;
+                        if let Some(delivery) = delivery {
+                            pending_deliveries.push(delivery);
+                        }
+                        while write_buf.len() < 48 * 1024 {
+                            let Ok(QueuedFrame {
+                                frame: next_frame,
+                                delivery: next_delivery,
+                            }) = rx.try_recv()
+                            else {
+                                break;
+                            };
+                            packet = packet.saturating_add(1);
+                            next_frame.encode_into(&mut write_buf)?;
+                            if let Some(d) = next_delivery {
+                                pending_deliveries.push(d);
+                            }
+                        }
+                        writer.write_all(&write_buf).await?;
+                        writer.flush().await?;
+                        for d in pending_deliveries.drain(..) {
+                            d.stream.confirm(d.mark);
+                        }
                     }
                 }
             };
@@ -417,92 +586,53 @@ impl Session {
         if streams.len() >= self.max_streams || streams.contains_key(&id) {
             return Err(Error::ResourceLimit);
         }
-        let (app, network) = tokio::io::duplex(65536);
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(128);
         let cancel = CancellationToken::new();
         let delivery = Arc::new(Delivery::default());
+        let fin_sent = Arc::new(AtomicBool::new(false));
+        let (ending_tx, mut ended) = tokio::sync::watch::channel(None);
         streams.insert(
             id,
             Entry {
                 data: tx,
                 cancel: cancel.clone(),
-                ending: tokio::sync::watch::channel(None).0,
+                ending: ending_tx,
                 delivery: delivery.clone(),
             },
         );
         self.active.fetch_add(1, Ordering::AcqRel);
         let session = self.clone();
         let task_cancel = cancel.clone();
-        let stream_delivery = delivery.clone();
+        let task_fin_sent = fin_sent.clone();
         self.spawn(async move {
-            let (mut reader, mut writer) = tokio::io::split(network);
-            let mut fin_queued = false;
-            let outgoing = async {
-                let mut buf = vec![0; 16384];
-                let mut position = 0u64;
-                loop {
-                    let n = reader.read(&mut buf).await?;
-                    if n == 0 {
-                        let (delivered, confirmed) = tokio::sync::oneshot::channel();
-                        session
-                            .queue(QueuedFrame {
-                                frame: Frame::new(codec::FIN, id, Vec::new()),
-                                delivery: Some(FrameDelivery {
-                                    stream: stream_delivery.clone(),
-                                    mark: WriteMark::Fin(delivered),
-                                }),
-                            })
-                            .await?;
-                        fin_queued = true;
-                        confirmed
-                            .await
-                            .map_err(|_| Error::Protocol("AnyTLS FIN 未完成物理交付"))?;
-                        return Ok::<_, Error>(());
-                    }
-                    position = position.checked_add(n as u64).ok_or(Error::ResourceLimit)?;
-                    session
-                        .queue(QueuedFrame {
-                            frame: Frame::new(codec::PSH, id, buf[..n].to_vec()),
-                            delivery: Some(FrameDelivery {
-                                stream: stream_delivery.clone(),
-                                mark: WriteMark::Bytes(position),
-                            }),
-                        })
-                        .await?;
-                }
-            };
-            let incoming = async {
-                while let Some(data) = rx.recv().await {
-                    writer.write_all(&data).await?;
-                }
-                writer.shutdown().await?;
-                Ok::<_, Error>(())
-            };
             let reason = tokio::select! {
                 biased;
                 _ = session.closed.cancelled() => session.finish_reason(),
                 _ = task_cancel.cancelled() => kerlico_core::FlowOutcome::ClosedByCaller,
-                result = outgoing => crate::flow::reason(&result),
-                result = incoming => crate::flow::reason(&result),
+                reason = crate::flow::ended(&mut ended) => reason,
             };
             if let Some(entry) = session.streams.lock().unwrap().remove(&id) {
                 entry.end(reason);
             }
-            session.active.fetch_sub(1, Ordering::AcqRel);
-            *session.idle_since.lock().unwrap() = Instant::now();
-            if !fin_queued {
+            if !task_fin_sent.load(Ordering::Acquire) {
                 let _ = session.send(Frame::new(codec::FIN, id, Vec::new())).await;
             }
         })?;
         Ok(Box::new(LogicalStream {
-            io: app,
+            id,
+            session: self.clone(),
+            frames: PollSender::new(self.frames.clone()),
+            rx,
+            read_buf: Vec::new(),
+            read_pos: 0,
             cancel,
             delivery,
+            fin_sent,
             client: self.client,
             write_closed: false,
         }))
     }
-    pub async fn open(self: &Arc<Self>) -> Result<BoxStream> {
+    pub fn reserve_stream(self: &Arc<Self>) -> Result<(u32, BoxStream)> {
         let id = self
             .next
             .fetch_add(1, Ordering::AcqRel)
@@ -513,7 +643,15 @@ impl Session {
             return Err(Error::ResourceLimit);
         }
         let stream = self.logical(id)?;
-        self.send(Frame::new(codec::SYN, id, Vec::new())).await?;
+        Ok((id, stream))
+    }
+    pub async fn send_syn(&self, id: u32) -> Result<()> {
+        self.send(Frame::new(codec::SYN, id, Vec::new())).await
+    }
+    #[cfg(test)]
+    pub async fn open(self: &Arc<Self>) -> Result<BoxStream> {
+        let (id, stream) = self.reserve_stream()?;
+        self.send_syn(id).await?;
         Ok(stream)
     }
     async fn receive(
@@ -649,6 +787,7 @@ impl Session {
 mod tests {
     use super::*;
     use crate::padding;
+    use tokio::io::AsyncReadExt;
     #[tokio::test]
     async fn concurrent_streams_heartbeat_and_close() {
         let padding = Arc::new(RwLock::new(Padding::parse(padding::DEFAULT).unwrap()));

@@ -23,11 +23,11 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_flows: 256,
-            tcp_buffer_bytes: 262_144,
-            queue_packets: 512,
-            queue_bytes: 2 * 1024 * 1024,
-            fragment_packets: 64,
-            fragment_bytes: 2 * 1024 * 1024,
+            tcp_buffer_bytes: 1_048_560,
+            queue_packets: 8192,
+            queue_bytes: 32 * 1024 * 1024,
+            fragment_packets: 256,
+            fragment_bytes: 8 * 1024 * 1024,
             udp_idle_timeout_ms: 60_000,
         }
     }
@@ -35,10 +35,10 @@ impl Default for Limits {
 impl Limits {
     pub fn validate(&self) -> Result<()> {
         if !(1..=4096).contains(&self.max_flows)
-            || !(4096..=1024 * 1024).contains(&self.tcp_buffer_bytes)
-            || !(8..=4096).contains(&self.queue_packets)
-            || !(65536..=64 * 1024 * 1024).contains(&self.queue_bytes)
-            || !(1..=1024).contains(&self.fragment_packets)
+            || !(4096..=16 * 1024 * 1024).contains(&self.tcp_buffer_bytes)
+            || !(8..=65536).contains(&self.queue_packets)
+            || !(65536..=128 * 1024 * 1024).contains(&self.queue_bytes)
+            || !(1..=4096).contains(&self.fragment_packets)
             || !(65536..=64 * 1024 * 1024).contains(&self.fragment_bytes)
             || !(100..=86_400_000).contains(&self.udp_idle_timeout_ms)
         {

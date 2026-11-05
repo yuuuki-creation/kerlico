@@ -13,6 +13,7 @@ pub(crate) struct RecordAligned {
     header: [u8; 5],
     position: usize,
     remaining: usize,
+    released: bool,
 }
 impl RecordAligned {
     pub fn new(inner: BoxStream) -> Self {
@@ -21,6 +22,7 @@ impl RecordAligned {
             header: [0; 5],
             position: 0,
             remaining: 0,
+            released: false,
         }
     }
 }
@@ -33,6 +35,9 @@ impl AsyncRead for RecordAligned {
         let this = self.get_mut();
         if out.remaining() == 0 {
             return Poll::Ready(Ok(()));
+        }
+        if this.released && this.position == 0 && this.remaining == 0 {
+            return Pin::new(&mut this.inner).poll_read(cx, out);
         }
         if this.remaining == 0 {
             let mut bytes = [0; 5];
@@ -78,6 +83,16 @@ impl AsyncWrite for RecordAligned {
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, bytes)
     }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_flush(cx)
     }
@@ -93,7 +108,22 @@ impl AsyncRead for ServerTls {
         cx: &mut Context<'_>,
         out: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().0).poll_read(cx, out)
+        let this = self.get_mut();
+        let before = out.filled().len();
+        let poll = Pin::new(&mut this.0).poll_read(cx, out);
+        if matches!(poll, Poll::Ready(Ok(()))) && out.filled().len() > before {
+            let released = this.0.get_ref().0.released;
+            if released {
+                while out.remaining() >= 16384 {
+                    let prev = out.filled().len();
+                    match Pin::new(&mut this.0).poll_read(cx, out) {
+                        Poll::Ready(Ok(())) if out.filled().len() > prev => {}
+                        _ => break,
+                    }
+                }
+            }
+        }
+        poll
     }
 }
 impl AsyncWrite for ServerTls {
@@ -104,6 +134,16 @@ impl AsyncWrite for ServerTls {
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().0).poll_write(cx, bytes)
     }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
+    }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().0).poll_flush(cx)
     }
@@ -112,6 +152,9 @@ impl AsyncWrite for ServerTls {
     }
 }
 impl TransportStream for ServerTls {
+    fn release_record_alignment(&mut self) {
+        self.0.get_mut().0.released = true;
+    }
     fn poll_read_direct(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -172,6 +215,16 @@ impl AsyncWrite for Plain {
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().0).poll_write(cx, bytes)
+    }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().0).poll_flush(cx)

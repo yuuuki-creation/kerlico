@@ -25,9 +25,11 @@ pub(crate) struct Reader {
     initialized: bool,
     pub physical_closed: bool,
     sequence: u32,
+    pub v3_chacha_used: bool,
 }
 impl Reader {
     pub fn new(io: ReadHalf<BoxStream>, settings: Arc<Settings>) -> Self {
+        let v3_chacha_used = settings.v3_chacha;
         Self {
             io,
             settings,
@@ -36,6 +38,7 @@ impl Reader {
             initialized: false,
             physical_closed: false,
             sequence: 0,
+            v3_chacha_used,
         }
     }
     pub fn salt(&self) -> Option<[u8; 16]> {
@@ -44,6 +47,55 @@ impl Reader {
     pub async fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
         if self.physical_closed {
             return Ok(None);
+        }
+        if self.settings.version == 3 {
+            let first = !self.initialized;
+            if first {
+                let mut salt = [0u8; 16];
+                self.io.read_exact(&mut salt).await?;
+                self.cipher = Some(Cipher::new_v3(
+                    &self.settings.psk,
+                    &salt,
+                    self.settings.v3_chacha,
+                )?);
+                self.salt = Some(salt);
+                self.initialized = true;
+            }
+            let mut head = vec![0; 18];
+            let count = self.io.read(&mut head).await?;
+            if count == 0 {
+                self.physical_closed = true;
+                return Ok(None);
+            }
+            self.io.read_exact(&mut head[count..]).await?;
+            let header = {
+                let cipher = self.cipher.as_mut().ok_or_else(io_protocol)?;
+                match cipher.open(head.clone(), &[]) {
+                    Ok(h) => h,
+                    Err(_) if first => {
+                        let salt = self.salt.ok_or_else(io_protocol)?;
+                        let alt_chacha = !self.settings.v3_chacha;
+                        let mut alt = Cipher::new_v3(&self.settings.psk, &salt, alt_chacha)?;
+                        let h = alt.open(head, &[])?;
+                        self.v3_chacha_used = alt_chacha;
+                        self.cipher = Some(alt);
+                        h
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            let len = u16::from_be_bytes([header[0], header[1]]) as usize;
+            if len > 0x3fff {
+                return Err(io_protocol());
+            }
+            self.sequence = self.sequence.checked_add(1).ok_or_else(io_protocol)?;
+            if len == 0 {
+                return Ok(None);
+            }
+            let mut bytes = vec![0; len + 16];
+            self.io.read_exact(&mut bytes).await?;
+            let cipher = self.cipher.as_mut().ok_or_else(io_protocol)?;
+            return cipher.open(bytes, &[]).map(Some);
         }
         if !self.initialized {
             if !self.settings.raw() {
@@ -120,6 +172,7 @@ pub(crate) struct Writer {
     settings: Arc<Settings>,
     cipher: Option<Cipher>,
     salt: [u8; 16],
+    v3_chacha: bool,
     sent_salt: bool,
     sequence: u32,
     initial_padding: usize,
@@ -133,8 +186,11 @@ impl Writer {
     pub fn new(settings: Arc<Settings>) -> io::Result<Self> {
         let mut salt = [0; 16];
         rand::rngs::OsRng.fill_bytes(&mut salt);
+        let v3_chacha = settings.v3_chacha;
         let cipher = if settings.raw() {
             None
+        } else if settings.version == 3 {
+            Some(Cipher::new_v3(&settings.psk, &salt, v3_chacha)?)
         } else {
             Some(Cipher::new(&settings.psk, &salt)?)
         };
@@ -143,6 +199,7 @@ impl Writer {
             settings,
             cipher,
             salt,
+            v3_chacha,
             sent_salt: false,
             sequence: 0,
             initial_padding,
@@ -153,6 +210,13 @@ impl Writer {
             batch_limit: 0,
         })
     }
+    pub fn sync_v3_cipher(&mut self, chacha: bool) -> io::Result<()> {
+        if self.settings.version == 3 && !self.sent_salt && self.v3_chacha != chacha {
+            self.v3_chacha = chacha;
+            self.cipher = Some(Cipher::new_v3(&self.settings.psk, &self.salt, chacha)?);
+        }
+        Ok(())
+    }
     pub fn maximum(&self) -> usize {
         if self.settings.version < 6 {
             0x3fff
@@ -161,6 +225,9 @@ impl Writer {
         }
     }
     pub fn stream_limit(&mut self) -> usize {
+        if self.settings.version == 3 {
+            return 0x3fff;
+        }
         let now = seconds();
         if let Some(profile) = &self.settings.profile {
             if self.last == 0 || now.saturating_sub(self.last) > profile.reset_seconds {
@@ -207,6 +274,25 @@ impl Writer {
             return Err(io_protocol());
         }
         let first = !self.sent_salt;
+        if self.settings.version == 3 {
+            let cipher = self.cipher.as_mut().ok_or_else(io_protocol)?;
+            let header = cipher.seal(&(payload.len() as u16).to_be_bytes(), &[])?;
+            let body = if payload.is_empty() {
+                Vec::new()
+            } else {
+                cipher.seal(payload, &[])?
+            };
+            let mut out =
+                Vec::with_capacity(if first { 16 } else { 0 } + header.len() + body.len());
+            if first {
+                out.extend_from_slice(&self.salt);
+            }
+            out.extend_from_slice(&header);
+            out.extend_from_slice(&body);
+            self.sent_salt = true;
+            self.sequence = self.sequence.checked_add(1).ok_or_else(io_protocol)?;
+            return Ok(out);
+        }
         let padding_len = if let Some(profile) = &self.settings.profile {
             profile.padding_len(self.sequence, payload.len(), first)
         } else if self.settings.version < 6 && first && !payload.is_empty() {

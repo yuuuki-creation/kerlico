@@ -115,6 +115,9 @@ pub(crate) fn wrap_hopping(
     socket: UdpSocket,
     hop: Option<(SocketAddr, Vec<RangeInclusive<u16>>, Duration, Duration)>,
 ) -> io::Result<Arc<dyn AsyncUdpSocket>> {
+    let sock_ref = socket2::SockRef::from(&socket);
+    let _ = sock_ref.set_recv_buffer_size(8 * 1024 * 1024);
+    let _ = sock_ref.set_send_buffer_size(8 * 1024 * 1024);
     let mut inner: Arc<dyn AsyncUdpSocket> = quinn::TokioRuntime.wrap_udp_socket(socket)?;
     if let Some((base_peer, ranges, interval_min, interval_max)) = hop
         && !ranges.is_empty()

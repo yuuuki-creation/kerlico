@@ -526,7 +526,11 @@ impl Carrier {
                     idle_timeout_secs,
                     health_check_timeout_secs,
                     permit_without_stream,
-                    initial_windows_size: initial_window_size,
+                    initial_windows_size: if initial_window_size == 0 {
+                        4 * 1024 * 1024
+                    } else {
+                        initial_window_size
+                    },
                 })
             }
             Transport::Xhttp { mut settings } => {
@@ -884,6 +888,7 @@ fn xhttp(
             to: i32::try_from(b).map_err(|_| invalid())?,
         };
     }
+    input.h2_stream_receive_window = Some(16 * 1024 * 1024);
     let mut xmux = XhttpXmuxPolicy::default();
     if let Some(xmux_cfg) = settings.xmux {
         if let Some(v) = xmux_cfg.max_concurrency {
@@ -907,6 +912,9 @@ fn xhttp(
         if let Some(v) = xmux_cfg.h_keep_alive_period {
             xmux.h_keep_alive_period_secs = v;
         }
+    } else {
+        xmux.max_concurrency = XhttpRange::exact(1);
+        xmux.max_connections = XhttpRange::exact(0);
     }
     let mut h3_quic = H3QuicConfig::default();
     if let Some(frag) = fragment_input
@@ -1048,6 +1056,16 @@ impl tokio::io::AsyncWrite for DialerTransportStream {
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
     }
     fn poll_flush(
         mut self: std::pin::Pin<&mut Self>,

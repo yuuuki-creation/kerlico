@@ -94,8 +94,13 @@ pub(crate) async fn serve(
     let cancel = context.cancel.clone();
     let executor = NodeExecutor(context.tasks.clone());
     let idle = context.idle_timeout;
-    let (activity, mut changed) = tokio::sync::watch::channel(tokio::time::Instant::now());
-    let inner = ActiveIo { inner, activity };
+    let now = tokio::time::Instant::now();
+    let (activity, mut changed) = tokio::sync::watch::channel(now);
+    let inner = ActiveIo {
+        inner,
+        activity,
+        last: now,
+    };
     let service = hyper::service::service_fn(move |request| {
         let transport = transport.clone();
         let payload = payload.clone();
@@ -107,7 +112,13 @@ pub(crate) async fn serve(
         }
     });
     let serving = async {
-        hyper_util::server::conn::auto::Builder::new(executor)
+        let mut builder = hyper_util::server::conn::auto::Builder::new(executor);
+        builder
+            .http2()
+            .initial_stream_window_size(16 * 1024 * 1024)
+            .initial_connection_window_size(64 * 1024 * 1024)
+            .adaptive_window(true);
+        builder
             .serve_connection_with_upgrades(TokioIo::new(inner), service)
             .await
             .map_err(|_| Error::Protocol("VMess HTTP 载体失败"))?;
@@ -190,15 +201,15 @@ async fn handle(
                     tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
                 config.max_message_size = Some(1024 * 1024);
                 config.max_frame_size = Some(1024 * 1024);
-                config.write_buffer_size = 8192;
-                config.max_write_buffer_size = 65536;
+                config.write_buffer_size = 65536;
+                config.max_write_buffer_size = 256 * 1024;
                 let websocket = tokio_tungstenite::WebSocketStream::from_raw_socket(
                     TokioIo::new(socket),
                     tokio_tungstenite::tungstenite::protocol::Role::Server,
                     Some(config),
                 )
                 .await;
-                let (local, peer) = tokio::io::duplex(64 * 1024);
+                let (local, peer) = tokio::io::duplex(256 * 1024);
                 let run = payload.serve(Box::new(local), access, context.clone());
                 let bridge = ws_bridge(websocket, peer);
                 tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),result=async{tokio::try_join!(run,bridge).map(|_|())}=>result}
@@ -253,9 +264,9 @@ async fn handle(
             {
                 return empty(StatusCode::NOT_FOUND);
             }
-            let (sender, receiver) = mpsc::channel(16);
+            let (sender, receiver) = mpsc::channel(128);
             let body = StreamBody::new(ReceiverStream::new(receiver)).boxed_unsync();
-            let (local, peer) = tokio::io::duplex(64 * 1024);
+            let (local, peer) = tokio::io::duplex(256 * 1024);
             if !spawn(&tasks, &context.tasks.clone(), async move {
                 let _lease = lease;
                 let run = payload.serve(Box::new(local), access, context.clone());
@@ -321,7 +332,7 @@ async fn grpc_bridge(
         Ok::<_, Error>(())
     };
     let download = async move {
-        let mut bytes = vec![0; 8192];
+        let mut bytes = vec![0; 65536];
         loop {
             let n = reader.read(&mut bytes).await?;
             if n == 0 {
@@ -373,7 +384,7 @@ async fn ws_bridge<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         Ok::<_, Error>(())
     };
     let download = async move {
-        let mut bytes = vec![0; 8192];
+        let mut bytes = vec![0; 65536];
         loop {
             let n = reader.read(&mut bytes).await?;
             if n == 0 {
@@ -394,6 +405,7 @@ async fn ws_bridge<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
 struct ActiveIo {
     inner: BoxStream,
     activity: tokio::sync::watch::Sender<tokio::time::Instant>,
+    last: tokio::time::Instant,
 }
 impl AsyncRead for ActiveIo {
     fn poll_read(
@@ -405,7 +417,11 @@ impl AsyncRead for ActiveIo {
         let before = out.filled().len();
         let result = std::pin::Pin::new(&mut this.inner).poll_read(cx, out);
         if matches!(result, std::task::Poll::Ready(Ok(()))) && out.filled().len() > before {
-            this.activity.send_replace(tokio::time::Instant::now());
+            let now = tokio::time::Instant::now();
+            if now.duration_since(this.last) >= std::time::Duration::from_secs(1) {
+                this.last = now;
+                this.activity.send_replace(now);
+            }
         }
         result
     }
@@ -419,7 +435,11 @@ impl AsyncWrite for ActiveIo {
         let this = self.get_mut();
         let result = std::pin::Pin::new(&mut this.inner).poll_write(cx, bytes);
         if matches!(result,std::task::Poll::Ready(Ok(n)) if n>0) {
-            this.activity.send_replace(tokio::time::Instant::now());
+            let now = tokio::time::Instant::now();
+            if now.duration_since(this.last) >= std::time::Duration::from_secs(1) {
+                this.last = now;
+                this.activity.send_replace(now);
+            }
         }
         result
     }

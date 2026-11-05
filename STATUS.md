@@ -1,10 +1,10 @@
 # 项目状态
 
-更新日期：2026-11-04（Asia/Shanghai）
+更新日期：2026-11-05（Asia/Shanghai）
 
 ## 版本
 
-最新发布：[v1.11.0](docs/releases/1.11.0.md)（首轮跨机发行版为 [v1.3.2](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.3.2)），带 Linux `x86_64` 二进制。首轮完成计划、`M0`–`M7` 三核心（Mihomo、sing-box、Xray）主要功能对齐与 `M8`–`M10` Mihomo 深度体验对标已全部完成并经实测核销（见[能力总表](docs/capability-matrix/README.md)与 [M1–M10 验证记录](docs/testing/m1-m7-verification-2026-11-04.md)）。
+最新发布：[v1.12.0](docs/releases/1.12.0.md)（[GitHub Release v1.12.0](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.12.0)），带 Linux `x86_64` 二进制。首轮完成计划、`M0`–`M7` 三核心（Mihomo、sing-box、Xray）主要功能对齐、`M8`–`M10` Mihomo 深度体验对标及 17 协议 70 组合性能对标与数据面加速已全部完成并经实测核销（见[能力总表](docs/capability-matrix/README.md)、[M1–M10 验证记录](docs/testing/m1-m7-verification-2026-11-04.md)与 [17 协议 70 组合性能对标报告](docs/testing/benchmarks/mihomo-vs-kerlico-2026-11-04/REPORT.md)）。
 
 构建基线：Rust `1.99.1`，Linux `x86_64`。
 
@@ -29,6 +29,7 @@
 | `M8`（`v1.11.0`） | Mihomo YAML 原生直通与全协议订阅解析：顶层 `port`/`socks-port`/`allow-lan`/`bind-address`/`mode`/`rules`/`sub-rules`、内置 `DIRECT`/`REJECT`/`PASS` 自动注入、`proxy-providers` 字段 `override` 及 `vmess`/`ss`/`ssr`/`vless`/`trojan`/`hy2`/`tuic`/`anytls`/`wg` URI 分享链接解析 | 已完成 |
 | `M9`（`v1.11.0`） | TUN 自动路由守卫、UDP/TCP DNS 劫持与本机进程匹配：`TunRouteGuard` 生命周期路由安装回滚与 `route-address-set` 展开、多目标 UDP 与 TCP DNS 劫持自动注入、跨平台本机套接字进程解析与 `PROCESS-NAME*`/`PROCESS-PATH*` 规则匹配 | 已完成 |
 | `M10`（`v1.11.0`） | Hysteria2 / TUIC 动态 UDP 端口跳跃与 `SUB-RULE`：TUIC `HoppingSocket`（`ports`/`mport`/`hop_interval`/`hop_interval_max`）、Hysteria2 毫秒级跳跃间隔与 `mport`、`RouteTable` 命名子规则表递归求值 | 已完成 |
+| `v1.12.0` | 17 协议 70 组合性能对标与数据面全栈加速：公网 1Gbps 跨机 30s 与内网环回 256MiB 双场景 70/70 达标（`>= 78%` Mihomo），8 流总吞吐分别达 Mihomo 的 109.1% 与 103.2%，双端峰值内存占 Mihomo 中位数约 55.1% | 已发布 |
 
 验证规则见 [0012](docs/decisions/0012-simplified-delivery-and-verification.md)。跨进程设备 daemon/IPC 不在计划内，出现多进程部署需求时再排。
 
@@ -137,11 +138,11 @@ flowchart TD
 
 ## 最新门禁
 
-`v1.11.0`（`perf-02`）：fmt、严格 Clippy、zerotier-node 测试、release、许可通知、能力总表与站点检查全部通过；全量单元与回环集成测试 0 失败（见 [M1–M10 验证记录](docs/testing/m1-m7-verification-2026-11-04.md)）。门禁只含回环与单元测试。
+`v1.12.0`（`perf-01` / `perf-02`）：fmt、严格 Clippy、zerotier-node 测试、release、许可通知、能力总表与站点检查全部通过；全量单元与回环集成测试 0 失败（见 [M1–M10 验证记录](docs/testing/m1-m7-verification-2026-11-04.md) 与 [17 协议 70 组合性能对标报告](docs/testing/benchmarks/mihomo-vs-kerlico-2026-11-04/REPORT.md)）。门禁只含回环与单元测试。
 
 ## 实机测试
 
-30 个协议都在 `perf-01`、`perf-02`、`perf-03` 上跨机跑过，也都对过第三方真实对端，记录见 [跨机矩阵](docs/testing/cross-host-2026-11-03.md) 与 [第三方互通](docs/testing/peer-interop-2026-11-03.md)。`v1.3.2` 二进制的双端矩阵（TCP 小包与 1 MiB、UDP）：通过 1597，失败 45，不适用 128；44 项失败是 1200 字节及以上的 UDP 大包，1 项是 WireGuard IPv6 的 TCP 1 MiB，都在 MTU 1300 的 Mesh 路径上。公网高位端口被机器防火墙拦截，跨机走 Mesh。
+30 个协议都在 `perf-01`、`perf-02`、`perf-03` 上跨机跑过，也都对过第三方真实对端，记录见 [跨机矩阵](docs/testing/cross-host-2026-11-03.md)、[第三方互通](docs/testing/peer-interop-2026-11-03.md) 与 [17 协议 70 组合性能对标报告](docs/testing/benchmarks/mihomo-vs-kerlico-2026-11-04/REPORT.md)。公网 1Gbps 跨机 30s 固定时长（`perf-01 <-> perf-03`）与内网环回 256MiB（`perf-01`）17 协议 70 组合 100% 达标（`>= 78%` Mihomo 吞吐）。`v1.3.2` 二进制的双端矩阵（TCP 小包与 1 MiB、UDP）：通过 1597，失败 45，不适用 128；44 项失败是 1200 字节及以上的 UDP 大包，1 项是 WireGuard IPv6 的 TCP 1 MiB，都在 MTU 1300 的 Mesh 路径上。
 
 官网 https://www.kerlico.com ，文档站 https://wiki.kerlico.com 。源码和部署参数在 `site/`。
 

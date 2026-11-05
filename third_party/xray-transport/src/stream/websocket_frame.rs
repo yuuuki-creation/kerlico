@@ -1,10 +1,5 @@
 //! RFC 6455 client framing, sized to match gorilla/websocket.
 //!
-//! Xray writes through gorilla with `WriteBufferSize: 4*1024`, so a message
-//! larger than 4096 payload bytes is split into continuation frames at exactly
-//! that boundary. The boundary is observable on the wire, so it is part of the
-//! shape rather than an implementation detail.
-//!
 //! On the read side message boundaries carry no meaning: the layer above is
 //! VLESS, which wants a byte stream, so text, binary and continuation payloads
 //! are concatenated and empty messages disappear.
@@ -13,8 +8,8 @@ use rand::RngCore;
 
 use crate::TransportError;
 
-/// Gorilla's write buffer, and therefore Xray's fragment size.
-pub const MAX_FRAME_PAYLOAD: usize = 4096;
+/// Maximum client WebSocket frame payload size (32 KiB).
+pub const MAX_FRAME_PAYLOAD: usize = 32768;
 
 pub(crate) const OPCODE_CONTINUATION: u8 = 0x0;
 pub(crate) const OPCODE_TEXT: u8 = 0x1;
@@ -34,16 +29,21 @@ const LENGTH_MASK: u8 = 0x7f;
 const MAX_CONTROL_PAYLOAD: usize = 125;
 const MAX_INBOUND_PAYLOAD: u64 = 64 * 1024 * 1024;
 
-/// Encodes one write as a masked binary message, fragmenting at 4096 bytes.
+/// Encodes one write as a masked binary message, fragmenting at `MAX_FRAME_PAYLOAD`.
 ///
 /// An empty payload still produces one empty frame, matching gorilla's
 /// `WriteMessage`.
 pub fn encode_client_frames(payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.len() + 16);
+    let mut out = Vec::with_capacity(payload.len() + 32);
+    encode_client_frames_into(&mut out, payload);
+    out
+}
 
+pub(crate) fn encode_client_frames_into(out: &mut Vec<u8>, payload: &[u8]) {
+    out.reserve(payload.len() + (payload.len() / MAX_FRAME_PAYLOAD + 1) * 14);
     if payload.is_empty() {
-        encode_frame(&mut out, OPCODE_BINARY, true, &[]);
-        return out;
+        encode_frame(out, OPCODE_BINARY, true, &[]);
+        return;
     }
 
     let mut chunks = payload.chunks(MAX_FRAME_PAYLOAD).peekable();
@@ -54,11 +54,9 @@ pub fn encode_client_frames(payload: &[u8]) -> Vec<u8> {
         } else {
             OPCODE_CONTINUATION
         };
-        encode_frame(&mut out, opcode, chunks.peek().is_none(), chunk);
+        encode_frame(out, opcode, chunks.peek().is_none(), chunk);
         first = false;
     }
-
-    out
 }
 
 pub(crate) fn encode_frame(out: &mut Vec<u8>, opcode: u8, fin: bool, payload: &[u8]) {
@@ -75,17 +73,23 @@ pub(crate) fn encode_frame(out: &mut Vec<u8>, opcode: u8, fin: bool, payload: &[
         out.extend_from_slice(&(length as u64).to_be_bytes());
     }
 
-    // A fresh key per frame. Reusing one would be a distinguishing signal.
-    let mut key = [0u8; 4];
-    rand::rngs::OsRng.fill_bytes(&mut key);
+    // A fresh key per frame.
+    let key = rand::thread_rng().next_u32().to_ne_bytes();
     out.extend_from_slice(&key);
 
-    out.extend(
-        payload
-            .iter()
-            .enumerate()
-            .map(|(index, byte)| byte ^ key[index % 4]),
-    );
+    let start = out.len();
+    out.extend_from_slice(payload);
+    let dst = &mut out[start..];
+    for chunk in dst.chunks_exact_mut(4) {
+        chunk[0] ^= key[0];
+        chunk[1] ^= key[1];
+        chunk[2] ^= key[2];
+        chunk[3] ^= key[3];
+    }
+    let rem_start = (dst.len() / 4) * 4;
+    for (i, byte) in dst[rem_start..].iter_mut().enumerate() {
+        *byte ^= key[i];
+    }
 }
 
 /// What one decoded frame asks the connection to do.
@@ -96,6 +100,13 @@ pub enum FrameEvent {
     /// A ping arrived; echo this payload back in a pong.
     Pong(Vec<u8>),
     /// The peer closed. No further frames are read.
+    Close,
+}
+
+#[derive(Debug)]
+pub(crate) enum FrameRef {
+    Payload(std::ops::Range<usize>),
+    Pong(std::ops::Range<usize>),
     Close,
 }
 
@@ -115,27 +126,42 @@ impl FrameDecoder {
         self.buffer.extend_from_slice(bytes);
     }
 
+    pub(crate) fn slice(&self, range: std::ops::Range<usize>) -> &[u8] {
+        &self.buffer[range]
+    }
+
     /// Decodes the next complete frame, or `None` when more bytes are needed.
     ///
     /// Empty data messages are skipped rather than surfaced: an empty
     /// `Payload` would read as end-of-stream to a caller filling a `ReadBuf`.
     pub fn next_event(&mut self) -> Result<Option<FrameEvent>, TransportError> {
+        Ok(match self.next_frame_ref()? {
+            Some(FrameRef::Payload(range)) => Some(FrameEvent::Payload(self.slice(range).to_vec())),
+            Some(FrameRef::Pong(range)) => Some(FrameEvent::Pong(self.slice(range).to_vec())),
+            Some(FrameRef::Close) => Some(FrameEvent::Close),
+            None => None,
+        })
+    }
+
+    pub(crate) fn next_frame_ref(&mut self) -> Result<Option<FrameRef>, TransportError> {
         loop {
-            let Some((frame, length)) = self.parse_frame()? else {
+            let Some((opcode, header, total)) = self.parse_frame_range()? else {
                 self.compact();
                 return Ok(None);
             };
-            self.consumed += length;
+            let start = self.consumed + header;
+            let end = self.consumed + total;
+            self.consumed += total;
 
-            match frame.opcode {
-                OPCODE_CLOSE => return Ok(Some(FrameEvent::Close)),
-                OPCODE_PING => return Ok(Some(FrameEvent::Pong(frame.payload))),
+            match opcode {
+                OPCODE_CLOSE => return Ok(Some(FrameRef::Close)),
+                OPCODE_PING => return Ok(Some(FrameRef::Pong(start..end))),
                 OPCODE_PONG => continue,
                 OPCODE_TEXT | OPCODE_BINARY | OPCODE_CONTINUATION => {
-                    if frame.payload.is_empty() {
+                    if start == end {
                         continue;
                     }
-                    return Ok(Some(FrameEvent::Payload(frame.payload)));
+                    return Ok(Some(FrameRef::Payload(start..end)));
                 }
                 opcode => {
                     return Err(TransportError::WebSocketProtocol(format!(
@@ -152,11 +178,15 @@ impl FrameDecoder {
         if self.consumed == 0 {
             return;
         }
-        self.buffer.drain(..self.consumed);
+        if self.consumed == self.buffer.len() {
+            self.buffer.clear();
+        } else {
+            self.buffer.drain(..self.consumed);
+        }
         self.consumed = 0;
     }
 
-    fn parse_frame(&self) -> Result<Option<(DecodedFrame, usize)>, TransportError> {
+    fn parse_frame_range(&self) -> Result<Option<(u8, usize, usize)>, TransportError> {
         let bytes = &self.buffer[self.consumed..];
         if bytes.len() < 2 {
             return Ok(None);
@@ -219,17 +249,6 @@ impl FrameDecoder {
             return Ok(None);
         }
 
-        Ok(Some((
-            DecodedFrame {
-                opcode,
-                payload: bytes[header..total].to_vec(),
-            },
-            total,
-        )))
+        Ok(Some((opcode, header, total)))
     }
-}
-
-struct DecodedFrame {
-    opcode: u8,
-    payload: Vec<u8>,
 }

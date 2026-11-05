@@ -35,8 +35,8 @@ pub(crate) struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_connections: 4,
-            max_streams: 64,
+            max_connections: 8,
+            max_streams: 256,
             max_udp_flows: 64,
             idle_timeout_ms: 30000,
             health_check_ms: 10000,
@@ -61,9 +61,12 @@ impl Limits {
     pub fn quic(&self, incoming: usize) -> Result<Arc<quinn::TransportConfig>> {
         let mut value = quinn::TransportConfig::default();
         value.max_concurrent_bidi_streams((incoming as u32).into());
-        value.stream_receive_window(131072u32.into());
-        value.receive_window((2 * 1024 * 1024u32).into());
-        value.send_window(2 * 1024 * 1024);
+        value.stream_receive_window((32 * 1024 * 1024u32).into());
+        value.receive_window((128 * 1024 * 1024u32).into());
+        value.send_window(128 * 1024 * 1024);
+        let mut cubic = quinn::congestion::CubicConfig::default();
+        cubic.initial_window(2 * 1024 * 1024);
+        value.congestion_controller_factory(Arc::new(cubic));
         value.max_idle_timeout(Some(
             quinn::IdleTimeout::try_from(self.idle()).map_err(|_| invalid())?,
         ));

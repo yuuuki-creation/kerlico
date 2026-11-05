@@ -1,7 +1,7 @@
 use crate::io::DuplexWake;
 use aes_gcm::{
     Aes128Gcm,
-    aead::{Aead, KeyInit, Payload},
+    aead::{Aead, AeadInPlace, KeyInit, Payload},
 };
 use chacha20poly1305::ChaCha20Poly1305;
 use hmac::{Hmac, Mac};
@@ -11,6 +11,10 @@ use sha2::Sha256;
 use std::{
     io,
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll, ready},
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -60,19 +64,6 @@ impl Cipher {
             Method::None => Err(crate::invalid()),
         }
     }
-    fn seal(&self, nonce: &[u8; 12], plain: &[u8]) -> Result<Vec<u8>> {
-        let payload = Payload {
-            msg: plain,
-            aad: nonce,
-        };
-        match self {
-            Self::Aes(cipher) => cipher.encrypt(aes_gcm::Nonce::from_slice(nonce), payload),
-            Self::ChaCha(cipher) => {
-                cipher.encrypt(chacha20poly1305::Nonce::from_slice(nonce), payload)
-            }
-        }
-        .map_err(|_| crate::invalid())
-    }
     fn open(&self, nonce: &[u8; 12], cipher: &[u8]) -> Result<Vec<u8>> {
         let payload = Payload {
             msg: cipher,
@@ -85,6 +76,51 @@ impl Cipher {
             }
         }
         .map_err(|_| crate::invalid())
+    }
+    fn seal_into(&self, nonce: &[u8; 12], plain: &[u8], out: &mut Vec<u8>) -> Result<()> {
+        out.clear();
+        out.reserve(14 + plain.len() + 16);
+        out.extend_from_slice(&((12 + plain.len() + 16) as u16).to_be_bytes());
+        out.extend_from_slice(nonce);
+        out.extend_from_slice(plain);
+        let tag = match self {
+            Self::Aes(cipher) => cipher
+                .encrypt_in_place_detached(aes_gcm::Nonce::from_slice(nonce), nonce, &mut out[14..])
+                .map(<[u8; 16]>::from),
+            Self::ChaCha(cipher) => cipher
+                .encrypt_in_place_detached(
+                    chacha20poly1305::Nonce::from_slice(nonce),
+                    nonce,
+                    &mut out[14..],
+                )
+                .map(<[u8; 16]>::from),
+        }
+        .map_err(|_| crate::invalid())?;
+        out.extend_from_slice(&tag);
+        Ok(())
+    }
+    fn open_in_place(&self, nonce: &[u8; 12], cipher_and_tag: &mut [u8]) -> Result<usize> {
+        if cipher_and_tag.len() < 16 {
+            return Err(crate::invalid());
+        }
+        let msg_len = cipher_and_tag.len() - 16;
+        let (msg, tag) = cipher_and_tag.split_at_mut(msg_len);
+        match self {
+            Self::Aes(cipher) => cipher.decrypt_in_place_detached(
+                aes_gcm::Nonce::from_slice(nonce),
+                nonce,
+                msg,
+                aes_gcm::Tag::from_slice(tag),
+            ),
+            Self::ChaCha(cipher) => cipher.decrypt_in_place_detached(
+                chacha20poly1305::Nonce::from_slice(nonce),
+                nonce,
+                msg,
+                chacha20poly1305::Tag::from_slice(tag),
+            ),
+        }
+        .map_err(|_| crate::invalid())?;
+        Ok(msg_len)
     }
 }
 
@@ -134,18 +170,25 @@ impl Sender {
         })
     }
     pub fn seal(&mut self, plain: &[u8]) -> Result<Vec<u8>> {
+        let mut frame = Vec::new();
+        self.seal_into(plain, &mut frame)?;
+        Ok(frame)
+    }
+    pub fn seal_into(&mut self, plain: &[u8], out: &mut Vec<u8>) -> Result<()> {
         if self.failed {
             return Err(crate::invalid());
         }
-        let result = self.seal_inner(plain);
+        let result = self.seal_into_inner(plain, out);
         if result.is_err() {
             self.failed = true;
         }
         result
     }
-    fn seal_inner(&mut self, plain: &[u8]) -> Result<Vec<u8>> {
+    fn seal_into_inner(&mut self, plain: &[u8], out: &mut Vec<u8>) -> Result<()> {
         if plain.is_empty() || self.method == Method::None {
-            return Ok(plain.to_vec());
+            out.clear();
+            out.extend_from_slice(plain);
+            return Ok(());
         }
         if plain.len() > MAX_PLAIN {
             return Err(Error::ResourceLimit);
@@ -164,11 +207,11 @@ impl Sender {
         let mut nonce = [0; 12];
         nonce[..4].copy_from_slice(&self.epoch.to_be_bytes());
         nonce[4..].copy_from_slice(&self.sequence.to_be_bytes());
-        let encrypted = self.cipher.as_ref().unwrap().1.seal(&nonce, plain)?;
-        let mut frame = Vec::with_capacity(14 + encrypted.len());
-        frame.extend_from_slice(&((12 + encrypted.len()) as u16).to_be_bytes());
-        frame.extend_from_slice(&nonce);
-        frame.extend(encrypted);
+        self.cipher
+            .as_ref()
+            .unwrap()
+            .1
+            .seal_into(&nonce, plain, out)?;
         self.sequence = next_sequence;
         self.plain_bytes = total;
         if self.threshold > 0
@@ -178,7 +221,7 @@ impl Sender {
             self.updates = self.updates.checked_add(1).ok_or(Error::ResourceLimit)?;
             self.sequence = random_sequence()?;
         }
-        Ok(frame)
+        Ok(())
     }
 }
 
@@ -234,6 +277,47 @@ impl Receiver {
         self.next = Some((epoch, next_sequence));
         Ok(plain)
     }
+    pub fn open_in_place(&mut self, body: &mut Vec<u8>) -> Result<usize> {
+        if self.failed {
+            return Err(crate::invalid());
+        }
+        let result = self.open_in_place_inner(body);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+    fn open_in_place_inner(&mut self, body: &mut Vec<u8>) -> Result<usize> {
+        if self.method == Method::None {
+            return Ok(0);
+        }
+        if !(28..=65535).contains(&body.len()) {
+            return Err(crate::invalid());
+        }
+        let header: [u8; 12] = body[..12].try_into().unwrap();
+        let epoch = u32::from_be_bytes(header[..4].try_into().unwrap());
+        let sequence = u64::from_be_bytes(header[4..].try_into().unwrap());
+        let next_sequence = sequence.checked_add(1).ok_or_else(crate::invalid)?;
+        if let Some((previous, expected)) = self.next
+            && (epoch < previous
+                || (epoch == previous && sequence != expected)
+                || epoch.saturating_sub(previous) > 8)
+        {
+            return Err(crate::invalid());
+        }
+        if self.cipher.as_ref().map(|(epoch, _)| *epoch) != Some(epoch) {
+            self.cipher = Some((epoch, Cipher::new(self.method, &self.base, epoch)?));
+        }
+        let msg_len = self
+            .cipher
+            .as_ref()
+            .unwrap()
+            .1
+            .open_in_place(&header, &mut body[12..])?;
+        body.truncate(12 + msg_len);
+        self.next = Some((epoch, next_sequence));
+        Ok(12)
+    }
 }
 
 pub(crate) struct RecordStream<T> {
@@ -254,7 +338,8 @@ pub(crate) struct RecordStream<T> {
     read_closed: bool,
     flush_pending: bool,
     shutdown_done: bool,
-    wake: std::sync::Arc<DuplexWake>,
+    wake: Arc<DuplexWake>,
+    peer_failed: Arc<AtomicBool>,
 }
 impl<T> RecordStream<T> {
     pub fn new(inner: T, method: Method, send: [u8; 32], receive: [u8; 32]) -> Result<Self> {
@@ -263,13 +348,13 @@ impl<T> RecordStream<T> {
             method,
             sender: Sender::new(method, send, UPDATE_BYTES)?,
             receiver: Receiver::new(method, receive),
-            pending: Vec::new(),
+            pending: Vec::with_capacity(65536),
             written: 0,
             header: [0; 2],
             header_used: 0,
-            body: Vec::new(),
+            body: Vec::with_capacity(65536),
             body_used: 0,
-            plain: Vec::new(),
+            plain: Vec::with_capacity(65536),
             plain_used: 0,
             failed: false,
             write_closed: false,
@@ -277,12 +362,14 @@ impl<T> RecordStream<T> {
             flush_pending: false,
             shutdown_done: false,
             wake: DuplexWake::new(),
+            peer_failed: Arc::new(AtomicBool::new(false)),
         })
     }
     pub fn inner_mut(&mut self) -> &mut T {
         &mut self.inner
     }
     fn fail(&mut self) {
+        self.peer_failed.store(true, Ordering::Release);
         if !self.failed {
             self.failed = true;
             self.wake.wake_both();
@@ -374,7 +461,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for RecordStream<T> {
         if output.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        if this.failed {
+        if this.failed || this.peer_failed.load(Ordering::Acquire) {
+            this.failed = true;
             return Poll::Ready(Err(broken()));
         }
         // 输出Pending不能阻塞反向读取；下层就绪会经共享waker唤醒两个方向。
@@ -437,14 +525,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for RecordStream<T> {
                 }
                 this.body_used += count;
             }
-            match this.receiver.open(&this.body) {
-                Ok(plain) => this.plain = plain,
+            match this.receiver.open_in_place(&mut this.body) {
+                Ok(offset) => {
+                    std::mem::swap(&mut this.plain, &mut this.body);
+                    this.plain_used = offset;
+                }
                 Err(error) => {
                     this.fail();
                     return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, error)));
                 }
             }
-            this.plain_used = 0;
             this.body.clear();
             this.body_used = 0;
             this.header_used = 0;
@@ -463,7 +553,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RecordStream<T> {
         let forwarded = this.wake.writer(cx.waker());
         let mut inner_context = Context::from_waker(&forwarded);
         let cx = &mut inner_context;
-        if this.failed || this.write_closed {
+        if this.failed || this.write_closed || this.peer_failed.load(Ordering::Acquire) {
+            this.failed = true;
             return Poll::Ready(Err(broken()));
         }
         ready!(this.output(cx))?;
@@ -475,11 +566,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RecordStream<T> {
             return result;
         }
         let count = bytes.len().min(MAX_PLAIN);
-        match this.sender.seal(&bytes[..count]) {
-            Ok(frame) => {
-                this.pending = frame;
-                this.wake.wake_reader();
-            }
+        match this.sender.seal_into(&bytes[..count], &mut this.pending) {
+            Ok(()) => match this.drain(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => this.wake.wake_reader(),
+            },
             Err(error) => {
                 this.fail();
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, error)));
@@ -492,7 +584,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RecordStream<T> {
         let forwarded = this.wake.writer(cx.waker());
         let mut inner_context = Context::from_waker(&forwarded);
         let cx = &mut inner_context;
-        if this.failed {
+        if this.failed || this.peer_failed.load(Ordering::Acquire) {
+            this.failed = true;
             return Poll::Ready(Err(broken()));
         }
         if !this.shutdown_done {
@@ -505,11 +598,203 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RecordStream<T> {
         let forwarded = this.wake.writer(cx.waker());
         let mut inner_context = Context::from_waker(&forwarded);
         let cx = &mut inner_context;
-        if this.failed {
+        if this.failed || this.peer_failed.load(Ordering::Acquire) {
+            this.failed = true;
             return Poll::Ready(Err(broken()));
         }
         this.write_closed = true;
         this.output(cx)
+    }
+}
+
+struct ParallelRecordStream {
+    rx: tokio::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    read_buf: Vec<u8>,
+    read_pos: usize,
+    writer: RecordStream<crate::codec::obfs::ObfsStream>,
+    cancel: kerlico_core::CancellationToken,
+}
+impl Drop for ParallelRecordStream {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+impl AsyncRead for ParallelRecordStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if output.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let this = self.get_mut();
+        if this.read_pos < this.read_buf.len() {
+            let avail = &this.read_buf[this.read_pos..];
+            let count = avail.len().min(output.remaining());
+            output.put_slice(&avail[..count]);
+            this.read_pos += count;
+            if this.read_pos >= this.read_buf.len() {
+                this.read_buf = Vec::new();
+                this.read_pos = 0;
+            }
+            return Poll::Ready(Ok(()));
+        }
+        loop {
+            match this.rx.poll_recv(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    if output.remaining() >= chunk.len() {
+                        output.put_slice(&chunk);
+                    } else {
+                        let count = output.remaining();
+                        output.put_slice(&chunk[..count]);
+                        this.read_buf = chunk;
+                        this.read_pos = count;
+                    }
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    this.writer.fail();
+                    return Poll::Ready(Err(error));
+                }
+                Poll::Ready(None) => {
+                    if this.writer.failed || this.writer.peer_failed.load(Ordering::Acquire) {
+                        this.writer.failed = true;
+                        return Poll::Ready(Err(broken()));
+                    }
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Pending => {
+                    if this.writer.failed {
+                        return Poll::Ready(Err(broken()));
+                    }
+                    return Poll::Pending;
+                }
+            }
+        }
+    }
+}
+impl AsyncWrite for ParallelRecordStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let res = Pin::new(&mut this.writer).poll_write(cx, bytes);
+        if matches!(res, Poll::Ready(Err(_))) {
+            this.cancel.cancel();
+        }
+        res
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let res = Pin::new(&mut this.writer).poll_flush(cx);
+        if matches!(res, Poll::Ready(Err(_))) {
+            this.cancel.cancel();
+        }
+        res
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let res = Pin::new(&mut this.writer).poll_shutdown(cx);
+        if matches!(res, Poll::Ready(Err(_))) {
+            this.cancel.cancel();
+        }
+        res
+    }
+}
+impl RecordStream<crate::codec::obfs::ObfsStream> {
+    pub(crate) fn into_parallel(self, scope: &crate::scope::Scope) -> kerlico_core::BoxStream {
+        let peer_failed = self.peer_failed.clone();
+        let (read_obfs, write_obfs) = self.inner.into_split(peer_failed.clone());
+        let mut read_record = Self {
+            inner: read_obfs,
+            method: self.method,
+            sender: Sender {
+                method: Method::None,
+                base: Zeroizing::new([0; 32]),
+                cipher: None,
+                epoch: 1,
+                sequence: 1,
+                plain_bytes: 0,
+                updates: 0,
+                threshold: UPDATE_BYTES,
+                failed: false,
+            },
+            receiver: self.receiver,
+            pending: Vec::new(),
+            written: 0,
+            header: self.header,
+            header_used: self.header_used,
+            body: self.body,
+            body_used: self.body_used,
+            plain: self.plain,
+            plain_used: self.plain_used,
+            failed: self.failed,
+            write_closed: false,
+            read_closed: self.read_closed,
+            flush_pending: false,
+            shutdown_done: false,
+            wake: self.wake.clone(),
+            peer_failed: peer_failed.clone(),
+        };
+        let write_record = Self {
+            inner: write_obfs,
+            method: self.method,
+            sender: self.sender,
+            receiver: Receiver::new(Method::None, [0; 32]),
+            pending: self.pending,
+            written: self.written,
+            header: [0; 2],
+            header_used: 0,
+            body: Vec::new(),
+            body_used: 0,
+            plain: Vec::new(),
+            plain_used: 0,
+            failed: self.failed,
+            write_closed: self.write_closed,
+            read_closed: true,
+            flush_pending: self.flush_pending,
+            shutdown_done: self.shutdown_done,
+            wake: self.wake,
+            peer_failed,
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel::<io::Result<Vec<u8>>>(16);
+        let cancel = scope.cancel.child_token();
+        let reader_cancel = cancel.clone();
+        scope.spawn(async move {
+            loop {
+                let mut chunk = Vec::with_capacity(65536);
+                let result = tokio::select! {
+                    biased;
+                    _ = reader_cancel.cancelled() => break,
+                    res = tokio::io::AsyncReadExt::read_buf(&mut read_record, &mut chunk) => res,
+                };
+                match result {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Err(error)).await;
+                        break;
+                    }
+                }
+            }
+        });
+        Box::new(ParallelRecordStream {
+            rx,
+            read_buf: Vec::new(),
+            read_pos: 0,
+            writer: write_record,
+            cancel,
+        })
     }
 }
 

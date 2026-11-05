@@ -67,13 +67,16 @@ impl AsyncRead for Candidate {
         if state.accepted {
             return Pin::new(&mut state.stream).poll_read(cx, out);
         }
-        if state.bytes.len() >= 262144 {
+        if state.bytes.len() >= 2 * 1048576 {
             return Poll::Ready(Err(io::Error::other("认证首部超过限制")));
         }
         if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
             state.waiters.push(cx.waker().clone());
         }
-        let size = out.remaining().min(16384).min(262144 - state.bytes.len());
+        let size = out
+            .remaining()
+            .min(16384)
+            .min(2 * 1048576 - state.bytes.len());
         let mut bytes = vec![0; size];
         let mut buffer = ReadBuf::new(&mut bytes);
         match Pin::new(&mut state.stream).poll_read(cx, &mut buffer) {

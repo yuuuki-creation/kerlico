@@ -48,18 +48,20 @@ impl Limits {
                 .try_into()
                 .map_err(|_| invalid())?,
         ));
-        value.stream_receive_window((256 * 1024u32).into());
-        value.receive_window((2 * 1024 * 1024u32).into());
-        value.send_window(2 * 1024 * 1024);
+        value.stream_receive_window((16 * 1024 * 1024u32).into());
+        value.receive_window((64 * 1024 * 1024u32).into());
+        value.send_window(64 * 1024 * 1024);
         value.datagram_receive_buffer_size(Some(256 * 1024));
         value.datagram_send_buffer_size(256 * 1024);
         value.advertised_datagram_frame_size(Some(1200));
         if self.congestion == "bbr" {
-            value.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+            let mut bbr = quinn::congestion::BbrConfig::default();
+            bbr.initial_window(1024 * 1024);
+            value.congestion_controller_factory(Arc::new(bbr));
         } else {
-            value.congestion_controller_factory(Arc::new(
-                quinn::congestion::NewRenoConfig::default(),
-            ));
+            let mut reno = quinn::congestion::NewRenoConfig::default();
+            reno.initial_window(1024 * 1024);
+            value.congestion_controller_factory(Arc::new(reno));
         }
         if obfs {
             let mut mtu = quinn::MtuDiscoveryConfig::default();

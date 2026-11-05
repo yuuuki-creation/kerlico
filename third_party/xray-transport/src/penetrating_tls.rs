@@ -310,7 +310,23 @@ where
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         match &mut this.state {
-            PenetratingTlsState::Tls(Some(stream)) => Pin::new(stream).poll_read(cx, output),
+            PenetratingTlsState::Tls(Some(stream)) => {
+                let before = output.filled().len();
+                let poll = Pin::new(stream.as_mut()).poll_read(cx, output);
+                if matches!(poll, Poll::Ready(Ok(()))) && output.filled().len() > before {
+                    let released = stream.as_ref().get_ref().0.limiter_released;
+                    if released {
+                        while output.remaining() >= 16384 {
+                            let prev = output.filled().len();
+                            match Pin::new(stream.as_mut()).poll_read(cx, output) {
+                                Poll::Ready(Ok(())) if output.filled().len() > prev => {}
+                                _ => break,
+                            }
+                        }
+                    }
+                }
+                poll
+            }
             PenetratingTlsState::Tls(None) => {
                 Poll::Ready(Err(io::Error::other("TLS stream was already taken")))
             }

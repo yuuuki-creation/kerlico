@@ -40,10 +40,11 @@ pub(crate) fn start(token: Arc<Token>, scope: &Scope) -> Body {
             let mut down=tokio::select!{biased;_=state.cancel.cancelled()=>return Err(Error::Cancelled),_=token.cancel.cancelled()=>return Err(Error::Cancelled),down=token.down.lock()=>down};
             loop {
                 if down.pending.is_none() && !down.eof {
-                    let mut bytes=vec![0;32*1024];
-                    let read=tokio::select!{biased;_=state.cancel.cancelled()=>return Err(Error::Cancelled),_=token.cancel.cancelled()=>return Err(Error::Cancelled),result=tokio::time::timeout(Duration::from_secs(15),down.reader.read(&mut bytes))=>result};
+                    let cap=if token.mode==Mode::Stream{64*1024}else{32*1024};
+                    let mut bytes=Vec::with_capacity(cap);
+                    let read=tokio::select!{biased;_=state.cancel.cancelled()=>return Err(Error::Cancelled),_=token.cancel.cancelled()=>return Err(Error::Cancelled),result=tokio::time::timeout(Duration::from_secs(15),down.reader.read_buf(&mut bytes))=>result};
                     let count=match read {Err(_)=>{state.planned.store(true,Ordering::Release);return Ok(());},Ok(Err(error))=>return Err(Error::Io(error)),Ok(Ok(count))=>count};
-                    if count==0{down.eof=true;}else{bytes.truncate(count);down.pending=Some(Bytes::from(bytes));}
+                    if count==0{down.eof=true;}else{down.pending=Some(Bytes::from(bytes));}
                 }
                 if let Some(payload)=down.pending.as_ref(){
                     let bytes=if token.mode==Mode::Stream{payload.clone()}else{let mut encoded=STANDARD.encode(payload).into_bytes();encoded.push(b'\n');Bytes::from(encoded)};

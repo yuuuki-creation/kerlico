@@ -61,7 +61,7 @@ impl Codec {
             last_server: vec![0; 16],
             cipher_send: None,
             cipher_receive: None,
-            mss: 1460,
+            mss: 2809,
             peer_overhead: cfg.overhead(),
         }
     }
@@ -142,7 +142,7 @@ impl Codec {
                 reply: false,
             });
         }
-        if self.buffer.len() + data.len() > 131072 {
+        if self.buffer.len() + data.len() > 2 * 1048576 {
             return Err(Error::ResourceLimit);
         }
         self.recv_iv = iv.to_vec();

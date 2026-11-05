@@ -304,7 +304,7 @@ impl FlowLedger {
 struct LeaseInner {
     telemetry: Telemetry,
     ledger: Arc<FlowLedger>,
-    cancelled: Vec<kerlico_core::CancellationToken>,
+    cancelled: [kerlico_core::CancellationToken; 4],
     service: kerlico_core::ServiceStatus,
     state: Mutex<CompletionState>,
     _peer_lease: Option<kerlico_core::PeerLease>,
@@ -387,7 +387,7 @@ impl FlowLease {
         Self(Arc::new(LeaseInner {
             telemetry: telemetry.clone(),
             ledger,
-            cancelled: vec![
+            cancelled: [
                 context.cancel.clone(),
                 context.peer_cancel(),
                 context.node_cancel(),
@@ -404,6 +404,9 @@ impl FlowLease {
     }
     pub(crate) fn ledger(&self) -> &FlowLedger {
         &self.0.ledger
+    }
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.0.cancelled.iter().any(|token| token.is_cancelled())
     }
     pub(crate) fn cancellation_error(&self) -> Error {
         self.0.cancellation_error().unwrap_or(Error::Cancelled)

@@ -35,7 +35,7 @@ impl Default for Limits {
             udp_queue_packets: 32,
             udp_queue_bytes: 4 * 1024 * 1024,
             idle_timeout_ms: 30000,
-            congestion_control: Congestion::Cubic,
+            congestion_control: Congestion::Bbr,
         }
     }
 }
@@ -57,9 +57,9 @@ impl Limits {
         let mut config = quinn::TransportConfig::default();
         config.max_concurrent_bidi_streams((incoming.min(65535) as u32).into());
         config.max_concurrent_uni_streams(0u32.into());
-        config.stream_receive_window((256 * 1024u32).into());
-        config.receive_window((2 * 1024 * 1024u32).into());
-        config.send_window(2 * 1024 * 1024);
+        config.stream_receive_window((16 * 1024 * 1024u32).into());
+        config.receive_window((64 * 1024 * 1024u32).into());
+        config.send_window(64 * 1024 * 1024);
         config.datagram_receive_buffer_size(if udp { Some(256 * 1024) } else { None });
         config.datagram_send_buffer_size(256 * 1024);
         config.advertised_datagram_frame_size(if udp { Some(1200) } else { None });
@@ -73,7 +73,9 @@ impl Limits {
         ));
         config.initial_mtu(1200);
         config.min_mtu(1200);
-        config.mtu_discovery_config(None);
+        let mut mtu = quinn::MtuDiscoveryConfig::default();
+        mtu.upper_bound(1444);
+        config.mtu_discovery_config(Some(mtu));
         config.congestion_controller_factory(Arc::new(crate::congestion::Factory::new(
             self.congestion_control,
         )));

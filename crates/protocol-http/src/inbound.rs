@@ -315,8 +315,22 @@ impl HttpNode {
                 };
                 match upgraded {
                     Ok(upgraded) => {
+                        let stream: BoxStream = match upgraded.downcast::<TokioIo<ActiveIo>>() {
+                            Ok(parts) => {
+                                let inner = parts.io.into_inner().into_inner();
+                                if parts.read_buf.is_empty() {
+                                    inner
+                                } else {
+                                    Box::new(UpgradedConnectStream {
+                                        inner,
+                                        prefix: parts.read_buf,
+                                    })
+                                }
+                            }
+                            Err(upgraded) => Box::new(TokioIo::new(upgraded)),
+                        };
                         let _ = kerlico_core::relay_tcp(
-                            Box::new(TokioIo::new(upgraded)),
+                            stream,
                             remote,
                             task_context.idle_timeout,
                             task_context.cancel,
@@ -499,10 +513,10 @@ impl HttpNode {
                 Ok::<_, Infallible>(response)
             }
         });
-        let (activity, mut observed) = watch::channel(Instant::now());
+        let activity = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stream = ActiveIo {
-            inner: stream,
-            activity,
+            inner: Some(stream),
+            activity: activity.clone(),
             flushed: flushed.clone(),
         };
         let mut builder = hyper::server::conn::http1::Builder::new();
@@ -510,7 +524,7 @@ impl HttpNode {
             .timer(TokioTimer::new())
             .header_read_timeout(context.connect_timeout)
             .pipeline_flush(false)
-            .max_buf_size(16_384);
+            .max_buf_size(65_536);
         let connection = builder
             .serve_connection(TokioIo::new(stream), service)
             .with_upgrades();
@@ -522,8 +536,13 @@ impl HttpNode {
                 biased;
                 _=context.cancel.cancelled()=>break Err(Error::Cancelled),
                 result=&mut connection=>break result.map_err(|_|config::invalid()),
-                changed=observed.changed()=>{if changed.is_ok(){timer.as_mut().reset(*observed.borrow_and_update()+context.idle_timeout);}},
-                _=&mut timer=>break Err(Error::Timeout),
+                _=&mut timer=>{
+                    if activity.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        timer.as_mut().reset(Instant::now() + context.idle_timeout);
+                    } else {
+                        break Err(Error::Timeout);
+                    }
+                },
             }
         };
         if let Err(error) = &result {
@@ -589,14 +608,60 @@ impl InboundProtocol for HttpNode {
     }
 }
 
-struct ActiveIo {
+struct UpgradedConnectStream {
     inner: BoxStream,
-    activity: watch::Sender<Instant>,
+    prefix: Bytes,
+}
+impl AsyncRead for UpgradedConnectStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if buffer.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        if !this.prefix.is_empty() {
+            let count = buffer.remaining().min(this.prefix.len());
+            buffer.put_slice(&this.prefix[..count]);
+            bytes::Buf::advance(&mut this.prefix, count);
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buffer)
+    }
+}
+impl AsyncWrite for UpgradedConnectStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, bytes)
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+struct ActiveIo {
+    inner: Option<BoxStream>,
+    activity: Arc<std::sync::atomic::AtomicBool>,
     flushed: FlushReceipts,
+}
+impl ActiveIo {
+    fn into_inner(mut self) -> BoxStream {
+        self.inner.take().expect("ActiveIo inner taken once")
+    }
 }
 impl Drop for ActiveIo {
     fn drop(&mut self) {
-        self.flushed.failed(FlowOutcome::ClosedByCaller);
+        if self.inner.is_some() {
+            self.flushed.failed(FlowOutcome::ClosedByCaller);
+        }
     }
 }
 impl AsyncRead for ActiveIo {
@@ -607,9 +672,10 @@ impl AsyncRead for ActiveIo {
     ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
         let previous = buffer.filled().len();
-        let result = Pin::new(&mut this.inner).poll_read(cx, buffer);
+        let result = Pin::new(this.inner.as_mut().expect("active")).poll_read(cx, buffer);
         if matches!(result, Poll::Ready(Ok(()))) && buffer.filled().len() > previous {
-            this.activity.send_replace(Instant::now());
+            this.activity
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         result
     }
@@ -621,9 +687,10 @@ impl AsyncWrite for ActiveIo {
         bytes: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
-        let result = Pin::new(&mut this.inner).poll_write(cx, bytes);
+        let result = Pin::new(this.inner.as_mut().expect("active")).poll_write(cx, bytes);
         if matches!(result,Poll::Ready(Ok(count)) if count>0) {
-            this.activity.send_replace(Instant::now());
+            this.activity
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         if matches!(result, Poll::Ready(Err(_)) | Poll::Ready(Ok(0))) && !bytes.is_empty() {
             this.flushed
@@ -633,7 +700,7 @@ impl AsyncWrite for ActiveIo {
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        let result = Pin::new(&mut this.inner).poll_flush(cx);
+        let result = Pin::new(this.inner.as_mut().expect("active")).poll_flush(cx);
         match &result {
             Poll::Ready(Ok(())) => this.flushed.succeeded(),
             Poll::Ready(Err(_)) => this
@@ -644,7 +711,7 @@ impl AsyncWrite for ActiveIo {
         result
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        Pin::new(self.get_mut().inner.as_mut().expect("active")).poll_shutdown(cx)
     }
 }
 

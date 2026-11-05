@@ -15,7 +15,7 @@ use tokio::io::AsyncReadExt;
 use x25519_dalek::StaticSecret;
 
 pub(crate) struct Negotiated {
-    pub stream: BoxStream,
+    pub stream: RecordStream<ObfsStream>,
     pub features: u32,
 }
 pub(crate) fn client_table(protocol: &Protocol) -> Result<Arc<Pair>> {
@@ -144,7 +144,7 @@ pub(crate) async fn client(
     )?;
     stream.rekey(*keys.c2s, *keys.s2c)?;
     Ok(Negotiated {
-        stream: Box::new(stream),
+        stream,
         features: response.features,
     })
 }
@@ -292,7 +292,7 @@ pub(crate) async fn server(mut raw: BoxStream, protocol: &Protocol) -> Result<Ne
     kip::write(&mut stream, kip::SERVER_HELLO, &response.encode()).await?;
     stream.rekey(*keys.s2c, *keys.c2s)?;
     Ok(Negotiated {
-        stream: Box::new(stream),
+        stream,
         features: response.features,
     })
 }
@@ -407,7 +407,7 @@ impl EarlyClient {
             self.hello.nonce,
         )?;
         Ok(Negotiated {
-            stream: Box::new(record(stream, &self.protocol, &self.pair, true, &keys)?),
+            stream: record(stream, &self.protocol, &self.pair, true, &keys)?,
             features: response.features,
         })
     }
@@ -450,13 +450,7 @@ impl EarlyServer {
     }
     pub fn finish(self, stream: BoxStream) -> Result<Negotiated> {
         Ok(Negotiated {
-            stream: Box::new(record(
-                stream,
-                &self.protocol,
-                &self.pair,
-                false,
-                &self.keys,
-            )?),
+            stream: record(stream, &self.protocol, &self.pair, false, &self.keys)?,
             features: self.features,
         })
     }

@@ -157,7 +157,24 @@ impl AsyncWrite for BodyIo {
             return Poll::Ready(Ok(0));
         }
         ready!(this.poll_pending(cx))?;
-        let count = buf.len().min(16384);
+        if let Some(Writer::H2(send)) = &mut this.writer {
+            let want = buf.len().min(65536);
+            if send.capacity() == 0 {
+                send.reserve_capacity(want);
+            }
+            let capacity = match ready!(send.poll_capacity(cx)) {
+                Some(Ok(cap)) => cap,
+                Some(Err(_)) | None => return Poll::Ready(Err(error())),
+            };
+            if capacity == 0 {
+                return Poll::Pending;
+            }
+            let count = capacity.min(want);
+            let bytes = Bytes::copy_from_slice(&buf[..count]);
+            send.send_data(bytes, false).map_err(|_| error())?;
+            return Poll::Ready(Ok(count));
+        }
+        let count = buf.len().min(262144);
         let bytes = Bytes::copy_from_slice(&buf[..count]);
         let mut writer = this.writer.take().ok_or_else(error)?;
         // 此次写入先取得有界缓冲所有权；后续 write/flush/shutdown 都等待该段真正提交。
@@ -165,6 +182,7 @@ impl AsyncWrite for BodyIo {
             let result = writer.data(bytes).await;
             (writer, result)
         }));
+        let _ = this.poll_pending(cx)?;
         Poll::Ready(Ok(count))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -176,6 +194,12 @@ impl AsyncWrite for BodyIo {
             return Poll::Ready(Ok(()));
         }
         ready!(this.poll_pending(cx))?;
+        if let Some(Writer::H2(send)) = &mut this.writer {
+            send.send_data(Bytes::new(), true).map_err(|_| error())?;
+            this.closing = true;
+            this.closed = true;
+            return Poll::Ready(Ok(()));
+        }
         if !this.closing {
             this.closing = true;
             let mut writer = this.writer.take().ok_or_else(error)?;

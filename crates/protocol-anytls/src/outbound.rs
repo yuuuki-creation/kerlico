@@ -136,25 +136,33 @@ impl AnyTlsOutbound {
                 .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
                 .clone()
         };
-        let mut sessions = bucket.lock().await;
-        if self.closed.load(Ordering::Acquire) || self.host.cancel().is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        sessions.retain(|session| !session.closed.is_cancelled());
-        let reusable = sessions
-            .iter()
-            .rev()
-            .find(|s| s.active.load(Ordering::Acquire) == 0)
-            .cloned();
-        let session = if let Some(s) = reusable {
-            s
+        let reserved = {
+            let mut sessions = bucket.lock().await;
+            if self.closed.load(Ordering::Acquire) || self.host.cancel().is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            sessions.retain(|session| !session.closed.is_cancelled());
+            let reusable = sessions
+                .iter()
+                .rev()
+                .find(|s| s.active.load(Ordering::Acquire) == 0)
+                .cloned();
+            if let Some(s) = reusable {
+                let (id, stream) = s.reserve_stream()?;
+                Some((s, id, stream))
+            } else {
+                None
+            }
+        };
+        let (session, id, mut stream) = if let Some(reserved) = reserved {
+            reserved
         } else {
             let permit = self
                 .capacity
                 .clone()
                 .try_acquire_owned()
                 .map_err(|_| Error::ResourceLimit)?;
-            let mut stream = self.connector.connect(&self.server).await?;
+            let mut raw = self.connector.connect(&self.server).await?;
             let padding = Arc::new(RwLock::new(Padding::parse(padding::DEFAULT)?));
             let count = padding
                 .read()
@@ -167,10 +175,10 @@ impl AnyTlsOutbound {
             let mut auth = self.password.to_vec();
             auth.extend_from_slice(&(count as u16).to_be_bytes());
             auth.resize(auth.len() + count, 0);
-            stream.write_all(&auth).await?;
-            stream.flush().await?;
+            raw.write_all(&auth).await?;
+            raw.flush().await?;
             let session = Session::start(
-                stream,
+                raw,
                 true,
                 padding,
                 1,
@@ -180,11 +188,17 @@ impl AnyTlsOutbound {
             )
             .await?;
             session.assign_permit(permit);
+            let (id, stream) = session.reserve_stream()?;
+            let mut sessions = bucket.lock().await;
+            if self.closed.load(Ordering::Acquire) || self.host.cancel().is_cancelled() {
+                session.close();
+                return Err(Error::Cancelled);
+            }
             sessions.push(session.clone());
-            session
+            drop(sessions);
+            (session, id, stream)
         };
-        let mut stream = session.open().await?;
-        drop(sessions);
+        session.send_syn(id).await?;
         let header = target
             .map(|t| codec::address(t, false))
             .unwrap_or_else(codec::uot_target);

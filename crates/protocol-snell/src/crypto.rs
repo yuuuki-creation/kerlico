@@ -1,7 +1,7 @@
 //! 固定 Snell KDF 参数，头部与载荷分别使用不重复的 nonce。
 use crate::io_protocol;
 use argon2::{Algorithm, Argon2, Params, Version};
-use ring::aead::{AES_128_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+use ring::aead::{AES_128_GCM, Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use std::io;
 pub(crate) struct Cipher {
     key: LessSafeKey,
@@ -9,12 +9,19 @@ pub(crate) struct Cipher {
 }
 impl Cipher {
     pub fn new(psk: &[u8], salt: &[u8; 16]) -> io::Result<Self> {
+        Self::new_v3(psk, salt, false)
+    }
+    pub fn new_v3(psk: &[u8], salt: &[u8; 16], chacha: bool) -> io::Result<Self> {
         let params = Params::new(8, 3, 1, Some(32)).map_err(|_| io_protocol())?;
         let mut bytes = [0; 32];
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password_into(psk, salt, &mut bytes)
             .map_err(|_| io_protocol())?;
-        let key = UnboundKey::new(&AES_128_GCM, &bytes[..16]).map_err(|_| io_protocol())?;
+        let key = if chacha {
+            UnboundKey::new(&CHACHA20_POLY1305, &bytes[..32]).map_err(|_| io_protocol())?
+        } else {
+            UnboundKey::new(&AES_128_GCM, &bytes[..16]).map_err(|_| io_protocol())?
+        };
         bytes.fill(0);
         Ok(Self {
             key: LessSafeKey::new(key),

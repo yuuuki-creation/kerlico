@@ -175,7 +175,7 @@ impl Registry {
         let prepared = early.map(|bytes| self.members.early(bytes)).transpose()?;
         let early_response = prepared.as_ref().and_then(|s| s.response().cloned());
         let value = URL_SAFE_NO_PAD.encode(key::random::<16>()?);
-        let (logical, transport) = tokio::io::duplex(64 * 1024);
+        let (logical, transport) = tokio::io::duplex(128 * 1024);
         let (reader, writer) = tokio::io::split(transport);
         let (upload, receiver) = mpsc::channel(4);
         let token = Arc::new(Token {

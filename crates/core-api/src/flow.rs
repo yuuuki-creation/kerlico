@@ -275,6 +275,14 @@ pub struct TcpFlow {
 pub struct TcpFlowIo {
     inner: BoxStream,
 }
+impl TcpFlowIo {
+    pub(crate) fn inner_ref(&self) -> &dyn crate::IoStream {
+        self.inner.as_ref()
+    }
+    pub(crate) fn inner_mut(&mut self) -> &mut dyn crate::IoStream {
+        self.inner.as_mut()
+    }
+}
 impl TcpFlow {
     pub fn info(&self) -> &TcpConnectInfo {
         &self.info
@@ -328,6 +336,20 @@ impl AsyncWrite for TcpFlow {
     ) -> Poll<io::Result<usize>> {
         Pin::new(self.get_mut().io.as_mut().expect("业务 I/O 尚未移交")).poll_write(cx, buf)
     }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(self.get_mut().io.as_mut().expect("业务 I/O 尚未移交"))
+            .poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.io
+            .as_ref()
+            .expect("业务 I/O 尚未移交")
+            .is_write_vectored()
+    }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(self.get_mut().io.as_mut().expect("业务 I/O 尚未移交")).poll_flush(cx)
     }
@@ -351,6 +373,16 @@ impl AsyncWrite for TcpFlowIo {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_flush(cx)

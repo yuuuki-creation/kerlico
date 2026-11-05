@@ -183,13 +183,18 @@ pub(super) async fn read_loop(
     }
 }
 
-async fn send(writer: &mut (impl AsyncWrite + Unpin), frame: &Frame) -> std::io::Result<()> {
-    let mut header = [0; 9];
-    header[0] = frame.kind;
-    header[1..5].copy_from_slice(&frame.id.to_be_bytes());
-    header[5..9].copy_from_slice(&(frame.payload.len() as u32).to_be_bytes());
-    writer.write_all(&header).await?;
-    writer.write_all(&frame.payload).await?;
+async fn send(
+    writer: &mut (impl AsyncWrite + Unpin),
+    frame: &Frame,
+    write_buf: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    write_buf.clear();
+    write_buf.reserve(9 + frame.payload.len());
+    write_buf.push(frame.kind);
+    write_buf.extend_from_slice(&frame.id.to_be_bytes());
+    write_buf.extend_from_slice(&(frame.payload.len() as u32).to_be_bytes());
+    write_buf.extend_from_slice(&frame.payload);
+    writer.write_all(write_buf).await?;
     writer.flush().await
 }
 pub(super) async fn write_loop(
@@ -205,6 +210,7 @@ pub(super) async fn write_loop(
     let mut controls = 0usize;
     let mut commands = 0usize;
     let mut bytes = 0usize;
+    let mut write_buf = Vec::with_capacity(super::SEND_CHUNK + 9);
     loop {
         if commands == 8 || bytes >= turn {
             // 全局发送队列持续就绪时也必须让读方向推进，不能依赖socket偶然阻塞。
@@ -246,7 +252,7 @@ pub(super) async fn write_loop(
                     continue;
                 }
                 // 一旦开始，不因其他逻辑流事件取消半个帧或加密记录。
-                let result = tokio::select! {biased;_=shared.cancel.cancelled()=>return Err(Error::Cancelled),result=send(&mut writer,&frame)=>result};
+                let result = tokio::select! {biased;_=shared.cancel.cancelled()=>return Err(Error::Cancelled),result=send(&mut writer,&frame,&mut write_buf)=>result};
                 let failed = result.is_err();
                 if !failed
                     && frame.kind == FIN

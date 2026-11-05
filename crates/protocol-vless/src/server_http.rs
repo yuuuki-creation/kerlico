@@ -254,6 +254,7 @@ impl Drop for PhysicalLease {
 struct ObservedIo {
     inner: BoxStream,
     activity: watch::Sender<tokio::time::Instant>,
+    last: tokio::time::Instant,
 }
 impl AsyncRead for ObservedIo {
     fn poll_read(
@@ -265,7 +266,11 @@ impl AsyncRead for ObservedIo {
         let before = out.filled().len();
         let result = Pin::new(&mut this.inner).poll_read(cx, out);
         if matches!(result, Poll::Ready(Ok(()))) && out.filled().len() > before {
-            this.activity.send_replace(tokio::time::Instant::now());
+            let now = tokio::time::Instant::now();
+            if now.duration_since(this.last) >= std::time::Duration::from_secs(1) {
+                this.last = now;
+                this.activity.send_replace(now);
+            }
         }
         result
     }
@@ -279,9 +284,32 @@ impl AsyncWrite for ObservedIo {
         let this = self.get_mut();
         let result = Pin::new(&mut this.inner).poll_write(cx, bytes);
         if matches!(result,Poll::Ready(Ok(count)) if count>0) {
-            this.activity.send_replace(tokio::time::Instant::now());
+            let now = tokio::time::Instant::now();
+            if now.duration_since(this.last) >= std::time::Duration::from_secs(1) {
+                this.last = now;
+                this.activity.send_replace(now);
+            }
         }
         result
+    }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write_vectored(cx, bufs);
+        if matches!(result,Poll::Ready(Ok(count)) if count>0) {
+            let now = tokio::time::Instant::now();
+            if now.duration_since(this.last) >= std::time::Duration::from_secs(1) {
+                this.last = now;
+                this.activity.send_replace(now);
+            }
+        }
+        result
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_flush(cx)
@@ -343,7 +371,7 @@ impl State {
         self.table.get_or_init(||{let limits=context.clone();let weak=Arc::downgrade(self);let handler:rust_xhttp::session::Handler=Arc::new(move |connection|{
             let Some(state)=weak.upgrade() else{return};let Ok(lease)=context.stream_budget.try_acquire() else{return};let payload=payload.clone();let access=access.clone();let mut context=context.clone();context.cancel=context.cancel.child_token();
             state.spawn(&context.tasks.clone(),async move {let _lease=lease;let stream=SessionIo::new(connection);let _=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),result=payload.serve(Box::new(Plain(Box::new(stream))),access,context.clone())=>result};});
-        });SessionTable::new(SessionConfig {max_sessions:limits.max_streams,max_pending_packets:32,max_pending_bytes:1024*1024,downlink_capacity:16,grace:limits.connect_timeout,..Default::default()},handler,Arc::new(rust_xhttp::metrics::Metrics::default()))}).clone()
+        });SessionTable::new(SessionConfig {max_sessions:limits.max_streams,max_pending_packets:256,max_pending_bytes:8*1024*1024,downlink_capacity:256,grace:limits.connect_timeout,..Default::default()},handler,Arc::new(rust_xhttp::metrics::Metrics::default()))}).clone()
     }
     pub async fn serve(
         self: Arc<Self>,
@@ -352,15 +380,27 @@ impl State {
         access: IngressBinding,
         context: InboundContext,
     ) -> Result<()> {
+        if let Transport::Httpupgrade { path } = &self.transport {
+            return serve_httpupgrade(stream, path, payload, access, context).await;
+        }
+        if let Transport::Ws {
+            path,
+            early_data_bytes,
+        } = &self.transport
+        {
+            return serve_ws(stream, path, *early_data_bytes, payload, access, context).await;
+        }
         let idle = context.idle_timeout;
         let cancel = context.cancel.clone();
         let executor = NodeExecutor(context.tasks.clone());
         let physical = Physical::new();
         let request_physical = physical.clone();
-        let (activity, mut changes) = watch::channel(tokio::time::Instant::now());
+        let now = tokio::time::Instant::now();
+        let (activity, mut changes) = watch::channel(now);
         let stream = ObservedIo {
             inner: stream,
             activity,
+            last: now,
         };
         let service =
             hyper::service::service_fn(move |mut request: Request<hyper::body::Incoming>| {
@@ -373,7 +413,13 @@ impl State {
                     Ok::<_, Infallible>(state.request(request, payload, access, context).await)
                 }
             });
-        let builder = hyper_util::server::conn::auto::Builder::new(executor);
+        let mut builder = hyper_util::server::conn::auto::Builder::new(executor);
+        builder
+            .http2()
+            .initial_stream_window_size(16 * 1024 * 1024)
+            .initial_connection_window_size(64 * 1024 * 1024)
+            .max_frame_size(64 * 1024)
+            .adaptive_window(true);
         let serving = async {
             builder
                 .serve_connection_with_upgrades(TokioIo::new(stream), service)
@@ -462,9 +508,9 @@ impl State {
                 let tracked = physical.as_ref().map(Physical::lease);
                 let upgrade = hyper::upgrade::on(&mut request);
                 self.spawn(&context.tasks.clone(), async move {let _lease=lease;let _tracked=tracked;if let Ok(io)=upgrade.await {
-                    let mut config=tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();config.max_message_size=Some(1024*1024);config.max_frame_size=Some(1024*1024);config.write_buffer_size=8192;config.max_write_buffer_size=65536;
+                    let mut config=tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();config.max_message_size=Some(1024*1024);config.max_frame_size=Some(1024*1024);config.write_buffer_size=65536;config.max_write_buffer_size=256*1024;
                     let websocket=tokio_tungstenite::WebSocketStream::from_raw_socket(TokioIo::new(io),tokio_tungstenite::tungstenite::protocol::Role::Server,Some(config)).await;
-                    let (local,peer)=tokio::io::duplex(64*1024);let running=payload.serve(Box::new(Plain(Box::new(local))),access,context.clone());let bridge=websocket_bridge(websocket,peer,early,context.clone());let result=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),result=async{tokio::try_join!(running,bridge).map(|_|())}=>result};if result.is_err()&&let Some(physical)=&physical{physical.fail();}
+                    let (local,peer)=tokio::io::duplex(256*1024);let running=payload.serve(Box::new(Plain(Box::new(local))),access,context.clone());let bridge=websocket_bridge(websocket,peer,early,context.clone());let result=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),result=async{tokio::try_join!(running,bridge).map(|_|())}=>result};if result.is_err()&&let Some(physical)=&physical{physical.fail();}
                 }else if let Some(physical)=&physical{physical.fail();}});
                 Response::builder()
                     .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -715,7 +761,7 @@ impl State {
             return empty(StatusCode::TOO_MANY_REQUESTS);
         };
         let (sender, response_body) = body_channel();
-        let (local, peer) = tokio::io::duplex(64 * 1024);
+        let (local, peer) = tokio::io::duplex(256 * 1024);
         self.spawn(&context.tasks.clone(), async move {let _lease=lease;let running=payload.serve(Box::new(Plain(Box::new(local))),access,context.clone());let bridge=http_bridge(body,peer,sender,grpc);let _=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),r=async {tokio::try_join!(running,bridge).map(|_|())}=>r};});
         response(response_body, grpc.is_some())
     }
@@ -760,6 +806,661 @@ fn upgrade_header<B>(request: &Request<B>) -> bool {
                     .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
             })
 }
+async fn serve_httpupgrade(
+    mut stream: BoxStream,
+    expected_path: &str,
+    payload: Arc<Payload>,
+    access: IngressBinding,
+    context: InboundContext,
+) -> Result<()> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 2048];
+    let header_end = loop {
+        let n = tokio::select! {
+            _ = context.cancel.cancelled() => return Err(Error::Cancelled),
+            _ = tokio::time::sleep(context.idle_timeout) => return Err(Error::Timeout),
+            r = stream.read(&mut chunk) => r?,
+        };
+        if n == 0 {
+            if buf.is_empty() {
+                return Ok(());
+            }
+            return Err(Error::Protocol("HTTP 节点连接失败"));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos;
+        }
+        if buf.len() > 72 * 1024 {
+            let _ = stream
+                .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+            return Ok(());
+        }
+    };
+    let Ok(head) = std::str::from_utf8(&buf[..header_end]) else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    let mut lines = head.split("\r\n");
+    let Some(req_line) = lines.next() else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    let mut parts = req_line.split_whitespace();
+    let (Some(_method), Some(target), Some(version), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    if !version.starts_with("HTTP/1.") {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    }
+    let mut header_bytes = 0usize;
+    let mut has_upgrade_ws = false;
+    let mut has_conn_upgrade = false;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+            return Ok(());
+        };
+        let name = name.trim();
+        let value = value.trim();
+        header_bytes = header_bytes.saturating_add(name.len() + value.len());
+        if name.eq_ignore_ascii_case("upgrade") && value.eq_ignore_ascii_case("websocket") {
+            has_upgrade_ws = true;
+        }
+        if name.eq_ignore_ascii_case("connection")
+            && value
+                .split(',')
+                .any(|p| p.trim().eq_ignore_ascii_case("upgrade"))
+        {
+            has_conn_upgrade = true;
+        }
+    }
+    if header_bytes > 65536 {
+        let _ = stream
+            .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+        return Ok(());
+    }
+    if context.stream_budget.is_closed() {
+        let _ = stream
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+        return Ok(());
+    }
+    let Ok(uri) = target.parse::<http::Uri>() else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    if uri.path() != expected_path {
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+        return Ok(());
+    }
+    if !has_upgrade_ws || !has_conn_upgrade {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    }
+    let Ok(_lease) = context.stream_budget.try_acquire() else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    stream
+        .write_all(b"HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: upgrade\r\n\r\n")
+        .await?;
+    stream.flush().await?;
+    let leftover = &buf[header_end + 4..];
+    let upgraded: xray_transport::BoxedTransportStream = if leftover.is_empty() {
+        Box::new(Plain(stream))
+    } else {
+        Box::new(xray_transport::stream::PrefixedStream::new(
+            Box::new(Plain(stream)),
+            leftover.to_vec(),
+        ))
+    };
+    payload.serve(upgraded, access, context).await
+}
+async fn serve_ws(
+    mut stream: BoxStream,
+    expected_path: &str,
+    early_data_bytes: usize,
+    payload: Arc<Payload>,
+    access: IngressBinding,
+    context: InboundContext,
+) -> Result<()> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 2048];
+    let header_end = loop {
+        let n = tokio::select! {
+            _ = context.cancel.cancelled() => return Err(Error::Cancelled),
+            _ = tokio::time::sleep(context.idle_timeout) => return Err(Error::Timeout),
+            r = stream.read(&mut chunk) => r?,
+        };
+        if n == 0 {
+            if buf.is_empty() {
+                return Ok(());
+            }
+            return Err(Error::Protocol("HTTP 节点连接失败"));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos;
+        }
+        if buf.len() > 72 * 1024 {
+            let _ = stream
+                .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+            return Ok(());
+        }
+    };
+    let Ok(head) = std::str::from_utf8(&buf[..header_end]) else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    let mut lines = head.split("\r\n");
+    let Some(req_line) = lines.next() else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    let mut parts = req_line.split_whitespace();
+    let (Some(method), Some(target), Some(version), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    if !version.starts_with("HTTP/1.") {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    }
+    let mut header_bytes = 0usize;
+    let mut has_upgrade_ws = false;
+    let mut has_conn_upgrade = false;
+    let mut ws_version_ok = false;
+    let mut ws_key: Option<&str> = None;
+    let mut ws_proto: Option<&str> = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+            return Ok(());
+        };
+        let name = name.trim();
+        let value = value.trim();
+        header_bytes = header_bytes.saturating_add(name.len() + value.len());
+        if name.eq_ignore_ascii_case("upgrade") && value.eq_ignore_ascii_case("websocket") {
+            has_upgrade_ws = true;
+        } else if name.eq_ignore_ascii_case("connection")
+            && value
+                .split(',')
+                .any(|p| p.trim().eq_ignore_ascii_case("upgrade"))
+        {
+            has_conn_upgrade = true;
+        } else if name.eq_ignore_ascii_case("sec-websocket-version") && value == "13" {
+            ws_version_ok = true;
+        } else if name.eq_ignore_ascii_case("sec-websocket-key") && ws_key.is_none() {
+            ws_key = Some(value);
+        } else if name.eq_ignore_ascii_case("sec-websocket-protocol") && ws_proto.is_none() {
+            ws_proto = Some(value);
+        }
+    }
+    if header_bytes > 65536 {
+        let _ = stream
+            .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+        return Ok(());
+    }
+    if context.stream_budget.is_closed() {
+        let _ = stream
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+        return Ok(());
+    }
+    let Ok(uri) = target.parse::<http::Uri>() else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    if uri.path() != expected_path {
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+        return Ok(());
+    }
+    use base64::Engine;
+    let Some(key) = ws_key.filter(|k| {
+        base64::engine::general_purpose::STANDARD
+            .decode(k)
+            .is_ok_and(|bytes| bytes.len() == 16)
+    }) else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    if method != "GET" || !has_upgrade_ws || !has_conn_upgrade || !ws_version_ok {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    }
+    let early = match ws_proto {
+        Some(value) => match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(value) {
+            Ok(bytes) if bytes.len() <= early_data_bytes => bytes,
+            _ => {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await;
+                return Ok(());
+            }
+        },
+        None => Vec::new(),
+    };
+    let Ok(_lease) = context.stream_budget.try_acquire() else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    let accept = xray_transport::stream::accept_key_for(key);
+    let resp = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: {accept}\r\n\r\n"
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.flush().await?;
+    let ws = ServerWsStream::new(stream, early, &buf[header_end + 4..]);
+    let result = tokio::select! {
+        _ = context.cancel.cancelled() => Err(Error::Cancelled),
+        r = payload.serve(Box::new(ws), access, context.clone()) => r,
+    };
+    if result.is_err() {
+        return Err(Error::Protocol("HTTP 升级会话失败"));
+    }
+    Ok(())
+}
+
+enum ServerWsEvent {
+    Payload(std::ops::Range<usize>),
+    Ping(std::ops::Range<usize>),
+    Close,
+}
+
+struct ServerWsStream {
+    inner: BoxStream,
+    rx_buf: Vec<u8>,
+    rx_consumed: usize,
+    pending: std::ops::Range<usize>,
+    tx_buf: Vec<u8>,
+    tx_pos: usize,
+    scratch: Vec<u8>,
+    peer_closed: bool,
+    close_queued: bool,
+}
+
+impl ServerWsStream {
+    fn new(inner: BoxStream, early: Vec<u8>, leftover: &[u8]) -> Self {
+        let early_len = early.len();
+        let mut rx_buf = Vec::with_capacity((early_len + leftover.len()).max(65536 + 32));
+        rx_buf.extend_from_slice(&early);
+        rx_buf.extend_from_slice(leftover);
+        Self {
+            inner,
+            rx_buf,
+            rx_consumed: early_len,
+            pending: 0..early_len,
+            tx_buf: Vec::with_capacity(65536 + 32),
+            tx_pos: 0,
+            scratch: vec![0u8; 65536],
+            peer_closed: false,
+            close_queued: false,
+        }
+    }
+
+    fn deliver(&mut self, output: &mut ReadBuf<'_>) -> bool {
+        if self.pending.is_empty() {
+            return false;
+        }
+        let remaining = &self.rx_buf[self.pending.clone()];
+        let take = remaining.len().min(output.remaining());
+        if take == 0 {
+            return false;
+        }
+        output.put_slice(&remaining[..take]);
+        self.pending.start += take;
+        if self.pending.is_empty() {
+            self.pending = 0..0;
+        }
+        true
+    }
+
+    fn compact(&mut self) {
+        if self.rx_consumed == 0 {
+            return;
+        }
+        if self.rx_consumed == self.rx_buf.len() {
+            self.rx_buf.clear();
+        } else {
+            self.rx_buf.drain(..self.rx_consumed);
+        }
+        self.rx_consumed = 0;
+    }
+
+    fn next_frame(&mut self) -> io::Result<Option<ServerWsEvent>> {
+        loop {
+            let bytes = &mut self.rx_buf[self.rx_consumed..];
+            if bytes.len() < 2 {
+                self.compact();
+                return Ok(None);
+            }
+            if bytes[0] & 0x70 != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "WebSocket 帧不合法",
+                ));
+            }
+            let opcode = bytes[0] & 0x0f;
+            let is_control = opcode & 0x8 != 0;
+            let masked = (bytes[1] & 0x80) != 0;
+            let short_len = (bytes[1] & 0x7f) as usize;
+            let (payload_len, mut hdr) = match short_len {
+                126 => {
+                    if bytes.len() < 4 {
+                        self.compact();
+                        return Ok(None);
+                    }
+                    (u16::from_be_bytes([bytes[2], bytes[3]]) as usize, 4)
+                }
+                127 => {
+                    if bytes.len() < 10 {
+                        self.compact();
+                        return Ok(None);
+                    }
+                    let mut len_bytes = [0u8; 8];
+                    len_bytes.copy_from_slice(&bytes[2..10]);
+                    (u64::from_be_bytes(len_bytes) as usize, 10)
+                }
+                len => (len, 2),
+            };
+            if (is_control && (payload_len > 125 || bytes[0] & 0x80 == 0))
+                || payload_len > 16 * 1024 * 1024
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "WebSocket 帧不合法",
+                ));
+            }
+            let mask_key = if masked {
+                if bytes.len() < hdr + 4 {
+                    self.compact();
+                    return Ok(None);
+                }
+                let k = [bytes[hdr], bytes[hdr + 1], bytes[hdr + 2], bytes[hdr + 3]];
+                hdr += 4;
+                Some(k)
+            } else {
+                None
+            };
+            let total = hdr + payload_len;
+            if bytes.len() < total {
+                self.compact();
+                return Ok(None);
+            }
+            if let Some(key) = mask_key {
+                let payload = &mut bytes[hdr..total];
+                let (chunks, tail) = payload.as_chunks_mut::<4>();
+                for chunk in chunks {
+                    chunk[0] ^= key[0];
+                    chunk[1] ^= key[1];
+                    chunk[2] ^= key[2];
+                    chunk[3] ^= key[3];
+                }
+                for (i, b) in tail.iter_mut().enumerate() {
+                    *b ^= key[i];
+                }
+            }
+            let start = self.rx_consumed + hdr;
+            let end = self.rx_consumed + total;
+            self.rx_consumed += total;
+            match opcode {
+                0x8 => return Ok(Some(ServerWsEvent::Close)),
+                0x9 => return Ok(Some(ServerWsEvent::Ping(start..end))),
+                0xa => continue,
+                0x0..=0x2 => {
+                    if start == end {
+                        continue;
+                    }
+                    return Ok(Some(ServerWsEvent::Payload(start..end)));
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "WebSocket 帧不合法",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn encode_frame(out: &mut Vec<u8>, opcode: u8, payload: &[u8]) {
+        out.reserve(payload.len() + 10);
+        out.push(0x80 | opcode);
+        let len = payload.len();
+        if len < 126 {
+            out.push(len as u8);
+        } else if let Ok(len16) = u16::try_from(len) {
+            out.push(126);
+            out.extend_from_slice(&len16.to_be_bytes());
+        } else {
+            out.push(127);
+            out.extend_from_slice(&(len as u64).to_be_bytes());
+        }
+        out.extend_from_slice(payload);
+    }
+
+    fn poll_flush_tx(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while self.tx_pos < self.tx_buf.len() {
+            let written =
+                match Pin::new(&mut self.inner).poll_write(cx, &self.tx_buf[self.tx_pos..]) {
+                    Poll::Ready(Ok(n)) => n,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                };
+            if written == 0 {
+                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+            }
+            self.tx_pos += written;
+        }
+        self.tx_buf.clear();
+        self.tx_pos = 0;
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncRead for ServerWsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let initial_rem = output.remaining();
+        if initial_rem == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        if let Poll::Ready(Err(e)) = this.poll_flush_tx(cx) {
+            return Poll::Ready(Err(e));
+        }
+        loop {
+            if this.deliver(output) && output.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            if this.peer_closed {
+                return Poll::Ready(Ok(()));
+            }
+            match this.next_frame()? {
+                Some(ServerWsEvent::Payload(range)) => {
+                    this.pending = range;
+                    continue;
+                }
+                Some(ServerWsEvent::Ping(range)) => {
+                    Self::encode_frame(&mut this.tx_buf, 0xa, &this.rx_buf[range]);
+                    if let Poll::Ready(Err(e)) = this.poll_flush_tx(cx) {
+                        return Poll::Ready(Err(e));
+                    }
+                    continue;
+                }
+                Some(ServerWsEvent::Close) => {
+                    this.peer_closed = true;
+                    return Poll::Ready(Ok(()));
+                }
+                None => {}
+            }
+            if output.remaining() < initial_rem {
+                return Poll::Ready(Ok(()));
+            }
+            let filled = {
+                let mut buffer = ReadBuf::new(&mut this.scratch);
+                match Pin::new(&mut this.inner).poll_read(cx, &mut buffer) {
+                    Poll::Ready(Ok(())) => buffer.filled().len(),
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            };
+            if filled == 0 {
+                this.peer_closed = true;
+                return Poll::Ready(Ok(()));
+            }
+            this.rx_buf.extend_from_slice(&this.scratch[..filled]);
+        }
+    }
+}
+
+impl AsyncWrite for ServerWsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        input: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        match this.poll_flush_tx(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+        if input.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        Self::encode_frame(&mut this.tx_buf, 0x2, input);
+        this.tx_pos = 0;
+        if let Poll::Ready(Err(e)) = this.poll_flush_tx(cx) {
+            return Poll::Ready(Err(e));
+        }
+        Poll::Ready(Ok(input.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        match this.poll_flush_tx(cx) {
+            Poll::Ready(Ok(())) => Pin::new(&mut this.inner).poll_flush(cx),
+            other => other,
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if !this.close_queued {
+            Self::encode_frame(&mut this.tx_buf, 0x8, &1000u16.to_be_bytes());
+            this.close_queued = true;
+        }
+        match this.poll_flush_tx(cx) {
+            Poll::Ready(Ok(())) => Pin::new(&mut this.inner).poll_shutdown(cx),
+            other => other,
+        }
+    }
+}
+
+impl xray_transport::TransportStream for ServerWsStream {
+    fn release_record_alignment(&mut self) {}
+    fn poll_read_direct(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        AsyncRead::poll_read(self, cx, output)
+    }
+    fn poll_write_direct(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        input: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        AsyncWrite::poll_write(self, cx, input)
+    }
+}
 fn empty_body() -> Body {
     Empty::<Bytes>::new()
         .map_err(|never: Infallible| match never {})
@@ -772,7 +1473,7 @@ fn empty(status: StatusCode) -> Response<Body> {
         .unwrap_or_else(|_| Response::new(empty_body()))
 }
 fn body_channel() -> (mpsc::Sender<io::Result<Frame<Bytes>>>, Body) {
-    let (sender, receiver) = mpsc::channel(16);
+    let (sender, receiver) = mpsc::channel(128);
     (
         sender,
         StreamBody::new(ReceiverStream::new(receiver)).boxed_unsync(),
@@ -970,7 +1671,7 @@ impl AsyncWrite for SessionIo {
         if this.pending.is_some() {
             return this.send(cx);
         }
-        let bytes = Bytes::copy_from_slice(&bytes[..bytes.len().min(8192)]);
+        let bytes = Bytes::copy_from_slice(&bytes[..bytes.len().min(65536)]);
         let count = bytes.len();
         let Some(writer) = this.writer.clone() else {
             return Poll::Ready(Err(io::Error::new(
@@ -1061,7 +1762,7 @@ where
         Ok::<_, Error>(())
     };
     let download = async move {
-        let mut bytes = vec![0; 8192];
+        let mut bytes = vec![0; 65536];
         loop {
             let n = reader.read(&mut bytes).await?;
             if n == 0 {
@@ -1120,7 +1821,7 @@ async fn websocket_bridge<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         Ok::<_, Error>(())
     };
     let download = async move {
-        let mut bytes = vec![0; 8192];
+        let mut bytes = vec![0; 65536];
         loop {
             let n = reader.read(&mut bytes).await?;
             if n == 0 {

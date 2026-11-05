@@ -19,6 +19,7 @@ enum Phase {
     Length,
     Payload,
     Plain,
+    Raw,
 }
 pub(crate) struct RecordStream {
     inner: BoxStream,
@@ -83,10 +84,14 @@ impl RecordStream {
     }
     pub fn flags(mut self, flags: u8) -> Self {
         self.flags = flags;
+        if self.keys.is_none() && flags & 1 == 0 {
+            self.phase = Phase::Raw;
+            self.required = 0;
+            self.input.clear();
+        }
         self
     }
     fn expect(&mut self, n: usize, phase: Phase) {
-        self.input.zeroize();
         self.input.resize(n, 0);
         self.position = 0;
         self.required = n;
@@ -101,7 +106,6 @@ impl RecordStream {
             }
             self.written += n;
         }
-        self.pending.zeroize();
         self.pending.clear();
         self.written = 0;
         Poll::Ready(Ok(()))
@@ -118,6 +122,17 @@ impl RecordStream {
             return Poll::Ready(Ok(()));
         }
         loop {
+            if matches!(self.phase, Phase::Raw) {
+                if !self.pending.is_empty() {
+                    let _ = self.drain(cx)?;
+                }
+                let before = out.filled().len();
+                ready!(Pin::new(&mut self.inner).poll_read(cx, out))?;
+                if out.filled().len() == before {
+                    self.eof = true;
+                }
+                return Poll::Ready(Ok(()));
+            }
             if matches!(self.phase, Phase::Plain) {
                 let remaining = self.input.len() - self.position;
                 if remaining == 0 {
@@ -132,7 +147,6 @@ impl RecordStream {
                 }
                 let n = remaining.min(out.remaining());
                 out.put_slice(&self.input[self.position..self.position + n]);
-                self.input[self.position..self.position + n].zeroize();
                 self.position += n;
                 return Poll::Ready(Ok(()));
             }
@@ -163,17 +177,21 @@ impl RecordStream {
                         .take()
                         .unwrap()
                         .response_header(&mut self.input, self.flags)?;
-                    self.expect(self.reader.size_bytes(), Phase::Length);
+                    if self.flags & 1 == 0 {
+                        self.expect(0, Phase::Raw);
+                    } else {
+                        self.expect(self.reader.size_bytes(), Phase::Length);
+                    }
                 }
                 Phase::Length => {
-                    let (n, padding) = self.reader.length(std::mem::take(&mut self.input))?;
+                    let (n, padding) = self
+                        .reader
+                        .length_in_place(&mut self.input[..self.required])?;
                     self.padding = padding;
                     self.expect(n, Phase::Payload);
                 }
                 Phase::Payload => {
-                    self.input = self
-                        .reader
-                        .open(std::mem::take(&mut self.input), self.padding)?;
+                    self.reader.open_in_place(&mut self.input, self.padding)?;
                     self.position = 0;
                     if self.input.is_empty() {
                         self.eof = true;
@@ -181,7 +199,7 @@ impl RecordStream {
                     }
                     self.phase = Phase::Plain;
                 }
-                Phase::Plain => unreachable!(),
+                Phase::Plain | Phase::Raw => unreachable!(),
             }
         }
     }
@@ -223,21 +241,24 @@ impl AsyncWrite for RecordStream {
             this.failed = true;
             return Poll::Ready(Err(error));
         }
+        if matches!(this.phase, Phase::Raw) || (this.flags & 1 == 0 && !this.udp) {
+            return Pin::new(&mut this.inner).poll_write(cx, bytes);
+        }
         let n = if this.udp {
             bytes.len()
         } else {
-            bytes.len().min(8192)
+            bytes.len().min(32768)
         };
-        match this.writer.seal(&bytes[..n]) {
-            Ok(wire) => {
-                this.pending = wire;
-                Poll::Ready(Ok(n))
-            }
-            Err(error) => {
-                this.failed = true;
-                Poll::Ready(Err(error))
-            }
+        if let Err(error) = this.writer.seal_into(&bytes[..n], &mut this.pending) {
+            this.failed = true;
+            return Poll::Ready(Err(error));
         }
+        this.written = 0;
+        if let Poll::Ready(Err(error)) = this.drain(cx) {
+            this.failed = true;
+            return Poll::Ready(Err(error));
+        }
+        Poll::Ready(Ok(n))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
@@ -262,7 +283,8 @@ impl AsyncWrite for RecordStream {
         if !this.terminating {
             this.terminating = true;
             if this.termination {
-                this.pending = this.writer.seal(&[])?;
+                this.writer.seal_into(&[], &mut this.pending)?;
+                this.written = 0;
             }
         }
         ready!(this.drain(cx))?;

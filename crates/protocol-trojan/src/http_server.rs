@@ -60,6 +60,9 @@ pub(crate) async fn serve(
     access: IngressBinding,
     context: InboundContext,
 ) -> Result<()> {
+    if let Transport::Httpupgrade { path, .. } = &transport {
+        return serve_httpupgrade(stream, path, payload, access, context).await;
+    }
     let jobs = Arc::new(Jobs(Mutex::new(JoinSet::new()), context.tasks.clone()));
     let tasks = jobs.clone();
     let cancel = context.cancel.clone();
@@ -76,7 +79,12 @@ pub(crate) async fn serve(
             )
         }
     });
-    let builder = hyper_util::server::conn::auto::Builder::new(executor);
+    let mut builder = hyper_util::server::conn::auto::Builder::new(executor);
+    builder
+        .http2()
+        .initial_stream_window_size(16 * 1024 * 1024)
+        .initial_connection_window_size(64 * 1024 * 1024)
+        .adaptive_window(true);
     builder
         .serve_connection_with_upgrades(TokioIo::new(stream), service)
         .await
@@ -165,9 +173,9 @@ async fn request_handler(
                 let _lease = lease;
                 let running = async {
                     let upgraded = upgraded.await.map_err(|_| Error::Protocol("Trojan WS 升级失败"))?;
-                    let mut config = WebSocketConfig::default();config.max_message_size=Some(1024*1024);config.max_frame_size=Some(1024*1024);config.write_buffer_size=8192;config.max_write_buffer_size=65536;
+                    let mut config = WebSocketConfig::default();config.max_message_size=Some(1024*1024);config.max_frame_size=Some(1024*1024);config.write_buffer_size=65536;config.max_write_buffer_size=256*1024;
                     let websocket = tokio_tungstenite::WebSocketStream::from_raw_socket(TokioIo::new(upgraded),Role::Server,Some(config)).await;
-                    let (local, peer) = tokio::io::duplex(64*1024);
+                    let (local, peer) = tokio::io::duplex(256*1024);
                     let serving = serve_payload(payload,Box::new(local),access,context.clone());
                     tokio::try_join!(serving, websocket_bridge(websocket,peer,early)).map(|_|())
                 };
@@ -212,8 +220,8 @@ async fn request_handler(
             let Ok(lease) = context.stream_budget.try_acquire() else {
                 return empty(StatusCode::TOO_MANY_REQUESTS);
             };
-            let (sender, receiver) = mpsc::channel(16);
-            let (local, peer) = tokio::io::duplex(64 * 1024);
+            let (sender, receiver) = mpsc::channel(128);
+            let (local, peer) = tokio::io::duplex(256 * 1024);
             jobs.spawn(async move {let _lease=lease;let serving=serve_payload(payload,Box::new(local),access,context.clone());let bridge=grpc_bridge(request.into_body(),peer,sender);let _=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),result=async{tokio::try_join!(serving,bridge).map(|_|())}=>result};});
             Response::builder()
                 .status(200)
@@ -230,14 +238,218 @@ async fn serve_payload(
     access: IngressBinding,
     context: InboundContext,
 ) -> Result<()> {
-    let (stream, activity) = crate::io::observe(stream);
-    crate::io::bounded(
-        payload.serve(stream, access, context.clone()),
-        activity,
-        context.idle_timeout,
-        context.cancel,
-    )
-    .await
+    payload.serve(stream, access, context).await
+}
+struct PrefixedIo {
+    inner: BoxStream,
+    prefix: Vec<u8>,
+    pos: usize,
+}
+impl AsyncRead for PrefixedIo {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if this.pos < this.prefix.len() {
+            let rem = &this.prefix[this.pos..];
+            let take = rem.len().min(buf.remaining());
+            buf.put_slice(&rem[..take]);
+            this.pos += take;
+            if this.pos == this.prefix.len() {
+                this.prefix = Vec::new();
+                this.pos = 0;
+            }
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for PrefixedIo {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+async fn serve_httpupgrade(
+    mut stream: BoxStream,
+    expected_path: &str,
+    payload: Arc<Payload>,
+    access: IngressBinding,
+    context: InboundContext,
+) -> Result<()> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 2048];
+    let header_end = loop {
+        let n = tokio::select! {
+            _ = context.cancel.cancelled() => return Err(Error::Cancelled),
+            r = stream.read(&mut chunk) => r?,
+        };
+        if n == 0 {
+            if buf.is_empty() {
+                return Ok(());
+            }
+            return Err(Error::Protocol("Trojan HTTP 载体失败"));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos;
+        }
+        if buf.len() > 72 * 1024 {
+            let _ = stream
+                .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+            return Ok(());
+        }
+    };
+    if context.stream_budget.is_closed() {
+        let _ = stream
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+        return Ok(());
+    }
+    let Ok(head) = std::str::from_utf8(&buf[..header_end]) else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    let mut lines = head.split("\r\n");
+    let Some(req_line) = lines.next() else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    let mut parts = req_line.split_whitespace();
+    let (Some(method), Some(target), Some(version), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    if !version.starts_with("HTTP/1.") {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    }
+    let mut header_bytes = 0usize;
+    let mut has_upgrade_ws = false;
+    let mut has_conn_upgrade = false;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+            return Ok(());
+        };
+        let name = name.trim();
+        let value = value.trim();
+        header_bytes = header_bytes.saturating_add(name.len() + value.len());
+        if name.eq_ignore_ascii_case("upgrade") && value.eq_ignore_ascii_case("websocket") {
+            has_upgrade_ws = true;
+        }
+        if name.eq_ignore_ascii_case("connection")
+            && value
+                .split(',')
+                .any(|p| p.trim().eq_ignore_ascii_case("upgrade"))
+        {
+            has_conn_upgrade = true;
+        }
+    }
+    if header_bytes > 65536 {
+        let _ = stream
+            .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+        return Ok(());
+    }
+    let Ok(uri) = target.parse::<http::Uri>() else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    if uri.path() != expected_path {
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+        return Ok(());
+    }
+    if method != "GET" || !has_upgrade_ws || !has_conn_upgrade {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    }
+    let Ok(_lease) = context.stream_budget.try_acquire() else {
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return Ok(());
+    };
+    stream
+        .write_all(b"HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: upgrade\r\n\r\n")
+        .await?;
+    stream.flush().await?;
+    let leftover = &buf[header_end + 4..];
+    let upgraded: BoxStream = if leftover.is_empty() {
+        stream
+    } else {
+        Box::new(PrefixedIo {
+            inner: stream,
+            prefix: leftover.to_vec(),
+            pos: 0,
+        })
+    };
+    tokio::select! {
+        _ = context.cancel.cancelled() => Err(Error::Cancelled),
+        result = serve_payload(payload, upgraded, access, context.clone()) => result,
+    }
 }
 fn upgrade(request: &Request<Incoming>) -> bool {
     request
@@ -317,7 +529,7 @@ async fn grpc_bridge(
         Ok::<_, Error>(())
     };
     let download = async move {
-        let mut bytes = vec![0; 8192];
+        let mut bytes = vec![0; 65536];
         loop {
             let n = reader.read(&mut bytes).await?;
             if n == 0 {
@@ -367,7 +579,7 @@ async fn websocket_bridge<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         Ok::<_, Error>(())
     };
     let download = async move {
-        let mut bytes = vec![0; 8192];
+        let mut bytes = vec![0; 65536];
         let mut controls_open = true;
         loop {
             tokio::select! {

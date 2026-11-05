@@ -244,6 +244,10 @@ fn node_socket(address: SocketAddr, udp: bool, transparent: bool) -> Result<sock
         let _ = socket.set_ip_transparent_v4(true);
     }
     socket.set_reuse_address(true)?;
+    if udp {
+        let _ = socket.set_recv_buffer_size(8 * 1024 * 1024);
+        let _ = socket.set_send_buffer_size(8 * 1024 * 1024);
+    }
     socket.set_nonblocking(true)?;
     socket.bind(&address.into())?;
     Ok(socket)
@@ -864,7 +868,7 @@ async fn serve_node(
                             }
                         }
                     } else {
-                        (Box::new(stream), context)
+                        (kerlico_core::SpliceBox::boxed(stream), context)
                     };
                     let result=tokio::select! {_=token.cancelled()=>Err(Error::Cancelled),r=protocol.handle(stream,access,context)=>r};
                     if result.is_ok(){stats.completed.fetch_add(1,Ordering::Relaxed);local_stats.completed.fetch_add(1,Ordering::Relaxed);}else{stats.failed.fetch_add(1,Ordering::Relaxed);local_stats.failed.fetch_add(1,Ordering::Relaxed);}
@@ -967,6 +971,7 @@ async fn serve_tcp_with_options(
             result=sessions.join_next(),if !sessions.is_empty()=>{ if result.is_some_and(|result|result.is_err()) { stats.failed.fetch_add(1,Ordering::Relaxed); } },
             accepted=listener.accept()=>{
                 let (stream,peer)=match accepted { Ok(value)=>value, Err(error) if accept_retryable(&error)=>{ tokio::time::sleep(ACCEPT_BACKOFF).await; continue; }, Err(error)=>{failure=Some(Error::Io(error));break;} };
+                let _ = stream.set_nodelay(true);
                 if !cleanup.lan_filter.is_empty() && !cleanup.lan_filter.allows(peer.ip()) {
                     stats.dropped.fetch_add(1,Ordering::Relaxed);
                     continue;
@@ -1236,34 +1241,35 @@ fn forward_context(limits: &Limits, cancel: CancellationToken, tasks: NodeTasks)
 struct PeerIo {
     stream: TcpStream,
     _lease: kerlico_core::PeerLease,
+    cancel: CancellationToken,
     read_cancel: Option<kerlico_core::BoxFuture<'static, ()>>,
     write_cancel: Option<kerlico_core::BoxFuture<'static, ()>>,
 }
 impl PeerIo {
     fn new(stream: TcpStream, lease: kerlico_core::PeerLease, cancel: CancellationToken) -> Self {
-        let read_cancel = cancel.clone();
         Self {
             stream,
             _lease: lease,
-            read_cancel: Some(Box::pin(async move { read_cancel.cancelled().await })),
-            write_cancel: Some(Box::pin(async move { cancel.cancelled().await })),
+            cancel,
+            read_cancel: None,
+            write_cancel: None,
         }
     }
-    fn check(
+    fn aborted() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::ConnectionAborted, Error::Cancelled)
+    }
+    fn poll_cancel(
+        token: &CancellationToken,
         cancellation: &mut Option<kerlico_core::BoxFuture<'static, ()>>,
         cx: &mut std::task::Context<'_>,
     ) -> std::io::Result<()> {
-        if cancellation
-            .as_mut()
-            .is_some_and(|future| future.as_mut().poll(cx).is_ready())
-        {
+        let fut = cancellation.get_or_insert_with(|| {
+            let token = token.clone();
+            Box::pin(async move { token.cancelled().await })
+        });
+        if fut.as_mut().poll(cx).is_ready() {
             *cancellation = None;
-        }
-        if cancellation.is_none() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionAborted,
-                Error::Cancelled,
-            ))
+            Err(Self::aborted())
         } else {
             Ok(())
         }
@@ -1276,10 +1282,18 @@ impl tokio::io::AsyncRead for PeerIo {
         buffer: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        if let Err(error) = Self::check(&mut this.read_cancel, cx) {
-            return std::task::Poll::Ready(Err(error));
+        if this.cancel.is_cancelled() {
+            return std::task::Poll::Ready(Err(Self::aborted()));
         }
-        std::pin::Pin::new(&mut this.stream).poll_read(cx, buffer)
+        match std::pin::Pin::new(&mut this.stream).poll_read(cx, buffer) {
+            std::task::Poll::Pending => {
+                match Self::poll_cancel(&this.cancel, &mut this.read_cancel, cx) {
+                    Ok(()) => std::task::Poll::Pending,
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                }
+            }
+            ready => ready,
+        }
     }
 }
 impl tokio::io::AsyncWrite for PeerIo {
@@ -1289,30 +1303,96 @@ impl tokio::io::AsyncWrite for PeerIo {
         buffer: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = self.get_mut();
-        if let Err(error) = Self::check(&mut this.write_cancel, cx) {
-            return std::task::Poll::Ready(Err(error));
+        if this.cancel.is_cancelled() {
+            return std::task::Poll::Ready(Err(Self::aborted()));
         }
-        std::pin::Pin::new(&mut this.stream).poll_write(cx, buffer)
+        match std::pin::Pin::new(&mut this.stream).poll_write(cx, buffer) {
+            std::task::Poll::Pending => {
+                match Self::poll_cancel(&this.cancel, &mut this.write_cancel, cx) {
+                    Ok(()) => std::task::Poll::Pending,
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                }
+            }
+            ready => ready,
+        }
     }
     fn poll_flush(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        if let Err(error) = Self::check(&mut this.write_cancel, cx) {
-            return std::task::Poll::Ready(Err(error));
+        if this.cancel.is_cancelled() {
+            return std::task::Poll::Ready(Err(Self::aborted()));
         }
-        std::pin::Pin::new(&mut this.stream).poll_flush(cx)
+        match std::pin::Pin::new(&mut this.stream).poll_flush(cx) {
+            std::task::Poll::Pending => {
+                match Self::poll_cancel(&this.cancel, &mut this.write_cancel, cx) {
+                    Ok(()) => std::task::Poll::Pending,
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                }
+            }
+            ready => ready,
+        }
     }
     fn poll_shutdown(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        if let Err(error) = Self::check(&mut this.write_cancel, cx) {
-            return std::task::Poll::Ready(Err(error));
+        if this.cancel.is_cancelled() {
+            return std::task::Poll::Ready(Err(Self::aborted()));
         }
-        std::pin::Pin::new(&mut this.stream).poll_shutdown(cx)
+        match std::pin::Pin::new(&mut this.stream).poll_shutdown(cx) {
+            std::task::Poll::Pending => {
+                match Self::poll_cancel(&this.cancel, &mut this.write_cancel, cx) {
+                    Ok(()) => std::task::Poll::Pending,
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                }
+            }
+            ready => ready,
+        }
+    }
+}
+impl kerlico_core::SpliceIo for PeerIo {
+    #[cfg(target_os = "linux")]
+    fn poll_splice_to_pipe(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        pipe_wr: std::os::fd::BorrowedFd<'_>,
+        max_len: usize,
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if self.cancel.is_cancelled() {
+            return std::task::Poll::Ready(Err(Self::aborted()));
+        }
+        match self.stream.poll_splice_to_pipe(cx, pipe_wr, max_len) {
+            std::task::Poll::Pending => {
+                match Self::poll_cancel(&self.cancel, &mut self.read_cancel, cx) {
+                    Ok(()) => std::task::Poll::Pending,
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                }
+            }
+            ready => ready,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn poll_splice_from_pipe(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        pipe_rd: std::os::fd::BorrowedFd<'_>,
+        max_len: usize,
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if self.cancel.is_cancelled() {
+            return std::task::Poll::Ready(Err(Self::aborted()));
+        }
+        match self.stream.poll_splice_from_pipe(cx, pipe_rd, max_len) {
+            std::task::Poll::Pending => {
+                match Self::poll_cancel(&self.cancel, &mut self.write_cancel, cx) {
+                    Ok(()) => std::task::Poll::Pending,
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                }
+            }
+            ready => ready,
+        }
     }
 }
 

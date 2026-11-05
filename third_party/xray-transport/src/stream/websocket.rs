@@ -36,7 +36,7 @@ use tokio::time::{interval_at, Instant, Interval, MissedTickBehavior};
 
 use super::http_headers::websocket_request_target;
 use super::websocket_frame::{
-    encode_client_frames, encode_frame, FrameDecoder, FrameEvent, OPCODE_CLOSE, OPCODE_PING,
+    encode_client_frames_into, encode_frame, FrameDecoder, FrameRef, OPCODE_CLOSE, OPCODE_PING,
     OPCODE_PONG,
 };
 use super::{apply_masquerade, serialize_request, HeaderMap};
@@ -45,7 +45,7 @@ use crate::{BoxedTransportStream, TransportError, TransportStream};
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_RESPONSE_HEAD: usize = 64 * 1024;
-const READ_CHUNK: usize = 16 * 1024;
+const READ_CHUNK: usize = 64 * 1024;
 
 /// `websocket.CloseNormalClosure` with no reason text.
 const CLOSE_NORMAL: u16 = 1000;
@@ -121,9 +121,10 @@ pub struct WebSocketConfig {
 }
 
 pub async fn connect_websocket(
-    stream: BoxedTransportStream,
+    mut stream: BoxedTransportStream,
     config: &WebSocketConfig,
 ) -> Result<BoxedTransportStream, TransportError> {
+    stream.release_record_alignment();
     if config.early_data_bytes == 0 {
         let ready = handshake(stream, config.clone(), None).await?;
         return Ok(Box::new(ready));
@@ -294,9 +295,8 @@ fn token_list_contains(header: &str, wanted: &str) -> bool {
 pub(crate) struct WebSocketStream {
     inner: BoxedTransportStream,
     decoder: FrameDecoder,
-    /// Decoded payload not yet handed to the caller.
-    pending: Vec<u8>,
-    pending_pos: usize,
+    /// Decoded payload range inside `decoder` not yet handed to the caller.
+    pending: std::ops::Range<usize>,
     /// Encoded frames not yet written to the socket.
     out: Vec<u8>,
     out_pos: usize,
@@ -325,9 +325,8 @@ impl WebSocketStream {
         Self {
             inner,
             decoder,
-            pending: Vec::new(),
-            pending_pos: 0,
-            out: Vec::new(),
+            pending: 0..0,
+            out: Vec::with_capacity(READ_CHUNK + 32),
             out_pos: 0,
             scratch: vec![0u8; READ_CHUNK],
             heartbeat,
@@ -337,17 +336,19 @@ impl WebSocketStream {
     }
 
     fn deliver(&mut self, output: &mut ReadBuf<'_>) -> bool {
-        let remaining = &self.pending[self.pending_pos..];
+        if self.pending.is_empty() {
+            return false;
+        }
+        let remaining = self.decoder.slice(self.pending.clone());
         let take = remaining.len().min(output.remaining());
         if take == 0 {
             return false;
         }
 
         output.put_slice(&remaining[..take]);
-        self.pending_pos += take;
-        if self.pending_pos == self.pending.len() {
-            self.pending = Vec::new();
-            self.pending_pos = 0;
+        self.pending.start += take;
+        if self.pending.is_empty() {
+            self.pending = 0..0;
         }
         true
     }
@@ -390,7 +391,8 @@ impl AsyncRead for WebSocketStream {
         output: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if output.remaining() == 0 {
+        let initial_rem = output.remaining();
+        if initial_rem == 0 {
             return Poll::Ready(Ok(()));
         }
 
@@ -402,31 +404,34 @@ impl AsyncRead for WebSocketStream {
         }
 
         loop {
-            if this.deliver(output) {
+            if this.deliver(output) && output.remaining() == 0 {
                 return Poll::Ready(Ok(()));
             }
             if this.peer_closed {
                 return Poll::Ready(Ok(()));
             }
 
-            match this.decoder.next_event().map_err(protocol_io_error)? {
-                Some(FrameEvent::Payload(payload)) => {
-                    this.pending = payload;
-                    this.pending_pos = 0;
+            match this.decoder.next_frame_ref().map_err(protocol_io_error)? {
+                Some(FrameRef::Payload(range)) => {
+                    this.pending = range;
                     continue;
                 }
-                Some(FrameEvent::Pong(payload)) => {
-                    encode_frame(&mut this.out, OPCODE_PONG, true, &payload);
+                Some(FrameRef::Pong(range)) => {
+                    encode_frame(&mut this.out, OPCODE_PONG, true, this.decoder.slice(range));
                     if let Poll::Ready(Err(error)) = this.poll_flush_out(cx) {
                         return Poll::Ready(Err(error));
                     }
                     continue;
                 }
-                Some(FrameEvent::Close) => {
+                Some(FrameRef::Close) => {
                     this.peer_closed = true;
                     return Poll::Ready(Ok(()));
                 }
                 None => {}
+            }
+
+            if output.remaining() < initial_rem {
+                return Poll::Ready(Ok(()));
             }
 
             let filled = {
@@ -468,7 +473,7 @@ impl AsyncWrite for WebSocketStream {
             return Poll::Ready(Ok(0));
         }
 
-        this.out = encode_client_frames(input);
+        encode_client_frames_into(&mut this.out, input);
         this.out_pos = 0;
         if let Poll::Ready(Err(error)) = this.poll_flush_out(cx) {
             return Poll::Ready(Err(error));
@@ -508,6 +513,10 @@ impl AsyncWrite for WebSocketStream {
 }
 
 impl TransportStream for WebSocketStream {
+    fn release_record_alignment(&mut self) {
+        self.inner.release_record_alignment();
+    }
+
     fn poll_read_direct(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

@@ -22,6 +22,7 @@ pub(crate) enum Obfs {
 pub(crate) struct Settings {
     pub version: u8,
     pub psk: Arc<[u8]>,
+    pub v3_chacha: bool,
     pub mode: Mode,
     pub profile: Option<Arc<Profile>>,
     pub obfs: Obfs,
@@ -38,7 +39,7 @@ impl Settings {
         uri: Option<String>,
         server: bool,
     ) -> Result<Self> {
-        if !matches!((server, version), (false, 4) | (true, 5) | (_, 6))
+        if !matches!((server, version), (_, 3) | (false, 4) | (true, 5) | (_, 6))
             || psk.is_empty()
             || psk.len() > 4096
         {
@@ -79,12 +80,26 @@ impl Settings {
         Ok(Self {
             version,
             psk: Arc::from(psk.into_bytes()),
+            v3_chacha: false,
             mode,
             profile,
             obfs,
             host,
             uri,
         })
+    }
+    pub fn with_cipher(mut self, cipher: Option<&str>) -> Result<Self> {
+        match (self.version, cipher) {
+            (_, None | Some("aes-128-gcm")) => {
+                self.v3_chacha = false;
+                Ok(self)
+            }
+            (3, Some("chacha20-ietf-poly1305" | "chacha20-poly1305")) => {
+                self.v3_chacha = true;
+                Ok(self)
+            }
+            _ => Err(invalid()),
+        }
     }
     pub fn raw(&self) -> bool {
         self.version == 6 && self.mode == Mode::UnsafeRaw

@@ -115,6 +115,28 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessStream<S> {
         }
         Pin::new(&mut self.get_mut().inner).poll_write(cx, bytes)
     }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        if self.failed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "VLESS 响应头已失败",
+            )));
+        }
+        if self.write_closed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "VLESS 写端已关闭",
+            )));
+        }
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.failed {
             return Poll::Ready(Err(io::Error::new(

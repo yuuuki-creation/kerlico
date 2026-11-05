@@ -6,8 +6,10 @@ pub(crate) struct Layout {
     pub ascii: bool,
     pub hints: [[u8; 16]; 4],
     pub hint_index: [Option<u8>; 256],
+    pub raw_hint_index: [u8; 256],
     pub groups: [u8; 64],
     pub group_index: [Option<u8>; 256],
+    pub raw_group_index: [u8; 256],
     pub padding: Vec<u8>,
     pub marker: u8,
 }
@@ -56,8 +58,10 @@ impl Layout {
             ascii,
             hints: [[0; 16]; 4],
             hint_index: [None; 256],
+            raw_hint_index: [0xFF; 256],
             groups: [0; 64],
             group_index: [None; 256],
+            raw_group_index: [0xFF; 256],
             padding: Vec::new(),
             marker: if ascii { 0x3f } else { 0x80 },
         };
@@ -109,6 +113,10 @@ impl Layout {
                 self.hint_index[self.hints[value][position] as usize] =
                     Some(((position << 2) | value) as u8);
             }
+        }
+        for i in 0..256 {
+            self.raw_hint_index[i] = self.hint_index[i].unwrap_or(0xFF);
+            self.raw_group_index[i] = self.group_index[i].unwrap_or(0xFF);
         }
     }
 
@@ -168,8 +176,10 @@ impl Layout {
             ascii: false,
             hints: [[0; 16]; 4],
             hint_index: [None; 256],
+            raw_hint_index: [0xFF; 256],
             groups: [0; 64],
             group_index: [None; 256],
+            raw_group_index: [0xFF; 256],
             padding,
             marker,
         };

@@ -135,7 +135,11 @@ impl InboundProtocol for TrojanNode {
                                 .alpn_protocol()
                                 .and_then(|b| std::str::from_utf8(b).ok())
                                 .map(str::to_owned);
-                            Ok((Box::new(tls_stream) as BoxStream, sni, alpn))
+                            Ok((
+                                Box::new(crate::io::ServerTls(tls_stream)) as BoxStream,
+                                sni,
+                                alpn,
+                            ))
                         }
                         None => Ok((stream, None, None)),
                     }
@@ -194,20 +198,28 @@ impl Payload {
     ) -> Result<()> {
         let connect =
             ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
-        let mut recorder = RecordingStream::new(stream, 4096);
-        let handshake = connect
-            .run(codec::request(&mut recorder, &self.users))
-            .await;
-        let (stream, recorded) = recorder.into_parts();
-        let (slot, target, udp) = match handshake {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                if let Some(res) =
-                    try_fallback(stream, recorded, &self.fallbacks, sni, alpn, &context).await
-                {
-                    return res;
+        let (stream, (slot, target, udp)) = if self.fallbacks.is_empty() {
+            let mut stream = stream;
+            let parsed = connect
+                .run(codec::request(&mut stream, &self.users))
+                .await?;
+            (stream, parsed)
+        } else {
+            let mut recorder = RecordingStream::new(stream, 4096);
+            let handshake = connect
+                .run(codec::request(&mut recorder, &self.users))
+                .await;
+            let (stream, recorded) = recorder.into_parts();
+            match handshake {
+                Ok(parsed) => (stream, parsed),
+                Err(err) => {
+                    if let Some(res) =
+                        try_fallback(stream, recorded, &self.fallbacks, sni, alpn, &context).await
+                    {
+                        return res;
+                    }
+                    return Err(err);
                 }
-                return Err(err);
             }
         };
         let (access, (target, udp)) =

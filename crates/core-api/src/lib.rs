@@ -5,7 +5,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 /// 可克隆的协作取消信号；克隆共享取消状态，子令牌用于限制取消传播范围。
 pub use tokio_util::sync::CancellationToken;
 mod relay;
-pub use relay::{relay_streams, relay_tcp, relay_tcp_io};
+pub use relay::{as_splice_io, relay_streams, relay_tcp, relay_tcp_io, stream_supports_splice};
 mod flow;
 pub use flow::*;
 mod identity;
@@ -164,10 +164,79 @@ impl fmt::Display for Destination {
 /// Tokio 双向字节流，允许移动且无需固定内存地址；不要求 `Sync`。
 ///
 /// 写入可能部分完成；调用方仍须遵守 `AsyncWrite` 的刷新和关闭契约。
-pub trait IoStream: AsyncRead + AsyncWrite + Send + Unpin {}
-impl<T: AsyncRead + AsyncWrite + Send + Unpin> IoStream for T {}
+pub trait IoStream: AsyncRead + AsyncWrite + Send + Unpin + std::any::Any {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> IoStream for T {}
 /// 独占的异步字节流；半关闭能否到达最终业务目标须另查能力声明。
 pub type BoxStream = Box<dyn IoStream>;
+
+/// 支持 Linux 零拷贝管道拼接（`splice(2)`）的异步字节流扩展。
+pub trait SpliceIo: IoStream {
+    fn supports_splice(&self) -> bool {
+        true
+    }
+    #[cfg(target_os = "linux")]
+    fn poll_splice_to_pipe(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        pipe_wr: std::os::fd::BorrowedFd<'_>,
+        max_len: usize,
+    ) -> std::task::Poll<io::Result<usize>>;
+    #[cfg(target_os = "linux")]
+    fn poll_splice_from_pipe(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        pipe_rd: std::os::fd::BorrowedFd<'_>,
+        max_len: usize,
+    ) -> std::task::Poll<io::Result<usize>>;
+}
+
+/// 将任意 [`SpliceIo`] 包装为 [`BoxStream`] 并保留零拷贝拼接向下转型能力。
+pub struct SpliceBox(pub Box<dyn SpliceIo>);
+impl SpliceBox {
+    pub fn boxed(inner: impl SpliceIo + 'static) -> BoxStream {
+        Box::new(Self(Box::new(inner)))
+    }
+}
+impl AsyncRead for SpliceBox {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        Pin::new(&mut *self.get_mut().0).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for SpliceBox {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        Pin::new(&mut *self.get_mut().0).poll_write(cx, buf)
+    }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> std::task::Poll<io::Result<usize>> {
+        Pin::new(&mut *self.get_mut().0).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
+    }
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        Pin::new(&mut *self.get_mut().0).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        Pin::new(&mut *self.get_mut().0).poll_shutdown(cx)
+    }
+}
 
 /// 当前出站及其已选组合的数据能力，不代表对端已接受业务请求。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

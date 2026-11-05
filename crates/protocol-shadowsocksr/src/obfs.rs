@@ -56,7 +56,7 @@ impl Layer {
                 if self.phase == 8 {
                     return Ok(data.to_vec());
                 }
-                if self.pending.len() + data.len() > 131072 {
+                if self.pending.len() + data.len() > 2 * 1048576 {
                     return Err(Error::ResourceLimit);
                 }
                 self.pending.extend_from_slice(data);
@@ -73,7 +73,7 @@ impl Layer {
                     return records(data);
                 }
                 let encoded = records(data)?;
-                if self.pending.len() + encoded.len() > 131072 {
+                if self.pending.len() + encoded.len() > 2 * 1048576 {
                     return Err(Error::ResourceLimit);
                 }
                 self.pending.extend(encoded);
@@ -92,7 +92,7 @@ impl Layer {
                 reply: Vec::new(),
             });
         }
-        if self.buffer.len() + data.len() > 131072 {
+        if self.buffer.len() + data.len() > 2 * 1048576 {
             return Err(Error::ResourceLimit);
         }
         self.buffer.extend_from_slice(data);

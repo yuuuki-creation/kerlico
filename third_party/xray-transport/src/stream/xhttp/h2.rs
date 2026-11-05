@@ -43,7 +43,7 @@ const STREAM_WINDOW_SIZE: u32 = DEFAULT_H2_STREAM_RECEIVE_WINDOW;
 const CONNECTION_WINDOW_SIZE: u32 = H2_CONNECTION_RECEIVE_WINDOW;
 
 /// Bounds the copy made by one [`AsyncWrite::poll_write`] call.
-const MAX_UPLOAD_DATA_BYTES: usize = 16 * 1024;
+const MAX_UPLOAD_DATA_BYTES: usize = 64 * 1024;
 
 /// x/net/http2's default `Transport.PingTimeout`.
 const PING_TIMEOUT: Duration = Duration::from_secs(15);
@@ -249,7 +249,7 @@ pub async fn connect_h2_with_receive_window(
     builder
         .initial_window_size(stream_receive_window)
         .initial_connection_window_size(CONNECTION_WINDOW_SIZE)
-        .initial_max_send_streams(1);
+        .initial_max_send_streams(100);
     let (send_request, mut connection) = builder
         .handshake::<_, Bytes>(io)
         .await

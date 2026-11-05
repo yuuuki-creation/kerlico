@@ -4,9 +4,9 @@
   "releases_url": "https://github.com/yuuuki-creation/kerlico/releases",
   "status_url": "https://github.com/yuuuki-creation/kerlico/blob/main/STATUS.md",
   "usage_url": "https://github.com/yuuuki-creation/kerlico/blob/main/docs/usage.en.md",
-  "notes_url": "https://github.com/yuuuki-creation/kerlico/blob/main/docs/releases/1.11.0.md",
+  "notes_url": "https://github.com/yuuuki-creation/kerlico/blob/main/docs/releases/1.12.0.md",
   "license_url": "https://github.com/yuuuki-creation/kerlico/blob/main/LICENSE",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "default_lang": "en",
   "languages": [
     { "code": "zh-CN", "name": "简体中文", "short": "中", "dir": "ltr" },

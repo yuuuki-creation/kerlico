@@ -304,7 +304,7 @@ impl TlsConnector {
             .await
             .map_err(TransportError::Tls)?;
 
-        Ok(Box::new(stream))
+        Ok(Box::new(ClientTlsStream(stream)))
     }
 
     /// Completes the handshake on a carrier that Vision may unwrap.
@@ -439,6 +439,78 @@ fn validate_quic_client_config(client_config: &rustls::ClientConfig) -> Result<(
 /// removes only that layer, and the sessions `TlsConnector` dials for DNS and
 /// probes. Direct I/O therefore stays inside the session. The raw transport's
 /// TLS, which Vision does unwrap, is a `PenetratingTlsStream`.
+struct ClientTlsStream(tokio_rustls::client::TlsStream<BoxedTransportStream>);
+
+impl AsyncRead for ClientTlsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = output.filled().len();
+        let poll = Pin::new(&mut this.0).poll_read(cx, output);
+        if matches!(poll, Poll::Ready(Ok(()))) && output.filled().len() > before {
+            while output.remaining() >= 16384 {
+                let prev = output.filled().len();
+                match Pin::new(&mut this.0).poll_read(cx, output) {
+                    Poll::Ready(Ok(())) if output.filled().len() > prev => {}
+                    _ => break,
+                }
+            }
+        }
+        poll
+    }
+}
+
+impl AsyncWrite for ClientTlsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        input: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write(cx, input)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        inputs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write_vectored(cx, inputs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
+impl TransportStream for ClientTlsStream {
+    fn poll_read_direct(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        AsyncRead::poll_read(self, cx, output)
+    }
+
+    fn poll_write_direct(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        input: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        AsyncWrite::poll_write(self, cx, input)
+    }
+}
+
 impl TransportStream for tokio_rustls::client::TlsStream<BoxedTransportStream> {
     fn poll_read_direct(
         self: Pin<&mut Self>,

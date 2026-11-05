@@ -48,6 +48,16 @@ impl tokio::io::AsyncWrite for BridgedStream {
     ) -> std::task::Poll<std::io::Result<usize>> {
         std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
     }
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
+    }
     fn poll_flush(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -144,7 +154,7 @@ impl Carrier {
                     }
                 }
                 let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-                    rustls::crypto::ring::default_provider(),
+                    rustls::crypto::aws_lc_rs::default_provider(),
                 ))
                 .with_safe_default_protocol_versions()
                 .map_err(|_| invalid())?
@@ -213,7 +223,7 @@ impl Carrier {
                 idle_timeout_secs: 0,
                 health_check_timeout_secs: 0,
                 permit_without_stream: false,
-                initial_windows_size: 0,
+                initial_windows_size: 4 * 1024 * 1024,
             }),
         };
         let compile_dialer = kerlico_core::current_compile_dialer();
@@ -320,11 +330,12 @@ impl Carrier {
             list.truncate(32);
             list
         };
-        let stream = self
+        let mut stream = self
             .dialer
             .connect_stream(&self.connector, &layer, &target, &candidates, None)
             .await
             .map_err(|_| Error::Protocol("Trojan 载体建立失败"))?;
+        stream.release_record_alignment();
         Ok(Box::new(
             self.owner.as_ref().ok_or_else(invalid)?.wrap(stream),
         ))

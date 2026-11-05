@@ -46,6 +46,7 @@ pub async fn connect_httpupgrade(
     mut stream: BoxedTransportStream,
     config: &HttpUpgradeConfig,
 ) -> Result<BoxedTransportStream, TransportError> {
+    stream.release_record_alignment();
     let mut headers = HeaderMap::new();
     for (key, value) in &config.headers {
         headers.set(key, value);
@@ -75,6 +76,9 @@ pub async fn connect_httpupgrade(
         .map_err(TransportError::Tcp)?;
 
     let leftover = read_and_validate_response(&mut stream).await?;
+    if leftover.is_empty() {
+        return Ok(stream);
+    }
     Ok(Box::new(PrefixedStream::new(stream, leftover)))
 }
 
@@ -221,6 +225,18 @@ impl AsyncWrite for PrefixedStream {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, input)
     }
 
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        inputs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, inputs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_flush(cx)
     }
@@ -233,6 +249,10 @@ impl AsyncWrite for PrefixedStream {
 /// The direct-mode methods forward to the plain ones. Record alignment exists
 /// only for Vision, which the compatibility matrix keeps off this transport.
 impl TransportStream for PrefixedStream {
+    fn release_record_alignment(&mut self) {
+        self.inner.release_record_alignment();
+    }
+
     fn poll_read_direct(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

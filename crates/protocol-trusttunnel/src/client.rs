@@ -124,6 +124,7 @@ impl Drop for Carrier {
 }
 struct Pool {
     carriers: Vec<Arc<Carrier>>,
+    connecting: usize,
 }
 type MemberPool = tokio::sync::Mutex<Pool>;
 struct Client {
@@ -224,8 +225,10 @@ impl Client {
         let (sender, driver) = if self.transport == Transport::H2 {
             let io = self.tls().await?;
             let (sender, connection) = h2::client::Builder::new()
-                .initial_window_size(131072)
-                .initial_connection_window_size(2 * 1024 * 1024)
+                .initial_window_size(16 * 1024 * 1024)
+                .initial_connection_window_size(64 * 1024 * 1024)
+                .max_frame_size(65536)
+                .max_send_buffer_size(4 * 1024 * 1024)
                 .max_header_list_size(16384)
                 .handshake(io)
                 .await
@@ -250,6 +253,9 @@ impl Client {
             .parse()
             .map_err(|_| crate::invalid())?;
             let socket = std::net::UdpSocket::bind(bind)?;
+            let sock_ref = socket2::SockRef::from(&socket);
+            let _ = sock_ref.set_recv_buffer_size(8 * 1024 * 1024);
+            let _ = sock_ref.set_send_buffer_size(8 * 1024 * 1024);
             socket.set_nonblocking(true)?;
             let mut endpoint = quinn::Endpoint::new(
                 quinn::EndpointConfig::default(),
@@ -330,37 +336,76 @@ impl Client {
                 .or_insert_with(|| {
                     Arc::new(tokio::sync::Mutex::new(Pool {
                         carriers: Vec::new(),
+                        connecting: 0,
                     }))
                 })
                 .clone()
         };
-        let mut pool = bucket.lock().await;
-        pool.carriers.retain(|c| !c.closed.load(Ordering::Relaxed));
-        for carrier in &pool.carriers {
-            if let Ok(slot) = carrier.slots.clone().try_acquire_owned() {
-                if carrier.age() >= std::time::Duration::from_millis(self.limits.health_check_ms) {
-                    let mut health = carrier.open("_check", &self.auth).await?;
-                    let mut bytes = [0; 1];
-                    if health.read(&mut bytes).await? != 0 {
-                        carrier.close();
-                        return Err(protocol());
-                    }
-                    carrier.touch();
+        let slots = self
+            .limits
+            .max_streams
+            .div_ceil(self.limits.max_connections);
+        let mut should_make = false;
+        let picked = {
+            let mut pool = bucket.lock().await;
+            pool.carriers.retain(|c| !c.closed.load(Ordering::Relaxed));
+            let mut idle = None;
+            for carrier in &pool.carriers {
+                if carrier.slots.available_permits() == slots
+                    && let Ok(slot) = carrier.slots.clone().try_acquire_owned()
+                {
+                    idle = Some((carrier.clone(), slot));
+                    break;
                 }
-                return Ok((carrier.clone(), slot));
             }
+            if let Some(pair) = idle {
+                Some(pair)
+            } else if pool.carriers.len() + pool.connecting < self.limits.max_connections {
+                pool.connecting += 1;
+                should_make = true;
+                None
+            } else if let Some(carrier) = pool
+                .carriers
+                .iter()
+                .max_by_key(|c| c.slots.available_permits())
+                .cloned()
+                && let Ok(slot) = carrier.slots.clone().try_acquire_owned()
+            {
+                Some((carrier, slot))
+            } else if pool.carriers.len() < self.limits.max_connections {
+                pool.connecting += 1;
+                should_make = true;
+                None
+            } else {
+                None
+            }
+        };
+        if let Some((carrier, slot)) = picked {
+            if carrier.age() >= std::time::Duration::from_millis(self.limits.health_check_ms) {
+                let mut health = carrier.open("_check", &self.auth).await?;
+                let mut bytes = [0; 1];
+                if health.read(&mut bytes).await? != 0 {
+                    carrier.close();
+                    return Err(protocol());
+                }
+                carrier.touch();
+            }
+            return Ok((carrier, slot));
         }
-        if pool.carriers.len() >= self.limits.max_connections {
-            return Err(Error::ResourceLimit);
+        if should_make {
+            let made = self.make().await;
+            let mut pool = bucket.lock().await;
+            pool.connecting = pool.connecting.saturating_sub(1);
+            let carrier = made?;
+            let slot = carrier
+                .slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| Error::ResourceLimit)?;
+            pool.carriers.push(carrier.clone());
+            return Ok((carrier, slot));
         }
-        let carrier = self.make().await?;
-        let slot = carrier
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Error::ResourceLimit)?;
-        pool.carriers.push(carrier.clone());
-        Ok((carrier, slot))
+        Err(Error::ResourceLimit)
     }
     async fn open(&self, authority: &str, context: &ConnectContext) -> Result<BoxStream> {
         context

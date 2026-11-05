@@ -13,13 +13,11 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pub(crate) fn stream(inner: BoxStream, lease: FlowLease) -> BoxStream {
-    let read_cancel = lease.clone();
-    let write_cancel = lease.clone();
-    Box::new(MeteredStream {
+    kerlico_core::SpliceBox::boxed(MeteredStream {
         inner,
         lease,
-        read_cancel: Some(Box::pin(async move { read_cancel.cancelled().await })),
-        write_cancel: Some(Box::pin(async move { write_cancel.cancelled().await })),
+        read_cancel: None,
+        write_cancel: None,
     })
 }
 struct MeteredStream {
@@ -29,21 +27,23 @@ struct MeteredStream {
     write_cancel: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 impl MeteredStream {
-    fn check(
+    fn aborted(lease: &FlowLease) -> io::Error {
+        let error = lease.cancellation_error();
+        lease.failed(&error);
+        io::Error::new(io::ErrorKind::ConnectionAborted, error)
+    }
+    fn poll_cancel(
         cancel: &mut Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
         lease: &FlowLease,
         cx: &mut Context<'_>,
     ) -> io::Result<()> {
-        if cancel
-            .as_mut()
-            .is_some_and(|cancel| cancel.as_mut().poll(cx).is_ready())
-        {
+        let fut = cancel.get_or_insert_with(|| {
+            let lease = lease.clone();
+            Box::pin(async move { lease.cancelled().await })
+        });
+        if fut.as_mut().poll(cx).is_ready() {
             *cancel = None;
-        }
-        if cancel.is_none() {
-            let error = lease.cancellation_error();
-            lease.failed(&error);
-            Err(io::Error::new(io::ErrorKind::ConnectionAborted, error))
+            Err(Self::aborted(lease))
         } else {
             Ok(())
         }
@@ -56,8 +56,8 @@ impl AsyncRead for MeteredStream {
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if let Err(error) = Self::check(&mut this.read_cancel, &this.lease, cx) {
-            return Poll::Ready(Err(error));
+        if this.lease.is_cancelled() {
+            return Poll::Ready(Err(Self::aborted(&this.lease)));
         }
         let before = buffer.filled().len();
         let had_capacity = buffer.remaining() > 0;
@@ -74,7 +74,10 @@ impl AsyncRead for MeteredStream {
                 this.lease.io_failed(&error);
                 Poll::Ready(Err(error))
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => match Self::poll_cancel(&mut this.read_cancel, &this.lease, cx) {
+                Ok(()) => Poll::Pending,
+                Err(error) => Poll::Ready(Err(error)),
+            },
         }
     }
 }
@@ -85,8 +88,8 @@ impl AsyncWrite for MeteredStream {
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if let Err(error) = Self::check(&mut this.write_cancel, &this.lease, cx) {
-            return Poll::Ready(Err(error));
+        if this.lease.is_cancelled() {
+            return Poll::Ready(Err(Self::aborted(&this.lease)));
         }
         match Pin::new(&mut this.inner).poll_write(cx, bytes) {
             Poll::Ready(Ok(count)) => {
@@ -97,24 +100,60 @@ impl AsyncWrite for MeteredStream {
                 this.lease.io_failed(&error);
                 Poll::Ready(Err(error))
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => match Self::poll_cancel(&mut this.write_cancel, &this.lease, cx) {
+                Ok(()) => Poll::Pending,
+                Err(error) => Poll::Ready(Err(error)),
+            },
         }
+    }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if this.lease.is_cancelled() {
+            return Poll::Ready(Err(Self::aborted(&this.lease)));
+        }
+        match Pin::new(&mut this.inner).poll_write_vectored(cx, bufs) {
+            Poll::Ready(Ok(count)) => {
+                this.lease.ledger().upload(count, false);
+                Poll::Ready(Ok(count))
+            }
+            Poll::Ready(Err(error)) => {
+                this.lease.io_failed(&error);
+                Poll::Ready(Err(error))
+            }
+            Poll::Pending => match Self::poll_cancel(&mut this.write_cancel, &this.lease, cx) {
+                Ok(()) => Poll::Pending,
+                Err(error) => Poll::Ready(Err(error)),
+            },
+        }
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if let Err(error) = Self::check(&mut this.write_cancel, &this.lease, cx) {
-            return Poll::Ready(Err(error));
+        if this.lease.is_cancelled() {
+            return Poll::Ready(Err(Self::aborted(&this.lease)));
         }
-        let result = Pin::new(&mut this.inner).poll_flush(cx);
-        if let Poll::Ready(Err(error)) = &result {
-            this.lease.io_failed(error);
+        match Pin::new(&mut this.inner).poll_flush(cx) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(error)) => {
+                this.lease.io_failed(&error);
+                Poll::Ready(Err(error))
+            }
+            Poll::Pending => match Self::poll_cancel(&mut this.write_cancel, &this.lease, cx) {
+                Ok(()) => Poll::Pending,
+                Err(error) => Poll::Ready(Err(error)),
+            },
         }
-        result
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if let Err(error) = Self::check(&mut this.write_cancel, &this.lease, cx) {
-            return Poll::Ready(Err(error));
+        if this.lease.is_cancelled() {
+            return Poll::Ready(Err(Self::aborted(&this.lease)));
         }
         match Pin::new(&mut this.inner).poll_shutdown(cx) {
             Poll::Ready(Ok(())) => {
@@ -125,7 +164,74 @@ impl AsyncWrite for MeteredStream {
                 this.lease.io_failed(&error);
                 Poll::Ready(Err(error))
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => match Self::poll_cancel(&mut this.write_cancel, &this.lease, cx) {
+                Ok(()) => Poll::Pending,
+                Err(error) => Poll::Ready(Err(error)),
+            },
+        }
+    }
+}
+impl kerlico_core::SpliceIo for MeteredStream {
+    fn supports_splice(&self) -> bool {
+        kerlico_core::stream_supports_splice(self.inner.as_ref())
+    }
+    #[cfg(target_os = "linux")]
+    fn poll_splice_to_pipe(
+        &mut self,
+        cx: &mut Context<'_>,
+        pipe_wr: std::os::fd::BorrowedFd<'_>,
+        max_len: usize,
+    ) -> Poll<io::Result<usize>> {
+        if self.lease.is_cancelled() {
+            return Poll::Ready(Err(Self::aborted(&self.lease)));
+        }
+        let Some(inner) = kerlico_core::as_splice_io(self.inner.as_mut()) else {
+            return Poll::Ready(Err(io::ErrorKind::Unsupported.into()));
+        };
+        match inner.poll_splice_to_pipe(cx, pipe_wr, max_len) {
+            Poll::Ready(Ok(read)) => {
+                self.lease.ledger().download(read, false);
+                if read == 0 && max_len > 0 {
+                    self.lease.download_closed();
+                }
+                Poll::Ready(Ok(read))
+            }
+            Poll::Ready(Err(error)) => {
+                self.lease.io_failed(&error);
+                Poll::Ready(Err(error))
+            }
+            Poll::Pending => match Self::poll_cancel(&mut self.read_cancel, &self.lease, cx) {
+                Ok(()) => Poll::Pending,
+                Err(error) => Poll::Ready(Err(error)),
+            },
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn poll_splice_from_pipe(
+        &mut self,
+        cx: &mut Context<'_>,
+        pipe_rd: std::os::fd::BorrowedFd<'_>,
+        max_len: usize,
+    ) -> Poll<io::Result<usize>> {
+        if self.lease.is_cancelled() {
+            return Poll::Ready(Err(Self::aborted(&self.lease)));
+        }
+        let Some(inner) = kerlico_core::as_splice_io(self.inner.as_mut()) else {
+            return Poll::Ready(Err(io::ErrorKind::Unsupported.into()));
+        };
+        match inner.poll_splice_from_pipe(cx, pipe_rd, max_len) {
+            Poll::Ready(Ok(count)) => {
+                self.lease.ledger().upload(count, false);
+                Poll::Ready(Ok(count))
+            }
+            Poll::Ready(Err(error)) => {
+                self.lease.io_failed(&error);
+                Poll::Ready(Err(error))
+            }
+            Poll::Pending => match Self::poll_cancel(&mut self.write_cancel, &self.lease, cx) {
+                Ok(()) => Poll::Pending,
+                Err(error) => Poll::Ready(Err(error)),
+            },
         }
     }
 }

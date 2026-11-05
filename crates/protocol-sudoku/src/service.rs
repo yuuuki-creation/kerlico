@@ -134,7 +134,7 @@ impl Runtime {
                         return Err(Error::Rejected);
                     };
                     return kerlico_net::sing_mux::serve_inbound(
-                        negotiated.stream,
+                        negotiated.stream.into_parallel(&self.scope),
                         peer,
                         mux_cfg,
                         &context,
@@ -143,7 +143,7 @@ impl Runtime {
                 }
                 let stream = peer.connect_tcp(&target, &connecting).await?;
                 kerlico_core::relay_tcp(
-                    negotiated.stream,
+                    negotiated.stream.into_parallel(&self.scope),
                     stream,
                     context.idle_timeout,
                     context.cancel,
@@ -157,7 +157,7 @@ impl Runtime {
             {
                 let access = peer.associate_udp(&connecting).await?;
                 let wire = udp::association(
-                    negotiated.stream,
+                    Box::new(negotiated.stream),
                     &context.cancel,
                     context.max_datagram_size,
                     false,
@@ -165,7 +165,8 @@ impl Runtime {
                 relay_udp(wire, access, context).await
             }
             kip::START_MUX if negotiated.features & 2 != 0 && intent.payload.is_empty() => {
-                self.multiplex(negotiated.stream, peer, context).await
+                self.multiplex(negotiated.stream.into_parallel(&self.scope), peer, context)
+                    .await
             }
             _ => Err(Error::Unsupported("Sudoku意图未协商或格式不合法")),
         }

@@ -149,58 +149,77 @@ impl InboundProtocol for ShadowsocksNode {
         Box::pin(async move {
             let handshake =
                 ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
-            let candidates = Candidates::new(stream);
-            let mut tasks = JoinSet::new();
-            let configurations: Vec<_> = if self.local {
-                vec![self.config.clone()]
-            } else {
-                self.credentials
-                    .rows()
-                    .map(|(_, row)| row.config.clone())
-                    .collect()
-            };
-            for config in configurations {
-                let stream = candidates.reader();
-                let crypto = crate::crypto(ServerType::Server);
-                let owner = context.tasks.clone();
-                let task = owner.spawn_tracked(async move {
-                    let mut stream = ProxyServerStream::from_stream(
-                        crypto,
-                        stream,
-                        config.method(),
-                        config.key(),
-                    );
-                    let target = destination(&stream.handshake().await?)?;
-                    Ok::<_, Error>((config.key().to_vec(), Box::new(stream) as BoxStream, target))
-                })?;
-                tasks.spawn(async move {
-                    task.await
-                        .unwrap_or(Err(Error::Protocol("认证任务异常退出")))
-                });
-            }
-            let selected = handshake
-                .run(async {
-                    while let Some(result) = tasks.join_next().await {
-                        if let Ok(Ok(result)) = result {
-                            return Ok(result);
-                        }
-                    }
-                    Err(Error::Rejected)
-                })
-                .await;
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
-            let (key, stream, target) = selected?;
-            let nonce = candidates.prefix(
-                if self.config.method().is_aead() || self.config.method().is_aead_2022() {
-                    self.config.method().salt_len()
+            let (key, stream, target) =
+                if self.local && self.config.method() == shadowsocks::crypto::CipherKind::NONE {
+                    let mut stream = stream;
+                    let addr = handshake
+                        .run(async {
+                            shadowsocks::relay::socks5::Address::read_from(&mut stream)
+                                .await
+                                .map_err(|_| crate::protocol_error())
+                        })
+                        .await?;
+                    let target = destination(&addr)?;
+                    (Vec::new(), stream, target)
                 } else {
-                    self.config.method().iv_len()
-                },
-            )?;
-            self.crypto
-                .check_nonce_replay(self.config.method(), &nonce)?;
-            candidates.accept();
+                    let candidates = Candidates::new(stream);
+                    let mut tasks = JoinSet::new();
+                    let configurations: Vec<_> = if self.local {
+                        vec![self.config.clone()]
+                    } else {
+                        self.credentials
+                            .rows()
+                            .map(|(_, row)| row.config.clone())
+                            .collect()
+                    };
+                    for config in configurations {
+                        let stream = candidates.reader();
+                        let crypto = crate::crypto(ServerType::Server);
+                        let owner = context.tasks.clone();
+                        let task = owner.spawn_tracked(async move {
+                            let mut stream = ProxyServerStream::from_stream(
+                                crypto,
+                                stream,
+                                config.method(),
+                                config.key(),
+                            );
+                            let target = destination(&stream.handshake().await?)?;
+                            Ok::<_, Error>((
+                                config.key().to_vec(),
+                                Box::new(stream) as BoxStream,
+                                target,
+                            ))
+                        })?;
+                        tasks.spawn(async move {
+                            task.await
+                                .unwrap_or(Err(Error::Protocol("认证任务异常退出")))
+                        });
+                    }
+                    let selected = handshake
+                        .run(async {
+                            while let Some(result) = tasks.join_next().await {
+                                if let Ok(Ok(result)) = result {
+                                    return Ok(result);
+                                }
+                            }
+                            Err(Error::Rejected)
+                        })
+                        .await;
+                    tasks.abort_all();
+                    while tasks.join_next().await.is_some() {}
+                    let (key, stream, target) = selected?;
+                    let nonce = candidates.prefix(
+                        if self.config.method().is_aead() || self.config.method().is_aead_2022() {
+                            self.config.method().salt_len()
+                        } else {
+                            self.config.method().iv_len()
+                        },
+                    )?;
+                    self.crypto
+                        .check_nonce_replay(self.config.method(), &nonce)?;
+                    candidates.accept();
+                    (key, stream, target)
+                };
             let access = if self.local {
                 ingress.local(&context)?
             } else {

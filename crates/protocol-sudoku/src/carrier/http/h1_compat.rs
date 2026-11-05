@@ -116,7 +116,10 @@ impl Compat {
         self.consumed += count;
     }
     fn compact(&mut self) {
-        if self.consumed != 0 {
+        if self.consumed >= self.input.len() {
+            self.input.clear();
+            self.consumed = 0;
+        } else if self.consumed != 0 {
             self.input.drain(..self.consumed);
             self.consumed = 0;
         }
@@ -234,7 +237,7 @@ impl Compat {
         match self.framing {
             Framing::Head => self.head(),
             Framing::Fixed(remaining) | Framing::ChunkData(remaining) => {
-                let count = self.remaining().len().min(remaining.min(4096) as usize);
+                let count = self.remaining().len().min(remaining.min(65536) as usize);
                 if count == 0 {
                     return Ok(false);
                 }
@@ -280,7 +283,7 @@ impl Compat {
             }
             Framing::Trailers => self.trailers(),
             Framing::Raw => {
-                let count = self.remaining().len().min(4096);
+                let count = self.remaining().len().min(65536);
                 if count == 0 {
                     return Ok(false);
                 }
@@ -337,17 +340,65 @@ impl AsyncRead for Compat {
                 )));
             }
             this.compact();
+            if this.input.is_empty() {
+                match this.framing {
+                    Framing::Fixed(remaining) | Framing::ChunkData(remaining)
+                        if remaining > 0 && target.remaining() as u64 <= remaining =>
+                    {
+                        let before = target.filled().len();
+                        match Pin::new(&mut this.inner).poll_read(cx, target) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(error)) => {
+                                this.failed = true;
+                                return Poll::Ready(Err(error));
+                            }
+                            Poll::Ready(Ok(())) => {
+                                let n = target.filled().len() - before;
+                                if n == 0 {
+                                    this.eof = true;
+                                    continue;
+                                }
+                                let next = remaining - n as u64;
+                                this.framing = match this.framing {
+                                    Framing::Fixed(_) if next == 0 => Framing::Head,
+                                    Framing::Fixed(_) => Framing::Fixed(next),
+                                    _ if next == 0 => Framing::ChunkEnd,
+                                    _ => Framing::ChunkData(next),
+                                };
+                                return Poll::Ready(Ok(()));
+                            }
+                        }
+                    }
+                    Framing::Raw => {
+                        let before = target.filled().len();
+                        match Pin::new(&mut this.inner).poll_read(cx, target) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(error)) => {
+                                this.failed = true;
+                                return Poll::Ready(Err(error));
+                            }
+                            Poll::Ready(Ok(())) => {
+                                if target.filled().len() == before {
+                                    this.eof = true;
+                                }
+                                return Poll::Ready(Ok(()));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let limit = match this.framing {
                 Framing::Head | Framing::Trailers => MAX_HEAD.saturating_sub(this.input.len()),
                 Framing::ChunkSize => MAX_CHUNK_LINE.saturating_sub(this.input.len()),
-                _ => 4096,
+                _ => 16384,
             }
-            .min(4096);
+            .min(16384);
             if limit == 0 {
                 this.failed = true;
                 return Poll::Ready(Err(invalid()));
             }
-            let mut bytes = [0; 4096];
+            let mut bytes = [0; 16384];
             let mut buffer = ReadBuf::new(&mut bytes[..limit]);
             match Pin::new(&mut this.inner).poll_read(cx, &mut buffer) {
                 Poll::Pending => return Poll::Pending,

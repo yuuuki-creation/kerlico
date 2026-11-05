@@ -24,20 +24,32 @@ impl Frame {
     pub fn new(command: u8, id: u32, data: Vec<u8>) -> Self {
         Self { command, id, data }
     }
-    pub fn encode(&self) -> Result<Vec<u8>> {
+    pub fn encode_into(&self, bytes: &mut Vec<u8>) -> Result<()> {
         let length = u16::try_from(self.data.len()).map_err(|_| Error::ResourceLimit)?;
-        let mut bytes = vec![self.command];
+        bytes.reserve(7 + self.data.len());
+        bytes.push(self.command);
         bytes.extend_from_slice(&self.id.to_be_bytes());
         bytes.extend_from_slice(&length.to_be_bytes());
         bytes.extend_from_slice(&self.data);
+        Ok(())
+    }
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(7 + self.data.len());
+        self.encode_into(&mut bytes)?;
         Ok(bytes)
     }
     pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> Result<Self> {
-        let command = reader.read_u8().await?;
-        let id = reader.read_u32().await?;
-        let length = reader.read_u16().await? as usize;
-        let mut data = vec![0; length];
-        reader.read_exact(&mut data).await?;
+        let mut header = [0u8; 7];
+        reader.read_exact(&mut header).await?;
+        let command = header[0];
+        let id = u32::from_be_bytes([header[1], header[2], header[3], header[4]]);
+        let length = u16::from_be_bytes([header[5], header[6]]) as usize;
+        let mut data = Vec::with_capacity(length);
+        while data.len() < length {
+            if reader.read_buf(&mut data).await? == 0 {
+                return Err(Error::Io(std::io::ErrorKind::UnexpectedEof.into()));
+            }
+        }
         Ok(Self { command, id, data })
     }
 }

@@ -194,7 +194,8 @@ impl Client {
             return Err(Error::Unsupported("对端未选择Sudoku session mux"));
         }
         kip::write(&mut negotiated.stream, kip::START_MUX, &[]).await?;
-        let stream = Box::new(CancelIo::new(negotiated.stream, &self.scope.cancel)) as BoxStream;
+        let parallel = negotiated.stream.into_parallel(&self.scope);
+        let stream = Box::new(CancelIo::new(parallel, &self.scope.cancel)) as BoxStream;
         let session = Arc::new(Session::start_shared(
             stream,
             &self.scope,
@@ -276,7 +277,11 @@ impl Outbound for Client {
                         &address::encode(target),
                     )
                     .await?;
-                    Ok(self.owned(negotiated.stream, context, permit))
+                    Ok(self.owned(
+                        negotiated.stream.into_parallel(&self.scope),
+                        context,
+                        permit,
+                    ))
                 })
                 .await
                 .map(|stream| kerlico_core::OpenedTcp {
@@ -306,7 +311,7 @@ impl Outbound for Client {
                     }
                     kip::write(&mut negotiated.stream, kip::START_UOT, &[]).await?;
                     Ok(udp::association(
-                        self.owned(negotiated.stream, context, permit),
+                        self.owned(Box::new(negotiated.stream), context, permit),
                         &context.cancel,
                         udp::MAX_PACKET,
                         true,

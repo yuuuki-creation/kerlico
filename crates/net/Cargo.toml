@@ -15,7 +15,7 @@ kerlico-config.workspace = true
 kerlico-dns.workspace = true
 tokio.workspace = true
 rcgen.workspace = true
-rustls.workspace = true
+rustls = { workspace = true, features = ["aws_lc_rs"] }
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
 webpki-roots.workspace = true

@@ -60,7 +60,11 @@ impl State {
         if receive.reset || self.cancel.is_cancelled() {
             return Poll::Ready(Err(super::stream::broken()));
         }
-        if let Some(front) = receive.queue.front_mut() {
+        let mut read_any = false;
+        while output.remaining() > 0 {
+            let Some(front) = receive.queue.front_mut() else {
+                break;
+            };
             let count = output.remaining().min(front.bytes.len());
             output.put_slice(&front.bytes[..count]);
             front.bytes.advance(count);
@@ -68,6 +72,9 @@ impl State {
                 receive.queue.pop_front();
             }
             receive.bytes -= count;
+            read_any = true;
+        }
+        if read_any {
             return Poll::Ready(Ok(receive.local_fin
                 && receive.remote_fin
                 && receive.bytes == 0));

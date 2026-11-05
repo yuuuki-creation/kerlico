@@ -72,10 +72,13 @@ impl OutboundFactory for VmessFactory {
             .map_err(|_| invalid())?
             .as_bytes();
         let cipher = Cipher::parse(&options.security).map_err(|_| invalid())?;
-        let flags = 1
-            | if options.chunk_masking { 4 } else { 0 }
-            | if options.global_padding { 8 } else { 0 }
-            | if options.authenticated_length { 16 } else { 0 };
+        let flags = if cipher == Cipher::None {
+            1
+        } else {
+            1 | if options.chunk_masking { 4 } else { 0 }
+                | if options.global_padding { 8 } else { 0 }
+                | if options.authenticated_length { 16 } else { 0 }
+        };
         let carrier = Client::build(
             options.server.destination()?,
             options.tls,

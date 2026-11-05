@@ -1,14 +1,63 @@
 use super::table::Table;
 use crate::io::DuplexWake;
 use kerlico_core::{BoxStream, Error, Result};
-use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
+use rand::{
+    RngCore,
+    distributions::{Distribution, Uniform},
+};
 use std::{
     io,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll, ready},
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+#[derive(Clone)]
+pub(crate) struct FastRng(u64);
+impl FastRng {
+    pub fn from_seed(seed: [u8; 8]) -> Self {
+        let state = u64::from_le_bytes(seed);
+        Self(if state == 0 {
+            0x9e37_79b9_7f4a_7c15
+        } else {
+            state
+        })
+    }
+    #[cfg(test)]
+    pub fn seed_from_u64(seed: u64) -> Self {
+        let state = seed ^ 0x9e37_79b9_7f4a_7c15;
+        Self(if state == 0 { 1 } else { state })
+    }
+}
+impl RngCore for FastRng {
+    #[inline(always)]
+    fn next_u32(&mut self) -> u32 {
+        (self.next_u64() >> 32) as u32
+    }
+    #[inline(always)]
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(8) {
+            let bytes = self.next_u64().to_le_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), rand::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
 
 pub(crate) struct Decoder {
     table: Arc<Table>,
@@ -49,48 +98,80 @@ impl Decoder {
             error: None,
         };
         if self.packed {
-            while progress.consumed < wire.len() && progress.produced < output.len() {
-                let byte = wire[progress.consumed];
-                progress.consumed += 1;
-                let Some(group) = self.table.layout.group_index[byte as usize] else {
-                    if byte == self.table.layout.marker {
-                        self.bits = 0;
-                        self.bit_count = 0;
+            let group_index = &self.table.layout.raw_group_index;
+            let marker = self.table.layout.marker;
+            let mut bits = self.bits;
+            let mut bit_count = self.bit_count;
+            let mut consumed = 0;
+            let mut produced = 0;
+            while consumed < wire.len() && produced < output.len() {
+                let byte = wire[consumed];
+                consumed += 1;
+                let group = group_index[byte as usize];
+                if group == 0xFF {
+                    if byte == marker {
+                        bits = 0;
+                        bit_count = 0;
                     }
                     continue;
-                };
-                self.bits = (self.bits << 6) | u32::from(group);
-                self.bit_count += 6;
-                if self.bit_count >= 8 {
-                    self.bit_count -= 8;
-                    output[progress.produced] = (self.bits >> self.bit_count) as u8;
-                    progress.produced += 1;
-                    self.bits &= (1 << self.bit_count) - 1;
+                }
+                bits = (bits << 6) | u32::from(group);
+                bit_count += 6;
+                if bit_count >= 8 {
+                    bit_count -= 8;
+                    output[produced] = (bits >> bit_count) as u8;
+                    produced += 1;
+                    bits &= (1 << bit_count) - 1;
                 }
             }
+            self.bits = bits;
+            self.bit_count = bit_count;
+            progress.consumed = consumed;
+            progress.produced = produced;
         } else {
-            while progress.consumed < wire.len() && progress.produced < output.len() {
-                let byte = wire[progress.consumed];
-                progress.consumed += 1;
-                let Some(clue) = self.table.layout.hint_index[byte as usize] else {
-                    continue;
-                };
-                self.clues[self.clue_count] = clue;
-                self.clue_count += 1;
-                if self.clue_count == 4 {
-                    self.clue_count = 0;
-                    match self.table.decode(self.clues) {
-                        Ok(byte) => {
-                            output[progress.produced] = byte;
-                            progress.produced += 1;
-                        }
-                        Err(error) => {
-                            progress.error = Some(error);
+            let table = &*self.table;
+            let hint_index = &table.layout.raw_hint_index;
+            let mut clues = self.clues;
+            let mut clue_count = self.clue_count;
+            let mut consumed = 0;
+            let mut produced = 0;
+            while produced < output.len() {
+                while consumed < wire.len() {
+                    let byte = wire[consumed];
+                    consumed += 1;
+                    let clue = hint_index[byte as usize];
+                    if clue != 0xFF {
+                        clues[clue_count] = clue;
+                        clue_count += 1;
+                        if clue_count == 4 {
                             break;
                         }
                     }
                 }
+                if clue_count < 4 {
+                    break;
+                }
+                clue_count = 0;
+                match table.decode(clues) {
+                    Ok(byte) => {
+                        output[produced] = byte;
+                        produced += 1;
+                    }
+                    Err(error) => {
+                        self.clues = clues;
+                        self.clue_count = 0;
+                        return DecodeProgress {
+                            consumed,
+                            produced,
+                            error: Some(error),
+                        };
+                    }
+                }
             }
+            self.clues = clues;
+            self.clue_count = clue_count;
+            progress.consumed = consumed;
+            progress.produced = produced;
         }
         progress
     }
@@ -105,16 +186,18 @@ impl Decoder {
 pub(crate) struct Encoder {
     table: Arc<Table>,
     packed: bool,
-    random: StdRng,
+    random: FastRng,
     threshold: u64,
     padding: Vec<u8>,
+    padding_dist: Uniform<usize>,
+    gap_dist: Uniform<usize>,
 }
 impl Encoder {
     pub fn new(table: Arc<Table>, packed: bool, min: u8, max: u8) -> Result<Self> {
         if min > max || max > 100 {
             return Err(Error::Config("Sudoku padding范围不合法".into()));
         }
-        let mut random = StdRng::from_seed(crate::key::random::<32>()?);
+        let mut random = FastRng::from_seed(crate::key::random::<8>()?);
         let low = u64::from(min) * (1u64 << 32) / 100;
         let high = u64::from(max) * (1u64 << 32) / 100;
         let threshold = low + ((u64::from(random.next_u32()) * (high - low)) >> 32);
@@ -125,17 +208,23 @@ impl Encoder {
         if padding.is_empty() {
             return Err(Error::Protocol("Sudoku布局没有可用padding"));
         }
+        let padding_dist = Uniform::new(0, padding.len());
+        let gap_dist = Uniform::new_inclusive(1, 2);
         Ok(Self {
             table,
             packed,
             random,
             threshold,
             padding,
+            padding_dist,
+            gap_dist,
         })
     }
+    #[inline(always)]
     fn forced_padding(&mut self, out: &mut Vec<u8>) {
-        out.push(self.padding[self.random.gen_range(0..self.padding.len())]);
+        out.push(self.padding[self.padding_dist.sample(&mut self.random)]);
     }
+    #[inline(always)]
     fn maybe_padding(&mut self, out: &mut Vec<u8>) {
         if self.threshold == 0 {
             return;
@@ -154,30 +243,60 @@ impl Encoder {
                 self.encode_packed_zero(bytes, out);
             } else {
                 out.reserve(bytes.len() * 4);
-                for &byte in bytes {
-                    out.extend_from_slice(&self.table.randomized_puzzle(byte, &mut self.random));
+                let table = &*self.table;
+                let mut rng = self.random.clone();
+                let mut buf = [0u8; 64 * 4];
+                for chunk in bytes.chunks(64) {
+                    let mut pos = 0;
+                    for &byte in chunk {
+                        let puzzle = table.randomized_puzzle(byte, &mut rng);
+                        buf[pos..pos + 4].copy_from_slice(&puzzle);
+                        pos += 4;
+                    }
+                    out.extend_from_slice(&buf[..pos]);
                 }
+                self.random = rng;
             }
             return;
         }
         if !self.packed {
-            for &byte in bytes {
-                let puzzle = self.table.randomized_puzzle(byte, &mut self.random);
-                self.maybe_padding(out);
-                for clue in puzzle {
-                    self.maybe_padding(out);
-                    out.push(clue);
+            out.reserve(bytes.len() * 9);
+            let table = &*self.table;
+            let padding = self.padding.as_slice();
+            let padding_dist = self.padding_dist;
+            let threshold = self.threshold;
+            let mut rng = self.random.clone();
+            let mut buf = [0u8; 64 * 9];
+            for chunk in bytes.chunks(64) {
+                let mut pos = 0;
+                for &byte in chunk {
+                    let puzzle = table.randomized_puzzle(byte, &mut rng);
+                    if threshold == (1u64 << 32) || u64::from(rng.next_u32()) < threshold {
+                        buf[pos] = padding[padding_dist.sample(&mut rng)];
+                        pos += 1;
+                    }
+                    for clue in puzzle {
+                        if threshold == (1u64 << 32) || u64::from(rng.next_u32()) < threshold {
+                            buf[pos] = padding[padding_dist.sample(&mut rng)];
+                            pos += 1;
+                        }
+                        buf[pos] = clue;
+                        pos += 1;
+                    }
                 }
+                out.extend_from_slice(&buf[..pos]);
             }
+            self.random = rng;
             return;
         }
-        let prefix = self.random.gen_range(1..=2);
+        out.reserve(bytes.len() * 2 + 18);
+        let prefix = self.gap_dist.sample(&mut self.random);
         for _ in 0..prefix {
             self.forced_padding(out);
         }
         let mut bits = 0u32;
         let mut bit_count = 0u8;
-        let mut gap = self.random.gen_range(1..=2);
+        let mut gap = self.gap_dist.sample(&mut self.random);
         let mut since_padding = 0;
         for (index, &byte) in bytes.iter().enumerate() {
             bits = (bits << 8) | u32::from(byte);
@@ -195,7 +314,7 @@ impl Encoder {
                 if since_padding >= gap {
                     self.forced_padding(out);
                     since_padding = 0;
-                    gap = self.random.gen_range(1..=2);
+                    gap = self.gap_dist.sample(&mut self.random);
                 }
             }
         }
@@ -208,13 +327,13 @@ impl Encoder {
     }
     fn encode_packed_zero(&mut self, bytes: &[u8], out: &mut Vec<u8>) {
         out.reserve(bytes.len().div_ceil(3) * 4 + 18);
-        let prefix = self.random.gen_range(1..=2);
+        let prefix = self.gap_dist.sample(&mut self.random);
         for _ in 0..prefix {
             self.forced_padding(out);
         }
         let mut bits = 0u32;
         let mut bit_count = 0u8;
-        let mut gap = self.random.gen_range(1..=2);
+        let mut gap = self.gap_dist.sample(&mut self.random);
         let mut since_padding = 0;
         const PROTECTED_PREFIX_BYTES: usize = 14;
         const PACKED_BATCH_INPUT_BYTES: usize = 3;
@@ -234,7 +353,7 @@ impl Encoder {
                 if since_padding >= gap {
                     self.forced_padding(out);
                     since_padding = 0;
-                    gap = self.random.gen_range(1..=2);
+                    gap = self.gap_dist.sample(&mut self.random);
                 }
             }
         }
@@ -269,11 +388,59 @@ enum StreamFailure {
     Reported,
 }
 
+struct SplitRead(tokio::io::ReadHalf<BoxStream>);
+impl AsyncRead for SplitRead {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for SplitRead {
+    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> {
+        Poll::Ready(Ok(0))
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+struct SplitWrite(tokio::io::WriteHalf<BoxStream>);
+impl AsyncRead for SplitWrite {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+impl AsyncWrite for SplitWrite {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
 pub(crate) struct ObfsStream {
     inner: BoxStream,
     decoder: Decoder,
     encoder: Encoder,
-    input: [u8; 4096],
+    input: Box<[u8]>,
     input_used: usize,
     input_len: usize,
     pending: Vec<u8>,
@@ -284,6 +451,7 @@ pub(crate) struct ObfsStream {
     flush_pending: bool,
     shutdown_done: bool,
     wake: Arc<DuplexWake>,
+    peer_failed: Arc<AtomicBool>,
 }
 impl ObfsStream {
     pub fn new(
@@ -299,10 +467,10 @@ impl ObfsStream {
             inner,
             decoder: Decoder::new(receive, receive_packed),
             encoder: Encoder::new(transmit, transmit_packed, min, max)?,
-            input: [0; 4096],
+            input: vec![0; 65536].into_boxed_slice(),
             input_used: 0,
             input_len: 0,
-            pending: Vec::new(),
+            pending: Vec::with_capacity(589824),
             written: 0,
             failure: None,
             local_closed: false,
@@ -310,7 +478,56 @@ impl ObfsStream {
             flush_pending: false,
             shutdown_done: false,
             wake: DuplexWake::new(),
+            peer_failed: Arc::new(AtomicBool::new(false)),
         })
+    }
+    pub fn into_split(self, peer_failed: Arc<AtomicBool>) -> (Self, Self) {
+        let (raw_read, raw_write) = tokio::io::split(self.inner);
+        let dummy_table = self.encoder.table.clone();
+        let dummy_encoder = Encoder {
+            table: dummy_table.clone(),
+            packed: false,
+            random: FastRng(1),
+            threshold: 0,
+            padding: dummy_table.layout.padding.clone(),
+            padding_dist: self.encoder.padding_dist,
+            gap_dist: self.encoder.gap_dist,
+        };
+        let reader = Self {
+            inner: Box::new(SplitRead(raw_read)),
+            decoder: self.decoder,
+            encoder: dummy_encoder,
+            input: self.input,
+            input_used: self.input_used,
+            input_len: self.input_len,
+            pending: Vec::new(),
+            written: 0,
+            failure: self.failure,
+            local_closed: false,
+            remote_closed: self.remote_closed,
+            flush_pending: false,
+            shutdown_done: false,
+            wake: self.wake.clone(),
+            peer_failed: peer_failed.clone(),
+        };
+        let writer = Self {
+            inner: Box::new(SplitWrite(raw_write)),
+            decoder: Decoder::new(dummy_table, false),
+            encoder: self.encoder,
+            input: Box::new([]),
+            input_used: 0,
+            input_len: 0,
+            pending: self.pending,
+            written: self.written,
+            failure: None,
+            local_closed: self.local_closed,
+            remote_closed: true,
+            flush_pending: self.flush_pending,
+            shutdown_done: self.shutdown_done,
+            wake: self.wake,
+            peer_failed,
+        };
+        (reader, writer)
     }
     pub fn set_transmit_table(
         &mut self,
@@ -326,6 +543,7 @@ impl ObfsStream {
         Ok(())
     }
     fn fail(&mut self) {
+        self.peer_failed.store(true, Ordering::Release);
         if self.failure.is_none() {
             self.failure = Some(StreamFailure::Reported);
             self.wake.wake_both();
@@ -405,6 +623,9 @@ impl AsyncRead for ObfsStream {
                 StreamFailure::Reported => closed(),
             }));
         }
+        if this.peer_failed.load(Ordering::Acquire) {
+            return Poll::Ready(Err(closed()));
+        }
         if let Poll::Ready(Err(error)) = this.output(cx) {
             return Poll::Ready(Err(error));
         }
@@ -437,7 +658,7 @@ impl AsyncRead for ObfsStream {
             if this.remote_closed {
                 return Poll::Ready(Ok(()));
             }
-            if consumed >= 65536 {
+            if consumed >= 524288 {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
@@ -471,14 +692,18 @@ impl AsyncWrite for ObfsStream {
         let forwarded = this.wake.writer(cx.waker());
         let mut inner_context = Context::from_waker(&forwarded);
         let cx = &mut inner_context;
-        if this.failure.is_some() || this.local_closed {
+        if this.failure.is_some() || this.local_closed || this.peer_failed.load(Ordering::Acquire) {
             return Poll::Ready(Err(closed()));
         }
         ready!(this.output(cx))?;
-        let count = bytes.len().min(4096);
+        let count = bytes.len().min(65536);
         this.encoder.encode(&bytes[..count], &mut this.pending);
         if count != 0 {
-            this.wake.wake_reader();
+            match this.drain(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => this.wake.wake_reader(),
+            }
         }
         Poll::Ready(Ok(count))
     }
@@ -487,7 +712,7 @@ impl AsyncWrite for ObfsStream {
         let forwarded = this.wake.writer(cx.waker());
         let mut inner_context = Context::from_waker(&forwarded);
         let cx = &mut inner_context;
-        if this.failure.is_some() {
+        if this.failure.is_some() || this.peer_failed.load(Ordering::Acquire) {
             return Poll::Ready(Err(closed()));
         }
         if !this.shutdown_done {
@@ -500,7 +725,7 @@ impl AsyncWrite for ObfsStream {
         let forwarded = this.wake.writer(cx.waker());
         let mut inner_context = Context::from_waker(&forwarded);
         let cx = &mut inner_context;
-        if this.failure.is_some() {
+        if this.failure.is_some() || this.peer_failed.load(Ordering::Acquire) {
             return Poll::Ready(Err(closed()));
         }
         this.local_closed = true;
@@ -586,7 +811,7 @@ mod tests {
                 server.shutdown().await.unwrap();
             });
             client.write_all(&vec![0x5a; 65537]).await.unwrap();
-            assert!(client.pending.len() <= 4096 * 9 + 128);
+            assert!(client.pending.len() <= 65536 * 9 + 128);
             client.shutdown().await.unwrap();
             let mut reply = Vec::new();
             client.read_to_end(&mut reply).await.unwrap();

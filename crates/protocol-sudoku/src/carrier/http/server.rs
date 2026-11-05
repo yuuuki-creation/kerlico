@@ -190,8 +190,15 @@ impl Handler {
                     tokio::time::timeout(Duration::from_secs(20), read_upload(&mut request))
                         .await
                         .map_err(|_| Error::Timeout)??;
-                let bytes = mode.decode_upload(&bytes)?;
-                match token.push(sequence, Bytes::from(bytes)).await {
+                let bytes = if mode == Mode::Stream {
+                    if bytes.len() > 1024 * 1024 {
+                        return Err(Error::ResourceLimit);
+                    }
+                    Bytes::from(bytes)
+                } else {
+                    Bytes::from(mode.decode_upload(&bytes)?)
+                };
+                match token.push(sequence, bytes).await {
                     Ok(()) => Ok(response(StatusCode::OK, Bytes::new())),
                     Err(Error::Protocol(_)) => Ok(response(StatusCode::CONFLICT, Bytes::new())),
                     Err(_) => Ok(response(StatusCode::GONE, Bytes::new())),

@@ -2103,15 +2103,15 @@ impl<'a> Socket<'a> {
             // TODO: When flow control is implemented,
             // refractor the following block within that implementation
 
+            let has_sack = repr.sack_ranges.iter().any(|r| r.is_some());
             match self.local_rx_last_ack {
                 // Duplicate ACK if payload empty and ACK doesn't move send window ->
                 // Increment duplicate ACK count, notify congestion controller and
                 // set for retransmit if we just received the third duplicate ACK
                 Some(last_rx_ack)
-                    if (repr.payload.is_empty() || repr.sack_ranges.iter().any(|r| r.is_some()))
-                        && last_rx_ack == ack_number
+                    if last_rx_ack == ack_number
                         && ack_number < self.remote_last_seq
-                        && !is_window_update =>
+                        && (has_sack || (repr.payload.is_empty() && !is_window_update)) =>
                 {
                     // Increment duplicate ACK count
                     self.local_rx_dup_acks = self.local_rx_dup_acks.saturating_add(1);
@@ -2146,7 +2146,16 @@ impl<'a> Socket<'a> {
                 // No duplicate ACK means we reset the duplicate ACK count
                 // and notify the congestion controller of the fresh ACK
                 _ => {
-                    if self.local_rx_dup_acks > 0 {
+                    let sack_loss = has_sack
+                        && ack_number < self.remote_last_seq
+                        && (self.local_rx_dup_acks >= 3
+                            || repr.sack_ranges.iter().flatten().any(|&(_, right)| {
+                                TcpSeqNumber(right as i32) >= ack_number + self.remote_mss * 3
+                            }));
+                    if sack_loss {
+                        self.local_rx_dup_acks = 3;
+                        self.timer.set_for_fast_retransmit();
+                    } else if self.local_rx_dup_acks > 0 {
                         self.local_rx_dup_acks = 0;
                         net_debug!("reset duplicate ACK count");
                     }

@@ -127,6 +127,9 @@ pub(crate) fn wrap_hopping(
     password: Option<Arc<String>>,
     hop: Option<(SocketAddr, Vec<RangeInclusive<u16>>, Duration, Duration)>,
 ) -> io::Result<Arc<dyn AsyncUdpSocket>> {
+    let sock_ref = socket2::SockRef::from(&socket);
+    let _ = sock_ref.set_recv_buffer_size(8 * 1024 * 1024);
+    let _ = sock_ref.set_send_buffer_size(8 * 1024 * 1024);
     let mut inner: Arc<dyn AsyncUdpSocket> = quinn::TokioRuntime.wrap_udp_socket(socket)?;
     if let Some((base_peer, ranges, interval_min, interval_max)) = hop
         && !ranges.is_empty()
@@ -206,47 +209,34 @@ impl AsyncUdpSocket for Salamander {
         if output.is_empty() || meta.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        let mut scratch = self
-            .receive
-            .lock()
-            .map_err(|_| io::Error::other("Salamander 状态不可用"))?;
-        let count = std::task::ready!(self.inner.poll_recv(
-            cx,
-            &mut [IoSliceMut::new(&mut scratch)],
-            &mut meta[..1]
-        ))?;
-        if count == 0 {
-            return Poll::Ready(Ok(0));
-        }
-        let info = &mut meta[0];
-        let length = info.len.min(scratch.len());
-        let stride = info.stride.max(1);
-        let mut written = 0;
-        if stride <= 8 {
-            info.len = 0;
-            info.stride = 1;
-            return Poll::Ready(Ok(1));
-        }
-        for start in (0..length).step_by(stride) {
-            let end = (start + stride).min(length);
-            if end - start <= 8 {
+        let _ = &self.receive;
+        let count = std::task::ready!(self.inner.poll_recv(cx, output, meta))?;
+        for i in 0..count {
+            let info = &mut meta[i];
+            let buf = &mut output[i];
+            let length = info.len.min(buf.len());
+            let stride = info.stride.max(1);
+            if stride <= 8 {
+                info.len = 0;
+                info.stride = 1;
                 continue;
             }
-            let key = mask(&self.password, &scratch[start..start + 8]);
-            for index in start + 8..end {
-                scratch[written] = scratch[index] ^ key[(index - start - 8) % 32];
-                written += 1;
+            let mut written = 0;
+            for start in (0..length).step_by(stride) {
+                let end = (start + stride).min(length);
+                if end - start <= 8 {
+                    continue;
+                }
+                let key = mask(&self.password, &buf[start..start + 8]);
+                for index in start + 8..end {
+                    buf[written] = buf[index] ^ key[(index - start - 8) % 32];
+                    written += 1;
+                }
             }
+            info.len = written;
+            info.stride = if written == 0 { 1 } else { stride - 8 };
         }
-        if written > output[0].len() {
-            info.len = 0;
-            info.stride = 1;
-            return Poll::Ready(Ok(1));
-        }
-        output[0][..written].copy_from_slice(&scratch[..written]);
-        info.len = written;
-        info.stride = stride - 8;
-        Poll::Ready(Ok(1))
+        Poll::Ready(Ok(count))
     }
     fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr()

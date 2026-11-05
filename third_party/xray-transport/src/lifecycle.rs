@@ -200,6 +200,13 @@ impl AsyncWrite for OwnedStream {
         let this = self.get_mut();
         OWNER.sync_scope(this.owner.clone(), || Pin::new(&mut this.stream).poll_write(cx, bytes))
     }
+    fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        OWNER.sync_scope(this.owner.clone(), || Pin::new(&mut this.stream).poll_write_vectored(cx, bufs))
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         OWNER.sync_scope(this.owner.clone(), || Pin::new(&mut this.stream).poll_flush(cx))
@@ -245,6 +252,13 @@ impl AsyncWrite for OwnedWrite {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         OWNER.sync_scope(this.owner.clone(), || Pin::new(&mut this.writer).poll_write(cx, bytes))
+    }
+    fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        OWNER.sync_scope(this.owner.clone(), || Pin::new(&mut this.writer).poll_write_vectored(cx, bufs))
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.writer.is_write_vectored()
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();

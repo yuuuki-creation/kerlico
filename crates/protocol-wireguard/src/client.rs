@@ -174,6 +174,9 @@ async fn start(
         return Err(Error::Config("WireGuard载体绑定与对端地址族不一致".into()));
     }
     let socket = UdpSocket::bind(bind).await?;
+    let sock_ref = socket2::SockRef::from(&socket);
+    let _ = sock_ref.set_recv_buffer_size(8 * 1024 * 1024);
+    let _ = sock_ref.set_send_buffer_size(8 * 1024 * 1024);
     let stack = SharedStack::new(
         &prepared,
         cancel.clone(),
@@ -284,41 +287,95 @@ pub(crate) async fn run(
         prepared.limits.fragment_packets,
         prepared.limits.fragment_bytes,
     ));
-    let mut receive = vec![0; 65536];
-    let mut timer = tokio::time::interval(Duration::from_millis(20));
+    let socket = Arc::new(socket);
+    let (rx_tx, mut rx_rx) =
+        tokio::sync::mpsc::channel::<std::io::Result<(Vec<u8>, SocketAddr)>>(4096);
+    let rx_socket = socket.clone();
+    let rx_cancel = stack.cancel.clone();
+    tokio::spawn(async move {
+        let mut receive = vec![0; 65536];
+        loop {
+            let first = tokio::select! {
+                biased;
+                _ = rx_cancel.cancelled() => break,
+                res = rx_socket.recv_from(&mut receive) => match res {
+                    Ok((count, source)) => Ok((receive[..count].to_vec(), source)),
+                    Err(error) if is_peer_path_error(&error) => continue,
+                    Err(error) => Err(error),
+                },
+            };
+            let is_err = first.is_err();
+            if rx_tx.send(first).await.is_err() || is_err {
+                break;
+            }
+            for _ in 0..64 {
+                match rx_socket.try_recv_from(&mut receive) {
+                    Ok((count, source)) => {
+                        if rx_tx
+                            .try_send(Ok((receive[..count].to_vec(), source)))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+    let mut timer = tokio::time::interval(Duration::from_millis(1));
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut tick_mod = 0u8;
+    let mut sent_in_window = 0usize;
     loop {
         tokio::select! { biased;
             _ = stack.cancel.cancelled() => return Ok(()),
             _ = timer.tick() => {
-                index.limiter.reset_count();
-                fragments.expire(Instant::now());
-                if let Some(packet) = crypto.tick()
-                    && let Some(endpoint) = crypto.endpoint
-                { send_or_drop(&socket, endpoint, &packet, &stack.cancel, &carrier).await?; }
-            }
-            result = socket.recv_from(&mut receive) => {
-                let (count, source) = match result {
-                    Ok(value) => value,
-                    Err(error) if is_peer_path_error(&error) => continue,
-                    Err(error) => return Err(error.into()),
-                };
-                carrier.record(0, count);
-                // 来源地址未经认证；回复发不出去只损失这一个数据报。
-                match index.identify(source, &receive[..count]) {
-                    Ok(Identified::Cookie(packet)) => { let _ = send(&socket, source, &packet, &stack.cancel, &carrier).await; }
-                    Ok(Identified::Peer(_)) => {
-                        if let Ok(received) = crypto.receive(source, &receive[..count]) {
-                            for packet in received.network { let _ = send(&socket, source, &packet, &stack.cancel, &carrier).await; }
-                            if let Some(packet) = received.plain { let _ = input(&stack, &peer, &mut fragments, &packet); }
-                        }
-                    }
-                    Err(_) => {}
+                sent_in_window = 0;
+                tick_mod = tick_mod.wrapping_add(1);
+                if tick_mod & 15 == 0 {
+                    index.limiter.reset_count();
+                    fragments.expire(Instant::now());
+                    if let Some(packet) = crypto.tick()
+                        && let Some(endpoint) = crypto.endpoint
+                    { send_or_drop(&socket, endpoint, &packet, &stack.cancel, &carrier).await?; }
                 }
+            }
+            maybe_pkt = rx_rx.recv() => {
+                let Some(first) = maybe_pkt else { return Ok(()); };
+                let mut next_pkt = Some(first);
+                let mut batch = 0usize;
+                while let Some(res) = next_pkt {
+                    let (pkt, source) = res?;
+                    let count = pkt.len();
+                    carrier.record(0, count);
+                    // 来源地址未经认证；回复发不出去只损失这一个数据报。
+                    match index.identify(source, &pkt) {
+                        Ok(Identified::Cookie(packet)) => { let _ = send(&socket, source, &packet, &stack.cancel, &carrier).await; }
+                        Ok(Identified::Peer(_)) => {
+                            if let Ok(received) = crypto.receive(source, &pkt) {
+                                for packet in received.network { let _ = send(&socket, source, &packet, &stack.cancel, &carrier).await; }
+                                if let Some(packet) = received.plain { let _ = input(&stack, &peer, &mut fragments, &packet); }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                    batch += 1;
+                    if batch >= 64 {
+                        break;
+                    }
+                    next_pkt = rx_rx.try_recv().ok();
+                }
+                sent_in_window = sent_in_window.saturating_sub(batch);
             }
             _ = stack.notify.notified() => {}
         }
-        stack.poll()?;
+        let budget = if crypto.ready() {
+            32usize.saturating_sub(sent_in_window)
+        } else {
+            1
+        };
+        stack.poll_with_budget(budget)?;
         if stack.has_output()
             && !crypto.ready()
             && let Some(packet) = crypto.initiate()
@@ -327,7 +384,8 @@ pub(crate) async fn run(
             send_or_drop(&socket, endpoint, &packet, &stack.cancel, &carrier).await?;
         }
         if crypto.ready() {
-            for packet in stack.drain(64)? {
+            for packet in stack.drain(usize::MAX)? {
+                sent_in_window += 1;
                 let destination = IpPacket::parse(&packet)?.target;
                 if !peer.allows(destination) {
                     continue;
@@ -337,9 +395,6 @@ pub(crate) async fn run(
                 {
                     send_or_drop(&socket, endpoint, &wire, &stack.cancel, &carrier).await?;
                 }
-            }
-            if stack.has_output() {
-                stack.notify.notify_one();
             }
         }
     }

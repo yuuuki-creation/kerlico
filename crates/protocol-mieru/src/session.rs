@@ -29,10 +29,10 @@ use tokio::{
     sync::{Notify, OwnedSemaphorePermit, mpsc, oneshot, watch},
 };
 const PIPE_BYTES: usize = 32768;
-pub(crate) const RECEIVE_BYTES: usize = 256 * 1024;
+pub(crate) const RECEIVE_BYTES: usize = 8 * 1024 * 1024;
 /// TCP 载体靠停读把背压传给对端，必须在单帧放不下之前停，否则会话会被当成超限中止。
-const RECEIVE_PAUSE_BYTES: usize = RECEIVE_BYTES / 2;
-const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const RECEIVE_PAUSE_BYTES: usize = 512 * 1024;
+const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 const REQUEST_CANCELLED: u8 = 4;
 pub(crate) const IDLE_TIMEOUT: u8 = 5;
 pub(crate) struct Scope {
@@ -142,7 +142,7 @@ impl Link {
         multiplexing: bool,
         server: Option<Server>,
     ) -> (Arc<Self>, mpsc::Receiver<Command>) {
-        let (command, receive) = mpsc::channel(256);
+        let (command, receive) = mpsc::channel(4096);
         (
             Arc::new(Self {
                 command,
@@ -167,7 +167,7 @@ impl Link {
         )
     }
     fn receive_ready(&self) -> bool {
-        self.receive_pending.load(Ordering::Acquire) == 0
+        self.receive_pending.load(Ordering::Acquire) < 256
             && !self.receive_blocked.load(Ordering::Acquire)
     }
     async fn wait_receive_room(&self) {
@@ -477,7 +477,7 @@ impl Entry {
     ) -> (Self, SessionIo, oneshot::Receiver<Result<()>>) {
         let (app, transport) = tokio::io::duplex(PIPE_BYTES);
         let (mut outgoing, mut incoming) = tokio::io::split(transport);
-        let (delivery, receive) = mpsc::channel(4);
+        let (delivery, receive) = mpsc::channel(256);
         let (started, _) = watch::channel(!client);
         let life = Arc::new(Life {
             id,
@@ -518,14 +518,14 @@ impl Entry {
             read_life.handshake_ok.store(result.is_ok(), Ordering::Release); read_life.handshake_done.store(true, Ordering::Release); read_life.wake();
             let good = result.is_ok(); let _ = handshake_tx.send(result);
             if !good { read_life.abort(1); read_life.rx_done.store(true, Ordering::Release); return; }
-            let copying = async { let mut buffer = [0; 8192]; loop { let n = reader.read(&mut buffer).await?; if n == 0 { break; } incoming.write_all(&buffer[..n]).await?; } incoming.shutdown().await };
+            let copying = async { let mut buffer = vec![0; 32768]; loop { let n = reader.read(&mut buffer).await?; if n == 0 { break; } incoming.write_all(&buffer[..n]).await?; } incoming.shutdown().await };
             if tokio::select! { biased; _ = read_life.abort_cancel.cancelled() => Err(io::ErrorKind::Interrupted.into()), result = copying => result }.is_err() && !read_life.graceful.load(Ordering::Acquire) && !read_life.closed.load(Ordering::Acquire) { read_life.abort(2); }
             read_life.rx_done.store(true, Ordering::Release); let _ = read_life.link.command.try_send(Command::Consumed(read_life.id));
         });
         let write_life = life.clone();
         link.scope.spawn(async move {
             let result: Result<()> = async {
-                let mut buffer = vec![0; 32768];
+                let mut buffer = vec![0; 65536];
                 loop {
                     let n = tokio::select! { biased; _ = write_life.tx_cancel.cancelled() => return if write_life.closed.load(Ordering::Acquire) { Ok(()) } else { Err(Error::Cancelled) }, n = outgoing.read(&mut buffer) => n? };
                     if n == 0 {
@@ -772,35 +772,78 @@ pub(crate) fn tcp_link(
         settings.server,
     );
     let (reader, mut writer) = tokio::io::split(stream);
-    let (output, mut writes) = mpsc::channel::<WireWrite>(16);
+    let (output, mut writes) = mpsc::channel::<WireWrite>(1024);
     let writing = link.clone();
     link.scope.spawn(async move {
         let mut cipher = send_cipher;
-        while let Some(operation) = writes.recv().await {
-            if operation.life.abort_cancel.is_cancelled() && !matches!(operation.frame.kind, 4 | 5)
-            {
-                operation.receipt.fail();
+        let mut batch = Vec::with_capacity(64);
+        let mut batch_wire = Vec::with_capacity(65536);
+        while let Some(first_op) = writes.recv().await {
+            batch.clear();
+            batch_wire.clear();
+            batch.push(first_op);
+            while batch.len() < 64 {
+                match writes.try_recv() {
+                    Ok(op) => batch.push(op),
+                    Err(_) => break,
+                }
+            }
+            let mut active_ops = Vec::with_capacity(batch.len());
+            let mut seal_err = false;
+            for operation in batch.drain(..) {
+                if operation.life.abort_cancel.is_cancelled()
+                    && !matches!(operation.frame.kind, 4 | 5)
+                {
+                    operation.receipt.fail();
+                    continue;
+                }
+                match codec::seal_stream(&mut cipher, &operation.frame, &writing.traffic) {
+                    Ok(wire) => {
+                        batch_wire.extend_from_slice(&wire);
+                        active_ops.push(operation);
+                    }
+                    Err(_) => {
+                        operation.receipt.fail();
+                        seal_err = true;
+                        break;
+                    }
+                }
+            }
+            if seal_err {
+                for op in active_ops {
+                    op.receipt.fail();
+                }
+                for op in batch.drain(..) {
+                    op.receipt.fail();
+                }
+                writing.scope.cancel.cancel();
+                return;
+            }
+            if active_ops.is_empty() {
                 continue;
             }
             let result: Result<()> = async {
-                let wire = codec::seal_stream(&mut cipher, &operation.frame, &writing.traffic)?;
                 // 对端停读是合法的背压，只有整段空闲期都写不动才算载体失效。
-                tokio::time::timeout(writing.idle, writer.write_all(&wire))
+                tokio::time::timeout(writing.idle, writer.write_all(&batch_wire))
                     .await
                     .map_err(|_| Error::Timeout)??;
                 Ok(())
             }
             .await;
             if result.is_err() {
-                operation.receipt.fail();
+                for operation in active_ops {
+                    operation.receipt.fail();
+                }
                 writing.scope.cancel.cancel();
                 return;
             }
-            if operation.frame.kind == 2 {
-                operation.life.started.send_replace(true);
-                operation.life.wake();
+            for operation in active_ops {
+                if operation.frame.kind == 2 {
+                    operation.life.started.send_replace(true);
+                    operation.life.wake();
+                }
+                operation.receipt.sent();
             }
-            operation.receipt.sent();
             let _ = writing.command.send(Command::Written).await;
         }
         writing.scope.cancel.cancel();
@@ -808,7 +851,7 @@ pub(crate) fn tcp_link(
     let reading = link.clone();
     link.scope.spawn(async move {
         let mut cipher = receive_cipher;
-        let mut reader = BufReader::new(reader);
+        let mut reader = BufReader::with_capacity(65536, reader);
         loop {
             let result: Result<Frame> = async {
                 if reader.fill_buf().await?.is_empty() {
@@ -868,7 +911,7 @@ struct TcpActor {
 }
 impl TcpActor {
     fn push(&mut self, frame: Frame, life: Arc<Life>, receipt: Arc<Receipt>) -> Result<()> {
-        if self.queued.len() >= 512 || self.queued_bytes + frame.body.len() > MAX_PENDING_BYTES {
+        if self.queued.len() >= 4096 || self.queued_bytes + frame.body.len() > MAX_PENDING_BYTES {
             receipt.fail();
             return Err(Error::ResourceLimit);
         }

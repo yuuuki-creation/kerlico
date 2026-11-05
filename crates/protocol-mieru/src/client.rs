@@ -29,6 +29,7 @@ pub(crate) struct Client {
     ports: std::ops::RangeInclusive<u16>,
     user: Arc<User>,
     transport: Transport,
+    allow_insecure: bool,
     traffic: config::Traffic,
     multiplexing: bool,
     no_wait: bool,
@@ -43,7 +44,7 @@ impl Client {
     pub fn compile(options: ClientOptions) -> Result<OutboundPlan> {
         let transport = Transport::parse(&options.transport, options.unsafe_udp_compatibility)?;
         let (server, ports) = options.server.destination_and_ports(options.port_range)?;
-        if transport == Transport::LocalUnsafeUdp {
+        if transport == Transport::LocalUnsafeUdp && !options.allow_insecure {
             config::require_literal_loopback(&server)?;
         }
         options.traffic.validate()?;
@@ -65,6 +66,7 @@ impl Client {
                         ports,
                         user,
                         transport,
+                        allow_insecure: options.allow_insecure,
                         traffic: options.traffic,
                         multiplexing: options.multiplexing,
                         no_wait: options.no_wait,
@@ -135,13 +137,30 @@ impl Client {
                 )
             }
             Transport::LocalUnsafeUdp => {
-                if !endpoint.ip().is_loopback() || endpoint.ip().to_canonical() != endpoint.ip() {
+                if !self.allow_insecure
+                    && (!endpoint.ip().is_loopback()
+                        || endpoint.ip().to_canonical() != endpoint.ip())
+                {
                     return Err(config::invalid());
                 }
                 let bind = if endpoint.is_ipv6() {
-                    SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 0)
+                    SocketAddr::new(
+                        IpAddr::V6(if self.allow_insecure {
+                            std::net::Ipv6Addr::UNSPECIFIED
+                        } else {
+                            std::net::Ipv6Addr::LOCALHOST
+                        }),
+                        0,
+                    )
                 } else {
-                    SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0)
+                    SocketAddr::new(
+                        IpAddr::V4(if self.allow_insecure {
+                            std::net::Ipv4Addr::UNSPECIFIED
+                        } else {
+                            std::net::Ipv4Addr::LOCALHOST
+                        }),
+                        0,
+                    )
                 };
                 let socket = Arc::new(UdpSocket::bind(bind).await?);
                 packet::start(
@@ -154,6 +173,7 @@ impl Client {
                         peer: Some(endpoint),
                         users: None,
                         replay: None,
+                        allow_insecure: self.allow_insecure,
                     },
                 )?
             }

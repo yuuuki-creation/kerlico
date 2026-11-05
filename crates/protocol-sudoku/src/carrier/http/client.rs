@@ -30,7 +30,6 @@ use tokio_util::sync::PollSender;
 
 enum Upload {
     Data(Bytes),
-    Flush(oneshot::Sender<io::Result<()>>),
     Fin(oneshot::Sender<io::Result<()>>),
 }
 struct DownloadWriter {
@@ -117,7 +116,7 @@ impl AsyncWrite for SplitIo {
         }
         ready!(this.acknowledged(cx))?;
         ready!(this.sender.poll_reserve(cx)).map_err(|_| broken())?;
-        let count = bytes.len().min(32 * 1024);
+        let count = bytes.len().min(64 * 1024);
         this.sender
             .send_item(Upload::Data(Bytes::copy_from_slice(&bytes[..count])))
             .map_err(|_| broken())?;
@@ -131,16 +130,7 @@ impl AsyncWrite for SplitIo {
         if this.ack.is_some() {
             return this.acknowledged(cx);
         }
-        if this.write_closed {
-            return Poll::Ready(Ok(()));
-        }
-        ready!(this.sender.poll_reserve(cx)).map_err(|_| broken())?;
-        let (ack, received) = oneshot::channel();
-        this.sender
-            .send_item(Upload::Flush(ack))
-            .map_err(|_| broken())?;
-        this.ack = Some(received);
-        this.acknowledged(cx)
+        Poll::Ready(Ok(()))
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
@@ -225,7 +215,11 @@ async fn upload(
                         }
                     }
                 }
-                let encoded = Bytes::from(mode.encode(&batch));
+                let encoded = if mode == Mode::Stream {
+                    batch.freeze()
+                } else {
+                    Bytes::from(mode.encode(&batch))
+                };
                 let mut attempts = 0;
                 loop {
                     let result = post(
@@ -250,9 +244,6 @@ async fn upload(
                     attempts += 1;
                 }
                 sequence = sequence.checked_add(1).ok_or(Error::ResourceLimit)?;
-            }
-            Upload::Flush(ack) => {
-                let _ = ack.send(Ok(()));
             }
             Upload::Fin(ack) => {
                 let mut attempts = 0;
@@ -393,7 +384,7 @@ pub(crate) async fn connect(
         early: early_response,
         sequences,
     } = authorization;
-    let (reader, writer) = tokio::io::duplex(64 * 1024);
+    let (reader, writer) = tokio::io::duplex(256 * 1024);
     let (sender, requests) = mpsc::channel(16);
     let (ready, received) = oneshot::channel();
     let cancel = scope.cancel.child_token();

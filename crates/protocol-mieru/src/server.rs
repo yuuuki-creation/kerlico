@@ -25,6 +25,7 @@ pub(crate) struct Node {
     users: Arc<Users>,
     credentials: CredentialSet<Arc<User>>,
     transport: Transport,
+    allow_insecure: bool,
     traffic: config::Traffic,
     mtu: usize,
     replay: Arc<Replay>,
@@ -84,6 +85,7 @@ impl Node {
             users: Arc::new(Users::new(users, options.user_hint_required)),
             credentials,
             transport,
+            allow_insecure: options.allow_insecure,
             traffic: options.traffic,
             mtu: options.mtu,
             replay: Arc::new(Replay::new()),
@@ -195,7 +197,9 @@ impl InboundProtocol for Node {
                 return Err(Error::Unsupported("公网 Mieru UDP 载体未支持"));
             }
             let address = socket.local_addr()?;
-            if !address.ip().is_loopback() || address.ip().to_canonical() != address.ip() {
+            if !self.allow_insecure
+                && (!address.ip().is_loopback() || address.ip().to_canonical() != address.ip())
+            {
                 return Err(Error::Config("Mieru 不安全 UDP 必须回环监听".into()));
             }
             Self::check_access(&access)?;
@@ -220,6 +224,7 @@ impl InboundProtocol for Node {
                     peer: None,
                     users: Some(self.users.clone()),
                     replay: Some(self.replay.clone()),
+                    allow_insecure: self.allow_insecure,
                 },
             )?;
             link.scope.cancel.cancelled().await;

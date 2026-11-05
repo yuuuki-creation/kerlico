@@ -202,7 +202,7 @@ pub(crate) fn server_tls(
         .map_err(|_| invalid())?
         .ok_or_else(invalid)?;
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
+        rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .map_err(|_| invalid())?

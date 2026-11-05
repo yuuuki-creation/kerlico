@@ -15,10 +15,19 @@ use tokio::{
 pub(crate) struct Activity {
     inner: BoxStream,
     events: watch::Sender<Instant>,
+    last: Instant,
 }
 pub(crate) fn observe(inner: BoxStream) -> (BoxStream, watch::Receiver<Instant>) {
-    let (events, receiver) = watch::channel(Instant::now());
-    (Box::new(Activity { inner, events }), receiver)
+    let now = Instant::now();
+    let (events, receiver) = watch::channel(now);
+    (
+        Box::new(Activity {
+            inner,
+            events,
+            last: now,
+        }),
+        receiver,
+    )
 }
 pub(crate) async fn bounded<T>(
     future: impl Future<Output = Result<T>>,
@@ -53,7 +62,11 @@ impl AsyncRead for Activity {
         let before = out.filled().len();
         let result = Pin::new(&mut this.inner).poll_read(cx, out);
         if matches!(result, Poll::Ready(Ok(()))) && out.filled().len() > before {
-            this.events.send_replace(Instant::now());
+            let now = Instant::now();
+            if now.duration_since(this.last) >= Duration::from_secs(1) {
+                this.last = now;
+                this.events.send_replace(now);
+            }
         }
         result
     }
@@ -67,14 +80,85 @@ impl AsyncWrite for Activity {
         let this = self.get_mut();
         let result = Pin::new(&mut this.inner).poll_write(cx, bytes);
         if matches!(result, Poll::Ready(Ok(n)) if n>0) {
-            this.events.send_replace(Instant::now());
+            let now = Instant::now();
+            if now.duration_since(this.last) >= Duration::from_secs(1) {
+                this.last = now;
+                this.events.send_replace(now);
+            }
         }
         result
+    }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write_vectored(cx, bufs);
+        if matches!(result, Poll::Ready(Ok(n)) if n>0) {
+            let now = Instant::now();
+            if now.duration_since(this.last) >= Duration::from_secs(1) {
+                this.last = now;
+                this.events.send_replace(now);
+            }
+        }
+        result
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_flush(cx)
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+pub(crate) struct ServerTls(pub tokio_rustls::server::TlsStream<BoxStream>);
+impl AsyncRead for ServerTls {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = out.filled().len();
+        let poll = Pin::new(&mut this.0).poll_read(cx, out);
+        if matches!(poll, Poll::Ready(Ok(()))) && out.filled().len() > before {
+            while out.remaining() >= 16384 {
+                let prev = out.filled().len();
+                match Pin::new(&mut this.0).poll_read(cx, out) {
+                    Poll::Ready(Ok(())) if out.filled().len() > prev => {}
+                    _ => break,
+                }
+            }
+        }
+        poll
+    }
+}
+impl AsyncWrite for ServerTls {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write(cx, bytes)
+    }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
     }
 }

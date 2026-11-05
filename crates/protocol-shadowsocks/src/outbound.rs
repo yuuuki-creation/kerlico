@@ -80,11 +80,18 @@ impl ShadowsocksOutbound {
         target: &Destination,
         context: &ConnectContext,
     ) -> Result<BoxStream> {
-        let carrier: BoxStream = if let Some(connector) = &self.connector {
+        let mut carrier: BoxStream = if let Some(connector) = &self.connector {
             connector.connect_tcp(&self.server, context).await?
         } else {
             kerlico_net::TcpConnector::connect_raw_with_dialer(&self.server, &self.dialer).await?
         };
+        if self.config.method() == shadowsocks::crypto::CipherKind::NONE {
+            let mut buf = bytes::BytesMut::new();
+            address(target).write_to_buf(&mut buf);
+            carrier.write_all(&buf).await?;
+            carrier.flush().await?;
+            return Ok(carrier);
+        }
         let mut stream = ProxyClientStream::from_stream(
             self.crypto.clone(),
             carrier,

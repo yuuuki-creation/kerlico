@@ -101,7 +101,7 @@ impl NodeFactory for AnyTlsNodeFactory {
             .map_err(|_| invalid())?
             .ok_or_else(invalid)?;
         let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
+            rustls::crypto::aws_lc_rs::default_provider(),
         ))
         .with_safe_default_protocol_versions()
         .map_err(|_| invalid())?
@@ -147,6 +147,7 @@ impl InboundProtocol for AnyTlsNode {
             let (stream, access) = connection
                 .run(async {
                     let mut stream = self.tls.accept(stream).await?;
+                    stream.get_mut().1.set_buffer_limit(Some(68 * 1024));
                     let mut password = [0; 32];
                     stream.read_exact(&mut password).await?;
                     let verified = self.passwords.verify(&password, |expected, password| {
@@ -156,7 +157,7 @@ impl InboundProtocol for AnyTlsNode {
                     let padding = stream.read_u16().await? as usize;
                     let mut bytes = vec![0; padding];
                     stream.read_exact(&mut bytes).await?;
-                    Ok((Box::new(stream) as BoxStream, access))
+                    Ok((Box::new(ServerTls(stream)) as BoxStream, access))
                 })
                 .await?;
             let (tx, mut rx) = mpsc::channel::<Incoming>(context.max_streams.clamp(1, 64));
@@ -259,4 +260,59 @@ async fn serve_stream(
         ending,
     )
     .await
+}
+
+struct ServerTls(tokio_rustls::server::TlsStream<BoxStream>);
+impl tokio::io::AsyncRead for ServerTls {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        out: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = out.filled().len();
+        let poll = std::pin::Pin::new(&mut this.0).poll_read(cx, out);
+        if matches!(poll, std::task::Poll::Ready(Ok(()))) && out.filled().len() > before {
+            while out.remaining() >= 16384 {
+                let prev = out.filled().len();
+                match std::pin::Pin::new(&mut this.0).poll_read(cx, out) {
+                    std::task::Poll::Ready(Ok(())) if out.filled().len() > prev => {}
+                    _ => break,
+                }
+            }
+        }
+        poll
+    }
+}
+impl tokio::io::AsyncWrite for ServerTls {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let mut total = 0;
+        let limit = bytes.len().min(65536);
+        while total < limit {
+            match std::pin::Pin::new(&mut this.0).poll_write(cx, &bytes[total..limit]) {
+                std::task::Poll::Ready(Ok(0)) => break,
+                std::task::Poll::Ready(Ok(n)) => total += n,
+                std::task::Poll::Pending if total > 0 => break,
+                other => return other,
+            }
+        }
+        std::task::Poll::Ready(Ok(total))
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+    }
 }

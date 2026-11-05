@@ -429,6 +429,8 @@ impl InboundProtocol for VlessNode {
                             )
                             .await
                     } else {
+                        let mut stream = stream;
+                        stream.release_record_alignment();
                         self.http
                             .clone()
                             .serve(Box::new(stream), self.payload.clone(), access, context)
@@ -524,6 +526,16 @@ impl Payload {
             if let Some(decryption) = &self.decryption {
                 stream = decryption.accept(stream).await.map_err(|e| (e, None))?;
             }
+            if self.fallbacks.is_empty() {
+                let request = inbound_wire::read(&mut stream)
+                    .await
+                    .map_err(|e| (e, None))?;
+                let verified = self.verify(&request).map_err(|e| (e, None))?;
+                let (access, vision) = binding
+                    .authenticated(verified, &context)
+                    .map_err(|e| (e, None))?;
+                return Ok((stream, request, vision, access));
+            }
             let mut recorder = RecordingStream::new(stream, 4096);
             let parsed = inbound_wire::read(&mut recorder).await;
             let (stream, recorded) = recorder.into_parts();
@@ -563,6 +575,9 @@ impl Payload {
             }
             Err((err, None)) => return Err(err),
         };
+        if !vision {
+            stream.release_record_alignment();
+        }
 
         let budget = ConnectContext::new(deadline.saturating_duration_since(Instant::now()))
             .with_cancel(context.cancel.clone());

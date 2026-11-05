@@ -16,9 +16,21 @@ pub(crate) struct Factory {
 impl Factory {
     pub fn new(kind: Congestion) -> Self {
         let inner: Arc<dyn ControllerFactory + Send + Sync> = match kind {
-            Congestion::Cubic => Arc::new(quinn::congestion::CubicConfig::default()),
-            Congestion::Newreno => Arc::new(quinn::congestion::NewRenoConfig::default()),
-            Congestion::Bbr => Arc::new(quinn::congestion::BbrConfig::default()),
+            Congestion::Cubic => {
+                let mut c = quinn::congestion::CubicConfig::default();
+                c.initial_window(1024 * 1024);
+                Arc::new(c)
+            }
+            Congestion::Newreno => {
+                let mut c = quinn::congestion::NewRenoConfig::default();
+                c.initial_window(1024 * 1024);
+                Arc::new(c)
+            }
+            Congestion::Bbr => {
+                let mut c = quinn::congestion::BbrConfig::default();
+                c.initial_window(1024 * 1024);
+                Arc::new(c)
+            }
         };
         Self { inner }
     }

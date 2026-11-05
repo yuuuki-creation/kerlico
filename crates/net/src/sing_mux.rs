@@ -164,11 +164,7 @@ struct WireFrame {
     payload: Vec<u8>,
 }
 
-async fn write_wire_frame(
-    writer: &mut (impl AsyncWrite + Unpin),
-    protocol: SingMuxProtocol,
-    frame: &WireFrame,
-) -> io::Result<()> {
+fn encode_wire_frame_into(out: &mut Vec<u8>, protocol: SingMuxProtocol, frame: &WireFrame) {
     match protocol {
         SingMuxProtocol::Smux => {
             let cmd = match frame.cmd {
@@ -183,9 +179,9 @@ async fn write_wire_frame(
             hdr[1] = cmd;
             hdr[2..4].copy_from_slice(&len.to_le_bytes());
             hdr[4..8].copy_from_slice(&frame.stream_id.to_le_bytes());
-            writer.write_all(&hdr).await?;
+            out.extend_from_slice(&hdr);
             if len > 0 {
-                writer.write_all(&frame.payload[..usize::from(len)]).await?;
+                out.extend_from_slice(&frame.payload[..usize::from(len)]);
             }
         }
         SingMuxProtocol::Yamux => {
@@ -202,9 +198,9 @@ async fn write_wire_frame(
             hdr[2..4].copy_from_slice(&flags.to_be_bytes());
             hdr[4..8].copy_from_slice(&frame.stream_id.to_be_bytes());
             hdr[8..12].copy_from_slice(&len.to_be_bytes());
-            writer.write_all(&hdr).await?;
+            out.extend_from_slice(&hdr);
             if len > 0 && ty == 0 {
-                writer.write_all(&frame.payload[..len as usize]).await?;
+                out.extend_from_slice(&frame.payload[..len as usize]);
             }
         }
         SingMuxProtocol::H2Mux => {
@@ -227,13 +223,33 @@ async fn write_wire_frame(
             hdr[3] = ty;
             hdr[4] = flags;
             hdr[5..9].copy_from_slice(&(frame.stream_id & 0x7fff_ffff).to_be_bytes());
-            writer.write_all(&hdr).await?;
+            out.extend_from_slice(&hdr);
             if len > 0 {
-                writer.write_all(&payload[..len]).await?;
+                out.extend_from_slice(&payload[..len]);
             }
         }
     }
-    writer.flush().await
+}
+
+async fn write_wire_frames_batched(
+    writer: &mut (impl AsyncWrite + Unpin),
+    protocol: SingMuxProtocol,
+    rx: &mut mpsc::Receiver<WireFrame>,
+) {
+    let mut batch = Vec::with_capacity(65536);
+    while let Some(first) = rx.recv().await {
+        batch.clear();
+        encode_wire_frame_into(&mut batch, protocol, &first);
+        while batch.len() < 49152 {
+            match rx.try_recv() {
+                Ok(next) => encode_wire_frame_into(&mut batch, protocol, &next),
+                Err(_) => break,
+            }
+        }
+        if writer.write_all(&batch).await.is_err() || writer.flush().await.is_err() {
+            break;
+        }
+    }
 }
 
 async fn read_wire_frame(
@@ -395,6 +411,18 @@ async fn read_wire_frame(
     }
 }
 
+type PermitFuture = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = std::result::Result<
+                    mpsc::OwnedPermit<WireFrame>,
+                    mpsc::error::SendError<()>,
+                >,
+            > + Send
+            + Sync,
+    >,
+>;
+
 pub struct MuxLogicalStream {
     stream_id: u32,
     rx: mpsc::Receiver<Vec<u8>>,
@@ -402,19 +430,59 @@ pub struct MuxLogicalStream {
     read_pos: usize,
     eof: bool,
     tx: mpsc::Sender<WireFrame>,
+    permit_fut: Option<PermitFuture>,
     active_streams: Arc<AtomicU32>,
     closed: bool,
+}
+
+impl MuxLogicalStream {
+    fn poll_reserve(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<mpsc::OwnedPermit<WireFrame>>> {
+        if self.permit_fut.is_none() {
+            match self.tx.clone().try_reserve_owned() {
+                Ok(permit) => return Poll::Ready(Ok(permit)),
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.permit_fut = Some(Box::pin(self.tx.clone().reserve_owned()));
+                }
+            }
+        }
+        let fut = self.permit_fut.as_mut().expect("permit_fut set");
+        match fut.as_mut().poll(cx) {
+            Poll::Ready(Ok(permit)) => {
+                self.permit_fut = None;
+                Poll::Ready(Ok(permit))
+            }
+            Poll::Ready(Err(_)) => {
+                self.permit_fut = None;
+                Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 impl Drop for MuxLogicalStream {
     fn drop(&mut self) {
         self.active_streams.fetch_sub(1, Ordering::AcqRel);
         if !self.closed {
-            let _ = self.tx.try_send(WireFrame {
+            let fin = WireFrame {
                 cmd: FrameCmd::Fin,
                 stream_id: self.stream_id,
                 payload: Vec::new(),
-            });
+            };
+            if let Err(mpsc::error::TrySendError::Full(fin)) = self.tx.try_send(fin) {
+                let tx = self.tx.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        let _ = tx.send(fin).await;
+                    });
+                }
+            }
         }
     }
 }
@@ -460,8 +528,8 @@ impl AsyncRead for MuxLogicalStream {
 
 impl AsyncWrite for MuxLogicalStream {
     fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         if self.closed {
@@ -470,35 +538,42 @@ impl AsyncWrite for MuxLogicalStream {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        let n = buf.len().min(16 * 1024);
-        match self.tx.try_send(WireFrame {
+        let permit = match self.poll_reserve(cx) {
+            Poll::Ready(Ok(p)) => p,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        };
+        let n = buf.len().min(32 * 1024);
+        permit.send(WireFrame {
             cmd: FrameCmd::Psh,
             stream_id: self.stream_id,
             payload: buf[..n].to_vec(),
-        }) {
-            Ok(()) => Poll::Ready(Ok(n)),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                Poll::Ready(Err(io::Error::from(io::ErrorKind::WouldBlock)))
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
-            }
-        }
+        });
+        Poll::Ready(Ok(n))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if !self.closed {
-            self.closed = true;
-            let _ = self.tx.try_send(WireFrame {
-                cmd: FrameCmd::Fin,
-                stream_id: self.stream_id,
-                payload: Vec::new(),
-            });
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.closed {
+            return Poll::Ready(Ok(()));
         }
+        let permit = match self.poll_reserve(cx) {
+            Poll::Ready(Ok(p)) => p,
+            Poll::Ready(Err(_)) => {
+                self.closed = true;
+                return Poll::Ready(Ok(()));
+            }
+            Poll::Pending => return Poll::Pending,
+        };
+        self.closed = true;
+        permit.send(WireFrame {
+            cmd: FrameCmd::Fin,
+            stream_id: self.stream_id,
+            payload: Vec::new(),
+        });
         Poll::Ready(Ok(()))
     }
 }
@@ -514,7 +589,7 @@ struct ClientSession {
 
 impl ClientSession {
     async fn connect(stream: BoxStream, config: &SingMuxOutboundConfig) -> Result<Arc<Self>> {
-        let (mut reader, mut writer) = tokio::io::split(stream);
+        let (reader, mut writer) = tokio::io::split(stream);
         let mut preface = vec![1u8, config.protocol.code(), u8::from(config.padding)];
         if config.padding {
             let mut pad = [0u8; 24];
@@ -540,20 +615,14 @@ impl ClientSession {
 
         let dead_w = dead.clone();
         tokio::spawn(async move {
-            while let Some(frame) = rx.recv().await {
-                if write_wire_frame(&mut writer, protocol, &frame)
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
+            write_wire_frames_batched(&mut writer, protocol, &mut rx).await;
             dead_w.store(true, Ordering::Release);
         });
 
         let streams_r = streams.clone();
         let dead_r = dead.clone();
         tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::with_capacity(64 * 1024, reader);
             if padded {
                 let Ok(pad_len) = reader.read_u16().await else {
                     dead_r.store(true, Ordering::Release);
@@ -641,6 +710,7 @@ impl ClientSession {
             read_pos: 0,
             eof: false,
             tx: self.tx.clone(),
+            permit_fut: None,
             active_streams: self.active_streams.clone(),
             closed: false,
         };
@@ -913,16 +983,10 @@ pub async fn serve_inbound(
     let cancel = context.cancel.clone();
 
     let writer_task = tokio::spawn(async move {
-        while let Some(frame) = rx.recv().await {
-            if write_wire_frame(&mut writer, protocol, &frame)
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
+        write_wire_frames_batched(&mut writer, protocol, &mut rx).await;
     });
 
+    let mut reader = tokio::io::BufReader::with_capacity(64 * 1024, reader);
     loop {
         let next_frame = tokio::select! {
             _ = cancel.cancelled() => break,
@@ -944,13 +1008,16 @@ pub async fn serve_inbound(
                     read_pos: 0,
                     eof: false,
                     tx: tx.clone(),
+                    permit_fut: None,
                     active_streams: active_streams.clone(),
                     closed: false,
                 };
                 let peer_clone = peer.clone();
                 let ctx_clone = context.clone();
+                let streams_cleanup = streams.clone();
                 tokio::spawn(async move {
                     let _ = handle_inbound_stream(logical, peer_clone, ctx_clone).await;
+                    streams_cleanup.lock().await.remove(&sid);
                 });
             }
             FrameCmd::Psh => {
@@ -1121,28 +1188,27 @@ mod tests {
                         break;
                     };
                     if frame.cmd == FrameCmd::Syn {
-                        write_wire_frame(
-                            &mut s_io,
+                        let mut out = Vec::new();
+                        encode_wire_frame_into(
+                            &mut out,
                             protocol,
                             &WireFrame {
                                 cmd: FrameCmd::Psh,
                                 stream_id: frame.stream_id,
                                 payload: b"\x00hello".to_vec(),
                             },
-                        )
-                        .await
-                        .unwrap();
-                        write_wire_frame(
-                            &mut s_io,
+                        );
+                        encode_wire_frame_into(
+                            &mut out,
                             protocol,
                             &WireFrame {
                                 cmd: FrameCmd::Fin,
                                 stream_id: frame.stream_id,
                                 payload: Vec::new(),
                             },
-                        )
-                        .await
-                        .unwrap();
+                        );
+                        s_io.write_all(&out).await.unwrap();
+                        s_io.flush().await.unwrap();
                         break;
                     }
                 }

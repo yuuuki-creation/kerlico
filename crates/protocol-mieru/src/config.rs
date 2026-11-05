@@ -128,6 +128,8 @@ pub(crate) struct ClientOptions {
     pub transport: String,
     #[serde(default)]
     pub unsafe_udp_compatibility: bool,
+    #[serde(default)]
+    pub allow_insecure: bool,
     #[serde(default = "yes")]
     pub multiplexing: bool,
     #[serde(default)]
@@ -160,6 +162,8 @@ pub(crate) struct ServerOptions {
     pub transport: String,
     #[serde(default)]
     pub unsafe_udp_compatibility: bool,
+    #[serde(default)]
+    pub allow_insecure: bool,
     #[serde(default = "yes")]
     pub user_hint_required: bool,
     #[serde(default = "mtu")]

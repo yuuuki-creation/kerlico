@@ -399,7 +399,10 @@ impl Node {
         let mut connection = connect
             .run(async {
                 h2::server::Builder::new()
-                    .initial_window_size(131072)
+                    .initial_window_size(16 * 1024 * 1024)
+                    .initial_connection_window_size(64 * 1024 * 1024)
+                    .max_frame_size(65536)
+                    .max_send_buffer_size(4 * 1024 * 1024)
                     .max_header_list_size(16384)
                     .max_concurrent_streams(self.limits.max_streams.min(context.max_streams) as u32)
                     .handshake(stream)

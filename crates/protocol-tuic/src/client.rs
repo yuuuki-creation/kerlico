@@ -22,7 +22,26 @@ use std::{
 };
 use tokio::{sync::mpsc, time::Instant};
 
-type MemberConnection = tokio::sync::Mutex<Option<Arc<Connection>>>;
+#[derive(Default)]
+struct ConnectionPool {
+    connections: tokio::sync::Mutex<Vec<Arc<Connection>>>,
+    connecting: AtomicUsize,
+}
+type MemberConnection = ConnectionPool;
+struct ConnectingGuard(Arc<MemberConnection>);
+impl Drop for ConnectingGuard {
+    fn drop(&mut self) {
+        self.0.connecting.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+struct TcpReservation(Option<Arc<Connection>>);
+impl Drop for TcpReservation {
+    fn drop(&mut self) {
+        if let Some(conn) = &self.0 {
+            conn.release_tcp();
+        }
+    }
+}
 pub(crate) struct Client {
     server: Destination,
     port_ranges: Vec<RangeInclusive<u16>>,
@@ -361,26 +380,7 @@ impl Client {
             },
         ))
     }
-    async fn connection(&self, context: &ConnectContext) -> Result<Arc<Connection>> {
-        let bucket = {
-            let mut buckets = self.current.lock().await;
-            buckets
-                .entry(context.resource_key().clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
-                .clone()
-        };
-        let mut current = bucket.lock().await;
-        if let Some(connection) = current.as_ref()
-            && connection.quic.close_reason().is_none()
-            && connection.next.load(Ordering::Acquire)
-                < if connection.version == 4 {
-                    u32::MAX
-                } else {
-                    65535
-                }
-        {
-            return Ok(connection.clone());
-        }
+    async fn dial_connection(&self, initial_active: usize) -> Result<Arc<Connection>> {
         let candidates = tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
             .await?
             .take(32)
@@ -428,7 +428,7 @@ impl Client {
                 version: self.credential.version(),
                 mode: self.mode,
                 next: AtomicU32::new(1),
-                active: AtomicUsize::new(0),
+                active: AtomicUsize::new(initial_active),
                 entries: Mutex::new(HashMap::new()),
                 fragments: Mutex::new(Reassembler::new()),
                 tasks: Mutex::new(Vec::new()),
@@ -436,10 +436,68 @@ impl Client {
                 activity: Mutex::new(Instant::now()),
             });
             connection.start(self.heartbeat);
-            *current = Some(connection.clone());
             return Ok(connection);
         }
         Err(last)
+    }
+    async fn connection(
+        &self,
+        context: &ConnectContext,
+        reserve_tcp: bool,
+    ) -> Result<Arc<Connection>> {
+        let bucket = {
+            let mut buckets = self.current.lock().await;
+            buckets
+                .entry(context.resource_key().clone())
+                .or_insert_with(|| Arc::new(ConnectionPool::default()))
+                .clone()
+        };
+        let max_pool = if reserve_tcp { 4usize } else { 1usize };
+        {
+            let mut connections = bucket.connections.lock().await;
+            connections.retain(|connection| {
+                connection.quic.close_reason().is_none()
+                    && connection.next.load(Ordering::Acquire)
+                        < if connection.version == 4 {
+                            u32::MAX
+                        } else {
+                            65535
+                        }
+            });
+            if !reserve_tcp {
+                if let Some(connection) = connections.first() {
+                    return Ok(connection.clone());
+                }
+            } else {
+                if let Some(idle) = connections
+                    .iter()
+                    .find(|c| c.active.load(Ordering::Acquire) == 0)
+                {
+                    idle.active.fetch_add(1, Ordering::AcqRel);
+                    idle.touch();
+                    return Ok(idle.clone());
+                }
+                if connections.len() + bucket.connecting.load(Ordering::Acquire) >= max_pool
+                    && let Some(best) = connections
+                        .iter()
+                        .min_by_key(|c| c.active.load(Ordering::Acquire))
+                {
+                    best.active.fetch_add(1, Ordering::AcqRel);
+                    best.touch();
+                    return Ok(best.clone());
+                }
+            }
+            bucket.connecting.fetch_add(1, Ordering::AcqRel);
+        }
+        let _guard = ConnectingGuard(bucket.clone());
+        let connection = self
+            .dial_connection(if reserve_tcp { 1 } else { 0 })
+            .await?;
+        let mut connections = bucket.connections.lock().await;
+        if connections.len() < 8 {
+            connections.push(connection.clone());
+        }
+        Ok(connection)
     }
 }
 impl Outbound for Client {
@@ -448,28 +506,27 @@ impl Outbound for Client {
             self.host.cancel().cancel();
             let buckets = { std::mem::take(&mut *self.current.lock().await) };
             for bucket in buckets.into_values() {
-                let connection = { bucket.lock().await.take() };
-                let Some(connection) = connection else {
-                    continue;
-                };
-                connection.quic.close(0u32.into(), b"");
-                connection._endpoint.close(0u32.into(), b"");
-                let tasks = connection
-                    .tasks
-                    .lock()
-                    .map(|mut tasks| std::mem::take(&mut *tasks))
-                    .unwrap_or_default();
-                for task in &tasks {
-                    task.abort();
+                let connections = { std::mem::take(&mut *bucket.connections.lock().await) };
+                for connection in connections {
+                    connection.quic.close(0u32.into(), b"");
+                    connection._endpoint.close(0u32.into(), b"");
+                    let tasks = connection
+                        .tasks
+                        .lock()
+                        .map(|mut tasks| std::mem::take(&mut *tasks))
+                        .unwrap_or_default();
+                    for task in &tasks {
+                        task.abort();
+                    }
+                    for task in tasks {
+                        let _ = task.await;
+                    }
+                    let _ = tokio::time::timeout(
+                        kerlico_core::QUIC_CLOSE_GRACE,
+                        connection._endpoint.wait_idle(),
+                    )
+                    .await;
                 }
-                for task in tasks {
-                    let _ = task.await;
-                }
-                let _ = tokio::time::timeout(
-                    kerlico_core::QUIC_CLOSE_GRACE,
-                    connection._endpoint.wait_idle(),
-                )
-                .await;
             }
             Ok(())
         })
@@ -490,7 +547,7 @@ impl Outbound for Client {
     ) -> BoxFuture<'a, Result<DatagramAssociation>> {
         Box::pin(async move {
             context
-                .run(async { self.connection(context).await?.association() })
+                .run(async { self.connection(context, false).await?.association() })
                 .await
         })
     }
@@ -502,7 +559,8 @@ impl Outbound for Client {
         Box::pin(async move {
             context
                 .run(async {
-                    let connection = self.connection(context).await?;
+                    let connection = self.connection(context, true).await?;
+                    let mut reservation = TcpReservation(Some(connection.clone()));
                     let (mut send, mut recv) = connection
                         .quic
                         .open_bi()
@@ -518,12 +576,11 @@ impl Outbound for Client {
                             return Err(Error::Rejected);
                         }
                     }
-                    connection.active.fetch_add(1, Ordering::AcqRel);
                     connection.touch();
                     Ok(Box::new(crate::io::QuicIo {
                         send,
                         recv,
-                        owner: Some(connection),
+                        owner: reservation.0.take(),
                     }) as BoxStream)
                 })
                 .await

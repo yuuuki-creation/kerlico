@@ -147,6 +147,7 @@ struct Peer {
     crypto: CryptoPeer,
     fragments: Reassembler,
     runtime: Option<RuntimePeer>,
+    sent_in_window: usize,
 }
 pub(crate) struct RuntimePeer {
     stack: Arc<SharedStack>,
@@ -241,55 +242,126 @@ impl WireGuardNode {
                 ),
                 fragments: Reassembler::new(fragment_budget.clone()),
                 runtime: None,
+                sent_in_window: 0,
             })
             .collect::<Vec<_>>();
-        let mut input = vec![0; 65536];
-        let mut timer = tokio::time::interval(Duration::from_millis(20));
+        let sock_ref = socket2::SockRef::from(&*socket);
+        let _ = sock_ref.set_recv_buffer_size(8 * 1024 * 1024);
+        let _ = sock_ref.set_send_buffer_size(8 * 1024 * 1024);
+        let (rx_tx, mut rx_rx) =
+            tokio::sync::mpsc::channel::<std::io::Result<(Vec<u8>, SocketAddr)>>(4096);
+        let rx_socket = socket.clone();
+        let rx_cancel = context.cancel.clone();
+        tokio::spawn(async move {
+            let mut input = vec![0; 65536];
+            loop {
+                let first = tokio::select! {
+                    biased;
+                    _ = rx_cancel.cancelled() => break,
+                    res = rx_socket.recv_from(&mut input) => match res {
+                        Ok((count, source)) => Ok((input[..count].to_vec(), source)),
+                        Err(error) => Err(error),
+                    },
+                };
+                let is_fatal = first.as_ref().is_err_and(|e| !is_peer_path_error(e));
+                if rx_tx.send(first).await.is_err() || is_fatal {
+                    break;
+                }
+                for _ in 0..64 {
+                    match rx_socket.try_recv_from(&mut input) {
+                        Ok((count, source)) => {
+                            if rx_tx
+                                .try_send(Ok((input[..count].to_vec(), source)))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+        let mut timer = tokio::time::interval(Duration::from_millis(1));
         timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut tick_mod = 0u8;
         loop {
             tokio::select! { biased;
                 _ = context.cancel.cancelled() => return Err(Error::Cancelled),
                 _ = timer.tick() => {
-                    index.limiter.reset_count();
                     for peer in &mut peers {
-                        peer.fragments.expire(Instant::now());
-                        if let Some(packet) = peer.crypto.tick()
-                            && let Some(endpoint) = peer.crypto.endpoint
-                        { send_or_drop(&socket, endpoint, &packet, &context, &carrier).await; }
+                        peer.sent_in_window = 0;
+                    }
+                    tick_mod = tick_mod.wrapping_add(1);
+                    if tick_mod & 15 == 0 {
+                        index.limiter.reset_count();
+                        for peer in &mut peers {
+                            peer.fragments.expire(Instant::now());
+                            if let Some(packet) = peer.crypto.tick()
+                                && let Some(endpoint) = peer.crypto.endpoint
+                            { send_or_drop(&socket, endpoint, &packet, &context, &carrier).await; }
+                        }
                     }
                 }
-                result = socket.recv_from(&mut input) => {
-                    let (count, source) = match result {
-                        Ok(value) => value,
-                        Err(error) if is_peer_path_error(&error) => { context.events.record(NodeEvent::Dropped); continue; }
+                maybe_pkt = rx_rx.recv() => {
+                    let Some(result) = maybe_pkt else { return Err(Error::Cancelled); };
+                    let mut next_pkt = match result {
+                        Ok(value) => Some(value),
+                        Err(error) if is_peer_path_error(&error) => { context.events.record(NodeEvent::Dropped); None }
                         Err(error) => return Err(error.into()),
                     };
-                    carrier.record(0, count);
-                    let selected = match index.identify(source, &input[..count]) {
-                        Ok(Identified::Cookie(packet)) => { send_or_drop(&socket, source, &packet, &context, &carrier).await; continue; }
-                        Ok(Identified::Peer(index)) => index,
-                        Err(_) => { context.events.record(NodeEvent::Dropped); continue; }
-                    };
-                    let peer = &mut peers[selected];
-                    let Ok(received) = peer.crypto.receive(source, &input[..count]) else {
-                        context.events.record(NodeEvent::Dropped); continue;
-                    };
-                    for packet in received.network { send_or_drop(&socket, source, &packet, &context, &carrier).await; }
-                    if received.authenticated {
-                        if peer.runtime.is_none() {
-                            let runtime = self.admit_peer(peer, source, &ingress, &context, notify.clone(), budget.clone());
-                            match runtime {
-                                Ok(runtime) => peer.runtime = Some(runtime),
-                                Err(_) => { context.events.record(NodeEvent::Dropped); continue; }
+                    let mut batch = 0usize;
+                    while let Some((pkt, source)) = next_pkt {
+                        let count = pkt.len();
+                        carrier.record(0, count);
+                        if let Ok(identified) = index.identify(source, &pkt) {
+                            match identified {
+                                Identified::Cookie(packet) => {
+                                    send_or_drop(&socket, source, &packet, &context, &carrier).await;
+                                }
+                                Identified::Peer(selected) => {
+                                    let peer = &mut peers[selected];
+                                    peer.sent_in_window = peer.sent_in_window.saturating_sub(1);
+                                    if let Ok(received) = peer.crypto.receive(source, &pkt) {
+                                        for packet in received.network {
+                                            send_or_drop(&socket, source, &packet, &context, &carrier).await;
+                                        }
+                                        if received.authenticated {
+                                            if peer.runtime.is_none() {
+                                                let runtime = self.admit_peer(peer, source, &ingress, &context, notify.clone(), budget.clone());
+                                                match runtime {
+                                                    Ok(runtime) => peer.runtime = Some(runtime),
+                                                    Err(_) => { context.events.record(NodeEvent::Dropped); }
+                                                }
+                                            }
+                                            if let Some(runtime) = &mut peer.runtime {
+                                                runtime.last_seen = Instant::now();
+                                            }
+                                        }
+                                        if let Some(bytes) = received.plain
+                                            && let Some(runtime) = &mut peer.runtime
+                                            && let Err(error) = accept_packet(runtime, &peer.config.allowed, &mut peer.fragments, &bytes)
+                                        {
+                                            runtime.context.events.record(if matches!(error, Error::Cancelled) { NodeEvent::Failed } else { NodeEvent::Dropped });
+                                        }
+                                    } else {
+                                        context.events.record(NodeEvent::Dropped);
+                                    }
+                                }
                             }
+                        } else {
+                            context.events.record(NodeEvent::Dropped);
                         }
-                        if let Some(runtime) = &mut peer.runtime { runtime.last_seen = Instant::now(); }
-                    }
-                    if let Some(bytes) = received.plain
-                        && let Some(runtime) = &mut peer.runtime
-                        && let Err(error) = accept_packet(runtime, &peer.config.allowed, &mut peer.fragments, &bytes)
-                    {
-                        runtime.context.events.record(if matches!(error, Error::Cancelled) { NodeEvent::Failed } else { NodeEvent::Dropped });
+                        batch += 1;
+                        if batch >= 64 {
+                            break;
+                        }
+                        next_pkt = match rx_rx.try_recv() {
+                            Ok(Ok(v)) => Some(v),
+                            Ok(Err(error)) if is_peer_path_error(&error) => { context.events.record(NodeEvent::Dropped); None }
+                            Ok(Err(error)) => return Err(error.into()),
+                            Err(_) => None,
+                        };
                     }
                 }
                 _ = notify.notified() => {}
@@ -303,7 +375,12 @@ impl WireGuardNode {
                     peer.runtime = None;
                     continue;
                 }
-                runtime.stack.poll()?;
+                let budget = if peer.crypto.ready() {
+                    32usize.saturating_sub(peer.sent_in_window)
+                } else {
+                    1
+                };
+                runtime.stack.poll_with_budget(budget)?;
                 if runtime.stack.has_output()
                     && !peer.crypto.ready()
                     && let Some(packet) = peer.crypto.initiate()
@@ -312,7 +389,8 @@ impl WireGuardNode {
                     send_or_drop(&socket, endpoint, &packet, &context, &carrier).await;
                 }
                 if peer.crypto.ready() {
-                    for packet in runtime.stack.drain(32)? {
+                    for packet in runtime.stack.drain(usize::MAX)? {
+                        peer.sent_in_window += 1;
                         if !peer.config.allows(IpPacket::parse(&packet)?.target) {
                             continue;
                         }
@@ -321,9 +399,6 @@ impl WireGuardNode {
                         {
                             send_or_drop(&socket, endpoint, &packet, &context, &carrier).await;
                         }
-                    }
-                    if runtime.stack.has_output() {
-                        notify.notify_one();
                     }
                 }
                 if runtime.udp.is_empty()
@@ -450,7 +525,17 @@ fn accept_tcp(peer: &mut RuntimePeer, bytes: Vec<u8>) -> Result<()> {
         peer.access.clone()
     };
     let context = peer.context.clone();
-    let target = destination(tuple.target)?;
+    let target_addr = if peer.stack.addresses.contains(tuple.target.ip()) {
+        let local_ip = if tuple.target.is_ipv4() {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        } else {
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        };
+        SocketAddr::new(local_ip, tuple.target.port())
+    } else {
+        tuple.target
+    };
+    let target = destination(target_addr)?;
     let events = context.events.clone();
     let owner = context.tasks.clone();
     owner.spawn(async move {

@@ -42,12 +42,17 @@ impl TcpStream {
         {
             return Err(Error::Rejected);
         }
+        let mut buf_bytes = stack.limits.tcp_buffer_bytes;
+        if buf_bytes >= 65536 && buf_bytes.is_power_of_two() {
+            buf_bytes -= 1;
+        }
         let mut socket = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; stack.limits.tcp_buffer_bytes]),
-            tcp::SocketBuffer::new(vec![0; stack.limits.tcp_buffer_bytes]),
+            tcp::SocketBuffer::new(vec![0; buf_bytes]),
+            tcp::SocketBuffer::new(vec![0; buf_bytes]),
         );
         socket.set_nagle_enabled(false);
-        socket.set_congestion_control(tcp::CongestionControl::Reno);
+        socket.set_ack_delay(None);
+        socket.set_congestion_control(tcp::CongestionControl::None);
         if wire.is_some() {
             socket
                 .listen(endpoint(local))

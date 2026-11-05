@@ -17,10 +17,10 @@ use tokio::{
     net::UdpSocket,
     sync::{mpsc, oneshot},
 };
-const WINDOW: usize = 128;
+const WINDOW: usize = 4096;
 // 通告值保留内核 skb 与共享载体的余量，不能把协议缓存槽全当作瞬时 socket 容量。
-const ADVERTISED_WINDOW: usize = 32;
-const SEND_LIMIT: usize = 512;
+const ADVERTISED_WINDOW: usize = 2048;
+const SEND_LIMIT: usize = 8192;
 type Route = (SocketAddr, [u8; 32], u32);
 pub(crate) struct Settings {
     pub common: TcpSettings,
@@ -29,6 +29,7 @@ pub(crate) struct Settings {
     pub peer: Option<SocketAddr>,
     pub users: Option<Arc<Users>>,
     pub replay: Option<Arc<Replay>>,
+    pub allow_insecure: bool,
 }
 pub(crate) fn start(
     socket: Arc<UdpSocket>,
@@ -36,16 +37,19 @@ pub(crate) fn start(
     settings: Settings,
 ) -> Result<Arc<Link>> {
     let local = socket.local_addr()?;
-    if !local.ip().is_loopback()
-        || local.ip().to_canonical() != local.ip()
-        || settings
-            .peer
-            .is_some_and(|peer| !peer.ip().is_loopback() || peer.ip().to_canonical() != peer.ip())
+    if !settings.allow_insecure
+        && (!local.ip().is_loopback()
+            || local.ip().to_canonical() != local.ip()
+            || settings.peer.is_some_and(|peer| {
+                !peer.ip().is_loopback() || peer.ip().to_canonical() != peer.ip()
+            }))
     {
         return Err(Error::Config("Mieru 不安全 UDP 仅允许回环载体".into()));
     }
     // 仅设置本项目持有的 socket；系统上限可能截断请求，不修改全局 sysctl。
-    socket2::SockRef::from(socket.as_ref()).set_recv_buffer_size(2 * 1024 * 1024)?;
+    let sock_ref = socket2::SockRef::from(socket.as_ref());
+    let _ = sock_ref.set_recv_buffer_size(8 * 1024 * 1024);
+    let _ = sock_ref.set_send_buffer_size(8 * 1024 * 1024);
     let client = settings.peer.is_some();
     let common = settings.common;
     let (link, commands) = Link::new(
@@ -57,7 +61,7 @@ pub(crate) fn start(
         common.multiplexing,
         common.server,
     );
-    let (incoming, receive) = mpsc::channel(128);
+    let (incoming, receive) = mpsc::channel(1024);
     let reading = socket.clone();
     let source = link.clone();
     link.scope.spawn(async move {
@@ -92,6 +96,7 @@ pub(crate) fn start(
         replay: settings.replay,
         client_key: settings.key,
         server_peer: settings.peer,
+        allow_insecure: settings.allow_insecure,
         mtu: settings.mtu,
         entries: HashMap::new(),
         routes: HashMap::new(),
@@ -142,6 +147,8 @@ struct Arq {
     ack_due: Option<Instant>,
     last_tx: Instant,
     last_ack: u32,
+    last_loss: Option<Instant>,
+    dup_ack_sent: (u32, u8),
 }
 impl Arq {
     fn new() -> Self {
@@ -150,21 +157,23 @@ impl Arq {
             sent: BTreeMap::new(),
             received: BTreeMap::new(),
             highest_sent: 0,
-            remote_window: WINDOW,
-            cwnd: 4.0,
-            threshold: 32.0,
+            remote_window: 256,
+            cwnd: 256.0,
+            threshold: 1536.0,
             srtt: None,
             variance: 0.0,
             ack_due: None,
             last_tx: Instant::now(),
             last_ack: 0,
+            last_loss: None,
+            dup_ack_sent: (0, 0),
         }
     }
     fn rto(&self) -> Duration {
         Duration::from_secs_f64(
             self.srtt
-                .map(|srtt| srtt + 4.0 * self.variance + 0.001)
-                .unwrap_or(0.2)
+                .map(|srtt| srtt + (4.0 * self.variance).max(srtt * 0.35 + 0.03))
+                .unwrap_or(1.0)
                 .clamp(0.1, 3.0),
         )
     }
@@ -191,8 +200,10 @@ impl Arq {
             return Ok(());
         }
         self.remote_window = usize::from(window).min(WINDOW);
+        let min_dup_age = Duration::from_secs_f64(self.srtt.unwrap_or(0.2) * 0.5);
         if next == self.last_ack
             && let Some(pending) = self.sent.get_mut(&next)
+            && now.duration_since(pending.sent_at) >= min_dup_age
         {
             pending.duplicate_acks = pending.duplicate_acks.saturating_add(1);
         }
@@ -202,28 +213,32 @@ impl Arq {
             .range(..next)
             .map(|(seq, _)| *seq)
             .collect::<Vec<_>>();
+        let mut rtt_sample = None;
         for seq in acknowledged {
             if let Some(pending) = self.sent.remove(&seq) {
-                if pending.transmissions == 1 {
-                    let sample = now
-                        .duration_since(pending.sent_at)
-                        .as_secs_f64()
-                        .max(0.000001);
-                    if let Some(srtt) = self.srtt {
-                        self.variance = 0.75 * self.variance + 0.25 * (srtt - sample).abs();
-                        self.srtt = Some(0.875 * srtt + 0.125 * sample);
-                    } else {
-                        self.srtt = Some(sample);
-                        self.variance = sample / 2.0;
-                    }
+                if pending.transmissions == 1 || self.srtt.is_none() {
+                    rtt_sample = Some(
+                        now.duration_since(pending.sent_at)
+                            .as_secs_f64()
+                            .max(0.000001),
+                    );
                 }
                 self.cwnd = (self.cwnd
                     + if self.cwnd < self.threshold {
-                        1.0
+                        2.0
                     } else {
-                        1.0 / self.cwnd
+                        4.0 / self.cwnd
                     })
                 .min(WINDOW as f64);
+            }
+        }
+        if let Some(sample) = rtt_sample {
+            if let Some(srtt) = self.srtt {
+                self.variance = 0.75 * self.variance + 0.25 * (srtt - sample).abs();
+                self.srtt = Some(0.875 * srtt + 0.125 * sample);
+            } else {
+                self.srtt = Some(sample);
+                self.variance = sample / 2.0;
             }
         }
         Ok(())
@@ -245,7 +260,7 @@ impl PacketEntry {
         (self.peer, self.key.user.fingerprint(), self.io.life.wire_id)
     }
     fn window(&self) -> u16 {
-        let free = crate::session::RECEIVE_BYTES
+        let free = crate::session::RECEIVE_PAUSE_BYTES
             .saturating_sub(self.io.life.received_bytes.load(Ordering::Acquire));
         ADVERTISED_WINDOW
             .min(WINDOW.saturating_sub(self.arq.received.len()))
@@ -274,6 +289,7 @@ struct Actor {
     replay: Option<Arc<Replay>>,
     client_key: Option<Arc<Key>>,
     server_peer: Option<SocketAddr>,
+    allow_insecure: bool,
     mtu: usize,
     entries: HashMap<u32, PacketEntry>,
     routes: HashMap<Route, u32>,
@@ -292,7 +308,7 @@ impl Actor {
         receipt: Option<Arc<Receipt>>,
         first: bool,
     ) -> Result<()> {
-        if self.output.len() >= 512 {
+        if self.output.len() >= 4096 {
             if let Some(receipt) = receipt {
                 receipt.fail();
             }
@@ -319,7 +335,7 @@ impl Actor {
         Ok(())
     }
     fn flush_output(&mut self) -> Result<()> {
-        for _ in 0..32 {
+        for _ in 0..512 {
             let Some(out) = self.output.pop_front() else {
                 break;
             };
@@ -385,7 +401,14 @@ impl Actor {
         if fragments > 256 {
             return Err(codec::bad());
         }
-        let receipt = Receipt::new(fragments, done);
+        let receipt = if entry.io.established && entry.arq.unsent.len() + fragments < 512 {
+            if let Some(done) = done {
+                let _ = done.send(Ok(()));
+            }
+            Receipt::new(fragments, None)
+        } else {
+            Receipt::new(fragments, done)
+        };
         for (index, chunk) in body.chunks(maximum).enumerate() {
             let mut frame = Frame::data(
                 entry.io.life.wire_id,
@@ -529,9 +552,13 @@ impl Actor {
                 .arq
                 .acknowledge(frame.ack, frame.window, Instant::now())?,
             _ if frame.is_data() && !entry.io.peer_closed => {
-                entry
-                    .arq
-                    .acknowledge(frame.ack, frame.window, Instant::now())?;
+                if frame.ack > entry.arq.last_ack
+                    || usize::from(frame.window).min(WINDOW) != entry.arq.remote_window
+                {
+                    entry
+                        .arq
+                        .acknowledge(frame.ack, frame.window, Instant::now())?;
+                }
                 let next = entry.io.receive_next;
                 if frame.seq >= next
                     && frame.seq.saturating_sub(next) < WINDOW as u32
@@ -540,14 +567,36 @@ impl Actor {
                     entry.arq.received.entry(frame.seq).or_insert(frame);
                 }
                 Self::receive_ready(entry)?;
+                let after_next = entry.io.receive_next;
+                if !entry.arq.received.is_empty() {
+                    if entry.arq.dup_ack_sent.0 != after_next {
+                        entry.arq.dup_ack_sent = (after_next, 1);
+                    } else {
+                        entry.arq.dup_ack_sent.1 = entry.arq.dup_ack_sent.1.saturating_add(1);
+                    }
+                    if entry.arq.dup_ack_sent.1 <= 3 {
+                        let mut ack = Frame::control(
+                            if self.link.client { 8 } else { 9 },
+                            entry.io.life.wire_id,
+                            entry.io.send_next.saturating_sub(1),
+                            Bytes::new(),
+                        );
+                        ack.ack = after_next;
+                        ack.window = entry.window();
+                        entry.arq.ack_due = None;
+                        self.emit(entry, &ack, None, false)?;
+                    }
+                } else {
+                    entry.arq.dup_ack_sent = (after_next, 0);
+                }
             }
             _ => {}
         }
         Ok(())
     }
     fn incoming(&mut self, peer: SocketAddr, bytes: Bytes) -> Result<()> {
-        if !peer.ip().is_loopback()
-            || peer.ip().to_canonical() != peer.ip()
+        if (!self.allow_insecure
+            && (!peer.ip().is_loopback() || peer.ip().to_canonical() != peer.ip()))
             || self.server_peer.is_some_and(|server| server != peer)
         {
             return Ok(());
@@ -764,7 +813,7 @@ impl Actor {
         Self::receive_ready_if_buffered(entry)?;
         let mut loss = false;
         let mut timeout_loss = false;
-        let retransmit = entry
+        let expired = entry
             .arq
             .sent
             .iter()
@@ -773,8 +822,17 @@ impl Actor {
                     || pending.duplicate_acks >= 3 && pending.transmissions <= 1
             })
             .map(|(seq, _)| *seq)
-            .take(16)
             .collect::<Vec<_>>();
+        let retransmit = expired.iter().copied().take(4).collect::<Vec<_>>();
+        for &seq in expired.iter().skip(4) {
+            if let Some(pending) = entry.arq.sent.get_mut(&seq)
+                && now.duration_since(pending.sent_at) >= pending.rto
+            {
+                pending.sent_at = (now + Duration::from_millis(20))
+                    .checked_sub(pending.rto)
+                    .unwrap_or(now);
+            }
+        }
         for seq in retransmit {
             let mut pending = entry.arq.sent.remove(&seq).expect("已找到待重传帧");
             timeout_loss |= pending.retry(now, entry.arq.rto())?;
@@ -782,15 +840,23 @@ impl Actor {
             self.emit(entry, &pending.frame, None, false)?;
             entry.arq.sent.insert(seq, pending);
         }
-        if loss {
+        if loss
+            && entry
+                .arq
+                .last_loss
+                .is_none_or(|last| now.duration_since(last) >= entry.arq.rto())
+        {
+            entry.arq.last_loss = Some(now);
             entry.arq.loss(timeout_loss);
+            entry.arq.cwnd = entry.arq.cwnd.max(192.0);
+            entry.arq.threshold = entry.arq.threshold.max(384.0);
         }
         let limit = entry
             .arq
             .remote_window
             .min(entry.arq.cwnd.floor() as usize)
             .min(WINDOW);
-        for _ in 0..16 {
+        for _ in 0..96 {
             let Some(front) = entry.arq.unsent.front() else {
                 break;
             };
@@ -894,14 +960,37 @@ impl Actor {
     ) {
         loop {
             let delay = self.delay();
+            let mut fatal = false;
             tokio::select! { biased;
                 _ = self.link.scope.cancel.cancelled() => break,
-                command = commands.recv() => match command { Some(command) => if self.command(command).is_err() { break; }, None => break },
-                packet = incoming.recv() => match packet { Some((peer, bytes)) => if self.incoming(peer, bytes).is_err() { break; }, None => break },
+                command = commands.recv() => match command {
+                    Some(command) => {
+                        if self.command(command).is_err() { break; }
+                        for _ in 0..64 {
+                            match commands.try_recv() {
+                                Ok(cmd) => if self.command(cmd).is_err() { fatal = true; break; },
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    None => break,
+                },
+                packet = incoming.recv() => match packet {
+                    Some((peer, bytes)) => {
+                        if self.incoming(peer, bytes).is_err() { break; }
+                        for _ in 0..128 {
+                            match incoming.try_recv() {
+                                Ok((p, b)) => if self.incoming(p, b).is_err() { fatal = true; break; },
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    None => break,
+                },
                 writable = self.socket.writable(), if !self.output.is_empty() => if writable.is_err() { break; },
                 _ = tokio::time::sleep(delay) => {},
             }
-            if self.tick().is_err() {
+            if fatal || self.tick().is_err() {
                 break;
             }
             if self.link.client

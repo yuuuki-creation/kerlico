@@ -23,6 +23,8 @@ struct Options {
     version: u8,
     psk: String,
     #[serde(default)]
+    cipher: Option<String>,
+    #[serde(default)]
     userkey: String,
     #[serde(default)]
     reuse: bool,
@@ -49,15 +51,18 @@ impl OutboundFactory for SnellFactory {
     }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         let options: Options = serde_json::from_value(options.clone()).map_err(|_| invalid())?;
-        let settings = Arc::new(Settings::new(
-            options.version,
-            options.psk,
-            options.mode,
-            options.obfs_mode,
-            options.obfs_host,
-            options.obfs_uri,
-            false,
-        )?);
+        let settings = Arc::new(
+            Settings::new(
+                options.version,
+                options.psk,
+                options.mode,
+                options.obfs_mode,
+                options.obfs_host,
+                options.obfs_uri,
+                false,
+            )?
+            .with_cipher(options.cipher.as_deref())?,
+        );
         let server = options.server.destination()?;
         let userkey = userkey(&options.userkey)?;
         if settings.raw() && (!server.is_loopback() || userkey.is_empty()) {

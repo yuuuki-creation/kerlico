@@ -257,6 +257,9 @@ pub(crate) fn transport(
     let mut config = quinn::TransportConfig::default();
     config.max_concurrent_bidi_streams((streams.min(65536) as u32).into());
     config.max_concurrent_uni_streams((streams.min(65536) as u32).into());
+    config.stream_receive_window((6 * 1024 * 1024u32).into());
+    config.receive_window((16 * 1024 * 1024u32).into());
+    config.send_window(16 * 1024 * 1024);
     config.datagram_receive_buffer_size(Some(4 * 1024 * 1024));
     config.datagram_send_buffer_size(4 * 1024 * 1024);
     config.max_idle_timeout(Some(
@@ -265,16 +268,19 @@ pub(crate) fn transport(
     config.keep_alive_interval(heartbeat);
     match congestion {
         "cubic" => {
-            config
-                .congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
+            let mut c = quinn::congestion::CubicConfig::default();
+            c.initial_window(512 * 1024);
+            config.congestion_controller_factory(Arc::new(c));
         }
         "newreno" => {
-            config.congestion_controller_factory(Arc::new(
-                quinn::congestion::NewRenoConfig::default(),
-            ));
+            let mut c = quinn::congestion::NewRenoConfig::default();
+            c.initial_window(512 * 1024);
+            config.congestion_controller_factory(Arc::new(c));
         }
         "bbr" => {
-            config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+            let mut c = quinn::congestion::BbrConfig::default();
+            c.initial_window(512 * 1024);
+            config.congestion_controller_factory(Arc::new(c));
         }
         _ => return Err(invalid()),
     };

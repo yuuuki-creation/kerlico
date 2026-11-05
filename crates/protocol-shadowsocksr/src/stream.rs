@@ -161,7 +161,7 @@ impl Stream {
             plain_offset: 0,
             network_bytes: 0,
             plain_bytes: 0,
-            buffer: vec![0; 4096],
+            buffer: vec![0; 16384],
             needs_flush: false,
             request: false,
             incoming_end: false,
@@ -189,7 +189,7 @@ impl Stream {
         if data.is_empty() {
             return Ok(());
         }
-        if self.network_bytes + data.len() > 131072 {
+        if self.network_bytes + data.len() > 2 * 1048576 {
             return Err(kerlico_core::Error::ResourceLimit);
         }
         self.network_bytes += data.len();
@@ -224,7 +224,7 @@ impl Stream {
             self.output(&[])?;
         }
         if !decoded.data.is_empty() {
-            if self.plain_bytes + decoded.data.len() > 131072 {
+            if self.plain_bytes + decoded.data.len() > 2 * 1048576 {
                 return Err(kerlico_core::Error::ResourceLimit);
             }
             self.plain_bytes += decoded.data.len();
@@ -376,10 +376,18 @@ impl AsyncWrite for Stream {
         if data.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        if this.network_bytes >= 65536 {
+        if this.network_bytes >= 262144 {
             return Poll::Pending;
         }
-        let count = data.len().min(4096);
+        let count = if (this.role == Role::Client && this.codec.sent_header
+            || this.role == Role::Server && this.codec.send_id > 1)
+            && this.cfg.protocol.chain()
+            && data.len() >= 2800
+        {
+            (data.len().min(64400) / 2800) * 2800
+        } else {
+            data.len().min(4096)
+        };
         if this.output(&data[..count]).is_err() {
             return Poll::Ready(Err(this.error()));
         }

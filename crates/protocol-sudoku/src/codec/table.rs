@@ -94,6 +94,7 @@ const fn coefficients() -> [[usize; 4]; 64] {
 const COEFFICIENTS: [[usize; 4]; 64] = coefficients();
 
 // 严格升序四元组的组合数排名；64选4恰有CLUE_SETS个位置。
+#[inline(always)]
 fn sorted_rank(clues: [u8; 4]) -> usize {
     COEFFICIENTS[clues[0] as usize][0]
         + COEFFICIENTS[clues[1] as usize][1]
@@ -101,19 +102,29 @@ fn sorted_rank(clues: [u8; 4]) -> usize {
         + COEFFICIENTS[clues[3] as usize][3]
 }
 
-fn clue_rank(mut clues: [u8; 4]) -> Option<usize> {
-    if clues.iter().any(|&clue| clue >= 64) {
+#[inline(always)]
+fn sort2(left: usize, right: usize) -> (usize, usize) {
+    (left.min(right), left.max(right))
+}
+
+#[inline(always)]
+fn clue_rank(clues: [u8; 4]) -> Option<usize> {
+    let a = clues[0] as usize;
+    let b = clues[1] as usize;
+    let c = clues[2] as usize;
+    let d = clues[3] as usize;
+    if (a | b | c | d) >= 64 {
         return None;
     }
-    for (left, right) in [(0, 1), (2, 3), (0, 2), (1, 3), (1, 2)] {
-        if clues[left] > clues[right] {
-            clues.swap(left, right);
-        }
-    }
-    if clues.windows(2).any(|pair| pair[0] == pair[1]) {
+    let (a, b) = sort2(a, b);
+    let (c, d) = sort2(c, d);
+    let (a, c) = sort2(a, c);
+    let (b, d) = sort2(b, d);
+    let (b, c) = sort2(b, c);
+    if a == b || b == c || c == d {
         return None;
     }
-    Some(sorted_rank(clues))
+    Some(COEFFICIENTS[a][0] + COEFFICIENTS[b][1] + COEFFICIENTS[c][2] + COEFFICIENTS[d][3])
 }
 
 pub(crate) struct GridOrder {
@@ -162,6 +173,7 @@ impl GridOrder {
         }
         order
     }
+    #[inline(always)]
     fn decode(&self, clues: [u8; 4]) -> Option<u8> {
         let value = self.decoded[clue_rank(clues)?];
         (value < 256).then_some(value as u8)
@@ -187,33 +199,51 @@ fn for_each_puzzle(grid: &Grid, mut visit: impl FnMut([u8; 4])) {
 pub(crate) struct Table {
     pub layout: Layout,
     order: Arc<GridOrder>,
-    // 每布局仅新增64字节，不复制全部puzzle或排列。
+    wire_clues: Box<[[u8; 4]]>,
+    offsets: [u32; 257],
+    #[cfg(test)]
     wire_hints: [u8; 64],
 }
 impl Table {
     fn new(layout: Layout, order: Arc<GridOrder>) -> Self {
-        let wire_hints = std::array::from_fn(|hint| layout.hints[hint & 3][hint >> 2]);
+        let wire_hints: [u8; 64] = std::array::from_fn(|hint| layout.hints[hint & 3][hint >> 2]);
+        let total: usize = order.clues.iter().map(Vec::len).sum();
+        let mut wire_clues = Vec::with_capacity(total);
+        let mut offsets = [0u32; 257];
+        for (byte, puzzles) in order.clues.iter().enumerate() {
+            offsets[byte] = wire_clues.len() as u32;
+            for &hints in puzzles {
+                wire_clues.push([
+                    wire_hints[hints[0] as usize],
+                    wire_hints[hints[1] as usize],
+                    wire_hints[hints[2] as usize],
+                    wire_hints[hints[3] as usize],
+                ]);
+            }
+        }
+        offsets[256] = wire_clues.len() as u32;
         Self {
             layout,
             order,
+            wire_clues: wire_clues.into_boxed_slice(),
+            offsets,
+            #[cfg(test)]
             wire_hints,
         }
     }
+    #[inline(always)]
     pub fn decode(&self, clues: [u8; 4]) -> Result<u8> {
         self.order.decode(clues).ok_or_else(crate::invalid)
     }
+    #[inline(always)]
     pub fn puzzle_count(&self, byte: u8) -> usize {
-        self.order.clues[byte as usize].len()
+        (self.offsets[byte as usize + 1] - self.offsets[byte as usize]) as usize
     }
+    #[inline(always)]
     pub fn puzzle(&self, byte: u8, index: usize) -> [u8; 4] {
-        let hints = self.order.clues[byte as usize][index];
-        [
-            self.wire_hints[hints[0] as usize],
-            self.wire_hints[hints[1] as usize],
-            self.wire_hints[hints[2] as usize],
-            self.wire_hints[hints[3] as usize],
-        ]
+        self.wire_clues[self.offsets[byte as usize] as usize + index]
     }
+    #[inline(always)]
     fn choice(&self, byte: u8, choice: u32) -> [u8; 4] {
         let puzzle = self.puzzle(byte, (choice / 24) as usize);
         let permutation = PERMUTATIONS[(choice % 24) as usize];
@@ -224,6 +254,7 @@ impl Table {
             puzzle[permutation[3] as usize],
         ]
     }
+    #[inline(always)]
     pub fn randomized_puzzle<R: Rng + ?Sized>(&self, byte: u8, random: &mut R) -> [u8; 4] {
         let choice = self.order.choices[byte as usize].sample(random);
         self.choice(byte, choice)

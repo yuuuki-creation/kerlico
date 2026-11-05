@@ -268,29 +268,41 @@ impl AsyncUdpSocket for Raw {
         };
         loop {
             std::task::ready!(socket.poll_recv_ready(cx))?;
-            match socket.try_recv_from(&mut output[0]) {
-                Ok((len, mut addr)) => {
-                    if let Some(hop) = &self.hop
-                        && let Ok(state) = hop.lock()
-                        && state.nominal_port != 0
-                    {
-                        addr.set_port(state.nominal_port);
+            let mut count = 0;
+            let limit = output.len().min(meta.len());
+            while count < limit {
+                match socket.try_recv_from(&mut output[count]) {
+                    Ok((len, mut addr)) => {
+                        if let Some(hop) = &self.hop
+                            && let Ok(state) = hop.lock()
+                            && state.nominal_port != 0
+                        {
+                            addr.set_port(state.nominal_port);
+                        }
+                        meta[count] = udp::RecvMeta {
+                            addr,
+                            len,
+                            stride: len.max(1),
+                            ecn: None,
+                            dst_ip: if self.address.ip().is_unspecified() {
+                                None
+                            } else {
+                                Some(self.address.ip())
+                            },
+                        };
+                        count += 1;
                     }
-                    meta[0] = udp::RecvMeta {
-                        addr,
-                        len,
-                        stride: len.max(1),
-                        ecn: None,
-                        dst_ip: if self.address.ip().is_unspecified() {
-                            None
-                        } else {
-                            Some(self.address.ip())
-                        },
-                    };
-                    return Poll::Ready(Ok(1));
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) => {
+                        if count > 0 {
+                            return Poll::Ready(Ok(count));
+                        }
+                        return Poll::Ready(Err(error));
+                    }
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(error) => return Poll::Ready(Err(error)),
+            }
+            if count > 0 {
+                return Poll::Ready(Ok(count));
             }
         }
     }
@@ -301,7 +313,7 @@ impl AsyncUdpSocket for Raw {
         1
     }
     fn max_receive_segments(&self) -> usize {
-        1
+        32
     }
     fn may_fragment(&self) -> bool {
         false
@@ -311,6 +323,9 @@ pub(crate) fn wrap(
     socket: UdpSocket,
     settings: Arc<Settings>,
 ) -> io::Result<(Arc<dyn AsyncUdpSocket>, Close)> {
+    let sock_ref = socket2::SockRef::from(&socket);
+    let _ = sock_ref.set_recv_buffer_size(8 * 1024 * 1024);
+    let _ = sock_ref.set_send_buffer_size(8 * 1024 * 1024);
     let address = socket.local_addr()?;
     let hop = settings.hop.clone().map(|config| {
         let initial = config.pick();
@@ -384,43 +399,35 @@ impl AsyncUdpSocket for Socket {
         if output.is_empty() || meta.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        let mut scratch = self
-            .receive
-            .lock()
-            .map_err(|_| io::Error::other("Hysteria v1 接收状态不可用"))?;
-        let count = std::task::ready!(self.inner.poll_recv(
-            cx,
-            &mut [IoSliceMut::new(&mut scratch)],
-            &mut meta[..1]
-        ))?;
-        if count == 0 {
-            return Poll::Ready(Ok(0));
-        }
-        let info = &mut meta[0];
-        let length = info.len.min(scratch.len());
-        let stride = info.stride.max(1);
-        let mut written = 0;
+        let _ = &self.receive;
+        let count = std::task::ready!(self.inner.poll_recv(cx, output, meta))?;
         let overhead = self.settings.overhead();
-        if stride <= overhead {
-            info.len = 0;
-            info.stride = 1;
-            return Poll::Ready(Ok(1));
-        }
-        for start in (0..length).step_by(stride) {
-            let end = (start + stride).min(length);
-            if let Some(data) = unpack(&self.settings, &scratch[start..end]) {
-                if written + data.len() > output[0].len() {
-                    info.len = 0;
-                    info.stride = 1;
-                    return Poll::Ready(Ok(1));
-                }
-                output[0][written..written + data.len()].copy_from_slice(&data);
-                written += data.len();
+        for i in 0..count {
+            let info = &mut meta[i];
+            let buf = &mut output[i];
+            let length = info.len.min(buf.len());
+            let stride = info.stride.max(1);
+            if stride <= overhead {
+                info.len = 0;
+                info.stride = 1;
+                continue;
             }
+            let mut written = 0;
+            for start in (0..length).step_by(stride) {
+                let end = (start + stride).min(length);
+                if let Some(data) = unpack(&self.settings, &buf[start..end]) {
+                    if written + data.len() > buf.len() {
+                        written = 0;
+                        break;
+                    }
+                    buf[written..written + data.len()].copy_from_slice(&data);
+                    written += data.len();
+                }
+            }
+            info.len = written;
+            info.stride = if written == 0 { 1 } else { stride - overhead };
         }
-        info.len = written;
-        info.stride = stride - overhead;
-        Poll::Ready(Ok(1))
+        Poll::Ready(Ok(count))
     }
     fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr()

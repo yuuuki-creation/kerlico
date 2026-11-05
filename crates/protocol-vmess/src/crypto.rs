@@ -1,8 +1,7 @@
 //! VMess AEAD 密钥派生、认证标识和带独立计数器的记录。
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit as BlockKeyInit};
-use aes_gcm::{Aes128Gcm, aead::AeadInPlace};
-use chacha20poly1305::ChaCha20Poly1305;
 use md5::Md5;
+use ring::aead::{AES_128_GCM, Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use sha2::{Digest, Sha256};
 use sha3::{
     Shake128, Shake128Reader,
@@ -18,6 +17,7 @@ pub(crate) fn invalid() -> io::Error {
 pub(crate) enum Cipher {
     Aes,
     ChaCha,
+    None,
 }
 impl Cipher {
     pub fn parse(name: &str) -> io::Result<Self> {
@@ -25,6 +25,7 @@ impl Cipher {
             "aes-128-gcm" => Ok(Self::Aes),
             "chacha20-poly1305" => Ok(Self::ChaCha),
             "auto" => Ok(Self::Aes),
+            "zero" => Ok(Self::None),
             _ => Err(invalid()),
         }
     }
@@ -32,11 +33,16 @@ impl Cipher {
         match value {
             3 => Ok(Self::Aes),
             4 => Ok(Self::ChaCha),
+            5 | 6 => Ok(Self::None),
             _ => Err(invalid()),
         }
     }
     pub fn wire(self) -> u8 {
-        if self == Self::Aes { 3 } else { 4 }
+        match self {
+            Self::Aes => 3,
+            Self::ChaCha => 4,
+            Self::None => 5,
+        }
     }
 }
 pub(crate) fn md5(bytes: &[u8]) -> [u8; 16] {
@@ -97,43 +103,84 @@ pub(crate) fn decode_auth(key: &[u8; 16], auth: &[u8; 16]) -> io::Result<u64> {
     }
     Ok(u64::from_be_bytes(bytes[..8].try_into().unwrap()))
 }
-enum Aead {
-    Aes(Box<Aes128Gcm>),
-    ChaCha(ChaCha20Poly1305),
+struct Aead {
+    key: LessSafeKey,
 }
 impl Aead {
     fn new(cipher: Cipher, key: &[u8; 16]) -> Self {
-        match cipher {
-            Cipher::Aes => Self::Aes(Box::new(Aes128Gcm::new_from_slice(key).unwrap())),
+        let unbound = match cipher {
+            Cipher::Aes => UnboundKey::new(&AES_128_GCM, key).unwrap(),
             Cipher::ChaCha => {
                 let first = Zeroizing::new(md5(key));
                 let second = Zeroizing::new(md5(&*first));
                 let mut full = Zeroizing::new([0; 32]);
                 full[..16].copy_from_slice(&*first);
                 full[16..].copy_from_slice(&*second);
-                Self::ChaCha(ChaCha20Poly1305::new_from_slice(&*full).unwrap())
+                UnboundKey::new(&CHACHA20_POLY1305, &*full).unwrap()
             }
+            Cipher::None => unreachable!(),
+        };
+        Self {
+            key: LessSafeKey::new(unbound),
         }
     }
     fn seal(&self, nonce: &[u8; 12], aad: &[u8], bytes: &mut Vec<u8>) -> io::Result<()> {
-        let result = match self {
-            Self::Aes(c) => c.encrypt_in_place(nonce.into(), aad, bytes),
-            Self::ChaCha(c) => c.encrypt_in_place(nonce.into(), aad, bytes),
-        };
-        result.map_err(|_| {
-            bytes.zeroize();
-            invalid()
-        })
+        let tag = self
+            .key
+            .seal_in_place_separate_tag(
+                Nonce::assume_unique_for_key(*nonce),
+                Aad::from(aad),
+                bytes.as_mut_slice(),
+            )
+            .map_err(|_| {
+                bytes.zeroize();
+                invalid()
+            })?;
+        bytes.extend_from_slice(tag.as_ref());
+        Ok(())
+    }
+    fn seal_slice(&self, nonce: &[u8; 12], aad: &[u8], buf: &mut [u8]) -> io::Result<()> {
+        if buf.len() < 16 {
+            return Err(invalid());
+        }
+        let body_len = buf.len() - 16;
+        let (body, tag_out) = buf.split_at_mut(body_len);
+        let tag = self
+            .key
+            .seal_in_place_separate_tag(Nonce::assume_unique_for_key(*nonce), Aad::from(aad), body)
+            .map_err(|_| {
+                body.zeroize();
+                invalid()
+            })?;
+        tag_out.copy_from_slice(tag.as_ref());
+        Ok(())
     }
     fn open(&self, nonce: &[u8; 12], aad: &[u8], bytes: &mut Vec<u8>) -> io::Result<()> {
-        let result = match self {
-            Self::Aes(c) => c.decrypt_in_place(nonce.into(), aad, bytes),
-            Self::ChaCha(c) => c.decrypt_in_place(nonce.into(), aad, bytes),
-        };
-        result.map_err(|_| {
-            bytes.zeroize();
-            invalid()
-        })
+        let plain_len = self
+            .key
+            .open_in_place(
+                Nonce::assume_unique_for_key(*nonce),
+                Aad::from(aad),
+                bytes.as_mut_slice(),
+            )
+            .map(|plain| plain.len())
+            .map_err(|_| {
+                bytes.zeroize();
+                invalid()
+            })?;
+        bytes.truncate(plain_len);
+        Ok(())
+    }
+    fn open_slice<'a>(
+        &self,
+        nonce: &[u8; 12],
+        aad: &[u8],
+        buf: &'a mut [u8],
+    ) -> io::Result<&'a [u8]> {
+        self.key
+            .open_in_place(Nonce::assume_unique_for_key(*nonce), Aad::from(aad), buf)
+            .map(|plain| &*plain)
+            .map_err(|_| invalid())
     }
 }
 pub(crate) fn header_seal(
@@ -187,18 +234,27 @@ impl Counter {
         self.iv[..2].copy_from_slice(&n.to_be_bytes());
         Ok(*self.iv)
     }
+    #[cfg(test)]
     fn seal(&mut self, bytes: &mut Vec<u8>) -> io::Result<()> {
         let nonce = self.nonce()?;
         self.aead.seal(&nonce, &[], bytes)
+    }
+    fn seal_slice(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        let nonce = self.nonce()?;
+        self.aead.seal_slice(&nonce, &[], buf)
     }
     fn open(&mut self, bytes: &mut Vec<u8>) -> io::Result<()> {
         let nonce = self.nonce()?;
         self.aead.open(&nonce, &[], bytes)
     }
+    fn open_slice<'a>(&mut self, buf: &'a mut [u8]) -> io::Result<&'a [u8]> {
+        let nonce = self.nonce()?;
+        self.aead.open_slice(&nonce, &[], buf)
+    }
 }
 pub(crate) const MAX_DATAGRAM: usize = 65_456;
 pub(crate) struct Records {
-    body: Counter,
+    body: Option<Counter>,
     length: Option<Counter>,
     shake: Shake128Reader,
     mask: bool,
@@ -214,12 +270,16 @@ impl Records {
     ) -> Self {
         let mut shake = Shake128::default();
         shake.update(iv);
-        let length = auth_keys.map(|(key, iv)| {
-            let key = kdf(key, &[b"auth_len"]);
-            Counter::new(cipher, key[..16].try_into().unwrap(), iv)
-        });
+        let length = if cipher == Cipher::None {
+            None
+        } else {
+            auth_keys.map(|(key, iv)| {
+                let key = kdf(key, &[b"auth_len"]);
+                Counter::new(cipher, key[..16].try_into().unwrap(), iv)
+            })
+        };
         Self {
-            body: Counter::new(cipher, key, iv),
+            body: (cipher != Cipher::None).then(|| Counter::new(cipher, key, iv)),
             length,
             shake: shake.finalize_xof(),
             mask: flags & 4 != 0,
@@ -241,50 +301,74 @@ impl Records {
             0
         }
     }
+    #[cfg(test)]
     pub fn seal(&mut self, plain: &[u8]) -> io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.seal_into(plain, &mut out)?;
+        Ok(out)
+    }
+    pub fn seal_into(&mut self, plain: &[u8], out: &mut Vec<u8>) -> io::Result<()> {
         if plain.len() > MAX_DATAGRAM {
             return Err(invalid());
         }
+        let tag_len = if self.body.is_some() { 16 } else { 0 };
         let padding = self.padding();
-        let size = plain.len() + 16 + padding;
-        let mut prefix = if let Some(length) = &mut self.length {
-            let mut b = ((size - 16) as u16).to_be_bytes().to_vec();
-            length.seal(&mut b)?;
-            b
+        let size = plain.len() + tag_len + padding;
+        let len_field = if self.length.is_some() { 18 } else { 2 };
+        let total = len_field + size;
+        out.clear();
+        out.reserve(total);
+        out.resize(total, 0);
+        if let Some(length) = &mut self.length {
+            out[..2].copy_from_slice(&((size - tag_len) as u16).to_be_bytes());
+            length.seal_slice(&mut out[..18])?;
         } else {
             let mask = if self.mask { self.next() } else { 0 };
-            ((size as u16) ^ mask).to_be_bytes().to_vec()
-        };
-        let mut body = Zeroizing::new(plain.to_vec());
-        self.body.seal(&mut body)?;
-        prefix.extend_from_slice(&body);
-        let start = prefix.len();
-        prefix.resize(start + padding, 0);
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut prefix[start..]);
-        Ok(prefix)
+            out[..2].copy_from_slice(&((size as u16) ^ mask).to_be_bytes());
+        }
+        let body_end = len_field + plain.len() + tag_len;
+        out[len_field..len_field + plain.len()].copy_from_slice(plain);
+        if let Some(body_cipher) = &mut self.body {
+            body_cipher.seal_slice(&mut out[len_field..body_end])?;
+        }
+        if padding > 0 {
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut out[body_end..]);
+        }
+        Ok(())
     }
+    #[cfg(test)]
     pub fn length(&mut self, mut bytes: Vec<u8>) -> io::Result<(usize, usize)> {
+        self.length_in_place(&mut bytes)
+    }
+    pub fn length_in_place(&mut self, bytes: &mut [u8]) -> io::Result<(usize, usize)> {
+        let tag_len = if self.body.is_some() { 16 } else { 0 };
         let padding = self.padding();
         let n = if let Some(length) = &mut self.length {
-            length.open(&mut bytes)?;
-            u16::from_be_bytes(bytes.as_slice().try_into().map_err(|_| invalid())?) as usize + 16
+            let plain = length.open_slice(bytes)?;
+            u16::from_be_bytes(plain.try_into().map_err(|_| invalid())?) as usize + tag_len
         } else {
             let mask = if self.mask { self.next() } else { 0 };
-            (u16::from_be_bytes(bytes.as_slice().try_into().map_err(|_| invalid())?) ^ mask)
-                as usize
+            (u16::from_be_bytes(bytes.try_into().map_err(|_| invalid())?) ^ mask) as usize
         };
-        if !(16 + padding..=65535).contains(&n) {
+        if !(tag_len + padding..=65535).contains(&n) {
             return Err(invalid());
         }
         Ok((n, padding))
     }
+    #[cfg(test)]
     pub fn open(&mut self, mut bytes: Vec<u8>, padding: usize) -> io::Result<Vec<u8>> {
+        self.open_in_place(&mut bytes, padding)?;
+        Ok(bytes)
+    }
+    pub fn open_in_place(&mut self, bytes: &mut Vec<u8>, padding: usize) -> io::Result<()> {
         if padding > bytes.len() {
             return Err(invalid());
         }
         bytes.truncate(bytes.len() - padding);
-        self.body.open(&mut bytes)?;
-        Ok(bytes)
+        if let Some(body) = &mut self.body {
+            body.open(bytes)?;
+        }
+        Ok(())
     }
 }
 

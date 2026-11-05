@@ -154,6 +154,7 @@ impl SharedStack {
             outgoing: VecDeque::new(),
             mtu,
             budget: budget.clone(),
+            egress_budget: usize::MAX,
         };
         let mut config = Config::new(HardwareAddress::Ip);
         config.random_seed = rand::random();
@@ -265,6 +266,9 @@ impl SharedStack {
         self.allowed.iter().any(|network| network.contains(address))
     }
     pub fn poll(&self) -> Result<()> {
+        self.poll_with_budget(usize::MAX)
+    }
+    pub fn poll_with_budget(&self, egress_budget: usize) -> Result<()> {
         let mut state = self.lock()?;
         let now = Instant::now();
         {
@@ -289,6 +293,7 @@ impl SharedStack {
                 device,
                 ..
             } = &mut *state;
+            device.egress_budget = egress_budget;
             interface.poll(self.time(), device, sockets);
         }
         {
@@ -480,6 +485,7 @@ struct PacketDevice {
     outgoing: VecDeque<QueuedPacket>,
     mtu: usize,
     budget: PacketBudget,
+    egress_budget: usize,
 }
 struct Receive(Vec<u8>);
 struct Transmit<'a> {
@@ -526,7 +532,11 @@ impl Device for PacketDevice {
         ))
     }
     fn transmit(&mut self, _: StackInstant) -> Option<Self::TxToken<'_>> {
+        if self.egress_budget == 0 {
+            return None;
+        }
         let lease = self.budget.reserve(self.mtu).ok()?;
+        self.egress_budget -= 1;
         Some(Transmit {
             outgoing: &mut self.outgoing,
             lease,
@@ -536,7 +546,7 @@ impl Device for PacketDevice {
         let mut capabilities = DeviceCapabilities::default();
         capabilities.medium = Medium::Ip;
         capabilities.max_transmission_unit = self.mtu;
-        capabilities.max_burst_size = Some(32);
+        capabilities.max_burst_size = None;
         capabilities
     }
 }

@@ -98,7 +98,7 @@ impl TcpConnector {
         client_cert_pem: Option<&str>,
         client_key_pem: Option<&str>,
     ) -> Result<Self> {
-        let provider = rustls::crypto::ring::default_provider();
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
         let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         if let Some(pem) = ca_pem {
             let certs = rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
@@ -186,9 +186,68 @@ impl TcpConnector {
     pub async fn connect(&self, server: &Destination) -> Result<BoxStream> {
         let tcp = Self::connect_raw_with_dialer(server, &self.dialer).await?;
         match &self.tls {
-            Some((connector, name)) => Ok(Box::new(connector.connect(name.clone(), tcp).await?)),
+            Some((connector, name)) => {
+                let mut tls = connector.connect(name.clone(), tcp).await?;
+                tls.get_mut().1.set_buffer_limit(Some(68 * 1024));
+                Ok(Box::new(ClientTls(tls)))
+            }
             None => Ok(tcp),
         }
+    }
+}
+
+struct ClientTls(tokio_rustls::client::TlsStream<BoxStream>);
+impl tokio::io::AsyncRead for ClientTls {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        out: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = out.filled().len();
+        let poll = std::pin::Pin::new(&mut this.0).poll_read(cx, out);
+        if matches!(poll, std::task::Poll::Ready(Ok(()))) && out.filled().len() > before {
+            while out.remaining() >= 16384 {
+                let prev = out.filled().len();
+                match std::pin::Pin::new(&mut this.0).poll_read(cx, out) {
+                    std::task::Poll::Ready(Ok(())) if out.filled().len() > prev => {}
+                    _ => break,
+                }
+            }
+        }
+        poll
+    }
+}
+impl tokio::io::AsyncWrite for ClientTls {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let mut total = 0;
+        let limit = bytes.len().min(65536);
+        while total < limit {
+            match std::pin::Pin::new(&mut this.0).poll_write(cx, &bytes[total..limit]) {
+                std::task::Poll::Ready(Ok(0)) => break,
+                std::task::Poll::Ready(Ok(n)) => total += n,
+                std::task::Poll::Pending if total > 0 => break,
+                other => return other,
+            }
+        }
+        std::task::Poll::Ready(Ok(total))
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
     }
 }
 

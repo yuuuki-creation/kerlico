@@ -117,6 +117,7 @@ pub(super) async fn udp(
     let result = async {
             let timer = tokio::time::sleep(idle);
             tokio::pin!(timer);
+            let mut translated_loopback = false;
             loop {
                 let received = {
                     let receive = receiver.recv_from();
@@ -127,7 +128,18 @@ pub(super) async fn udp(
                             _ = &mut timer => return Err(Error::Timeout),
                             packet = packets.recv() => {
                                 let Some(packet) = packet else { return Ok(()); };
-                                let destination = destination(packet.target)?;
+                                let target_addr = if stack.addresses.contains(packet.target.ip()) {
+                                    translated_loopback = true;
+                                    let local_ip = if packet.target.is_ipv4() {
+                                        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                                    } else {
+                                        std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+                                    };
+                                    SocketAddr::new(local_ip, packet.target.port())
+                                } else {
+                                    packet.target
+                                };
+                                let destination = destination(target_addr)?;
                                 operation(sender.send_to(&packet.packet.bytes, &destination), &scope.context.cancel, idle).await?;
                                 timer.as_mut().reset(Instant::now() + idle);
                             }
@@ -137,7 +149,10 @@ pub(super) async fn udp(
                 };
                 let Some((remote, payload)) = received else { return Ok(()); };
                 if payload.len() > scope.context.max_datagram_size { return Err(Error::ResourceLimit); }
-                let remote = target(&remote)?;
+                let mut remote = target(&remote)?;
+                if translated_loopback && remote.ip().is_loopback() {
+                    remote.set_ip(stack.addresses.for_target(remote.ip())?);
+                }
                 if remote.is_ipv4() != source.is_ipv4() {
                     return Err(Error::Protocol("WireGuard UDP回包地址族与原来源不一致"));
                 }

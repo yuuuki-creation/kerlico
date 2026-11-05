@@ -26,6 +26,8 @@ pub struct SnellNodeFactory;
 struct Options {
     version: u8,
     #[serde(default)]
+    cipher: Option<String>,
+    #[serde(default)]
     mode: Option<Mode>,
     #[serde(default)]
     obfs_mode: Obfs,
@@ -61,15 +63,18 @@ impl NodeFactory for SnellNodeFactory {
         let mut seen = BTreeSet::new();
         for value in input.native_credentials() {
             let user: User = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
-            let settings = Arc::new(Settings::new(
-                options.version,
-                user.psk,
-                options.mode,
-                options.obfs_mode.clone(),
-                options.obfs_host.clone(),
-                options.obfs_uri.clone(),
-                true,
-            )?);
+            let settings = Arc::new(
+                Settings::new(
+                    options.version,
+                    user.psk,
+                    options.mode,
+                    options.obfs_mode.clone(),
+                    options.obfs_host.clone(),
+                    options.obfs_uri.clone(),
+                    true,
+                )?
+                .with_cipher(options.cipher.as_deref())?,
+            );
             let key = userkey(&user.userkey)?;
             if settings.raw() && key.is_empty() {
                 return Err(invalid());
@@ -146,6 +151,9 @@ impl SnellNode {
             let task = owner.spawn_tracked(async move {
                 let mut session = Session::new(Box::new(raw), settings)?;
                 let record = session.reader.next().await?.ok_or_else(protocol)?;
+                session
+                    .writer
+                    .sync_v3_cipher(session.reader.v3_chacha_used)?;
                 let request = wire::parse_request(&record)?;
                 let hash: [u8; 32] = Sha256::digest(&request.userkey).into();
                 if user.is_some_and(|expected| !bool::from(expected.ct_eq(&hash))) {

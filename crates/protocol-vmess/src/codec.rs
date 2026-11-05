@@ -306,11 +306,12 @@ async fn accept_account(
         &auth,
         &mut plain,
     )?;
+    let raw_security = matches!(plain[35] & 15, 5 | 6);
     if plain.len() != size
         || plain[0] != 1
         || plain[36] != 0
-        || plain[34] & !0x1d != 0
-        || plain[34] & 1 == 0
+        || plain[34] & !0x1f != 0
+        || (plain[34] & 1 == 0 && (!raw_security || plain[37] != 1))
         || plain[34] & 8 != 0 && plain[34] & 4 == 0
         || !matches!(plain[37], 1 | 2)
     {
@@ -360,7 +361,16 @@ async fn accept_account(
     Ok(Handshake {
         target,
         udp,
-        stream: crate::stream::RecordStream::new(inner, reader, writer, udp, true, None, size),
+        stream: crate::stream::RecordStream::new(
+            inner,
+            reader,
+            writer,
+            udp,
+            options.flags & 1 != 0,
+            None,
+            size,
+        )
+        .flags(options.flags),
     })
 }
 impl Keys {

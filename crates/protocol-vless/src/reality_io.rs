@@ -16,7 +16,7 @@ type Reader = TlsApplicationReader<ReadHalf<BoxStream>>;
 type Writer = TlsApplicationWriter<WriteHalf<BoxStream>>;
 enum Reading {
     Ready(Option<Reader>),
-    Busy(BoxFuture<'static, (Reader, io::Result<Vec<u8>>)>),
+    Busy(BoxFuture<'static, (Reader, Vec<u8>, io::Result<()>)>),
     Raw {
         prefix: Vec<u8>,
         position: usize,
@@ -26,7 +26,7 @@ enum Reading {
 }
 enum Writing {
     Ready(Option<Writer>),
-    Busy(BoxFuture<'static, (Writer, io::Result<usize>)>),
+    Busy(BoxFuture<'static, (Writer, Vec<u8>, io::Result<usize>)>),
     Raw(WriteHalf<BoxStream>),
     Failed,
 }
@@ -34,6 +34,7 @@ pub(crate) struct RealityIo {
     read: Reading,
     write: Writing,
     pending: Vec<u8>,
+    write_buf: Vec<u8>,
     position: usize,
     timeout: Duration,
     direct_read: bool,
@@ -51,7 +52,8 @@ impl RealityIo {
         Self {
             read: Reading::Ready(Some(reader)),
             write: Writing::Ready(Some(writer)),
-            pending: Vec::new(),
+            pending: Vec::with_capacity(16 * 1024),
+            write_buf: Vec::with_capacity(64 * 1024),
             position: 0,
             timeout,
             direct_read: false,
@@ -65,7 +67,8 @@ impl RealityIo {
         if let Writing::Busy(future) = &mut self.write {
             match future.as_mut().poll(cx) {
                 Poll::Pending => Poll::Pending,
-                Poll::Ready((writer, result)) => {
+                Poll::Ready((writer, buf, result)) => {
+                    self.write_buf = buf;
                     self.write = Writing::Ready(Some(writer));
                     if result.is_err() {
                         self.write = Writing::Failed;
@@ -110,38 +113,44 @@ impl AsyncRead for RealityIo {
                         continue;
                     }
                     let timeout = this.timeout;
+                    let mut buf = std::mem::take(&mut this.pending);
+                    buf.clear();
+                    this.position = 0;
                     this.read = Reading::Busy(Box::pin(async move {
                         let mut reader = reader;
                         let result = match reader.read_application(timeout).await {
-                            Ok(record) => Ok(record.plaintext().to_vec()),
-                            Err(TlsApplicationIoError::PeerAlert { description: 0, .. }) => {
-                                Ok(Vec::new())
+                            Ok(record) => {
+                                buf.extend_from_slice(record.plaintext());
+                                Ok(())
                             }
+                            Err(TlsApplicationIoError::PeerAlert { description: 0, .. }) => Ok(()),
                             Err(TlsApplicationIoError::Read(error))
                                 if matches!(
                                     error.kind(),
                                     TlsRecordReadErrorKind::UnexpectedEof
                                 ) && error.wire_prefix().is_empty() =>
                             {
-                                Ok(Vec::new())
+                                Ok(())
                             }
                             Err(_) => Err(failure()),
                         };
-                        (reader, result)
+                        (reader, buf, result)
                     }));
                 }
                 Reading::Busy(future) => match future.as_mut().poll(cx) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready((reader, Ok(bytes))) => {
+                    Poll::Ready((reader, bytes, Ok(()))) => {
                         this.read = Reading::Ready(Some(reader));
                         if bytes.is_empty() {
+                            this.pending = bytes;
                             this.eof = true;
                             return Poll::Ready(Ok(()));
                         }
                         this.pending = bytes;
                         this.position = 0;
                     }
-                    Poll::Ready((_, Err(error))) => {
+                    Poll::Ready((_, bytes, Err(error))) => {
+                        this.pending = bytes;
                         this.read = Reading::Failed;
                         return Poll::Ready(Err(error));
                     }
@@ -195,12 +204,14 @@ impl AsyncWrite for RealityIo {
             }
             return Poll::Ready(Err(failure()));
         }
-        let bytes = input[..input.len().min(16 * 1024)].to_vec();
-        let size = bytes.len();
+        let size = input.len().min(64 * 1024);
         if size == 0 {
             this.write = Writing::Ready(Some(writer));
             return Poll::Ready(Ok(0));
         }
+        let mut bytes = std::mem::take(&mut this.write_buf);
+        bytes.clear();
+        bytes.extend_from_slice(&input[..size]);
         let timeout = this.timeout;
         this.write = Writing::Busy(Box::pin(async move {
             let mut writer = writer;
@@ -209,7 +220,7 @@ impl AsyncWrite for RealityIo {
                 .await
                 .map(|_| size)
                 .map_err(|_| failure());
-            (writer, result)
+            (writer, bytes, result)
         }));
         this.poll_write_pending(cx)
     }
@@ -242,13 +253,14 @@ impl AsyncWrite for RealityIo {
                         return Poll::Ready(Err(failure()));
                     };
                     let timeout = this.timeout;
+                    let buf = std::mem::take(&mut this.write_buf);
                     this.write = Writing::Busy(Box::pin(async move {
                         let result = writer
                             .shutdown(timeout)
                             .await
                             .map(|_| 0)
                             .map_err(|_| failure());
-                        (writer, result)
+                        (writer, buf, result)
                     }));
                 }
                 Writing::Raw(_) => {}

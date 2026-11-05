@@ -354,8 +354,7 @@ impl Outbound for Hysteria2Outbound {
             self.host.cancel().cancel();
             let buckets = { std::mem::take(&mut *self.pool.lock().await) };
             for bucket in buckets.into_values() {
-                let session = { bucket.lock().await.take() };
-                let Some(session) = session else {
+                let Some(session) = bucket.lock().await.take() else {
                     continue;
                 };
                 session.connection.close(0x100u32.into(), b"");

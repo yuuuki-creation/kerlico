@@ -74,7 +74,7 @@ impl CryptoPeer {
         } else {
             packet
         };
-        let mut output = vec![0; 65536];
+        let mut output = vec![0; packet.len().max(256)];
         let result = self
             .tunnel
             .decapsulate(Some(source.ip()), packet, &mut output);

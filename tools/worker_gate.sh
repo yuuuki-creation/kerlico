@@ -8,12 +8,12 @@ rev="$(git rev-parse "${2:-HEAD}")"
 root="${KERLICO_WORKER_ROOT:-/srv/build/kerlico}/gate"
 run() { ssh -F "${KERLICO_SSH_CONFIG:-.private/machines/ssh_config}" -o BatchMode=yes -o ServerAliveInterval=30 "$alias" "$@"; }
 
-git -c core.autocrlf=false archive "$rev" | gzip | run "pkill -f '[b]ash job.sh' 2>/dev/null || true; mkdir -p '$root' && rm -rf '$root/new' && mkdir '$root/new' \
+git -c core.autocrlf=false archive "$rev" | gzip | run "pkill -x cargo 2>/dev/null || true; pkill -x rustc 2>/dev/null || true; mkdir -p '$root' && rm -rf '$root/new' && mkdir '$root/new' \
   && tar -xz -C '$root/new' && mkdir -p '$root/src' && rsync -rc --delete '$root/new/' '$root/src/'"
 
 run "cat > '$root/job.sh'" <<EOF
 cd '$root/src'
-export CARGO_TARGET_DIR='$root/target' CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0
+export CARGO_TARGET_DIR='$root/target' CARGO_BUILD_JOBS="\$(nproc --ignore=1 2>/dev/null || echo 3)" CARGO_INCREMENTAL=0
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUST_TEST_THREADS=1
 export KERLICO_TEST_ASSETS_DIR='${root%/gate}/resume-test-assets' KERLICO_WORKER_ALIAS='$alias'
 export PATH="\$HOME/.cargo/bin:\$PATH" PROTOC="\$(bash tools/fetch_protoc.sh '${root%/gate}')"

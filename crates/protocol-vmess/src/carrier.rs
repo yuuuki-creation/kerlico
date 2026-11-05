@@ -136,7 +136,7 @@ impl Transport {
                 idle_timeout_secs: 30,
                 health_check_timeout_secs: 10,
                 permit_without_stream: false,
-                initial_windows_size: 0,
+                initial_windows_size: 4 * 1024 * 1024,
             }),
         })
     }
@@ -191,6 +191,16 @@ impl tokio::io::AsyncWrite for BridgedStream {
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
     }
     fn poll_flush(
         mut self: std::pin::Pin<&mut Self>,
@@ -406,11 +416,12 @@ impl Client {
             self.server.port(),
             xray_routing::Network::Tcp,
         );
-        let stream = self
+        let mut stream = self
             .dialer
             .connect_stream(&self.connector, &layer, &target, &candidates, None)
             .await
             .map_err(|_| Error::Protocol("VMess 载体建立失败"))?;
+        stream.release_record_alignment();
         Ok(Box::new(ClientIo(
             self.owner.as_ref().ok_or_else(invalid)?.wrap(stream),
         )))
@@ -433,6 +444,16 @@ impl tokio::io::AsyncWrite for ClientIo {
         b: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         std::pin::Pin::new(&mut self.get_mut().0).poll_write(cx, b)
+    }
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
     }
     fn poll_flush(
         self: std::pin::Pin<&mut Self>,

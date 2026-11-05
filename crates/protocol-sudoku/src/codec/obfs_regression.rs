@@ -90,12 +90,12 @@ fn scalar_maybe_padding(encoder: &mut Encoder, out: &mut Vec<u8>) {
         && (encoder.threshold == (1u64 << 32)
             || u64::from(encoder.random.next_u32()) < encoder.threshold)
     {
-        let index = encoder.random.gen_range(0..encoder.padding.len());
+        let index = encoder.padding_dist.sample(&mut encoder.random);
         out.push(encoder.padding[index]);
     }
 }
 fn scalar_forced_padding(encoder: &mut Encoder, out: &mut Vec<u8>) {
-    let index = encoder.random.gen_range(0..encoder.padding.len());
+    let index = encoder.padding_dist.sample(&mut encoder.random);
     out.push(encoder.padding[index]);
 }
 fn scalar_encode(encoder: &mut Encoder, bytes: &[u8], out: &mut Vec<u8>) {
@@ -113,13 +113,13 @@ fn scalar_encode(encoder: &mut Encoder, bytes: &[u8], out: &mut Vec<u8>) {
         }
         return;
     }
-    let prefix = encoder.random.gen_range(1..=2);
+    let prefix = encoder.gap_dist.sample(&mut encoder.random);
     for _ in 0..prefix {
         scalar_forced_padding(encoder, out);
     }
     let mut bits = 0u32;
     let mut bit_count = 0u8;
-    let mut gap = encoder.random.gen_range(1..=2);
+    let mut gap = encoder.gap_dist.sample(&mut encoder.random);
     let mut since_padding = 0;
     for (index, &byte) in bytes.iter().enumerate() {
         bits = (bits << 8) | u32::from(byte);
@@ -136,7 +136,7 @@ fn scalar_encode(encoder: &mut Encoder, bytes: &[u8], out: &mut Vec<u8>) {
             if since_padding >= gap {
                 scalar_forced_padding(encoder, out);
                 since_padding = 0;
-                gap = encoder.random.gen_range(1..=2);
+                gap = encoder.gap_dist.sample(&mut encoder.random);
             }
         }
     }
@@ -153,12 +153,16 @@ fn seeded_encoder(table: Arc<Table>, packed: bool, threshold: u64, seed: u64) ->
     if packed {
         padding.retain(|&byte| byte != table.layout.marker);
     }
+    let padding_dist = rand::distributions::Uniform::new(0, padding.len());
+    let gap_dist = rand::distributions::Uniform::new_inclusive(1, 2);
     Encoder {
         table,
         packed,
-        random: StdRng::seed_from_u64(seed),
+        random: FastRng::seed_from_u64(seed),
         threshold,
         padding,
+        padding_dist,
+        gap_dist,
     }
 }
 
