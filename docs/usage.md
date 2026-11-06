@@ -111,6 +111,8 @@ printf '%s' 'your-admin-password' | kerlico account-new --prefix alice
 
 `wireguard`、`masque`、`openvpn` 支持客户端出站与服务端入站双端运行；`openconnect`、`tailscale`、`easytier`、`zerotier` 把远端网络接成客户端出站。在节点或规则里引用它们的 `tag`。选项和限制见各[接口文档](interfaces/README.md)。
 
+OpenVPN 服务端节点只支持 TLS 模式，必须配置服务端证书与私钥，可按 CA、CRL、指纹与 `verify-x509-name` 校验客户端证书，也可用成员口令认证。每个客户端从 `address` 地址池分到独立地址，推送内容由 `push` 生成，断开后地址回收。官方 OpenVPN 2.6 与 2.4 客户端可直接连接，字段见 [OpenVPN 接口](interfaces/openvpn.md#服务端入站nodeoptions)。
+
 ## TUN
 
 [examples/tun-v2.json](../examples/tun-v2.json) 创建 `kerlico0` 接口，把进入接口的 TCP 和 UDP 交给出站。支持配置 `auto-route`、`auto-redirect`（nftables）、`strict-route` 与 `auto-detect-interface` 防回环，也可配合 Fake-IP 与首包嗅探还原域名。详见 [TUN 入站](interfaces/tun.md)。

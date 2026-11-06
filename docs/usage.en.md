@@ -111,6 +111,8 @@ It registers with Cloudflare once when first needed and keeps the identity in th
 
 `wireguard`, `masque`, and `openvpn` support both client outbound and server inbound roles; `openconnect`, `tailscale`, `easytier`, and `zerotier` connect to a remote network as client outbounds. Reference their `tag` from a node or a rule. Options and limits are in the [interface documents](interfaces/README.md).
 
+An OpenVPN server node runs in TLS mode only and needs a server certificate and private key. It can verify client certificates against a CA, a CRL, pinned fingerprints, and `verify-x509-name`, and it can authenticate members by password. Each client gets its own address from the `address` pool, receives a `PUSH_REPLY` built from `push`, and returns the address when it disconnects. Official OpenVPN 2.6 and 2.4 clients connect directly. See the [OpenVPN interface](interfaces/openvpn.md#服务端入站nodeoptions) for the fields.
+
 ## TUN
 
 [examples/tun-v2.json](../examples/tun-v2.json) creates a `kerlico0` interface and hands its TCP and UDP to an outbound. It supports `auto-route`, `auto-redirect` (nftables), `strict-route`, and `auto-detect-interface` loop prevention, and pairs with Fake-IP and packet sniffing to recover domain names. It needs `CAP_NET_ADMIN` on Linux.
