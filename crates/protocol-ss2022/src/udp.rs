@@ -51,7 +51,7 @@ pub(crate) async fn connect(
     target: &Destination,
     cancel: CancellationToken,
 ) -> Result<DatagramChannel> {
-    let peer = tokio::net::lookup_host((outbound.server.host().as_str(), outbound.server.port()))
+    let peer = kerlico_core::lookup_host((outbound.server.host().as_str(), outbound.server.port()))
         .await?
         .next()
         .ok_or(Error::InvalidAddress)?;

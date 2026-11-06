@@ -232,7 +232,7 @@ impl Drop for StackGuard {
 async fn resolve_endpoint(endpoint: &Destination, bind: Option<SocketAddr>) -> Result<SocketAddr> {
     let mut addresses = match endpoint.address() {
         Address::Ip(ip) => vec![SocketAddr::new(*ip, endpoint.port())],
-        Address::Domain(domain) => tokio::net::lookup_host((domain.as_str(), endpoint.port()))
+        Address::Domain(domain) => kerlico_core::lookup_host((domain.as_str(), endpoint.port()))
             .await?
             .collect(),
     };

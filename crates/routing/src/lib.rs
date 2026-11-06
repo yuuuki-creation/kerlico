@@ -347,6 +347,14 @@ pub struct RuleSpec {
     pub dscp: Vec<u8>,
     #[serde(default)]
     pub uid: Vec<u32>,
+    /// Mihomo IP 类规则（`IP-CIDR`、`GEOIP`、含 IP 的 `RULE-SET`）未写 `no-resolve` 时为真：
+    /// 目标是域名时先经 DNS 解析，再用解析结果匹配；不改变发往远端的目标。
+    #[serde(
+        default,
+        alias = "resolve-ip",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub resolve_ip: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -535,6 +543,7 @@ struct Rule {
     node: Vec<NodeId>,
     user: Vec<UserId>,
     label: RuleLabel,
+    resolve_ip: bool,
 }
 
 fn parse_duration_opt(raw: Option<&str>, default_ms: u64) -> Result<Duration> {
@@ -683,6 +692,7 @@ impl Rule {
                 .collect::<Result<Vec<_>>>()?;
             return Ok(Self {
                 label: RuleLabel::of(spec),
+                resolve_ip: spec.resolve_ip,
                 action,
                 domain: Vec::new(),
                 domain_suffix: Vec::new(),
@@ -733,6 +743,7 @@ impl Rule {
 
         let rule = Self {
             label: RuleLabel::of(spec),
+            resolve_ip: spec.resolve_ip,
             action,
             domain: spec
                 .domain
@@ -902,6 +913,26 @@ impl Rule {
             return Err(invalid());
         }
         Ok(rule)
+    }
+
+    /// 是否为匹配需要目标 IP：`resolve_ip` 且规则本身（或其规则集、子条件）含 IP 条件。
+    fn wants_ip(&self, sets: &HashMap<String, RuleSetSlot>) -> bool {
+        self.resolve_ip && self.has_ip_conditions(sets)
+    }
+
+    fn has_ip_conditions(&self, sets: &HashMap<String, RuleSetSlot>) -> bool {
+        !self.ip_cidr.is_empty()
+            || !self.geoip.is_empty()
+            || self.ip_is_private
+            || self.ip_version.is_some()
+            || self.rule_set.iter().any(|tag| {
+                sets.get(tag)
+                    .is_some_and(|slot| !slot.load().cidr_strings().is_empty())
+            })
+            || self
+                .logical
+                .as_ref()
+                .is_some_and(|(_, children)| children.iter().any(|c| c.has_ip_conditions(sets)))
     }
 
     fn has_process_rules(&self) -> bool {
@@ -1140,6 +1171,7 @@ fn domain(value: &str) -> Result<String> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct RouteContext<'a> {
     pub target: &'a Destination,
     pub resolved_ips: &'a [IpAddr],
@@ -1152,7 +1184,25 @@ pub struct RouteContext<'a> {
     pub process_path: Option<&'a str>,
 }
 
+/// 规则求值是否允许为 IP 规则解析域名目标。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Resolution {
+    /// 不解析（控制面测试、DNS 劫持判定等同步场景）。
+    Never,
+    /// 遇到需要 IP 的规则时停止，由调用方解析。
+    Pending,
+    /// 已解析（可能为空），`resolved_ips` 只对该顶层序号起的规则可见。
+    From(usize),
+}
+
 impl<'a> RouteContext<'a> {
+    fn without_resolved_ips(&self) -> Self {
+        Self {
+            resolved_ips: &[],
+            ..*self
+        }
+    }
+
     pub fn simple(target: &'a Destination, network: Network, source: &'a Source) -> Self {
         Self {
             target,
@@ -1177,6 +1227,8 @@ pub struct RouteDecision {
     pub override_address: Option<String>,
     pub override_port: Option<u16>,
     pub resolve_strategy: Option<ResolveStrategy>,
+    /// `Resolution::Pending` 求值停在此顶层规则，需要先解析目标域名。
+    pub resolve_at: Option<usize>,
     pub sniff: Option<(Vec<String>, Duration)>,
     /// 产生终结动作的规则；命中最终出站时为 `Match`。
     pub rule: Option<RuleLabel>,
@@ -1259,8 +1311,19 @@ impl RouteTable {
     }
 
     /// 按规则引用的 Geo 分类与 GEOIP 数据来源建立 Geo 槽；须在规则与 sub-rule 编译完成后调用。
-    pub fn with_geo_mode(mut self, mode: GeoIpMode) -> Self {
-        self.geo = GeoSlot::new(mode, self.geo_needs());
+    pub fn with_geo_mode(self, mode: GeoIpMode) -> Self {
+        self.with_geo(mode, &GeoNeeds::default())
+    }
+
+    /// 同 [`Self::with_geo_mode`]，并把路由规则之外（如 DNS 策略）引用的 Geo 数据并入同一槽。
+    pub fn with_geo(mut self, mode: GeoIpMode, extra: &GeoNeeds) -> Self {
+        let mut needs = self.geo_needs();
+        for site in extra.sites.values() {
+            needs.add_site(site);
+        }
+        needs.ip_codes.extend(extra.ip_codes.iter().cloned());
+        needs.asn |= extra.asn;
+        self.geo = GeoSlot::new(mode, needs);
         self
     }
 
@@ -1383,10 +1446,29 @@ impl RouteTable {
         None
     }
 
+    /// 不触发解析：IP 规则只匹配目标本身的 IP 与 `resolved_ips`。
     pub fn evaluate(&self, ctx: &RouteContext<'_>) -> RouteDecision {
+        self.evaluate_with(ctx, Resolution::Never)
+    }
+
+    /// 是否有规则可能要求解析域名目标（Mihomo IP 规则或 `resolve` 动作）。
+    pub fn has_resolving_rules(&self) -> bool {
+        self.rules
+            .iter()
+            .chain(self.sub_rules.values().flatten())
+            .any(|r| r.resolve_ip || matches!(r.action, RouteAction::Resolve { .. }))
+    }
+
+    /// `Resolution::Pending` 下遇到需要 IP 的规则即停止并在 `resolve_at` 给出顶层规则序号；
+    /// 调用方解析后以 `Resolution::From(序号)` 重算，解析结果只对该序号起的规则可见。
+    pub fn evaluate_with(&self, ctx: &RouteContext<'_>, mode: Resolution) -> RouteDecision {
         let mut decision = RouteDecision::default();
         let geo = self.geo.load();
-        let matched_terminal = self.evaluate_slice(&self.rules, ctx, &geo, &mut decision, 0);
+        let matched_terminal =
+            self.evaluate_slice(&self.rules, ctx, &geo, &mut decision, 0, 0, mode);
+        if decision.resolve_at.is_some() {
+            return decision;
+        }
         if !matched_terminal && decision.outbound.is_none() {
             decision.outbound = self.final_outbound.clone();
             if decision.outbound.is_some() {
@@ -1396,6 +1478,7 @@ impl RouteTable {
         decision
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_slice(
         &self,
         rules: &[Rule],
@@ -1403,12 +1486,27 @@ impl RouteTable {
         geo: &GeoData,
         decision: &mut RouteDecision,
         depth: usize,
+        top: usize,
+        mode: Resolution,
     ) -> bool {
         if depth > 8 {
             return false;
         }
-        for rule in rules {
-            if !rule.matches_ctx(ctx, &self.sets, geo) {
+        let pending = mode == Resolution::Pending
+            && matches!(ctx.target.address(), Address::Domain(_))
+            && ctx.resolved_ips.is_empty();
+        let hidden = ctx.without_resolved_ips();
+        for (index, rule) in rules.iter().enumerate() {
+            let top = if depth == 0 { index } else { top };
+            if pending && rule.wants_ip(&self.sets) {
+                decision.resolve_at = Some(top);
+                return true;
+            }
+            let visible = match mode {
+                Resolution::From(from) if top < from => &hidden,
+                _ => ctx,
+            };
+            if !rule.matches_ctx(visible, &self.sets, geo) {
                 continue;
             }
             match &rule.action {
@@ -1420,6 +1518,10 @@ impl RouteTable {
                 RouteAction::Resolve { strategy } => {
                     if decision.resolve_strategy.is_none() {
                         decision.resolve_strategy = Some(*strategy);
+                    }
+                    if pending {
+                        decision.resolve_at = Some(if depth == 0 { top + 1 } else { top });
+                        return true;
                     }
                 }
                 RouteAction::RouteOptions {
@@ -1435,7 +1537,7 @@ impl RouteTable {
                 }
                 RouteAction::SubRule { name } => {
                     if let Some(sub) = self.sub_rules.get(name)
-                        && self.evaluate_slice(sub, ctx, geo, decision, depth + 1)
+                        && self.evaluate_slice(sub, visible, geo, decision, depth + 1, top, mode)
                     {
                         return true;
                     }
@@ -1581,6 +1683,9 @@ pub fn parse_clash_rule_line(line: &str) -> Result<(Option<RuleSpec>, Option<Str
                 "and".into()
             }),
             invert: mode_upper == "NOT",
+            resolve_ip: child_specs
+                .iter()
+                .any(|c| !c.ip_cidr.is_empty() || !c.geoip.is_empty() || c.ip_is_private),
             logical_rules: child_specs,
             ..Default::default()
         };
@@ -1609,6 +1714,10 @@ pub fn parse_clash_rule_line(line: &str) -> Result<(Option<RuleSpec>, Option<Str
     let val = parts[1];
     let target = parts[2];
     let mut spec = build_clash_single_condition(&kind, val)?;
+    spec.resolve_ip = matches!(kind.as_str(), "IP-CIDR" | "IP-CIDR6" | "GEOIP" | "RULE-SET")
+        && !parts[3..]
+            .iter()
+            .any(|opt| opt.eq_ignore_ascii_case("no-resolve"));
     apply_clash_target(&mut spec, target);
     Ok((Some(spec), None))
 }
@@ -2083,6 +2192,73 @@ mod tests {
                 .map(ToString::to_string)
                 .as_deref(),
             Some("sub-out")
+        );
+    }
+
+    #[test]
+    fn mihomo_ip_rules_request_resolution_unless_no_resolve() {
+        let specs: Vec<RuleSpec> = [
+            "DOMAIN,named.test,out-name",
+            "IP-CIDR,192.0.2.0/24,out-skip,no-resolve",
+            "IP-CIDR,10.0.0.0/8,out-ip",
+            "DOMAIN-SUFFIX,test,out-tail",
+        ]
+        .iter()
+        .map(|l| parse_clash_rule_line(l).unwrap().0.unwrap())
+        .collect();
+        assert!(!specs[1].resolve_ip && specs[2].resolve_ip);
+        let table = RouteTable::compile(&specs).unwrap();
+        assert!(table.has_resolving_rules());
+        let source = local("node-a");
+        let target = Destination::new("x.test", 443).unwrap();
+        let ctx = RouteContext::simple(&target, Network::Tcp, &source);
+        let first = table.evaluate_with(&ctx, Resolution::Pending);
+        assert_eq!(
+            first.resolve_at,
+            Some(2),
+            "停在第一条未写 no-resolve 的 IP 规则"
+        );
+        assert!(first.outbound.is_none());
+        let ips = ["10.1.2.3".parse().unwrap()];
+        let resolved = RouteContext {
+            resolved_ips: &ips,
+            ..ctx
+        };
+        let second = table.evaluate_with(&resolved, Resolution::From(2));
+        assert_eq!(
+            second.outbound.as_ref().map(ToString::to_string).as_deref(),
+            Some("out-ip")
+        );
+        let skipped = ["192.0.2.1".parse().unwrap()];
+        let hidden = RouteContext {
+            resolved_ips: &skipped,
+            ..ctx
+        };
+        let third = table.evaluate_with(&hidden, Resolution::From(2));
+        assert_eq!(
+            third.outbound.as_ref().map(ToString::to_string).as_deref(),
+            Some("out-tail"),
+            "解析结果对停止点之前的 no-resolve 规则不可见"
+        );
+        let failed = table.evaluate_with(&ctx, Resolution::From(2));
+        assert_eq!(
+            failed.outbound.as_ref().map(ToString::to_string).as_deref(),
+            Some("out-tail")
+        );
+        assert_eq!(
+            table
+                .evaluate(&ctx)
+                .outbound
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("out-tail")
+        );
+        let named = Destination::new("named.test", 443).unwrap();
+        let ctx = RouteContext::simple(&named, Network::Tcp, &source);
+        assert_eq!(
+            table.evaluate_with(&ctx, Resolution::Pending).resolve_at,
+            None
         );
     }
 }

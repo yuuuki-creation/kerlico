@@ -751,7 +751,7 @@ async fn dns_query_answers_from_the_runtime_resolver_hosts() {
     assert_eq!(reply["Question"][0]["Name"], "svc.internal.");
     assert_eq!(
         reply["Answer"],
-        json!([{"name":"svc.internal.","type":1,"TTL":0,"data":"10.0.0.5"}])
+        json!([{"name":"svc.internal.","type":1,"TTL":10,"data":"10.0.0.5"}])
     );
     let (_, reply) = get(
         running.control,

@@ -19,7 +19,7 @@ use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{io::Cursor, sync::Arc};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::UdpSocket;
 use tokio_rustls::TlsConnector;
 
 /// 可复用的 TCP 或 TLS 客户端连接器；构造阶段不执行网络 I/O。
@@ -149,13 +149,13 @@ impl TcpConnector {
             return fut.await;
         }
         if dialer.is_default() {
-            let tcp = TcpStream::connect((server.host().as_str(), server.port())).await?;
+            let tcp = kerlico_core::connect_host((server.host().as_str(), server.port())).await?;
             tcp.set_nodelay(true)?;
             return Ok(Box::new(tcp));
         }
         let addrs: Vec<std::net::SocketAddr> = match server.address() {
             Address::Ip(ip) => vec![std::net::SocketAddr::new(*ip, server.port())],
-            Address::Domain(host) => tokio::net::lookup_host((host.as_str(), server.port()))
+            Address::Domain(host) => kerlico_core::lookup_host((host.as_str(), server.port()))
                 .await?
                 .collect(),
         };
@@ -555,13 +555,16 @@ struct DnsOutboundOptions {
     hosts: std::collections::BTreeMap<String, Vec<std::net::IpAddr>>,
 }
 
+/// 未配 `servers`/`hosts` 时 `engine` 为真：调度器把报文交给引擎 DNS 管线，
+/// 直接调用本出站时用系统上游。
 struct DnsOutbound {
-    resolver: Option<Arc<kerlico_dns::DnsResolver>>,
+    resolver: Arc<kerlico_dns::DnsResolver>,
+    engine: bool,
     host: kerlico_core::ServiceContext,
 }
 
 struct DnsFixedSender {
-    resolver: Option<Arc<kerlico_dns::DnsResolver>>,
+    resolver: Arc<kerlico_dns::DnsResolver>,
     tx: tokio::sync::mpsc::Sender<Vec<u8>>,
 }
 
@@ -570,7 +573,7 @@ impl kerlico_core::DatagramSender for DnsFixedSender {
         let resolver = self.resolver.clone();
         let tx = self.tx.clone();
         Box::pin(async move {
-            let reply = kerlico_dns::exchange_wire_query(packet, resolver.as_deref()).await?;
+            let reply = resolver.exchange_packet(packet).await?;
             tx.send(reply)
                 .await
                 .map_err(|_| Error::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
@@ -593,7 +596,7 @@ impl kerlico_core::DatagramReceiver for DnsFixedReceiver {
 }
 
 struct DnsAssocSender {
-    resolver: Option<Arc<kerlico_dns::DnsResolver>>,
+    resolver: Arc<kerlico_dns::DnsResolver>,
     tx: tokio::sync::mpsc::Sender<(Destination, Vec<u8>)>,
 }
 
@@ -607,7 +610,7 @@ impl kerlico_core::DatagramAssociationSender for DnsAssocSender {
         let tx = self.tx.clone();
         let target = target.clone();
         Box::pin(async move {
-            let reply = kerlico_dns::exchange_wire_query(packet, resolver.as_deref()).await?;
+            let reply = resolver.exchange_packet(packet).await?;
             tx.send((target, reply))
                 .await
                 .map_err(|_| Error::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
@@ -636,6 +639,9 @@ impl Outbound for DnsOutbound {
     fn supports_udp_association(&self) -> bool {
         true
     }
+    fn uses_engine_dns(&self) -> bool {
+        self.engine
+    }
     fn connect_tcp<'a>(
         &'a self,
         _target: &'a Destination,
@@ -657,9 +663,7 @@ impl Outbound for DnsOutbound {
                     if server.read_exact(&mut query).await.is_err() {
                         break;
                     }
-                    let Ok(reply) =
-                        kerlico_dns::exchange_wire_query(&query, resolver.as_deref()).await
-                    else {
+                    let Ok(reply) = resolver.exchange_packet(&query).await else {
                         break;
                     };
                     if reply.len() > u16::MAX as usize {
@@ -726,7 +730,14 @@ impl OutboundFactory for DnsFactory {
                     .into_iter()
                     .map(kerlico_dns::DnsServerInput::Url)
                     .collect(),
-                hosts: options.hosts,
+                hosts: options
+                    .hosts
+                    .into_iter()
+                    .map(|(name, ips)| {
+                        let ips = ips.iter().map(ToString::to_string).collect();
+                        (name, kerlico_dns::HostsValue::Many(ips))
+                    })
+                    .collect(),
                 ..Default::default()
             };
             spec.validate()?;
@@ -742,11 +753,16 @@ impl OutboundFactory for DnsFactory {
             TargetPolicy::Remote,
             move |host| {
                 Box::pin(async move {
-                    let resolver = match spec {
-                        Some(spec) => Some(Arc::new(kerlico_dns::DnsResolver::new(&spec)?)),
-                        None => None,
-                    };
-                    Ok(Arc::new(DnsOutbound { resolver, host }) as Arc<dyn Outbound>)
+                    let engine = spec.is_none();
+                    let resolver = Arc::new(match spec {
+                        Some(spec) => kerlico_dns::DnsResolver::new(&spec)?,
+                        None => kerlico_dns::DnsResolver::system()?,
+                    });
+                    Ok(Arc::new(DnsOutbound {
+                        resolver,
+                        engine,
+                        host,
+                    }) as Arc<dyn Outbound>)
                 })
             },
         ))

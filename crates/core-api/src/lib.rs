@@ -28,7 +28,11 @@ pub use carrier::CarrierUsage;
 mod locale;
 pub use locale::{Language, LocalizedError, diagnostic_translation};
 mod diagnostic;
+mod server_dns;
 pub use diagnostic::{Diagnostic, DiagnosticSink, LocalizedDiagnostic};
+pub use server_dns::{
+    ServerResolver, connect_host, install_server_resolver, lookup_host, remove_server_resolver,
+};
 
 /// 可在线程间移动的装箱异步操作；丢弃操作不会撤回已经发送的数据。
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -487,6 +491,10 @@ pub trait Outbound: Send + Sync {
         target: &'a Destination,
         context: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramChannel>>;
+    /// 为真时调度器把发往本出站的 DNS 报文交给引擎 DNS 管线（Mihomo `dns` 出站）。
+    fn uses_engine_dns(&self) -> bool {
+        false
+    }
 }
 
 /// 一次节点处理所需的取消、资源与观测上下文；不包含其他节点的认证材料。
@@ -860,7 +868,7 @@ impl DialerOptions {
                 Ok(opened) => Ok(opened.stream),
                 Err(Error::Unsupported(_)) if matches!(target.address(), Address::Domain(_)) => {
                     let host = target.host();
-                    let mut addrs = tokio::net::lookup_host((host.as_str(), target.port())).await?;
+                    let mut addrs = crate::lookup_host((host.as_str(), target.port())).await?;
                     let Some(addr) = addrs.next() else {
                         return Err(Error::InvalidAddress);
                     };

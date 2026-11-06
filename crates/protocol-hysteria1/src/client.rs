@@ -198,7 +198,7 @@ impl Client {
         }
         cached.take();
         let mut addresses: Vec<SocketAddr> =
-            tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
+            kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
                 .await?
                 .collect();
         addresses.sort_by_key(|address| address.is_ipv6());

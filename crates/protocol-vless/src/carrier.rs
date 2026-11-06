@@ -705,7 +705,7 @@ impl Carrier {
             return storage.open(host).await;
         }
         let server = target(&self.server, false);
-        let candidates: Vec<SocketAddr> = match tokio::net::lookup_host((
+        let candidates: Vec<SocketAddr> = match kerlico_core::lookup_host((
             self.server.host().as_str(),
             self.server.port(),
         ))
@@ -722,7 +722,7 @@ impl Carrier {
         };
         if let Some(down) = &self.download {
             let down_candidates: Vec<_> =
-                tokio::net::lookup_host((down.server.host().as_str(), down.server.port()))
+                kerlico_core::lookup_host((down.server.host().as_str(), down.server.port()))
                     .await?
                     .filter(|address| down.family.accepts(address.ip()))
                     .map(|address| SocketAddr::new(address.ip().to_canonical(), address.port()))

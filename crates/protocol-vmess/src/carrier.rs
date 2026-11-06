@@ -401,7 +401,7 @@ impl Client {
         let candidates = if self.has_detour {
             Vec::new()
         } else {
-            tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
+            kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
                 .await?
                 .take(32)
                 .collect::<Vec<_>>()

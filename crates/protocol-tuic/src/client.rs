@@ -381,10 +381,11 @@ impl Client {
         ))
     }
     async fn dial_connection(&self, initial_active: usize) -> Result<Arc<Connection>> {
-        let candidates = tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
-            .await?
-            .take(32)
-            .collect::<Vec<_>>();
+        let candidates =
+            kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
+                .await?
+                .take(32)
+                .collect::<Vec<_>>();
         let mut last = Error::InvalidAddress;
         for peer in candidates {
             let socket = std::net::UdpSocket::bind(if peer.is_ipv6() {

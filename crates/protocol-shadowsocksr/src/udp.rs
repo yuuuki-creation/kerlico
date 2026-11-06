@@ -81,7 +81,7 @@ async fn open(
         .try_acquire_owned()
         .map_err(|_| Error::ResourceLimit)?;
     let mut candidates: Vec<_> =
-        tokio::net::lookup_host((outbound.server.host().as_str(), outbound.server.port()))
+        kerlico_core::lookup_host((outbound.server.host().as_str(), outbound.server.port()))
             .await?
             .collect();
     candidates.sort_by_key(|peer| peer.is_ipv6());

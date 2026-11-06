@@ -106,7 +106,7 @@ impl Client {
         let endpoint = match self.server.address() {
             Address::Ip(ip) => SocketAddr::new(*ip, port),
             Address::Domain(name) => {
-                let mut addresses = tokio::net::lookup_host((name.as_str(), port))
+                let mut addresses = kerlico_core::lookup_host((name.as_str(), port))
                     .await?
                     .take(32)
                     .collect::<Vec<_>>();

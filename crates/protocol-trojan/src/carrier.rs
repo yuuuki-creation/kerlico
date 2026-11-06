@@ -322,7 +322,7 @@ impl Carrier {
             Vec::new()
         } else {
             let mut list: Vec<_> =
-                tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
+                kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
                     .await?
                     .collect();
             list.sort_by_key(|address| address.is_ipv6());

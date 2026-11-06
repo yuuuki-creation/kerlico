@@ -78,7 +78,7 @@ impl Tunnel {
 
 async fn resolve(server: &Destination) -> Result<SocketAddr> {
     let mut peers: Vec<SocketAddr> =
-        tokio::net::lookup_host((server.host().as_str(), server.port()))
+        kerlico_core::lookup_host((server.host().as_str(), server.port()))
             .await?
             .collect();
     peers.sort_by_key(SocketAddr::is_ipv6);

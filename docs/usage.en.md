@@ -184,7 +184,7 @@ An OpenVPN server node runs in TLS mode only and needs a server certificate and 
 
 ## DNS and Fake-IP
 
-The `dns` section configures upstreams (`udp://`, `tcp://`, `tls://`, `https://` DoH, `quic://` DoQ), dual-stack Fake-IP pools (`198.18.0.0/15` and `fc00::/18`), optimistic caching, EDNS Client Subnet (ECS), DNS routing rules, and static `hosts`. Without it, the system resolver is used.
+The `dns` section follows Mihomo semantics. `Local` egress, route rules, DNS hijacking, `dns.listen`, the DNS outbound, and `/dns/query` share one pipeline: hosts → DNS rules → Fake-IP (`fake-ip-filter`, `fake-ip-filter-mode`) → cache (LRU/ARC, optimistic, ECS) → `nameserver-policy` → `nameserver` and `fallback` (`fallback-filter`). Upstreams support UDP, TCP, DoT, DoH (HTTP/2, HTTP/3), DoQ, `system`, and `rcode://`; `#outbound-name` or `respect-rules` dials them through an outbound, and upstream hostnames resolve through `default-nameserver`. Proxy server hostnames use `proxy-server-nameserver`. Mihomo IP rules without `no-resolve` resolve a domain target for matching only; the remote still receives the domain. In the old form `tls://IP#name`, the part after `#` is now an outbound name; write `#sni=name` for the certificate name. Without the section, or with `enable: false`, the system resolver is used. See [DNS](interfaces/dns.md) (Chinese).
 
 ## Control interface and Web UI
 

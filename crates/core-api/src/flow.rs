@@ -89,6 +89,7 @@ pub struct FlowOpen<'a, T> {
 type OpenFactory<'a, T> = Box<dyn FnOnce() -> Result<FlowOpen<'a, T>> + Send + 'a>;
 enum OpenState<'a, T> {
     Deferred(OpenFactory<'a, T>),
+    Preparing(BoxFuture<'a, Result<FlowOpen<'a, T>>>),
     Opening(Box<dyn Opening<T> + 'a>),
     Done,
 }
@@ -124,6 +125,12 @@ impl<'a, T: 'a> FlowOpen<'a, T> {
     pub fn deferred(factory: impl FnOnce() -> Result<Self> + Send + 'a) -> Self {
         Self {
             state: OpenState::Deferred(Box::new(factory)),
+        }
+    }
+    /// 先完成异步准备（如为路由规则解析目标），再进入准入与建立；准备失败时不产生账本。
+    pub fn prepared(future: impl Future<Output = Result<Self>> + Send + 'a) -> Self {
+        Self {
+            state: OpenState::Preparing(Box::pin(future)),
         }
     }
     fn tracked<I: 'a>(
@@ -165,6 +172,13 @@ impl<T> Future for FlowOpen<'_, T> {
                         Err(error) => return Poll::Ready(Err(error)),
                     }
                 }
+                OpenState::Preparing(future) => match ready!(future.as_mut().poll(cx)) {
+                    Ok(next) => *state = next.state,
+                    Err(error) => {
+                        *state = OpenState::Done;
+                        return Poll::Ready(Err(error));
+                    }
+                },
                 OpenState::Opening(opening) => {
                     let result = ready!(opening.poll(cx));
                     *state = OpenState::Done;

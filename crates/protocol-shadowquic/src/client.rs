@@ -80,7 +80,7 @@ impl Client {
             return Ok(value.clone());
         }
         let mut candidates =
-            tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
+            kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
                 .await?
                 .take(32)
                 .collect::<Vec<_>>();

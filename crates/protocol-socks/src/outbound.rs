@@ -100,9 +100,11 @@ impl Outbound for SocksOutbound {
         Box::pin(async move {
             context
                 .run(async {
-                    let mut stream =
-                        TcpStream::connect((self.server.host().as_str(), self.server.port()))
-                            .await?;
+                    let mut stream = kerlico_core::connect_host((
+                        self.server.host().as_str(),
+                        self.server.port(),
+                    ))
+                    .await?;
                     stream.set_nodelay(true)?;
                     let info = if self.version == Version::Five {
                         negotiate(&mut stream, &self.auth).await?;
@@ -167,7 +169,7 @@ impl Outbound for SocksOutbound {
             context
                 .run(async {
                     let mut stream =
-                        TcpStream::connect((self.server.host().as_str(), self.server.port()))
+                        kerlico_core::connect_host((self.server.host().as_str(), self.server.port()))
                             .await?;
                     stream.set_nodelay(true)?;
                     let peer = stream.peer_addr()?;

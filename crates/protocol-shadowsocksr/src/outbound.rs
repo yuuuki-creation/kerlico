@@ -7,7 +7,7 @@ use kerlico_core::{
 };
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Semaphore};
+use tokio::{io::AsyncWriteExt, sync::Semaphore};
 
 pub struct ShadowsocksROutbound {
     pub(crate) cfg: Arc<Shared>,
@@ -63,9 +63,11 @@ impl Outbound for ShadowsocksROutbound {
                             .clone()
                             .try_acquire_owned()
                             .map_err(|_| Error::ResourceLimit)?;
-                        let raw =
-                            TcpStream::connect((self.server.host().as_str(), self.server.port()))
-                                .await?;
+                        let raw = kerlico_core::connect_host((
+                            self.server.host().as_str(),
+                            self.server.port(),
+                        ))
+                        .await?;
                         raw.set_nodelay(true)?;
                         let mut plain = stream::Stream::new(
                             Box::new(raw),

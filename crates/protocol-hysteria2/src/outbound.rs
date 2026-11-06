@@ -238,7 +238,7 @@ impl Hysteria2Outbound {
         }
         pool.take();
         let mut peers: Vec<_> =
-            tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
+            kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
                 .await?
                 .collect();
         peers.sort_by_key(|peer| peer.is_ipv6());

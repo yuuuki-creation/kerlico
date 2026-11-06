@@ -804,28 +804,19 @@ impl ControlPlane {
 
     /// Mihomo `/dns/query` 应答形状；经运行期解析器（hosts、上游与缓存）解析 A/AAAA。
     /// 解析器只返回地址，不带上游 TTL，`TTL` 固定为 0。
+    /// Mihomo `/dns/query`：经主解析器（不分配 Fake-IP）查询任意记录类型。
     pub async fn dns_query(&self, name: &str, qtype: &str) -> Value {
-        let rtype: u16 = match qtype.to_ascii_uppercase().as_str() {
-            "A" | "1" => 1,
-            "AAAA" | "28" => 28,
-            _ => {
-                return dns_reply(name, qtype.parse().unwrap_or(0), 4, Vec::new());
-            }
+        let fqdn = format!("{}.", name.trim_end_matches('.'));
+        let Some(rtype) = kerlico_dns::wire::type_code(qtype) else {
+            return dns_reply(&fqdn, 0, 1, Vec::new());
         };
-        let fqdn = if name.ends_with('.') {
-            name.to_owned()
-        } else {
-            format!("{name}.")
-        };
-        match self.0.resolver.resolve(name).await {
-            Ok(addresses) => {
-                let answers = addresses
-                    .into_iter()
-                    .filter(|ip| ip.is_ipv4() == (rtype == 1))
-                    .map(|ip| json!({ "name": fqdn, "type": rtype, "TTL": 0, "data": ip.to_string() }))
-                    .collect();
-                dns_reply(&fqdn, rtype, 0, answers)
-            }
+        match self
+            .0
+            .resolver
+            .query_dns_message(name.trim_end_matches('.'), rtype)
+            .await
+        {
+            Ok(message) => kerlico_dns::wire::message_json(&message),
             Err(_) => dns_reply(&fqdn, rtype, 2, Vec::new()),
         }
     }

@@ -505,7 +505,7 @@ async fn drain_tcp(
 async fn resolve(remote: &Destination, bind: Option<SocketAddr>) -> Result<SocketAddr> {
     let mut addresses: Vec<SocketAddr> = match remote.address() {
         Address::Ip(ip) => vec![SocketAddr::new(*ip, remote.port())],
-        Address::Domain(domain) => tokio::net::lookup_host((domain.as_str(), remote.port()))
+        Address::Domain(domain) => kerlico_core::lookup_host((domain.as_str(), remote.port()))
             .await?
             .collect(),
     };

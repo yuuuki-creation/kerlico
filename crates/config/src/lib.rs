@@ -1843,9 +1843,19 @@ impl Registry {
         } else {
             GeoIpMode::Mmdb
         };
+        let mut dns_geo = kerlico_routing::GeoNeeds::default();
+        if let Some(dns) = config.dns.as_ref().filter(|dns| dns.enabled()) {
+            let refs = dns.references();
+            for site in &refs.geosite {
+                dns_geo.add_site(&kerlico_routing::GeoSiteRef::parse(site)?);
+            }
+            for code in &refs.geoip {
+                dns_geo.add_ip(&kerlico_routing::GeoIpRef::parse(code)?);
+            }
+        }
         let routes = RouteTable::compile_with_sets(&all_rules, compiled_rule_sets.clone())?
             .with_sub_rules(&all_sub_rules)?
-            .with_geo_mode(geo_mode)
+            .with_geo(geo_mode, &dns_geo)
             .with_final_outbound(final_outbound);
         load_cached_geo(routes.geo())?;
         if routes
@@ -2281,12 +2291,11 @@ fn remote_resources(
     geo: &GeoConfigSpec,
 ) -> Result<Vec<ResourceSpec>> {
     let mut referenced: BTreeSet<&str> = routes.referenced_rule_sets().into_iter().collect();
-    referenced.extend(
-        dns.into_iter()
-            .flat_map(|dns| dns.rules.iter())
-            .flat_map(|rule| rule.rule_set.iter())
-            .map(|tag| tag.trim()),
-    );
+    let dns_sets: Vec<String> = dns
+        .filter(|dns| dns.enabled())
+        .map(|dns| dns.references().rule_sets)
+        .unwrap_or_default();
+    referenced.extend(dns_sets.iter().map(String::as_str));
     let mut resources = Vec::new();
     for source in rule_sets {
         let Some(file) = source.file.clone() else {

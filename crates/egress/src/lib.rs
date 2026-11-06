@@ -54,16 +54,60 @@ pub trait Resolver: Send + Sync {
     fn lookup_reverse_mapping(&self, _ip: IpAddr) -> Option<String> {
         None
     }
-    fn exchange_dns_packet<'a>(&'a self, _packet: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>>> {
-        Box::pin(async {
-            Err(Error::Unsupported("当前解析器不支持原始 DNS 报文转发"))
+    /// 未装配 DNS 管线时：A/AAAA 经 `resolve` 合成应答，其他类型回空 NOERROR。
+    fn exchange_dns_packet<'a>(&'a self, packet: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(synthesized_dns_reply(self, packet))
+    }
+    fn query_dns_message<'a>(
+        &'a self,
+        name: &'a str,
+        qtype: u16,
+    ) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async move {
+            let query = kerlico_dns::wire::build_query(1, name, qtype)?;
+            synthesized_dns_reply(self, &query).await
         })
     }
     fn flush_fake_ip(&self) -> Result<()> {
         Ok(())
     }
-    /// 清空解析应答缓存；不带缓存的解析器无事可做。
     fn flush_dns_cache(&self) {}
+    /// 注入路由规则集与 Geo 查询、上游拨号能力，并校验 DNS 配置引用的规则集与出站。
+    fn bind_runtime(
+        &self,
+        _sets: Arc<dyn kerlico_dns::SetLookup>,
+        _dialer: Arc<dyn kerlico_dns::DnsDialer>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn dns_listen(&self) -> Option<std::net::SocketAddr> {
+        None
+    }
+    /// 为真时调度器把 `resolve_proxy_host` 安装为代理服务器域名的进程级解析入口。
+    fn resolves_proxy_servers(&self) -> bool {
+        false
+    }
+    fn resolve_proxy_host<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Vec<IpAddr>>> {
+        self.resolve(host)
+    }
+}
+
+async fn synthesized_dns_reply<R: Resolver + ?Sized>(
+    resolver: &R,
+    packet: &[u8],
+) -> Result<Vec<u8>> {
+    use kerlico_dns::wire;
+    let q = wire::parse_question(packet)?;
+    if !matches!(q.qtype, wire::TYPE_A | wire::TYPE_AAAA) {
+        return Ok(wire::reply(packet, &q, wire::RCODE_NOERROR, &[], 0));
+    }
+    Ok(match resolver.resolve(&q.name).await {
+        Ok(ips) => {
+            let ips: Vec<wire::Synth> = ips.into_iter().map(wire::Synth::Ip).collect();
+            wire::reply(packet, &q, wire::RCODE_NOERROR, &ips, 60)
+        }
+        Err(_) => wire::reply(packet, &q, wire::RCODE_SERVFAIL, &[], 0),
+    })
 }
 struct SystemResolver;
 impl Resolver for SystemResolver {
@@ -93,12 +137,182 @@ impl Resolver for kerlico_dns::DnsResolver {
     fn exchange_dns_packet<'a>(&'a self, packet: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>>> {
         Box::pin(kerlico_dns::DnsResolver::exchange_packet(self, packet))
     }
+    fn query_dns_message<'a>(
+        &'a self,
+        name: &'a str,
+        qtype: u16,
+    ) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async move {
+            use kerlico_dns::wire;
+            let query = wire::build_query(1, name, qtype)?;
+            let q = wire::parse_question(&query)?;
+            Ok(
+                match self.query(&query, kerlico_dns::Purpose::Query).await {
+                    Ok(answer) => answer.message,
+                    Err(Error::Rejected) => wire::reply(&query, &q, wire::RCODE_REFUSED, &[], 0),
+                    Err(_) => wire::reply(&query, &q, wire::RCODE_SERVFAIL, &[], 0),
+                },
+            )
+        })
+    }
     fn flush_fake_ip(&self) -> Result<()> {
         kerlico_dns::DnsResolver::flush_fake_ip(self)
     }
     fn flush_dns_cache(&self) {
         kerlico_dns::DnsResolver::flush_cache(self);
     }
+    fn bind_runtime(
+        &self,
+        sets: Arc<dyn kerlico_dns::SetLookup>,
+        dialer: Arc<dyn kerlico_dns::DnsDialer>,
+    ) -> Result<()> {
+        self.bind(sets, Some(dialer))
+    }
+    fn dns_listen(&self) -> Option<std::net::SocketAddr> {
+        self.listen_addr()
+    }
+    fn resolves_proxy_servers(&self) -> bool {
+        true
+    }
+    fn resolve_proxy_host<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Vec<IpAddr>>> {
+        Box::pin(kerlico_dns::DnsResolver::resolve_proxy_host(self, host))
+    }
+}
+
+/// 代理服务器域名经引擎 DNS 管线解析（Mihomo `proxy-server-nameserver`）。
+struct ProxyServerResolver(Arc<dyn Resolver>);
+impl kerlico_core::ServerResolver for ProxyServerResolver {
+    fn resolve<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Vec<IpAddr>>> {
+        self.0.resolve_proxy_host(host)
+    }
+}
+
+/// DNS 策略中的 `rule-set:`、`geosite:` 与 `fallback-filter` 的 GeoIP 查询，读运行中的路由规则集。
+struct RouteSets(RouteTable);
+impl kerlico_dns::SetLookup for RouteSets {
+    fn has_rule_set(&self, tag: &str) -> bool {
+        self.0.has_rule_set(tag)
+    }
+    fn rule_set_matches_domain(&self, tag: &str, host: &str) -> bool {
+        self.0
+            .rule_set(tag)
+            .is_some_and(|slot| slot.load().matches(&[host], &[], 0, Network::Udp, None))
+    }
+    fn rule_set_matches_ip(&self, tag: &str, ip: IpAddr) -> bool {
+        self.0
+            .rule_set(tag)
+            .is_some_and(|slot| slot.load().matches(&[], &[ip], 0, Network::Udp, None))
+    }
+    /// 读路由表的 `GeoSlot`：Geo 文件刷新后换入的新数据立即生效。
+    fn geosite_matches(&self, code: &str, host: &str) -> bool {
+        kerlico_routing::GeoSiteRef::parse(code)
+            .is_ok_and(|site| self.0.geo().load().site_matches(&site, host))
+    }
+    fn geoip_matches(&self, code: &str, ip: IpAddr) -> bool {
+        kerlico_routing::GeoIpRef::parse(code)
+            .is_ok_and(|geoip| self.0.geo().load().ip_matches(&geoip, ip))
+    }
+}
+
+/// DNS 上游经命名出站、代理组或路由规则拨号；调度器建成后才可用。
+struct DnsUpstreamDialer {
+    known: HashSet<String>,
+    dispatcher: std::sync::OnceLock<std::sync::Weak<Dispatcher>>,
+    timeout: Duration,
+}
+impl DnsUpstreamDialer {
+    fn service(
+        &self,
+        via: &kerlico_dns::Via,
+        target: &Destination,
+        network: Network,
+    ) -> Result<(Arc<Dispatcher>, OutId)> {
+        let dispatcher = self
+            .dispatcher
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or(Error::Cancelled)?;
+        let initial = match via {
+            kerlico_dns::Via::Outbound(name) => OutId::parse(name)?,
+            kerlico_dns::Via::Rules => {
+                let source = kerlico_core::Source::Local {
+                    node: NodeId::parse("dns-upstream")?,
+                };
+                let ctx = kerlico_routing::RouteContext::simple(target, network, &source);
+                dispatcher
+                    .routes
+                    .evaluate(&ctx)
+                    .outbound
+                    .ok_or(Error::Rejected)?
+            }
+            kerlico_dns::Via::Direct => return Err(Error::Unsupported("直连上游不经出站拨号")),
+        };
+        let id = dispatcher.control_plane.resolve_untouched(&initial)?;
+        if !dispatcher.services.contains_key(&id) {
+            return Err(Error::Rejected);
+        }
+        Ok((dispatcher, id))
+    }
+}
+/// `Local` 出站需要 IP 目标；上游主机名在此用系统解析，避免与 DNS 管线互相等待。
+async fn dns_upstream_target(policy: TargetPolicy, target: &Destination) -> Result<Destination> {
+    match (policy, target.address()) {
+        (TargetPolicy::Local, Address::Domain(host)) => {
+            let addr = tokio::net::lookup_host((host.as_str(), target.port()))
+                .await?
+                .next()
+                .ok_or(Error::InvalidAddress)?;
+            Destination::new(&addr.ip().to_string(), addr.port())
+        }
+        _ => Ok(target.clone()),
+    }
+}
+impl kerlico_dns::DnsDialer for DnsUpstreamDialer {
+    fn knows(&self, outbound: &str) -> bool {
+        self.known.contains(outbound)
+    }
+    fn connect_tcp<'a>(
+        &'a self,
+        via: &'a kerlico_dns::Via,
+        target: &'a Destination,
+    ) -> BoxFuture<'a, Result<kerlico_core::BoxStream>> {
+        Box::pin(async move {
+            let (dispatcher, id) = self.service(via, target, Network::Tcp)?;
+            let service = dispatcher.services.get(&id).ok_or(Error::Rejected)?;
+            let target = dns_upstream_target(service.policy, target).await?;
+            let context = ConnectContext::new(self.timeout);
+            Ok(service.backend.connect_tcp(&target, &context).await?.stream)
+        })
+    }
+    fn connect_udp<'a>(
+        &'a self,
+        via: &'a kerlico_dns::Via,
+        target: &'a Destination,
+    ) -> BoxFuture<'a, Result<kerlico_core::DatagramChannel>> {
+        Box::pin(async move {
+            let (dispatcher, id) = self.service(via, target, Network::Udp)?;
+            let service = dispatcher.services.get(&id).ok_or(Error::Rejected)?;
+            let target = dns_upstream_target(service.policy, target).await?;
+            let context = ConnectContext::new(self.timeout);
+            service.backend.connect_udp(&target, &context).await
+        })
+    }
+}
+
+/// 路由规则所需的域名解析结果；`mode` 决定结果对哪些规则可见。
+struct RuleIps {
+    ips: Vec<IpAddr>,
+    mode: kerlico_routing::Resolution,
+}
+impl RuleIps {
+    const NONE: Self = Self {
+        ips: Vec::new(),
+        mode: kerlico_routing::Resolution::Never,
+    };
+    const PENDING: Self = Self {
+        ips: Vec::new(),
+        mode: kerlico_routing::Resolution::Pending,
+    };
 }
 
 struct RunningService {
@@ -171,9 +385,11 @@ impl RuntimeDrain {
 pub struct EgressRuntime {
     dispatcher: Arc<Dispatcher>,
     ingresses: BTreeMap<NodeId, IngressBinding>,
+    run: u64,
 }
 impl Drop for EgressRuntime {
     fn drop(&mut self) {
+        kerlico_core::remove_server_resolver(self.run);
         self.dispatcher.closed.store(true, Ordering::Release);
         self.dispatcher.health.retire(Instant::now());
         for service in self.dispatcher.services.values() {
@@ -190,7 +406,7 @@ impl EgressRuntime {
         options: RuntimeOptions,
         budget: Duration,
     ) -> Result<Self> {
-        let resolver: Arc<dyn Resolver> = match plan.dns() {
+        let resolver: Arc<dyn Resolver> = match plan.dns().filter(|spec| spec.enabled()) {
             Some(spec) => Arc::new(kerlico_dns::DnsResolver::new(spec)?),
             None => Arc::new(SystemResolver),
         };
@@ -219,6 +435,24 @@ impl EgressRuntime {
             .iter()
             .map(|named| (named.id.clone(), group::mihomo_type(&named.kind)))
             .collect();
+        let known: HashSet<String> = plans
+            .iter()
+            .map(|named| named.id.to_string())
+            .chain(compiled_groups.iter().map(|g| g.id.to_string()))
+            .collect();
+        let dns_dialer = Arc::new(DnsUpstreamDialer {
+            known,
+            dispatcher: std::sync::OnceLock::new(),
+            timeout: Duration::from_secs(5),
+        });
+        resolver.bind_runtime(
+            Arc::new(RouteSets(routes_table.clone())),
+            dns_dialer.clone(),
+        )?;
+        let dns_sockets = match resolver.dns_listen() {
+            Some(addr) => Some(kerlico_dns::listener::bind(addr).await?),
+            None => None,
+        };
         let mut started = Vec::new();
         for named in plans {
             let host = ServiceContext::with_options(
@@ -321,6 +555,36 @@ impl EgressRuntime {
             shutdown: tokio::sync::Mutex::new(None),
             _device: device,
         });
+        let _ = dns_dialer.dispatcher.set(Arc::downgrade(&dispatcher));
+        if dispatcher.resolver.resolves_proxy_servers() {
+            kerlico_core::install_server_resolver(
+                run,
+                Arc::new(ProxyServerResolver(dispatcher.resolver.clone())),
+            );
+        }
+        if let Some((udp, tcp)) = dns_sockets {
+            let resolver = dispatcher.resolver.clone();
+            let handler: kerlico_dns::listener::Handler = Arc::new(move |packet: Vec<u8>| {
+                let resolver = resolver.clone();
+                Box::pin(async move { resolver.exchange_dns_packet(&packet).await })
+            });
+            let tasks: [BoxFuture<'static, Result<()>>; 2] = [
+                Box::pin(kerlico_dns::listener::serve_udp(udp, handler.clone())),
+                Box::pin(kerlico_dns::listener::serve_tcp(tcp, handler)),
+            ];
+            for task in tasks {
+                let cancel = dispatcher.health.cancel();
+                let spawned = dispatcher.health.spawn(async move {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {}
+                        _ = task => {}
+                    }
+                });
+                if let Err(error) = spawned {
+                    kerlico_core::log::warning(format!("DNS 监听任务启动失败：{error}"));
+                }
+            }
+        }
         for reason in rejected_jobs {
             kerlico_core::log::warning(format!("健康检查未启用：{reason}"));
         }
@@ -355,6 +619,7 @@ impl EgressRuntime {
         Ok(Self {
             dispatcher,
             ingresses,
+            run,
         })
     }
     fn bind(
@@ -562,6 +827,7 @@ impl Dispatcher {
         &self,
         identity: &SessionIdentity,
         request: Option<(&OriginalTarget, Network)>,
+        ips: &RuleIps,
     ) -> (
         kerlico_routing::RouteDecision,
         Option<OutId>,
@@ -581,7 +847,7 @@ impl Dispatcher {
         };
         let ctx = kerlico_routing::RouteContext {
             target: original.target(),
-            resolved_ips: &[],
+            resolved_ips: &ips.ips,
             network,
             source: identity.source(),
             source_addr: identity.observed_source(),
@@ -592,7 +858,7 @@ impl Dispatcher {
                 .as_ref()
                 .and_then(|(_, p)| (!p.is_empty()).then_some(p.as_str())),
         };
-        let decision = self.routes.evaluate(&ctx);
+        let decision = self.routes.evaluate_with(&ctx, ips.mode);
         let decision = match self.control_plane.mode() {
             RunMode::Rule => decision,
             mode => kerlico_routing::RouteDecision {
@@ -648,6 +914,7 @@ impl Dispatcher {
         &self,
         identity: &SessionIdentity,
         request: Option<(&OriginalTarget, Network)>,
+        ips: &RuleIps,
     ) -> Result<(
         &RunningService,
         FamilyMode,
@@ -665,7 +932,7 @@ impl Dispatcher {
             .bindings
             .get(identity.source().node())
             .ok_or(Error::Rejected)?;
-        let (decision, outbound, process) = self.evaluate_route(identity, request);
+        let (decision, outbound, process) = self.evaluate_route(identity, request, ips);
         if decision.reject {
             return Err(Error::Rejected);
         }
@@ -689,9 +956,32 @@ impl Dispatcher {
         &self,
         identity: &SessionIdentity,
         request: Option<(&OriginalTarget, Network)>,
+        ips: &RuleIps,
     ) -> Option<OutId> {
-        let (_, selected, _) = self.evaluate_route(identity, request);
+        let (_, selected, _) = self.evaluate_route(identity, request, ips);
         selected
+    }
+
+    /// 选中的出站是否把 DNS 报文交给引擎管线（Mihomo `dns` 出站）。
+    fn selects_engine_dns(&self, selected: Option<&OutId>) -> bool {
+        selected
+            .and_then(|id| self.control_plane.resolve_untouched(id).ok())
+            .and_then(|id| self.services.get(&id))
+            .is_some_and(|service| service.backend.uses_engine_dns())
+    }
+
+    /// Mihomo：IP 规则遇到域名目标时解析一次，有 IPv4 时只用 IPv4；失败时规则按无地址继续匹配。
+    /// 解析结果只用于匹配，发往 `Remote` 出站的目标仍是原域名。
+    async fn rule_ips(&self, original: &OriginalTarget, at: usize) -> RuleIps {
+        let ips = match original.target().address() {
+            Address::Domain(host) => self.resolver.resolve(host).await.unwrap_or_default(),
+            Address::Ip(_) => Vec::new(),
+        };
+        let v4: Vec<IpAddr> = ips.iter().copied().filter(IpAddr::is_ipv4).collect();
+        RuleIps {
+            ips: if v4.is_empty() { ips } else { v4 },
+            mode: kerlico_routing::Resolution::From(at),
+        }
     }
 
     /// 取得流账本前的准入；此处失败还没有租约，单独记一条错误事件。
@@ -701,8 +991,8 @@ impl Dispatcher {
         context: &ConnectContext,
         request: Option<(&OriginalTarget, Network)>,
         capable: impl FnOnce(&RunningService) -> Result<()>,
-        original: Option<OriginalTarget>,
         kind: Kind,
+        ips: &RuleIps,
     ) -> Result<(
         &RunningService,
         FamilyMode,
@@ -713,7 +1003,7 @@ impl Dispatcher {
             return Err(Error::Cancelled);
         }
         let admitted =
-            self.route(identity, request)
+            self.route(identity, request, ips)
                 .and_then(|(service, mode, decision, route)| {
                     capable(service)?;
                     let announce = log::enabled(LogLevel::Info).then(|| {
@@ -728,7 +1018,7 @@ impl Dispatcher {
                     let ledger = self.telemetry.open(
                         identity,
                         &service.id,
-                        original,
+                        request.map(|(original, _)| original.clone()),
                         kind,
                         route,
                         context.cancel.child_token(),
@@ -739,7 +1029,7 @@ impl Dispatcher {
                     Ok((service, mode, ledger, decision))
                 });
         if let Err(error) = &admitted
-            && let Some(outbound) = self.selected_outbound(identity, request)
+            && let Some(outbound) = self.selected_outbound(identity, request, ips)
         {
             if log::enabled(LogLevel::Warning) {
                 log::warning(format!(
@@ -765,8 +1055,30 @@ impl Dispatcher {
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, TcpFlow>> {
         let original = self.enrich_original(original);
-        let (decision_pre, _, _) = self.evaluate_route(identity, Some((&original, Network::Tcp)));
-        if decision_pre.hijack_dns {
+        let request = Some((&original, Network::Tcp));
+        if self.routes.has_resolving_rules()
+            && let Some(at) = self
+                .evaluate_route(identity, request, &RuleIps::PENDING)
+                .0
+                .resolve_at
+        {
+            return Ok(FlowOpen::prepared(async move {
+                let ips = self.rule_ips(&original, at).await;
+                self.tcp_routed(identity, original, context, ips)
+            }));
+        }
+        self.tcp_routed(identity, original, context, RuleIps::NONE)
+    }
+    fn tcp_routed<'a>(
+        &'a self,
+        identity: &'a SessionIdentity,
+        original: OriginalTarget,
+        context: &'a ConnectContext,
+        ips: RuleIps,
+    ) -> Result<FlowOpen<'a, TcpFlow>> {
+        let (decision_pre, selected, _) =
+            self.evaluate_route(identity, Some((&original, Network::Tcp)), &ips);
+        if decision_pre.hijack_dns || self.selects_engine_dns(selected.as_ref()) {
             let resolver = self.resolver.clone();
             return Ok(FlowOpen::tcp(
                 Box::pin(async move {
@@ -815,8 +1127,8 @@ impl Dispatcher {
                     .then_some(())
                     .ok_or(Error::Unsupported("所选命名出站没有 TCP 能力"))
             },
-            Some(original.clone()),
             Kind::Tcp,
+            &ips,
         )?;
         let original = Self::apply_route_overrides(original, &decision);
         let resolve_strategy = decision.resolve_strategy;
@@ -895,8 +1207,30 @@ impl Dispatcher {
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, FixedUdpFlow>> {
         let original = self.enrich_original(original);
-        let (decision_pre, _, _) = self.evaluate_route(identity, Some((&original, Network::Udp)));
-        if decision_pre.hijack_dns {
+        let request = Some((&original, Network::Udp));
+        if self.routes.has_resolving_rules()
+            && let Some(at) = self
+                .evaluate_route(identity, request, &RuleIps::PENDING)
+                .0
+                .resolve_at
+        {
+            return Ok(FlowOpen::prepared(async move {
+                let ips = self.rule_ips(&original, at).await;
+                self.udp_routed(identity, original, context, ips)
+            }));
+        }
+        self.udp_routed(identity, original, context, RuleIps::NONE)
+    }
+    fn udp_routed<'a>(
+        &'a self,
+        identity: &'a SessionIdentity,
+        original: OriginalTarget,
+        context: &'a ConnectContext,
+        ips: RuleIps,
+    ) -> Result<FlowOpen<'a, FixedUdpFlow>> {
+        let (decision_pre, selected, _) =
+            self.evaluate_route(identity, Some((&original, Network::Udp)), &ips);
+        if decision_pre.hijack_dns || self.selects_engine_dns(selected.as_ref()) {
             let resolver = self.resolver.clone();
             return Ok(FlowOpen::fixed_udp(
                 Box::pin(async move {
@@ -923,8 +1257,8 @@ impl Dispatcher {
                     .then_some(())
                     .ok_or(Error::Unsupported("所选命名出站没有固定 UDP 能力"))
             },
-            Some(original.clone()),
             Kind::FixedUdp,
+            &ips,
         )?;
         let original = Self::apply_route_overrides(original, &decision);
         let resolve_strategy = decision.resolve_strategy;
@@ -1011,8 +1345,8 @@ impl Dispatcher {
                     .then_some(())
                     .ok_or(Error::Unsupported("所选命名出站没有多目标 UDP 关联能力"))
             },
-            None,
             Kind::UdpAssociation,
+            &RuleIps::NONE,
         )?;
         let scoped = context
             .scoped(
@@ -1072,7 +1406,7 @@ impl Dispatcher {
 }
 impl SessionDispatcher for Dispatcher {
     fn supports_udp_association(&self, identity: &SessionIdentity) -> bool {
-        self.route(identity, None)
+        self.route(identity, None, &RuleIps::NONE)
             .is_ok_and(|(service, _, _, _)| service.association)
     }
     fn connect_tcp<'a>(
@@ -1455,6 +1789,66 @@ pub mod testing {
 mod tests {
     use super::*;
 
+    async fn fixed_a(ip: [u8; 4]) -> std::net::SocketAddr {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            loop {
+                let (n, peer) = socket.recv_from(&mut buf).await.unwrap();
+                let q = kerlico_dns::wire::parse_question(&buf[..n]).unwrap();
+                let ips = [kerlico_dns::wire::Synth::Ip(IpAddr::from(ip))];
+                let reply = kerlico_dns::wire::reply(&buf[..n], &q, 0, &ips, 60);
+                socket.send_to(&reply, peer).await.unwrap();
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn nameserver_policy_geosite_reads_the_route_geo_slot() {
+        use kerlico_routing::{GeoFile, GeoIpMode, GeoNeeds, GeoSiteRef, geodata::fixture};
+        let main = fixed_a([10, 40, 0, 1]).await;
+        let cn = fixed_a([10, 40, 0, 2]).await;
+        let mut needs = GeoNeeds::default();
+        needs.add_site(&GeoSiteRef::parse("cn").unwrap());
+        let routes = RouteTable::compile(&[])
+            .unwrap()
+            .with_geo(GeoIpMode::Mmdb, &needs);
+        let slot = routes.geo().clone();
+        let geosite = |domain: &str| fixture::geosite(&[("cn", &[(2, domain, &[])])]);
+        slot.install(slot.compile(GeoFile::GeoSite, &geosite("cn.test")).unwrap());
+        let spec: kerlico_dns::DnsSpec = serde_json::from_value(serde_json::json!({
+            "nameserver": [format!("udp://{main}")],
+            "nameserver-policy": {"geosite:cn": format!("udp://{cn}")},
+            "ipv6": false,
+            "disable-cache": true,
+            "use-system-hosts": false
+        }))
+        .unwrap();
+        assert_eq!(spec.references().geosite, ["cn"]);
+        let resolver = kerlico_dns::DnsResolver::new(&spec).unwrap();
+        resolver.bind(Arc::new(RouteSets(routes)), None).unwrap();
+        let ip = |s: &str| vec![s.parse::<IpAddr>().unwrap()];
+        assert_eq!(
+            resolver.resolve("www.cn.test").await.unwrap(),
+            ip("10.40.0.2")
+        );
+        assert_eq!(
+            resolver.resolve("other.test").await.unwrap(),
+            ip("10.40.0.1")
+        );
+        slot.install(
+            slot.compile(GeoFile::GeoSite, &geosite("elsewhere.test"))
+                .unwrap(),
+        );
+        assert_eq!(
+            resolver.resolve("www.cn.test").await.unwrap(),
+            ip("10.40.0.1"),
+            "Geo 数据换入后立即按新内容匹配"
+        );
+    }
+
     struct FakeMapResolver {
         fake_domain: String,
         real_ip: IpAddr,
@@ -1500,6 +1894,7 @@ mod tests {
             override_address: Some("new.example.com".into()),
             override_port: Some(8443),
             resolve_strategy: None,
+            resolve_at: None,
             sniff: None,
             reject: false,
             hijack_dns: false,

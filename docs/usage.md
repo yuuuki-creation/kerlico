@@ -184,7 +184,7 @@ OpenVPN 服务端节点只支持 TLS 模式，必须配置服务端证书与私�
 
 ## DNS 与 Fake-IP
 
-`dns` 段配置上游（`udp://`、`tcp://`、`tls://`、`https://` DoH、`quic://` DoQ）、Fake-IP 双栈地址池（默认 `198.18.0.0/15` 与 `fc00::/18`）、乐观缓存、EDNS Client Subnet（ECS）、DNS 分流规则和静态 `hosts`。未配置时使用系统解析器。详见 [DNS](interfaces/dns.md)。
+`dns` 段按 Mihomo 语义工作，`Local` 出网、路由规则、DNS 劫持、`dns.listen`、DNS 出站与 `/dns/query` 共用一条管线：hosts → DNS 规则 → Fake-IP（`fake-ip-filter`、`fake-ip-filter-mode`）→ 缓存（LRU/ARC、乐观缓存、ECS）→ `nameserver-policy` → `nameserver` 与 `fallback`（`fallback-filter`）。上游支持 UDP、TCP、DoT、DoH（HTTP/2、HTTP/3）、DoQ、`system`、`rcode://`，可用 `#出站名` 或 `respect-rules` 经出站拨号，主机名经 `default-nameserver` 解析；代理服务器域名用 `proxy-server-nameserver`。Mihomo IP 规则未写 `no-resolve` 时为匹配解析域名目标，发往远端的仍是原域名。旧写法 `tls://IP#证书名` 中 `#` 后现在是出站名，证书名改写 `#sni=`。未配置或 `enable: false` 时使用系统解析器。详见 [DNS](interfaces/dns.md)。
 
 ## 控制接口与 Web 面板
 

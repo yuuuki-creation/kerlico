@@ -253,7 +253,7 @@ impl Client {
             )?;
             Ok(session)
         } else {
-            let mut addresses = tokio::net::lookup_host((self.server.host(), self.server.port()))
+            let mut addresses = kerlico_core::lookup_host((self.server.host(), self.server.port()))
                 .await?
                 .collect::<Vec<_>>();
             addresses.sort_by_key(|a| a.is_ipv6());

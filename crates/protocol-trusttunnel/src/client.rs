@@ -199,8 +199,7 @@ impl OutboundFactory for TrustTunnelFactory {
 impl Client {
     async fn tls(&self) -> Result<BoxStream> {
         let stream =
-            tokio::net::TcpStream::connect((self.server.host().as_str(), self.server.port()))
-                .await?;
+            kerlico_core::connect_host((self.server.host().as_str(), self.server.port())).await?;
         stream.set_nodelay(true)?;
         let name = rustls::pki_types::ServerName::try_from(self.name.clone())
             .map_err(|_| crate::invalid())?;
@@ -240,7 +239,7 @@ impl Client {
             (Sender::H2(sender), driver)
         } else {
             let mut peers: Vec<SocketAddr> =
-                tokio::net::lookup_host((self.server.host().as_str(), self.server.port()))
+                kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
                     .await?
                     .collect();
             peers.sort_by_key(SocketAddr::is_ipv6);

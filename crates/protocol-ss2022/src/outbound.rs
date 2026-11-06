@@ -12,7 +12,7 @@ use shadowsocks::{
     relay::tcprelay::ProxyClientStream,
 };
 use std::sync::Arc;
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::io::AsyncWriteExt;
 
 pub struct Ss2022Outbound {
     pub(crate) config: Arc<ServerConfig>,
@@ -76,9 +76,11 @@ impl Outbound for Ss2022Outbound {
                     let carrier: BoxStream = if let Some(connector) = &self.connector {
                         connector.connect_tcp(&self.server, context).await?
                     } else {
-                        let tcp =
-                            TcpStream::connect((self.server.host().as_str(), self.server.port()))
-                                .await?;
+                        let tcp = kerlico_core::connect_host((
+                            self.server.host().as_str(),
+                            self.server.port(),
+                        ))
+                        .await?;
                         tcp.set_nodelay(true)?;
                         Box::new(tcp)
                     };

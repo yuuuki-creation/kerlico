@@ -54,6 +54,7 @@ pub fn parse_config_value_with_format(bytes: &[u8], format: Option<&str>) -> Res
         }
         let mut val = parse_yaml_with_anchors(text)?;
         normalize_yaml_root(&mut val)?;
+        mihomo_dns_defaults(&mut val);
         normalize_config_value(&mut val)?;
         return Ok(val);
     }
@@ -61,6 +62,17 @@ pub fn parse_config_value_with_format(bytes: &[u8], format: Option<&str>) -> Res
     Err(Error::Config(
         "JSON/JSONC/YAML/TOML 结构或字段不合法".into(),
     ))
+}
+
+/// YAML 中写 `nameserver` 的 `dns` 段按 Mihomo 默认值补齐：`ipv6` 默认 `false`。
+/// JSON 与 sing-box 写法（`servers`）保持 kerlico 默认值。
+fn mihomo_dns_defaults(root: &mut Value) {
+    if let Some(dns) = root.get_mut("dns").and_then(Value::as_object_mut)
+        && dns.contains_key("nameserver")
+        && !dns.contains_key("ipv6")
+    {
+        dns.insert("ipv6".into(), Value::Bool(false));
+    }
 }
 
 pub fn strip_jsonc_and_trailing_commas(input: &str) -> Result<String> {
@@ -306,6 +318,9 @@ fn parse_yaml_seq(
     Ok(Value::Array(arr))
 }
 
+/// Mihomo 按书写顺序匹配的映射；解析为单键对象数组以保留顺序。
+const ORDERED_YAML_KEYS: [&str; 2] = ["nameserver-policy", "proxy-server-nameserver-policy"];
+
 fn parse_yaml_map(
     lines: &[YamlLine],
     idx: &mut usize,
@@ -313,6 +328,26 @@ fn parse_yaml_map(
     anchors: &mut HashMap<String, Value>,
 ) -> Result<Value> {
     let mut map = Map::new();
+    for (key, val) in parse_yaml_entries(lines, idx, map_indent, anchors)? {
+        if ORDERED_YAML_KEYS.contains(&key.as_str())
+            && let Value::Array(pairs) = val
+        {
+            map.insert(key, Value::Array(pairs));
+            continue;
+        }
+        map.entry(key).or_insert(val);
+    }
+    Ok(Value::Object(map))
+}
+
+/// 按书写顺序返回映射条目；`<<:` 合并的键排在显式键之后，显式键优先。
+fn parse_yaml_entries(
+    lines: &[YamlLine],
+    idx: &mut usize,
+    map_indent: usize,
+    anchors: &mut HashMap<String, Value>,
+) -> Result<Vec<(String, Value)>> {
+    let mut entries: Vec<(String, Value)> = Vec::new();
     let mut merged = Map::new();
     while *idx < lines.len() {
         let line = &lines[*idx];
@@ -325,6 +360,24 @@ fn parse_yaml_map(
         let current_indent = line.indent;
         let (key, rhs) = split_yaml_key_value(&line.text)?;
         *idx += 1;
+        let ordered = ORDERED_YAML_KEYS.contains(&unquote_yaml_str(&key).as_str())
+            && rhs.trim().is_empty()
+            && *idx < lines.len()
+            && lines[*idx].indent > current_indent
+            && !(lines[*idx].text.starts_with("- ") || lines[*idx].text == "-");
+        if ordered {
+            let child = lines[*idx].indent;
+            let pairs = parse_yaml_entries(lines, idx, child, anchors)?
+                .into_iter()
+                .map(|(k, v)| {
+                    let mut one = Map::new();
+                    one.insert(k, v);
+                    Value::Object(one)
+                })
+                .collect();
+            entries.push((unquote_yaml_str(&key), Value::Array(pairs)));
+            continue;
+        }
         let val = parse_yaml_rhs(rhs, lines, idx, current_indent + 1, anchors)?;
         if key == "<<" {
             match val {
@@ -345,13 +398,17 @@ fn parse_yaml_map(
                 _ => return Err(Error::Config("YAML <<: 合并目标必须为映射对象".into())),
             }
         } else {
-            apply_yaml_key(&mut map, &key, val)?;
+            let key = unquote_yaml_str(&key);
+            entries.retain(|(k, _)| *k != key);
+            entries.push((key, val));
         }
     }
     for (mk, mv) in merged {
-        map.entry(mk).or_insert(mv);
+        if !entries.iter().any(|(k, _)| *k == mk) {
+            entries.push((mk, mv));
+        }
     }
-    Ok(Value::Object(map))
+    Ok(entries)
 }
 
 fn apply_yaml_key(map: &mut Map<String, Value>, key: &str, val: Value) -> Result<()> {
@@ -831,6 +888,23 @@ pub fn normalize_config_value(root: &mut Value) -> Result<()> {
         {
             let single = val.take();
             *val = Value::Array(vec![single]);
+        }
+    }
+
+    // Mihomo 顶层 `hosts` 并入 `dns.hosts`；`dns` 段里已写的同名键优先。
+    if let Some(Value::Object(top_hosts)) = obj.remove("hosts") {
+        let dns = obj
+            .entry("dns".to_owned())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(dns) = dns.as_object_mut() {
+            let hosts = dns
+                .entry("hosts".to_owned())
+                .or_insert_with(|| Value::Object(Map::new()));
+            if let Some(hosts) = hosts.as_object_mut() {
+                for (name, value) in top_hosts {
+                    hosts.entry(name).or_insert(value);
+                }
+            }
         }
     }
 
@@ -1354,6 +1428,7 @@ pub fn generate_json_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parses_jsonc_with_comments_and_trailing_commas() {
@@ -1429,6 +1504,41 @@ type = "direct"
         merge_config_values(&mut base, overlay, false);
         assert_eq!(base["outbounds"][0]["tag"], "proxy-a");
         assert_eq!(base["outbounds"][1]["tag"], "direct");
+    }
+
+    #[test]
+    fn mihomo_yaml_keeps_policy_order_and_ipv6_default() {
+        let yaml = "dns:\n  nameserver:\n    - 1.1.1.1\n  nameserver-policy:\n    'z.test': 10.0.0.1\n    'geosite:cn': 10.0.0.2\n    '+.a.test': 10.0.0.3\n";
+        let root = parse_config_value(yaml.as_bytes()).unwrap();
+        let keys: Vec<String> = root["dns"]["nameserver-policy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o.as_object().unwrap().keys().next().unwrap().clone())
+            .collect();
+        assert_eq!(keys, ["z.test", "geosite:cn", "+.a.test"]);
+        assert_eq!(root["dns"]["ipv6"], false);
+        let json = br#"{"dns":{"nameserver":["1.1.1.1"]}}"#;
+        assert!(
+            parse_config_value(json).unwrap()["dns"]
+                .get("ipv6")
+                .is_none()
+        );
+        let explicit = "dns:\n  nameserver:\n    - 1.1.1.1\n  ipv6: true\n";
+        assert_eq!(
+            parse_config_value(explicit.as_bytes()).unwrap()["dns"]["ipv6"],
+            true
+        );
+    }
+
+    #[test]
+    fn mihomo_top_level_hosts_merge_into_dns() {
+        let mut root = json!({"hosts": {"a.test": "10.0.0.1", "b.test": "10.0.0.2"},
+            "dns": {"hosts": {"a.test": "10.0.0.9"}}});
+        normalize_config_value(&mut root).unwrap();
+        assert!(root.get("hosts").is_none());
+        assert_eq!(root["dns"]["hosts"]["a.test"], "10.0.0.9");
+        assert_eq!(root["dns"]["hosts"]["b.test"], "10.0.0.2");
     }
 
     #[test]

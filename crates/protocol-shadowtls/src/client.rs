@@ -1,7 +1,6 @@
 use crate::{stream, tls, wire};
 use kerlico_core::{BoxFuture, BoxStream, ConnectContext, Destination, Result, StreamConnector};
 use std::sync::{Arc, OnceLock};
-use tokio::net::TcpStream;
 pub(crate) struct Connector {
     pub version: u8,
     pub strict: bool,
@@ -27,7 +26,8 @@ impl StreamConnector for Connector {
             context
                 .run(async {
                     let tcp =
-                        TcpStream::connect((endpoint.host().as_str(), endpoint.port())).await?;
+                        kerlico_core::connect_host((endpoint.host().as_str(), endpoint.port()))
+                            .await?;
                     tcp.set_nodelay(true)?;
                     let outcome = tls::handshake(
                         Box::new(tcp),

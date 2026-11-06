@@ -19,10 +19,7 @@ use std::{
     task::{Context, Poll},
 };
 use subtle::ConstantTimeEq;
-use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
-    net::TcpStream,
-};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 struct VerifyHost {
     pins: Arc<Vec<String>>,
@@ -226,7 +223,7 @@ async fn drive(
     let socket = tokio::select! {
         biased;
         error = interrupted(&context, &service, &cancel) => Err(error),
-        result = TcpStream::connect((server_host.as_str(), prepared.server.port())) => result.map_err(Error::Io),
+        result = kerlico_core::connect_host((server_host.as_str(), prepared.server.port())) => result.map_err(Error::Io),
     };
     let stream = match socket {
         Ok(stream) => stream,
