@@ -1749,13 +1749,8 @@ fn build_clash_single_condition(kind: &str, val: &str) -> Result<RuleSpec> {
         "IP-ASN" => spec.ip_asn.push(parse_asn(val)?),
         "SRC-IP-ASN" => spec.source_ip_asn.push(parse_asn(val)?),
         "SRC-GEOIP" => spec.source_geoip.push(val.to_owned()),
-        "GEOIP" => {
-            if val.eq_ignore_ascii_case("private") || val.eq_ignore_ascii_case("lan") {
-                spec.ip_is_private = true;
-            } else {
-                spec.geoip.push(val.to_owned());
-            }
-        }
+        // Mihomo 只把 `lan` 当作内置判定，`private` 与其他代码一样查 GeoIP 数据。
+        "GEOIP" => spec.geoip.push(val.to_owned()),
         "IP-CIDR" | "IP-CIDR6" => spec.ip_cidr.push(val.to_owned()),
         "SRC-IP-CIDR" => spec.source_ip_cidr.push(val.to_owned()),
         "DST-PORT" => {
@@ -1853,6 +1848,28 @@ mod tests {
                 "{line} must not compile into a match-all rule"
             );
         }
+    }
+
+    #[test]
+    fn clash_geoip_private_reads_geo_data_and_lan_stays_builtin() {
+        let table = RouteTable::compile(&[
+            parse_clash_rule_line("GEOIP,private,priv")
+                .unwrap()
+                .0
+                .unwrap(),
+            parse_clash_rule_line("GEOIP,LAN,lan").unwrap().0.unwrap(),
+        ])
+        .unwrap()
+        .with_geo_mode(GeoIpMode::Mmdb);
+        let codes = &table.geo().needs().ip_codes;
+        assert!(codes.contains("private") && !codes.contains("lan"));
+        let source = local("n");
+        assert_eq!(
+            pick(&table, "10.0.0.1", 443, Network::Tcp, &source).as_deref(),
+            Some("lan"),
+            "没有 GeoIP 数据时 private 不命中"
+        );
+        assert_eq!(pick(&table, "100.64.0.1", 443, Network::Tcp, &source), None);
     }
 
     #[test]

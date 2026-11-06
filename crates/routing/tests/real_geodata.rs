@@ -103,12 +103,14 @@ fn real_country_mmdb_and_geoip_dat_lookups() {
         return;
     };
     let cn = GeoIpRef::parse("cn").unwrap();
+    let private = GeoIpRef::parse("private").unwrap();
     for (mode, file, name) in [
         (GeoIpMode::Mmdb, GeoFile::Mmdb, "country.mmdb"),
         (GeoIpMode::Dat, GeoFile::GeoIp, "geoip.dat"),
     ] {
         let mut needs = GeoNeeds::default();
         needs.add_ip(&cn);
+        needs.add_ip(&private);
         let slot = GeoSlot::new(mode, needs);
         let bytes = std::fs::read(dir.join(name)).unwrap();
         let started = Instant::now();
@@ -127,5 +129,7 @@ fn real_country_mmdb_and_geoip_dat_lookups() {
         );
         assert!(data.ip_matches(&cn, "114.114.114.114".parse().unwrap()));
         assert!(!data.ip_matches(&cn, "8.8.8.8".parse().unwrap()));
+        assert!(data.ip_matches(&private, "10.0.0.1".parse().unwrap()));
+        assert!(!data.ip_matches(&private, "8.8.8.8".parse().unwrap()));
     }
 }

@@ -154,13 +154,13 @@ printf '%s' 'your-admin-password' | kerlico account-new --prefix alice
 | --- | --- | --- |
 | `GEOSITE` | `GeoSite.dat`（V2Ray 格式） | 写法 `cn`、`cn@cn`（条目须带该属性）、`!cn`（取反）。条目类型 plain 为子串、regex 为正则、domain 为域名及子域、full 为完全相同 |
 | `GEOIP`，`geodata-mode: false`（默认） | `Country.mmdb` | 支持 MaxMind GeoLite2-Country（取 `country.iso_code`）、`sing-geoip` 与 Mihomo `geoip.metadb`（`Meta-geoip0`） |
-| `GEOIP`，`geodata-mode: true` | `GeoIP.dat`（V2Ray 格式） | `lan` 匹配私有、回环、链路本地等地址，不读文件 |
+| `GEOIP`，`geodata-mode: true` | `GeoIP.dat`（V2Ray 格式） | 两种模式下 `lan` 都不读文件，按 Mihomo 判定私有、未指定、回环、组播与链路本地地址（不含 100.64.0.0/10 与 198.18.0.0/15）；`private` 与其他代码一样查库：`GeoIP.dat` 的 `private` 列表，或 mmdb 记录中的 `private` 代码（`geoip.metadb` 有，MaxMind 国家库没有） |
 | `IP-ASN` | `ASN.mmdb`（没有时读旧名 `GeoLite2-ASN.mmdb`） | 支持 GeoLite2-ASN、DB-IP ASN Lite 与 ipinfo ASN 库 |
 
 - **只加载引用的分类**：启动时只解码规则引用的分类与属性组合。引用的分类不在文件中时配置检查失败，错误信息给出分类名；`mmdb` 按 IP 查代码，没有分类列表可校验。
 - **下载**：文件来自 `geox-url` 的 `geoip`、`geosite`、`mmdb`、`asn`；规则引用某个文件而 `geox-url` 未写时用 Mihomo 默认地址（MetaCubeX/meta-rules-dat）。引用的文件缺失时启动即下载，下载失败则拒绝启动。`geo-auto-update: true` 时按 `geo-update-interval`（小时，默认 24）刷新，`POST /upgrade/geo` 立即下载。新文件解码成功后整体换入，新连接立即使用，无需重启；新文件缺少引用的分类时保留旧数据，接口回 503。
 - **取值**：`geodata-loader`（`standard`、`memconservative`）与 `geosite-matcher`（`mph`、`succinct`、`default`）均使用同一实现：域名集合是按标签逐级查找的紧凑哈希表。geosite:cn（约 11 万条）占用约 3 MiB。
-- **差异**：`cn@!cn` 表示条目不带 `cn` 属性，Mihomo 把 `!cn` 当作属性名，结果为空集。`GEOIP,private` 按私有地址判断，不查数据库。
+- **差异**：`cn@!cn` 表示条目不带 `cn` 属性，Mihomo 把 `!cn` 当作属性名，结果为空集。
 
 规则集文件支持以下格式：
 

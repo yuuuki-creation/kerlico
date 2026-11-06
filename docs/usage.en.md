@@ -154,13 +154,13 @@ With `bind-address: '*'`, `port`, `socks-port` and `mixed-port` listen on `[::]`
 | --- | --- | --- |
 | `GEOSITE` | `GeoSite.dat` (V2Ray format) | Write `cn`, `cn@cn` (entries must carry the attribute), or `!cn` (negated). Entry types: plain is a substring, regex a regular expression, domain the domain and its subdomains, full an exact match |
 | `GEOIP`, `geodata-mode: false` (default) | `Country.mmdb` | MaxMind GeoLite2-Country (`country.iso_code`), `sing-geoip`, and Mihomo `geoip.metadb` (`Meta-geoip0`) |
-| `GEOIP`, `geodata-mode: true` | `GeoIP.dat` (V2Ray format) | `lan` matches private, loopback, and link-local addresses without reading a file |
+| `GEOIP`, `geodata-mode: true` | `GeoIP.dat` (V2Ray format) | In both modes `lan` reads no file and uses the Mihomo check: private, unspecified, loopback, multicast, and link-local addresses (not 100.64.0.0/10 or 198.18.0.0/15). `private` is looked up like any other code: the `private` list in `GeoIP.dat`, or the `private` code in mmdb records (`geoip.metadb` has it, MaxMind country databases do not) |
 | `IP-ASN` | `ASN.mmdb` (falls back to the old name `GeoLite2-ASN.mmdb`) | GeoLite2-ASN, DB-IP ASN Lite, and ipinfo ASN databases |
 
 - **Only referenced categories load**: startup decodes only the categories and attribute combinations that rules reference. A referenced category missing from the file fails the configuration check and the error names it. `mmdb` files map IPs to codes and have no category list to check.
 - **Download**: files come from the `geoip`, `geosite`, `mmdb`, and `asn` entries of `geox-url`. When a rule needs a file and `geox-url` does not name it, the Mihomo default URL (MetaCubeX/meta-rules-dat) is used. A needed file that is missing downloads at startup, and startup fails if the download fails. With `geo-auto-update: true` files refresh every `geo-update-interval` hours (default 24); `POST /upgrade/geo` downloads them immediately. A new file that decodes is swapped in whole and new connections use it without a restart. A new file that lacks a referenced category is rejected, the old data stays, and the API returns 503.
 - **Options**: every value of `geodata-loader` (`standard`, `memconservative`) and `geosite-matcher` (`mph`, `succinct`, `default`) uses the same implementation: a compact hash table probed label by label. geosite:cn (about 110,000 entries) takes about 3 MiB.
-- **Differences**: `cn@!cn` selects entries without the `cn` attribute; Mihomo treats `!cn` as an attribute name and gets an empty set. `GEOIP,private` checks private ranges and does not read a database.
+- **Differences**: `cn@!cn` selects entries without the `cn` attribute; Mihomo treats `!cn` as an attribute name and gets an empty set.
 
 Rule-set files support these formats:
 

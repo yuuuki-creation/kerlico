@@ -295,6 +295,27 @@ impl GeoIpRef {
     }
 }
 
+/// Mihomo `GEOIP,lan` 的内置判定（`rules/common/geoip.go` 的 `isLan`）：Go `netip` 的私有、
+/// 未指定、回环、组播与链路本地单播地址；不含 CGNAT、198.18.0.0/15 与广播地址。
+fn is_mihomo_lan(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_multicast()
+                || v4.is_link_local()
+        }
+        IpAddr::V6(v6) => {
+            (v6.segments()[0] & 0xfe00) == 0xfc00
+                || v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                || v6.is_unicast_link_local()
+        }
+    }
+}
+
 /// 路由规则引用的 Geo 数据。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GeoNeeds {
@@ -358,7 +379,7 @@ impl GeoData {
 
     pub fn ip_matches(&self, geoip: &GeoIpRef, ip: IpAddr) -> bool {
         if geoip.is_lan() {
-            return is_private_ip(ip) != geoip.negate;
+            return is_mihomo_lan(ip) != geoip.negate;
         }
         let hit = match self.mode {
             GeoIpMode::Dat => match self.ips.get(&geoip.code) {
@@ -976,6 +997,62 @@ mod tests {
         assert!(m("!cn", "8.8.8.8"));
         assert!(m("lan", "192.168.1.1"));
         assert!(!m("us", "8.8.8.8"), "未被引用的代码不加载");
+    }
+
+    #[test]
+    fn private_is_a_data_code_and_lan_is_the_mihomo_builtin() {
+        use crate::mmdb::writer::{self, Value};
+        let wanted = needs(&[], &["private", "lan"], false);
+        assert!(wanted.ip_codes.contains("private") && !wanted.ip_codes.contains("lan"));
+        let dat = GeoSlot::new(GeoIpMode::Dat, wanted.clone());
+        let file = fixture::geoip(&[("private", &["10.0.0.0/8", "100.64.0.0/10"])]);
+        dat.install(dat.compile(GeoFile::GeoIp, &file).unwrap());
+        let meta = GeoSlot::new(GeoIpMode::Mmdb, wanted.clone());
+        let file = writer::build(
+            "Meta-geoip0",
+            &[(
+                "10.0.0.0/8",
+                Value::Array(vec![Value::Str("private".into())]),
+            )],
+        );
+        meta.install(meta.compile(GeoFile::Mmdb, &file).unwrap());
+        let plain = GeoSlot::new(GeoIpMode::Mmdb, wanted);
+        let file = writer::build("sing-geoip", &[("1.0.1.0/24", Value::Str("cn".into()))]);
+        plain.install(plain.compile(GeoFile::Mmdb, &file).unwrap());
+        let m = |slot: &GeoSlot, code: &str, ip: &str| {
+            slot.load()
+                .ip_matches(&GeoIpRef::parse(code).unwrap(), ip.parse().unwrap())
+        };
+        assert!(
+            m(&dat, "private", "100.64.0.1"),
+            "geoip.dat 的 private 列表"
+        );
+        assert!(!m(&dat, "private", "192.168.1.1"));
+        assert!(
+            m(&meta, "private", "10.1.2.3"),
+            "mmdb 记录里的 private 代码"
+        );
+        assert!(
+            !m(&plain, "private", "10.1.2.3"),
+            "mmdb 没有 private 代码时不命中"
+        );
+        for slot in [&dat, &meta, &plain] {
+            for ip in [
+                "10.0.0.1",
+                "192.168.1.1",
+                "127.0.0.1",
+                "169.254.1.1",
+                "224.0.0.1",
+            ] {
+                assert!(m(slot, "lan", ip), "lan {ip}");
+            }
+            for ip in ["fd00::1", "fe80::1", "::1", "ff02::1", "0.0.0.0"] {
+                assert!(m(slot, "lan", ip), "lan {ip}");
+            }
+            for ip in ["100.64.0.1", "198.18.0.1", "255.255.255.255", "8.8.8.8"] {
+                assert!(!m(slot, "lan", ip), "非 lan {ip}");
+            }
+        }
     }
 
     #[test]
