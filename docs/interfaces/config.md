@@ -58,7 +58,7 @@
 
 同一字段内任一值命中即可；`domain*`、`geosite`、`ip_cidr`、`geoip`、`ip_asn` 都描述目标地址，任一命中即满足；其余字段须同时满足。规则引用的 Geo 分类不在数据文件中时配置检查失败。
 
-路由不查询 DNS，域名目标不会匹配 `ip_cidr`。多目标 UDP 关联建立时没有单一目标，固定走节点绑定的出站；TCP 与固定目标 UDP 按规则选择。规则选中的出站缺少对应能力时，该连接返回不支持错误。
+路由不查询 DNS，域名目标不会匹配 `ip_cidr`。多目标 UDP 关联（SOCKS5 UDP、TUN、WireGuard）按首个数据报的目标（含嗅探结果）选一次出站，之后该关联的全部目标走同一出口，与 Mihomo 按来源建 NAT 表项一致；TCP 与固定目标 UDP 逐条按规则选择。规则选中的出站缺少对应能力时，该连接返回不支持错误。
 
 以下规则永远不会按预期命中，`kerlico check` 直接拒绝：`node` 不是任何入站的标签，`user` 不在 `accounts` 内，`ip_cidr` 前缀为空（`10.0.0.0/`）或是 IPv4-mapped 网段（`::ffff:10.0.0.0/104`），`domain_keyword` 含非 ASCII 字符（目标域名已是 punycode）。
 
@@ -69,6 +69,31 @@
   {"outbound": "direct", "user": ["00000000-0000-4000-8000-000000000001"], "port": [443]}
 ]
 ```
+
+## 流量嗅探
+
+嗅探在共享调度器里、路由之前执行，对全部入站的 TCP 与 UDP 生效：`socks`、`http`、`mixed`、`tun`、`tproxy`、`redirect`、`tcp-forward`/`udp-forward` 与各协议服务端节点。TCP 连接先缓冲客户端首段，识别出协议或等到超时后才路由并拨号，再把缓冲原样发往出站；因此 SOCKS5 与 HTTP CONNECT 在拨号前就回复成功（与 Mihomo 相同），拨号失败表现为连接关闭。固定目标 UDP 在首批数据报后建立；QUIC ClientHello 拆在多个 Initial 里时最多缓冲 8 个数据报重组。
+
+可识别协议：`tls`（SNI）、`http`（Host）、`quic`（SNI，含多包与乱序 CRYPTO）、`bittorrent`（TCP 握手、uTP、UDP tracker、DHT）、`dtls`、`stun`、`ssh`、`rdp`。只有 TLS、HTTP、QUIC 产出域名；其余只提供协议名，供 `protocol` 规则匹配。
+
+顶层 `sniffer` 按 Mihomo 语义：
+
+| 字段 | 含义与默认值 |
+| --- | --- |
+| `enable` | 默认 `false` |
+| `sniff` | `{TLS: {ports}, HTTP: {ports, override-destination}, QUIC: {ports}}`；未写端口时 TLS/QUIC 为 443、HTTP 为 80；按 TLS、HTTP、QUIC 顺序尝试；未知协议名报错。kerlico 另接受 `BitTorrent`、`DTLS`、`STUN`、`SSH`、`RDP`，未写端口为全部端口 |
+| `sniffing` + `port-whitelist` | Mihomo 旧写法，`sniff` 为空时使用 |
+| `override-destination` | 默认 `true`；为真时出站拨号改用嗅探域名，`sniff` 内逐协议可覆盖。为假时嗅探域名只参与路由 |
+| `parse-pure-ip` | 默认 `true`：目标是纯 IP 时嗅探 |
+| `force-dns-mapping` | 默认 `true`：经 DNS 反向映射找回域名的 IP 目标也嗅探 |
+| `force-domain` | 域名目标只在命中该列表时嗅探（`+.`、`*.` 通配） |
+| `skip-domain` | 嗅探出的域名命中时丢弃该域名 |
+| `skip-src-address` / `skip-dst-address` | 来源或目标 IP 落在网段内时不嗅探；`geoip:`、`rule-set:` 项记 warning 后忽略 |
+| `timeout` | kerlico 扩展；默认 1 秒 |
+
+入站上的 `sniff: true`、`sniff_override_destination`、`sniff_timeout`（sing-box）与 `sniffing: {enabled, destOverride, routeOnly, domainsExcluded}`（Xray）对该入站覆盖顶层设置：嗅探全部连接（含域名目标），默认不覆盖目标，超时默认 300 ms；`destOverride` 列出的协议会覆盖目标，`routeOnly` 关闭覆盖。
+
+路由动作 `{"action": "sniff", "sniffer": ["ssh", "tls"], "timeout": "500ms"}`（sing-box）：入站策略没有嗅探的连接命中该动作时，按列出的协议（为空表示全部）与超时嗅探，结果只用于后续规则匹配，不覆盖目标。
 
 ## 设备 WARP（`device`）
 

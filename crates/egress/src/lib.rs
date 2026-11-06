@@ -1465,7 +1465,13 @@ impl SessionDispatcher for Dispatcher {
         identity: &'a SessionIdentity,
         context: &'a ConnectContext,
     ) -> FlowOpen<'a, UdpAssociation> {
-        FlowOpen::deferred(move || self.lazy_association(identity, context))
+        FlowOpen::deferred(move || {
+            if self.routes.has_rules() && self.control_plane.mode() == RunMode::Rule {
+                self.lazy_association(identity, context)
+            } else {
+                self.association(identity, None, context)
+            }
+        })
     }
 }
 
@@ -1486,7 +1492,7 @@ impl Dispatcher {
     ) -> Result<FlowOpen<'a, TcpFlow>> {
         let me = self.owned()?;
         let owned_identity = identity.clone();
-        let later = sniff::later_context(identity, context);
+        let later = sniff::later_context(context);
         let slot = sniff::CompletionSlot::default();
         let opener_plan = plan.clone();
         let open: sniff::TcpOpener = Box::new(move |result| {
@@ -1517,7 +1523,7 @@ impl Dispatcher {
         let (sender, receiver) = sniff::LazyFixedSender::new(
             self.owned()?,
             identity.clone(),
-            sniff::later_context(identity, context),
+            sniff::later_context(context),
             original,
             plan,
             slot.clone(),
@@ -1550,7 +1556,7 @@ impl Dispatcher {
         let (sender, receiver) = sniff::LazyAssociationSender::new(
             self.owned()?,
             identity.clone(),
-            sniff::later_context(identity, context),
+            sniff::later_context(context),
             slot.clone(),
         );
         Ok(FlowOpen::association(

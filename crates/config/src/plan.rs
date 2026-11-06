@@ -143,6 +143,8 @@ pub struct PreparedNode {
     pub protocol: Arc<dyn InboundProtocol>,
     pub max_sessions: usize,
     pub accept_proxy_protocol: bool,
+    /// 在 `[::]` 上关闭 IPV6_V6ONLY；主机没有 IPv6 时退回 `0.0.0.0`。
+    pub dual_stack: bool,
 }
 
 /// 出站计划只能整体移动到运行所有者，不对应用暴露运行对象表。

@@ -407,6 +407,9 @@ pub struct NodeSpec {
     pub sniff_timeout: Option<DurationSpec>,
     #[serde(default)]
     pub sniffing: Option<InboundSniffingSpec>,
+    /// `bind-address: '*'` 的快捷入站：IPv6 未指定地址上同时接收 IPv4。
+    #[serde(skip)]
+    pub dual_stack: bool,
 }
 
 /// 每个协议仅见本节点原生凭据和不可由网络构造的签发者。
@@ -1510,6 +1513,7 @@ impl Registry {
         }
         let lan_filter =
             kerlico_core::IpFilter::compile(&config.lan_allowed_ips, &config.lan_disallowed_ips)?;
+        let any_address = config.bind_address.as_deref().map(str::trim) == Some("*");
         let shortcut_ip: std::net::IpAddr = match config.bind_address.as_deref().map(str::trim) {
             Some("*" | "0.0.0.0") => std::net::IpAddr::from([0, 0, 0, 0]),
             Some(addr) if !addr.is_empty() => addr
@@ -1539,10 +1543,17 @@ impl Registry {
                         "启用快捷入站端口时必须至少配置一个出站".into(),
                     ));
                 };
+                // 透明代理依赖按族的原始目标选项，保持 IPv4 监听。
+                let dual_stack = any_address && !matches!(kind, "redirect" | "tproxy");
+                let ip = if dual_stack {
+                    std::net::IpAddr::from(std::net::Ipv6Addr::UNSPECIFIED)
+                } else {
+                    shortcut_ip
+                };
                 config.local_inbounds.push(NodeSpec {
                     tag: tag.into(),
                     kind: kind.into(),
-                    listen: SocketAddr::new(shortcut_ip, port),
+                    listen: SocketAddr::new(ip, port),
                     outbound,
                     mode: NodeMode::Dual,
                     options: empty_object(),
@@ -1553,6 +1564,7 @@ impl Registry {
                     sniff_override_destination: None,
                     sniff_timeout: None,
                     sniffing: None,
+                    dual_stack,
                 });
             }
         }
@@ -1602,6 +1614,7 @@ impl Registry {
                     sniff_override_destination: None,
                     sniff_timeout: None,
                     sniffing: None,
+                    dual_stack: false,
                 });
             }
         }
@@ -2249,6 +2262,7 @@ impl Registry {
                 sniff_policy,
             });
             nodes.push(PreparedNode {
+                dual_stack: spec.dual_stack,
                 tag: spec.tag,
                 listen: spec.listen,
                 protocol,
@@ -2677,5 +2691,65 @@ mod tests {
         assert!(dns_spec.fakedns.is_some());
         assert!(dns_spec.cache_file.as_ref().unwrap().enabled);
         assert!(dns_spec.cache_file.as_ref().unwrap().store_fakeip);
+    }
+
+    #[test]
+    fn mihomo_sniffer_defaults_ports_order_and_per_protocol_override() {
+        let spec: GlobalSnifferSpec = serde_json::from_value(serde_json::json!({
+            "enable": true,
+            "sniff": {
+                "QUIC": {},
+                "HTTP": {"ports": [80, "8080-8880"], "override-destination": false},
+                "TLS": {}
+            },
+            "skip-dst-address": ["10.0.0.0/8", "geoip:telegram"]
+        }))
+        .unwrap();
+        let policy = spec.to_policy().unwrap();
+        let order: Vec<&str> = policy.sniffers.iter().map(|r| r.protocol.as_str()).collect();
+        assert_eq!(order, ["tls", "http", "quic"], "Mihomo 固定尝试顺序");
+        assert_eq!(policy.sniffer("tls", 443), Some(true), "override-destination 默认 true");
+        assert_eq!(policy.sniffer("tls", 8443), None, "TLS 未写端口时只看 443");
+        assert_eq!(policy.sniffer("http", 8443), Some(false), "逐协议覆盖开关");
+        assert_eq!(policy.sniffer("quic", 443), Some(true));
+        assert_eq!(policy.skip_dst_address.len(), 1, "geoip: 项忽略");
+        assert_eq!(
+            policy.targets,
+            kerlico_core::SniffTargets::Mihomo {
+                parse_pure_ip: true,
+                force_dns_mapping: true
+            }
+        );
+        let legacy: GlobalSnifferSpec = serde_json::from_value(serde_json::json!({
+            "enable": true, "sniffing": ["tls", "http"], "port-whitelist": ["443", "8000-9000"]
+        }))
+        .unwrap();
+        let legacy = legacy.to_policy().unwrap();
+        assert_eq!(legacy.sniffer("http", 8080), Some(true), "旧写法共用 port-whitelist");
+        assert_eq!(legacy.sniffer("http", 80), None);
+        let off: GlobalSnifferSpec = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!off.to_policy().unwrap().enabled, "enable 默认 false");
+        let bad: GlobalSnifferSpec =
+            serde_json::from_value(serde_json::json!({"sniff": {"FOO": {}}})).unwrap();
+        assert!(bad.to_policy().is_err(), "未知嗅探器同 Mihomo 报错");
+    }
+
+    #[test]
+    fn inbound_sniff_sniffs_every_target_without_overriding_by_default() {
+        let mut policy = kerlico_core::SniffPolicy::default();
+        apply_inbound_sniffing(&mut policy, Some(true), None, None, None).unwrap();
+        assert!(policy.enabled);
+        assert_eq!(policy.targets, kerlico_core::SniffTargets::All);
+        assert_eq!(policy.sniffer("ssh", 22), Some(false));
+        let target = kerlico_core::Destination::new("example.com", 443).unwrap();
+        assert!(policy.wants(&target, None, None), "sing-box 入站嗅探域名目标");
+        let spec: InboundSniffingSpec = serde_json::from_value(serde_json::json!({
+            "enabled": true, "destOverride": ["http", "tls", "fakedns"], "routeOnly": true
+        }))
+        .unwrap();
+        let mut xray = kerlico_core::SniffPolicy::default();
+        apply_inbound_sniffing(&mut xray, None, None, None, Some(&spec)).unwrap();
+        assert_eq!(xray.sniffers.len(), 2, "fakedns 不是字节嗅探器");
+        assert_eq!(xray.sniffer("tls", 443), Some(false), "routeOnly 不覆盖目标");
     }
 }

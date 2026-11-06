@@ -132,7 +132,9 @@ printf '%s' 'your-admin-password' | kerlico account-new --prefix alice
 
 ## 路由与规则集
 
-规则按顺序匹配，首条命中生效，未命中走节点绑定的 `outbound`。顶层 `mode` 同 Mihomo：`rule`（默认）按规则分流，`global` 全部交给 `GLOBAL` 选择组，`direct` 全部走 `DIRECT`；运行中可用 `PATCH /configs` 切换。没有同名策略组或出站时，kerlico 自动生成 `GLOBAL`，成员依次为 `DIRECT`、`REJECT`、配置中的出站、策略组。可按域名、关键字、正则、CIDR、端口、网络、节点、用户、协议嗅探（TLS SNI、HTTP Host、QUIC SNI、BitTorrent、SSH、RDP）和外部规则集匹配。开启 `sniff` 或 Fake-IP 时，IP 目标可还原域名并参与域名规则匹配。详见[路由规则](interfaces/config.md)。
+规则按顺序匹配，首条命中生效，未命中走节点绑定的 `outbound`。顶层 `mode` 同 Mihomo：`rule`（默认）按规则分流，`global` 全部交给 `GLOBAL` 选择组，`direct` 全部走 `DIRECT`；运行中可用 `PATCH /configs` 切换。没有同名策略组或出站时，kerlico 自动生成 `GLOBAL`，成员依次为 `DIRECT`、`REJECT`、配置中的出站、策略组。可按域名、关键字、正则、CIDR、端口、网络、节点、用户、协议嗅探（TLS SNI、HTTP Host、QUIC SNI、BitTorrent、SSH、RDP）和外部规则集匹配。开启嗅探或 Fake-IP 时，IP 目标可还原域名并参与域名规则匹配。嗅探对全部入站的 TCP 与 UDP 生效，顶层 `sniffer:` 默认值与 Mihomo 相同；SOCKS5 UDP 与 TUN 的 UDP 关联按首个数据报的目标选择出站。详见[路由规则](interfaces/config.md)与[流量嗅探](interfaces/config.md#流量嗅探)。
+
+`bind-address: '*'` 时 `port`、`socks-port`、`mixed-port` 在 `[::]` 上同时接收 IPv4 与 IPv6，主机没有 IPv6 时退回 `0.0.0.0`；`redir-port`、`tproxy-port` 仍只监听 IPv4。`lan-allowed-ips`/`lan-disallowed-ips` 同时作用于 TCP 接入和 UDP 来源。`tproxy` 的 UDP 按内核给出的原始目标转发，回包从原始目标地址发出，支持 IPv4 与 IPv6（需要 `CAP_NET_ADMIN`）。
 
 ## 订阅、远程规则集与 Geo 数据
 

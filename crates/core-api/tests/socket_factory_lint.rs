@@ -40,6 +40,11 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "SOCKS5 入站 UDP ASSOCIATE 监听",
     ),
     (
+        "crates/net/src/transparent.rs",
+        "socket2::Socket::new(",
+        "tproxy 入站回包套接字，以透明方式绑定在原始目标地址",
+    ),
+    (
         "crates/protocol-shadowtls/src/server.rs",
         "TcpStream::connect(",
         "ShadowTLS 服务端到握手目标的拨号，入站侧没有出站拨号配置",

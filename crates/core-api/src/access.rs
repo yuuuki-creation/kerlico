@@ -349,6 +349,7 @@ impl IngressBinding {
         {
             return Err(Error::Cancelled);
         }
+        self.admits_peer(context)?;
         let (source, decoded) = self.issuer.accept(verified)?;
         Ok((self.session(source, context), decoded))
     }
@@ -362,12 +363,21 @@ impl IngressBinding {
         {
             return Err(Error::Cancelled);
         }
+        self.admits_peer(context)?;
         Ok(self.session(
             Source::Local {
                 node: self.issuer.node().clone(),
             },
             context,
         ))
+    }
+    fn admits_peer(&self, context: &InboundContext) -> Result<()> {
+        match context.peer_addr {
+            Some(peer) if !self.lan_filter.is_empty() && !self.lan_filter.allows(peer.ip()) => {
+                Err(Error::Rejected)
+            }
+            _ => Ok(()),
+        }
     }
     fn session(&self, source: Source, context: &InboundContext) -> PeerSession {
         PeerSession {

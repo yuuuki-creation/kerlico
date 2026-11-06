@@ -156,14 +156,9 @@ fn store_slot(slot: &CompletionSlot, completion: FlowCompletion) {
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(completion);
 }
 
-/// 新建立操作沿用会话取消域，期限从嗅探结束时重新计算。
-pub(crate) fn later_context(
-    identity: &SessionIdentity,
-    context: &ConnectContext,
-) -> ConnectContext {
-    context
-        .new_operation(context.timeout)
-        .with_cancel(identity.cancel())
+/// 嗅探结束后的建立沿用原取消域，期限从此刻重新计算。
+pub(crate) fn later_context(context: &ConnectContext) -> ConnectContext {
+    context.new_operation(context.timeout)
 }
 
 pub(crate) type TcpOpener =
@@ -523,7 +518,10 @@ impl DatagramAssociationSender for LazyAssociationSender {
             }
             let (original, plan) = self.first.as_ref().expect("首个目标已记录");
             let first = original.target().clone();
-            let pending = self.pending.as_mut().expect("首个目标已记录");
+            // 首个目标建立失败后关联不再重试。
+            let Some(pending) = self.pending.as_mut() else {
+                return Err(Error::Rejected);
+            };
             let Some(result) = pending.push(packet, target, &first) else {
                 return Ok(());
             };
@@ -531,6 +529,7 @@ impl DatagramAssociationSender for LazyAssociationSender {
                 Some(plan) => plan.apply(self.identity.sniff_policy(), original.clone(), result),
                 None => original.clone(),
             };
+            let buffered = self.pending.take().map(|p| p.buffered).unwrap_or_default();
             let association = self
                 .dispatcher
                 .association(&self.identity, Some(original), &self.context)?
@@ -540,7 +539,6 @@ impl DatagramAssociationSender for LazyAssociationSender {
             if let Some(tx) = self.receiver.take() {
                 let _ = tx.send(receiver);
             }
-            let buffered = self.pending.take().map(|p| p.buffered).unwrap_or_default();
             for (packet, target) in buffered {
                 sender.send_to(&packet, &target).await?;
             }

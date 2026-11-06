@@ -218,7 +218,35 @@ impl NodeCleanup {
         report
     }
 }
-fn node_socket(address: SocketAddr, udp: bool, transparent: bool) -> Result<socket2::Socket> {
+/// 双栈监听上的 IPv4 来源以 IPv4-mapped 形式出现，入站协议与日志按原生 IPv4 处理。
+fn canonical(address: SocketAddr) -> SocketAddr {
+    SocketAddr::new(address.ip().to_canonical(), address.port())
+}
+
+/// 双栈监听在主机不支持 IPv6 时退回 IPv4 未指定地址。
+fn node_listen_socket(
+    address: &mut SocketAddr,
+    udp: bool,
+    transparent: bool,
+    dual_stack: bool,
+) -> Result<socket2::Socket> {
+    match node_socket(*address, udp, transparent, dual_stack) {
+        Err(Error::Io(error)) if dual_stack && address.is_ipv6() => {
+            let fallback = SocketAddr::from(([0, 0, 0, 0], address.port()));
+            let socket = node_socket(fallback, udp, transparent, false).map_err(|_| Error::Io(error))?;
+            *address = fallback;
+            Ok(socket)
+        }
+        other => other,
+    }
+}
+
+fn node_socket(
+    address: SocketAddr,
+    udp: bool,
+    transparent: bool,
+    dual_stack: bool,
+) -> Result<socket2::Socket> {
     let socket = socket2::Socket::new(
         if address.is_ipv6() {
             socket2::Domain::IPV6
@@ -237,7 +265,7 @@ fn node_socket(address: SocketAddr, udp: bool, transparent: bool) -> Result<sock
         }),
     )?;
     if address.is_ipv6() {
-        socket.set_only_v6(true)?;
+        socket.set_only_v6(!dual_stack)?;
     }
     #[cfg(target_os = "linux")]
     if transparent {
@@ -386,12 +414,17 @@ impl Engine {
             let mut nodes = Vec::new();
             let mut node_stats = BTreeMap::new();
             for mut node in config.nodes {
-                let ingress = egress
-                    .ingress(&NodeId::parse(&node.tag)?)?
-                    .with_lan_filter(lan_filter.clone());
+                // Mihomo 的 lan-allowed-ips 只约束监听入站；TUN 等虚拟入口的来源是本机流量。
+                let ingress = egress.ingress(&NodeId::parse(&node.tag)?)?.with_lan_filter(
+                    if node.protocol.supports_virtual() {
+                        IpFilter::default()
+                    } else {
+                        lan_filter.clone()
+                    },
+                );
                 let transparent = node.protocol.transparent();
                 let tcp = if node.protocol.supports_tcp() {
-                    let socket = node_socket(node.listen, false, transparent)?;
+                    let socket = node_listen_socket(&mut node.listen, false, transparent, node.dual_stack)?;
                     socket.listen(1024)?;
                     let listener = TcpListener::from_std(socket.into())?;
                     node.listen = listener.local_addr()?;
@@ -401,7 +434,7 @@ impl Engine {
                 };
                 let udp = if node.protocol.supports_udp() {
                     let socket = Arc::new(UdpSocket::from_std(
-                        node_socket(node.listen, true, transparent)?.into(),
+                        node_listen_socket(&mut node.listen, true, transparent, node.dual_stack)?.into(),
                     )?);
                     if tcp.is_none() {
                         node.listen = socket.local_addr()?;
@@ -868,7 +901,7 @@ async fn serve_node(
                 let _=stream.set_nodelay(true);
                 let protocol=node.protocol.clone();let access=access.clone();let token=force.child_token();let stats=stats.clone();let local_stats=local_stats.clone();
                 let mut context=node_context(&limits,&node,token.clone(),&shared);
-                context.peer_addr=Some(peer_addr);context.local_addr=stream.local_addr().ok();
+                context.peer_addr=Some(canonical(peer_addr));context.local_addr=stream.local_addr().ok().map(canonical);
                 let lease = kerlico_core::PeerLease::new(token.clone(), budget)
                     .with_original_dst(original_destination(&stream));
                 context.peer_lease = Some(lease.clone());
