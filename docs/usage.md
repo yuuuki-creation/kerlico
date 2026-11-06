@@ -87,7 +87,7 @@ cargo build --locked --release -p kerlico
 
 分享链接支持 `ss://`（含 SIP002 `plugin=obfs-local`/`v2ray-plugin`）、`ssr://`、`vmess://`（v2rayN Base64 JSON 与 URL 形式）、`vless://`、`trojan://`、`hysteria2://`/`hy2://`、`hysteria://`、`tuic://`、`socks://`/`socks5://`、`http://`/`https://`、`anytls://`、`wireguard://`/`wg://`。链接参数先转成上表的 Mihomo 字段，未识别的参数报错并给出参数名。
 
-`proxy-providers` 的 `override.skip-cert-verify` 与 `override.udp` 目前直接写入 kerlico `options`，对多数类型会在编译时报错；需要时请在节点本身设置。
+`proxy-providers.<name>.override` 与 Mihomo 同序生效：先按原名做 `filter`/`exclude-filter`/`exclude-type`，再把 `tfo`、`mptcp`、`udp`、`udp-over-tcp`、`up`、`down`、`dialer-proxy`、`skip-cert-verify`、`name-cert-verify`、`interface-name`、`routing-mark`、`ip-version` 覆盖写入每个成员的 Mihomo 代理映射，随后走与手写代理相同的字段映射，因此类型不支持的取值与手写时报同样的错误（例如 trojan 的 `skip-cert-verify: true`）。改名顺序为 `proxy-name`（`pattern` 正则替换为 `target`，`$1` 引用捕获组，按列表依次执行）、`additional-prefix`、`additional-suffix`。`pattern` 使用 Rust `regex` 语法，不支持环视与反向引用。kerlico 原生成员（带 `tag`/`options`）只接受改名项，设置字段覆盖会报错；`override-expr` 不支持。
 
 ## 作为客户端
 

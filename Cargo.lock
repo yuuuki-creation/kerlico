@@ -4289,6 +4289,7 @@ dependencies = [
  "kerlico-dns",
  "kerlico-routing",
  "rand 0.8.8",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",

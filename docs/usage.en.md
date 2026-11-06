@@ -87,7 +87,7 @@ Top-level `proxies`, `proxy-providers` members (Mihomo YAML), and share links us
 
 Share links: `ss://` (including SIP002 `plugin=obfs-local`/`v2ray-plugin`), `ssr://`, `vmess://` (v2rayN Base64 JSON and URL form), `vless://`, `trojan://`, `hysteria2://`/`hy2://`, `hysteria://`, `tuic://`, `socks://`/`socks5://`, `http://`/`https://`, `anytls://`, and `wireguard://`/`wg://`. Link parameters become the Mihomo fields above first. An unknown parameter fails and the error names it.
 
-`proxy-providers` `override.skip-cert-verify` and `override.udp` are still written straight into kerlico `options`, which fails compilation for most types. Set these on the node itself.
+`proxy-providers.<name>.override` follows the Mihomo order. `filter`, `exclude-filter`, and `exclude-type` run first on the original name. Then `tfo`, `mptcp`, `udp`, `udp-over-tcp`, `up`, `down`, `dialer-proxy`, `skip-cert-verify`, `name-cert-verify`, `interface-name`, `routing-mark`, and `ip-version` overwrite the member's Mihomo proxy map. The result goes through the same field mapping as a hand-written proxy, so a value a type does not support fails with the same error (for example `skip-cert-verify: true` on trojan). Names change in this order: `proxy-name` (regex `pattern` replaced by `target`, `$1` refers to a capture group, rules run in list order), `additional-prefix`, then `additional-suffix`. `pattern` uses Rust `regex` syntax, without look-around or backreferences. Native kerlico members (with `tag` or `options`) accept only the name options, and a field override on them is an error. `override-expr` is not supported.
 
 ## As a client
 

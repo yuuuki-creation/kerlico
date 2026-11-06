@@ -54,18 +54,155 @@ pub struct HealthCheckSpec {
     pub expected_status: Option<Value>,
 }
 
+/// `proxy-name` 的一条正则替换规则，语义同 Mihomo `override.proxy-name`。
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyNameRule {
+    pub pattern: String,
+    #[serde(default)]
+    pub target: String,
+}
+
+/// `proxy-providers.<name>.override`。字段语义同 Mihomo：对每个通过过滤的成员，先把这些字段
+/// 覆盖写入原始代理映射，再走与手写代理相同的逐类型映射。
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProxyProviderOverrideSpec {
+    pub tfo: Option<bool>,
+    pub mptcp: Option<bool>,
+    pub udp: Option<bool>,
+    #[serde(alias = "udp-over-tcp")]
+    pub udp_over_tcp: Option<bool>,
+    pub up: Option<Value>,
+    pub down: Option<Value>,
+    #[serde(alias = "dialer-proxy", alias = "detour")]
+    pub dialer_proxy: Option<String>,
+    #[serde(alias = "skip-cert-verify")]
+    pub skip_cert_verify: Option<bool>,
+    #[serde(alias = "name-cert-verify")]
+    pub name_cert_verify: Option<String>,
+    #[serde(alias = "interface-name")]
+    pub interface_name: Option<String>,
+    #[serde(alias = "routing-mark")]
+    pub routing_mark: Option<u64>,
+    #[serde(alias = "ip-version")]
+    pub ip_version: Option<String>,
     #[serde(alias = "additional-prefix")]
     pub additional_prefix: Option<String>,
     #[serde(alias = "additional-suffix")]
     pub additional_suffix: Option<String>,
-    #[serde(alias = "skip-cert-verify")]
-    pub skip_cert_verify: Option<bool>,
-    pub udp: Option<bool>,
-    #[serde(alias = "dialer-proxy", alias = "detour")]
-    pub dialer_proxy: Option<String>,
+    #[serde(alias = "proxy-name")]
+    pub proxy_name: Vec<ProxyNameRule>,
+}
+
+impl ProxyProviderOverrideSpec {
+    fn compile(&self) -> Result<CompiledOverride<'_>> {
+        let mut names = Vec::with_capacity(self.proxy_name.len());
+        for rule in &self.proxy_name {
+            let re = regex::Regex::new(&rule.pattern).map_err(|e| {
+                Error::Config(format!(
+                    "override.proxy-name 正则不合法：{}：{e}",
+                    rule.pattern
+                ))
+            })?;
+            names.push((re, braced_numeric_refs(&rule.target)));
+        }
+        let fields: Vec<(&'static str, Value)> = [
+            ("tfo", self.tfo.map(Value::from)),
+            ("mptcp", self.mptcp.map(Value::from)),
+            ("udp", self.udp.map(Value::from)),
+            ("udp-over-tcp", self.udp_over_tcp.map(Value::from)),
+            ("up", self.up.clone()),
+            ("down", self.down.clone()),
+            ("dialer-proxy", self.dialer_proxy.clone().map(Value::from)),
+            ("skip-cert-verify", self.skip_cert_verify.map(Value::from)),
+            (
+                "name-cert-verify",
+                self.name_cert_verify.clone().map(Value::from),
+            ),
+            (
+                "interface-name",
+                self.interface_name.clone().map(Value::from),
+            ),
+            ("routing-mark", self.routing_mark.map(Value::from)),
+            ("ip-version", self.ip_version.clone().map(Value::from)),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|v| (key, v)))
+        .collect();
+        Ok(CompiledOverride {
+            spec: self,
+            names,
+            fields,
+        })
+    }
+}
+
+/// 把 `$1` 写成 `${1}`：Mihomo（regexp2）的数字引用只取数字，而 `regex` 会把 `$1_x` 读成名为 `1_x` 的组。
+fn braced_numeric_refs(target: &str) -> String {
+    let mut out = String::with_capacity(target.len());
+    let mut chars = target.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+        } else if chars.peek() == Some(&'$') {
+            out.push_str("$$");
+            chars.next();
+        } else if chars.peek().is_some_and(char::is_ascii_digit) {
+            out.push_str("${");
+            while let Some(d) = chars.next_if(char::is_ascii_digit) {
+                out.push(d);
+            }
+            out.push('}');
+        } else {
+            out.push('$');
+        }
+    }
+    out
+}
+
+struct CompiledOverride<'a> {
+    spec: &'a ProxyProviderOverrideSpec,
+    names: Vec<(regex::Regex, String)>,
+    fields: Vec<(&'static str, Value)>,
+}
+
+impl CompiledOverride<'_> {
+    /// 先覆盖字段，再依次做 `proxy-name` 替换、加前缀、加后缀（与 Mihomo `override.Apply` 同序）。
+    /// Mihomo 代理映射的字段随后交由逐类型映射校验；kerlico 原生出站只接受名称改写。
+    fn apply(&self, member: &mut Value) -> Result<()> {
+        let Value::Object(map) = member else {
+            return Ok(());
+        };
+        let native = map.contains_key("tag") || map.contains_key("options");
+        let name_key = if map.contains_key("tag") {
+            "tag"
+        } else {
+            "name"
+        };
+        if native && let Some((key, _)) = self.fields.first() {
+            return Err(Error::Config(format!(
+                "proxy-provider 成员 {} 是 kerlico 原生出站，不支持 override 字段 {key}",
+                map.get(name_key).and_then(Value::as_str).unwrap_or("?")
+            )));
+        }
+        for (key, value) in &self.fields {
+            map.insert((*key).to_owned(), value.clone());
+        }
+        let Some(Value::String(name)) = map.get_mut(name_key) else {
+            return Ok(());
+        };
+        for (re, target) in &self.names {
+            *name = re.replace_all(name, target.as_str()).into_owned();
+        }
+        if let Some(prefix) = &self.spec.additional_prefix {
+            name.insert_str(0, prefix);
+        }
+        if let Some(suffix) = &self.spec.additional_suffix {
+            name.push_str(suffix);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -174,12 +311,12 @@ impl ProxyProviderSpec {
             headers.insert(hk.clone(), vals);
         }
 
-        let mut raw_specs = Vec::new();
+        let mut members = Vec::new();
         for item in &self.payload {
             if let Some(s) = item.as_str() {
-                raw_specs.extend(parse_subscription_content(s)?);
+                members.extend(parse_subscription_members(s)?);
             } else {
-                raw_specs.push(value_to_outbound_spec(item.clone())?);
+                members.push(item.clone());
             }
         }
         let path = match self.path.as_deref().map(str::trim) {
@@ -200,39 +337,25 @@ impl ProxyProviderSpec {
             }
             let text = std::str::from_utf8(&bytes)
                 .map_err(|_| Error::Config("proxy-provider 文件不是 UTF-8".into()))?;
-            raw_specs.extend(parse_subscription_content(text)?);
+            members.extend(parse_subscription_members(text)?);
         }
 
-        let mut filtered = filter_outbound_specs(
-            raw_specs,
+        let mut members = filter_members(
+            members,
             self.filter.as_deref(),
             self.exclude_filter.as_deref(),
             self.exclude_type.as_deref(),
         )?;
         if let Some(ov) = &self.override_opts {
-            for spec in &mut filtered {
-                let mut new_tag = String::new();
-                if let Some(pre) = &ov.additional_prefix {
-                    new_tag.push_str(pre);
-                }
-                new_tag.push_str(&spec.tag);
-                if let Some(suf) = &ov.additional_suffix {
-                    new_tag.push_str(suf);
-                }
-                spec.tag = sanitize_tag(&new_tag);
-                if let Some(opts) = spec.options.as_object_mut() {
-                    if let Some(detour) = &ov.dialer_proxy {
-                        opts.insert("detour".into(), Value::String(detour.clone()));
-                    }
-                    if let Some(scv) = ov.skip_cert_verify {
-                        opts.insert("skip-cert-verify".into(), Value::Bool(scv));
-                    }
-                    if let Some(u) = ov.udp {
-                        opts.insert("udp".into(), Value::Bool(u));
-                    }
-                }
+            let ov = ov.compile()?;
+            for member in &mut members {
+                ov.apply(member)?;
             }
         }
+        let filtered = members
+            .into_iter()
+            .map(value_to_outbound_spec)
+            .collect::<Result<Vec<_>>>()?;
         let mut proxy_ids = Vec::with_capacity(filtered.len());
         for spec in &filtered {
             proxy_ids.push(OutId::parse(&spec.tag)?);
@@ -336,12 +459,26 @@ fn matches_pattern(pat: &str, text: &str) -> Result<bool> {
     Ok(false)
 }
 
-pub fn filter_outbound_specs(
-    specs: Vec<OutboundSpec>,
+fn member_name(member: &Value) -> &str {
+    member
+        .get("name")
+        .or_else(|| member.get("tag"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
+fn member_kind(member: &Value) -> String {
+    let raw = member.get("type").and_then(Value::as_str).unwrap_or("");
+    normalize_outbound_kind(raw)
+}
+
+/// 在原始成员（Mihomo 映射或 kerlico 原生条目）上按名称与类型过滤，名称取改写之前的原名。
+fn filter_members(
+    members: Vec<Value>,
     filter: Option<&str>,
     exclude_filter: Option<&str>,
     exclude_type: Option<&str>,
-) -> Result<Vec<OutboundSpec>> {
+) -> Result<Vec<Value>> {
     let include_pat = filter.map(str::trim).filter(|s| !s.is_empty());
     if let Some(p) = include_pat {
         let _ = matches_pattern(p, "")?;
@@ -353,39 +490,47 @@ pub fn filter_outbound_specs(
     let excluded_types: Vec<String> = exclude_type
         .unwrap_or("")
         .split('|')
-        .map(|s| s.trim().to_ascii_lowercase())
+        .map(normalize_outbound_kind)
         .filter(|s| !s.is_empty())
         .collect();
 
     let mut out = Vec::new();
-    for spec in specs {
+    for member in members {
+        let name = member_name(&member);
         if let Some(pat) = include_pat
-            && !matches_pattern(pat, &spec.tag)?
+            && !matches_pattern(pat, name)?
         {
             continue;
         }
         if let Some(pat) = exclude_pat
-            && matches_pattern(pat, &spec.tag)?
+            && matches_pattern(pat, name)?
         {
             continue;
         }
-        let kind_lower = spec.kind.trim().to_ascii_lowercase();
-        if excluded_types.contains(&kind_lower) {
+        if excluded_types.contains(&member_kind(&member)) {
             continue;
         }
-        out.push(spec);
+        out.push(member);
     }
     Ok(out)
 }
 
 pub fn parse_subscription_content(content: &str) -> Result<Vec<OutboundSpec>> {
+    parse_subscription_members(content)?
+        .into_iter()
+        .map(value_to_outbound_spec)
+        .collect()
+}
+
+/// 解析订阅内容为未映射的原始成员：Mihomo 代理映射、kerlico 原生条目或分享链接解析结果。
+fn parse_subscription_members(content: &str) -> Result<Vec<Value>> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
     // 1. Try JSON object or array
     if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
-        return extract_specs_from_value(val);
+        return Ok(extract_members_from_value(val));
     }
     // 2. Try Base64 decoding if no whitespace/newlines or looks like base64
     let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
@@ -395,54 +540,45 @@ pub fn parse_subscription_content(content: &str) -> Result<Vec<OutboundSpec>> {
         && let Ok(decoded_str) = String::from_utf8(decoded)
         && (decoded_str.contains("://") || decoded_str.contains("proxies:"))
     {
-        return parse_subscription_content(&decoded_str);
+        return parse_subscription_members(&decoded_str);
     }
     // 3. Try URI lines if any line contains `://`
     if trimmed.lines().any(|l| l.trim().contains("://")) {
-        let mut specs = Vec::new();
+        let mut members = Vec::new();
         for (idx, line) in trimmed.lines().enumerate() {
             let l = line.trim();
             if l.is_empty() || l.starts_with('#') {
                 continue;
             }
-            specs.push(value_to_outbound_spec(crate::share_link::parse(
-                l,
-                idx + 1,
-            )?)?);
+            members.push(crate::share_link::parse(l, idx + 1)?);
         }
-        if !specs.is_empty() {
-            return Ok(specs);
+        if !members.is_empty() {
+            return Ok(members);
         }
     }
     // 4. Try YAML
     if let Ok(val) = parse_yaml_with_anchors(trimmed) {
-        return extract_specs_from_value(val);
+        return Ok(extract_members_from_value(val));
     }
     Ok(Vec::new())
 }
 
-fn extract_specs_from_value(val: Value) -> Result<Vec<OutboundSpec>> {
-    let mut out = Vec::new();
+fn extract_members_from_value(val: Value) -> Vec<Value> {
     match val {
-        Value::Array(items) => {
-            for item in items {
-                out.push(value_to_outbound_spec(item)?);
-            }
-        }
+        Value::Array(items) => items,
         Value::Object(mut map) => {
             if let Some(Value::Array(items)) =
                 map.remove("proxies").or_else(|| map.remove("outbounds"))
             {
-                for item in items {
-                    out.push(value_to_outbound_spec(item)?);
-                }
+                items
             } else if map.contains_key("name") || map.contains_key("tag") {
-                out.push(value_to_outbound_spec(Value::Object(map))?);
+                vec![Value::Object(map)]
+            } else {
+                Vec::new()
             }
         }
-        _ => {}
+        _ => Vec::new(),
     }
-    Ok(out)
 }
 
 fn value_to_outbound_spec(val: Value) -> Result<OutboundSpec> {
@@ -920,7 +1056,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_share_links_and_applies_provider_overrides() {
+    fn parses_share_links_and_applies_provider_name_and_dialer_overrides() {
         let vmess_json = r#"{"v":"2","ps":"HK%20Node","add":"hk.example.com","port":"443","id":"11111111-1111-1111-1111-111111111111","aid":"0","scy":"auto","net":"ws","type":"none","host":"hk.example.com","path":"/ws","tls":"tls","sni":"hk.example.com"}"#;
         let vmess_b64 = "eyJ2IjoiMiIsInBzIjoiSEslMjBOb2RlIiwiYWRkIjoiaGsuZXhhbXBsZS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJhaWQiOiIwIiwic2N5IjoiYXV0byIsIm5ldCI6IndzIiwidHlwZSI6Im5vbmUiLCJob3N0IjoiaGsuZXhhbXBsZS5jb20iLCJwYXRoIjoiL3dzIiwidGxzIjoidGxzIiwic25pIjoiaGsuZXhhbXBsZS5jb20ifQ==";
         let _ = vmess_json;
@@ -937,9 +1073,8 @@ mod tests {
             override_opts: Some(ProxyProviderOverrideSpec {
                 additional_prefix: Some("Sub-".into()),
                 additional_suffix: Some("-V1".into()),
-                skip_cert_verify: Some(true),
-                udp: Some(true),
                 dialer_proxy: Some("upstream-detour".into()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -947,7 +1082,7 @@ mod tests {
         assert_eq!(compiled.proxies.len(), 4);
         assert_eq!(specs[0].tag, "Sub-HK-Node-V1");
         assert_eq!(specs[0].kind, "vmess");
-        assert_eq!(specs[0].options["detour"], "upstream-detour");
+        assert_eq!(specs[0].options["dialer-proxy"], "upstream-detour");
         assert_eq!(specs[1].tag, "Sub-JP-Reality-V1");
         assert_eq!(specs[1].kind, "vless");
         assert_eq!(specs[2].tag, "Sub-US-Hy2-V1");
