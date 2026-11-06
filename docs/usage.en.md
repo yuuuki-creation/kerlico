@@ -180,7 +180,19 @@ An OpenVPN server node runs in TLS mode only and needs a server certificate and 
 
 ## TUN
 
-[examples/tun-v2.json](../examples/tun-v2.json) creates a `kerlico0` interface and hands its TCP and UDP to an outbound. It supports `auto-route`, `auto-redirect` (nftables), `strict-route`, and `auto-detect-interface` loop prevention, and pairs with Fake-IP and packet sniffing to recover domain names. It needs `CAP_NET_ADMIN` on Linux.
+[examples/tun-v2.json](../examples/tun-v2.json) creates a `kerlico0` interface and hands its TCP and UDP to an outbound. A Mihomo top-level `tun:` section works as is:
+
+```yaml
+tun:
+  enable: true
+  stack: system
+  auto-route: true
+  strict-route: true
+  auto-detect-interface: true
+  dns-hijack: [any:53, tcp://any:53]
+```
+
+On Linux, `auto-route` installs routing table 2022 and policy rules from priority 9000, one set for IPv4 and one for IPv6. `strict-route` makes an address family unreachable when the TUN has no address in it. `auto-redirect` uses nftables to hand TCP to the kernel stack. When `routing-mark` is not set, every kerlico outbound and DNS upstream socket carries mark `0x2024`, the policy rules let that mark bypass the TUN, and sockets bind the physical egress interface by default, so kerlico's own traffic does not loop into the TUN. `route-address-set` and `route-exclude-address-set` reference rule sets, and the routing table follows rule-set refreshes. `dns-hijack` only hijacks DNS queries that enter through this TUN. Stale rules in the same priority range and table are removed before start and on exit, so a restart after `kill -9` does not stack rules. All three `stack` values run on kerlico's user-space stack. It needs `CAP_NET_ADMIN`. See [TUN inbound](interfaces/tun.md).
 
 ## DNS and Fake-IP
 

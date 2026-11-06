@@ -1,9 +1,47 @@
-//! TUN 自动路由、策略路由表、`auto-redirect` 标记与 DNS 劫持规划。
+//! Linux TUN 自动路由：专用路由表、`ip rule` 优先级段与 nftables TCP 重定向。
+//!
+//! 布局沿用 sing-tun 的 Linux `auto_route`。每个地址族在 `[rule_index, rule_index + 10]`
+//! 内安装规则，`rule_index + 10` 是 `nop` 跳转终点：
+//!
+//! | 优先级 | 规则 |
+//! | --- | --- |
+//! | P | `fwmark <bypass> goto P+10`、`uidrange` / `iif` 排除、无 TUN 地址族的排除网段 |
+//! | P+1 | 非严格模式：`lookup main suppress_prefixlength 0`，局域网直连路由优先 |
+//! | P+2 | `lookup <table>`；配置 include-uid / include-interface 时逐条限定 |
+//! | P+3 | 严格模式下 TUN 没有地址的地址族：`unreachable` |
+//! | P+10 | `nop` |
+//! | fallback | `auto_redirect` 时 `lookup <table>`，供主表无路由的目标 |
+//!
+//! 路由表只放 TUN 网段：包含网段为 `dev <tun>` 路由，排除网段为 `throw` 路由，
+//! 查表落空后继续走 `nop` 之后的主表。安装前和退出时都按优先级段、表号和 nft 表名清理，
+//! 进程崩溃留下的规则在下次启动时被清掉。
 
-use kerlico_core::{Cidr, Error, Result};
+use kerlico_core::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::{
+    collections::BTreeSet,
+    fmt,
+    io::Write,
+    net::IpAddr,
+    process::{Command, Stdio},
+};
 
+pub const DEFAULT_TABLE_INDEX: u32 = 2022;
+pub const DEFAULT_RULE_INDEX: u32 = 9000;
+pub const DEFAULT_FALLBACK_RULE_INDEX: u32 = 32768;
+pub const DEFAULT_INPUT_MARK: u32 = 0x2023;
+/// 开启 auto-route 且未配置 `routing-mark` 时 kerlico 出站套接字的默认标记，与 sing-box 一致。
+pub const DEFAULT_OUTPUT_MARK: u32 = 0x2024;
+const NOP_OFFSET: u32 = 10;
+const SUPPRESS_OFFSET: u32 = 1;
+const LOOKUP_OFFSET: u32 = 2;
+const UNREACHABLE_OFFSET: u32 = 3;
+
+fn invalid(what: &str) -> Error {
+    Error::Config(format!("TUN 自动路由选项不合法：{what}"))
+}
+
+/// 配置中的标记：数字或 `0x` 十六进制字符串。
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(untagged)]
 pub enum MarkInput {
@@ -13,535 +51,805 @@ pub enum MarkInput {
 
 impl MarkInput {
     pub fn parse_u32(&self) -> Result<u32> {
-        match self {
-            Self::Number(n) => Ok(*n),
+        let value = match self {
+            Self::Number(n) => Some(*n),
             Self::Text(s) => {
                 let t = s.trim();
-                if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-                    u32::from_str_radix(hex, 16).map_err(|_| invalid())
-                } else {
-                    t.parse::<u32>().map_err(|_| invalid())
+                match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                    None => t.parse().ok(),
                 }
             }
-        }
-    }
-}
-
-pub fn default_table_index() -> u32 {
-    2022
-}
-
-pub fn default_rule_index() -> u32 {
-    9000
-}
-
-pub fn default_fallback_rule_index() -> u32 {
-    32768
-}
-
-fn invalid() -> Error {
-    Error::Config("TUN 自动化选项不合法".into())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DnsHijackProto {
-    Any,
-    Udp,
-    Tcp,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DnsHijackRule {
-    pub proto: DnsHijackProto,
-    pub target_ip: Option<IpAddr>,
-    pub port: u16,
-}
-
-impl DnsHijackRule {
-    pub fn parse(raw: &str) -> Result<Self> {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return Err(invalid());
-        }
-        let (proto, addr_part) = match trimmed.split_once("://") {
-            Some(("udp", rest)) => (DnsHijackProto::Udp, rest),
-            Some(("tcp", rest)) => (DnsHijackProto::Tcp, rest),
-            Some(("any", rest)) => (DnsHijackProto::Any, rest),
-            Some(_) => return Err(invalid()),
-            None => (DnsHijackProto::Any, trimmed),
         };
-        let (host_str, port_str) = addr_part.rsplit_once(':').ok_or_else(invalid)?;
-        let port: u16 = port_str.trim().parse().map_err(|_| invalid())?;
-        if port == 0 {
-            return Err(invalid());
+        value.filter(|v| *v != 0).ok_or_else(|| invalid("标记"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum Family {
+    V4,
+    V6,
+}
+
+impl Family {
+    pub const ALL: [Self; 2] = [Self::V4, Self::V6];
+
+    pub fn of(ip: IpAddr) -> Self {
+        if ip.is_ipv4() { Self::V4 } else { Self::V6 }
+    }
+
+    /// 内核是否启用该地址族；`ipv6.disable=1` 的主机没有 IPv6 规则表可写。
+    fn available(self) -> bool {
+        match self {
+            Self::V4 => true,
+            Self::V6 => std::path::Path::new("/proc/sys/net/ipv6").exists(),
         }
-        let host_clean = host_str
-            .trim()
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or(host_str.trim());
-        let target_ip = match host_clean.to_ascii_lowercase().as_str() {
-            "any" | "*" | "0.0.0.0" | "::" => None,
-            other => Some(other.parse::<IpAddr>().map_err(|_| invalid())?),
+    }
+
+    fn available_all() -> impl Iterator<Item = Self> {
+        Self::ALL.into_iter().filter(|f| f.available())
+    }
+
+    fn flag(self) -> &'static str {
+        match self {
+            Self::V4 => "-4",
+            Self::V6 => "-6",
+        }
+    }
+
+    fn default_prefix(self) -> Prefix {
+        match self {
+            Self::V4 => Prefix {
+                addr: IpAddr::from([0, 0, 0, 0]),
+                len: 0,
+            },
+            Self::V6 => Prefix {
+                addr: IpAddr::from([0u16; 8]),
+                len: 0,
+            },
+        }
+    }
+}
+
+/// 主机位已清零的网段，可直接交给 `ip route`。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct Prefix {
+    addr: IpAddr,
+    len: u8,
+}
+
+impl Prefix {
+    pub fn parse(text: &str) -> Result<Self> {
+        let text = text.trim();
+        let (addr, len) = match text.split_once('/') {
+            Some((addr, len)) => (addr, Some(len)),
+            None => (text, None),
         };
-        Ok(Self {
-            proto,
-            target_ip,
-            port,
-        })
+        let addr: IpAddr = addr.parse().map_err(|_| invalid(text))?;
+        if addr.to_canonical() != addr {
+            return Err(invalid(text));
+        }
+        let bits = if addr.is_ipv4() { 32 } else { 128 };
+        let len = match len {
+            Some(len) => len.parse().map_err(|_| invalid(text))?,
+            None => bits,
+        };
+        if len > bits {
+            return Err(invalid(text));
+        }
+        let addr = match addr {
+            IpAddr::V4(ip) => {
+                let mask = u32::MAX.checked_shl(32 - u32::from(len)).unwrap_or(0);
+                IpAddr::from((ip.to_bits() & mask).to_be_bytes())
+            }
+            IpAddr::V6(ip) => {
+                let mask = u128::MAX.checked_shl(128 - u32::from(len)).unwrap_or(0);
+                IpAddr::from((ip.to_bits() & mask).to_be_bytes())
+            }
+        };
+        Ok(Self { addr, len })
     }
 
-    pub fn matches(&self, is_udp: bool, dst_ip: IpAddr, dst_port: u16) -> bool {
-        if self.port != dst_port {
-            return false;
-        }
-        match (self.proto, is_udp) {
-            (DnsHijackProto::Udp, false) | (DnsHijackProto::Tcp, true) => return false,
-            _ => {}
-        }
-        self.target_ip
-            .is_none_or(|expected| expected.to_canonical() == dst_ip.to_canonical())
+    pub fn family(&self) -> Family {
+        Family::of(self.addr)
     }
 }
 
+impl fmt::Display for Prefix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.addr, self.len)
+    }
+}
+
+/// 闭区间 UID 段；接受 `1000`、`1000-2000` 与 Mihomo 的 `1000:2000`。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TunDnsMode {
-    Disabled,
-    Hijack,
-    Native,
+pub struct UidRange {
+    start: u32,
+    end: u32,
 }
 
-impl TunDnsMode {
-    pub fn parse(raw: &str) -> Result<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "disabled" | "none" | "off" => Ok(Self::Disabled),
-            "hijack" => Ok(Self::Hijack),
-            "native" => Ok(Self::Native),
-            _ => Err(invalid()),
+impl UidRange {
+    pub fn single(uid: u32) -> Self {
+        Self {
+            start: uid,
+            end: uid,
         }
+    }
+
+    pub fn parse(text: &str) -> Result<Self> {
+        let text = text.trim();
+        let (start, end) = text.split_once(['-', ':']).unwrap_or((text, text));
+        let start: u32 = start.trim().parse().map_err(|_| invalid(text))?;
+        let end: u32 = end.trim().parse().map_err(|_| invalid(text))?;
+        if start > end {
+            return Err(invalid(text));
+        }
+        Ok(Self { start, end })
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TunRoutePlan {
-    pub interface_name: String,
-    pub outbound_interface: Option<String>,
-    pub auto_route: bool,
-    pub strict_route: bool,
-    pub table_index: u32,
-    pub rule_index: u32,
-    pub include_cidrs: Vec<Cidr>,
-    pub exclude_cidrs: Vec<Cidr>,
-    pub auto_redirect: bool,
+/// 参与 TUN 路由的流量范围。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Selection {
+    pub include_uid: Vec<UidRange>,
+    pub exclude_uid: Vec<UidRange>,
+    pub include_interface: Vec<String>,
+    pub exclude_interface: Vec<String>,
+}
+
+/// 经路由表进入 TUN 的目标网段。规则集刷新时整体替换。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AddressSet {
+    pub include: BTreeSet<Prefix>,
+    pub exclude: BTreeSet<Prefix>,
+    /// 配置了包含网段或包含规则集：未包含的目标不进 TUN，即使包含集合为空。
+    pub restricted: bool,
+}
+
+/// `auto_redirect`：nftables 把经 TUN 路由的 TCP 重定向到本机监听端口。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Redirect {
     pub input_mark: u32,
-    pub output_mark: u32,
     pub fallback_rule_index: u32,
-    pub dns_mode: TunDnsMode,
-    pub dns_addresses: Vec<IpAddr>,
-    pub dns_hijack_rules: Vec<DnsHijackRule>,
-    pub auto_system_dns_to_gateway: bool,
 }
 
-impl TunRoutePlan {
-    pub fn matches_dns_hijack(&self, is_udp: bool, dst_ip: IpAddr, dst_port: u16) -> bool {
-        if self
-            .dns_hijack_rules
-            .iter()
-            .any(|r| r.matches(is_udp, dst_ip, dst_port))
-        {
-            return true;
-        }
-        if self.dns_mode == TunDnsMode::Hijack && dst_port == 53 {
-            if self.dns_addresses.is_empty() {
-                return true;
-            }
-            return self
-                .dns_addresses
-                .iter()
-                .any(|ip| ip.to_canonical() == dst_ip.to_canonical());
-        }
-        false
+/// 已校验的 Linux 自动路由计划，不含随规则集变化的网段。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoutePlan {
+    pub interface: String,
+    /// TUN 配有地址的地址族。
+    pub families: BTreeSet<Family>,
+    pub table: u32,
+    pub rule_index: u32,
+    pub strict: bool,
+    /// kerlico 自身出站套接字的标记；命中即跳过 TUN 规则。
+    pub bypass_mark: Option<u32>,
+    pub selection: Selection,
+    pub redirect: Option<Redirect>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Selector {
+    All,
+    Fwmark(u32),
+    Uid(UidRange),
+    Iif(String),
+    To(Prefix),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Action {
+    Goto(u32),
+    Lookup(u32),
+    MainSuppressDefault,
+    Unreachable,
+    Nop,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IpRule {
+    family: Family,
+    pref: u32,
+    selector: Selector,
+    action: Action,
+}
+
+impl IpRule {
+    fn batch_line(&self) -> String {
+        let selector = match &self.selector {
+            Selector::All => String::new(),
+            Selector::Fwmark(mark) => format!(" fwmark {mark:#x}"),
+            Selector::Uid(range) => format!(" uidrange {}-{}", range.start, range.end),
+            Selector::Iif(name) => format!(" iif {name}"),
+            Selector::To(prefix) => format!(" to {prefix}"),
+        };
+        let action = match self.action {
+            Action::Goto(pref) => format!("goto {pref}"),
+            Action::Lookup(table) => format!("lookup {table}"),
+            Action::MainSuppressDefault => "lookup main suppress_prefixlength 0".into(),
+            Action::Unreachable => "unreachable".into(),
+            Action::Nop => "nop".into(),
+        };
+        format!("rule add pref {}{selector} {action}", self.pref)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+enum RouteKind {
+    /// 网段进入 TUN。
+    Device,
+    /// 网段在本表落空，继续后续规则。
+    Throw,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct Route {
+    prefix: Prefix,
+    kind: RouteKind,
+}
+
+impl RoutePlan {
+    fn nop(&self) -> u32 {
+        self.rule_index + NOP_OFFSET
     }
 
-    /// 生成激活 TUN 路由表、策略路由与系统 DNS 的幂等命令序列。
-    pub fn setup_commands(&self) -> Vec<(String, Vec<String>)> {
-        let mut cmds = Vec::new();
-        if self.auto_route {
-            let table = self.table_index.to_string();
-            let pref = self.rule_index.to_string();
-            cmds.push((
-                "ip".into(),
-                vec![
-                    "route".into(),
-                    "replace".into(),
-                    "default".into(),
-                    "dev".into(),
-                    self.interface_name.clone(),
-                    "table".into(),
-                    table.clone(),
-                ],
-            ));
-            for cidr in &self.exclude_cidrs {
-                let flag = if cidr.is_ipv6() { "-6" } else { "-4" };
-                cmds.push((
-                    "ip".into(),
-                    vec![
-                        flag.into(),
-                        "rule".into(),
-                        "add".into(),
-                        "to".into(),
-                        cidr.to_string(),
-                        "lookup".into(),
-                        "main".into(),
-                        "pref".into(),
-                        pref.clone(),
-                    ],
-                ));
+    fn fallback(&self) -> Option<u32> {
+        self.redirect.map(|r| r.fallback_rule_index)
+    }
+
+    fn owns(&self, pref: u32, table: Option<u32>) -> bool {
+        (self.rule_index..=self.nop()).contains(&pref)
+            || (self.fallback() == Some(pref) && table == Some(self.table))
+    }
+
+    /// 按安装顺序排列：先 `nop` 终点和跳过规则，最后才是把流量导入 TUN 的规则。
+    fn rules(&self, set: &AddressSet) -> Vec<IpRule> {
+        let mut rules = Vec::new();
+        let p = self.rule_index;
+        let skip = Action::Goto(self.nop());
+        for family in Family::ALL {
+            let routed = self.families.contains(&family);
+            if !routed && !self.strict {
+                continue;
             }
-            if self.include_cidrs.is_empty() {
-                cmds.push((
-                    "ip".into(),
-                    vec![
-                        "rule".into(),
-                        "add".into(),
-                        "lookup".into(),
-                        table,
-                        "pref".into(),
-                        pref,
-                    ],
-                ));
+            let mut push = |pref, selector, action| {
+                rules.push(IpRule {
+                    family,
+                    pref,
+                    selector,
+                    action,
+                })
+            };
+            push(self.nop(), Selector::All, Action::Nop);
+            if let Some(mark) = self.bypass_mark {
+                push(p, Selector::Fwmark(mark), skip);
+            }
+            for range in &self.selection.exclude_uid {
+                push(p, Selector::Uid(*range), skip);
+            }
+            for name in &self.selection.exclude_interface {
+                push(p, Selector::Iif(name.clone()), skip);
+            }
+            if !routed {
+                for prefix in set.exclude.iter().filter(|x| x.family() == family) {
+                    push(p, Selector::To(*prefix), skip);
+                }
+                push(p + UNREACHABLE_OFFSET, Selector::All, Action::Unreachable);
+                continue;
+            }
+            if !self.strict {
+                push(
+                    p + SUPPRESS_OFFSET,
+                    Selector::All,
+                    Action::MainSuppressDefault,
+                );
+            }
+            let lookup = Action::Lookup(self.table);
+            let selection = &self.selection;
+            if selection.include_uid.is_empty() && selection.include_interface.is_empty() {
+                push(p + LOOKUP_OFFSET, Selector::All, lookup);
             } else {
-                for cidr in &self.include_cidrs {
-                    let flag = if cidr.is_ipv6() { "-6" } else { "-4" };
-                    cmds.push((
-                        "ip".into(),
-                        vec![
-                            flag.into(),
-                            "rule".into(),
-                            "add".into(),
-                            "to".into(),
-                            cidr.to_string(),
-                            "lookup".into(),
-                            table.clone(),
-                            "pref".into(),
-                            pref.clone(),
-                        ],
-                    ));
+                for range in &selection.include_uid {
+                    push(p + LOOKUP_OFFSET, Selector::Uid(*range), lookup);
+                }
+                for name in &selection.include_interface {
+                    push(p + LOOKUP_OFFSET, Selector::Iif(name.clone()), lookup);
                 }
             }
-        }
-        if self.auto_system_dns_to_gateway && !self.dns_addresses.is_empty() {
-            let mut args = vec!["dns".into(), self.interface_name.clone()];
-            for ip in &self.dns_addresses {
-                args.push(ip.to_string());
+            if let Some(fallback) = self.fallback() {
+                push(fallback, Selector::All, lookup);
             }
-            cmds.push(("resolvectl".into(), args));
         }
-        cmds
+        rules
     }
 
-    /// 生成卸载 TUN 路由表与策略路由的幂等恢复命令序列。
-    pub fn teardown_commands(&self) -> Vec<(String, Vec<String>)> {
-        let mut cmds = Vec::new();
-        if self.auto_system_dns_to_gateway && !self.dns_addresses.is_empty() {
-            cmds.push((
-                "resolvectl".into(),
-                vec!["revert".into(), self.interface_name.clone()],
-            ));
+    fn routes(&self, set: &AddressSet) -> BTreeSet<Route> {
+        let mut routes = BTreeSet::new();
+        for family in self.families.iter().copied() {
+            let mut include: Vec<Prefix> = set
+                .include
+                .iter()
+                .filter(|p| p.family() == family)
+                .copied()
+                .collect();
+            if include.is_empty() && !set.restricted {
+                include.push(family.default_prefix());
+            }
+            for prefix in include {
+                routes.insert(Route {
+                    prefix,
+                    kind: RouteKind::Device,
+                });
+            }
+            for prefix in set.exclude.iter().filter(|p| p.family() == family) {
+                routes.insert(Route {
+                    prefix: *prefix,
+                    kind: RouteKind::Throw,
+                });
+            }
         }
-        if self.auto_route {
-            let table = self.table_index.to_string();
-            let pref = self.rule_index.to_string();
-            cmds.push((
-                "ip".into(),
-                vec!["rule".into(), "del".into(), "pref".into(), pref],
-            ));
-            cmds.push((
-                "ip".into(),
-                vec!["route".into(), "flush".into(), "table".into(), table],
-            ));
-        }
-        cmds
+        routes
     }
 
-    /// 激活路由与 DNS 计划，返回在 Drop 时自动清理的守卫。
-    pub fn activate(&self) -> TunRouteGuard {
-        for (prog, args) in self.setup_commands() {
-            let _ = std::process::Command::new(&prog)
-                .args(&args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+    fn route_line(&self, verb: &str, route: &Route) -> String {
+        match route.kind {
+            RouteKind::Device => format!(
+                "route {verb} {} dev {} table {}",
+                route.prefix, self.interface, self.table
+            ),
+            RouteKind::Throw => format!("route {verb} throw {} table {}", route.prefix, self.table),
         }
-        TunRouteGuard { plan: self.clone() }
+    }
+
+    fn nft_table(&self) -> String {
+        format!("kerlico_{}", self.interface.replace('-', "_"))
+    }
+
+    fn nft_script(&self, port: u16) -> Option<String> {
+        let redirect = self.redirect?;
+        let table = self.nft_table();
+        let tun = &self.interface;
+        let mark = redirect.input_mark;
+        let bypass = self
+            .bypass_mark
+            .map(|m| format!("    meta mark {m:#x} return\n"))
+            .unwrap_or_default();
+        Some(format!(
+            "add table inet {table}\n\
+             delete table inet {table}\n\
+             table inet {table} {{\n\
+             \x20 chain output {{\n\
+             \x20   type nat hook output priority -101; policy accept;\n\
+             {bypass}\
+             \x20   oifname \"{tun}\" meta l4proto tcp ct mark set {mark:#x} redirect to :{port}\n\
+             \x20 }}\n\
+             \x20 chain prerouting {{\n\
+             \x20   type nat hook prerouting priority -101; policy accept;\n\
+             \x20   iifname \"{tun}\" return\n\
+             \x20   fib daddr type local return\n\
+             \x20   meta l4proto tcp fib daddr . mark . iif oifname \"{tun}\" ct mark set {mark:#x} redirect to :{port}\n\
+             \x20 }}\n\
+             }}\n"
+        ))
     }
 }
 
-pub struct TunRouteGuard {
-    plan: TunRoutePlan,
+/// 运行一条外部命令，非零退出码连同标准错误一起作为错误返回。
+fn run(program: &str, args: &[&str], stdin: Option<&str>) -> Result<String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::Config(format!("无法执行 {program}：{e}")))?;
+    if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        pipe.write_all(input.as_bytes())?;
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(Error::Config(format!(
+            "{program} {} 失败：{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-impl Drop for TunRouteGuard {
+fn ip_batch(family: Family, lines: &[String], force: bool) -> Result<()> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec![family.flag()];
+    if force {
+        args.push("-force");
+    }
+    args.extend(["-batch", "-"]);
+    run("ip", &args, Some(&(lines.join("\n") + "\n"))).map(drop)
+}
+
+#[derive(Deserialize)]
+struct ListedRule {
+    priority: u32,
+    #[serde(default)]
+    table: Option<serde_json::Value>,
+}
+
+impl ListedRule {
+    fn table(&self) -> Option<u32> {
+        match self.table.as_ref()? {
+            serde_json::Value::Number(n) => n.as_u64().and_then(|n| u32::try_from(n).ok()),
+            serde_json::Value::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
+}
+
+fn owned_rules(plan: &RoutePlan, family: Family) -> Result<Vec<ListedRule>> {
+    let text = run("ip", &[family.flag(), "-j", "rule", "show"], None)?;
+    let rules: Vec<ListedRule> = serde_json::from_str(text.trim())
+        .map_err(|_| Error::Config("无法解析 ip -j rule show 输出".into()))?;
+    Ok(rules
+        .into_iter()
+        .filter(|r| plan.owns(r.priority, r.table()))
+        .collect())
+}
+
+fn table_routes(plan: &RoutePlan, family: Family) -> Result<usize> {
+    let table = plan.table.to_string();
+    // 指定不存在的表号时 `ip route show table N` 报错，`table all` 不会。
+    let text = run(
+        "ip",
+        &[family.flag(), "route", "show", "table", "all"],
+        None,
+    )?;
+    Ok(text
+        .lines()
+        .filter(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            words.windows(2).any(|w| w == ["table", table.as_str()])
+        })
+        .count())
+}
+
+fn nft_tables() -> Option<String> {
+    run("nft", &["list", "tables"], None).ok()
+}
+
+/// 删除本计划优先级段内的全部规则、清空路由表并删除 nft 表，再核对系统里确实没有残留。
+/// 重复执行或在半安装状态下执行都收敛到同一结果。
+pub fn cleanup(plan: &RoutePlan) -> Result<()> {
+    for family in Family::available_all() {
+        let mut lines: Vec<String> = owned_rules(plan, family)?
+            .iter()
+            .map(|r| match r.table() {
+                Some(table) => format!("rule del pref {} table {table}", r.priority),
+                None => format!("rule del pref {}", r.priority),
+            })
+            .collect();
+        lines.push(format!("route flush table {}", plan.table));
+        ip_batch(family, &lines, true).ok();
+    }
+    let table = plan.nft_table();
+    if nft_tables().is_some_and(|t| t.contains(&format!("inet {table}"))) {
+        run("nft", &["delete", "table", "inet", &table], None)?;
+    }
+    for family in Family::available_all() {
+        let left = owned_rules(plan, family)?.len();
+        let routes = table_routes(plan, family)?;
+        if left > 0 || routes > 0 {
+            return Err(Error::Config(format!(
+                "TUN 路由清理后仍有 {left} 条规则与 {routes} 条表 {} 路由残留",
+                plan.table
+            )));
+        }
+    }
+    if nft_tables().is_some_and(|t| t.contains(&format!("inet {table}"))) {
+        return Err(Error::Config(format!("nft 表 {table} 清理后仍存在")));
+    }
+    Ok(())
+}
+
+/// 已安装到系统的 TUN 路由。丢弃时清理。
+pub struct Installed {
+    plan: RoutePlan,
+    routes: BTreeSet<Route>,
+    rules: Vec<IpRule>,
+}
+
+impl Installed {
+    /// 先清理同一优先级段与表号的旧状态（含崩溃残留），再安装路由表、规则与 nft 重定向。
+    pub fn install(plan: &RoutePlan, set: &AddressSet, redirect_port: Option<u16>) -> Result<Self> {
+        if !cfg!(target_os = "linux") {
+            return Err(Error::Unsupported("TUN 自动路由仅支持 Linux"));
+        }
+        cleanup(plan)?;
+        let mut installed = Self {
+            plan: plan.clone(),
+            routes: BTreeSet::new(),
+            rules: Vec::new(),
+        };
+        installed.apply(set, redirect_port)?;
+        Ok(installed)
+    }
+
+    fn apply(&mut self, set: &AddressSet, redirect_port: Option<u16>) -> Result<()> {
+        let routes = self.plan.routes(set);
+        for family in self.plan.families.iter().copied() {
+            let lines: Vec<String> = routes
+                .iter()
+                .filter(|r| r.prefix.family() == family)
+                .map(|r| self.plan.route_line("replace", r))
+                .collect();
+            ip_batch(family, &lines, false)?;
+        }
+        self.routes = routes;
+        if let Some(script) = redirect_port.and_then(|port| self.plan.nft_script(port)) {
+            run("nft", &["-f", "-"], Some(&script))?;
+        }
+        let rules = self.plan.rules(set);
+        for family in Family::available_all() {
+            let lines: Vec<String> = rules
+                .iter()
+                .filter(|r| r.family == family)
+                .map(IpRule::batch_line)
+                .collect();
+            ip_batch(family, &lines, false)?;
+        }
+        self.rules = rules;
+        Ok(())
+    }
+
+    /// 规则集刷新后按差异更新路由表：先加新网段再删旧网段，期间不出现空表。
+    pub fn update(&mut self, set: &AddressSet) -> Result<()> {
+        let routes = self.plan.routes(set);
+        let rules = self.plan.rules(set);
+        if rules != self.rules {
+            // 无地址族的排除规则随网段变化，整体重装该段规则。
+            let old: Vec<IpRule> = std::mem::take(&mut self.rules);
+            for family in Family::available_all() {
+                let added: Vec<String> = rules
+                    .iter()
+                    .filter(|r| r.family == family && !old.contains(r))
+                    .map(IpRule::batch_line)
+                    .collect();
+                ip_batch(family, &added, false)?;
+                let removed: Vec<String> = old
+                    .iter()
+                    .filter(|r| r.family == family && !rules.contains(r))
+                    .map(|r| r.batch_line().replacen("rule add", "rule del", 1))
+                    .collect();
+                ip_batch(family, &removed, true)?;
+            }
+            self.rules = rules;
+        }
+        for family in self.plan.families.iter().copied() {
+            let added: Vec<String> = routes
+                .difference(&self.routes)
+                .filter(|r| r.prefix.family() == family)
+                .map(|r| self.plan.route_line("replace", r))
+                .collect();
+            ip_batch(family, &added, false)?;
+            let removed: Vec<String> = self
+                .routes
+                .difference(&routes)
+                .filter(|r| r.prefix.family() == family)
+                .filter(|r| !routes.iter().any(|n| n.prefix == r.prefix))
+                .map(|r| self.plan.route_line("del", r))
+                .collect();
+            ip_batch(family, &removed, true)?;
+        }
+        self.routes = routes;
+        Ok(())
+    }
+}
+
+impl Drop for Installed {
     fn drop(&mut self) {
-        for (prog, args) in self.plan.teardown_commands() {
-            let _ = std::process::Command::new(&prog)
-                .args(&args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+        if let Err(error) = cleanup(&self.plan) {
+            kerlico_core::log::warning(format!("TUN 路由清理失败：{error}"));
         }
     }
 }
 
-/// 从 Linux `/proc/net/route` 与 `/proc/net/ipv6_route` 文本解析系统默认物理出网网卡。
-pub fn parse_linux_default_interface(proc_v4: &str, proc_v6: &str) -> Option<String> {
-    for line in proc_v4.lines().skip(1) {
-        let mut cols = line.split_whitespace();
-        let Some(iface) = cols.next() else {
-            continue;
-        };
-        let Some(dest) = cols.next() else {
-            continue;
-        };
-        if dest == "00000000" && !is_virtual_or_loopback_if(iface) {
-            return Some(iface.to_owned());
+/// 把系统 DNS 指向 TUN 网关（systemd-resolved）。失败只告警，不阻止 TUN 启动。
+pub struct SystemDns {
+    interface: String,
+}
+
+impl SystemDns {
+    pub fn apply(interface: &str, servers: &[IpAddr]) -> Option<Self> {
+        if servers.is_empty() {
+            return None;
         }
-    }
-    for line in proc_v6.lines() {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() >= 10 {
-            let dest = cols[0];
-            let prefix = cols[1];
-            let iface = cols[9];
-            if dest == "00000000000000000000000000000000"
-                && prefix == "00"
-                && !is_virtual_or_loopback_if(iface)
-            {
-                return Some(iface.to_owned());
+        let servers: Vec<String> = servers.iter().map(IpAddr::to_string).collect();
+        let mut args = vec!["dns", interface];
+        args.extend(servers.iter().map(String::as_str));
+        let domain = run("resolvectl", &args, None)
+            .and_then(|_| run("resolvectl", &["domain", interface, "~."], None));
+        match domain {
+            Ok(_) => Some(Self {
+                interface: interface.to_owned(),
+            }),
+            Err(error) => {
+                kerlico_core::log::warning(format!("TUN 系统 DNS 设置失败：{error}"));
+                None
             }
         }
     }
-    None
 }
 
-fn is_virtual_or_loopback_if(iface: &str) -> bool {
-    iface == "lo"
-        || iface.starts_with("tun")
-        || iface.starts_with("utun")
-        || iface.starts_with("kerlico")
-        || iface.starts_with("wg")
-}
-
-/// 探测当前主机默认物理出网网卡名。
-pub fn detect_default_interface() -> Option<String> {
-    let v4 = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
-    let v6 = std::fs::read_to_string("/proc/net/ipv6_route").unwrap_or_default();
-    parse_linux_default_interface(&v4, &v6)
-}
-
-/// 编译并校验 TUN 自动化路由、重定向与 DNS 计划。
-#[allow(clippy::too_many_arguments)]
-pub fn compile_route_plan(
-    interface_name: &str,
-    gateways: &[IpAddr],
-    auto_detect_interface: bool,
-    auto_outbounds_interface: Option<&str>,
-    auto_route: bool,
-    auto_system_routing_table: &[String],
-    strict_route: bool,
-    table_index: u32,
-    rule_index: u32,
-    route_address: &[String],
-    inet4_route_address: &[String],
-    inet6_route_address: &[String],
-    route_exclude_address: &[String],
-    inet4_route_exclude_address: &[String],
-    inet6_route_exclude_address: &[String],
-    auto_redirect: bool,
-    input_mark: Option<&MarkInput>,
-    output_mark: Option<&MarkInput>,
-    fallback_rule_index: u32,
-    dns_hijack: &[String],
-    dns_mode_raw: Option<&str>,
-    dns_address: &[IpAddr],
-    dns: &[IpAddr],
-    auto_system_dns_to_gateway: bool,
-) -> Result<TunRoutePlan> {
-    if table_index == 0 || rule_index == 0 || fallback_rule_index == 0 {
-        return Err(invalid());
-    }
-    let input_mark_val = match input_mark {
-        Some(m) => m.parse_u32()?,
-        None => 0x2023,
-    };
-    let output_mark_val = match output_mark {
-        Some(m) => m.parse_u32()?,
-        None => 0x2024,
-    };
-    if auto_redirect
-        && (input_mark_val == 0 || output_mark_val == 0 || input_mark_val == output_mark_val)
-    {
-        return Err(invalid());
-    }
-
-    let mut include_cidrs = Vec::new();
-    for raw in route_address.iter().chain(auto_system_routing_table.iter()) {
-        include_cidrs.push(Cidr::parse(raw).map_err(|_| invalid())?);
-    }
-    for raw in inet4_route_address {
-        let cidr = Cidr::parse(raw).map_err(|_| invalid())?;
-        if !raw.parse::<Ipv4Addr>().is_ok() && !raw.contains('.') {
-            return Err(invalid());
-        }
-        include_cidrs.push(cidr);
-    }
-    for raw in inet6_route_address {
-        let cidr = Cidr::parse(raw).map_err(|_| invalid())?;
-        if !raw.parse::<Ipv6Addr>().is_ok() && !raw.contains(':') {
-            return Err(invalid());
-        }
-        include_cidrs.push(cidr);
-    }
-
-    if (auto_route || auto_redirect) && include_cidrs.is_empty() {
-        for gw in gateways {
-            if gw.is_ipv4() {
-                include_cidrs.push(Cidr::parse("0.0.0.0/0").map_err(|_| invalid())?);
-            } else {
-                include_cidrs.push(Cidr::parse("::/0").map_err(|_| invalid())?);
-            }
+impl Drop for SystemDns {
+    fn drop(&mut self) {
+        if let Err(error) = run("resolvectl", &["revert", &self.interface], None) {
+            kerlico_core::log::warning(format!("TUN 系统 DNS 恢复失败：{error}"));
         }
     }
-
-    let mut exclude_cidrs = Vec::new();
-    for raw in route_exclude_address {
-        exclude_cidrs.push(Cidr::parse(raw).map_err(|_| invalid())?);
-    }
-    for raw in inet4_route_exclude_address {
-        if !raw.contains('.') {
-            return Err(invalid());
-        }
-        exclude_cidrs.push(Cidr::parse(raw).map_err(|_| invalid())?);
-    }
-    for raw in inet6_route_exclude_address {
-        if !raw.contains(':') {
-            return Err(invalid());
-        }
-        exclude_cidrs.push(Cidr::parse(raw).map_err(|_| invalid())?);
-    }
-
-    let mut dns_hijack_rules = Vec::with_capacity(dns_hijack.len());
-    for raw in dns_hijack {
-        dns_hijack_rules.push(DnsHijackRule::parse(raw)?);
-    }
-
-    let dns_mode = match dns_mode_raw {
-        Some(m) => TunDnsMode::parse(m)?,
-        None => {
-            if !dns_hijack_rules.is_empty() || auto_route || !auto_system_routing_table.is_empty() {
-                TunDnsMode::Hijack
-            } else {
-                TunDnsMode::Disabled
-            }
-        }
-    };
-
-    let mut dns_addresses: Vec<IpAddr> = dns_address.iter().chain(dns.iter()).copied().collect();
-    if dns_addresses.is_empty() && (dns_mode != TunDnsMode::Disabled || auto_system_dns_to_gateway)
-    {
-        dns_addresses.extend_from_slice(gateways);
-    }
-
-    let outbound_interface = match auto_outbounds_interface {
-        Some(name) if !name.trim().is_empty() && !name.eq_ignore_ascii_case("auto") => {
-            Some(name.trim().to_owned())
-        }
-        Some(_) => detect_default_interface(),
-        None if auto_detect_interface => detect_default_interface(),
-        None => None,
-    };
-
-    Ok(TunRoutePlan {
-        interface_name: interface_name.to_owned(),
-        outbound_interface,
-        auto_route: auto_route || !auto_system_routing_table.is_empty(),
-        strict_route,
-        table_index,
-        rule_index,
-        include_cidrs,
-        exclude_cidrs,
-        auto_redirect,
-        input_mark: input_mark_val,
-        output_mark: output_mark_val,
-        fallback_rule_index,
-        dns_mode,
-        dns_addresses,
-        dns_hijack_rules,
-        auto_system_dns_to_gateway,
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn plan(strict: bool, families: &[Family]) -> RoutePlan {
+        RoutePlan {
+            interface: "kerlico0".into(),
+            families: families.iter().copied().collect(),
+            table: DEFAULT_TABLE_INDEX,
+            rule_index: DEFAULT_RULE_INDEX,
+            strict,
+            bypass_mark: Some(DEFAULT_OUTPUT_MARK),
+            selection: Selection::default(),
+            redirect: None,
+        }
+    }
+
+    fn lines(plan: &RoutePlan, set: &AddressSet, family: Family) -> Vec<String> {
+        plan.rules(set)
+            .iter()
+            .filter(|r| r.family == family)
+            .map(IpRule::batch_line)
+            .collect()
+    }
+
     #[test]
-    fn parses_linux_default_interface_and_builds_tun_route_plan() {
-        let proc_v4 = "\
-Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
-lo\t00000000\t00000000\t0001\t0\t0\t1000\t00000000\t0\t0\t0
-kerlico0\t00000000\t00000000\t0001\t0\t0\t10\t00000000\t0\t0\t0
-eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
-";
+    fn strict_route_without_ipv6_address_makes_ipv6_unreachable() {
+        let plan = plan(true, &[Family::V4]);
+        let set = AddressSet::default();
         assert_eq!(
-            parse_linux_default_interface(proc_v4, "").as_deref(),
-            Some("eth0")
+            lines(&plan, &set, Family::V4),
+            [
+                "rule add pref 9010 nop",
+                "rule add pref 9000 fwmark 0x2024 goto 9010",
+                "rule add pref 9002 lookup 2022",
+            ]
         );
+        assert_eq!(
+            lines(&plan, &set, Family::V6),
+            [
+                "rule add pref 9010 nop",
+                "rule add pref 9000 fwmark 0x2024 goto 9010",
+                "rule add pref 9003 unreachable",
+            ]
+        );
+        let routes: Vec<String> = plan
+            .routes(&set)
+            .iter()
+            .map(|r| plan.route_line("replace", r))
+            .collect();
+        assert_eq!(routes, ["route replace 0.0.0.0/0 dev kerlico0 table 2022"]);
+    }
 
-        let gw = vec!["198.18.0.2".parse::<IpAddr>().unwrap()];
-        let plan = compile_route_plan(
-            "kerlico0",
-            &gw,
-            true,
-            Some("eth0"),
-            true,
-            &[],
-            true,
-            2022,
-            9000,
-            &["10.0.0.0/8".into()],
-            &["172.16.0.0/12".into()],
-            &["fd00::/8".into()],
-            &["192.168.0.0/16".into()],
-            &["100.64.0.0/10".into()],
-            &["fe80::/10".into()],
-            true,
-            Some(&MarkInput::Text("0x2023".into())),
-            Some(&MarkInput::Number(0x2024)),
-            32768,
-            &["any:53".into(), "tcp://1.1.1.1:53".into()],
-            Some("hijack"),
-            &[],
-            &[],
-            true,
-        )
-        .unwrap();
+    #[test]
+    fn non_strict_route_prefers_main_table_specific_routes() {
+        let plan = plan(false, &[Family::V4, Family::V6]);
+        let v6 = lines(&plan, &AddressSet::default(), Family::V6);
+        assert!(v6.contains(&"rule add pref 9001 lookup main suppress_prefixlength 0".into()));
+        assert!(v6.contains(&"rule add pref 9002 lookup 2022".into()));
+        assert!(!v6.iter().any(|l| l.contains("unreachable")));
+    }
 
-        assert_eq!(plan.outbound_interface.as_deref(), Some("eth0"));
-        assert!(plan.auto_route);
-        assert!(plan.strict_route);
-        assert!(plan.auto_redirect);
-        assert_eq!(plan.input_mark, 0x2023);
-        assert_eq!(plan.output_mark, 0x2024);
-        assert_eq!(plan.include_cidrs.len(), 3);
-        assert_eq!(plan.exclude_cidrs.len(), 3);
-        assert!(plan.matches_dns_hijack(true, "8.8.8.8".parse().unwrap(), 53));
-        assert!(plan.matches_dns_hijack(false, "1.1.1.1".parse().unwrap(), 53));
-        let setup = plan.setup_commands();
-        let teardown = plan.teardown_commands();
-        assert!(!setup.is_empty());
-        assert!(!teardown.is_empty());
-        assert_eq!(setup[0].0, "ip");
-        assert_eq!(teardown.last().unwrap().0, "ip");
+    #[test]
+    fn address_sets_become_device_and_throw_routes() {
+        let plan = plan(true, &[Family::V4, Family::V6]);
+        let set = AddressSet {
+            include: ["10.1.2.3/8", "fd00::1/8"]
+                .iter()
+                .map(|t| Prefix::parse(t).unwrap())
+                .collect(),
+            exclude: ["10.9.0.0/16"]
+                .iter()
+                .map(|t| Prefix::parse(t).unwrap())
+                .collect(),
+            restricted: true,
+        };
+        let routes: Vec<String> = plan
+            .routes(&set)
+            .iter()
+            .map(|r| plan.route_line("replace", r))
+            .collect();
+        assert_eq!(
+            routes,
+            [
+                "route replace 10.0.0.0/8 dev kerlico0 table 2022",
+                "route replace throw 10.9.0.0/16 table 2022",
+                "route replace fd00::/8 dev kerlico0 table 2022",
+            ]
+        );
+        let empty_restricted = AddressSet {
+            restricted: true,
+            ..AddressSet::default()
+        };
+        assert!(plan.routes(&empty_restricted).is_empty());
+    }
+
+    #[test]
+    fn uid_and_interface_filters_scope_the_lookup_rule() {
+        let mut plan = plan(true, &[Family::V4]);
+        plan.selection = Selection {
+            include_uid: vec![UidRange::parse("1000:1999").unwrap()],
+            exclude_uid: vec![UidRange::single(0)],
+            include_interface: vec!["lan0".into()],
+            exclude_interface: vec!["wg0".into()],
+        };
+        assert_eq!(
+            lines(&plan, &AddressSet::default(), Family::V4),
+            [
+                "rule add pref 9010 nop",
+                "rule add pref 9000 fwmark 0x2024 goto 9010",
+                "rule add pref 9000 uidrange 0-0 goto 9010",
+                "rule add pref 9000 iif wg0 goto 9010",
+                "rule add pref 9002 uidrange 1000-1999 lookup 2022",
+                "rule add pref 9002 iif lan0 lookup 2022",
+            ]
+        );
+    }
+
+    #[test]
+    fn auto_redirect_adds_fallback_rule_and_nft_redirect() {
+        let mut plan = plan(true, &[Family::V4]);
+        plan.redirect = Some(Redirect {
+            input_mark: DEFAULT_INPUT_MARK,
+            fallback_rule_index: DEFAULT_FALLBACK_RULE_INDEX,
+        });
+        assert!(
+            lines(&plan, &AddressSet::default(), Family::V4)
+                .contains(&"rule add pref 32768 lookup 2022".into())
+        );
+        assert!(plan.owns(32768, Some(2022)));
+        assert!(!plan.owns(32768, None));
+        assert!(plan.owns(9010, None) && !plan.owns(9011, None));
+        let script = plan.nft_script(7890).unwrap();
+        assert!(script.contains("meta mark 0x2024 return"));
+        assert!(script.contains(
+            "oifname \"kerlico0\" meta l4proto tcp ct mark set 0x2023 redirect to :7890"
+        ));
+        assert!(script.starts_with("add table inet kerlico_kerlico0\ndelete table inet"));
+    }
+
+    #[test]
+    fn parses_marks_prefixes_and_uid_ranges() {
+        assert_eq!(
+            MarkInput::Text("0x2024".into()).parse_u32().unwrap(),
+            0x2024
+        );
+        assert_eq!(MarkInput::Number(7).parse_u32().unwrap(), 7);
+        assert!(MarkInput::Number(0).parse_u32().is_err());
+        assert_eq!(
+            Prefix::parse("192.168.1.9/16").unwrap().to_string(),
+            "192.168.0.0/16"
+        );
+        assert_eq!(
+            Prefix::parse("2001:db8::1").unwrap().to_string(),
+            "2001:db8::1/128"
+        );
+        assert!(Prefix::parse("::ffff:1.2.3.4/128").is_err());
+        assert_eq!(UidRange::parse("5").unwrap(), UidRange::single(5));
+        assert!(UidRange::parse("9-1").is_err());
     }
 }

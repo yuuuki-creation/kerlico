@@ -1,21 +1,32 @@
 //! 系统 TUN 入站：把内核交来的 IP 包还原成业务流，经本地会话进入共享调度器。
 //!
-//! 支持配置虚拟接口地址、MTU、自动路由、策略表、重定向标记及 DNS 劫持规划。
+//! Linux 上 `auto_route` 由 [`automation`] 安装专用路由表与策略规则，`auto_redirect`
+//! 额外用 nftables 把 TCP 重定向到本节点监听的端口。
 pub mod automation;
 pub use automation::{
-    DnsHijackProto, DnsHijackRule, MarkInput, TunDnsMode, TunRoutePlan, compile_route_plan,
-    detect_default_interface, parse_linux_default_interface,
+    AddressSet, Family, MarkInput, Prefix, Redirect, RoutePlan, Selection, UidRange,
 };
 
+use automation::{Installed, SystemDns};
 use kerlico_config::{NodeBuildContext, NodeFactory};
 use kerlico_core::{
-    BoxFuture, CredentialManifest, Error, InboundContext, InboundProtocol, IngressBinding,
-    NodeEvent, Result,
+    BoxFuture, ConnectContext, CredentialManifest, Destination, Error, InboundContext,
+    InboundProtocol, IngressBinding, NodeEvent, OriginalTarget, PeerSession, Result,
 };
+use kerlico_routing::{CompiledRuleSet, RuleSetSlot};
 use kerlico_wireguard::ip::{ServerTunnel, StackLimits, StackOptions};
 use serde::Deserialize;
-use std::{net::IpAddr, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::net::{TcpListener, TcpStream};
 use tun_rs::DeviceBuilder;
+
+/// 规则集被资源刷新任务换入后，TUN 路由表在一个周期内跟上。
+const RULE_SET_POLL: Duration = Duration::from_secs(5);
 
 fn default_name() -> String {
     "kerlico0".into()
@@ -25,6 +36,46 @@ fn default_mtu() -> u16 {
 }
 fn default_max_flows() -> usize {
     1024
+}
+fn default_table_index() -> u32 {
+    automation::DEFAULT_TABLE_INDEX
+}
+fn default_rule_index() -> u32 {
+    automation::DEFAULT_RULE_INDEX
+}
+fn default_fallback_rule_index() -> u32 {
+    automation::DEFAULT_FALLBACK_RULE_INDEX
+}
+
+/// sing-box 与 Mihomo 的 `udp_timeout`：秒数或 `30s`、`5m` 形式的时长。
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Timeout {
+    Seconds(u64),
+    Text(String),
+}
+
+impl Timeout {
+    fn millis(&self) -> Result<u64> {
+        let seconds = match self {
+            Self::Seconds(s) => Some(*s),
+            Self::Text(t) => {
+                let t = t.trim();
+                let (number, unit) =
+                    t.split_at(t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len()));
+                let n: Option<u64> = number.parse().ok();
+                match unit {
+                    "" | "s" => n,
+                    "m" => n.and_then(|n| n.checked_mul(60)),
+                    "h" => n.and_then(|n| n.checked_mul(3600)),
+                    _ => None,
+                }
+            }
+        };
+        seconds
+            .and_then(|s| s.checked_mul(1000))
+            .ok_or_else(invalid)
+    }
 }
 
 #[derive(Deserialize)]
@@ -47,9 +98,27 @@ struct Options {
     mtu: u16,
     #[serde(default = "default_max_flows", alias = "max-flows")]
     max_flows: usize,
+    /// `system`、`gvisor`、`mixed` 都由同一个用户态栈承载。
+    #[serde(default)]
+    stack: Option<String>,
+    #[serde(default, alias = "udp-timeout")]
+    udp_timeout: Option<Timeout>,
+    /// UDP 按来源端口建立多目标关联，本身就是端点无关映射。
+    #[serde(default, alias = "endpoint-independent-nat")]
+    #[allow(dead_code)]
+    endpoint_independent_nat: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    gso: bool,
+    #[serde(default, alias = "gso-max-size")]
+    #[allow(dead_code)]
+    gso_max_size: Option<u32>,
+    /// 由配置层并入全局出站拨号选项。
     #[serde(default, alias = "auto-detect-interface")]
-    auto_detect_interface: bool,
+    #[allow(dead_code)]
+    auto_detect_interface: Option<bool>,
     #[serde(default, alias = "auto-outbounds-interface")]
+    #[allow(dead_code)]
     auto_outbounds_interface: Option<String>,
     #[serde(default, alias = "auto-route")]
     auto_route: bool,
@@ -57,15 +126,9 @@ struct Options {
     auto_system_routing_table: Vec<String>,
     #[serde(default, alias = "strict-route")]
     strict_route: bool,
-    #[serde(
-        default = "automation::default_table_index",
-        alias = "iproute2-table-index"
-    )]
+    #[serde(default = "default_table_index", alias = "iproute2-table-index")]
     iproute2_table_index: u32,
-    #[serde(
-        default = "automation::default_rule_index",
-        alias = "iproute2-rule-index"
-    )]
+    #[serde(default = "default_rule_index", alias = "iproute2-rule-index")]
     iproute2_rule_index: u32,
     #[serde(default, alias = "route-address")]
     route_address: Vec<String>,
@@ -83,20 +146,44 @@ struct Options {
     route_address_set: Vec<String>,
     #[serde(default, alias = "route-exclude-address-set")]
     route_exclude_address_set: Vec<String>,
+    #[serde(default, alias = "include-uid")]
+    include_uid: Vec<u32>,
+    #[serde(default, alias = "include-uid-range")]
+    include_uid_range: Vec<String>,
+    #[serde(default, alias = "exclude-uid")]
+    exclude_uid: Vec<u32>,
+    #[serde(default, alias = "exclude-uid-range")]
+    exclude_uid_range: Vec<String>,
+    #[serde(default, alias = "include-interface")]
+    include_interface: Vec<String>,
+    #[serde(default, alias = "exclude-interface")]
+    exclude_interface: Vec<String>,
+    /// Android 专用过滤；Linux 上记录日志后忽略。
+    #[serde(default, alias = "include-package")]
+    include_package: Vec<String>,
+    #[serde(default, alias = "exclude-package")]
+    exclude_package: Vec<String>,
+    #[serde(default, alias = "include-android-user")]
+    include_android_user: Vec<u32>,
     #[serde(default, alias = "auto-redirect")]
     auto_redirect: bool,
     #[serde(default, alias = "auto-redirect-input-mark")]
     auto_redirect_input_mark: Option<MarkInput>,
+    /// 由配置层用作 kerlico 出站套接字的默认标记。
     #[serde(default, alias = "auto-redirect-output-mark")]
+    #[allow(dead_code)]
     auto_redirect_output_mark: Option<MarkInput>,
     #[serde(
-        default = "automation::default_fallback_rule_index",
+        default = "default_fallback_rule_index",
         alias = "auto-redirect-iproute2-fallback-rule-index"
     )]
     auto_redirect_iproute2_fallback_rule_index: u32,
+    /// 由配置层编译为限定本节点的 `hijack-dns` 路由规则。
     #[serde(default, alias = "dns-hijack")]
+    #[allow(dead_code)]
     dns_hijack: Vec<String>,
     #[serde(default, alias = "dns-mode")]
+    #[allow(dead_code)]
     dns_mode: Option<String>,
     #[serde(default, alias = "dns-address")]
     dns_address: Vec<IpAddr>,
@@ -186,12 +273,160 @@ impl InterfaceAddress {
     }
 }
 
+/// auto-route 的静态计划与随规则集刷新的网段来源。
+struct Routing {
+    plan: RoutePlan,
+    include: BTreeSet<Prefix>,
+    exclude: BTreeSet<Prefix>,
+    include_sets: Vec<RuleSetSlot>,
+    exclude_sets: Vec<RuleSetSlot>,
+}
+
+type SetVersions = Vec<Arc<CompiledRuleSet>>;
+
+impl Routing {
+    fn versions(&self) -> SetVersions {
+        self.include_sets
+            .iter()
+            .chain(&self.exclude_sets)
+            .map(RuleSetSlot::load)
+            .collect()
+    }
+
+    fn address_set(&self, versions: &SetVersions) -> AddressSet {
+        let (include_versions, exclude_versions) = versions.split_at(self.include_sets.len());
+        let prefixes = |sets: &[Arc<CompiledRuleSet>]| -> Vec<Prefix> {
+            sets.iter()
+                .flat_map(|set| set.cidr_strings())
+                .filter_map(|text| Prefix::parse(&text).ok())
+                .collect()
+        };
+        let mut include = self.include.clone();
+        include.extend(prefixes(include_versions));
+        let mut exclude = self.exclude.clone();
+        exclude.extend(prefixes(exclude_versions));
+        AddressSet {
+            include,
+            exclude,
+            restricted: !self.include.is_empty() || !self.include_sets.is_empty(),
+        }
+    }
+}
+
+fn changed(old: &SetVersions, new: &SetVersions) -> bool {
+    old.iter().zip(new).any(|(a, b)| !Arc::ptr_eq(a, b))
+}
+
+/// `auto_redirect` 的 TCP 入口：nftables 把经 TUN 路由的连接重定向到这里。
+struct RedirectListeners {
+    port: u16,
+    v4: TcpListener,
+    v6: Option<TcpListener>,
+}
+
+impl RedirectListeners {
+    /// nft `redirect` 在本机发出时改写到回环地址，转发时改写到入接口主地址，因此监听全部地址。
+    /// 监听套接字带上旁路标记，接受的连接继承它，回包不会再被策略规则导入 TUN。
+    fn bind(mark: Option<u32>) -> Result<Self> {
+        let v4 = Self::listener(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)), mark)?;
+        let port = v4.local_addr()?.port();
+        let v6 = Self::listener(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)), mark).ok();
+        Ok(Self { port, v4, v6 })
+    }
+
+    fn listener(address: SocketAddr, mark: Option<u32>) -> Result<TcpListener> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::for_address(address),
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        if address.is_ipv6() {
+            socket.set_only_v6(true)?;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(mark) = mark {
+            socket.set_mark(mark)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = mark;
+        socket.set_reuse_address(true)?;
+        socket.set_nonblocking(true)?;
+        socket.bind(&address.into())?;
+        socket.listen(1024)?;
+        Ok(TcpListener::from_std(socket.into())?)
+    }
+
+    async fn accept(&self) -> std::io::Result<TcpStream> {
+        let accepted = match &self.v6 {
+            Some(v6) => tokio::select! {
+                r = self.v4.accept() => r,
+                r = v6.accept() => r,
+            },
+            None => self.v4.accept().await,
+        };
+        accepted.map(|(stream, _)| stream)
+    }
+}
+
+/// 未经 NAT 的直连没有原始目标，拒绝，避免监听端口成为开放代理。
+fn redirected_target(stream: &TcpStream) -> Option<SocketAddr> {
+    let local = stream.local_addr().ok()?;
+    let sock = socket2::SockRef::from(stream);
+    #[cfg(target_os = "linux")]
+    let original = if local.is_ipv6() {
+        sock.original_dst_v6()
+    } else {
+        sock.original_dst_v4()
+    }
+    .ok()
+    .and_then(|a| a.as_socket())?;
+    #[cfg(not(target_os = "linux"))]
+    let original = {
+        let _ = sock;
+        local
+    };
+    (original != local).then(|| SocketAddr::new(original.ip().to_canonical(), original.port()))
+}
+
+async fn relay_redirected(stream: TcpStream, access: PeerSession, context: InboundContext) {
+    let Some(target) = redirected_target(&stream) else {
+        return;
+    };
+    let access = match stream.peer_addr() {
+        Ok(peer) => access.with_observed_source(peer),
+        Err(_) => access,
+    };
+    let result = async {
+        let target = Destination::new(&target.ip().to_string(), target.port())?;
+        let budget =
+            ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
+        let remote = budget
+            .run(access.open_tcp(OriginalTarget::from_destination(target), &budget))
+            .await?;
+        stream.set_nodelay(true)?;
+        kerlico_core::relay_tcp(
+            Box::new(stream),
+            remote,
+            context.idle_timeout,
+            context.cancel.clone(),
+        )
+        .await
+    }
+    .await;
+    context.events.record(match result {
+        Ok(()) => NodeEvent::Completed,
+        Err(_) => NodeEvent::Failed,
+    });
+}
+
 struct TunNode {
     name: String,
     mtu: u16,
     max_flows: usize,
+    udp_idle_timeout_ms: Option<u64>,
     addresses: Vec<InterfaceAddress>,
-    route_plan: TunRoutePlan,
+    routing: Option<Routing>,
+    system_dns: Vec<IpAddr>,
 }
 
 impl TunNode {
@@ -207,6 +442,13 @@ impl TunNode {
     }
 
     fn stack(&self) -> Result<StackOptions> {
+        let mut limits = StackLimits {
+            max_flows: self.max_flows,
+            ..StackLimits::default()
+        };
+        if let Some(ms) = self.udp_idle_timeout_ms {
+            limits.udp_idle_timeout_ms = ms;
+        }
         Ok(StackOptions {
             addresses: self
                 .addresses
@@ -226,10 +468,7 @@ impl TunNode {
                 })
                 .collect(),
             mtu: usize::from(self.mtu),
-            limits: StackLimits {
-                max_flows: self.max_flows,
-                ..StackLimits::default()
-            },
+            limits,
         })
     }
 }
@@ -267,11 +506,32 @@ impl InboundProtocol for TunNode {
             // Engine 的 max_streams 是单条多路复用连接的上限；TUN 的流由 max_flows 和会话配额约束。
             context.max_streams = self.max_flows;
             let device = self.create()?;
-            let _route_guard = self.route_plan.activate();
             let access = ingress.local(&context)?;
+            let redirect = match &self.routing {
+                Some(routing) if routing.plan.redirect.is_some() => {
+                    Some(RedirectListeners::bind(routing.plan.bypass_mark)?)
+                }
+                _ => None,
+            };
+            let mut versions = SetVersions::new();
+            let mut installed = match &self.routing {
+                Some(routing) => {
+                    versions = routing.versions();
+                    Some(Installed::install(
+                        &routing.plan,
+                        &routing.address_set(&versions),
+                        redirect.as_ref().map(|r| r.port),
+                    )?)
+                }
+                None => None,
+            };
+            let _system_dns = SystemDns::apply(&self.name, &self.system_dns);
+            let mut poll = tokio::time::interval(RULE_SET_POLL);
             let cancel = context.cancel.clone();
             let events = context.events.clone();
-            let tunnel = ServerTunnel::new(self.stack()?, access, context)?;
+            let tasks = context.tasks.clone();
+            let redirect_context = context.clone();
+            let tunnel = ServerTunnel::new(self.stack()?, access.clone(), context)?;
             // 留出链路层余量；过长的包由内核按 MTU 截断前已被拒绝。
             let mut buffer = vec![0; usize::from(self.mtu) + 64];
             loop {
@@ -300,9 +560,70 @@ impl InboundProtocol for TunNode {
                             Err(_) => events.record(NodeEvent::Dropped),
                         }
                     }
+                    accepted = async { redirect.as_ref().expect("guarded").accept().await }, if redirect.is_some() => {
+                        if let Ok(stream) = accepted {
+                            events.record(NodeEvent::Accepted);
+                            let relay = relay_redirected(stream, access.clone(), redirect_context.clone());
+                            if tasks.spawn(relay).is_err() {
+                                events.record(NodeEvent::Dropped);
+                            }
+                        }
+                    }
+                    _ = poll.tick(), if installed.is_some() => {
+                        let routing = self.routing.as_ref().expect("installed implies routing");
+                        let next = routing.versions();
+                        if changed(&versions, &next) {
+                            if let Some(installed) = installed.as_mut()
+                                && let Err(error) = installed.update(&routing.address_set(&next))
+                            {
+                                kerlico_core::log::warning(format!("TUN 路由规则集刷新失败：{error}"));
+                            }
+                            versions = next;
+                        }
+                    }
                 }
             }
         })
+    }
+}
+
+fn parse_prefixes(
+    sources: &[(&[String], Option<Family>)],
+    into: &mut BTreeSet<Prefix>,
+) -> Result<()> {
+    for (texts, family) in sources {
+        for text in texts.iter() {
+            let prefix = Prefix::parse(text)?;
+            if family.is_some_and(|f| f != prefix.family()) {
+                return Err(invalid());
+            }
+            into.insert(prefix);
+        }
+    }
+    Ok(())
+}
+
+fn rule_sets(input: &NodeBuildContext, tags: &[String]) -> Result<Vec<RuleSetSlot>> {
+    tags.iter()
+        .map(|tag| {
+            input
+                .rule_set(tag.trim())
+                .ok_or_else(|| Error::Config(format!("TUN 引用的规则集不存在：{}", tag.trim())))
+        })
+        .collect()
+}
+
+fn stack_note(stack: Option<&str>) -> Result<()> {
+    let Some(stack) = stack else {
+        return Ok(());
+    };
+    match stack.trim().to_ascii_lowercase().as_str() {
+        "gvisor" => Ok(()),
+        "system" | "mixed" | "lwip" => {
+            kerlico_core::log::info(format!("TUN stack={stack} 由 kerlico 用户态 TCP/IP 栈承载"));
+            Ok(())
+        }
+        _ => Err(Error::Config(format!("TUN stack 不支持：{stack}"))),
     }
 }
 
@@ -316,22 +637,13 @@ impl NodeFactory for TunNodeFactory {
         true
     }
     fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
-        let mut options: Options =
-            serde_json::from_value(input.options().clone()).map_err(|_| invalid())?;
-        for a4 in &options.inet4_address {
-            if !options.addresses.contains(a4) {
-                options.addresses.push(a4.clone());
+        let mut options: Options = serde_json::from_value(input.options().clone())
+            .map_err(|e| Error::Config(format!("TUN 选项不合法：{e}")))?;
+        for address in options.inet4_address.iter().chain(&options.inet6_address) {
+            if !options.addresses.contains(address) {
+                options.addresses.push(address.clone());
             }
         }
-        for a6 in &options.inet6_address {
-            if !options.addresses.contains(a6) {
-                options.addresses.push(a6.clone());
-            }
-        }
-        let _ = (
-            &options.route_address_set,
-            &options.route_exclude_address_set,
-        );
         if options.name.is_empty()
             || options.name.len() > 15
             || !options
@@ -343,6 +655,15 @@ impl NodeFactory for TunNodeFactory {
             || options.addresses.len() > 2
         {
             return Err(invalid());
+        }
+        stack_note(options.stack.as_deref())?;
+        if !options.include_package.is_empty()
+            || !options.exclude_package.is_empty()
+            || !options.include_android_user.is_empty()
+        {
+            kerlico_core::log::warning(
+                "TUN include/exclude-package 与 include-android-user 仅用于 Android，已忽略",
+            );
         }
         let addresses = options
             .addresses
@@ -356,38 +677,116 @@ impl NodeFactory for TunNodeFactory {
             .iter()
             .map(InterfaceAddress::gateway)
             .collect::<Result<Vec<_>>>()?;
-        let route_plan = compile_route_plan(
-            &options.name,
-            &gateways,
-            options.auto_detect_interface,
-            options.auto_outbounds_interface.as_deref(),
-            options.auto_route,
-            &options.auto_system_routing_table,
-            options.strict_route,
-            options.iproute2_table_index,
-            options.iproute2_rule_index,
-            &options.route_address,
-            &options.inet4_route_address,
-            &options.inet6_route_address,
-            &options.route_exclude_address,
-            &options.inet4_route_exclude_address,
-            &options.inet6_route_exclude_address,
-            options.auto_redirect,
-            options.auto_redirect_input_mark.as_ref(),
-            options.auto_redirect_output_mark.as_ref(),
-            options.auto_redirect_iproute2_fallback_rule_index,
-            &options.dns_hijack,
-            options.dns_mode.as_deref(),
-            &options.dns_address,
-            &options.dns,
-            options.auto_system_dns_to_gateway,
-        )?;
+
+        let auto_route = options.auto_route || !options.auto_system_routing_table.is_empty();
+        if options.auto_redirect && !auto_route {
+            return Err(Error::Config(
+                "TUN auto_redirect 需要同时开启 auto_route".into(),
+            ));
+        }
+        let routing = if auto_route {
+            if options.iproute2_table_index == 0
+                || options.iproute2_rule_index == 0
+                || options.iproute2_rule_index > u32::MAX - 16
+            {
+                return Err(invalid());
+            }
+            let mut include = BTreeSet::new();
+            parse_prefixes(
+                &[
+                    (&options.route_address, None),
+                    (&options.auto_system_routing_table, None),
+                    (&options.inet4_route_address, Some(Family::V4)),
+                    (&options.inet6_route_address, Some(Family::V6)),
+                ],
+                &mut include,
+            )?;
+            let mut exclude = BTreeSet::new();
+            parse_prefixes(
+                &[
+                    (&options.route_exclude_address, None),
+                    (&options.inet4_route_exclude_address, Some(Family::V4)),
+                    (&options.inet6_route_exclude_address, Some(Family::V6)),
+                ],
+                &mut exclude,
+            )?;
+            let uids = |single: &[u32], ranges: &[String]| -> Result<Vec<UidRange>> {
+                let mut out: Vec<UidRange> = single.iter().copied().map(UidRange::single).collect();
+                for text in ranges {
+                    out.push(UidRange::parse(text)?);
+                }
+                Ok(out)
+            };
+            let redirect = if options.auto_redirect {
+                let input_mark = options
+                    .auto_redirect_input_mark
+                    .as_ref()
+                    .map(MarkInput::parse_u32)
+                    .transpose()?
+                    .unwrap_or(automation::DEFAULT_INPUT_MARK);
+                if Some(input_mark) == input.routing_mark()
+                    || options.auto_redirect_iproute2_fallback_rule_index == 0
+                {
+                    return Err(invalid());
+                }
+                Some(Redirect {
+                    input_mark,
+                    fallback_rule_index: options.auto_redirect_iproute2_fallback_rule_index,
+                })
+            } else {
+                None
+            };
+            Some(Routing {
+                plan: RoutePlan {
+                    interface: options.name.clone(),
+                    families: addresses.iter().map(|a| Family::of(a.ip)).collect(),
+                    table: options.iproute2_table_index,
+                    rule_index: options.iproute2_rule_index,
+                    strict: options.strict_route,
+                    bypass_mark: input.routing_mark(),
+                    selection: Selection {
+                        include_uid: uids(&options.include_uid, &options.include_uid_range)?,
+                        exclude_uid: uids(&options.exclude_uid, &options.exclude_uid_range)?,
+                        include_interface: options.include_interface.clone(),
+                        exclude_interface: options.exclude_interface.clone(),
+                    },
+                    redirect,
+                },
+                include,
+                exclude,
+                include_sets: rule_sets(input, &options.route_address_set)?,
+                exclude_sets: rule_sets(input, &options.route_exclude_address_set)?,
+            })
+        } else {
+            None
+        };
+        let system_dns = if options.auto_system_dns_to_gateway {
+            let explicit: Vec<IpAddr> = options
+                .dns_address
+                .iter()
+                .chain(&options.dns)
+                .copied()
+                .collect();
+            if explicit.is_empty() {
+                gateways
+            } else {
+                explicit
+            }
+        } else {
+            Vec::new()
+        };
         let node = TunNode {
             name: options.name,
             mtu: options.mtu,
             max_flows: options.max_flows,
+            udp_idle_timeout_ms: options
+                .udp_timeout
+                .as_ref()
+                .map(Timeout::millis)
+                .transpose()?,
             addresses,
-            route_plan,
+            routing,
+            system_dns,
         };
         node.stack()?.validate().map_err(|_| invalid())?;
         Ok(Arc::new(node))
@@ -397,6 +796,7 @@ impl NodeFactory for TunNodeFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn gateway_is_the_next_address() {
@@ -425,5 +825,48 @@ mod tests {
         ] {
             assert!(InterfaceAddress::parse(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn accepts_mihomo_tun_section_keys() {
+        let options = json!({
+            "stack": "mixed",
+            "device": "kerlico-t0",
+            "inet4-address": ["172.19.0.1/30"],
+            "inet6-address": ["fdfe:dcba:9876::1/126"],
+            "auto-route": true,
+            "auto-redirect": true,
+            "strict-route": true,
+            "auto-detect-interface": true,
+            "endpoint-independent-nat": false,
+            "gso": true,
+            "gso-max-size": 65536,
+            "udp-timeout": 300,
+            "dns-hijack": ["any:53", "tcp://any:53"],
+            "route-exclude-address": ["192.168.0.0/16"],
+            "include-uid-range": ["1000:99999"],
+            "exclude-interface": ["wg0"],
+            "include-package": ["com.example"],
+        });
+        let node = TunNodeFactory
+            .build(&NodeBuildContext::for_test(options, Vec::new()))
+            .unwrap();
+        assert!(node.supports_virtual());
+        let bad = json!({"addresses": ["172.19.0.1/30"], "stack": "netstack"});
+        assert!(
+            TunNodeFactory
+                .build(&NodeBuildContext::for_test(bad, Vec::new()))
+                .is_err()
+        );
+        let redirect_without_route = json!({"addresses": ["172.19.0.1/30"], "auto_redirect": true});
+        assert!(
+            TunNodeFactory
+                .build(&NodeBuildContext::for_test(
+                    redirect_without_route,
+                    Vec::new()
+                ))
+                .is_err()
+        );
+        assert_eq!(Timeout::Text("5m".into()).millis().unwrap(), 300_000);
     }
 }

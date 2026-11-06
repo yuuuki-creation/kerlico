@@ -9,8 +9,10 @@ publish.workspace = true
 [dependencies]
 kerlico-core.workspace = true
 kerlico-config.workspace = true
+kerlico-routing.workspace = true
 kerlico-wireguard.workspace = true
 serde.workspace = true
+socket2.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tun-rs = { version = "=2.8.16", features = ["async_tokio"] }

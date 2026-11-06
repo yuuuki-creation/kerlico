@@ -180,7 +180,19 @@ OpenVPN 服务端节点只支持 TLS 模式，必须配置服务端证书与私�
 
 ## TUN
 
-[examples/tun-v2.json](../examples/tun-v2.json) 创建 `kerlico0` 接口，把进入接口的 TCP 和 UDP 交给出站。支持配置 `auto-route`、`auto-redirect`（nftables）、`strict-route` 与 `auto-detect-interface` 防回环，也可配合 Fake-IP 与首包嗅探还原域名。详见 [TUN 入站](interfaces/tun.md)。
+[examples/tun-v2.json](../examples/tun-v2.json) 创建 `kerlico0` 接口，把进入接口的 TCP 和 UDP 交给出站。Mihomo 顶层 `tun:` 段可直接使用：
+
+```yaml
+tun:
+  enable: true
+  stack: system
+  auto-route: true
+  strict-route: true
+  auto-detect-interface: true
+  dns-hijack: [any:53, tcp://any:53]
+```
+
+Linux 上 `auto-route` 安装路由表 2022 与优先级 9000 起的策略规则，IPv4、IPv6 各一套；`strict-route` 让 TUN 没有地址的地址族不可达；`auto-redirect` 用 nftables 把 TCP 交给内核栈。未配置 `routing-mark` 时 kerlico 的全部出站与 DNS 上游套接字带标记 `0x2024`，策略规则据此放行，并默认绑定物理出口网卡，不会回环进 TUN。`route-address-set` 与 `route-exclude-address-set` 引用规则集，刷新后路由表随之更新。`dns-hijack` 只劫持经本 TUN 进入的 DNS 查询。启动前和退出时都清理同一优先级段与表号的残留规则，`kill -9` 后重启不会叠加。`stack` 的三种取值都由 kerlico 的用户态栈承载。详见 [TUN 入站](interfaces/tun.md)。
 
 ## DNS 与 Fake-IP
 

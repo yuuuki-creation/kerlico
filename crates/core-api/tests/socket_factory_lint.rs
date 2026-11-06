@@ -30,6 +30,11 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "NTP 校时请求，由调用方传入绑定地址",
     ),
     (
+        "crates/protocol-tun/src/lib.rs",
+        "socket2::Socket::new(",
+        "TUN auto_redirect 的 TCP 重定向监听",
+    ),
+    (
         "crates/protocol-socks/src/inbound.rs",
         "UdpSocket::bind(",
         "SOCKS5 入站 UDP ASSOCIATE 监听",

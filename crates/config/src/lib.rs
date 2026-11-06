@@ -22,6 +22,7 @@ mod plan;
 mod share_link;
 pub use plan::*;
 mod resource;
+mod tun;
 pub use resource::{
     Accepted, DEFAULT_SIZE_LIMIT, Download, GeoFile, ResourceKey, ResourceKind, ResourceSpec,
 };
@@ -415,10 +416,20 @@ pub struct NodeBuildContext {
     native: Arc<Vec<Value>>,
     issuer: CredentialIssuer,
     local: bool,
+    routing_mark: Option<u32>,
+    routes: RouteTable,
 }
 impl NodeBuildContext {
     pub fn options(&self) -> &Value {
         &self.options
+    }
+    /// 全局出站拨号选项的路由标记，即 kerlico 自身出站套接字带的 fwmark。
+    pub fn routing_mark(&self) -> Option<u32> {
+        self.routing_mark
+    }
+    /// 路由表中按标签共享的规则集槽；资源刷新换入新内容后持有者读到新版本。
+    pub fn rule_set(&self, tag: &str) -> Option<RuleSetSlot> {
+        self.routes.rule_set(tag).cloned()
     }
     pub fn native_credentials(&self) -> &[Value] {
         &self.native
@@ -466,6 +477,8 @@ impl NodeBuildContext {
             )
             .expect("固定测试代次"),
             local: false,
+            routing_mark: None,
+            routes: RouteTable::default(),
         }
     }
     pub fn local_for_test(options: Value) -> Self {
@@ -1188,7 +1201,12 @@ fn global_interface(config: &Config) -> Option<kerlico_core::InterfaceBinding> {
     if let Some(name) = named {
         return Some(kerlico_core::InterfaceBinding::Named(name.to_owned()));
     }
+    let tun = tun::interface(config.local_inbounds.iter().chain(&config.nodes));
+    if let Some(binding @ kerlico_core::InterfaceBinding::Named(_)) = &tun {
+        return Some(binding.clone());
+    }
     let auto = config.dialer.auto_detect_interface
+        || tun.is_some()
         || config
             .route
             .as_ref()
@@ -1517,10 +1535,14 @@ impl Registry {
         let global_dialer = kerlico_core::DialerOptions {
             detour: None,
             interface: global_interface(&config),
-            routing_mark: config
+            routing_mark: match config
                 .routing_mark
                 .or(config.dialer.routing_mark)
-                .or(config.route.as_ref().and_then(|r| r.default_mark)),
+                .or(config.route.as_ref().and_then(|r| r.default_mark))
+            {
+                Some(mark) => Some(mark),
+                None => tun::bypass_mark(config.local_inbounds.iter().chain(&config.nodes))?,
+            },
             bind_v4: config.dialer.inet4_bind_address,
             bind_v6: config.dialer.inet6_bind_address,
             tcp_fast_open: config.dialer.tcp_fast_open,
@@ -1884,38 +1906,8 @@ impl Registry {
                     .extend(v.iter().cloned());
             }
         }
-        let tun_wants_dns_hijack =
-            config
-                .nodes
-                .iter()
-                .chain(config.local_inbounds.iter())
-                .any(|n| {
-                    n.kind == "tun"
-                        && n.options.as_object().is_some_and(|m| {
-                            m.get("dns_hijack")
-                                .or_else(|| m.get("dns-hijack"))
-                                .and_then(Value::as_array)
-                                .is_some_and(|a| !a.is_empty())
-                                || m.get("dns_mode")
-                                    .or_else(|| m.get("dns-mode"))
-                                    .and_then(Value::as_str)
-                                    .is_some_and(|s| s.eq_ignore_ascii_case("hijack"))
-                        })
-                });
-        if tun_wants_dns_hijack
-            && !all_rules
-                .iter()
-                .any(|r| r.action.as_deref() == Some("hijack-dns"))
-        {
-            all_rules.insert(
-                0,
-                RuleSpec {
-                    action: Some("hijack-dns".into()),
-                    port: vec![53],
-                    ..Default::default()
-                },
-            );
-        }
+        let tun_hijack = tun::dns_hijack_rules(config.nodes.iter().chain(&config.local_inbounds))?;
+        all_rules.splice(0..0, tun_hijack);
         let final_outbound = match config
             .route
             .as_ref()
@@ -2062,55 +2054,6 @@ impl Registry {
                 sniff_policy.enabled = true;
                 sniff_policy.route_only = true;
             }
-            if spec.kind == "tun"
-                && let Some(map) = spec.options.as_object_mut()
-            {
-                let mut inc_cidrs = Vec::new();
-                let mut exc_cidrs = Vec::new();
-                for (key, is_exclude) in [
-                    ("route_address_set", false),
-                    ("route-address-set", false),
-                    ("route_exclude_address_set", true),
-                    ("route-exclude-address-set", true),
-                ] {
-                    if let Some(arr) = map.get(key).and_then(Value::as_array) {
-                        for item in arr {
-                            let set_tag = item.as_str().ok_or_else(|| {
-                                Error::Config("TUN 路由规则集标签须为字符串".into())
-                            })?;
-                            let Some(set) = compiled_rule_sets.get(set_tag.trim()) else {
-                                return Err(Error::Config(
-                                    "TUN 引用的 route_address_set/route_exclude_address_set 不存在"
-                                        .into(),
-                                ));
-                            };
-                            for cidr in set.cidr_strings() {
-                                if is_exclude {
-                                    exc_cidrs.push(Value::String(cidr));
-                                } else {
-                                    inc_cidrs.push(Value::String(cidr));
-                                }
-                            }
-                        }
-                    }
-                }
-                if !inc_cidrs.is_empty() {
-                    let entry = map
-                        .entry("route_address".to_owned())
-                        .or_insert_with(|| Value::Array(Vec::new()));
-                    if let Some(arr) = entry.as_array_mut() {
-                        arr.extend(inc_cidrs);
-                    }
-                }
-                if !exc_cidrs.is_empty() {
-                    let entry = map
-                        .entry("route_exclude_address".to_owned())
-                        .or_insert_with(|| Value::Array(Vec::new()));
-                    if let Some(arr) = entry.as_array_mut() {
-                        arr.extend(exc_cidrs);
-                    }
-                }
-            }
             let node = NodeId::parse(&spec.tag)?;
             if !tags.insert(node.clone()) {
                 return Err(Error::Config("节点与入站标签重复".into()));
@@ -2162,6 +2105,8 @@ impl Registry {
                 native: Arc::new(native),
                 issuer: issuer.clone(),
                 local,
+                routing_mark: global_dialer.routing_mark,
+                routes: routes.clone(),
             };
             let protocol = factory.build(&input)?;
             if maximum <= protocol.reserved_sessions() {

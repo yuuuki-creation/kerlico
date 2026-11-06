@@ -5064,9 +5064,11 @@ dependencies = [
  "kerlico-config",
  "kerlico-core",
  "kerlico-engine",
+ "kerlico-routing",
  "kerlico-wireguard",
  "serde",
  "serde_json",
+ "socket2 0.6.5",
  "tokio",
  "tun-rs",
 ]
