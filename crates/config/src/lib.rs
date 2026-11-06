@@ -855,20 +855,22 @@ fn mihomo_default_ports(protocol: &str) -> Vec<(u16, u16)> {
     }
 }
 
-fn sniff_cidrs(items: &[String], field: &str) -> Result<Vec<kerlico_core::Cidr>> {
-    let mut cidrs = Vec::new();
+fn sniff_ips(items: &[String], field: &str) -> Result<Vec<kerlico_core::IpMatch>> {
+    let mut out = Vec::new();
     for item in items {
-        let text = item.trim();
-        if text.starts_with("geoip:") || text.starts_with("rule-set:") {
-            kerlico_core::log::warning(format!("sniffer.{field} 暂不支持 {text}，已忽略"));
-            continue;
-        }
-        cidrs.push(
-            kerlico_core::Cidr::parse(text)
-                .map_err(|_| Error::Config(format!("sniffer.{field} 网段不合法：{text}")))?,
-        );
+        out.extend(kerlico_core::IpMatch::parse_entry(
+            item,
+            &format!("sniffer.{field}"),
+        )?);
     }
-    Ok(cidrs)
+    Ok(out)
+}
+
+fn sniff_domains(items: &[String]) -> Vec<kerlico_core::DomainMatch> {
+    items
+        .iter()
+        .flat_map(|item| kerlico_core::DomainMatch::parse_entry(item))
+        .collect()
 }
 
 impl GlobalSnifferSpec {
@@ -884,10 +886,10 @@ impl GlobalSnifferSpec {
                 force_dns_mapping: self.force_dns_mapping.unwrap_or(true),
             },
             timeout: std::time::Duration::from_secs(1),
-            skip_domain: self.skip_domain.clone(),
-            force_domain: self.force_domain.clone(),
-            skip_src_address: sniff_cidrs(&self.skip_src_address, "skip-src-address")?,
-            skip_dst_address: sniff_cidrs(&self.skip_dst_address, "skip-dst-address")?,
+            skip_domain: sniff_domains(&self.skip_domain),
+            force_domain: sniff_domains(&self.force_domain),
+            skip_src_address: sniff_ips(&self.skip_src_address, "skip-src-address")?,
+            skip_dst_address: sniff_ips(&self.skip_dst_address, "skip-dst-address")?,
             ..Default::default()
         };
         if let Some(timeout) = &self.timeout {
@@ -986,11 +988,17 @@ fn apply_inbound_sniffing(
         if let Some(ro) = sn.route_only {
             policy.route_only = ro;
         }
+        let patterns = |items: &[String]| {
+            items
+                .iter()
+                .map(|item| kerlico_core::DomainMatch::Pattern(item.trim().to_owned()))
+                .collect()
+        };
         if !sn.domains_excluded.is_empty() {
-            policy.skip_domain = sn.domains_excluded.clone();
+            policy.skip_domain = patterns(&sn.domains_excluded);
         }
         if !sn.force_domain.is_empty() {
-            policy.force_domain = sn.force_domain.clone();
+            policy.force_domain = patterns(&sn.force_domain);
         }
         if let Some(tm) = &sn.timeout {
             policy.timeout = tm.to_duration()?;
@@ -2026,6 +2034,41 @@ impl Registry {
                 dns_geo.add_ip(&kerlico_routing::GeoIpRef::parse(code)?);
             }
         }
+        let mut sniff_sets = Vec::new();
+        for item in base_sniff_policy
+            .skip_src_address
+            .iter()
+            .chain(&base_sniff_policy.skip_dst_address)
+        {
+            match item {
+                kerlico_core::IpMatch::GeoIp(code) => {
+                    dns_geo.add_ip(&kerlico_routing::GeoIpRef::parse(code)?);
+                }
+                kerlico_core::IpMatch::RuleSet(tag) => sniff_sets.push(tag.clone()),
+                kerlico_core::IpMatch::Cidr(_) => {}
+            }
+        }
+        for item in base_sniff_policy
+            .skip_domain
+            .iter()
+            .chain(&base_sniff_policy.force_domain)
+        {
+            match item {
+                kerlico_core::DomainMatch::GeoSite(code) => {
+                    dns_geo.add_site(&kerlico_routing::GeoSiteRef::parse(code)?);
+                }
+                kerlico_core::DomainMatch::RuleSet(tag) => sniff_sets.push(tag.clone()),
+                kerlico_core::DomainMatch::Pattern(_) => {}
+            }
+        }
+        if let Some(tag) = sniff_sets
+            .iter()
+            .find(|tag| !compiled_rule_sets.contains_key(tag.as_str()))
+        {
+            return Err(Error::Config(format!(
+                "sniffer 引用的 rule-set 不存在：{tag}"
+            )));
+        }
         let routes = RouteTable::compile_with_sets(&all_rules, compiled_rule_sets.clone())?
             .with_sub_rules(&all_sub_rules)?
             .with_geo(geo_mode, &dns_geo)
@@ -2044,6 +2087,7 @@ impl Registry {
         let resources = remote_resources(
             rule_set_sources,
             &routes,
+            &sniff_sets,
             config.dns.as_ref(),
             &compiled_providers,
             &geo_spec,
@@ -2406,6 +2450,7 @@ fn load_cached_geo(slot: &GeoSlot) -> Result<()> {
 fn remote_resources(
     rule_sets: Vec<RuleSetSource>,
     routes: &RouteTable,
+    sniff_sets: &[String],
     dns: Option<&DnsSpec>,
     providers: &BTreeMap<String, CompiledProxyProvider>,
     geo: &GeoConfigSpec,
@@ -2416,6 +2461,7 @@ fn remote_resources(
         .map(|dns| dns.references().rule_sets)
         .unwrap_or_default();
     referenced.extend(dns_sets.iter().map(String::as_str));
+    referenced.extend(sniff_sets.iter().map(String::as_str));
     let mut resources = Vec::new();
     for source in rule_sets {
         let Some(file) = source.file.clone() else {
@@ -2719,7 +2765,14 @@ mod tests {
         assert_eq!(policy.sniffer("tls", 8443), None, "TLS 未写端口时只看 443");
         assert_eq!(policy.sniffer("http", 8443), Some(false), "逐协议覆盖开关");
         assert_eq!(policy.sniffer("quic", 443), Some(true));
-        assert_eq!(policy.skip_dst_address.len(), 1, "geoip: 项忽略");
+        assert_eq!(
+            policy.skip_dst_address,
+            [
+                kerlico_core::IpMatch::Cidr(kerlico_core::Cidr::parse("10.0.0.0/8").unwrap()),
+                kerlico_core::IpMatch::GeoIp("telegram".into()),
+            ],
+            "geoip: 项保留为 Geo 条目"
+        );
         assert_eq!(
             policy.targets,
             kerlico_core::SniffTargets::Mihomo {
@@ -2754,7 +2807,7 @@ mod tests {
         assert_eq!(policy.sniffer("ssh", 22), Some(false));
         let target = kerlico_core::Destination::new("example.com", 443).unwrap();
         assert!(
-            policy.wants(&target, None, None),
+            policy.wants(&target, None, None, &kerlico_core::NoSets),
             "sing-box 入站嗅探域名目标"
         );
         let spec: InboundSniffingSpec = serde_json::from_value(serde_json::json!({

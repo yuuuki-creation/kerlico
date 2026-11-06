@@ -86,10 +86,12 @@
 | `override-destination` | 默认 `true`；为真时出站拨号改用嗅探域名，`sniff` 内逐协议可覆盖。为假时嗅探域名只参与路由 |
 | `parse-pure-ip` | 默认 `true`：目标是纯 IP 时嗅探 |
 | `force-dns-mapping` | 默认 `true`：经 DNS 反向映射找回域名的 IP 目标也嗅探 |
-| `force-domain` | 域名目标只在命中该列表时嗅探（`+.`、`*.` 通配） |
-| `skip-domain` | 嗅探出的域名命中时丢弃该域名 |
-| `skip-src-address` / `skip-dst-address` | 来源或目标 IP 落在网段内时不嗅探；`geoip:`、`rule-set:` 项记 warning 后忽略 |
+| `force-domain` | 域名目标只在命中该列表时嗅探（`+.`、`*.` 通配，或 `geosite:<分类>`、`rule-set:<名字>`） |
+| `skip-domain` | 嗅探出的域名命中时丢弃该域名；条目写法同 `force-domain` |
+| `skip-src-address` / `skip-dst-address` | 来源或目标 IP 命中时不嗅探；条目为网段、`geoip:<代码>` 或 `rule-set:<名字>` |
 | `timeout` | kerlico 扩展；默认 1 秒 |
+
+前缀条目同 Mihomo：前缀不区分大小写，冒号后可用逗号列多项（`geoip:cn,us`）。`geoip:` 与 `geosite:` 查路由使用的同一份 Geo 数据（受 `geodata-mode` 影响），`rule-set:` 查同名规则集（`rule-providers` 或 `rule_set`），文件刷新后立即生效；引用不存在的规则集时拒绝加载。入站级 `domainsExcluded` 与 `force_domain` 只接受域名通配。
 
 入站上的 `sniff: true`、`sniff_override_destination`、`sniff_timeout`（sing-box）与 `sniffing: {enabled, destOverride, routeOnly, domainsExcluded}`（Xray）对该入站覆盖顶层设置：嗅探全部连接（含域名目标），默认不覆盖目标，超时默认 300 ms；`destOverride` 列出的协议会覆盖目标，`routeOnly` 关闭覆盖。
 

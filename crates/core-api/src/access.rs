@@ -55,10 +55,10 @@ pub struct SniffPolicy {
     pub route_only: bool,
     pub targets: SniffTargets,
     pub timeout: std::time::Duration,
-    pub skip_domain: Vec<String>,
-    pub force_domain: Vec<String>,
-    pub skip_src_address: Vec<crate::Cidr>,
-    pub skip_dst_address: Vec<crate::Cidr>,
+    pub skip_domain: Vec<crate::DomainMatch>,
+    pub force_domain: Vec<crate::DomainMatch>,
+    pub skip_src_address: Vec<crate::IpMatch>,
+    pub skip_dst_address: Vec<crate::IpMatch>,
 }
 
 impl SniffPolicy {
@@ -91,31 +91,28 @@ impl SniffPolicy {
         })
     }
 
-    /// `mapped` 是 DNS 映射为 IP 目标找回的域名。
+    /// `mapped` 是 DNS 映射为 IP 目标找回的域名；`sets` 提供 `geoip:`、`geosite:`、`rule-set:` 条目的数据。
     pub fn wants(
         &self,
         target: &Destination,
         mapped: Option<&str>,
         source: Option<std::net::IpAddr>,
+        sets: &dyn crate::SetLookup,
     ) -> bool {
         if !self.enabled {
             return false;
         }
         if let crate::Address::Ip(ip) = target.address()
-            && self.skip_dst_address.iter().any(|cidr| cidr.contains(*ip))
+            && self.skip_dst_address.iter().any(|m| m.matches(*ip, sets))
         {
             return false;
         }
         if let Some(ip) = source
-            && self.skip_src_address.iter().any(|cidr| cidr.contains(ip))
+            && self.skip_src_address.iter().any(|m| m.matches(ip, sets))
         {
             return false;
         }
-        let forced = |domain: &str| {
-            self.force_domain
-                .iter()
-                .any(|pattern| wildcard_domain_match(pattern, domain))
-        };
+        let forced = |domain: &str| self.force_domain.iter().any(|m| m.matches(domain, sets));
         match (self.targets, target.address()) {
             (SniffTargets::All, _) => true,
             (
@@ -133,10 +130,19 @@ impl SniffPolicy {
     }
 
     /// 命中 `skip-domain` 的嗅探域名整体丢弃。
-    pub fn skips_domain(&self, domain: &str) -> bool {
-        self.skip_domain
-            .iter()
-            .any(|pattern| wildcard_domain_match(pattern, domain))
+    pub fn skips_domain(&self, domain: &str, sets: &dyn crate::SetLookup) -> bool {
+        self.skip_domain.iter().any(|m| m.matches(domain, sets))
+    }
+}
+
+impl crate::DomainMatch {
+    pub fn matches(&self, domain: &str, sets: &dyn crate::SetLookup) -> bool {
+        let host = domain.trim().strip_suffix('.').unwrap_or(domain.trim());
+        match self {
+            Self::Pattern(pattern) => wildcard_domain_match(pattern, domain),
+            Self::GeoSite(code) => sets.geosite_matches(code, &host.to_ascii_lowercase()),
+            Self::RuleSet(tag) => sets.rule_set_matches_domain(tag, host),
+        }
     }
 }
 

@@ -1317,6 +1317,28 @@ pub struct RouteTable {
     final_outbound: Option<OutId>,
 }
 
+/// DNS 策略与嗅探器的 `rule-set:`、`geosite:`、`geoip:` 条目读运行中的规则集与 `GeoSlot`，
+/// 刷新后换入的新数据立即生效。
+impl kerlico_core::SetLookup for RouteTable {
+    fn has_rule_set(&self, tag: &str) -> bool {
+        RouteTable::has_rule_set(self, tag)
+    }
+    fn rule_set_matches_domain(&self, tag: &str, host: &str) -> bool {
+        self.rule_set(tag)
+            .is_some_and(|slot| slot.load().matches(&[host], &[], 0, Network::Udp, None))
+    }
+    fn rule_set_matches_ip(&self, tag: &str, ip: IpAddr) -> bool {
+        self.rule_set(tag)
+            .is_some_and(|slot| slot.load().matches(&[], &[ip], 0, Network::Udp, None))
+    }
+    fn geosite_matches(&self, code: &str, host: &str) -> bool {
+        GeoSiteRef::parse(code).is_ok_and(|site| self.geo.load().site_matches(&site, host))
+    }
+    fn geoip_matches(&self, code: &str, ip: IpAddr) -> bool {
+        GeoIpRef::parse(code).is_ok_and(|geoip| self.geo.load().ip_matches(&geoip, ip))
+    }
+}
+
 impl RouteTable {
     pub fn compile(specs: &[RuleSpec]) -> Result<Self> {
         Self::compile_with_sets(specs, HashMap::new())

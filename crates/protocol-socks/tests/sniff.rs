@@ -24,13 +24,17 @@ impl Running {
     }
 }
 
-/// 未命中规则的流量走节点绑定的 `block`；只有嗅探到 `allowed.test` 或 SSH 才走 `exit`。
-async fn start(sniffer: Value) -> Running {
+fn registry() -> Registry {
     let mut registry = Registry::default();
     registry.register(DirectFactory).unwrap();
     registry.register(RejectFactory).unwrap();
     registry.register_node(SocksNodeFactory).unwrap();
-    let config = json!({
+    registry
+}
+
+/// 未命中规则的流量走节点绑定的 `block`；只有嗅探到 `allowed.test` 或 SSH 才走 `exit`。
+fn config(sniffer: Value) -> Value {
+    json!({
         "version": 2,
         "outbounds": [{"tag":"exit","type":"direct"},{"tag":"block","type":"reject"}],
         "inbounds": [],
@@ -39,11 +43,20 @@ async fn start(sniffer: Value) -> Running {
             {"outbound":"exit","domain":["allowed.test","quic.example.com"]},
             {"outbound":"exit","protocol":["ssh"]}
         ],
+        "rule_set": [
+            {"tag":"loopback","type":"inline","rules":[{"ip_cidr":["127.0.0.0/8"]}]},
+            {"tag":"names","type":"inline","rules":[{"domain_suffix":["allowed.test"]}]},
+            {"tag":"local-name","type":"inline","rules":[{"domain":["localhost"]}]}
+        ],
         "sniffer": sniffer,
         "limits": {"connect_timeout_ms":2000,"idle_timeout_ms":3000,"drain_timeout_ms":100}
-    });
+    })
+}
+
+async fn start(sniffer: Value) -> Running {
+    let config = config(sniffer);
     let engine = Engine::bind(
-        registry
+        registry()
             .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
             .unwrap(),
     )
@@ -152,6 +165,26 @@ async fn skip_and_force_lists_follow_mihomo() {
             "parse-pure-ip 关闭时纯 IP 不嗅探",
         ),
         (json!({"enable":false}), false, "未启用不嗅探"),
+        (
+            json!({"skip_domain":["rule-set:names"]}),
+            false,
+            "skip-domain 的 rule-set 条目",
+        ),
+        (
+            json!({"skip-dst-address":["RULE-SET:loopback"]}),
+            false,
+            "skip-dst-address 的 rule-set 条目",
+        ),
+        (
+            json!({"skip_src_address":["rule-set:names,loopback"]}),
+            false,
+            "skip-src-address 的 rule-set 条目按逗号拆分",
+        ),
+        (
+            json!({"skip_dst_address":["rule-set:names"]}),
+            true,
+            "不含该地址的规则集不跳过",
+        ),
     ];
     for (extra, expected, why) in cases {
         let running = start(sniffer(extra)).await;
@@ -176,6 +209,26 @@ async fn skip_and_force_lists_follow_mihomo() {
         "force-domain 命中的域名目标按嗅探结果分流"
     );
     forced.stop().await;
+    let forced = start(sniffer(json!({"force_domain":["rule-set:local-name"]}))).await;
+    let mut domain = socks5_connect_domain(forced.proxy, "localhost", echo.port()).await;
+    assert!(
+        echoes(&mut domain, &tls_client_hello("allowed.test")).await,
+        "force-domain 的 rule-set 条目"
+    );
+    forced.stop().await;
+    for (sniffer_options, missing) in [
+        (json!({"skip_dst_address":["rule-set:absent"]}), "absent"),
+        (json!({"force_domain":["rule-set:gone"]}), "gone"),
+    ] {
+        let error = registry()
+            .prepare(
+                parse(&serde_json::to_vec(&config(sniffer(sniffer_options))).unwrap()).unwrap(),
+            )
+            .err()
+            .expect("引用不存在的规则集应拒绝加载")
+            .to_string();
+        assert!(error.contains(missing), "{error}");
+    }
 }
 
 #[tokio::test]

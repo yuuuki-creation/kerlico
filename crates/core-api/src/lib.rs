@@ -13,6 +13,8 @@ mod identity;
 pub use identity::*;
 mod access;
 pub use access::*;
+mod sets;
+pub use sets::{DomainMatch, IpMatch, NoSets, SetLookup};
 mod lifecycle;
 pub use lifecycle::*;
 mod login_backoff;

@@ -9,7 +9,7 @@ use kerlico_core::{
     Address, AddressedDatagram, AssociationSender, BoxFuture, ConnectContext,
     DatagramAssociationReceiver, DatagramAssociationSender, DatagramReceiver, DatagramSender,
     Destination, Error, FixedUdpSender, FlowCompletion, FlowOutcome, OriginalTarget, Result,
-    SessionIdentity, SniffPolicy, TcpFlow, TcpFlowIo,
+    SessionIdentity, SetLookup, SniffPolicy, TcpFlow, TcpFlowIo,
 };
 use kerlico_net::sniff::{SniffProtocol, SniffResult, Sniffed, UdpSniffer, sniff_tcp};
 use std::{
@@ -60,6 +60,7 @@ impl SniffPlan {
             original.target(),
             mapped,
             identity.observed_source().map(|addr| addr.ip()),
+            &dispatcher.routes,
         ) {
             let order: Vec<SniffProtocol> = if policy.sniffers.is_empty() {
                 SniffProtocol::ALL.to_vec()
@@ -117,13 +118,16 @@ impl SniffPlan {
     pub(crate) fn apply(
         &self,
         policy: &SniffPolicy,
+        sets: &dyn SetLookup,
         original: OriginalTarget,
         result: Option<SniffResult>,
     ) -> OriginalTarget {
         let Some(result) = result else {
             return original;
         };
-        let domain = result.domain.filter(|domain| !policy.skips_domain(domain));
+        let domain = result
+            .domain
+            .filter(|domain| !policy.skips_domain(domain, sets));
         let mut original = original;
         if let Some(domain) = &domain
             && self.overrides.contains(&result.protocol)
@@ -414,9 +418,12 @@ impl DatagramSender for LazyFixedSender {
                 self.original = Some(original);
                 return Ok(());
             };
-            let original = self
-                .plan
-                .apply(self.identity.sniff_policy(), original, result);
+            let original = self.plan.apply(
+                self.identity.sniff_policy(),
+                &self.dispatcher.routes,
+                original,
+                result,
+            );
             let flow = self
                 .dispatcher
                 .udp(&self.identity, original, &self.context)?
@@ -526,7 +533,12 @@ impl DatagramAssociationSender for LazyAssociationSender {
                 return Ok(());
             };
             let original = match plan {
-                Some(plan) => plan.apply(self.identity.sniff_policy(), original.clone(), result),
+                Some(plan) => plan.apply(
+                    self.identity.sniff_policy(),
+                    &self.dispatcher.routes,
+                    original.clone(),
+                    result,
+                ),
                 None => original.clone(),
             };
             let buffered = self.pending.take().map(|p| p.buffered).unwrap_or_default();

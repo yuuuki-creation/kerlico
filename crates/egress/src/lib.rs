@@ -188,33 +188,6 @@ impl kerlico_core::ServerResolver for ProxyServerResolver {
     }
 }
 
-/// DNS 策略中的 `rule-set:`、`geosite:` 与 `fallback-filter` 的 GeoIP 查询，读运行中的路由规则集。
-struct RouteSets(RouteTable);
-impl kerlico_dns::SetLookup for RouteSets {
-    fn has_rule_set(&self, tag: &str) -> bool {
-        self.0.has_rule_set(tag)
-    }
-    fn rule_set_matches_domain(&self, tag: &str, host: &str) -> bool {
-        self.0
-            .rule_set(tag)
-            .is_some_and(|slot| slot.load().matches(&[host], &[], 0, Network::Udp, None))
-    }
-    fn rule_set_matches_ip(&self, tag: &str, ip: IpAddr) -> bool {
-        self.0
-            .rule_set(tag)
-            .is_some_and(|slot| slot.load().matches(&[], &[ip], 0, Network::Udp, None))
-    }
-    /// 读路由表的 `GeoSlot`：Geo 文件刷新后换入的新数据立即生效。
-    fn geosite_matches(&self, code: &str, host: &str) -> bool {
-        kerlico_routing::GeoSiteRef::parse(code)
-            .is_ok_and(|site| self.0.geo().load().site_matches(&site, host))
-    }
-    fn geoip_matches(&self, code: &str, ip: IpAddr) -> bool {
-        kerlico_routing::GeoIpRef::parse(code)
-            .is_ok_and(|geoip| self.0.geo().load().ip_matches(&geoip, ip))
-    }
-}
-
 /// DNS 上游经命名出站、代理组或路由规则拨号；调度器建成后才可用。
 struct DnsUpstreamDialer {
     known: HashSet<String>,
@@ -454,10 +427,7 @@ impl EgressRuntime {
             timeout: Duration::from_secs(5),
             sockets: dns_sockets_options,
         });
-        resolver.bind_runtime(
-            Arc::new(RouteSets(routes_table.clone())),
-            dns_dialer.clone(),
-        )?;
+        resolver.bind_runtime(Arc::new(routes_table.clone()), dns_dialer.clone())?;
         let dns_sockets = match resolver.dns_listen() {
             Some(addr) => Some(kerlico_dns::listener::bind(addr).await?),
             None => None,
@@ -1517,7 +1487,8 @@ impl Dispatcher {
         let opener_plan = plan.clone();
         let open: sniff::TcpOpener = Box::new(move |result| {
             Box::pin(async move {
-                let original = opener_plan.apply(owned_identity.sniff_policy(), original, result);
+                let original =
+                    opener_plan.apply(owned_identity.sniff_policy(), &me.routes, original, result);
                 me.tcp(&owned_identity, original, &later)?.await
             })
         });
@@ -1981,7 +1952,7 @@ mod tests {
         .unwrap();
         assert_eq!(spec.references().geosite, ["cn"]);
         let resolver = kerlico_dns::DnsResolver::new(&spec).unwrap();
-        resolver.bind(Arc::new(RouteSets(routes)), None).unwrap();
+        resolver.bind(Arc::new(routes), None).unwrap();
         let ip = |s: &str| vec![s.parse::<IpAddr>().unwrap()];
         assert_eq!(
             resolver.resolve("www.cn.test").await.unwrap(),

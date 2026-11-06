@@ -1,36 +1,9 @@
 //! Mihomo 域名通配、`geosite:` 与 `rule-set:` 条件；集合内容由运行时注入的 [`SetLookup`] 提供。
 
 use kerlico_core::{Error, Result};
-use std::{net::IpAddr, sync::Arc};
+use std::sync::Arc;
 
-/// 规则集与 Geo 数据的查询入口，由装配方（出站调度器）注入。
-pub trait SetLookup: Send + Sync {
-    fn has_rule_set(&self, tag: &str) -> bool;
-    fn rule_set_matches_domain(&self, tag: &str, host: &str) -> bool;
-    fn rule_set_matches_ip(&self, tag: &str, ip: IpAddr) -> bool;
-    fn geosite_matches(&self, code: &str, host: &str) -> bool;
-    fn geoip_matches(&self, code: &str, ip: IpAddr) -> bool;
-}
-
-/// 未注入集合时：规则集不存在，Geo 条件不命中。
-pub struct NoSets;
-impl SetLookup for NoSets {
-    fn has_rule_set(&self, _tag: &str) -> bool {
-        false
-    }
-    fn rule_set_matches_domain(&self, _tag: &str, _host: &str) -> bool {
-        false
-    }
-    fn rule_set_matches_ip(&self, _tag: &str, _ip: IpAddr) -> bool {
-        false
-    }
-    fn geosite_matches(&self, _code: &str, _host: &str) -> bool {
-        false
-    }
-    fn geoip_matches(&self, _code: &str, _ip: IpAddr) -> bool {
-        false
-    }
-}
+pub use kerlico_core::{NoSets, SetLookup};
 
 pub(crate) fn invalid() -> Error {
     Error::Config("DNS 配置不合法".into())
@@ -266,6 +239,7 @@ pub(crate) type Sets = Arc<dyn SetLookup>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
 
     #[test]
     fn mihomo_wildcards() {
