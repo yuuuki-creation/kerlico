@@ -48,6 +48,7 @@ def local_identifiers():
 
 LOCAL_IDENTIFIERS = local_identifiers()
 CHECKED_BLOBS = set()
+BLOB_CACHE = {}
 # 固定上游原文中的法定署名；只有逐字匹配的已审文件可保留原作者邮箱。
 UPSTREAM_NOTICES = {
     b"third_party/shaped-rustls/LICENSE-ISC": "7cfafc877eccc46c0e346ccbaa5c51bb6b894d2b818e617d970211e232785ad4",
@@ -103,7 +104,9 @@ def check_entry(mode, oid, name):
     if mode == b"160000":
         raise Rejected("unreviewed-submodule")
     if oid not in CHECKED_BLOBS or name in UPSTREAM_NOTICES:
-        contents = git("cat-file", "blob", oid.decode("ascii"))
+        contents = BLOB_CACHE.pop(oid, None)
+        if contents is None:
+            contents = git("cat-file", "blob", oid.decode("ascii"))
         if name in UPSTREAM_NOTICES:
             if hashlib.sha256(contents).hexdigest() != UPSTREAM_NOTICES[name]:
                 raise Rejected("upstream-notice-changed-needs-review")
@@ -112,7 +115,34 @@ def check_entry(mode, oid, name):
             CHECKED_BLOBS.add(oid)
 
 
+def prefetch_blobs(oids):
+    """一次 `git cat-file --batch` 读出全部待查对象，避免逐个启动进程。"""
+    wanted = [oid for oid in dict.fromkeys(oids) if oid not in CHECKED_BLOBS]
+    if not wanted:
+        return
+    result = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        input=b"".join(oid + b"\n" for oid in wanted),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode:
+        raise Rejected("git-check-failed")
+    out = result.stdout
+    pos = 0
+    for oid in wanted:
+        end = out.index(b"\n", pos)
+        header = out[pos:end].split()
+        if len(header) != 3 or header[0] != oid or header[1] != b"blob":
+            raise Rejected("git-check-failed")
+        start = end + 1
+        size = int(header[2])
+        BLOB_CACHE[oid] = out[start:start + size]
+        pos = start + size + 1
+
+
 def check_index():
+    entries = []
     for entry in git("ls-files", "--stage", "-z").split(b"\0"):
         if not entry:
             continue
@@ -120,15 +150,22 @@ def check_index():
         mode, oid, stage = metadata.split()
         if stage != b"0":
             raise Rejected("unmerged-index")
+        entries.append((mode, oid, name))
+    prefetch_blobs(oid for mode, oid, _ in entries if mode != b"160000")
+    for mode, oid, name in entries:
         check_entry(mode, oid, name)
 
 
 def check_tree(commit):
+    entries = []
     for entry in git("ls-tree", "-r", "-z", "--full-tree", commit).split(b"\0"):
         if not entry:
             continue
         metadata, name = entry.split(b"\t", 1)
         mode, kind, oid = metadata.split()
+        entries.append((mode, kind, oid, name))
+    prefetch_blobs(oid for _, kind, oid, _ in entries if kind == b"blob")
+    for mode, _, oid, name in entries:
         check_entry(mode, oid, name)
 
 
