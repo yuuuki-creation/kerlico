@@ -51,7 +51,7 @@ Field details are in the [configuration interface](interfaces/config.md) (Chines
 
 ### Mihomo proxy compatibility
 
-Top-level `proxies`, `proxy-providers` members (Mihomo YAML), and share links use one field mapping table (`crates/config/src/mihomo.rs`). The three forms of one node produce the same kerlico `options`. An entry with an `options` key is a native kerlico outbound and is kept as written.
+Top-level `proxies`, `proxy-providers` members (Mihomo YAML), and share links use one field mapping table (`crates/config/src/mihomo.rs`). The three forms of one node produce the same kerlico `options`. An entry with a `tag` or `options` key (such as the JSON subscription `[{"tag":"n1","type":"direct"}]`) is a native kerlico outbound and is kept as written. A native entry allows only `tag` (or `name` when `options` is present), `type`, and `options`; any other field is an error.
 
 - Any field the table does not list fails config loading. The error names the proxy and the field path (for example `ws-opts.bogus`). Nothing is dropped or passed through silently.
 - Common fields: `interface-name`, `routing-mark`, `dialer-proxy`, and `tfo` go to the dialer. These values have no effect and are accepted: `udp: true`, `skip-cert-verify: false`, `mptcp: false`, `ip-version: dual`, `smux.enabled: false`. Other values fail. kerlico carries UDP according to each protocol's capability, so a node without `udp` still carries UDP. `udp: false` turns UDP off only for SSR, Hysteria, TrustTunnel, and Sudoku, and fails for other types. HTTP and SSH ignore `udp` (Mihomo does not carry UDP for them either).

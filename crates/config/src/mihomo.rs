@@ -47,25 +47,36 @@ const TYPES: &[(&str, Mapper)] = &[
     ("dns", dns),
 ];
 
-/// `proxies` 或订阅成员：带 `options` 的条目是 kerlico 原生出站，原样保留；其余按 Mihomo 代理映射。
+/// `proxies` 或订阅成员：带 `tag` 或 `options` 的条目是 kerlico 原生出站（`tag`、`type`、可选
+/// `options`），原样保留；其余按 Mihomo 代理映射。
 pub(crate) fn member_outbound(raw: Value) -> Result<(String, String, Value)> {
-    if let Value::Object(map) = &raw
-        && map.contains_key("options")
-    {
-        let mut map = map.clone();
-        let tag = match map.remove("tag").or_else(|| map.remove("name")) {
-            Some(Value::String(s)) => s,
-            _ => return Err(Error::Config("出站条目缺少 tag".into())),
-        };
-        let kind = match map.remove("type") {
-            Some(Value::String(s)) => crate::group::normalize_outbound_kind(&s),
-            _ => return Err(Error::Config(format!("出站条目 {tag} 缺少 type"))),
-        };
-        let options = map.remove("options").unwrap_or(Value::Null);
-        return Ok((tag, kind, options));
+    match raw {
+        Value::Object(map) if map.contains_key("tag") || map.contains_key("options") => {
+            native_outbound(map)
+        }
+        raw => {
+            let out = translate_proxy(raw)?;
+            Ok((out.name, out.kind.to_owned(), out.options))
+        }
     }
-    let out = translate_proxy(raw)?;
-    Ok((out.name, out.kind.to_owned(), out.options))
+}
+
+fn native_outbound(mut map: Map<String, Value>) -> Result<(String, String, Value)> {
+    let tag = match map.remove("tag").or_else(|| map.remove("name")) {
+        Some(Value::String(s)) => s,
+        _ => return Err(Error::Config("出站条目缺少 tag".into())),
+    };
+    let kind = match map.remove("type") {
+        Some(Value::String(s)) => crate::group::normalize_outbound_kind(&s),
+        _ => return Err(Error::Config(format!("出站条目 {tag} 缺少 type"))),
+    };
+    let options = map.remove("options").unwrap_or_else(|| json!({}));
+    if let Some(field) = map.keys().next() {
+        return Err(Error::Config(format!(
+            "出站条目 {tag} 的字段 {field} 不受支持"
+        )));
+    }
+    Ok((tag, kind, options))
 }
 
 /// 把一个 Mihomo 代理映射对象（含 `name`、`type`）转为 kerlico 出站。

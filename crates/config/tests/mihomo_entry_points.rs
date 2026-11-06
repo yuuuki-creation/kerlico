@@ -1,4 +1,4 @@
-use kerlico_config::{ProxyProviderSpec, parse_config_value};
+use kerlico_config::{ProxyProviderSpec, parse_config_value, parse_subscription_content};
 use serde_json::{Value, json};
 
 const TROJAN_YAML: &str = "proxies:\n  - name: same\n    type: trojan\n    server: t.example.com\n    port: 443\n    password: pw\n    sni: t.example.com\n    network: grpc\n    grpc-opts:\n      grpc-service-name: grpc-svc\n";
@@ -84,4 +84,34 @@ fn unknown_provider_member_field_fails_naming_proxy_and_field() {
     };
     let err = spec.compile("sub").err().expect("rejected").to_string();
     assert!(err.contains("same") && err.contains("alpn"), "{err}");
+}
+
+#[test]
+fn kerlico_native_members_keep_their_shape() {
+    let content = r#"[{"tag":"n1","type":"direct"},{"tag":"n2","type":"socks","options":{"server":{"host":"s.example.com","port":1080}}}]"#;
+    let got: Vec<_> = parse_subscription_content(content)
+        .expect("native members parse")
+        .into_iter()
+        .map(|s| (s.tag, s.kind, s.options))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("n1".to_owned(), "direct".to_owned(), json!({})),
+            (
+                "n2".to_owned(),
+                "socks".to_owned(),
+                json!({"server":{"host":"s.example.com","port":1080}})
+            ),
+        ]
+    );
+}
+
+#[test]
+fn unknown_native_member_field_fails_naming_tag_and_field() {
+    let err = parse_subscription_content(r#"[{"tag":"n1","type":"direct","server":"x"}]"#)
+        .err()
+        .expect("rejected")
+        .to_string();
+    assert!(err.contains("n1") && err.contains("server"), "{err}");
 }

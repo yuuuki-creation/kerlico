@@ -51,7 +51,7 @@ cargo build --locked --release -p kerlico
 
 ### Mihomo 代理兼容
 
-顶层 `proxies`、`proxy-providers` 成员（Mihomo YAML）与分享链接走同一张字段映射表（`crates/config/src/mihomo.rs`），同一节点三种写法得到相同的 kerlico `options`。带 `options` 键的条目视为 kerlico 原生出站，原样保留。
+顶层 `proxies`、`proxy-providers` 成员（Mihomo YAML）与分享链接走同一张字段映射表（`crates/config/src/mihomo.rs`），同一节点三种写法得到相同的 kerlico `options`。带 `tag` 或 `options` 键的条目（如 JSON 订阅 `[{"tag":"n1","type":"direct"}]`）视为 kerlico 原生出站，原样保留；原生条目只允许 `tag`（带 `options` 时也可写 `name`）、`type`、`options`，其他字段报错。
 
 - 映射表未列出的字段一律报错，错误信息给出代理名和字段路径（如 `ws-opts.bogus`），不会静默丢弃或原样透传。
 - 公共字段：`interface-name`、`routing-mark`、`dialer-proxy`、`tfo` 交给拨号层。以下取值无效果、允许出现：`udp: true`、`skip-cert-verify: false`、`mptcp: false`、`ip-version: dual`、`smux.enabled: false`；其他取值报错。kerlico 按协议能力承载 UDP，未写 `udp` 的节点也会承载 UDP；`udp: false` 只在 SSR、Hysteria、TrustTunnel、Sudoku 上映射为关闭 UDP，其他类型报错。HTTP、SSH 的 `udp` 任意取值都忽略（Mihomo 同样不为它们承载 UDP）。
