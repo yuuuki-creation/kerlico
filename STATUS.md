@@ -4,7 +4,7 @@
 
 ## 版本
 
-最新发布：[v1.13.0](docs/releases/1.13.0.md)，带 Linux `x86_64` 二进制。`M11` 审计发现 `M2`–`M10` 交付中有一批标为已实现的功能是空壳或夸大（2,080 项中 642 项），本版本修复了影响最大的一批并把能力总表改为审计后的真实状态；未修复的单元见 [M11 审计](docs/testing/m11-audit/README.md)。
+最新发布：[v1.13.0](docs/releases/1.13.0.md)（[GitHub Release v1.13.0](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.13.0)），带 Linux `x86_64` 二进制。`M11` 审计发现 `M2`–`M10` 交付中有一批标为已实现的功能是空壳或夸大（2,080 项中 642 项），本版本修复了影响最大的一批并把能力总表改为审计后的真实状态；未修复的单元见 [M11 审计](docs/testing/m11-audit/README.md)。
 
 构建基线：Rust `1.99.1`，Linux `x86_64`。
 
@@ -140,7 +140,7 @@ flowchart TD
 
 ## 最新门禁
 
-`v1.12.0`（`perf-01` / `perf-02`）：fmt、严格 Clippy、zerotier-node 测试、release、许可通知、能力总表与站点检查全部通过；全量单元与回环集成测试 0 失败（见 [M1–M10 验证记录](docs/testing/m1-m7-verification-2026-11-04.md) 与 [17 协议 70 组合性能对标报告](docs/testing/benchmarks/mihomo-vs-kerlico-2026-11-04/REPORT.md)）。门禁只含回环与单元测试。
+`v1.13.0`（`perf-01`，提交 `177504c`）：fmt、严格 Clippy、全量单元与回环集成测试、第三方测试、release 与许可通知全部通过；发行二进制在 `perf-02` 构建。同一提交在 `perf-02` 首次门禁中 `kerlico-sudoku --test mux` 的 `real_mux_uses_one_carrier_for_concurrent_distinct_targets_and_fin` 在高负载下因引擎关闭清理超时失败一次，空闲机器上连续 5 次通过。门禁只含回环与单元测试。
 
 ## 实机测试
 
@@ -150,6 +150,7 @@ flowchart TD
 
 ## 已知问题
 
+- **Sudoku mux 测试关闭超时**：机器高负载时 `real_mux_uses_one_carrier_for_concurrent_distinct_targets_and_fin` 偶发 `Shutdown { cleanup_timed_out: true }`，原因未定位。
 - **SS2022 EIH UDP 测试**：整树门禁中无回包失败过 2 次，单独压测 1000 轮与整树 5 轮都未复现，原因未定位。测试现在带新包序号重发，并断言节点的 `Dropped` 与 `Failed` 为零，重发次数打印到标准错误。
 - **MASQUE**：`perf-03` 到 `perf-01` 的转发路径 32 MiB 约 20 分钟后 `eof`，吞吐 0.01 MiB/s，原因未定位。Mesh MTU 1300 低于 QUIC 路径 MTU 下限 1350，属路径限制。
 - **ZeroTier**：伪造流量持续时，首次主动联系我们的成员学习变慢；本节点发起的查询不受影响。
