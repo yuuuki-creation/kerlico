@@ -938,3 +938,86 @@ async fn empty_first_write_is_never_rejected_for_zero_padding() {
             .unwrap_or_else(|error| panic!("第 {round} 次首部被拒绝：{error}"));
     }
 }
+
+#[tokio::test]
+async fn sing_mux_carries_tcp_and_udp_over_bounded_carriers() {
+    for protocol in ["smux", "yamux", "h2mux"] {
+        let method = METHODS[0];
+        let user_key = key(method, 11);
+        let node = Arc::new(
+            support::node(
+                &kerlico_ss2022::Ss2022NodeFactory,
+                &json!({"method":method,"key":user_key,"multiplex":{"enabled":true}}),
+            )
+            .unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let access = Arc::new(Echo::default());
+        let carriers = Arc::new(AtomicUsize::new(0));
+        let ctx = context();
+        let server = {
+            let (node, access, ctx, carriers) =
+                (node.clone(), access.clone(), ctx.clone(), carriers.clone());
+            tokio::spawn(async move {
+                loop {
+                    let (stream, _) = tokio::select! {
+                        biased;
+                        _ = ctx.cancel.cancelled() => break,
+                        accepted = listener.accept() => accepted.unwrap(),
+                    };
+                    carriers.fetch_add(1, Ordering::Relaxed);
+                    let (node, access, ctx) = (node.clone(), access.clone(), ctx.clone());
+                    tokio::spawn(async move {
+                        let _ = node.handle(Box::new(stream), access, ctx).await;
+                    });
+                }
+            })
+        };
+        let outbound = support::outbound(
+            &kerlico_ss2022::Ss2022Factory,
+            &json!({"server":"127.0.0.1","port":port,"method":method,"key":user_key,
+                "multiplex":{"enabled":true,"protocol":protocol,"max_connections":2,"min_streams":4}}),
+        )
+        .unwrap();
+        assert!(outbound.capabilities().udp && outbound.supports_udp_association());
+        let target = Destination::new("example.invalid", 443).unwrap();
+        let connect = ConnectContext::new(Duration::from_secs(3));
+        let mut streams = Vec::new();
+        for index in 0..8u8 {
+            let mut stream = outbound
+                .connect_tcp(&target, &connect)
+                .await
+                .unwrap()
+                .stream;
+            let payload = vec![index; 20_000];
+            stream.write_all(&payload).await.unwrap();
+            streams.push((stream, payload));
+        }
+        for (stream, payload) in &mut streams {
+            let mut got = vec![0; payload.len()];
+            tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut got))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&got, payload, "{protocol} TCP 回显");
+        }
+        let mut channel = outbound.connect_udp(&target, &connect).await.unwrap();
+        for payload in [vec![1, 2, 3], vec![0x65; 1200]] {
+            channel.sender.send(&payload).await.unwrap();
+            let got = tokio::time::timeout(Duration::from_secs(3), channel.receiver.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(got, payload, "{protocol} UDP 回显");
+        }
+        let opened = carriers.load(Ordering::Relaxed);
+        assert!(
+            (1..=2).contains(&opened),
+            "{protocol} 九个流用了 {opened} 条载体连接"
+        );
+        ctx.cancel.cancel();
+        server.await.unwrap();
+    }
+}

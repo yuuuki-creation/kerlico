@@ -2,7 +2,7 @@
 
 更新日期：2026-11-07（Asia/Shanghai）
 
-`kerlico-net::sing_mux` 实现 sagernet/sing-mux 的线格式，与 sing-box 1.14.4（sing-mux `caf09fe`）和 Mihomo v1.19.33（metacubex/sing-mux v0.3.12）双向互通。Shadowsocks、VMess、VLESS、Trojan 出站用 `multiplex` 启用客户端；这些协议以及 Hysteria2、TUIC、ShadowQUIC、Sudoku 节点用 `multiplex` 接纳复用流。客户端把载体拨到 `sp.mux.sing-box.arpa:444`，服务端见到该目标即进入 sing-mux 会话。
+`kerlico-net::sing_mux` 实现 sagernet/sing-mux 的线格式，与 sing-box 1.14.4（sing-mux `caf09fe`）和 Mihomo v1.19.33（metacubex/sing-mux v0.3.12）双向互通。Shadowsocks、Shadowsocks 2022（`ss2022`）、VMess、VLESS、Trojan 出站用 `multiplex` 启用客户端；这些协议以及 Hysteria2、TUIC、ShadowQUIC、Sudoku 节点用 `multiplex` 接纳复用流。客户端把载体拨到 `sp.mux.sing-box.arpa:444`，服务端见到该目标即进入 sing-mux 会话。
 
 ## 配置
 

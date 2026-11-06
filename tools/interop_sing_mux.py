@@ -5,6 +5,7 @@
 32 路并发流同时打开时载体 TCP 连接数不超过客户端 max_connections。
 """
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import json
@@ -27,11 +28,12 @@ import mihomo_ready
 
 HOST = "127.0.0.1"
 PROTOCOLS = ["smux", "yamux", "h2mux"]
-CARRIERS = ["ss", "vless"]
+CARRIERS = ["ss", "ss2022", "vless"]
 KERLICO_PAIRS = [("kerlico", "sing-box"), ("kerlico", "mihomo"), ("sing-box", "kerlico"), ("mihomo", "kerlico")]
 BASELINE_PAIRS = [("sing-box", "mihomo"), ("mihomo", "sing-box")]
 CHECKS = ["tcp", "udp", "mux"]
 METHOD = "aes-128-gcm"
+METHOD_2022 = "2022-blake3-aes-128-gcm"
 MAX_CONNECTIONS = 4
 MIN_STREAMS = 4
 TCP_BYTES = 1 << 20
@@ -329,6 +331,7 @@ def write_json(path, value):
 class Secrets:
     password: str
     uuid: str
+    key: str
 
 
 def kerlico_mux(cell):
@@ -346,15 +349,20 @@ def mihomo_mux(cell):
 LIMITS = {"connect_timeout_ms": 8000, "idle_timeout_ms": 30000, "drain_timeout_ms": 500, "max_sessions": 512, "max_datagram_size": 65507}
 
 
+KERLICO_KIND = {"ss": "shadowsocks", "ss2022": "ss2022", "vless": "vless"}
+
+
 def kerlico_client(cell, secrets, server_port, socks_port):
     if cell.carrier == "ss":
         options = {"server": HOST, "port": server_port, "method": METHOD, "password": secrets.password}
+    elif cell.carrier == "ss2022":
+        options = {"server": HOST, "port": server_port, "method": METHOD_2022, "key": secrets.key}
     else:
         options = {"server": {"host": HOST, "port": server_port}, "uuid": secrets.uuid, "flow": "", "security": {"type": "none"}, "transport": {"type": "tcp"}}
     options["multiplex"] = kerlico_mux(cell)
     return {
         "version": 2,
-        "outbounds": [{"tag": "proxy", "type": "shadowsocks" if cell.carrier == "ss" else "vless", "options": options}],
+        "outbounds": [{"tag": "proxy", "type": KERLICO_KIND[cell.carrier], "options": options}],
         "inbounds": [],
         "local_inbounds": [{"tag": "socks", "type": "socks", "listen": f"{HOST}:{socks_port}", "outbound": "proxy", "options": {"version": "5"}}],
         "limits": LIMITS,
@@ -365,9 +373,11 @@ def kerlico_server(cell, secrets, server_port):
     mux = {"enabled": True, "padding": cell.padding}
     if cell.carrier == "ss":
         options, credential = {"method": METHOD, "allow_insecure": True, "multiplex": mux}, {"password": secrets.password}
+    elif cell.carrier == "ss2022":
+        options, credential = {"method": METHOD_2022, "multiplex": mux}, {"key": secrets.key}
     else:
         options, credential = {"security": {"type": "none"}, "transport": {"type": "tcp"}, "multiplex": mux}, {"uuid": secrets.uuid, "flow": ""}
-    node = {"tag": "node", "type": "shadowsocks" if cell.carrier == "ss" else "vless", "listen": f"{HOST}:{server_port}", "outbound": "direct", "options": options}
+    node = {"tag": "node", "type": KERLICO_KIND[cell.carrier], "listen": f"{HOST}:{server_port}", "outbound": "direct", "options": options}
     config = {"version": 2, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], "nodes": [node], "limits": LIMITS}
     bind_members(config, node, [credential])
     return config
@@ -376,6 +386,8 @@ def kerlico_server(cell, secrets, server_port):
 def singbox_client(cell, secrets, server_port, socks_port):
     if cell.carrier == "ss":
         outbound = {"type": "shadowsocks", "method": METHOD, "password": secrets.password}
+    elif cell.carrier == "ss2022":
+        outbound = {"type": "shadowsocks", "method": METHOD_2022, "password": secrets.key}
     else:
         outbound = {"type": "vless", "uuid": secrets.uuid, "flow": ""}
     outbound.update(tag="proxy", server=HOST, server_port=server_port, multiplex=singbox_mux(cell))
@@ -389,6 +401,8 @@ def singbox_client(cell, secrets, server_port, socks_port):
 def singbox_server(cell, secrets, server_port):
     if cell.carrier == "ss":
         inbound = {"type": "shadowsocks", "method": METHOD, "password": secrets.password}
+    elif cell.carrier == "ss2022":
+        inbound = {"type": "shadowsocks", "method": METHOD_2022, "password": secrets.key}
     else:
         inbound = {"type": "vless", "users": [{"name": "user", "uuid": secrets.uuid, "flow": ""}]}
     inbound.update(tag="node", listen=HOST, listen_port=server_port, multiplex={"enabled": True, "padding": cell.padding})
@@ -408,6 +422,8 @@ def mihomo_base(rules):
 def mihomo_client(cell, secrets, server_port, socks_port):
     if cell.carrier == "ss":
         proxy = {"type": "ss", "cipher": METHOD, "password": secrets.password}
+    elif cell.carrier == "ss2022":
+        proxy = {"type": "ss", "cipher": METHOD_2022, "password": secrets.key}
     else:
         proxy = {"type": "vless", "uuid": secrets.uuid, "flow": ""}
     proxy.update(name="proxy", server=HOST, port=server_port, udp=True, smux=mihomo_mux(cell))
@@ -420,6 +436,8 @@ def mihomo_client(cell, secrets, server_port, socks_port):
 def mihomo_server(cell, secrets, server_port):
     if cell.carrier == "ss":
         listener = {"type": "shadowsocks", "cipher": METHOD, "password": secrets.password}
+    elif cell.carrier == "ss2022":
+        listener = {"type": "shadowsocks", "cipher": METHOD_2022, "password": secrets.key}
     else:
         listener = {"type": "vless", "users": [{"username": "user", "uuid": secrets.uuid, "flow": ""}], "allow-insecure": True}
     listener.update({"name": "node", "listen": HOST, "port": server_port, "udp": True, "mux-option": {"padding": cell.padding}})
@@ -459,7 +477,8 @@ def tail(path, work):
 
 def run_cell(cell, binaries, work, targets):
     directory = Path(tempfile.mkdtemp(prefix="cell-", dir=work))
-    secrets = Secrets(password="synthetic-" + os.urandom(12).hex(), uuid=str(uuid.uuid4()))
+    secrets = Secrets(password="synthetic-" + os.urandom(12).hex(), uuid=str(uuid.uuid4()),
+                      key=base64.b64encode(os.urandom(16)).decode())
     server_port, socks_port = free_port(), free_port()
     result = {"cell": cell.label, "protocol": cell.protocol, "padding": cell.padding, "carrier": cell.carrier,
               "client": cell.client, "server": cell.server, "checks": {}, "failed_check": None}

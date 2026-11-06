@@ -4,6 +4,7 @@ use kerlico_core::{
     BoxFuture, BoxStream, ConnectContext, CredentialManifest, CredentialSet, Error, InboundContext,
     InboundProtocol, IngressBinding, Result,
 };
+use kerlico_net::sing_mux::SingMuxInboundConfig;
 use serde::Deserialize;
 use shadowsocks::{
     ServerConfig,
@@ -24,6 +25,7 @@ pub struct Ss2022Node {
     pub(crate) crypto: SharedContext,
     pub(crate) credentials: CredentialSet<Credential>,
     local: bool,
+    mux: Option<SingMuxInboundConfig>,
 }
 impl Ss2022Node {
     pub fn from_context(input: &NodeBuildContext) -> Result<Self> {
@@ -33,6 +35,10 @@ impl Ss2022Node {
             method: String,
             #[serde(default)]
             identity_key: Option<String>,
+            #[serde(default)]
+            multiplex: Option<SingMuxInboundConfig>,
+            #[serde(default, alias = "mux-option-padding")]
+            mux_option_padding: Option<bool>,
         }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -94,11 +100,16 @@ impl Ss2022Node {
             });
         }
         let local = false;
+        let mux = SingMuxInboundConfig::effective_with_padding(
+            options.multiplex.as_ref(),
+            options.mux_option_padding,
+        );
         Ok(Self {
             config,
             crypto: Context::new_shared(ServerType::Server),
             credentials: input.credentials(rows)?,
             local,
+            mux,
         })
     }
 }
@@ -200,6 +211,12 @@ impl InboundProtocol for Ss2022Node {
                     .authenticated(self.credentials.verified(&slot, ())?, &context)?
                     .0
             };
+            if kerlico_net::sing_mux::is_magic_target(&target) {
+                let Some(mux) = &self.mux else {
+                    return Err(Error::Rejected);
+                };
+                return kerlico_net::sing_mux::serve_inbound(stream, access, mux, &context).await;
+            }
             let remote = access.connect_tcp(&target, &handshake).await?;
             kerlico_core::relay_tcp(stream, remote, context.idle_timeout, context.cancel).await
         })

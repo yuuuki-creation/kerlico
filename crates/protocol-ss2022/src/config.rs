@@ -18,6 +18,14 @@ pub(crate) struct ClientOptions {
     pub key: String,
     #[serde(default)]
     pub identity_keys: Vec<String>,
+    #[serde(default)]
+    pub multiplex: Option<kerlico_net::sing_mux::SingMuxOutboundConfig>,
+}
+
+pub(crate) struct PreparedClient {
+    pub config: ServerConfig,
+    pub target: Destination,
+    pub multiplex: Option<kerlico_net::sing_mux::SingMuxOutboundConfig>,
 }
 
 #[derive(Deserialize)]
@@ -52,7 +60,7 @@ pub(crate) fn fingerprint(key: &[u8]) -> [u8; 32] {
     Sha256::digest(key).into()
 }
 
-pub(crate) fn client(options: ClientOptions) -> Result<(ServerConfig, Destination)> {
+pub(crate) fn client(options: ClientOptions) -> Result<PreparedClient> {
     let method = method(&options.method)?;
     let raw = key(&options.key, method)?;
     let target = Destination::new(&options.server, options.port)?;
@@ -79,7 +87,14 @@ pub(crate) fn client(options: ClientOptions) -> Result<(ServerConfig, Destinatio
         method,
     )
     .map_err(|_| Error::Config("SS2022 客户端参数不合法".into()))?;
-    Ok((config, target))
+    if let Some(mux) = &options.multiplex {
+        mux.validate()?;
+    }
+    Ok(PreparedClient {
+        config,
+        target,
+        multiplex: options.multiplex.filter(|m| m.enabled),
+    })
 }
 
 pub(crate) fn node(options: NodeOptions) -> Result<(ServerConfig, Vec<[u8; 32]>)> {

@@ -1195,6 +1195,7 @@ fn shadowsocks(p: &mut Proxy) -> Result<(&'static str, Opts)> {
             return Err(p.bad_value("plugin", name));
         }
         p.noop_bool("udp-over-tcp", false)?;
+        p.smux(&mut opts)?;
         p.udp(&mut opts, None)?;
         return Ok(("ss2022", opts));
     }
@@ -2417,6 +2418,10 @@ mod tests {
         assert_eq!(out.kind, "shadowtls");
         assert_eq!(out.options["tls"]["server_name"], "cloud.tencent.com");
         assert_eq!(out.options["inner"]["options"]["method"], "aes-128-gcm");
+        let mux = map("name: a\ntype: ss\nserver: 1.2.3.4\nport: 8388\ncipher: 2022-blake3-aes-128-gcm\npassword: AAAAAAAAAAAAAAAAAAAAAA==\nsmux:\n  enabled: true\n  protocol: h2mux\n  max-connections: 2\n").unwrap();
+        assert_eq!(mux.kind, "ss2022");
+        assert_eq!(mux.options["multiplex"]["protocol"], "h2mux");
+        assert_eq!(mux.options["multiplex"]["max_connections"], 2);
     }
 
     #[test]
