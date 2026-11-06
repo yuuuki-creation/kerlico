@@ -48,10 +48,16 @@ async fn bind_address_star_listens_on_both_families() {
     .await
     .unwrap();
     let listen = engine.listeners().unwrap()[0].1;
-    assert!(listen.ip().is_unspecified() && listen.is_ipv6(), "监听 [::]：{listen}");
+    assert!(
+        listen.ip().is_unspecified() && listen.is_ipv6(),
+        "监听 [::]：{listen}"
+    );
     let stop = CancellationToken::new();
     let task = tokio::spawn(engine.run(stop.clone()));
-    assert_eq!(socks_greeting(SocketAddr::from(([127, 0, 0, 1], port))).await, [5, 0]);
+    assert_eq!(
+        socks_greeting(SocketAddr::from(([127, 0, 0, 1], port))).await,
+        [5, 0]
+    );
     assert_eq!(
         socks_greeting(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port))).await,
         [5, 0]

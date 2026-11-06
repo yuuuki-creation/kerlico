@@ -64,10 +64,19 @@ async fn tls_via(proxy: SocketAddr, target: SocketAddr, sni: &str) -> bool {
 async fn socks_routes_raw_ip_tls_http_and_ssh_by_sniffed_result() {
     let echo = tcp_echo().await;
     let running = start(sniffer(json!({}))).await;
-    assert!(tls_via(running.proxy, echo, "allowed.test").await, "TLS SNI 命中域名规则");
-    assert!(!tls_via(running.proxy, echo, "other.test").await, "其他 SNI 走绑定的 reject");
+    assert!(
+        tls_via(running.proxy, echo, "allowed.test").await,
+        "TLS SNI 命中域名规则"
+    );
+    assert!(
+        !tls_via(running.proxy, echo, "other.test").await,
+        "其他 SNI 走绑定的 reject"
+    );
     let mut http = socks5_connect(running.proxy, echo).await;
-    assert!(echoes(&mut http, &http_request("allowed.test:8080")).await, "HTTP Host 命中域名规则");
+    assert!(
+        echoes(&mut http, &http_request("allowed.test:8080")).await,
+        "HTTP Host 命中域名规则"
+    );
     let mut ssh = socks5_connect(running.proxy, echo).await;
     assert!(
         !echoes(&mut ssh, &openssh_banner()).await,
@@ -105,7 +114,10 @@ async fn sing_box_style_route_sniff_action_detects_ssh_for_protocol_rules() {
     let stop = CancellationToken::new();
     let task = tokio::spawn(engine.run(stop.clone()));
     let mut ssh = socks5_connect(proxy, echo).await;
-    assert!(echoes(&mut ssh, &openssh_banner()).await, "路由 sniff 动作识别 SSH");
+    assert!(
+        echoes(&mut ssh, &openssh_banner()).await,
+        "路由 sniff 动作识别 SSH"
+    );
     let mut tls = socks5_connect(proxy, echo).await;
     assert!(
         !echoes(&mut tls, &tls_client_hello("allowed.test")).await,
@@ -119,15 +131,35 @@ async fn sing_box_style_route_sniff_action_detects_ssh_for_protocol_rules() {
 async fn skip_and_force_lists_follow_mihomo() {
     let echo = tcp_echo().await;
     let cases = [
-        (json!({"skip_domain":["+.allowed.test"]}), false, "skip-domain 丢弃嗅探域名"),
-        (json!({"skip_dst_address":["127.0.0.0/8"]}), false, "skip-dst-address 不嗅探"),
-        (json!({"skip_src_address":["127.0.0.1/32"]}), false, "skip-src-address 不嗅探"),
-        (json!({"parse_pure_ip":false}), false, "parse-pure-ip 关闭时纯 IP 不嗅探"),
+        (
+            json!({"skip_domain":["+.allowed.test"]}),
+            false,
+            "skip-domain 丢弃嗅探域名",
+        ),
+        (
+            json!({"skip_dst_address":["127.0.0.0/8"]}),
+            false,
+            "skip-dst-address 不嗅探",
+        ),
+        (
+            json!({"skip_src_address":["127.0.0.1/32"]}),
+            false,
+            "skip-src-address 不嗅探",
+        ),
+        (
+            json!({"parse_pure_ip":false}),
+            false,
+            "parse-pure-ip 关闭时纯 IP 不嗅探",
+        ),
         (json!({"enable":false}), false, "未启用不嗅探"),
     ];
     for (extra, expected, why) in cases {
         let running = start(sniffer(extra)).await;
-        assert_eq!(tls_via(running.proxy, echo, "allowed.test").await, expected, "{why}");
+        assert_eq!(
+            tls_via(running.proxy, echo, "allowed.test").await,
+            expected,
+            "{why}"
+        );
         running.stop().await;
     }
     let plain = start(sniffer(json!({}))).await;

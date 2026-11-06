@@ -73,7 +73,9 @@ pub fn quic_curl_initial() -> Vec<Vec<u8>> {
 
 /// 新版 Chrome 把 ClientHello 拆进三个 Initial。
 pub fn quic_chrome_initials() -> Vec<Vec<u8>> {
-    parse_hex(include_str!("../fixtures/sniff/singbox-quic-chrome-new.hex"))
+    parse_hex(include_str!(
+        "../fixtures/sniff/singbox-quic-chrome-new.hex"
+    ))
 }
 
 pub fn openssh_banner() -> Vec<u8> {
@@ -194,13 +196,18 @@ pub async fn http_connect(proxy: SocketAddr, target: SocketAddr) -> TcpStream {
         stream.read_exact(&mut byte).await.unwrap();
         head.push(byte[0]);
     }
-    assert!(head.starts_with(b"HTTP/1.1 200"), "{}", String::from_utf8_lossy(&head));
+    assert!(
+        head.starts_with(b"HTTP/1.1 200"),
+        "{}",
+        String::from_utf8_lossy(&head)
+    );
     stream
 }
 
 /// SOCKS5 UDP ASSOCIATE：依次发送数据报，返回是否收到最后一个的回显。
 pub async fn socks5_udp_echoes(proxy: SocketAddr, target: SocketAddr, packets: &[Vec<u8>]) -> bool {
-    let (control, bound) = socks_request(proxy, 3, socks_address("0.0.0.0:0".parse().unwrap())).await;
+    let (control, bound) =
+        socks_request(proxy, 3, socks_address("0.0.0.0:0".parse().unwrap())).await;
     let relay: SocketAddr = match bound[0] {
         1 => SocketAddr::from((
             [bound[1], bound[2], bound[3], bound[4]],

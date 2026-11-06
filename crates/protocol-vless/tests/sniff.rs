@@ -1,8 +1,8 @@
 //! VLESS 服务端入站经共享嗅探阶段：经 VLESS 到达的 IP 目标按嗅探域名分流。
 
-mod support;
 #[path = "../../net/tests/support/handshakes.rs"]
 mod handshakes;
+mod support;
 
 use handshakes::*;
 use kerlico_config::{Registry, parse};
@@ -72,6 +72,12 @@ async fn forwarded_echoes(sni: &str) -> bool {
 
 #[tokio::test]
 async fn vless_server_routes_raw_ip_tls_by_sniffed_sni() {
-    assert!(forwarded_echoes("allowed.test").await, "VLESS 会话内 TLS SNI 命中域名规则");
-    assert!(!forwarded_echoes("other.test").await, "其他 SNI 走节点绑定的 reject");
+    assert!(
+        forwarded_echoes("allowed.test").await,
+        "VLESS 会话内 TLS SNI 命中域名规则"
+    );
+    assert!(
+        !forwarded_echoes("other.test").await,
+        "其他 SNI 走节点绑定的 reject"
+    );
 }

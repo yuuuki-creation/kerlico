@@ -130,17 +130,6 @@ def socks_request(proxy, cmd, host, port):
     return s, head[1], atyp, rest
 
 
-def tcp_case(proxy, host, port, payload):
-    s, _, _, _ = socks_request(proxy, 1, host, port)
-    try:
-        s.sendall(payload)
-        s.settimeout(2)
-        s.recv(65536)
-    except OSError:
-        pass
-    s.close()
-
-
 def udp_case(proxy, host, port, packets):
     ctrl, rep, atyp, rest = socks_request(proxy, 3, "0.0.0.0", 0)
     if rep != 0:
@@ -172,10 +161,12 @@ def decisions(log):
         m = LINE.search(line)
         if not m:
             continue
-        net, src, _dst, kind, payload, using, unmatched = m.groups()
-        sport = src.rsplit(":", 1)[1]
+        net, src, dst, kind, payload, using, unmatched = m.groups()
+        # TCP 按客户端源端口对应夹具；UDP 每个夹具用独立目标端口。
+        key = src.rsplit(":", 1)[1] if net == "TCP" else dst.rsplit(":", 1)[1]
         rule = "MATCH" if unmatched or (kind or "").lower() == "match" else f"{kind.lower()}({payload})"
-        out[(net, sport)] = (rule, (using or unmatched).split("[")[-1].rstrip("]"))
+        outbound = (using or unmatched).strip('"').split("[")[-1].rstrip("]")
+        out[(net, key)] = (rule, outbound)
     return out
 
 
@@ -214,10 +205,13 @@ def main():
     parser.add_argument("--mihomo", required=True)
     args = parser.parse_args()
     stop = threading.Event()
-    tcp, udp = free_port(), free_port(socket.SOCK_DGRAM)
+    tcp = free_port()
+    udp_ports = [free_port(socket.SOCK_DGRAM) for _ in range(2)]
     for ip in ("127.0.0.1", "127.0.0.2"):
         threading.Thread(target=tcp_echo, args=(ip, tcp, stop), daemon=True).start()
-    threading.Thread(target=udp_echo, args=("127.0.0.1", udp, stop), daemon=True).start()
+    for udp in udp_ports:
+        threading.Thread(target=udp_echo, args=("127.0.0.1", udp, stop), daemon=True).start()
+    udp = ",".join(str(p) for p in udp_ports)
     time.sleep(0.3)
 
     workdir = tempfile.mkdtemp(prefix="sniff-diff-")
@@ -245,10 +239,10 @@ def main():
                     return str(sport)
                 return go
 
-            def udp_fixture(packets):
+            def udp_fixture(index, packets):
                 def go():
-                    udp_case(port, "127.0.0.1", udp, packets)
-                    return None
+                    udp_case(port, "127.0.0.1", udp_ports[index], packets)
+                    return str(udp_ports[index])
                 return go
 
             cases = [
@@ -261,22 +255,18 @@ def main():
                 ("ssh-not-sniffed", "TCP", tcp_fixture("127.0.0.1", bytes.fromhex(hex_packets("openssh-client-banner")[0].hex()))),
                 ("domain-target-forced", "TCP", tcp_fixture("localhost", client_hello("allowed.test"))),
                 ("random-bytes", "TCP", tcp_fixture("127.0.0.1", os.urandom(64))),
-                ("quic-curl", "UDP", udp_fixture(hex_packets("curl-http3-initial"))),
-                ("quic-chrome-3-initials", "UDP", udp_fixture(hex_packets("singbox-quic-chrome-new"))),
+                ("quic-curl", "UDP", udp_fixture(0, hex_packets("curl-http3-initial"))),
+                ("quic-chrome-3-initials", "UDP", udp_fixture(1, hex_packets("singbox-quic-chrome-new"))),
             ]
             log, ran = run(binary, cli, cases, workdir, port)
             found = decisions(log)
-            udp_lines = [v for (net, _), v in sorted(found.items()) if net == "UDP"]
-            row = {}
-            for name, network, sport in ran:
-                if network == "TCP":
-                    row[name] = found.get(("TCP", sport), ("<无日志>", ""))
-                else:
-                    row[name] = udp_lines.pop(0) if udp_lines else ("<无日志>", "")
+            row = {name: found.get((network, key), ("<无日志>", "")) for name, network, key in ran}
             results[label] = row
             shutil.copy(os.path.join(workdir, os.path.basename(binary) + ".log"), os.path.join(workdir, f"{label}.out"))
     finally:
         stop.set()
+        if "kerlico" not in results:
+            shutil.rmtree(workdir, ignore_errors=True)
     same = True
     width = max(len(n) for n in results["mihomo"])
     for name in results["mihomo"]:

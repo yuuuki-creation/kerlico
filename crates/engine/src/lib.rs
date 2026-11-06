@@ -233,7 +233,8 @@ fn node_listen_socket(
     match node_socket(*address, udp, transparent, dual_stack) {
         Err(Error::Io(error)) if dual_stack && address.is_ipv6() => {
             let fallback = SocketAddr::from(([0, 0, 0, 0], address.port()));
-            let socket = node_socket(fallback, udp, transparent, false).map_err(|_| Error::Io(error))?;
+            let socket =
+                node_socket(fallback, udp, transparent, false).map_err(|_| Error::Io(error))?;
             *address = fallback;
             Ok(socket)
         }
@@ -424,7 +425,8 @@ impl Engine {
                 );
                 let transparent = node.protocol.transparent();
                 let tcp = if node.protocol.supports_tcp() {
-                    let socket = node_listen_socket(&mut node.listen, false, transparent, node.dual_stack)?;
+                    let socket =
+                        node_listen_socket(&mut node.listen, false, transparent, node.dual_stack)?;
                     socket.listen(1024)?;
                     let listener = TcpListener::from_std(socket.into())?;
                     node.listen = listener.local_addr()?;
@@ -434,7 +436,8 @@ impl Engine {
                 };
                 let udp = if node.protocol.supports_udp() {
                     let socket = Arc::new(UdpSocket::from_std(
-                        node_listen_socket(&mut node.listen, true, transparent, node.dual_stack)?.into(),
+                        node_listen_socket(&mut node.listen, true, transparent, node.dual_stack)?
+                            .into(),
                     )?);
                     if tcp.is_none() {
                         node.listen = socket.local_addr()?;

@@ -2,7 +2,7 @@
 # TUN 入站经共享嗅探阶段的端到端验证：只在临时 netns 内建 TUN 与路由，不改宿主网络。
 # 用法（root）：tools/sniff_tun_netns_e2e.sh <kerlico 可执行文件>
 # netns 内 kerlico 持有 TUN，客户端向文档地址发 TLS ClientHello 与 QUIC Initial；
-# 出站 hit/miss 都是 reject，按连接日志里命中的规则判定是否按嗅探域名分流。
+# 出站 hit/miss 都指向关闭的本机端口（TUN 要求出站具备 UDP 关联能力），按连接日志里命中的规则判定分流。
 set -euo pipefail
 
 bin="$(realpath "${1:?用法：$0 <kerlico 可执行文件>}")"
@@ -27,7 +27,9 @@ ip -n "$ns" link set lo up
 cat >"$work/config.json" <<JSON
 {
   "version": 2,
-  "outbounds": [{"tag":"hit","type":"reject"},{"tag":"miss","type":"reject"}],
+  "outbounds": [
+    {"tag":"hit","type":"socks","options":{"server":{"host":"127.0.0.1","port":9}}},
+    {"tag":"miss","type":"socks","options":{"server":{"host":"127.0.0.1","port":9}}}],
   "local_inbounds": [{"tag":"tun-in","type":"tun","listen":"127.0.0.1:0","outbound":"miss",
     "options":{"name":"ks0","addresses":["172.19.0.1/30","fdfe:dcba:9876::1/126"],"mtu":1500}}],
   "routes": [{"outbound":"hit","domain":["allowed.test","quic.example.com"]}],
@@ -92,7 +94,6 @@ for dst in '198\.51\.100\.10' '\[2001:db8::10\]'; do
   fam=ipv4; [ "$dst" = '198\.51\.100\.10' ] || fam=ipv6
   check "\[TCP\] [^ ]+ --> $dst:443 match Domain\(allowed\.test,quic\.example\.com\) using hit" "tcp/$fam TLS SNI 命中"
   check "\[TCP\] [^ ]+ --> $dst:443 doesn't match any rule using miss" "tcp/$fam 其他 SNI 未命中"
-  # reject 没有多目标 UDP 能力，准入失败时记 warning，出站名同样说明路由结果。
   check "\[UDP\] [^ ]+ --> $dst:443 match Domain\(allowed\.test,quic\.example\.com\) using hit|\[UDP\] dial hit [^ ]+ --> $dst:443" "udp/$fam QUIC SNI 命中"
 done
 [ "$fail" = 0 ] || { echo "--- kerlico 日志"; cat "$log"; }

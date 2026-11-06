@@ -2706,9 +2706,17 @@ mod tests {
         }))
         .unwrap();
         let policy = spec.to_policy().unwrap();
-        let order: Vec<&str> = policy.sniffers.iter().map(|r| r.protocol.as_str()).collect();
+        let order: Vec<&str> = policy
+            .sniffers
+            .iter()
+            .map(|r| r.protocol.as_str())
+            .collect();
         assert_eq!(order, ["tls", "http", "quic"], "Mihomo 固定尝试顺序");
-        assert_eq!(policy.sniffer("tls", 443), Some(true), "override-destination 默认 true");
+        assert_eq!(
+            policy.sniffer("tls", 443),
+            Some(true),
+            "override-destination 默认 true"
+        );
         assert_eq!(policy.sniffer("tls", 8443), None, "TLS 未写端口时只看 443");
         assert_eq!(policy.sniffer("http", 8443), Some(false), "逐协议覆盖开关");
         assert_eq!(policy.sniffer("quic", 443), Some(true));
@@ -2725,7 +2733,11 @@ mod tests {
         }))
         .unwrap();
         let legacy = legacy.to_policy().unwrap();
-        assert_eq!(legacy.sniffer("http", 8080), Some(true), "旧写法共用 port-whitelist");
+        assert_eq!(
+            legacy.sniffer("http", 8080),
+            Some(true),
+            "旧写法共用 port-whitelist"
+        );
         assert_eq!(legacy.sniffer("http", 80), None);
         let off: GlobalSnifferSpec = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(!off.to_policy().unwrap().enabled, "enable 默认 false");
@@ -2742,7 +2754,10 @@ mod tests {
         assert_eq!(policy.targets, kerlico_core::SniffTargets::All);
         assert_eq!(policy.sniffer("ssh", 22), Some(false));
         let target = kerlico_core::Destination::new("example.com", 443).unwrap();
-        assert!(policy.wants(&target, None, None), "sing-box 入站嗅探域名目标");
+        assert!(
+            policy.wants(&target, None, None),
+            "sing-box 入站嗅探域名目标"
+        );
         let spec: InboundSniffingSpec = serde_json::from_value(serde_json::json!({
             "enabled": true, "destOverride": ["http", "tls", "fakedns"], "routeOnly": true
         }))
@@ -2750,6 +2765,10 @@ mod tests {
         let mut xray = kerlico_core::SniffPolicy::default();
         apply_inbound_sniffing(&mut xray, None, None, None, Some(&spec)).unwrap();
         assert_eq!(xray.sniffers.len(), 2, "fakedns 不是字节嗅探器");
-        assert_eq!(xray.sniffer("tls", 443), Some(false), "routeOnly 不覆盖目标");
+        assert_eq!(
+            xray.sniffer("tls", 443),
+            Some(false),
+            "routeOnly 不覆盖目标"
+        );
     }
 }
