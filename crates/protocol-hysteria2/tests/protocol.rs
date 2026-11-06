@@ -579,13 +579,21 @@ async fn shared_budget_rejects_new_streams_and_existing_streams_drain() {
         stream.read_exact(&mut banner).await.unwrap();
         streams.push(stream);
     }
+    let mut rejected = fixture
+        .outbound
+        .connect_tcp(&target, &establish)
+        .await
+        .unwrap()
+        .stream;
+    let mut byte = [0; 1];
     assert!(
-        fixture
-            .outbound
-            .connect_tcp(&target, &establish)
+        tokio::time::timeout(Duration::from_secs(3), rejected.read_exact(&mut byte))
             .await
-            .is_err()
+            .unwrap()
+            .is_err(),
+        "超出预算的流在首次读取时失败"
     );
+    drop(rejected);
     fixture.global.close();
     for stream in &mut streams {
         stream.write_all(b"drain").await.unwrap();

@@ -2,6 +2,7 @@
 
 pub mod fallback;
 pub mod generate;
+pub mod lazy_response;
 pub mod ntp;
 pub mod sing_mux;
 pub mod sniff;

@@ -9,6 +9,7 @@ use kerlico_core::{
     BoxFuture, BoxStream, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
     Destination, Error, Outbound, ResourceKey, Result, ServiceContext, ServiceTask, TargetPolicy,
 };
+use kerlico_net::lazy_response::LazyResponse;
 use rand::Rng;
 use serde_json::Value;
 use std::{
@@ -431,8 +432,7 @@ impl Outbound for Hysteria2Outbound {
                         _owner: owner,
                     };
                     wire::send_request(&mut stream, &target.to_string()).await?;
-                    wire::response(&mut stream).await?;
-                    Ok(Box::new(stream) as BoxStream)
+                    Ok(Box::new(LazyResponse::new(stream, wire::parse_response)) as BoxStream)
                 })
                 .await
                 .map(|stream| kerlico_core::OpenedTcp {

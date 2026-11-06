@@ -132,6 +132,20 @@ async def bulk(forward, size):
     return round(size / 1048576 / (loop.time() - started), 2)
 
 
+async def client_first(forward):
+    """客户端先发短请求；Mihomo 服务端在目标回写前不发 TCP 响应，客户端不能先等响应。"""
+    reader, writer = await asyncio.open_connection("127.0.0.1", forward)
+    try:
+        request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+        writer.write(request)
+        await writer.drain()
+        if await asyncio.wait_for(reader.readexactly(len(request)), 4) != request:
+            raise RuntimeError("TCP 内容不符")
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
 async def start(binary, kind, direction, config, log, forward):
     handle = log.open("wb")
     os.chmod(log, 0o600)
@@ -196,12 +210,12 @@ async def main(args):
                             try:
                                 active.append(await start(server_binary, server_kind, "server", h.save(root, label + "-server.json", server), root / (label + "-server.log"), forward))
                                 active.append(await start(client_binary, client_kind, "client", h.save(root, label + "-client.json", client), root / (label + "-client.log"), forward))
-                                for size in [None] + [int(size) for size in args.udp_sizes.split(",")]:
-                                    record = {"case": label, "network": "tcp" if size is None else "udp"}
-                                    if size is not None:
+                                for size in ["client-first", None] + [int(size) for size in args.udp_sizes.split(",")]:
+                                    record = {"case": label, "network": "tcp-client-first" if size == "client-first" else "tcp" if size is None else "udp"}
+                                    if isinstance(size, int):
                                         record["payload_bytes"] = size
                                     try:
-                                        await (h.tcp(forward) if size is None else h.udp(forward, b"u" * size))
+                                        await (client_first(forward) if size == "client-first" else h.tcp(forward) if size is None else h.udp(forward, b"u" * size))
                                         record["pass"] = True
                                     except Exception as error:
                                         record.update({"pass": False, "error": type(error).__name__})

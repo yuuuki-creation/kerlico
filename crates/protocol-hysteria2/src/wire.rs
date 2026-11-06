@@ -83,6 +83,62 @@ pub(crate) async fn send_request<W: AsyncWrite + Unpin + ?Sized>(
     writer.write_all(&bytes).await?;
     Ok(())
 }
+/// 解析 TCP 响应头（状态、消息、填充），供首次读取时惰性校验。
+///
+/// sing-quic 服务端（Mihomo）在目标第一次回写时才发送该头，客户端不能先等它再发数据。
+pub(crate) fn parse_response(input: &[u8]) -> std::io::Result<Option<usize>> {
+    let Some(&status) = input.first() else {
+        return Ok(None);
+    };
+    let mut cursor = 1;
+    let Some(message) = take_field(input, &mut cursor, 2048)? else {
+        return Ok(None);
+    };
+    if take_field(input, &mut cursor, 4096)?.is_none() {
+        return Ok(None);
+    }
+    if status != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            format!(
+                "Hysteria2 服务端拒绝 TCP 请求：{}",
+                String::from_utf8_lossy(message)
+            ),
+        ));
+    }
+    Ok(Some(cursor))
+}
+fn take_field<'a>(
+    input: &'a [u8],
+    cursor: &mut usize,
+    maximum: usize,
+) -> std::io::Result<Option<&'a [u8]>> {
+    let Some(&first) = input.get(*cursor) else {
+        return Ok(None);
+    };
+    let width = 1usize << (first >> 6);
+    let Some(bytes) = input.get(*cursor..*cursor + width) else {
+        return Ok(None);
+    };
+    let length = bytes[1..]
+        .iter()
+        .fold(u64::from(first & 63), |value, byte| {
+            value << 8 | u64::from(*byte)
+        });
+    if length > maximum as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hysteria2 TCP 响应字段过长",
+        ));
+    }
+    let start = *cursor + width;
+    let Some(field) = input.get(start..start + length as usize) else {
+        return Ok(None);
+    };
+    *cursor = start + length as usize;
+    Ok(Some(field))
+}
+#[cfg(test)]
 pub(crate) async fn response<R: AsyncRead + Unpin + ?Sized>(reader: &mut R) -> Result<()> {
     let status = reader.read_u8().await?;
     let _ = field(reader, 2048).await?;

@@ -1,6 +1,9 @@
 //! `sing-mux` 多路复用客户端连接池与服务端接入实现（支持 `h2mux`、`smux`、`yamux`）。
 
-use crate::uot::{encode_uot_address, read_uot_address};
+use crate::{
+    lazy_response::LazyResponse,
+    uot::{encode_uot_address, read_uot_address},
+};
 use kerlico_core::{
     AddressedDatagram, BoxFuture, BoxStream, ConnectContext, DatagramAssociation,
     DatagramAssociationReceiver, DatagramAssociationSender, DatagramChannel, DatagramReceiver,
@@ -675,7 +678,11 @@ impl ClientSession {
         true
     }
 
-    async fn open_stream(&self, flags: u16, target: &Destination) -> Result<MuxLogicalStream> {
+    async fn open_stream(
+        &self,
+        flags: u16,
+        target: &Destination,
+    ) -> Result<LazyResponse<MuxLogicalStream>> {
         let sid = self.next_id.fetch_add(2, Ordering::Relaxed);
         self.total_streams.fetch_add(1, Ordering::AcqRel);
         self.active_streams.fetch_add(1, Ordering::AcqRel);
@@ -703,7 +710,7 @@ impl ClientSession {
             .await
             .map_err(|_| Error::Io(io::Error::from(io::ErrorKind::BrokenPipe)))?;
 
-        let mut stream = MuxLogicalStream {
+        let stream = MuxLogicalStream {
             stream_id: sid,
             rx: s_rx,
             read_buf: Vec::new(),
@@ -714,15 +721,50 @@ impl ClientSession {
             active_streams: self.active_streams.clone(),
             closed: false,
         };
+        Ok(LazyResponse::new(stream, parse_stream_status))
+    }
+}
 
-        let status = stream.read_u8().await?;
-        if status != 0 {
-            let msg_len = stream.read_u16().await? as usize;
-            let mut msg = vec![0u8; msg_len.min(1024)];
-            let _ = stream.read_exact(&mut msg).await;
-            return Err(Error::Protocol("sing-mux 远端流握手返回错误状态"));
+/// sing-mux 流状态：`0` 成功；`1` 后接 uvarint 长度的错误文本。
+fn parse_stream_status(input: &[u8]) -> io::Result<Option<usize>> {
+    let Some((&status, rest)) = input.split_first() else {
+        return Ok(None);
+    };
+    match status {
+        0 => Ok(Some(1)),
+        1 => {
+            let mut length = 0u64;
+            for (index, byte) in rest.iter().enumerate().take(10) {
+                length |= u64::from(byte & 0x7f) << (7 * index);
+                if byte & 0x80 == 0 {
+                    if length > 4096 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "sing-mux 流错误文本过长",
+                        ));
+                    }
+                    let start = index + 1;
+                    let Some(message) = rest.get(start..start + length as usize) else {
+                        return Ok(None);
+                    };
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionRefused,
+                        format!("sing-mux 远端拒绝流：{}", String::from_utf8_lossy(message)),
+                    ));
+                }
+            }
+            if rest.len() >= 10 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "sing-mux 流错误长度不合法",
+                ));
+            }
+            Ok(None)
         }
-        Ok(stream)
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sing-mux 流状态不合法",
+        )),
     }
 }
 
@@ -845,7 +887,7 @@ impl SingMuxClient {
 }
 
 struct MuxUdpChannelSender {
-    writer: tokio::io::WriteHalf<MuxLogicalStream>,
+    writer: tokio::io::WriteHalf<LazyResponse<MuxLogicalStream>>,
 }
 
 impl DatagramSender for MuxUdpChannelSender {
@@ -862,7 +904,7 @@ impl DatagramSender for MuxUdpChannelSender {
 }
 
 struct MuxUdpChannelReceiver {
-    reader: tokio::io::ReadHalf<MuxLogicalStream>,
+    reader: tokio::io::ReadHalf<LazyResponse<MuxLogicalStream>>,
     peer: Destination,
 }
 
@@ -886,7 +928,7 @@ impl DatagramReceiver for MuxUdpChannelReceiver {
 }
 
 struct MuxUdpAssocSender {
-    writer: tokio::io::WriteHalf<MuxLogicalStream>,
+    writer: tokio::io::WriteHalf<LazyResponse<MuxLogicalStream>>,
 }
 
 impl DatagramAssociationSender for MuxUdpAssocSender {
@@ -909,7 +951,7 @@ impl DatagramAssociationSender for MuxUdpAssocSender {
 }
 
 struct MuxUdpAssocReceiver {
-    reader: tokio::io::ReadHalf<MuxLogicalStream>,
+    reader: tokio::io::ReadHalf<LazyResponse<MuxLogicalStream>>,
 }
 
 impl DatagramAssociationReceiver for MuxUdpAssocReceiver {
@@ -1226,5 +1268,79 @@ mod tests {
             assert_eq!(buf, b"hello");
             server_task.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn client_first_stream_does_not_wait_for_deferred_status() {
+        let protocol = SingMuxProtocol::Smux;
+        let client = SingMuxClient::new(SingMuxOutboundConfig {
+            enabled: true,
+            protocol,
+            max_connections: Some(1),
+            min_streams: Some(1),
+            max_streams: Some(8),
+            padding: false,
+            only_tcp: false,
+        });
+        let (c_io, mut s_io) = tokio::io::duplex(16384);
+        let server_task = tokio::spawn(async move {
+            let mut preamble = [0u8; 3];
+            s_io.read_exact(&mut preamble).await.unwrap();
+            let mut received = Vec::new();
+            loop {
+                let frame = read_wire_frame(&mut s_io, protocol).await.unwrap().unwrap();
+                if frame.cmd != FrameCmd::Psh {
+                    continue;
+                }
+                received.extend_from_slice(&frame.payload);
+                if received.ends_with(b"GET") {
+                    let mut out = Vec::new();
+                    for (cmd, payload) in [
+                        (FrameCmd::Psh, b"\x00HTTP".to_vec()),
+                        (FrameCmd::Fin, Vec::new()),
+                    ] {
+                        encode_wire_frame_into(
+                            &mut out,
+                            protocol,
+                            &WireFrame {
+                                cmd,
+                                stream_id: frame.stream_id,
+                                payload,
+                            },
+                        );
+                    }
+                    s_io.write_all(&out).await.unwrap();
+                    s_io.flush().await.unwrap();
+                    break;
+                }
+            }
+        });
+        let target = Destination::new("example.com", 80).unwrap();
+        let exchange = async {
+            let mut opened = client
+                .connect_tcp(&target, |_| async move { Ok(Box::new(c_io) as BoxStream) })
+                .await
+                .unwrap();
+            opened.stream.write_all(b"GET").await.unwrap();
+            opened.stream.flush().await.unwrap();
+            let mut body = Vec::new();
+            opened.stream.read_to_end(&mut body).await.unwrap();
+            body
+        };
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), exchange)
+            .await
+            .expect("客户端先发数据时不应等待服务端流状态");
+        assert_eq!(body, b"HTTP");
+        server_task.await.unwrap();
+    }
+
+    #[test]
+    fn stream_status_error_carries_server_message() {
+        assert_eq!(parse_stream_status(&[]).unwrap(), None);
+        assert_eq!(parse_stream_status(&[0, 7]).unwrap(), Some(1));
+        assert_eq!(parse_stream_status(&[1, 3, b'b']).unwrap(), None);
+        let error = parse_stream_status(&[1, 3, b'b', b'a', b'd']).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+        assert!(error.to_string().contains("bad"));
     }
 }
