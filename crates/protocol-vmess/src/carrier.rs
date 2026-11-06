@@ -178,6 +178,8 @@ pub(crate) enum ClientSecurity {
         server_name: Option<String>,
         #[serde(default)]
         ca_pem: Option<String>,
+        #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
+        insecure: bool,
     },
 }
 #[derive(Deserialize, Default)]
@@ -198,6 +200,32 @@ pub(crate) enum ServerSecurity {
 }
 fn invalid() -> Error {
     Error::Config("VMess 载体或 TLS 配置不合法".into())
+}
+fn client_config(ca_pem: Option<String>, insecure: bool) -> Result<rustls::ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|_| invalid())?;
+    if insecure {
+        kerlico_net::warn_insecure_tls("VMess");
+        return Ok(builder
+            .dangerous()
+            .with_custom_certificate_verifier(kerlico_net::insecure_verifier(provider))
+            .with_no_client_auth());
+    }
+    let mut roots =
+        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Some(pem) = ca_pem {
+        let certs =
+            rustls_pemfile::certs(&mut Cursor::new(pem)).collect::<std::io::Result<Vec<_>>>()?;
+        if certs.is_empty() {
+            return Err(invalid());
+        }
+        for cert in certs {
+            roots.add(cert).map_err(|_| invalid())?;
+        }
+    }
+    Ok(builder.with_root_certificates(roots).with_no_client_auth())
 }
 struct BridgedStream(BoxStream);
 
@@ -298,29 +326,11 @@ impl Client {
             ClientSecurity::Tls {
                 server_name,
                 ca_pem,
+                insecure,
             } => {
                 let name = server_name.unwrap_or_else(|| server.host());
                 xray_transport::validate_tls_server_name(&name).map_err(|_| invalid())?;
-                let mut roots = rustls::RootCertStore::from_iter(
-                    webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-                );
-                if let Some(pem) = ca_pem {
-                    let certs = rustls_pemfile::certs(&mut Cursor::new(pem))
-                        .collect::<std::io::Result<Vec<_>>>()?;
-                    if certs.is_empty() {
-                        return Err(invalid());
-                    }
-                    for cert in certs {
-                        roots.add(cert).map_err(|_| invalid())?;
-                    }
-                }
-                let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-                    rustls::crypto::ring::default_provider(),
-                ))
-                .with_safe_default_protocol_versions()
-                .map_err(|_| invalid())?
-                .with_root_certificates(roots)
-                .with_no_client_auth();
+                let mut tls = client_config(ca_pem, insecure)?;
                 tls.resumption = rustls::client::Resumption::disabled();
                 tls.alpn_protocols = transport.alpn();
                 dialer = TransportDialer::with_tls_connector(

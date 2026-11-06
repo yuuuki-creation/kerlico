@@ -86,12 +86,19 @@ pub(crate) fn client(
         }
     }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
-        Arc::new(roots),
-        provider.clone(),
-    )
-    .build()
-    .map_err(|_| invalid())?;
+    let verifier: Arc<dyn ServerCertVerifier> = if options.insecure {
+        kerlico_net::warn_insecure_tls("Naive");
+        kerlico_net::insecure_verifier(provider.clone())
+    } else {
+        Arc::new(Verifier {
+            inner: rustls::client::WebPkiServerVerifier::builder_with_provider(
+                Arc::new(roots),
+                provider.clone(),
+            )
+            .build()
+            .map_err(|_| invalid())?,
+        })
+    };
     let versions = if transport == Transport::H3 {
         vec![&rustls::version::TLS13]
     } else {
@@ -101,7 +108,7 @@ pub(crate) fn client(
         .with_protocol_versions(&versions)
         .map_err(|_| invalid())?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(Verifier { inner: verifier }))
+        .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
     config.resumption = rustls::client::Resumption::disabled();
     config.alpn_protocols = vec![match transport {

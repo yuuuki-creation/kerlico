@@ -379,3 +379,38 @@ fn registry_rejects_cross_node_reused_credentials() {
             .is_err()
     );
 }
+async fn echoes(outbound: &Arc<dyn Outbound>, target: &Destination) -> bool {
+    let Ok(opened) = outbound
+        .connect_tcp(target, &ConnectContext::new(Duration::from_secs(3)))
+        .await
+    else {
+        return false;
+    };
+    let mut stream = opened.stream;
+    if stream.write_all(b"insecure-probe").await.is_err() || stream.flush().await.is_err() {
+        return false;
+    }
+    let mut answer = [0; 14];
+    let read = tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut answer)).await;
+    matches!(read, Ok(Ok(_))) && &answer == b"insecure-probe"
+}
+#[tokio::test]
+async fn self_signed_server_is_rejected_unless_security_insecure() {
+    for transport in [
+        json!("tcp"),
+        json!({"type":"ws","path":"/trojan"}),
+        json!({"type":"httpupgrade","path":"/trojan"}),
+        json!({"type":"grpc","service_name":"trojan"}),
+    ] {
+        let (harness, mut options) = Harness::new(transport.clone(), true, false).await;
+        options["security"]
+            .as_object_mut()
+            .unwrap()
+            .remove("ca_pem");
+        let verified = support::outbound(&TrojanFactory, &options).unwrap();
+        assert!(!echoes(&verified, &harness.tcp).await, "{transport}");
+        options["security"]["insecure"] = json!(true);
+        let insecure = support::outbound(&TrojanFactory, &options).unwrap();
+        assert!(echoes(&insecure, &harness.tcp).await, "{transport}");
+    }
+}

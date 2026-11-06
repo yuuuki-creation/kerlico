@@ -938,3 +938,38 @@ async fn masquerade_string_and_default_still_answer_locally() {
     let (response, _) = masquerade_get(Value::Null, "https://front.invalid/x").await;
     assert_eq!(response.status().as_u16(), 404);
 }
+#[tokio::test]
+async fn self_signed_server_is_rejected_unless_tls_insecure() {
+    let fixture = start_fixture(false, false, "bbr", true, 128).await;
+    let target = Destination::new("127.0.0.1", 443).unwrap();
+    let mut options = fixture.options.clone();
+    options["tls"].as_object_mut().unwrap().remove("ca_pem");
+    let verified = shared::outbound(&kerlico_hysteria2::Hysteria2Factory, &options)
+        .await
+        .unwrap();
+    assert!(
+        verified
+            .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(2)))
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.access.0.load(Ordering::Relaxed), 0);
+    options["tls"]["insecure"] = json!(true);
+    let insecure = shared::outbound(&kerlico_hysteria2::Hysteria2Factory, &options)
+        .await
+        .unwrap();
+    let mut stream = insecure
+        .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(3)))
+        .await
+        .unwrap()
+        .stream;
+    let mut banner = [0; 12];
+    tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut banner))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&banner, b"server-first");
+    drop(stream);
+    drop(insecure);
+    close(fixture).await;
+}

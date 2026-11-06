@@ -120,7 +120,7 @@ async fn table_directions_pure_packed_padding_and_rotated_layouts() {
 }
 
 #[tokio::test]
-async fn tls_h1_h2_split_and_h1_websocket_validate_chain_and_name() {
+async fn tls_h1_h2_split_and_h1_websocket_validate_chain_and_name_unless_insecure() {
     for ipv6 in [false, true] {
         for (mode, version) in [
             ("stream", "h1"),
@@ -172,6 +172,15 @@ async fn tls_h1_h2_split_and_h1_websocket_validate_chain_and_name() {
                     "mode={mode} version={version} name={name}"
                 );
             }
+            options["http_mask"]["tls"] = json!({"server_name":"localhost","insecure":true});
+            let insecure = shared::outbound(&SudokuFactory, &options).await.unwrap();
+            exchange(
+                &insecure,
+                &Destination::new("localhost", 443).unwrap(),
+                vec![0x5a; 4096],
+            )
+            .await;
+            drop(insecure);
             server.close().await;
         }
     }

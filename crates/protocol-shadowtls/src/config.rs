@@ -28,6 +28,8 @@ pub(crate) struct Client {
 pub(crate) struct Tls {
     pub server_name: String,
     pub ca_pem: Option<String>,
+    #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
+    pub insecure: bool,
     #[serde(default = "alpn")]
     pub alpn: Vec<String>,
     /// auto、1.2、1.3；v1 自动固定 1.2。

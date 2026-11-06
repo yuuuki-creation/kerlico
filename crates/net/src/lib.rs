@@ -2,6 +2,8 @@
 
 pub mod fallback;
 pub mod generate;
+mod insecure_tls;
+pub use insecure_tls::{insecure_verifier, warn_insecure_tls};
 pub mod lazy_response;
 pub mod ntp;
 pub mod sing_mux;

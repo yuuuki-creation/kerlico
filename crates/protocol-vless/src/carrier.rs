@@ -166,6 +166,15 @@ impl Carrier {
         {
             return Err(Error::Config("节点地址不属于指定载体地址族".into()));
         }
+        if matches!(
+            security,
+            Security::Tls {
+                allow_insecure: true,
+                ..
+            }
+        ) {
+            kerlico_net::warn_insecure_tls("VLESS");
+        }
         let quic_tls = match &security {
             Security::Tls {
                 ca_pem,

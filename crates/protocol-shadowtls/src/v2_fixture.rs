@@ -95,6 +95,7 @@ async fn fixture(tls13: bool, tickets: usize) -> Fixture {
         &config::Tls {
             server_name: "shadowtls.example.invalid".into(),
             ca_pem: Some(pem),
+            insecure: false,
             version: if tls13 { "1.3" } else { "1.2" }.into(),
             alpn: vec!["http/1.1".into()],
         },

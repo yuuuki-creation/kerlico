@@ -691,3 +691,54 @@ mod shared {
         "/../../tools/protocol_b_test_support.rs"
     ));
 }
+async fn insecure_probe_target() -> (kerlico_core::Destination, tokio::task::JoinHandle<()>) {
+    let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    let target = kerlico_core::Destination::new("127.0.0.1", port).unwrap();
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = echo.accept().await.unwrap();
+            tokio::spawn(async move {
+                let (mut r, mut w) = stream.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
+    });
+    (target, task)
+}
+async fn echoes(
+    outbound: &std::sync::Arc<dyn kerlico_core::Outbound>,
+    target: &kerlico_core::Destination,
+) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let budget = kerlico_core::ConnectContext::new(std::time::Duration::from_secs(3));
+    let Ok(opened) = outbound.connect_tcp(target, &budget).await else {
+        return false;
+    };
+    let mut stream = opened.stream;
+    if stream.write_all(b"insecure-probe").await.is_err() || stream.flush().await.is_err() {
+        return false;
+    }
+    let mut answer = [0; 14];
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        stream.read_exact(&mut answer),
+    )
+    .await;
+    matches!(read, Ok(Ok(_))) && &answer == b"insecure-probe"
+}
+#[tokio::test]
+async fn self_signed_server_is_rejected_unless_tls_insecure() {
+    let (target, echo) = insecure_probe_target().await;
+    for version in [4, 5] {
+        let f = fixture(version, "quic", "127.0.0.1", "cubic").await;
+        let mut options = f.options.clone();
+        options["tls"].as_object_mut().unwrap().remove("ca_pem");
+        let verified = shared::outbound(&TuicFactory, &options).await.unwrap();
+        assert!(!echoes(&verified, &target).await, "TUIC v{version}");
+        options["tls"]["insecure"] = json!(true);
+        let insecure = shared::outbound(&TuicFactory, &options).await.unwrap();
+        assert!(echoes(&insecure, &target).await, "TUIC v{version}");
+    }
+    echo.abort();
+}

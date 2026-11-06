@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 kerlico-core.workspace = true
 kerlico-config.workspace = true
+kerlico-net.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,7 +26,6 @@ quinn-proto = { version = "=0.11.16", default-features = false }
 subtle = "2"
 
 [dev-dependencies]
-kerlico-net.workspace = true
 kerlico-egress = { workspace = true, features = ["test-support"] }
 kerlico-engine.workspace = true
 rcgen.workspace = true

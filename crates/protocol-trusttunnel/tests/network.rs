@@ -999,3 +999,54 @@ struct TestObserver;
 impl kerlico_core::NodeObserver for TestObserver {
     fn record(&self, _: kerlico_core::NodeEvent) {}
 }
+#[tokio::test]
+async fn self_signed_server_is_rejected_unless_tls_insecure() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let targets = Targets::new().await;
+        let (cert, key) = certificate();
+        for transport in ["h1", "h2", "h3"] {
+            let engine = Engine::start(
+                json!([node(
+                    "node",
+                    "127.0.0.1:0",
+                    "right-secret",
+                    &cert,
+                    &key,
+                    transport,
+                    "tls13"
+                )]),
+                4000,
+            )
+            .await;
+            let mut options = client(
+                engine.addresses[0].1,
+                "right-secret",
+                &cert,
+                transport,
+                "tls13",
+            );
+            options["tls"].as_object_mut().unwrap().remove("ca_pem");
+            let verified = shared::outbound(&TrustTunnelFactory, &options)
+                .await
+                .unwrap();
+            assert!(
+                verified
+                    .connect_tcp(
+                        &targets.tcp[0],
+                        &ConnectContext::new(Duration::from_secs(2))
+                    )
+                    .await
+                    .is_err(),
+                "{transport}"
+            );
+            options["tls"]["insecure"] = json!(true);
+            let insecure = shared::outbound(&TrustTunnelFactory, &options)
+                .await
+                .unwrap();
+            tcp(insecure.as_ref(), &targets.tcp[0], 4096).await;
+            engine.stop().await;
+        }
+    })
+    .await
+    .unwrap();
+}

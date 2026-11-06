@@ -421,7 +421,7 @@ pub(crate) struct ClientTls {
     #[serde(default)]
     pub ca_pem: Option<String>,
     /// 不校验服务端证书链与名称，对应 Mihomo `skip-cert-verify`。
-    #[serde(default)]
+    #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
     pub insecure: bool,
 }
 #[derive(Deserialize)]
@@ -524,6 +524,7 @@ pub(crate) fn client_tls(options: &ClientTls) -> Result<Arc<rustls::ClientConfig
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|_| invalid())?;
     let mut tls = if options.insecure {
+        kerlico_net::warn_insecure_tls("Hysteria2");
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))

@@ -182,6 +182,8 @@ pub(crate) struct ClientTls {
     pub server_name: String,
     #[serde(default)]
     pub ca_pem: Option<String>,
+    #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
+    pub insecure: bool,
     #[serde(default = "alpn")]
     pub alpn: Vec<String>,
 }
@@ -254,13 +256,19 @@ pub(crate) fn client_tls(
             roots.add(cert).map_err(|_| invalid())?;
         }
     }
-    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(|_| invalid())?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|_| invalid())?;
+    let mut tls = if options.insecure {
+        kerlico_net::warn_insecure_tls("Hysteria");
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(kerlico_net::insecure_verifier(provider))
+            .with_no_client_auth()
+    } else {
+        builder.with_root_certificates(roots).with_no_client_auth()
+    };
     tls.resumption = rustls::client::Resumption::disabled();
     tls.alpn_protocols = alpns(&options.alpn)?;
     rustls::pki_types::ServerName::try_from(options.server_name.clone()).map_err(|_| invalid())?;

@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 kerlico-core.workspace = true
 kerlico-config.workspace = true
+kerlico-net.workspace = true
 kerlico-http-carrier = { path = "../http-carrier" }
 tokio.workspace = true
 serde.workspace = true
@@ -31,7 +32,6 @@ subtle = "2"
 
 [dev-dependencies]
 kerlico-http.workspace = true
-kerlico-net.workspace = true
 kerlico-engine.workspace = true
 kerlico-egress = { workspace = true, features = ["test-support"] }
 rcgen.workspace = true

@@ -56,8 +56,8 @@ pub use reality_runtime::{
 };
 pub use reality_rustls::RustlsRealityTlsSessionProvider;
 pub use tls::{
-    build_custom_tls_client_config, plain_tls_client_hello_bytes, CustomTlsClientOptions,
-    TlsConnector,
+    build_custom_tls_client_config, no_certificate_verifier, plain_tls_client_hello_bytes,
+    CustomTlsClientOptions, TlsConnector,
 };
 pub use utls_profiles::draw_modern_fingerprint;
 

@@ -26,4 +26,7 @@ shadowsocks = { version = "=1.25.0", default-features = false, features = ["aead
 workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
 kerlico-egress = { workspace = true, features = ["test-support"] }

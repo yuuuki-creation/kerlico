@@ -369,7 +369,7 @@ async fn establish_timeout_cancel_active_stream_and_drop_release_real_socket() {
 }
 
 #[tokio::test]
-async fn tls_validates_name_and_issuer_before_authentication() {
+async fn tls_validates_name_and_issuer_unless_insecure() {
     let key = rcgen::KeyPair::generate().unwrap();
     let cert = rcgen::CertificateParams::new(vec!["relay.test.invalid".into()])
         .unwrap()
@@ -390,7 +390,7 @@ async fn tls_validates_name_and_issuer_before_authentication() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let peer = tokio::spawn(async move {
-        for valid in [true, false, false] {
+        for valid in [true, false, false, true] {
             let (stream, _) = listener.accept().await.unwrap();
             let result = acceptor.accept(stream).await;
             if valid {
@@ -403,13 +403,14 @@ async fn tls_validates_name_and_issuer_before_authentication() {
             }
         }
     });
-    for (name, ca, valid) in [
-        ("relay.test.invalid", Some(cert.pem()), true),
-        ("wrong.test.invalid", Some(cert.pem()), false),
-        ("relay.test.invalid", None, false),
+    for (name, ca, insecure, valid) in [
+        ("relay.test.invalid", Some(cert.pem()), false, true),
+        ("wrong.test.invalid", Some(cert.pem()), false, false),
+        ("relay.test.invalid", None, false, false),
+        ("relay.test.invalid", None, true, true),
     ] {
         let mut value = options(addr);
-        value["tls"] = json!({"server_name":name,"ca_pem":ca});
+        value["tls"] = json!({"server_name":name,"ca_pem":ca,"insecure":insecure});
         let outbound = support::outbound(&GostRelayFactory, &value).unwrap();
         assert!(!outbound.capabilities().tcp_eof);
         let result = outbound.connect_tcp(&target(), &context()).await;

@@ -1031,3 +1031,37 @@ async fn v2_late_tickets_are_gated_until_switch_and_normal_browser_fallback_is_p
     .await
     .expect("v2 完成事件、票据或普通浏览器回退超时");
 }
+#[tokio::test]
+async fn self_signed_handshake_server_is_rejected_unless_tls_insecure() {
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let origin = Origin::new(true, false).await;
+        let targets = Targets::new().await;
+        let engine = Engine::start(json!([node(
+            &origin,
+            3,
+            true,
+            "aes-128-gcm",
+            31,
+            "127.0.0.1:0"
+        )]))
+        .await;
+        let (_, address) = &engine.addresses[0];
+        let mut options = client(&origin, *address, 3, true, true, "aes-128-gcm", 31);
+        options["tls"].as_object_mut().unwrap().remove("ca_pem");
+        rejected(&options, &targets.addresses[0]).await;
+        assert_eq!(targets.accepted.load(Ordering::SeqCst), 0);
+        options["tls"]["insecure"] = json!(true);
+        tcp(
+            support::outbound(&ShadowTlsFactory, &options)
+                .unwrap()
+                .as_ref(),
+            &targets.addresses[0],
+            b"insecure-handshake",
+            true,
+        )
+        .await;
+        engine.stop().await;
+    })
+    .await
+    .expect("跳过证书校验的 ShadowTLS 用例超时");
+}

@@ -34,6 +34,8 @@ pub(crate) enum ResponseMode {
 struct Tls {
     server_name: String,
     ca_pem: Option<String>,
+    #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
+    insecure: bool,
 }
 
 pub(crate) struct Config {
@@ -57,11 +59,12 @@ impl Options {
                 if self.allow_insecure {
                     return Err(Error::Config("TLS 模式不接受明文许可字段".into()));
                 }
-                TcpConnector::tls(
-                    &tls.server_name,
-                    tls.ca_pem.as_deref(),
-                    kerlico_core::current_compile_dialer(),
-                )?
+                if tls.insecure {
+                    kerlico_net::warn_insecure_tls("Gost Relay");
+                    TcpConnector::tls_insecure(&tls.server_name, kerlico_core::current_compile_dialer())?
+                } else {
+                    TcpConnector::tls(&tls.server_name, tls.ca_pem.as_deref(), kerlico_core::current_compile_dialer())?
+                }
             }
             None => {
                 if !server.is_loopback() && !self.allow_insecure {

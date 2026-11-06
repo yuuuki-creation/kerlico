@@ -241,6 +241,8 @@ pub(crate) struct ClientTls {
     pub h2_allow_missing_alpn: bool,
     #[serde(default)]
     pub ca_pem: Option<String>,
+    #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
+    pub insecure: bool,
     #[serde(default)]
     pub certificate_pem: Option<String>,
     #[serde(default)]
@@ -299,16 +301,23 @@ pub(crate) fn client_tls(
         return Err(invalid());
     }
     rustls::pki_types::ServerName::try_from(tls.server_name.clone()).map_err(|_| invalid())?;
-    let trust = match tls.ca_pem {
-        Some(pem) => roots(&pem)?,
-        None => rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&versions(tls.version, transport)?)
+        .map_err(|_| invalid())?;
+    let builder = if tls.insecure {
+        kerlico_net::warn_insecure_tls("TrustTunnel");
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(kerlico_net::insecure_verifier(provider))
+    } else {
+        builder.with_root_certificates(match tls.ca_pem {
+            Some(pem) => roots(&pem)?,
+            None => {
+                rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned())
+            }
+        })
     };
-    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_protocol_versions(&versions(tls.version, transport)?)
-    .map_err(|_| invalid())?
-    .with_root_certificates(trust);
     let mut config = match (tls.certificate_pem, tls.private_key_pem) {
         (None, None) => builder.with_no_client_auth(),
         (Some(c), Some(k)) => builder

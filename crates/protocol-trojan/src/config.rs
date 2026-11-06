@@ -148,6 +148,8 @@ pub(crate) enum ClientSecurity {
         server_name: Option<String>,
         #[serde(default)]
         ca_pem: Option<String>,
+        #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
+        insecure: bool,
     },
     #[default]
     None,

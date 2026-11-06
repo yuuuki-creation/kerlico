@@ -23,6 +23,7 @@ rustls = { workspace = true, features = ["aws_lc_rs"] }
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
 webpki-roots.workspace = true
+xray-transport.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

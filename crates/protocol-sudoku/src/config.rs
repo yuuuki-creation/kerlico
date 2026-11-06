@@ -182,6 +182,8 @@ pub(crate) enum HttpVersion {
 pub(crate) struct ClientTls {
     pub server_name: String,
     pub ca_pem: Option<String>,
+    #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
+    pub insecure: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

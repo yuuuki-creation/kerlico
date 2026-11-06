@@ -4642,6 +4642,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "webpki-roots 1.0.11",
+ "xray-transport",
 ]
 
 [[package]]
@@ -4738,11 +4739,14 @@ dependencies = [
  "kerlico-egress",
  "kerlico-net",
  "rand 0.8.8",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "shadowsocks",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
 ]
 

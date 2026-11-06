@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 kerlico-core.workspace = true
 kerlico-config.workspace = true
+kerlico-net.workspace = true
 kerlico-shadowsocks.workspace = true
 kerlico-ss2022.workspace = true
 tokio.workspace = true
@@ -24,7 +25,6 @@ sha1 = "0.10"
 subtle = "2"
 
 [dev-dependencies]
-kerlico-net.workspace = true
 kerlico-egress = { workspace = true, features = ["test-support"] }
 kerlico-engine.workspace = true
 rcgen.workspace = true

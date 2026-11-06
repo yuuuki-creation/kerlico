@@ -43,6 +43,8 @@ struct Tls {
     server_name: String,
     #[serde(default)]
     ca_pem: Option<String>,
+    #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
+    insecure: bool,
 }
 fn idle_default() -> u64 {
     30000
@@ -94,11 +96,16 @@ impl OutboundFactory for AnyTlsFactory {
         }
         let server = Destination::new(&options.server.host, options.server.port)?;
         let password = Sha256::digest(options.password.as_bytes()).into();
-        let connector = TcpConnector::tls(
-            &options.tls.server_name,
-            options.tls.ca_pem.as_deref(),
-            kerlico_core::current_compile_dialer(),
-        )?;
+        let connector = if options.tls.insecure {
+            kerlico_net::warn_insecure_tls("AnyTLS");
+            TcpConnector::tls_insecure(&options.tls.server_name, kerlico_core::current_compile_dialer())?
+        } else {
+            TcpConnector::tls(
+                &options.tls.server_name,
+                options.tls.ca_pem.as_deref(),
+                kerlico_core::current_compile_dialer(),
+            )?
+        };
         let idle = std::time::Duration::from_millis(options.idle_session_timeout_ms);
         let max_sessions = options.max_sessions;
         Padding::parse(padding::DEFAULT)?;

@@ -331,3 +331,42 @@ async fn wrong_uuid_certificate_name_and_cancellation_fail() {
     );
     task.abort();
 }
+async fn echoes(outbound: &Arc<dyn Outbound>, target: &Destination) -> bool {
+    let Ok(opened) = outbound
+        .connect_tcp(target, &ConnectContext::new(Duration::from_secs(3)))
+        .await
+    else {
+        return false;
+    };
+    let mut stream = opened.stream;
+    if stream.write_all(b"insecure-probe").await.is_err() || stream.flush().await.is_err() {
+        return false;
+    }
+    let mut answer = [0; 14];
+    let read = tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut answer)).await;
+    matches!(read, Ok(Ok(_))) && &answer == b"insecure-probe"
+}
+#[tokio::test]
+async fn self_signed_server_is_rejected_unless_tls_insecure() {
+    let (target, task) = tcp_echo("127.0.0.1").await;
+    for transport in [
+        json!({"type":"tcp"}),
+        json!({"type":"ws","path":"/vmess"}),
+        json!({"type":"httpupgrade","path":"/vmess"}),
+        json!({"type":"grpc","service_name":"proxy"}),
+    ] {
+        let f = fixture("aes-128-gcm", transport, true, "127.0.0.1", 13).await;
+        let mut options = f.options.clone();
+        options["tls"].as_object_mut().unwrap().remove("ca_pem");
+        let verified = support::outbound(&VmessFactory, &options).unwrap();
+        assert!(
+            !echoes(&verified, &target).await,
+            "{}",
+            options["transport"]
+        );
+        options["tls"]["insecure"] = json!(true);
+        let insecure = support::outbound(&VmessFactory, &options).unwrap();
+        assert!(echoes(&insecure, &target).await, "{}", options["transport"]);
+    }
+    task.abort();
+}

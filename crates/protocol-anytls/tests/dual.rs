@@ -575,3 +575,52 @@ async fn client_shutdown_preserves_large_response_and_reuses_session() {
     echo_task.abort();
     let _ = echo_task.await;
 }
+async fn insecure_probe_target() -> (kerlico_core::Destination, tokio::task::JoinHandle<()>) {
+    let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    let target = kerlico_core::Destination::new("127.0.0.1", port).unwrap();
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = echo.accept().await.unwrap();
+            tokio::spawn(async move {
+                let (mut r, mut w) = stream.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
+    });
+    (target, task)
+}
+async fn echoes(
+    outbound: &std::sync::Arc<dyn kerlico_core::Outbound>,
+    target: &kerlico_core::Destination,
+) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let budget = kerlico_core::ConnectContext::new(std::time::Duration::from_secs(3));
+    let Ok(opened) = outbound.connect_tcp(target, &budget).await else {
+        return false;
+    };
+    let mut stream = opened.stream;
+    if stream.write_all(b"insecure-probe").await.is_err() || stream.flush().await.is_err() {
+        return false;
+    }
+    let mut answer = [0; 14];
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        stream.read_exact(&mut answer),
+    )
+    .await;
+    matches!(read, Ok(Ok(_))) && &answer == b"insecure-probe"
+}
+#[tokio::test]
+async fn self_signed_server_is_rejected_unless_tls_insecure() {
+    let (target, task) = insecure_probe_target().await;
+    let (_, cancel, _, mut options) = fixture().await;
+    options["tls"].as_object_mut().unwrap().remove("ca_pem");
+    let verified = support::outbound(&AnyTlsFactory, &options).unwrap();
+    assert!(!echoes(&verified, &target).await);
+    options["tls"]["insecure"] = json!(true);
+    let insecure = support::outbound(&AnyTlsFactory, &options).unwrap();
+    assert!(echoes(&insecure, &target).await);
+    cancel.cancel();
+    task.abort();
+}

@@ -84,29 +84,36 @@ pub(crate) fn settings(value: &config::Tls, version: u8, strict: bool) -> Result
         (_, _, "auto") => vec![&rustls::version::TLS13, &rustls::version::TLS12],
         _ => return Err(config::invalid()),
     };
-    let mut roots = RootCertStore::empty();
-    if let Some(pem) = &value.ca_pem {
-        if pem.len() > 1024 * 1024 {
-            return Err(config::invalid());
-        }
-        let certs = rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|_| config::invalid())?;
-        if certs.is_empty() {
-            return Err(config::invalid());
-        }
-        for cert in certs {
-            roots.add(cert).map_err(|_| config::invalid())?;
-        }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&versions)
+        .map_err(|_| config::invalid())?;
+    let mut config = if value.insecure {
+        kerlico_net::warn_insecure_tls("ShadowTLS");
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(kerlico_net::insecure_verifier(provider))
+            .with_no_client_auth()
     } else {
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    }
-    let mut config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_protocol_versions(&versions)
-            .map_err(|_| config::invalid())?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let mut roots = RootCertStore::empty();
+        if let Some(pem) = &value.ca_pem {
+            if pem.len() > 1024 * 1024 {
+                return Err(config::invalid());
+            }
+            let certs = rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|_| config::invalid())?;
+            if certs.is_empty() {
+                return Err(config::invalid());
+            }
+            for cert in certs {
+                roots.add(cert).map_err(|_| config::invalid())?;
+            }
+        } else {
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+        builder.with_root_certificates(roots).with_no_client_auth()
+    };
     config.resumption = rustls::client::Resumption::disabled();
     config.enable_early_data = false;
     if value.alpn.len() > 16 || value.alpn.iter().any(|p| p.is_empty() || p.len() > 255) {

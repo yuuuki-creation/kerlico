@@ -467,3 +467,25 @@ mod shared {
         "/../../tools/protocol_b_test_support.rs"
     ));
 }
+#[tokio::test]
+async fn self_signed_server_is_rejected_unless_tls_insecure() {
+    for transport in ["h1", "h2", "h3"] {
+        let mut fixture = fixture(transport, "127.0.0.1", 2).await;
+        let echo = tcp_echo("127.0.0.1").await;
+        let mut options = fixture.options.clone();
+        options["tls"].as_object_mut().unwrap().remove("ca_pem");
+        let verified = shared::outbound(&NaiveFactory, &options).await.unwrap();
+        assert!(
+            verified
+                .connect_tcp(&echo.target, &fixture.context())
+                .await
+                .is_err(),
+            "{transport}"
+        );
+        options["tls"]["insecure"] = json!(true);
+        let insecure = shared::outbound(&NaiveFactory, &options).await.unwrap();
+        tcp(&insecure, &fixture.context(), &echo.target, 17).await;
+        drop(insecure);
+        fixture.stop().await;
+    }
+}

@@ -20,12 +20,19 @@ pub(crate) fn client(options: &ClientTls, alpn: &[&[u8]]) -> Result<ClientConfig
             roots.add(cert).map_err(|_| invalid())?;
         }
     }
-    let mut config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(|_| invalid())?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|_| invalid())?;
+    let mut config = if options.insecure {
+        kerlico_net::warn_insecure_tls("Sudoku");
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(kerlico_net::insecure_verifier(provider))
+            .with_no_client_auth()
+    } else {
+        builder.with_root_certificates(roots).with_no_client_auth()
+    };
     config.resumption = rustls::client::Resumption::disabled();
     config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     Ok(config)

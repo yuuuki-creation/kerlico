@@ -702,3 +702,41 @@ mod shared {
         "/../../tools/protocol_b_test_support.rs"
     ));
 }
+#[tokio::test]
+async fn self_signed_server_is_rejected_unless_tls_insecure() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let targets = Targets::new().await;
+        let (cert, key) = certificate();
+        let engine = Engine::start(json!([node(
+            "node",
+            "127.0.0.1:0",
+            "hy1-insecure-test",
+            &cert,
+            &key,
+            ("udp", false, "cubic", false)
+        )]))
+        .await;
+        let mut options = client(
+            engine.addresses[0].1,
+            "hy1-insecure-test",
+            &cert,
+            "udp",
+            false,
+            "cubic",
+        );
+        options["tls"].as_object_mut().unwrap().remove("ca_pem");
+        let verified = shared::outbound(&Hysteria1Factory, &options).await.unwrap();
+        assert!(
+            verified
+                .connect_tcp(&targets.tcp4, &ConnectContext::new(Duration::from_secs(2)))
+                .await
+                .is_err()
+        );
+        options["tls"]["insecure"] = json!(true);
+        let insecure = shared::outbound(&Hysteria1Factory, &options).await.unwrap();
+        tcp(insecure.as_ref(), &targets.tcp4, b"insecure-tls").await;
+        engine.stop().await;
+    })
+    .await
+    .expect("跳过证书校验用例超时");
+}

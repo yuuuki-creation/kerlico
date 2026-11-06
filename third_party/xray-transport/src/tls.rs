@@ -538,6 +538,15 @@ struct NoCertificateVerification {
     provider: Arc<crypto::CryptoProvider>,
 }
 
+/// The `allowInsecure` verifier, for callers that build their own
+/// `ClientConfig` (protocol versions, provider, QUIC) but must honor the same
+/// skip-verification switch.
+pub fn no_certificate_verifier(
+    provider: Arc<crypto::CryptoProvider>,
+) -> Arc<dyn rustls::client::danger::ServerCertVerifier> {
+    Arc::new(NoCertificateVerification { provider })
+}
+
 /// Xray-compatible verifier for `pinnedPeerCertSha256` and
 /// `verifyPeerCertByName`.
 ///

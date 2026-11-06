@@ -186,6 +186,7 @@ pub enum Plugin {
     V2ray {
         transport: V2rayTransport,
         tls: bool,
+        skip_cert_verify: bool,
         host: Option<String>,
         path: String,
         headers: BTreeMap<String, String>,
@@ -204,6 +205,7 @@ impl Plugin {
                     "host",
                     "path",
                     "tls",
+                    "skip-cert-verify",
                     "headers",
                     "v2ray-http-upgrade",
                 ],
@@ -244,6 +246,9 @@ impl Plugin {
                 )));
             }
         }
+        if opts.tls && opts.skip_cert_verify {
+            kerlico_net::warn_insecure_tls(&format!("Shadowsocks {name}"));
+        }
         Ok(Self::V2ray {
             transport: if opts.v2ray_http_upgrade {
                 V2rayTransport::HttpUpgrade
@@ -251,6 +256,7 @@ impl Plugin {
                 V2rayTransport::WebSocket
             },
             tls: opts.tls,
+            skip_cert_verify: opts.tls && opts.skip_cert_verify,
             host,
             path,
             headers: opts.headers,
@@ -291,13 +297,19 @@ impl StreamConnector for PluginConnector {
                         Plugin::V2ray {
                             transport,
                             tls,
+                            skip_cert_verify,
                             host,
                             path,
                             headers,
                         } => {
                             let host = host.clone().unwrap_or_else(|| endpoint.host().clone());
                             let carrier = if *tls {
-                                kerlico_net::TcpConnector::tls(&host, None, self.dialer.clone())?
+                                let connector = if *skip_cert_verify {
+                                    kerlico_net::TcpConnector::tls_insecure(&host, self.dialer.clone())?
+                                } else {
+                                    kerlico_net::TcpConnector::tls(&host, None, self.dialer.clone())?
+                                };
+                                connector
                                     .connect(endpoint)
                                     .await?
                             } else {
@@ -667,7 +679,6 @@ mod tests {
             ("v2ray-plugin", json!("mode=quic")),
             ("v2ray-plugin", json!("mux=1")),
             ("v2ray-plugin", json!({"mux": true})),
-            ("v2ray-plugin", json!({"skip-cert-verify": true})),
             ("v2ray-plugin", json!({"fingerprint": "chrome"})),
             (
                 "v2ray-plugin",
@@ -771,5 +782,71 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn v2ray_plugin_tls_rejects_self_signed_unless_skip_cert_verify() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![cert.cert.der().clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into(),
+        )
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint =
+            Destination::new("127.0.0.1", listener.local_addr().unwrap().port()).unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let Ok(mut tls) = acceptor.accept(stream).await else {
+                    continue;
+                };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    tls.read_exact(&mut byte).await.unwrap();
+                    head.push(byte[0]);
+                }
+                tls.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+                    .await
+                    .unwrap();
+                let mut body = [0u8; 5];
+                tls.read_exact(&mut body).await.unwrap();
+                tls.write_all(&body).await.unwrap();
+                tls.flush().await.unwrap();
+                return;
+            }
+        });
+        let connector = |skip: bool| {
+            let opts = json!({"host":"localhost","tls":true,"v2ray-http-upgrade":true,"skip-cert-verify":skip});
+            PluginConnector::new(
+                parse("v2ray-plugin", opts).unwrap(),
+                kerlico_core::DialerOptions::default(),
+            )
+        };
+        let context = ConnectContext::new(std::time::Duration::from_secs(3));
+        assert!(
+            connector(false)
+                .connect_tcp(&endpoint, &context)
+                .await
+                .is_err()
+        );
+        let mut stream = connector(true)
+            .connect_tcp(&endpoint, &context)
+            .await
+            .unwrap();
+        stream.write_all(b"hello").await.unwrap();
+        stream.flush().await.unwrap();
+        let mut out = [0u8; 5];
+        stream.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"hello");
+        server.await.unwrap();
     }
 }
