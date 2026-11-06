@@ -2140,7 +2140,6 @@ impl Registry {
                 spec.sniff_timeout.as_ref(),
                 spec.sniffing.as_ref(),
             )?;
-            }
             let node = NodeId::parse(&spec.tag)?;
             if !tags.insert(node.clone()) {
                 return Err(Error::Config("节点与入站标签重复".into()));
