@@ -25,7 +25,7 @@ pub fn parse_config_value_with_format(bytes: &[u8], format: Option<&str>) -> Res
 
     if fmt == "toml" {
         let mut val = parse_toml_config(text)?;
-        normalize_yaml_root(&mut val);
+        normalize_yaml_root(&mut val)?;
         normalize_config_value(&mut val)?;
         return Ok(val);
     }
@@ -48,12 +48,12 @@ pub fn parse_config_value_with_format(bytes: &[u8], format: Option<&str>) -> Res
         if looks_like_toml(text)
             && let Ok(mut val) = parse_toml_config(text)
         {
-            normalize_yaml_root(&mut val);
+            normalize_yaml_root(&mut val)?;
             normalize_config_value(&mut val)?;
             return Ok(val);
         }
         let mut val = parse_yaml_with_anchors(text)?;
-        normalize_yaml_root(&mut val);
+        normalize_yaml_root(&mut val)?;
         normalize_config_value(&mut val)?;
         return Ok(val);
     }
@@ -500,6 +500,11 @@ fn parse_yaml_scalar_or_flow(s: &str, anchors: &mut HashMap<String, Value>) -> R
         "false" | "False" | "FALSE" => return Ok(Value::Bool(false)),
         _ => {}
     }
+    // 带前导零的数字串（如 Reality `short-id: 0123`）按字符串保留，避免丢失前导零。
+    if trimmed.len() > 1 && trimmed.starts_with('0') && trimmed.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Ok(Value::String(trimmed.to_owned()));
+    }
     if let Ok(u) = trimmed.parse::<u64>() {
         return Ok(Value::Number(Number::from(u)));
     }
@@ -555,9 +560,9 @@ fn unquote_yaml_str(s: &str) -> String {
     }
 }
 
-fn normalize_yaml_root(root: &mut Value) {
+fn normalize_yaml_root(root: &mut Value) -> Result<()> {
     let Some(obj) = root.as_object_mut() else {
-        return;
+        return Ok(());
     };
     if !obj.contains_key("version") {
         obj.insert("version".into(), Value::Number(Number::from(2u64)));
@@ -566,33 +571,13 @@ fn normalize_yaml_root(root: &mut Value) {
         && let Some(Value::Array(proxies)) = obj.remove("proxies")
     {
         let mut outbounds = Vec::with_capacity(proxies.len());
-        for mut p in proxies {
-            if let Some(m) = p.as_object_mut() {
-                if !m.contains_key("tag")
-                    && let Some(name) = m.remove("name")
-                {
-                    m.insert("tag".into(), name);
-                }
-                let tag = m
-                    .remove("tag")
-                    .unwrap_or_else(|| Value::String("proxy".into()));
-                let kind_raw = m
-                    .remove("type")
-                    .or_else(|| m.remove("protocol"))
-                    .and_then(|v| v.as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "direct".into());
-                let kind = Value::String(crate::group::normalize_outbound_kind(&kind_raw));
-                let options = if let Some(opts) = m.remove("options") {
-                    opts
-                } else {
-                    Value::Object(m.clone())
-                };
-                let mut spec = Map::new();
-                spec.insert("tag".into(), tag);
-                spec.insert("type".into(), kind);
-                spec.insert("options".into(), options);
-                outbounds.push(Value::Object(spec));
-            }
+        for proxy in proxies {
+            let (tag, kind, options) = crate::mihomo::member_outbound(proxy)?;
+            let mut spec = Map::new();
+            spec.insert("tag".into(), Value::String(tag));
+            spec.insert("type".into(), Value::String(kind));
+            spec.insert("options".into(), options);
+            outbounds.push(Value::Object(spec));
         }
         obj.insert("outbounds".into(), Value::Array(outbounds));
     }
@@ -605,6 +590,7 @@ fn normalize_yaml_root(root: &mut Value) {
             Value::Array(vec![Value::Object(direct)]),
         );
     }
+    Ok(())
 }
 
 fn looks_like_toml(input: &str) -> bool {

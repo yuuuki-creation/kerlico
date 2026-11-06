@@ -16,7 +16,10 @@ mod format;
 pub use format::*;
 mod group;
 pub use group::*;
+mod mihomo;
+pub use mihomo::{MihomoOutbound, translate_proxy as translate_mihomo_proxy};
 mod plan;
+mod share_link;
 pub use plan::*;
 mod resource;
 pub use resource::{

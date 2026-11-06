@@ -49,6 +49,46 @@ cargo build --locked --release -p kerlico
 
 字段细节见[配置接口](interfaces/config.md)，各协议的 `options` 见[接口文档](interfaces/README.md)。
 
+### Mihomo 代理兼容
+
+顶层 `proxies`、`proxy-providers` 成员（Mihomo YAML）与分享链接走同一张字段映射表（`crates/config/src/mihomo.rs`），同一节点三种写法得到相同的 kerlico `options`。带 `options` 键的条目视为 kerlico 原生出站，原样保留。
+
+- 映射表未列出的字段一律报错，错误信息给出代理名和字段路径（如 `ws-opts.bogus`），不会静默丢弃或原样透传。
+- 公共字段：`interface-name`、`routing-mark`、`dialer-proxy`、`tfo` 交给拨号层。以下取值无效果、允许出现：`udp: true`、`skip-cert-verify: false`、`mptcp: false`、`ip-version: dual`、`smux.enabled: false`；其他取值报错。kerlico 按协议能力承载 UDP，未写 `udp` 的节点也会承载 UDP；`udp: false` 只在 SSR、Hysteria、TrustTunnel、Sudoku 上映射为关闭 UDP，其他类型报错。HTTP、SSH 的 `udp` 任意取值都忽略（Mihomo 同样不为它们承载 UDP）。
+- `skip-cert-verify: true` 与 `client-fingerprint` 只在 VLESS 上支持，其他类型报错；`fingerprint`（证书指纹）均不支持。`alpn` 只在 VLESS、Hysteria、TUIC、ShadowQUIC 上支持；Hysteria2 只接受 `[h3]`。
+- 不支持的类型：`masque`（Mihomo 的 WARP 式密钥认证与 kerlico MASQUE 客户端不同）、`rematch`。
+
+| Mihomo `type` | kerlico 类型 | 支持的字段 | 报错的常见字段 |
+| --- | --- | --- | --- |
+| `ss` | `shadowsocks`；`2022-*` 加密为 `ss2022`；`plugin: shadow-tls` 为 `shadowtls` | `cipher`、`password`（2022 写作 `iPSK:uPSK`）、`udp-over-tcp`、`udp-over-tcp-version`、`smux`、`plugin: obfs`（`mode`、`host`）、`plugin: v2ray-plugin`/`gost-plugin`（`mode: websocket`、`tls`、`host`、`path`、`mux`、`headers`、`v2ray-http-upgrade`）、`shadow-tls`（`host`、`password`、`version`、`alpn`） | `plugin: restls`/`kcptun`/`jls`、`client-fingerprint`、`plugin-opts.fingerprint`；非 AEAD 旧式加密自动带 `allow_insecure` |
+| `ssr` | `shadowsocksr` | `cipher`、`password`、`protocol`、`obfs`、`protocol-param`、`obfs-param`、`udp` | 无 |
+| `snell` | `snell` | `psk`、`version`（3、4）、`reuse`、`obfs-opts.mode: http`、`obfs-opts.host` | `version` 1、2、5 或未写（Mihomo 默认 1），`obfs-opts.mode: tls` |
+| `vmess` | `vmess` | `uuid`、`alterId: 0`、`cipher`（`auto`、`aes-128-gcm`、`chacha20-poly1305`、`zero`）、`global-padding`（默认 false，与 Mihomo 一致）、`authenticated-length`、`tls`、`servername`、`network: tcp/ws/grpc`、`ws-opts.path`、`ws-opts.headers.Host`、`ws-opts.v2ray-http-upgrade`、`grpc-opts.grpc-service-name`、`smux` | `alterId` 非 0、`cipher: none`、`xudp`/`packet-encoding`、`network: h2/http`、`ws-opts` 中除 `Host` 外的请求头与 `max-early-data` |
+| `vless` | `vless` | `uuid`、`flow`、`encryption`、`packet-encoding`、`xudp`、`packet-addr`、`tls`、`servername`、`client-fingerprint`、`alpn`、`skip-cert-verify`、`reality-opts.public-key`、`reality-opts.short-id`、`network: tcp/ws/grpc`、`ws-opts`（`path`、`headers`、`max-early-data`、`early-data-header-name: Sec-WebSocket-Protocol`、`v2ray-http-upgrade`）、`grpc-opts`（`grpc-service-name`、`grpc-user-agent`）、`smux` | `network: h2/http/xhttp`、`ws-headers`、`fingerprint` |
+| `trojan` | `trojan` | `password`、`sni`、`network: tcp/ws/grpc` 与对应 `*-opts`（同 VLESS）、`ss-opts.enabled: false`、`smux` | `alpn`、`client-fingerprint`、`ss-opts.enabled: true`、`reality-opts` |
+| `anytls` | `anytls` | `password`、`sni`、`idle-session-timeout` | `idle-session-check-interval`、`min-idle-session`、`client-metadata`、`alpn` |
+| `http` | `http` | `username`、`password`、`tls`、`sni`、`headers` | `fingerprint` |
+| `socks5` | `socks` | `username`、`password`、`udp` | `tls: true`、`fingerprint` |
+| `hysteria` | `hysteria1` | `ports`、`hop-interval`、`auth-str`、`auth`、`up`/`down`（或 `up-speed`/`down-speed`，无单位为 Mbps，必填）、`obfs`、`protocol`/`obfs-protocol`（`udp`、`wechat-video`）、`sni`、`alpn`、`ca-str`、`udp` | `protocol: faketcp`、`ca`（路径）、`recv-window*`、`fast-open: true` |
+| `hysteria2` | `hysteria2` | `ports`、`hop-interval`（整数或 `15-30`）、`password`、`up`、`down`、`obfs: salamander`、`obfs-password`、`sni`、`ca-str` | `obfs: gecko`、`realm-opts`、`bbr-profile`、各接收窗口、`cwnd`、`udp-mtu` |
+| `tuic` | `tuic` | `token`（V4）或 `uuid` + `password`（V5）、`ip`、`ports`、`hop-interval`、`sni`、`alpn`、`ca-str`、`heartbeat-interval`、`udp-relay-mode`、`congestion-controller`（`cubic`、`new_reno`、`bbr`） | `disable-sni: true`、`reduce-rtt: true`、`request-timeout`、`max-udp-relay-packet-size`、`max-open-streams`、`udp-over-stream: true` |
+| `shadowquic` | `shadowquic` | `username`、`password`、`sni`、`alpn`、`udp-over-stream`、`congestion-controller` | `zero-rtt: true`、`quic-versions`、`up`、`down`、窗口类字段 |
+| `wireguard` | `wireguard` | `ip`、`ipv6`（去掉前缀长度）、`private-key`、`public-key`、`pre-shared-key`、`reserved`、`allowed-ips`（默认 `0.0.0.0/0`、`::/0`）、`persistent-keepalive`、`mtu`、单个 `peers` 条目 | 多个 `peers`、`dns`、`remote-dns-resolve: true`、`amnezia-wg-option`、`ip-stack`、`workers` |
+| `ssh` | `ssh` | `username`、`password`、`private-key`（PEM 或路径）、`private-key-passphrase`、`host-key`（转为 `SHA256:` 指纹） | 未写 `host-key`（kerlico 要求固定主机密钥）、`host-key-algorithms` |
+| `mieru` | `mieru` | `port` 或 `port-range`、`transport: TCP`、`username`、`password`、`multiplexing`、`handshake-mode` | `transport: UDP`、`traffic-pattern` |
+| `sudoku` | `sudoku` | `key`、`aead-method`、`padding-min`、`padding-max`、`table-type`、`custom-table`、`custom-tables`、`enable-pure-downlink`、`httpmask`（`disable`、`mode`、`tls`、`host`、`path-root`、`multiplex`）、`udp` | 旧式扁平 `http-mask*` 字段 |
+| `trusttunnel` | `trusttunnel` | `username`、`password`、`sni`、`quic`、`max-connections`、`max-streams`、`health-check: true`、`udp` | `min-streams`、`congestion-controller`、`bbr-profile`、`health-check: false` |
+| `gost-relay` | `gost-relay` | `username`、`password`、`mux`、`tls`、`sni`；未开 `tls` 时自动带 `allow_insecure` | `forward` |
+| `tailscale` | `tailscale` | `auth-key`、`control-url`（默认官方控制面）、`hostname`、`ephemeral`、`accept-routes`、`exit-node` | `state-dir`、`exit-node-allow-lan-access` |
+| `openvpn` | `openvpn` | `server`、`port`、`proto`、`username`、`password`、`ca`（PEM 文本）、`cert`、`key`、`tls-auth`、`key-direction`、`auth`、`tls-crypt`、`tls-crypt-v2`、`cipher`、`data-ciphers`、`ping`、`ping-restart`、`handshake-timeout`、`mtu` | `peer-info`、`tran-window`、`dev`、`comp-lzo`、`dns`、`ip-stack` |
+| `easytier` | `easytier` | `network-name`、`network-secret`、`peers`、`hostname`、`ipv4`、`dhcp`、`secure-mode`、`exit-nodes`、`enable-encryption`、`encryption-algorithm` | 监听、P2P、KCP/QUIC 代理、`mtu` 等其余字段 |
+| `zerotier` | `zerotier` | `network`、`identity-secret`、`tcp-fallback-mode`、`tcp-fallback-relay`；使用公共 planet | `planet`、`state-dir`、端口与 MTU 字段 |
+| `direct`、`reject`、`dns` | 同名 | 公共字段 | 其余字段 |
+
+分享链接支持 `ss://`（含 SIP002 `plugin=obfs-local`/`v2ray-plugin`）、`ssr://`、`vmess://`（v2rayN Base64 JSON 与 URL 形式）、`vless://`、`trojan://`、`hysteria2://`/`hy2://`、`hysteria://`、`tuic://`、`socks://`/`socks5://`、`http://`/`https://`、`anytls://`、`wireguard://`/`wg://`。链接参数先转成上表的 Mihomo 字段，未识别的参数报错并给出参数名。
+
+`proxy-providers` 的 `override.skip-cert-verify` 与 `override.udp` 目前直接写入 kerlico `options`，对多数类型会在编译时报错；需要时请在节点本身设置。
+
 ## 作为客户端
 
 [examples/client-routes-v2.json](../examples/client-routes-v2.json) 在本机开 SOCKS 入口，默认走远端代理，局域网直连，广告域名拒绝。把 `proxy` 的 `options` 换成你的服务器后运行：

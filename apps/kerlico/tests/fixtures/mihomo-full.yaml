@@ -1,0 +1,86 @@
+# Mihomo 风格完整配置：通用端口、多种代理、策略组与规则。
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+
+proxies:
+  - name: hk-ss
+    type: ss
+    server: 203.0.113.10
+    port: 8388
+    cipher: aes-256-gcm
+    password: secret
+    udp: true
+
+  - name: jp-vless
+    type: vless
+    server: 203.0.113.16
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    servername: www.example.com
+    reality-opts:
+      public-key: QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A
+      short-id: 0123abcd
+    client-fingerprint: chrome
+
+  - name: us-trojan
+    type: trojan
+    server: t.example.com
+    port: 443
+    password: pw
+    sni: t.example.com
+    network: ws
+    ws-opts:
+      path: /trojan
+      headers:
+        Host: t.example.com
+
+  - name: sg-hy2
+    type: hysteria2
+    server: h2.example.com
+    port: 443
+    password: pw
+    up: "30 Mbps"
+    down: "200 Mbps"
+    sni: h2.example.com
+
+  - name: kr-tuic
+    type: tuic
+    server: tuic.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000001
+    password: pw
+    alpn: [h3]
+    congestion-controller: bbr
+
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - auto
+      - hk-ss
+      - jp-vless
+      - us-trojan
+      - DIRECT
+
+  - name: auto
+    type: url-test
+    proxies:
+      - hk-ss
+      - jp-vless
+      - sg-hy2
+      - kr-tuic
+    url: https://cp.cloudflare.com/generate_204
+    interval: 300
+
+rules:
+  - DOMAIN-SUFFIX,google.com,Proxy
+  - DOMAIN-KEYWORD,github,us-trojan
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - GEOIP,CN,DIRECT
+  - MATCH,Proxy

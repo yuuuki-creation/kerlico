@@ -9,6 +9,7 @@ mod protocol_messages_batch2;
 mod protocol_messages_batch3;
 mod protocol_messages_easytier;
 mod protocol_messages_masque;
+mod protocol_messages_mihomo;
 mod protocol_messages_openvpn;
 mod protocol_messages_sudoku;
 mod protocol_messages_tailscale;
@@ -184,6 +185,7 @@ fn diagnostics() -> impl Iterator<Item = &'static (&'static str, &'static str)> 
         .chain(protocol_messages_vless::DIAGNOSTICS)
         .chain(protocol_messages_easytier::DIAGNOSTICS)
         .chain(protocol_messages_sudoku::DIAGNOSTICS)
+        .chain(protocol_messages_mihomo::DIAGNOSTICS)
         .chain(protocol_messages_tailscale::DIAGNOSTICS)
 }
 const DIAGNOSTICS: &[(&str, &str)] = &[

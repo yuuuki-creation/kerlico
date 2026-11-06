@@ -4284,12 +4284,14 @@ name = "kerlico-config"
 version = "1.12.0"
 dependencies = [
  "argon2 0.5.3",
+ "base64 0.23.1",
  "kerlico-core",
  "kerlico-dns",
  "kerlico-routing",
  "rand 0.8.8",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

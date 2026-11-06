@@ -49,6 +49,46 @@ The global `--lang zh-CN` or `--lang en` option selects the output language. Env
 
 Field details are in the [configuration interface](interfaces/config.md) (Chinese). Protocol `options` are in the [interface documents](interfaces/README.md).
 
+### Mihomo proxy compatibility
+
+Top-level `proxies`, `proxy-providers` members (Mihomo YAML), and share links use one field mapping table (`crates/config/src/mihomo.rs`). The three forms of one node produce the same kerlico `options`. An entry with an `options` key is a native kerlico outbound and is kept as written.
+
+- Any field the table does not list fails config loading. The error names the proxy and the field path (for example `ws-opts.bogus`). Nothing is dropped or passed through silently.
+- Common fields: `interface-name`, `routing-mark`, `dialer-proxy`, and `tfo` go to the dialer. These values have no effect and are accepted: `udp: true`, `skip-cert-verify: false`, `mptcp: false`, `ip-version: dual`, `smux.enabled: false`. Other values fail. kerlico carries UDP according to each protocol's capability, so a node without `udp` still carries UDP. `udp: false` turns UDP off only for SSR, Hysteria, TrustTunnel, and Sudoku, and fails for other types. HTTP and SSH ignore `udp` (Mihomo does not carry UDP for them either).
+- `skip-cert-verify: true` and `client-fingerprint` work only on VLESS. `fingerprint` (certificate pin) is not supported. `alpn` works on VLESS, Hysteria, TUIC, and ShadowQUIC; Hysteria2 accepts only `[h3]`.
+- Unsupported types: `masque` (Mihomo's WARP-style key authentication differs from the kerlico MASQUE client) and `rematch`.
+
+| Mihomo `type` | kerlico type | Supported fields | Common fields that fail |
+| --- | --- | --- | --- |
+| `ss` | `shadowsocks`; `2022-*` ciphers become `ss2022`; `plugin: shadow-tls` becomes `shadowtls` | `cipher`, `password` (2022 as `iPSK:uPSK`), `udp-over-tcp`, `udp-over-tcp-version`, `smux`, `plugin: obfs` (`mode`, `host`), `plugin: v2ray-plugin`/`gost-plugin` (`mode: websocket`, `tls`, `host`, `path`, `mux`, `headers`, `v2ray-http-upgrade`), `shadow-tls` (`host`, `password`, `version`, `alpn`) | `plugin: restls`/`kcptun`/`jls`, `client-fingerprint`, `plugin-opts.fingerprint`; legacy non-AEAD ciphers get `allow_insecure` automatically |
+| `ssr` | `shadowsocksr` | `cipher`, `password`, `protocol`, `obfs`, `protocol-param`, `obfs-param`, `udp` | none |
+| `snell` | `snell` | `psk`, `version` (3, 4), `reuse`, `obfs-opts.mode: http`, `obfs-opts.host` | `version` 1, 2, 5 or absent (Mihomo default 1), `obfs-opts.mode: tls` |
+| `vmess` | `vmess` | `uuid`, `alterId: 0`, `cipher` (`auto`, `aes-128-gcm`, `chacha20-poly1305`, `zero`), `global-padding` (default false, as in Mihomo), `authenticated-length`, `tls`, `servername`, `network: tcp/ws/grpc`, `ws-opts.path`, `ws-opts.headers.Host`, `ws-opts.v2ray-http-upgrade`, `grpc-opts.grpc-service-name`, `smux` | non-zero `alterId`, `cipher: none`, `xudp`/`packet-encoding`, `network: h2/http`, `ws-opts` headers other than `Host`, `max-early-data` |
+| `vless` | `vless` | `uuid`, `flow`, `encryption`, `packet-encoding`, `xudp`, `packet-addr`, `tls`, `servername`, `client-fingerprint`, `alpn`, `skip-cert-verify`, `reality-opts.public-key`, `reality-opts.short-id`, `network: tcp/ws/grpc`, `ws-opts` (`path`, `headers`, `max-early-data`, `early-data-header-name: Sec-WebSocket-Protocol`, `v2ray-http-upgrade`), `grpc-opts` (`grpc-service-name`, `grpc-user-agent`), `smux` | `network: h2/http/xhttp`, `ws-headers`, `fingerprint` |
+| `trojan` | `trojan` | `password`, `sni`, `network: tcp/ws/grpc` with the matching `*-opts` (as VLESS), `ss-opts.enabled: false`, `smux` | `alpn`, `client-fingerprint`, `ss-opts.enabled: true`, `reality-opts` |
+| `anytls` | `anytls` | `password`, `sni`, `idle-session-timeout` | `idle-session-check-interval`, `min-idle-session`, `client-metadata`, `alpn` |
+| `http` | `http` | `username`, `password`, `tls`, `sni`, `headers` | `fingerprint` |
+| `socks5` | `socks` | `username`, `password`, `udp` | `tls: true`, `fingerprint` |
+| `hysteria` | `hysteria1` | `ports`, `hop-interval`, `auth-str`, `auth`, `up`/`down` (or `up-speed`/`down-speed`; no unit means Mbps; required), `obfs`, `protocol`/`obfs-protocol` (`udp`, `wechat-video`), `sni`, `alpn`, `ca-str`, `udp` | `protocol: faketcp`, `ca` (path), `recv-window*`, `fast-open: true` |
+| `hysteria2` | `hysteria2` | `ports`, `hop-interval` (integer or `15-30`), `password`, `up`, `down`, `obfs: salamander`, `obfs-password`, `sni`, `ca-str` | `obfs: gecko`, `realm-opts`, `bbr-profile`, receive windows, `cwnd`, `udp-mtu` |
+| `tuic` | `tuic` | `token` (V4) or `uuid` + `password` (V5), `ip`, `ports`, `hop-interval`, `sni`, `alpn`, `ca-str`, `heartbeat-interval`, `udp-relay-mode`, `congestion-controller` (`cubic`, `new_reno`, `bbr`) | `disable-sni: true`, `reduce-rtt: true`, `request-timeout`, `max-udp-relay-packet-size`, `max-open-streams`, `udp-over-stream: true` |
+| `shadowquic` | `shadowquic` | `username`, `password`, `sni`, `alpn`, `udp-over-stream`, `congestion-controller` | `zero-rtt: true`, `quic-versions`, `up`, `down`, window fields |
+| `wireguard` | `wireguard` | `ip`, `ipv6` (prefix length removed), `private-key`, `public-key`, `pre-shared-key`, `reserved`, `allowed-ips` (default `0.0.0.0/0`, `::/0`), `persistent-keepalive`, `mtu`, a single `peers` entry | several `peers`, `dns`, `remote-dns-resolve: true`, `amnezia-wg-option`, `ip-stack`, `workers` |
+| `ssh` | `ssh` | `username`, `password`, `private-key` (PEM or path), `private-key-passphrase`, `host-key` (converted to `SHA256:` pins) | missing `host-key` (kerlico requires pinned host keys), `host-key-algorithms` |
+| `mieru` | `mieru` | `port` or `port-range`, `transport: TCP`, `username`, `password`, `multiplexing`, `handshake-mode` | `transport: UDP`, `traffic-pattern` |
+| `sudoku` | `sudoku` | `key`, `aead-method`, `padding-min`, `padding-max`, `table-type`, `custom-table`, `custom-tables`, `enable-pure-downlink`, `httpmask` (`disable`, `mode`, `tls`, `host`, `path-root`, `multiplex`), `udp` | legacy flat `http-mask*` fields |
+| `trusttunnel` | `trusttunnel` | `username`, `password`, `sni`, `quic`, `max-connections`, `max-streams`, `health-check: true`, `udp` | `min-streams`, `congestion-controller`, `bbr-profile`, `health-check: false` |
+| `gost-relay` | `gost-relay` | `username`, `password`, `mux`, `tls`, `sni`; without `tls` it gets `allow_insecure` automatically | `forward` |
+| `tailscale` | `tailscale` | `auth-key`, `control-url` (default: the official control plane), `hostname`, `ephemeral`, `accept-routes`, `exit-node` | `state-dir`, `exit-node-allow-lan-access` |
+| `openvpn` | `openvpn` | `server`, `port`, `proto`, `username`, `password`, `ca` (PEM text), `cert`, `key`, `tls-auth`, `key-direction`, `auth`, `tls-crypt`, `tls-crypt-v2`, `cipher`, `data-ciphers`, `ping`, `ping-restart`, `handshake-timeout`, `mtu` | `peer-info`, `tran-window`, `dev`, `comp-lzo`, `dns`, `ip-stack` |
+| `easytier` | `easytier` | `network-name`, `network-secret`, `peers`, `hostname`, `ipv4`, `dhcp`, `secure-mode`, `exit-nodes`, `enable-encryption`, `encryption-algorithm` | listeners, P2P, KCP/QUIC proxy, `mtu`, and the other fields |
+| `zerotier` | `zerotier` | `network`, `identity-secret`, `tcp-fallback-mode`, `tcp-fallback-relay`; uses the public planet | `planet`, `state-dir`, port and MTU fields |
+| `direct`, `reject`, `dns` | same name | common fields | everything else |
+
+Share links: `ss://` (including SIP002 `plugin=obfs-local`/`v2ray-plugin`), `ssr://`, `vmess://` (v2rayN Base64 JSON and URL form), `vless://`, `trojan://`, `hysteria2://`/`hy2://`, `hysteria://`, `tuic://`, `socks://`/`socks5://`, `http://`/`https://`, `anytls://`, and `wireguard://`/`wg://`. Link parameters become the Mihomo fields above first. An unknown parameter fails and the error names it.
+
+`proxy-providers` `override.skip-cert-verify` and `override.udp` are still written straight into kerlico `options`, which fails compilation for most types. Set these on the node itself.
+
 ## As a client
 
 [examples/client-routes-v2.json](../examples/client-routes-v2.json) opens a local SOCKS port. Traffic goes to a remote proxy by default, LAN addresses go direct, and ad domains are rejected. Replace the `options` of `proxy` with your server and run:

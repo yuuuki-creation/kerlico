@@ -3,7 +3,7 @@
 use crate::{OutboundSpec, format::parse_yaml_with_anchors};
 use kerlico_core::{Error, OutId, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -178,8 +178,8 @@ impl ProxyProviderSpec {
         for item in &self.payload {
             if let Some(s) = item.as_str() {
                 raw_specs.extend(parse_subscription_content(s)?);
-            } else if let Some(spec) = value_to_outbound_spec(item.clone()) {
-                raw_specs.push(spec);
+            } else {
+                raw_specs.push(value_to_outbound_spec(item.clone())?);
             }
         }
         let path = match self.path.as_deref().map(str::trim) {
@@ -405,9 +405,10 @@ pub fn parse_subscription_content(content: &str) -> Result<Vec<OutboundSpec>> {
             if l.is_empty() || l.starts_with('#') {
                 continue;
             }
-            if let Some(spec) = parse_proxy_uri(l, idx + 1) {
-                specs.push(spec);
-            }
+            specs.push(value_to_outbound_spec(crate::share_link::parse(
+                l,
+                idx + 1,
+            )?)?);
         }
         if !specs.is_empty() {
             return Ok(specs);
@@ -425,9 +426,7 @@ fn extract_specs_from_value(val: Value) -> Result<Vec<OutboundSpec>> {
     match val {
         Value::Array(items) => {
             for item in items {
-                if let Some(spec) = value_to_outbound_spec(item) {
-                    out.push(spec);
-                }
+                out.push(value_to_outbound_spec(item)?);
             }
         }
         Value::Object(mut map) => {
@@ -435,12 +434,10 @@ fn extract_specs_from_value(val: Value) -> Result<Vec<OutboundSpec>> {
                 map.remove("proxies").or_else(|| map.remove("outbounds"))
             {
                 for item in items {
-                    if let Some(spec) = value_to_outbound_spec(item) {
-                        out.push(spec);
-                    }
+                    out.push(value_to_outbound_spec(item)?);
                 }
-            } else if let Some(spec) = value_to_outbound_spec(Value::Object(map)) {
-                out.push(spec);
+            } else if map.contains_key("name") || map.contains_key("tag") {
+                out.push(value_to_outbound_spec(Value::Object(map))?);
             }
         }
         _ => {}
@@ -448,23 +445,11 @@ fn extract_specs_from_value(val: Value) -> Result<Vec<OutboundSpec>> {
     Ok(out)
 }
 
-fn value_to_outbound_spec(mut val: Value) -> Option<OutboundSpec> {
-    let map = val.as_object_mut()?;
-    let tag = map
-        .remove("tag")
-        .or_else(|| map.remove("name"))
-        .and_then(|v| v.as_str().map(str::to_owned))?;
-    let kind = map
-        .remove("type")
-        .or_else(|| map.remove("protocol"))
-        .and_then(|v| v.as_str().map(str::to_owned))?;
-    let options = match map.remove("options") {
-        Some(opts) => opts,
-        None => Value::Object(map.clone()),
-    };
-    Some(OutboundSpec {
+fn value_to_outbound_spec(val: Value) -> Result<OutboundSpec> {
+    let (tag, kind, options) = crate::mihomo::member_outbound(val)?;
+    Ok(OutboundSpec {
         tag: sanitize_tag(&tag),
-        kind: normalize_outbound_kind(&kind),
+        kind,
         options,
     })
 }
@@ -531,272 +516,6 @@ fn decode_base64_any(s: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
-}
-
-fn parse_proxy_uri(uri: &str, seq: usize) -> Option<OutboundSpec> {
-    let (scheme, rest) = uri.split_once("://")?;
-    let kind = normalize_outbound_kind(scheme);
-
-    // 1. VMess Base64 JSON (v2rayN format: vmess://eyJ...)
-    if kind == "vmess" && !rest.contains('@') {
-        let raw_b64 = rest.split('#').next().unwrap_or(rest).trim();
-        if let Some(decoded) = decode_base64_any(raw_b64)
-            && let Ok(json_val) = serde_json::from_slice::<Value>(&decoded)
-            && let Some(obj) = json_val.as_object()
-        {
-            let host = obj
-                .get("add")
-                .and_then(Value::as_str)
-                .unwrap_or("127.0.0.1");
-            let port = obj
-                .get("port")
-                .and_then(|v| {
-                    v.as_u64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-                })
-                .unwrap_or(443) as u16;
-            let ps = obj
-                .get("ps")
-                .and_then(Value::as_str)
-                .map(percent_decode_str)
-                .filter(|s| !s.is_empty());
-            let tag = ps
-                .as_deref()
-                .map(sanitize_tag)
-                .unwrap_or_else(|| format!("vmess-{seq}"));
-            let mut opts = Map::new();
-            opts.insert("uri".into(), Value::String(uri.to_owned()));
-            opts.insert("server".into(), Value::String(format!("{host}:{port}")));
-            opts.insert("port".into(), Value::from(port));
-            if let Some(id) = obj.get("id").and_then(Value::as_str) {
-                opts.insert("uuid".into(), Value::String(id.to_owned()));
-            }
-            if let Some(scy) = obj.get("scy").and_then(Value::as_str)
-                && !scy.is_empty()
-            {
-                opts.insert("security".into(), Value::String(scy.to_owned()));
-            }
-            if let Some(net) = obj.get("net").and_then(Value::as_str)
-                && !net.is_empty()
-            {
-                opts.insert("network".into(), Value::String(net.to_owned()));
-            }
-            if let Some(sni) = obj.get("sni").and_then(Value::as_str)
-                && !sni.is_empty()
-            {
-                opts.insert("sni".into(), Value::String(sni.to_owned()));
-            }
-            if let Some(tls) = obj.get("tls").and_then(Value::as_str)
-                && tls.eq_ignore_ascii_case("tls")
-            {
-                opts.insert("tls".into(), Value::Bool(true));
-            }
-            return Some(OutboundSpec {
-                tag,
-                kind,
-                options: Value::Object(opts),
-            });
-        }
-    }
-
-    // 2. ShadowsocksR Base64 (ssr://base64(host:port:protocol:method:obfs:base64pass/?params))
-    if kind == "shadowsocksr" && !rest.contains('@') {
-        let raw_b64 = rest.split('#').next().unwrap_or(rest).trim();
-        if let Some(decoded) = decode_base64_any(raw_b64)
-            && let Ok(ssr_str) = String::from_utf8(decoded)
-        {
-            let (main, query) = ssr_str.split_once("/?").unwrap_or((&ssr_str, ""));
-            let parts: Vec<&str> = main.split(':').collect();
-            if parts.len() >= 6 {
-                let host = parts[0];
-                let port = parts[1].parse::<u16>().unwrap_or(8388);
-                let protocol = parts[2];
-                let method = parts[3];
-                let obfs = parts[4];
-                let pass = decode_base64_any(parts[5])
-                    .and_then(|b| String::from_utf8(b).ok())
-                    .unwrap_or_else(|| parts[5].to_owned());
-                let mut opts = Map::new();
-                opts.insert("uri".into(), Value::String(uri.to_owned()));
-                opts.insert("server".into(), Value::String(format!("{host}:{port}")));
-                opts.insert("port".into(), Value::from(port));
-                opts.insert("protocol".into(), Value::String(protocol.to_owned()));
-                opts.insert("method".into(), Value::String(method.to_owned()));
-                opts.insert("cipher".into(), Value::String(method.to_owned()));
-                opts.insert("obfs".into(), Value::String(obfs.to_owned()));
-                opts.insert("password".into(), Value::String(pass));
-                let mut tag = format!("ssr-{seq}");
-                for pair in query.split('&') {
-                    if let Some((k, v)) = pair.split_once('=') {
-                        let decoded_v = decode_base64_any(v)
-                            .and_then(|b| String::from_utf8(b).ok())
-                            .unwrap_or_else(|| percent_decode_str(v));
-                        if k == "remarks" && !decoded_v.is_empty() {
-                            tag = sanitize_tag(&decoded_v);
-                        } else if !decoded_v.is_empty() {
-                            opts.insert(k.to_owned(), Value::String(decoded_v));
-                        }
-                    }
-                }
-                return Some(OutboundSpec {
-                    tag,
-                    kind,
-                    options: Value::Object(opts),
-                });
-            }
-        }
-    }
-
-    let (main_part, fragment) = match rest.rsplit_once('#') {
-        Some((m, f)) => (m, Some(percent_decode_str(f))),
-        None => (rest, None),
-    };
-    let tag = fragment
-        .as_deref()
-        .map(sanitize_tag)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{kind}-{seq}"));
-    let mut opts = Map::new();
-    opts.insert("uri".into(), Value::String(uri.to_owned()));
-
-    let (authority_raw, query_opt) = match main_part.split_once('?') {
-        Some((a, q)) => (a, Some(q)),
-        None => (main_part, None),
-    };
-
-    // Legacy ss://base64 without '@' in raw authority
-    let resolved_authority = if kind == "shadowsocks" && !authority_raw.contains('@') {
-        decode_base64_any(authority_raw.trim_end_matches('/'))
-            .and_then(|b| String::from_utf8(b).ok())
-            .unwrap_or_else(|| authority_raw.to_owned())
-    } else {
-        authority_raw.to_owned()
-    };
-
-    let (userinfo_opt, server_part) = match resolved_authority.rsplit_once('@') {
-        Some((u, h)) => (Some(u), h),
-        None => (None, resolved_authority.as_str()),
-    };
-
-    if let Some(userinfo) = userinfo_opt {
-        let decoded_user = if kind == "shadowsocks" && !userinfo.contains(':') {
-            decode_base64_any(userinfo)
-                .and_then(|b| String::from_utf8(b).ok())
-                .unwrap_or_else(|| percent_decode_str(userinfo))
-        } else {
-            percent_decode_str(userinfo)
-        };
-        match kind.as_str() {
-            "shadowsocks" => {
-                if let Some((method, pass)) = decoded_user.split_once(':') {
-                    opts.insert("method".into(), Value::String(method.to_owned()));
-                    opts.insert("cipher".into(), Value::String(method.to_owned()));
-                    opts.insert("password".into(), Value::String(pass.to_owned()));
-                }
-            }
-            "vless" | "vmess" => {
-                opts.insert("uuid".into(), Value::String(decoded_user));
-            }
-            "tuic" => {
-                if let Some((uuid, pass)) = decoded_user.split_once(':') {
-                    opts.insert("uuid".into(), Value::String(uuid.to_owned()));
-                    opts.insert("password".into(), Value::String(pass.to_owned()));
-                } else {
-                    opts.insert("uuid".into(), Value::String(decoded_user));
-                }
-            }
-            "socks" | "http" => {
-                if let Some((user, pass)) = decoded_user.split_once(':') {
-                    opts.insert("username".into(), Value::String(user.to_owned()));
-                    opts.insert("password".into(), Value::String(pass.to_owned()));
-                }
-            }
-            "wireguard" => {
-                opts.insert("private_key".into(), Value::String(decoded_user));
-            }
-            _ => {
-                opts.insert("password".into(), Value::String(decoded_user));
-            }
-        }
-    }
-
-    if let Some((host, port_str)) = server_part.rsplit_once(':')
-        && let Ok(port) = port_str.trim_matches('/').parse::<u16>()
-    {
-        let clean_host = host.trim_matches(&['[', ']'][..]);
-        opts.insert("server".into(), Value::String(clean_host.to_owned()));
-        opts.insert("port".into(), Value::from(port));
-    }
-
-    if let Some(query) = query_opt {
-        for pair in query.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                let key = percent_decode_str(k);
-                let val = percent_decode_str(v);
-                if key.is_empty() || val.is_empty() {
-                    continue;
-                }
-                match key.as_str() {
-                    "sni" | "servername" | "peer" => {
-                        opts.insert("sni".into(), Value::String(val));
-                    }
-                    "security" => {
-                        if val.eq_ignore_ascii_case("tls") || val.eq_ignore_ascii_case("reality") {
-                            opts.insert("tls".into(), Value::Bool(true));
-                        }
-                        opts.insert("security".into(), Value::String(val));
-                    }
-                    "type" | "net" => {
-                        opts.insert("network".into(), Value::String(val));
-                    }
-                    "insecure" | "allowInsecure" | "skip-cert-verify" => {
-                        let b = val == "1" || val.eq_ignore_ascii_case("true");
-                        opts.insert("skip-cert-verify".into(), Value::Bool(b));
-                    }
-                    "mport" | "ports" => {
-                        opts.insert("ports".into(), Value::String(val));
-                    }
-                    _ => {
-                        opts.insert(key, Value::String(val));
-                    }
-                }
-            }
-        }
-    }
-
-    Some(OutboundSpec {
-        tag,
-        kind,
-        options: Value::Object(opts),
-    })
-}
-
-fn percent_decode_str(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
-        {
-            out.push((hi << 4) | lo);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).unwrap_or_else(|_| input.to_owned())
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
