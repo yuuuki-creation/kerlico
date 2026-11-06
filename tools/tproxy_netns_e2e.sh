@@ -115,11 +115,12 @@ EOF
 cat >"$work/client.py" <<'EOF'
 import socket, sys
 proto, host, port = sys.argv[1], sys.argv[2], int(sys.argv[3])
+timeout = float(sys.argv[4]) if len(sys.argv) > 4 else 5
 family = socket.AF_INET6 if ":" in host else socket.AF_INET
 if proto == "udp":
     sockets = [socket.socket(family, socket.SOCK_DGRAM) for _ in range(2)]
     for index, s in enumerate(sockets):
-        s.settimeout(5)
+        s.settimeout(timeout)
         for seq in range(2):
             payload = f"udp-{host}-{index}-{seq}".encode()
             s.sendto(payload, (host, port))
@@ -170,6 +171,36 @@ for proto in udp tcp; do
     fi
   done
 done
+# lan-disallowed-ips 覆盖客户端时，UDP 数据报不得到达原始目标。
+kill "${pids[-1]}" 2>/dev/null || true
+wait "${pids[-1]}" 2>/dev/null || true
+sed -i 's|"lan_allowed_ips": \["0.0.0.0/0", "::/0"\],|&\n  "lan_disallowed_ips": ["192.0.2.2/32", "2001:db8:1::2/128"],|' "$work/config.json"
+ip netns exec "$p" "$bin" run -c "$work/config.json" >"$work/kerlico-deny.log" 2>&1 &
+pids+=($!)
+for _ in $(seq 50); do
+  [ "$(ip netns exec "$p" ss -Hlnu "sport = :$port" | wc -l)" -ge 2 ] && break
+  python3 -c 'import time; time.sleep(0.1)'
+done
+before="$(wc -l <"$work/server.log")"
+for dst in "$dst4" "$dst6"; do
+  family=ipv4
+  [[ "$dst" == *:* ]] && family=ipv6
+  if ip netns exec "$c" python3 "$work/client.py" udp "$dst" "$echo_port" 1 >/dev/null 2>&1; then
+    echo "FAIL lan-deny udp/$family"
+    failed=1
+  else
+    echo "PASS lan-deny udp/$family"
+  fi
+done
+if ! grep -q "dial direct" "$work/kerlico-deny.log"; then
+  echo "FAIL lan-deny：kerlico 没有记录拒绝（可能未启动）"
+  failed=1
+fi
+if [ "$(wc -l <"$work/server.log")" != "$before" ]; then
+  echo "FAIL lan-deny：被拒来源的数据报到达了服务端"
+  failed=1
+fi
+
 if [ "$failed" != 0 ]; then
   echo "--- server.log" >&2; cat "$work/server.log" >&2 || true
   echo "--- kerlico.log" >&2; tail -n 50 "$work/kerlico.log" >&2
