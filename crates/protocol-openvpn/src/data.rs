@@ -1,6 +1,9 @@
 //! AEAD 数据通道。线格式：`opcode|key_id, peer_id[3], packet_id[4], tag[16], ciphertext`。
 
-use crate::{wire::Opcode, wrap::ReplayWindow};
+use crate::{
+    wire::Opcode,
+    wrap::{ReplayConfig, ReplayWindow},
+};
 use kerlico_core::{Error, Result};
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
 
@@ -133,6 +136,7 @@ pub(crate) fn server_data_keys(
     key2: &[u8; 256],
     key_id: u8,
     peer_id: u32,
+    replay: ReplayConfig,
 ) -> Result<(SealKey, OpenKey)> {
     let part = |index: usize| {
         let group = &key2[index * 128..index * 128 + 128];
@@ -154,7 +158,7 @@ pub(crate) fn server_data_keys(
             key: cipher.key(open_material)?,
             implicit_iv: open_iv,
             key_id,
-            replay: ReplayWindow::default(),
+            replay: ReplayWindow::new(replay),
         },
     ))
 }
