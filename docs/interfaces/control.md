@@ -1,6 +1,6 @@
 # 控制接口
 
-配置 `control` 段后，kerlico 提供只读 HTTP/1.1 接口，返回 JSON。启动时打印实际监听地址。
+配置 `control` 段（或 Mihomo 顶层 `external-controller`）后，kerlico 提供 HTTP/1.1 与 WebSocket 接口，返回 JSON。启动时打印实际监听地址。
 
 ```json
 { "control": { "listen": "127.0.0.1:9090", "secret": "<随机字符串>" } }
@@ -9,11 +9,12 @@
 | 字段 | 约束说明 |
 | --- | --- |
 | `listen` | 监听地址。非回环地址必须配置 `secret`。不能与入站的 TCP 监听地址相同 |
-| `secret` | 可选。配置后请求须带 `Authorization: Bearer <secret>` 或查询参数 `?token=<secret>`，否则返回 401 |
+| `secret` | 可选。配置后请求须带 `Authorization: Bearer <secret>` 或查询参数 `?token=<secret>`（浏览器的 WebSocket 只能用后者），否则返回 401 |
+| `external_ui` | 可选。静态面板目录，在 `/ui/` 下提供；`external_ui_name` 指定其中的子目录。目录中不存在的文件返回 404 |
 
 接口是明文 HTTP。跨机器访问时放在受信网络或 TLS 反向代理之后。
 
-同时最多 64 条连接，超出的连接立即关闭。每条连接总时长上限 30 秒，含 keep-alive 复用。
+同时最多 64 条连接，超出的连接立即关闭。每条连接总时长上限 30 秒，含 keep-alive 复用；正在发送推送响应的连接不受此限。升级后的 WebSocket 会话与 HTTP 推送另计，同时最多 64 个，超出时回 503。
 
 ## 端点
 
@@ -27,15 +28,15 @@
 | `/v1/flows?after=<序号>&limit=<数量>` | `GET` | 内存中保留的访问记录，来源地址已遮罩。`limit` 为 1 至 4096，默认 1000 |
 | `/v1/stats` | `GET` | Engine 和各节点的处理单元计数 |
 | `/version` | `GET` | 内核版本号与兼容标志 |
-| `/configs` | `GET` / `PUT` / `PATCH` | `GET` 读取当前运行模式与日志级别；`PUT` 重载整份配置，见[配置重载](#配置重载)；`PATCH` 只更新日志级别 |
+| `/configs` | `GET` / `PUT` / `PATCH` | `GET` 返回 Mihomo 形状的运行设置，见[运行设置](#运行设置)；`PUT` 重载整份配置，见[配置重载](#配置重载)；`PATCH` 改运行模式、日志级别与入站监听 |
 | `/restart` | `POST` | 重读启动配置并重载，等同不带请求体的 `PUT /configs` |
 | `/configs/geo`、`/upgrade/geo` | `POST` | 立即下载 `geox_url` 配置的全部 Geo 数据库；未配置回 400，任一失败回 503 与 `message` |
 | `/cache/fakeip/flush` | `POST` | 清空 Fake-IP 映射表及持久化缓存 |
-| `/logs` | `GET` | 返回控制面环形日志缓冲条目 |
+| `/cache/dns/flush` | `POST` | 清空全部 UDP、TCP、DoT 上游解析器的应答缓存；DoH 上游不缓存 |
+| `/traffic`、`/memory`、`/logs?level=&format=` | `GET`（可升级为 WebSocket） | 推送端点，见[推送](#推送) |
 | `/rules`、`/routing/rules` | `GET` | 编译后的顶层路由规则，按配置顺序列出 `type`、`payload`、`proxy`，最终出站以 `Match` 行收尾，见[规则表](#规则表) |
 | `/routing/test` | `POST` | 对给定域名、IP、端口与协议模拟路由匹配并返回选中出站 |
-| `/connections`、`/connections/<id>` | `GET` / `DELETE` | 活动连接表与进程累计上下行字节；`DELETE` 关闭全部或指定连接，见[连接表](#连接表) |
-| `/memory` | `GET` | `inuse` 为进程常驻内存字节数（Linux 读取 `/proc/self/status` 的 `VmRSS`，其他平台为 0），`oslimit` 为 0 |
+| `/connections`、`/connections/<id>` | `GET` / `DELETE` | 活动连接表与进程累计上下行字节；`DELETE` 关闭全部或指定连接，见[连接表](#连接表)。WebSocket 升级后按 `interval` 推送快照 |
 | `/dns/query?name=<域名>&type=<A\|AAAA>` | `GET` | 经运行期解析器（hosts、上游与缓存）解析，返回 Mihomo 应答形状，见[DNS 查询](#dns-查询) |
 | `/proxies`、`/proxies/<name>`、`/proxies/<name>/delay?url=&timeout=&expected=` | `GET` / `PUT` | 查询全部出站与策略组状态、切换 `Select` 策略组选中项、经该出站实测延迟（见下文“延迟探测”） |
 | `/group`、`/group/<name>`、`/group/<name>/delay?url=&timeout=&expected=` | `GET` | 查询策略组列表、单组详情，或并发实测组内全部候选，返回成功项 `{"<name>": <ms>}`；全部失败时 504 |
@@ -76,7 +77,7 @@
 - 来源地址不遮罩：此表供已鉴权的管理端识别和关闭连接，不落盘。
 - `DELETE /connections/<id>` 触发该流的关闭令牌：计量边界中止读写，转发结束，客户端收到 EOF 或复位。`DELETE /connections` 关闭全部活动流。未知或非数字 `id` 不做任何操作，均返回 204。
 - 策略组开启 `interrupt-exist-connections` 后，`select` 切换选中项、`url-test` 与 `fallback` 因延迟记录改变当前成员时，经过该组但成员不是当前成员的流被关闭。`load-balance` 按流选择成员，不中断。
-- 没有 WebSocket 推送；需要实时刷新时轮询 `GET /connections`。
+- WebSocket 连接 `/connections?interval=<毫秒>` 每隔 `interval`（缺省 1000，最小 100）推送一份与 `GET /connections` 相同的快照。不带升级的 `GET /connections` 回单次快照。
 
 ### 规则表
 
@@ -96,6 +97,68 @@
 - 解析器只返回地址，不带上游 TTL，`TTL` 固定为 0。
 
 错误响应为 `{"error": "<稳定错误码>"}`，状态码 400、401、404 或 405。
+
+## 推送
+
+`/traffic`、`/memory`、`/logs`、`/connections` 带 `Upgrade: websocket` 请求时按 RFC 6455 升级，每条消息是一个 JSON 文本帧。`/traffic`、`/memory`、`/logs` 不带升级时回 `200`，以分块编码持续发送 JSON 行（每行一个对象，`\n` 结尾），同 Mihomo。推送跨配置重载继续，读取新一代引擎的数据。
+
+| 端点 | 消息 | 频率 |
+| --- | --- | --- |
+| `/traffic` | `{"up","down","upTotal","downTotal"}`：`up`、`down` 为上一秒的业务字节数，`*Total` 为本次引擎运行的累计业务字节 | 每秒，首条在连接 1 秒后 |
+| `/memory` | `{"inuse","oslimit"}`，含义同上表 | 每秒，首条立即发送 |
+| `/logs?level=<级别>` | `{"type":"info","payload":"..."}`；`format=structured` 时为 `{"time","level","message","fields":[]}` | 事件发生时 |
+| `/connections?interval=<毫秒>` | 同 `GET /connections` | 每 `interval` |
+
+`level` 缺省 `info`，只推送不低于该级别的事件；`silent` 不推送。订阅者收到全部级别的事件，与进程日志级别无关，同 Mihomo。订阅者处理不及时时丢弃积压的旧事件。
+
+## 日志
+
+进程日志与 `/logs` 共用一条管线。级别取 `log.level`，其次顶层 `log-level`，缺省 `info`，按 `debug < info < warning < error < silent` 过滤输出；`trace` 视为 `debug`，`warn` 视为 `warning`，`fatal`、`panic` 视为 `error`，`none` 视为 `silent`。
+
+| 字段 | 行为 |
+| --- | --- |
+| `log.output` | 缺省或 `stdout` 写标准输出；`stderr` 写标准错误；其他值为文件路径，追加写入。Xray 的 `error` 路径在未写 `output` 时同样生效 |
+| `log.timestamp` | 为真时每行以 UTC 时间开头，如 `2026-11-06T08:00:00.000Z INFO ...` |
+| `log.disabled` | 为真时级别为 `silent`，不写输出；`/logs` 订阅照常 |
+
+每次启动和重载按新配置重新打开输出。连接建立时记 `info`，格式同 Mihomo：
+
+```text
+[TCP] 127.0.0.1:50312 --> example.com:443 match DomainSuffix(example.com) using Proxy[node-a]
+[TCP] 127.0.0.1:50313 --> example.org:443 match Match using Proxy[DIRECT]
+[TCP] 127.0.0.1:50314 --> example.net:443 doesn't match any rule using exit
+[TCP] 127.0.0.1:50315 --> example.net:443 using GLOBAL
+```
+
+`using` 后为“第一层策略组[最终出站]”，没有策略组时为出站名。准入失败记 `warning`：`[TCP] dial <出站> <来源> --> <目标> error: <原因>`。
+
+## 运行模式
+
+顶层 `mode`（sing-box `clash_api.default_mode` 亦可）取 `rule`、`global` 或 `direct`，缺省 `rule`，不区分大小写。
+
+- `rule`：按路由规则分流。
+- `global`：全部连接交给 `GLOBAL` 策略组。
+- `direct`：全部连接交给 `DIRECT`。
+
+`global` 与 `direct` 不评估规则的拒绝、改写与出站，只保留规则中的 DNS 劫持与嗅探动作。
+
+配置中没有名为 `GLOBAL` 的策略组或出站时，kerlico 生成一个 `select` 组 `GLOBAL`，成员依次为 `DIRECT`、`REJECT`、配置中声明的出站（不含提供者成员）、策略组，默认选中 `DIRECT`，可用 `PUT /proxies/GLOBAL` 切换，`store-selected` 同样记录。`DIRECT` 与 `REJECT` 内置出站总是存在，已有同名出站时沿用。
+
+## 运行设置
+
+`GET /configs` 返回 Mihomo 字段：`port`、`socks-port`、`mixed-port`、`redir-port`、`tproxy-port`（未开启为 0）、`allow-lan`、`bind-address`、`lan-allowed-ips`、`lan-disallowed-ips`、`interface-name`、`routing-mark`、`mode`、`log-level`、`ipv6`、`sniffing`、`geodata-mode`、`geo-auto-update`、`geo-update-interval`、`geox-url`、`tun`（`enable`、`device`、`stack`、`dns-hijack`、`auto-route`、`auto-detect-interface`）。`mode` 与 `log-level` 是运行值，其余取自当前运行的配置。`ipv6` 固定为 `true`，`tcp-concurrent`、`unified-delay` 固定为 `false`。
+
+`PATCH /configs` 的请求体用同名字段：
+
+| 字段 | 行为 |
+| --- | --- |
+| `mode` | 就地生效，已有连接不中断 |
+| `log-level` | 就地生效 |
+| `port`、`socks-port`、`mixed-port`、`redir-port`、`tproxy-port` | 0 关闭该入站，其他值改端口 |
+| `allow-lan`、`bind-address`、`lan-allowed-ips`、`lan-disallowed-ips`、`interface-name` | 改写同名配置 |
+| `tun` | 对象，逐键合并进顶层 `tun`；`{"enable": false}` 关闭 TUN 入站 |
+
+只含 `mode`、`log-level` 时回 204，不重建引擎。含其他字段时把改动写进当前运行的配置，按[配置重载](#配置重载)重建引擎，成功回 204，失败回 400 与错误码；控制接口未接入重载循环时回 501。两种情况的改动都写入运行配置，之后由提供者更新触发的重载沿用；`PUT /configs`、`SIGHUP` 重读配置文件时恢复文件中的值。字段值不合法回 400 与 `message`。其他字段（如 `ipv6`、`sniffing`）忽略，并记一条 `warning` 日志。
 
 ## 延迟探测
 
@@ -142,6 +205,6 @@
 3. 用新配置启动引擎并绑定监听。从步骤 2 关闭监听到此步绑定完成之间，新连接被拒绝。
 4. 新引擎启动失败（如端口被占用）时，用上一份配置重新启动并返回 `startup.failed`。上一份配置也无法启动时进程以错误退出。
 
-跨重载保留的只有控制接口监听器、`reloads` 计数与设备（WARP）所有者。出站、策略组运行态、连接表、内存用量视图、`failed_nodes` 与控制面日志随新引擎重建；统计历史 SQLite、Fake-IP 缓存文件和 `store-selected` 选择文件由新引擎按新配置重新打开，未配置 `store-selected` 时策略组选择回到默认值。
+跨重载保留的只有控制接口监听器、`reloads` 计数、推送订阅与设备（WARP）所有者；日志级别与输出按新配置重设。出站、策略组运行态、连接表、内存用量视图、`failed_nodes` 与控制面日志随新引擎重建；统计历史 SQLite、Fake-IP 缓存文件和 `store-selected` 选择文件由新引擎按新配置重新打开，未配置 `store-selected` 时策略组选择回到默认值。
 
 `control.listen` 变化、增删 `control` 段和改变 `device` 设置需重启进程：前两者在新配置中被忽略，控制接口仍在原地址服务；`device` 变化使重载以 `configuration.invalid` 失败。`secret`、CORS 与面板等其余 `control` 字段随重载生效。

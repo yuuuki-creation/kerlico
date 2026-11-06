@@ -215,6 +215,10 @@ impl EgressRuntime {
             })
             .map_err(|_| Error::ResourceLimit)?;
         let deadline = Instant::now() + budget;
+        let kinds: HashMap<OutId, String> = plans
+            .iter()
+            .map(|named| (named.id.clone(), group::mihomo_type(&named.kind)))
+            .collect();
         let mut started = Vec::new();
         for named in plans {
             let host = ServiceContext::with_options(
@@ -269,7 +273,10 @@ impl EgressRuntime {
         let service_order = started.iter().map(|service| service.id.clone()).collect();
         let static_meta: Vec<(OutId, String, bool)> = started
             .iter()
-            .map(|s| (s.id.clone(), "Outbound".to_owned(), s.capabilities.udp))
+            .map(|s| {
+                let kind = kinds.get(&s.id).cloned().unwrap_or_default();
+                (s.id.clone(), kind, s.capabilities.udp)
+            })
             .collect();
         let mut services = BTreeMap::new();
         for service in started {
@@ -499,7 +506,7 @@ fn connection_log(
             "[{network}] {source} --> {target} match {}({}) using {chain}",
             rule.kind, rule.payload
         ),
-        (RunMode::Rule, Some(rule)) if rule.kind != "Match" => {
+        (RunMode::Rule, Some(rule)) => {
             format!(
                 "[{network}] {source} --> {target} match {} using {chain}",
                 rule.kind

@@ -122,6 +122,8 @@ impl OutboundPlan {
 
 pub struct NamedServicePlan {
     pub id: OutId,
+    /// 出站类型名（配置中的 `type`），控制面据此给出 Mihomo 类型名。
+    pub kind: String,
     pub plan: OutboundPlan,
 }
 

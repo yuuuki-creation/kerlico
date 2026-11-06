@@ -31,7 +31,7 @@
 | 单元 | 问题 | 规模 | 状态 |
 | --- | --- | --- | --- |
 | 健康检查与测速 | 测速记录常量 12/15 ms；没有后台健康检查；url-test、fallback、least-ping 无真实数据 | L | 已修复：经出站发 HEAD 实测，按 `interval` 后台检查；HTTPS 探测未对真实 TLS 服务验证 |
-| 配置热重载 | `SIGHUP`、`PUT/PATCH /configs`、`/restart` 只校验不应用 | L | 已修复 `SIGHUP`、`PUT /configs`、`/restart`；`PATCH /configs` 仍只记日志 |
+| 配置热重载 | `SIGHUP`、`PUT/PATCH /configs`、`/restart` 只校验不应用 | L | 已修复 `SIGHUP`、`PUT /configs`、`/restart`；`PATCH /configs` 改 `mode`、`log-level` 就地生效，改端口、`allow-lan`、`tun` 时重建引擎 |
 | HTTP 下载器 | http 订阅、远程规则集、Geo 自动更新只读本地文件 | L | 已修复：经出站下载、ETag、失败沿用缓存、运行中刷新；订阅成员变化时重建引擎；Geo 文件下载后运行时仍用内置表；HTTPS 与 gzip 未对真实服务验证 |
 | 连接表 | 见下 | M | 已修复：`/connections` 列出真实流量并可断开，`interrupt-exist-connections` 生效，`/rules`、`/memory`、`/dns/query` 用真实数据；无 WebSocket 推送 |
 | OpenVPN 服务端 | 见下 | M | 已修复：客户端证书、地址池、推送、NCP、换钥、tls-crypt-v2，官方客户端 10 个互通用例通过；`static_key` 模式改为拒绝；出站 tls-crypt-v2 的 WKc 长度读错位置已改正 |
@@ -41,7 +41,7 @@
 | 规则集与 Geo 格式 | `.srs`/`.mrs` 是私有格式，真实文件返回空集；运行时 GeoIP/GeoSite 是内置小表 | L | 待做 |
 | 路由解析 IP | `resolved_ips` 恒为空，`resolve` 动作后 IP/GeoIP 规则不匹配域名目标 | M | 待做 |
 | 连接表 | `register_active_connection` 无调用者，`/connections` 恒空，断开与 `interrupt-exist-connections` 无效 | M | 待做 |
-| 日志管线与 WebSocket | 日志级别与输出不生效；控制面没有 WebSocket 端点 | M | 待做 |
+| 日志管线与 WebSocket | 日志级别与输出不生效；控制面没有 WebSocket 端点；顶层 `mode` 不影响路由 | M | 已修复：进程日志管线（级别、文件输出、时间戳）驱动 `/logs`；`/traffic`、`/memory`、`/logs`、`/connections` WebSocket 推送；`mode` 与 `GLOBAL` 组生效；metacubexd 与 mihomo v1.19.33 同配置对照通过 |
 | 控制面伪数据 | `/dns/query` 返回固定地址，`/memory` 常量，`/rules` 占位，`tools` 子命令输出固定 JSON | M | 待做 |
 | 环境变量与 NTP | 环境变量收集后丢弃；NTP 校准无调用者 | M | 待做 |
 | ACME | 生成自签证书，不走 ACME 协议 | L | 待做 |

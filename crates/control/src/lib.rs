@@ -461,22 +461,23 @@ fn serve_ui_asset(spec: &ControlSpec, sub_path: &str) -> ApiReply {
             }
         }
         let target = root.join(rel);
-        if let Ok(bytes) = std::fs::read(&target) {
-            let mime = if rel.ends_with(".html") {
-                "text/html; charset=utf-8"
-            } else if rel.ends_with(".js") {
-                "application/javascript; charset=utf-8"
-            } else if rel.ends_with(".css") {
-                "text/css; charset=utf-8"
-            } else if rel.ends_with(".json") {
-                "application/json"
-            } else if rel.ends_with(".svg") {
-                "image/svg+xml"
-            } else {
-                "application/octet-stream"
-            };
-            return ApiReply::Static(StatusCode::OK, mime, bytes);
-        }
+        let Ok(bytes) = std::fs::read(&target) else {
+            return ApiReply::Json(StatusCode::NOT_FOUND, json!({"error": "not found"}));
+        };
+        let extension = rel.rsplit_once('.').map_or("", |(_, ext)| ext);
+        let mime = match extension {
+            "html" => "text/html; charset=utf-8",
+            "js" | "mjs" => "application/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "json" | "webmanifest" => "application/json",
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            "ico" => "image/x-icon",
+            "woff2" => "font/woff2",
+            "ttf" => "font/ttf",
+            _ => "application/octet-stream",
+        };
+        return ApiReply::Static(StatusCode::OK, mime, bytes);
     }
     let default_html = b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Kerlico Dashboard</title></head><body><h1>Kerlico External UI</h1></body></html>".to_vec();
     ApiReply::Static(StatusCode::OK, "text/html; charset=utf-8", default_html)

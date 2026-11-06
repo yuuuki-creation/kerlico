@@ -1067,6 +1067,35 @@ pub fn resident_memory_bytes() -> u64 {
         .map_or(0, |kib| kib.saturating_mul(1024))
 }
 
+/// kerlico 出站类型名转 Mihomo `/proxies` 的 `type`。
+pub(crate) fn mihomo_type(kind: &str) -> String {
+    let known = match kind {
+        "direct" => "Direct",
+        "reject" => "Reject",
+        "socks" => "Socks5",
+        "http" => "Http",
+        "shadowsocks" | "ss2022" => "Shadowsocks",
+        "shadowsocksr" => "ShadowsocksR",
+        "vmess" => "Vmess",
+        "vless" => "Vless",
+        "trojan" => "Trojan",
+        "hysteria1" => "Hysteria",
+        "hysteria2" => "Hysteria2",
+        "tuic" => "Tuic",
+        "wireguard" => "WireGuard",
+        "anytls" => "AnyTLS",
+        "ssh" => "Ssh",
+        _ => "",
+    };
+    if !known.is_empty() {
+        return known.to_owned();
+    }
+    let mut chars = kind.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
 fn now_iso_string() -> String {
     rfc3339(now_ms())
 }

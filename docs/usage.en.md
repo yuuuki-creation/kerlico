@@ -125,7 +125,7 @@ Put the output in `accounts`, then use its `user_id` as a node member. Create se
 
 ## Routing and rule-sets
 
-Rules match in order and the first match wins. Unmatched traffic uses the node's `outbound`. Rules can match domain, keyword, regex, CIDR, port, network, node, user, sniffed protocol (TLS SNI, HTTP Host, QUIC SNI, BitTorrent, SSH, RDP), and external rule-sets. When `sniff` or Fake-IP is enabled, IP targets recover their domain name for domain rule matching.
+Rules match in order and the first match wins. Unmatched traffic uses the node's `outbound`. The top-level `mode` works as in Mihomo: `rule` (default) applies the rules, `global` sends everything to the `GLOBAL` select group, and `direct` sends everything to `DIRECT`. `PATCH /configs` switches it at runtime. When no group or outbound is named `GLOBAL`, kerlico creates one whose members are `DIRECT`, `REJECT`, the configured outbounds, and then the groups. Rules can match domain, keyword, regex, CIDR, port, network, node, user, sniffed protocol (TLS SNI, HTTP Host, QUIC SNI, BitTorrent, SSH, RDP), and external rule-sets. When `sniff` or Fake-IP is enabled, IP targets recover their domain name for domain rule matching.
 
 ## Subscriptions, remote rule-sets, and Geo data
 
@@ -163,7 +163,7 @@ The `dns` section configures upstreams (`udp://`, `tcp://`, `tls://`, `https://`
 
 ## Control interface and Web UI
 
-The `control` section enables the HTTP/WebSocket control plane, serving both read-only `/v1/*` endpoints (`/v1/health`, `/v1/usage`, `/v1/online`, `/v1/flows`, `/v1/stats`) and Clash/Mihomo-compatible endpoints (`/proxies`, `/connections`, `/rules`, `/configs`, `/logs`, `/traffic`, `/memory`, `/dns/query`, `/cache/fakeip/flush`) plus static Web UI hosting at `/ui` (`external_ui`):
+The `control` section (or the Mihomo top-level `external-controller`, `external-ui`, and `secret`) enables the HTTP/WebSocket control plane, serving both read-only `/v1/*` endpoints (`/v1/health`, `/v1/usage`, `/v1/online`, `/v1/flows`, `/v1/stats`) and Clash/Mihomo-compatible endpoints (`/proxies`, `/connections`, `/rules`, `/configs`, `/logs`, `/traffic`, `/memory`, `/dns/query`, `/cache/fakeip/flush`, `/cache/dns/flush`) plus static Web UI hosting at `/ui` (`external_ui`). `/traffic`, `/memory`, `/logs`, and `/connections` push over WebSocket; browsers authenticate with `?token=<secret>`. Put metacubexd in the `external_ui` directory and open `http://127.0.0.1:9090/ui/` for the overview, proxy switching, connections, logs, rules, and mode switching:
 
 ```sh
 curl -H 'Authorization: Bearer <secret>' http://127.0.0.1:9090/v1/usage
@@ -176,6 +176,16 @@ After editing the configuration, send `kill -HUP <pid>` or call `PUT /configs`. 
 
 ```sh
 curl -X PUT -H 'Authorization: Bearer <secret>' -d '{}' http://127.0.0.1:9090/configs
+```
+
+`PATCH /configs` applies `mode` and `log-level` in place. Changing listener fields such as `mixed-port`, `port`, `socks-port`, `allow-lan`, or `tun.enable` rebuilds the engine from the patched configuration.
+
+## Logs
+
+Logs go to standard output and to `/logs` subscribers. The level comes from `log.level`, then the top-level `log-level` (Mihomo), and defaults to `info`. Levels are `silent`, `error`, `warning`, `info`, and `debug`. When `log.output` is a file path, lines are appended to that file; `stderr` writes to standard error. `log.timestamp: true` prefixes each line with the UTC time, and `log.disabled: true` turns output off. Connections are logged at `info` in the Mihomo format:
+
+```text
+2026-11-06T08:00:00.000Z INFO [TCP] 127.0.0.1:50312 --> example.com:443 match DomainSuffix(example.com) using Proxy[node-a]
 ```
 
 `PUT /configs` also accepts `payload` (configuration text) or an absolute `path` inside the startup configuration directory, as in Mihomo. Changes to `control.listen`, adding or removing the `control` section, and `device` changes need a process restart.

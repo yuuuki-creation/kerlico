@@ -1625,8 +1625,8 @@ impl Registry {
             config.proxy_groups.iter().map(|g| g.name.clone()).collect();
         for (builtin_tag, builtin_kind) in [
             ("DIRECT", "direct"),
-            ("REJECT", "block"),
-            ("REJECT-DROP", "block"),
+            ("REJECT", "reject"),
+            ("REJECT-DROP", "reject"),
             ("PASS", "direct"),
         ] {
             let referenced = config
@@ -1700,7 +1700,11 @@ impl Registry {
                 (plan.capabilities(), plan.supports_udp_association()),
             );
             static_outbound_kinds.push((id.clone(), spec.kind.clone()));
-            services.push(NamedServicePlan { id, plan });
+            services.push(NamedServicePlan {
+                id,
+                kind: spec.kind,
+                plan,
+            });
         }
         let mut all_group_specs = inline_groups;
         all_group_specs.extend(config.proxy_groups.iter().cloned());

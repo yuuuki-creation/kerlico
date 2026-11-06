@@ -125,7 +125,7 @@ printf '%s' 'your-admin-password' | kerlico account-new --prefix alice
 
 ## 路由与规则集
 
-规则按顺序匹配，首条命中生效，未命中走节点绑定的 `outbound`。可按域名、关键字、正则、CIDR、端口、网络、节点、用户、协议嗅探（TLS SNI、HTTP Host、QUIC SNI、BitTorrent、SSH、RDP）和外部规则集匹配。开启 `sniff` 或 Fake-IP 时，IP 目标可还原域名并参与域名规则匹配。详见[路由规则](interfaces/config.md)。
+规则按顺序匹配，首条命中生效，未命中走节点绑定的 `outbound`。顶层 `mode` 同 Mihomo：`rule`（默认）按规则分流，`global` 全部交给 `GLOBAL` 选择组，`direct` 全部走 `DIRECT`；运行中可用 `PATCH /configs` 切换。没有同名策略组或出站时，kerlico 自动生成 `GLOBAL`，成员依次为 `DIRECT`、`REJECT`、配置中的出站、策略组。可按域名、关键字、正则、CIDR、端口、网络、节点、用户、协议嗅探（TLS SNI、HTTP Host、QUIC SNI、BitTorrent、SSH、RDP）和外部规则集匹配。开启 `sniff` 或 Fake-IP 时，IP 目标可还原域名并参与域名规则匹配。详见[路由规则](interfaces/config.md)。
 
 ## 订阅、远程规则集与 Geo 数据
 
@@ -163,7 +163,7 @@ OpenVPN 服务端节点只支持 TLS 模式，必须配置服务端证书与私�
 
 ## 控制接口与 Web 面板
 
-`control` 段开启 HTTP/WebSocket 控制面接口，同时提供原生只读 `/v1/*` 接口、Clash/Mihomo 兼容接口（`/proxies`、`/connections`、`/rules`、`/configs`、`/logs`、`/traffic`、`/memory`、`/dns/query`、`/cache/fakeip/flush`）与 `/ui` 静态 Web 面板托管（配置 `external_ui` 目录）：
+`control` 段（或 Mihomo 顶层 `external-controller`、`external-ui`、`secret`）开启 HTTP/WebSocket 控制面接口，同时提供原生只读 `/v1/*` 接口、Clash/Mihomo 兼容接口（`/proxies`、`/connections`、`/rules`、`/configs`、`/logs`、`/traffic`、`/memory`、`/dns/query`、`/cache/fakeip/flush`、`/cache/dns/flush`）与 `/ui` 静态 Web 面板托管（配置 `external_ui` 目录）。`/traffic`、`/memory`、`/logs`、`/connections` 支持 WebSocket 推送，浏览器用 `?token=<secret>` 鉴权。metacubexd 放在 `external_ui` 目录后，打开 `http://127.0.0.1:9090/ui/` 即可使用总览、代理切换、连接、日志、规则与运行模式切换：
 
 ```sh
 curl -H 'Authorization: Bearer <secret>' http://127.0.0.1:9090/v1/usage
@@ -176,7 +176,17 @@ curl -H 'Authorization: Bearer <secret>' http://127.0.0.1:9090/proxies
 curl -X PUT -H 'Authorization: Bearer <secret>' -d '{}' http://127.0.0.1:9090/configs
 ```
 
+`PATCH /configs` 改 `mode`、`log-level` 时就地生效；改 `mixed-port`、`port`、`socks-port`、`allow-lan`、`tun.enable` 等监听字段时按改后的配置重建引擎。
+
 详见[控制接口](interfaces/control.md)与[配置重载](interfaces/control.md#配置重载)。
+
+## 日志
+
+日志写到标准输出，并推送给 `/logs` 订阅者。级别取 `log.level`，其次顶层 `log-level`（Mihomo），默认 `info`；可选 `silent`、`error`、`warning`、`info`、`debug`。`log.output` 为文件路径时追加写入该文件，写 `stderr` 时写标准错误；`log.timestamp: true` 在每行前加 UTC 时间；`log.disabled: true` 关闭输出。连接按 Mihomo 格式记 `info` 日志：
+
+```text
+2026-11-06T08:00:00.000Z INFO [TCP] 127.0.0.1:50312 --> example.com:443 match DomainSuffix(example.com) using Proxy[node-a]
+```
 
 ## 统计
 
