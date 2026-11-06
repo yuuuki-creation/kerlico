@@ -1,17 +1,27 @@
 //! 按目标、网络、节点、用户、来源、协议、规则集与 GeoData 选择命名出站或执行路由动作。
 
+pub mod domain_set;
 pub mod geodata;
+pub mod ip_set;
+pub mod mmdb;
+pub mod mrs;
 pub mod ruleset;
+pub mod srs;
+mod succinct;
+
+pub use domain_set::{DomainRule, DomainSet};
 pub use geodata::{
-    GeoConfigSpec, GeoIpDat, GeoSiteDat, GeoxUrlSpec, builtin_geoip_codes, builtin_geosite_codes,
-    export_geoip_ruleset, export_geosite_ruleset, is_private_ip, matches_geoip_code,
-    matches_geosite_code,
+    GeoConfigSpec, GeoData, GeoFile, GeoIpMode, GeoIpRef, GeoNeeds, GeoPart, GeoSiteRef, GeoSlot,
+    GeoxUrlSpec, export_geoip_ruleset, export_geosite_ruleset, is_private_ip,
 };
+pub use ip_set::IpSet;
+pub use mrs::{Behavior, MrsPayload};
 pub use ruleset::{
-    CompiledHeadlessRule, CompiledRuleSet, HeadlessRuleSpec, LogicalMode, RemoteRuleSet,
-    RuleProviderSpec, RuleSetFile, RuleSetFormat, RuleSetSource, RuleSetSpec, SourceRuleSetFile,
-    compile_ruleset_to_srs, convert_adguard_lines, decompile_ruleset_bytes, default_cache_path,
-    parse_ruleset_bytes, parse_update_interval,
+    CompiledHeadlessRule, CompiledRuleSet, DetectedFormat, HeadlessRuleSpec, LogicalMode,
+    MihomoFormat, RemoteRuleSet, RuleProviderSpec, RuleSetFile, RuleSetFormat, RuleSetSource,
+    RuleSetSpec, SingBoxFormat, SourceRuleSetFile, compile_ruleset_to_mrs, compile_ruleset_to_srs,
+    convert_adguard_lines, decompile_ruleset_bytes, decompile_with_behavior, default_cache_path,
+    detect_format, parse_ruleset_bytes, parse_update_interval, ruleset_to_mihomo_lines,
 };
 
 use arc_swap::ArcSwap;
@@ -228,6 +238,23 @@ pub struct RuleSpec {
     pub ip_cidr: Vec<String>,
     #[serde(default)]
     pub geoip: Vec<String>,
+    /// 目标 IP 所属自治系统号（Mihomo `IP-ASN`），查 `GeoLite2-ASN.mmdb`。
+    #[serde(default, alias = "ip-asn")]
+    pub ip_asn: Vec<u32>,
+    #[serde(
+        default,
+        alias = "source-geoip",
+        alias = "src_geoip",
+        alias = "src-geoip"
+    )]
+    pub source_geoip: Vec<String>,
+    #[serde(
+        default,
+        alias = "source-ip-asn",
+        alias = "src_ip_asn",
+        alias = "src-ip-asn"
+    )]
+    pub source_ip_asn: Vec<u32>,
     #[serde(
         default,
         alias = "ip-is-private",
@@ -399,6 +426,12 @@ impl RuleLabel {
         push("GeoSite", text(&spec.geosite));
         push("IPCIDR", text(&spec.ip_cidr));
         push("GeoIP", text(&spec.geoip));
+        push("IPASN", spec.ip_asn.iter().map(u32::to_string).collect());
+        push("SrcGeoIP", text(&spec.source_geoip));
+        push(
+            "SrcIPASN",
+            spec.source_ip_asn.iter().map(u32::to_string).collect(),
+        );
         if spec.ip_is_private {
             push("GeoIP", vec!["private".into()]);
         }
@@ -477,9 +510,12 @@ struct Rule {
     domain_keyword: Vec<String>,
     domain_regex: Vec<Regex>,
     domain_wildcard: Vec<String>,
-    geosite: Vec<String>,
+    geosite: Vec<GeoSiteRef>,
     ip_cidr: Vec<Cidr>,
-    geoip: Vec<String>,
+    geoip: Vec<GeoIpRef>,
+    ip_asn: Vec<u32>,
+    source_geoip: Vec<GeoIpRef>,
+    source_ip_asn: Vec<u32>,
     ip_is_private: bool,
     ip_version: Option<u8>,
     port: Vec<u16>,
@@ -656,6 +692,9 @@ impl Rule {
                 geosite: Vec::new(),
                 ip_cidr: Vec::new(),
                 geoip: Vec::new(),
+                ip_asn: Vec::new(),
+                source_geoip: Vec::new(),
+                source_ip_asn: Vec::new(),
                 ip_is_private: false,
                 ip_version: None,
                 port: Vec::new(),
@@ -729,13 +768,7 @@ impl Rule {
             geosite: spec
                 .geosite
                 .iter()
-                .map(|v| {
-                    if v.trim().is_empty() {
-                        Err(invalid())
-                    } else {
-                        Ok(v.trim().to_ascii_lowercase())
-                    }
-                })
+                .map(|v| GeoSiteRef::parse(v))
                 .collect::<Result<_>>()?,
             ip_cidr: spec
                 .ip_cidr
@@ -745,14 +778,15 @@ impl Rule {
             geoip: spec
                 .geoip
                 .iter()
-                .map(|v| {
-                    if v.trim().is_empty() {
-                        Err(invalid())
-                    } else {
-                        Ok(v.trim().to_ascii_lowercase())
-                    }
-                })
+                .map(|v| GeoIpRef::parse(v))
                 .collect::<Result<_>>()?,
+            ip_asn: spec.ip_asn.clone(),
+            source_geoip: spec
+                .source_geoip
+                .iter()
+                .map(|v| GeoIpRef::parse(v))
+                .collect::<Result<_>>()?,
+            source_ip_asn: spec.source_ip_asn.clone(),
             ip_is_private: spec.ip_is_private,
             ip_version: spec.ip_version,
             port: spec.port.clone(),
@@ -834,6 +868,9 @@ impl Rule {
             && rule.geosite.is_empty()
             && rule.ip_cidr.is_empty()
             && rule.geoip.is_empty()
+            && rule.ip_asn.is_empty()
+            && rule.source_geoip.is_empty()
+            && rule.source_ip_asn.is_empty()
             && !rule.ip_is_private
             && rule.ip_version.is_none()
             && rule.port.is_empty()
@@ -881,11 +918,31 @@ impl Rule {
         false
     }
 
-    fn matches_ctx(&self, ctx: &RouteContext<'_>, sets: &HashMap<String, RuleSetSlot>) -> bool {
+    fn collect_geo(&self, needs: &mut GeoNeeds) {
+        for site in &self.geosite {
+            needs.add_site(site);
+        }
+        for ip in self.geoip.iter().chain(&self.source_geoip) {
+            needs.add_ip(ip);
+        }
+        needs.asn |= !self.ip_asn.is_empty() || !self.source_ip_asn.is_empty();
+        if let Some((_, children)) = &self.logical {
+            for child in children {
+                child.collect_geo(needs);
+            }
+        }
+    }
+
+    fn matches_ctx(
+        &self,
+        ctx: &RouteContext<'_>,
+        sets: &HashMap<String, RuleSetSlot>,
+        geo: &GeoData,
+    ) -> bool {
         if let Some((mode, children)) = &self.logical {
             let child_hit = match mode {
-                LogicalMode::And => children.iter().all(|c| c.matches_ctx(ctx, sets)),
-                LogicalMode::Or => children.iter().any(|c| c.matches_ctx(ctx, sets)),
+                LogicalMode::And => children.iter().all(|c| c.matches_ctx(ctx, sets, geo)),
+                LogicalMode::Or => children.iter().any(|c| c.matches_ctx(ctx, sets, geo)),
             };
             let hit = if self.invert { !child_hit } else { child_hit };
             return hit
@@ -908,6 +965,16 @@ impl Rule {
                 candidate_hosts.push(s);
             }
         }
+        let lowered_hosts: Vec<std::borrow::Cow<'_, str>> = candidate_hosts
+            .iter()
+            .map(|h| {
+                if h.bytes().any(|b| b.is_ascii_uppercase()) {
+                    std::borrow::Cow::Owned(h.to_ascii_lowercase())
+                } else {
+                    std::borrow::Cow::Borrowed(*h)
+                }
+            })
+            .collect();
 
         let mut candidate_ips = Vec::with_capacity(1 + ctx.resolved_ips.len());
         if let Address::Ip(ip) = ctx.target.address() {
@@ -928,6 +995,7 @@ impl Rule {
             || !self.geosite.is_empty();
         let has_ip_cond = !self.ip_cidr.is_empty()
             || !self.geoip.is_empty()
+            || !self.ip_asn.is_empty()
             || self.ip_is_private
             || self.ip_version.is_some();
         let has_ruleset_cond = !self.rule_set.is_empty();
@@ -949,18 +1017,14 @@ impl Rule {
                     .domain_wildcard
                     .iter()
                     .any(|w| wildcard_domain_matches(w, host))
-                || self
-                    .geosite
-                    .iter()
-                    .any(|code| geodata::matches_geosite_code(code, host, None))
-        });
+        }) || lowered_hosts
+            .iter()
+            .any(|host| self.geosite.iter().any(|site| geo.site_matches(site, host)));
 
         let ip_hit = candidate_ips.iter().any(|&ip| {
             self.ip_cidr.iter().any(|cidr| cidr.contains(ip))
-                || self
-                    .geoip
-                    .iter()
-                    .any(|code| geodata::matches_geoip_code(code, ip, None))
+                || self.geoip.iter().any(|code| geo.ip_matches(code, ip))
+                || self.ip_asn.iter().any(|&asn| geo.asn_matches(asn, ip))
                 || (self.ip_is_private && geodata::is_private_ip(ip))
                 || self
                     .ip_version
@@ -1007,6 +1071,18 @@ impl Rule {
                     || self.source_port_range.iter().any(|r| r.contains(sa.port()))
             });
 
+        let src_geo_ok = (self.source_geoip.is_empty() && self.source_ip_asn.is_empty())
+            || ctx.source_addr.is_some_and(|sa| {
+                let ip = sa.ip().to_canonical();
+                self.source_geoip
+                    .iter()
+                    .any(|code| geo.ip_matches(code, ip))
+                    || self
+                        .source_ip_asn
+                        .iter()
+                        .any(|&asn| geo.asn_matches(asn, ip))
+            });
+
         let proto_ok = self.protocol.is_empty()
             || ctx.protocol.is_some_and(|p| {
                 self.protocol
@@ -1037,6 +1113,7 @@ impl Rule {
             && port_ok
             && src_ip_ok
             && src_port_ok
+            && src_geo_ok
             && proto_ok
             && proc_name_ok
             && proc_path_ok
@@ -1128,6 +1205,7 @@ impl RuleSetSlot {
 pub struct RouteTable {
     rules: Vec<Rule>,
     sets: HashMap<String, RuleSetSlot>,
+    geo: GeoSlot,
     sub_rules: HashMap<String, Vec<Rule>>,
     final_outbound: Option<OutId>,
 }
@@ -1147,6 +1225,7 @@ impl RouteTable {
                 .into_iter()
                 .map(|(tag, set)| (tag, RuleSetSlot::new(set)))
                 .collect(),
+            geo: GeoSlot::default(),
             sub_rules: HashMap::new(),
             final_outbound: None,
         })
@@ -1177,6 +1256,24 @@ impl RouteTable {
             }
         }
         Ok(self)
+    }
+
+    /// 按规则引用的 Geo 分类与 GEOIP 数据来源建立 Geo 槽；须在规则与 sub-rule 编译完成后调用。
+    pub fn with_geo_mode(mut self, mode: GeoIpMode) -> Self {
+        self.geo = GeoSlot::new(mode, self.geo_needs());
+        self
+    }
+
+    pub fn geo_needs(&self) -> GeoNeeds {
+        let mut needs = GeoNeeds::default();
+        for rule in self.rules.iter().chain(self.sub_rules.values().flatten()) {
+            rule.collect_geo(&mut needs);
+        }
+        needs
+    }
+
+    pub fn geo(&self) -> &GeoSlot {
+        &self.geo
     }
 
     pub fn with_final_outbound(mut self, final_outbound: Option<OutId>) -> Self {
@@ -1249,7 +1346,8 @@ impl RouteTable {
         source: &Source,
     ) -> Option<&OutId> {
         let ctx = RouteContext::simple(target, network, source);
-        self.select_in_slice(&self.rules, &ctx, 0)
+        let geo = self.geo.load();
+        self.select_in_slice(&self.rules, &ctx, &geo, 0)
             .or(self.final_outbound.as_ref())
     }
 
@@ -1257,13 +1355,14 @@ impl RouteTable {
         &'a self,
         rules: &'a [Rule],
         ctx: &RouteContext<'_>,
+        geo: &GeoData,
         depth: usize,
     ) -> Option<&'a OutId> {
         if depth > 8 {
             return None;
         }
         for rule in rules {
-            if rule.matches_ctx(ctx, &self.sets) {
+            if rule.matches_ctx(ctx, &self.sets, geo) {
                 match &rule.action {
                     RouteAction::Route {
                         outbound: Some(out),
@@ -1271,7 +1370,7 @@ impl RouteTable {
                     } => return Some(out),
                     RouteAction::SubRule { name } => {
                         if let Some(sub) = self.sub_rules.get(name)
-                            && let Some(out) = self.select_in_slice(sub, ctx, depth + 1)
+                            && let Some(out) = self.select_in_slice(sub, ctx, geo, depth + 1)
                         {
                             return Some(out);
                         }
@@ -1286,7 +1385,8 @@ impl RouteTable {
 
     pub fn evaluate(&self, ctx: &RouteContext<'_>) -> RouteDecision {
         let mut decision = RouteDecision::default();
-        let matched_terminal = self.evaluate_slice(&self.rules, ctx, &mut decision, 0);
+        let geo = self.geo.load();
+        let matched_terminal = self.evaluate_slice(&self.rules, ctx, &geo, &mut decision, 0);
         if !matched_terminal && decision.outbound.is_none() {
             decision.outbound = self.final_outbound.clone();
             if decision.outbound.is_some() {
@@ -1300,6 +1400,7 @@ impl RouteTable {
         &self,
         rules: &[Rule],
         ctx: &RouteContext<'_>,
+        geo: &GeoData,
         decision: &mut RouteDecision,
         depth: usize,
     ) -> bool {
@@ -1307,7 +1408,7 @@ impl RouteTable {
             return false;
         }
         for rule in rules {
-            if !rule.matches_ctx(ctx, &self.sets) {
+            if !rule.matches_ctx(ctx, &self.sets, geo) {
                 continue;
             }
             match &rule.action {
@@ -1334,7 +1435,7 @@ impl RouteTable {
                 }
                 RouteAction::SubRule { name } => {
                     if let Some(sub) = self.sub_rules.get(name)
-                        && self.evaluate_slice(sub, ctx, decision, depth + 1)
+                        && self.evaluate_slice(sub, ctx, geo, decision, depth + 1)
                     {
                         return true;
                     }
@@ -1531,6 +1632,9 @@ fn build_clash_single_condition(kind: &str, val: &str) -> Result<RuleSpec> {
         "DOMAIN-REGEX" => spec.domain_regex.push(val.to_owned()),
         "DOMAIN-WILDCARD" => spec.domain_wildcard.push(val.to_owned()),
         "GEOSITE" => spec.geosite.push(val.to_owned()),
+        "IP-ASN" => spec.ip_asn.push(parse_asn(val)?),
+        "SRC-IP-ASN" => spec.source_ip_asn.push(parse_asn(val)?),
+        "SRC-GEOIP" => spec.source_geoip.push(val.to_owned()),
         "GEOIP" => {
             if val.eq_ignore_ascii_case("private") || val.eq_ignore_ascii_case("lan") {
                 spec.ip_is_private = true;
@@ -1575,6 +1679,15 @@ fn build_clash_single_condition(kind: &str, val: &str) -> Result<RuleSpec> {
         _ => return Err(invalid()),
     }
     Ok(spec)
+}
+
+fn parse_asn(val: &str) -> Result<u32> {
+    let val = val.trim();
+    let digits = val
+        .strip_prefix("AS")
+        .or_else(|| val.strip_prefix("as"))
+        .unwrap_or(val);
+    digits.parse().map_err(|_| invalid())
 }
 
 fn apply_clash_target(spec: &mut RuleSpec, target: &str) {
@@ -1815,7 +1928,13 @@ mod tests {
         ]))
         .unwrap();
 
-        let table = RouteTable::compile_with_sets(&specs, sets).unwrap();
+        let table = RouteTable::compile_with_sets(&specs, sets)
+            .unwrap()
+            .with_geo_mode(GeoIpMode::Mmdb);
+        let site = geodata::fixture::geosite(&[("google", &[(2, "google.com", &[])])]);
+        table
+            .geo()
+            .install(table.geo().compile(GeoFile::GeoSite, &site).unwrap());
         let source = local("n");
 
         // 1. DNS Hijack on port 53

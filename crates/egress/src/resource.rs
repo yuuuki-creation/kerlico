@@ -1,4 +1,4 @@
-//! 落盘资源的启动加载、周期刷新与生效：规则集原地换入路由表槽，提供者变化通知引擎重建代际。
+//! 落盘资源的启动加载、周期刷新与生效：规则集与 Geo 数据原地换入路由表槽，提供者变化通知引擎重建代际。
 //!
 //! 下载经 `detour` 指定的命名出站（Mihomo `proxy`、sing-box `download_detour`），未指定时经
 //! 直连后端；连接复用延迟探测的出站路径。缓存先写临时文件再改名替换。
@@ -182,13 +182,15 @@ impl Hub {
                 touch(&spec.path)?;
             }
         }
-        if let (Accepted::RuleSet(set), ResourceKind::RuleSet { source, .. }) =
-            (accepted, &spec.kind)
-        {
-            let dispatcher = self.dispatcher.upgrade().ok_or(Error::Cancelled)?;
-            if let Some(slot) = dispatcher.routes.rule_set(&source.tag) {
-                slot.replace(set);
+        match (accepted, &spec.kind) {
+            (Accepted::RuleSet(set), ResourceKind::RuleSet { source, .. }) => {
+                let dispatcher = self.dispatcher.upgrade().ok_or(Error::Cancelled)?;
+                if let Some(slot) = dispatcher.routes.rule_set(&source.tag) {
+                    slot.replace(set);
+                }
             }
+            (Accepted::Geo(part), ResourceKind::Geo { slot, .. }) => slot.install(part),
+            _ => {}
         }
         // 校验值只在内容被接受后保存，否则被拒内容的 304 会把坏内容当作最新。
         let mut state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -338,12 +340,13 @@ fn initial_state(spec: &ResourceSpec) -> EntryState {
     }
 }
 
-/// 启动时是否需要立即加载：文件缺失，或下载资源的缓存已过 `interval`。Geo 数据只由周期任务与控制接口下载。
+/// 启动时是否需要立即加载：文件缺失，或下载资源的缓存已过 `interval`。
+/// 规则未引用的 Geo 文件只由周期任务与控制接口下载；引用的文件缺失时启动即下载。
 fn needs_initial_load(spec: &ResourceSpec) -> bool {
-    if matches!(spec.kind, ResourceKind::Geo(_)) {
-        return false;
-    }
     let exists = spec.path.exists();
+    if let ResourceKind::Geo { required, .. } = spec.kind {
+        return required && !exists;
+    }
     match &spec.download {
         None => !exists,
         Some(download) => {
@@ -410,6 +413,7 @@ impl EgressRuntime {
                     let required = matches!(
                         entry.spec.kind,
                         ResourceKind::RuleSet { required: true, .. }
+                            | ResourceKind::Geo { required: true, .. }
                     );
                     if required && !cached {
                         fatal.get_or_insert(Error::Config(format!("{key} 没有可用内容：{error}")));

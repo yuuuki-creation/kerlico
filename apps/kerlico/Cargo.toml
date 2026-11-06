@@ -77,6 +77,7 @@ ss2022 = ["protocol-ss2022"]
 [dependencies]
 kerlico-core.workspace = true
 kerlico-config.workspace = true
+kerlico-routing.workspace = true
 kerlico-engine.workspace = true
 kerlico-egress.workspace = true
 kerlico-net.workspace = true

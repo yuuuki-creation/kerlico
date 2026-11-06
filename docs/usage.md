@@ -28,8 +28,8 @@ cargo build --locked --release -p kerlico
 | `kerlico modules` | 列出此构建包含的协议与入站/出站角色 |
 | `kerlico account-new --prefix <name>` | 从标准输入读取管理密码，输出账户 JSON |
 | `kerlico history --kind <kind>` | 查询统计历史，`kind` 为 `usage`、`flows`、`bandwidth` 或 `events` |
-| `kerlico rule-set <compile\|decompile\|convert\|format\|match\|merge\|upgrade>` | 规则集编译（JSON/YAML 与 `.srs`/`.mrs` 互转）、格式化、合并与目标匹配测试 |
-| `kerlico geoip / geosite <list\|lookup\|export> -f <db>` | GeoIP / Geosite 数据库分类列表、IP/域名归属查询与规则集导出 |
+| `kerlico rule-set <compile\|decompile\|convert\|format\|match\|merge\|upgrade>` | 规则集在 sing-box 源格式 JSON、`.srs` 与 Mihomo yaml/text/`.mrs` 之间转换，格式化、合并与目标匹配测试 |
+| `kerlico geoip / geosite <list\|lookup\|export> -f <db>` | 读 `geoip.dat`/`geosite.dat`/`.mmdb`：分类列表、IP/域名/ASN 归属查询与规则集导出 |
 | `kerlico generate <uuid\|rand\|reality-keypair\|wg-keypair\|ech-keypair\|tls-keypair\|vlessenc\|mldsa65\|mlkem768>` | 生成 UUID、随机数、X25519/WireGuard/ECH/TLS/后量子及 VLESS Encryption 密钥对 |
 | `kerlico tls <cert\|ping>` | 生成自签名证书（含 SHA-256 指纹）或探测远端 TLS 握手与证书链 |
 | `kerlico tools <connect\|fetch\|resolve\|synctime> [-c <cfg> -o <tag>]` | 经指定配置或出站测试 TCP 连通、HTTP 获取、DNS 解析与 NTP 时间同步 |
@@ -135,7 +135,32 @@ printf '%s' 'your-admin-password' | kerlico account-new --prefix alice
 - **启动**：缓存存在且未超过 `interval` 时直接使用；否则先下载。下载失败而缓存存在时继续用旧缓存并记日志。被路由或 DNS 规则引用的规则集既无缓存又下载失败时拒绝启动；`type: local` 规则集或 `file` 规则提供者的文件不存在时配置检查失败。提供者没有内容时成员为空，`GET /providers/proxies/<name>` 带 `error`，使用它的策略组拒绝连接。
 - **刷新**：按 `interval`（sing-box `update_interval`，默认 `1d`）在后台刷新。规则集原地替换，新连接立即按新内容匹配。提供者内容变化时用当前配置重建引擎，新成员生效，期间入口短暂关闭、已有连接按 `drain_timeout_ms` 排空。内容校验失败（例如提供者没有可用节点）时不覆盖缓存。
 - **手动刷新**：`PUT /providers/proxies/<name>`、`PUT /providers/rules/<name>` 立即刷新，失败回 503 与 `message`。
-- **Geo 数据**：`geox-url` 中配置的 `geoip`、`geosite`、`mmdb`、`asn` 下载到工作目录的 `GeoIP.dat`、`GeoSite.dat`、`Country.mmdb`、`GeoLite2-ASN.mmdb`。`geo-auto-update: true` 时按 `geo-update-interval`（小时，默认 24）刷新；`POST /upgrade/geo` 立即下载。运行时 GeoIP/GeoSite 规则目前仍使用内置分类表，不读这些文件。
+- **Geo 数据**：见下节。
+
+## Geo 数据与规则集格式
+
+`GEOSITE`、`GEOIP`、`IP-ASN`、`SRC-GEOIP`、`SRC-IP-ASN`（kerlico 原生字段 `geosite`、`geoip`、`ip_asn`、`source_geoip`、`source_ip_asn`）读取工作目录下的数据库文件：
+
+| 规则 | 文件 | 说明 |
+| --- | --- | --- |
+| `GEOSITE` | `GeoSite.dat`（V2Ray 格式） | 写法 `cn`、`cn@cn`（条目须带该属性）、`!cn`（取反）。条目类型 plain 为子串、regex 为正则、domain 为域名及子域、full 为完全相同 |
+| `GEOIP`，`geodata-mode: false`（默认） | `Country.mmdb` | 支持 MaxMind GeoLite2-Country（取 `country.iso_code`）、`sing-geoip` 与 Mihomo `geoip.metadb`（`Meta-geoip0`） |
+| `GEOIP`，`geodata-mode: true` | `GeoIP.dat`（V2Ray 格式） | `lan` 匹配私有、回环、链路本地等地址，不读文件 |
+| `IP-ASN` | `GeoLite2-ASN.mmdb` | 支持 GeoLite2-ASN、DB-IP ASN Lite 与 ipinfo ASN 库 |
+
+- **只加载引用的分类**：启动时只解码规则引用的分类与属性组合。引用的分类不在文件中时配置检查失败，错误信息给出分类名；`mmdb` 按 IP 查代码，没有分类列表可校验。
+- **下载**：文件来自 `geox-url` 的 `geoip`、`geosite`、`mmdb`、`asn`；规则引用某个文件而 `geox-url` 未写时用 Mihomo 默认地址（MetaCubeX/meta-rules-dat）。引用的文件缺失时启动即下载，下载失败则拒绝启动。`geo-auto-update: true` 时按 `geo-update-interval`（小时，默认 24）刷新，`POST /upgrade/geo` 立即下载。新文件解码成功后整体换入，新连接立即使用，无需重启；新文件缺少引用的分类时保留旧数据，接口回 503。
+- **取值**：`geodata-loader`（`standard`、`memconservative`）与 `geosite-matcher`（`mph`、`succinct`、`default`）均使用同一实现：域名集合是按标签逐级查找的紧凑哈希表。geosite:cn（约 11 万条）占用约 3 MiB。
+- **差异**：`cn@!cn` 表示条目不带 `cn` 属性，Mihomo 把 `!cn` 当作属性名，结果为空集。`GEOIP,private` 按私有地址判断，不查数据库。
+
+规则集文件支持以下格式：
+
+| 来源 | 格式 | 说明 |
+| --- | --- | --- |
+| sing-box `rule_set` | `source`（JSON）、`binary`（`.srs`，版本 1–5） | 未写 `format` 时按内容识别。`domain_suffix` 以 `.` 开头时只匹配子域。`query_type`、`package_name`、`wifi_*`、`network_type` 等平台条件在路由中不成立，与 sing-box 一致；AdGuard 域名项与 `network_interface_address` 尚未支持，读到时报错 |
+| Mihomo `rule-providers` | `yaml`（默认，需 `payload:`）、`text`、`mrs` | behavior 为 `domain`、`ipcidr`、`classical`；`mrs` 只支持前两种。`domain` 写法：`example.com` 完全相同，`.example.com` 仅子域，`+.example.com` 域名及子域，`*` 匹配一级标签。无效条目跳过 |
+
+`kerlico rule-set convert <输入> -o <输出>` 按输入内容识别格式，按输出扩展名（`.srs`、`.mrs`、`.yaml`、`.txt`/`.list`、`.json`）写出；Mihomo 文本输入用 `--behavior` 指定 behavior。`compile` 默认写 `.srs`，输出名以 `.mrs` 结尾时写 Mihomo 格式。`match <规则集> <目标...>` 每个目标输出一行 JSON。`geosite -f GeoSite.dat lookup [--code cn] <域名...>`、`geoip -f Country.mmdb lookup <IP...>` 查询归属，对 ASN 库输出 `asn` 与 `organization`。
 
 ## WARP 补齐
 

@@ -28,11 +28,10 @@ pub use resource::{
 mod users;
 pub use kerlico_dns::DnsSpec;
 pub use kerlico_routing::{
-    CompiledHeadlessRule, CompiledRuleSet, GeoConfigSpec, GeoIpDat, GeoSiteDat, GeoxUrlSpec,
+    CompiledHeadlessRule, CompiledRuleSet, GeoConfigSpec, GeoIpMode, GeoSlot, GeoxUrlSpec,
     HeadlessRuleSpec, Network, RouteTable, RuleProviderSpec, RuleSetSlot, RuleSetSource,
-    RuleSetSpec, RuleSpec, SourceRuleSetFile, builtin_geoip_codes, builtin_geosite_codes,
-    compile_ruleset_to_srs, convert_adguard_lines, decompile_ruleset_bytes, export_geoip_ruleset,
-    export_geosite_ruleset, matches_geoip_code, matches_geosite_code, parse_ruleset_bytes,
+    RuleSetSpec, RuleSpec, SourceRuleSetFile, compile_ruleset_to_srs, convert_adguard_lines,
+    decompile_ruleset_bytes, parse_ruleset_bytes,
 };
 pub use users::AccountSpec;
 
@@ -1839,9 +1838,16 @@ impl Registry {
             Some(raw) => Some(OutId::parse(raw)?),
             None => None,
         };
+        let geo_mode = if config.geodata_mode == Some(true) {
+            GeoIpMode::Dat
+        } else {
+            GeoIpMode::Mmdb
+        };
         let routes = RouteTable::compile_with_sets(&all_rules, compiled_rule_sets.clone())?
             .with_sub_rules(&all_sub_rules)?
+            .with_geo_mode(geo_mode)
             .with_final_outbound(final_outbound);
+        load_cached_geo(routes.geo())?;
         if routes
             .referenced_rule_sets()
             .into_iter()
@@ -2187,7 +2193,7 @@ impl Registry {
         }
         let rule_providers_counts: BTreeMap<String, usize> = compiled_rule_sets
             .iter()
-            .map(|(k, v)| (k.clone(), v.rules.len()))
+            .map(|(k, v)| (k.clone(), v.entry_count()))
             .collect();
         let store_selected_enabled = config
             .cache_file
@@ -2247,7 +2253,26 @@ impl Registry {
     }
 }
 
-/// 文件来源的规则集、file/http 提供者与配置了 URL 的 Geo 数据库，交给运行时加载与刷新。
+/// 规则引用的 Geo 文件已在本地时立即解码换入；文件缺失时由运行时下载。
+fn load_cached_geo(slot: &GeoSlot) -> Result<()> {
+    for file in GeoFile::ALL {
+        if !slot.requires(file) {
+            continue;
+        }
+        let path = file.default_path();
+        if let Some(bytes) = resource::read_cached(&path)? {
+            let part = slot
+                .compile(file, &bytes)
+                .map_err(|error| Error::Config(format!("{} 不可用：{error}", path.display())))?;
+            slot.install(part);
+        }
+    }
+    Ok(())
+}
+
+/// 文件来源的规则集、file/http 提供者与 Geo 数据库，交给运行时加载与刷新。
+///
+/// Geo 文件在规则引用或配置了 `geox-url` 时登记；规则引用但未配置地址时用 Mihomo 默认地址。
 fn remote_resources(
     rule_sets: Vec<RuleSetSource>,
     routes: &RouteTable,
@@ -2317,17 +2342,19 @@ fn remote_resources(
         Duration::ZERO
     };
     for file in GeoFile::ALL {
-        let url = match file {
-            GeoFile::GeoIp => geo.effective_geoip_url(),
-            GeoFile::GeoSite => geo.effective_geosite_url(),
-            GeoFile::Mmdb => geo.effective_mmdb_url(),
-            GeoFile::Asn => geo.geox_url.as_ref().and_then(|u| u.asn.as_deref()),
-        };
-        let Some(url) = url.map(str::trim).filter(|u| !u.is_empty()) else {
+        let required = routes.geo().requires(file);
+        let Some(url) = geo
+            .configured_url(file)
+            .or_else(|| required.then(|| file.default_url()))
+        else {
             continue;
         };
         resources.push(ResourceSpec {
-            kind: ResourceKind::Geo(file),
+            kind: ResourceKind::Geo {
+                file,
+                slot: routes.geo().clone(),
+                required,
+            },
             path: file.default_path(),
             download: Some(Download {
                 url: url.to_owned(),

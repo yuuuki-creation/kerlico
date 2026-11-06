@@ -28,8 +28,8 @@ Only the EasyTier outbound needs `protoc`. Otherwise select protocols with `--no
 | `kerlico modules` | List the protocols and inbound/outbound roles in this build |
 | `kerlico account-new --prefix <name>` | Read an admin password from stdin and print account JSON |
 | `kerlico history --kind <kind>` | Query statistics history (`usage`, `flows`, `bandwidth`, or `events`) |
-| `kerlico rule-set <compile\|decompile\|convert\|format\|match\|merge\|upgrade>` | Compile, decompile, convert (`.srs`/`.mrs`/JSON/YAML), format, merge, and test rule-sets |
-| `kerlico geoip / geosite <list\|lookup\|export> -f <db>` | List categories, look up IPs/domains, or export rule-sets from GeoIP / Geosite databases |
+| `kerlico rule-set <compile\|decompile\|convert\|format\|match\|merge\|upgrade>` | Convert rule-sets between sing-box source JSON, `.srs`, and Mihomo yaml/text/`.mrs`; format, merge, and test targets |
+| `kerlico geoip / geosite <list\|lookup\|export> -f <db>` | Read `geoip.dat`/`geosite.dat`/`.mmdb`: list categories, look up IPs/domains/ASNs, export rule-sets |
 | `kerlico generate <uuid\|rand\|reality-keypair\|wg-keypair\|ech-keypair\|tls-keypair\|vlessenc\|mldsa65\|mlkem768>` | Generate UUIDs, random bytes, and X25519/WireGuard/ECH/TLS/post-quantum/VLESS keys |
 | `kerlico tls <cert\|ping>` | Generate self-signed TLS certificates with SHA-256 fingerprints or probe remote TLS servers |
 | `kerlico tools <connect\|fetch\|resolve\|synctime> [-c <cfg> -o <tag>]` | Diagnose TCP connectivity, HTTP fetching, DNS resolution, and NTP time sync |
@@ -135,7 +135,32 @@ Rules match in order and the first match wins. Unmatched traffic uses the node's
 - **Startup**: a cache younger than `interval` is used as is; otherwise the resource downloads first. If the download fails and a cache exists, the stale cache is used and a log entry is written. A rule-set referenced by route or DNS rules with no cache and a failed download stops startup. A missing file for a `type: local` rule-set or a `file` rule provider fails the configuration check. A provider with no content has no members, `GET /providers/proxies/<name>` reports `error`, and groups that use it reject connections.
 - **Refresh**: resources refresh in the background every `interval` (sing-box `update_interval`, default `1d`). Rule-sets are replaced in place and new connections match the new content immediately. When provider content changes, the engine is rebuilt from the current configuration so new members take effect; inbounds close briefly and existing connections drain within `drain_timeout_ms`. Content that fails validation (for example a provider with no usable proxies) does not overwrite the cache.
 - **Manual refresh**: `PUT /providers/proxies/<name>` and `PUT /providers/rules/<name>` refresh immediately and return 503 with `message` on failure.
-- **Geo data**: the `geoip`, `geosite`, `mmdb`, and `asn` entries of `geox-url` download to `GeoIP.dat`, `GeoSite.dat`, `Country.mmdb`, and `GeoLite2-ASN.mmdb` in the working directory. With `geo-auto-update: true` they refresh every `geo-update-interval` hours (default 24); `POST /upgrade/geo` downloads them immediately. Runtime GeoIP/GeoSite rules still use the built-in category tables and do not read these files yet.
+- **Geo data**: see the next section.
+
+## Geo data and rule-set formats
+
+`GEOSITE`, `GEOIP`, `IP-ASN`, `SRC-GEOIP`, and `SRC-IP-ASN` (native fields `geosite`, `geoip`, `ip_asn`, `source_geoip`, `source_ip_asn`) read database files in the working directory:
+
+| Rule | File | Notes |
+| --- | --- | --- |
+| `GEOSITE` | `GeoSite.dat` (V2Ray format) | Write `cn`, `cn@cn` (entries must carry the attribute), or `!cn` (negated). Entry types: plain is a substring, regex a regular expression, domain the domain and its subdomains, full an exact match |
+| `GEOIP`, `geodata-mode: false` (default) | `Country.mmdb` | MaxMind GeoLite2-Country (`country.iso_code`), `sing-geoip`, and Mihomo `geoip.metadb` (`Meta-geoip0`) |
+| `GEOIP`, `geodata-mode: true` | `GeoIP.dat` (V2Ray format) | `lan` matches private, loopback, and link-local addresses without reading a file |
+| `IP-ASN` | `GeoLite2-ASN.mmdb` | GeoLite2-ASN, DB-IP ASN Lite, and ipinfo ASN databases |
+
+- **Only referenced categories load**: startup decodes only the categories and attribute combinations that rules reference. A referenced category missing from the file fails the configuration check and the error names it. `mmdb` files map IPs to codes and have no category list to check.
+- **Download**: files come from the `geoip`, `geosite`, `mmdb`, and `asn` entries of `geox-url`. When a rule needs a file and `geox-url` does not name it, the Mihomo default URL (MetaCubeX/meta-rules-dat) is used. A needed file that is missing downloads at startup, and startup fails if the download fails. With `geo-auto-update: true` files refresh every `geo-update-interval` hours (default 24); `POST /upgrade/geo` downloads them immediately. A new file that decodes is swapped in whole and new connections use it without a restart. A new file that lacks a referenced category is rejected, the old data stays, and the API returns 503.
+- **Options**: every value of `geodata-loader` (`standard`, `memconservative`) and `geosite-matcher` (`mph`, `succinct`, `default`) uses the same implementation: a compact hash table probed label by label. geosite:cn (about 110,000 entries) takes about 3 MiB.
+- **Differences**: `cn@!cn` selects entries without the `cn` attribute; Mihomo treats `!cn` as an attribute name and gets an empty set. `GEOIP,private` checks private ranges and does not read a database.
+
+Rule-set files support these formats:
+
+| Source | Format | Notes |
+| --- | --- | --- |
+| sing-box `rule_set` | `source` (JSON), `binary` (`.srs`, versions 1–5) | Without `format` the content decides. A `domain_suffix` starting with `.` matches subdomains only. Platform conditions such as `query_type`, `package_name`, `wifi_*`, and `network_type` never hold for routed connections, as in sing-box. AdGuard domain items and `network_interface_address` are not supported yet and fail to load |
+| Mihomo `rule-providers` | `yaml` (default, needs `payload:`), `text`, `mrs` | Behaviors `domain`, `ipcidr`, `classical`; `mrs` supports the first two. Domain syntax: `example.com` exact, `.example.com` subdomains only, `+.example.com` the domain and its subdomains, `*` one label. Invalid entries are skipped |
+
+`kerlico rule-set convert <input> -o <output>` detects the input format from its content and writes the format named by the output extension (`.srs`, `.mrs`, `.yaml`, `.txt`/`.list`, `.json`). Pass `--behavior` for Mihomo text input. `compile` writes `.srs` unless the output name ends in `.mrs`. `match <rule-set> <targets...>` prints one JSON line per target. `geosite -f GeoSite.dat lookup [--code cn] <domains...>` and `geoip -f Country.mmdb lookup <IPs...>` look up membership; with an ASN database the output has `asn` and `organization`.
 
 ## WARP fill-in
 

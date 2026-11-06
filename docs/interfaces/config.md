@@ -28,7 +28,7 @@
 | `certificate_providers` | 命名证书提供者数组（支持 `acme` 及 Cloudflare DNS-01 质询配置），默认空 |
 | `route` / `rule_providers` | 扩展路由对象（含 `rules`、`rule_set`、`balancers`、`final`、`auto_detect_interface`、`default_interface`、`default_mark`）与外部/内联规则集提供者映射。`remote` 规则集与 `http` 规则提供者经 `download_detour`/`proxy` 下载到 `path`（默认 `rules/<标签>`），按 `update_interval`（默认 `1d`）或 `interval` 秒刷新并原地替换；被规则引用却既无缓存又下载失败时拒绝启动，`local`/`file` 文件缺失时配置检查失败 |
 | `sniffer` / `fakedns` / `tun` / `cache_file` / `profile` / `experimental` | 全局首包协议嗅探、顶层 FakeDNS 池、顶层 TUN 入口、选中节点（`store-selected`）与 Fake-IP 缓存持久化配置；两者共用 `cache_file.path`（默认 `cache.db`），JSON 文件中 `selected` 与 `fakeip` 各占一个顶层分区，互不覆盖 |
-| `geodata_mode` / `geodata_loader` / `geosite_matcher` / `geo_auto_update` / `geo_update_interval` / `geox_url` / `etag_support` | GeoIP / GeoSite 数据库加载模式与自动更新。`geox_url` 的 `geoip`/`geosite`/`mmdb`/`asn` 下载到工作目录 `GeoIP.dat`/`GeoSite.dat`/`Country.mmdb`/`GeoLite2-ASN.mmdb`，`geo_auto_update` 时按 `geo_update_interval` 小时（默认 24）刷新；运行时匹配尚不读取这些文件。条件请求始终启用，`etag_support` 目前不改变行为 |
+| `geodata_mode` / `geodata_loader` / `geosite_matcher` / `geo_auto_update` / `geo_update_interval` / `geox_url` / `etag_support` | GeoIP / GeoSite / ASN 数据库。`geodata_mode: true` 时 `geoip` 规则查 `GeoIP.dat`，否则查 `Country.mmdb`；`geosite` 查 `GeoSite.dat`，`ip_asn` 查 `GeoLite2-ASN.mmdb`（均在工作目录）。`geox_url` 的 `geoip`/`geosite`/`mmdb`/`asn` 为下载地址，规则需要而未写时用 Mihomo 默认地址；需要的文件缺失时启动即下载。`geo_auto_update` 时按 `geo_update_interval` 小时（默认 24）刷新并原地换入。`geodata_loader`、`geosite_matcher` 的各取值使用同一实现。条件请求始终启用，`etag_support` 目前不改变行为 |
 | `interface_name` / `routing_mark` / `disable_keep_alive` / `keep_alive_idle` / `keep_alive_interval` | 全局默认出站绑定网卡与套接字选项，可被单条出站 `dialer` / `sockopt` 覆盖 |
 
 - **标签与校验**：`tag` 为 1–64 个 ASCII 字母、数字、`-` 或 `_`；出站拥有独立标签命名空间，所有入站（`inbounds` / `nodes` / `local_inbounds`）共用另一命名空间。未知字段、缺失类型、无效引用或能力不匹配在编译期直接拒绝。
@@ -47,12 +47,16 @@
 | `domain_suffix` | 目标域名等于该后缀，或是它的子域名 |
 | `domain_keyword` | 目标域名包含该文本 |
 | `ip_cidr` | 目标是字面 IP 且落在网段内 |
+| `geosite` | 目标域名属于 `GeoSite.dat` 分类：`cn`、`cn@cn`（条目带属性）、`cn@!cn`（条目不带属性）、`!cn`（取反） |
+| `geoip` | 目标 IP 属于国家/分类代码，`!cn` 取反，`lan` 为私有地址；数据来源见 `geodata_mode` |
+| `ip_asn` | 目标 IP 所属自治系统号 |
+| `source_geoip` / `source_ip_asn` | 来源 IP 的国家代码或自治系统号 |
 | `port` | 目标端口 |
 | `network` | `tcp` 或 `udp` |
 | `node` | 入站标签 |
 | `user` | 管理账户 `user_id` |
 
-同一字段内任一值命中即可；`domain*` 与 `ip_cidr` 都描述目标地址，任一命中即满足；其余字段须同时满足。
+同一字段内任一值命中即可；`domain*`、`geosite`、`ip_cidr`、`geoip`、`ip_asn` 都描述目标地址，任一命中即满足；其余字段须同时满足。规则引用的 Geo 分类不在数据文件中时配置检查失败。
 
 路由不查询 DNS，域名目标不会匹配 `ip_cidr`。多目标 UDP 关联建立时没有单一目标，固定走节点绑定的出站；TCP 与固定目标 UDP 按规则选择。规则选中的出站缺少对应能力时，该连接返回不支持错误。
 

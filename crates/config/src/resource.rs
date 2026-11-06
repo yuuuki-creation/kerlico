@@ -1,62 +1,13 @@
 //! 落盘资源（proxy-provider、规则集、Geo 数据库）的缓存位置、下载规格与内容校验。
 
-use crate::{CompiledRuleSet, GeoIpDat, GeoSiteDat, RuleSetSource, parse_subscription_content};
+use crate::{CompiledRuleSet, RuleSetSource, parse_subscription_content};
 use kerlico_core::{Error, OutId, Result};
+pub use kerlico_routing::GeoFile;
+use kerlico_routing::{GeoPart, GeoSlot};
 use std::{fmt, path::PathBuf, time::Duration};
 
 /// 未配置 `size-limit` 或配置为 0 时的下载上限。
 pub const DEFAULT_SIZE_LIMIT: u64 = 64 * 1024 * 1024;
-
-/// Geo 数据库文件；默认缓存名与 Mihomo 工作目录下的文件名一致。
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum GeoFile {
-    GeoIp,
-    GeoSite,
-    Mmdb,
-    Asn,
-}
-
-impl GeoFile {
-    pub const ALL: [Self; 4] = [Self::GeoIp, Self::GeoSite, Self::Mmdb, Self::Asn];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::GeoIp => "geoip",
-            Self::GeoSite => "geosite",
-            Self::Mmdb => "mmdb",
-            Self::Asn => "asn",
-        }
-    }
-
-    pub fn default_path(self) -> PathBuf {
-        PathBuf::from(match self {
-            Self::GeoIp => "GeoIP.dat",
-            Self::GeoSite => "GeoSite.dat",
-            Self::Mmdb => "Country.mmdb",
-            Self::Asn => "GeoLite2-ASN.mmdb",
-        })
-    }
-
-    fn validate(self, bytes: &[u8]) -> Result<()> {
-        let valid = match self {
-            Self::GeoIp => !GeoIpDat::parse(bytes)?.is_empty(),
-            Self::GeoSite => !GeoSiteDat::parse(bytes)?.is_empty(),
-            Self::Mmdb | Self::Asn => bytes
-                .windows(MMDB_METADATA_MARKER.len())
-                .any(|w| w == MMDB_METADATA_MARKER),
-        };
-        if valid {
-            Ok(())
-        } else {
-            Err(Error::Config(format!(
-                "{} 数据库内容为空或格式不符",
-                self.name()
-            )))
-        }
-    }
-}
-
-const MMDB_METADATA_MARKER: &[u8] = b"\xAB\xCD\xEFMaxMind.com";
 
 /// 资源的身份：控制接口按它触发刷新，状态按它登记。
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -86,8 +37,12 @@ pub enum ResourceKind {
         source: RuleSetSource,
         required: bool,
     },
-    /// 只落盘；运行时 GeoIP/GeoSite 匹配尚不读取这些文件。
-    Geo(GeoFile),
+    /// 解码路由规则引用的分类后换入路由表的 Geo 槽；`required` 表示规则需要该文件。
+    Geo {
+        file: GeoFile,
+        slot: GeoSlot,
+        required: bool,
+    },
 }
 
 /// 下载来源：`interval` 为零时只在缓存缺失时下载，`detour` 为空时直连。
@@ -112,7 +67,7 @@ pub struct ResourceSpec {
 pub enum Accepted {
     RuleSet(CompiledRuleSet),
     Members(usize),
-    Geo,
+    Geo(GeoPart),
 }
 
 impl ResourceSpec {
@@ -120,7 +75,7 @@ impl ResourceSpec {
         match &self.kind {
             ResourceKind::ProxyProvider(name) => ResourceKey::ProxyProvider(name.clone()),
             ResourceKind::RuleSet { source, .. } => ResourceKey::RuleSet(source.tag.clone()),
-            ResourceKind::Geo(file) => ResourceKey::Geo(*file),
+            ResourceKind::Geo { file, .. } => ResourceKey::Geo(*file),
         }
     }
 
@@ -141,7 +96,10 @@ impl ResourceSpec {
             ResourceKind::RuleSet { source, .. } => {
                 Ok(Accepted::RuleSet(source.compile(Some(bytes))?))
             }
-            ResourceKind::Geo(file) => file.validate(bytes).map(|()| Accepted::Geo),
+            ResourceKind::Geo { file, slot, .. } => slot
+                .compile(*file, bytes)
+                .map(Accepted::Geo)
+                .map_err(|error| Error::Config(format!("{} 数据库不可用：{error}", file.name()))),
         }
     }
 }
