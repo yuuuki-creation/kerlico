@@ -240,9 +240,27 @@ fn node_socket(address: SocketAddr, udp: bool, transparent: bool) -> Result<sock
         socket.set_only_v6(true)?;
     }
     #[cfg(target_os = "linux")]
-    if transparent && address.is_ipv4() {
-        let _ = socket.set_ip_transparent_v4(true);
+    if transparent {
+        let enabled = if address.is_ipv6() {
+            socket.set_ip_transparent_v6(true)
+        } else {
+            socket.set_ip_transparent_v4(true)
+        }
+        .and_then(|()| {
+            if udp {
+                kerlico_net::transparent::sys::enable_original_dst(&socket, address.is_ipv6())
+            } else {
+                Ok(())
+            }
+        });
+        enabled.map_err(|error| {
+            Error::Config(format!(
+                "透明代理监听 {address} 需要 CAP_NET_ADMIN：{error}"
+            ))
+        })?;
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = transparent;
     socket.set_reuse_address(true)?;
     if udp {
         let _ = socket.set_recv_buffer_size(8 * 1024 * 1024);
