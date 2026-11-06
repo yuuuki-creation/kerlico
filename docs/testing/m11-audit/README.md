@@ -22,17 +22,20 @@
 | OpenVPN 默认账号 | 未配用户时自动加入代码内置的固定账号口令；口令按字节比较 | S | 已修复 |
 | OpenVPN 客户端证书 | `with_no_client_auth()`，`ca`、`crl`、指纹、EKU 等全部不生效；缺证书静默改用自签；所有客户端分到同一地址 `10.8.0.2` | M | 待做 |
 | 路由未实现条件 | `in_port`、`in_type`、`dscp`、`uid` 不参与匹配，带这些条件的规则匹配全部流量 | S | 已改为编译期拒绝；真实匹配待做 |
-| SIP003 插件降级 | 未实现的插件或选项静默改为明文 TCP | S | 进行中 |
-| 密钥生成 | `mldsa65`、`mlkem768`、`vlessenc` 输出 SHA-256 填充，不是真实密钥 | S | 进行中 |
-| `cache.db` 覆盖 | 选中节点持久化与 Fake-IP 持久化写同一默认路径 | S | 进行中 |
+| SIP003 插件降级 | 未实现的插件或选项静默改为明文 TCP | S | 已修复：未实现的插件与参数编译期拒绝，v2ray-plugin WebSocket 与 obfs http 改为真实实现；未与真实插件互通 |
+| 密钥生成 | `mldsa65`、`mlkem768`、`vlessenc` 输出 SHA-256 填充，不是真实密钥 | S | 已修复：真实 ML-KEM-768、ML-DSA-65；Hash32 改为 BLAKE3，未与 Xray 源码核对 |
+| `cache.db` 覆盖 | 选中节点持久化与 Fake-IP 持久化写同一默认路径 | S | 已修复：单一持有者分区写入；旧格式 Fake-IP 记录不再读取 |
 
 ### 已发布功能的空壳
 
 | 单元 | 问题 | 规模 | 状态 |
 | --- | --- | --- | --- |
-| 健康检查与测速 | 测速记录常量 12/15 ms；没有后台健康检查；url-test、fallback、least-ping 无真实数据 | L | 进行中 |
-| 配置热重载 | `SIGHUP`、`PUT/PATCH /configs`、`/restart` 只校验不应用 | L | 进行中 |
-| HTTP 下载器 | http 订阅、远程规则集、Geo 自动更新只读本地文件 | L | 待做 |
+| 健康检查与测速 | 测速记录常量 12/15 ms；没有后台健康检查；url-test、fallback、least-ping 无真实数据 | L | 已修复：经出站发 HEAD 实测，按 `interval` 后台检查；HTTPS 探测未对真实 TLS 服务验证 |
+| 配置热重载 | `SIGHUP`、`PUT/PATCH /configs`、`/restart` 只校验不应用 | L | 已修复 `SIGHUP`、`PUT /configs`、`/restart`；`PATCH /configs` 仍只记日志 |
+| HTTP 下载器 | http 订阅、远程规则集、Geo 自动更新只读本地文件 | L | 进行中 |
+| 连接表 | 见下 | M | 进行中 |
+| OpenVPN 服务端 | 见下 | M | 进行中 |
+| Mihomo YAML 直通 | 见下 | M | 进行中 |
 | DNS 管线 | 本地出网解析只用 hosts 与第一个 UDP/TCP/DoT 上游；DNS 规则、DoH、Fake-IP 只作用于劫持的报文；无 DoQ、乐观缓存、ECS；`dns.listen` 不监听；`detour` 不生效 | L | 待做 |
 | 规则集与 Geo 格式 | `.srs`/`.mrs` 是私有格式，真实文件返回空集；运行时 GeoIP/GeoSite 是内置小表 | L | 待做 |
 | 路由解析 IP | `resolved_ips` 恒为空，`resolve` 动作后 IP/GeoIP 规则不匹配域名目标 | M | 待做 |
