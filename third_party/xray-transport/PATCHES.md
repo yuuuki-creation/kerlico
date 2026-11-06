@@ -19,3 +19,9 @@ tls.rs 的自动配置默认关闭会话恢复，避免共享配置缓存把 TLS
 ## QUIC 关闭不等排空期（2026-11-03）
 
 `TaskOwner::shutdown` 对每个 endpoint 只等 200 毫秒，让 CONNECTION_CLOSE 发出，随后中止运行任务。原来等 `wait_idle`，排空期 3×PTO 在高延迟路径上超过关闭预算，进程退出码为 1。
+
+## TLS1.2 时代 uTLS 档案省略 supported_versions（2026-11-07）
+
+`utls_shaping.rs::extension_plan` 对不含 supported_versions 的档案（`android`、`hellochrome_58`、`hellofirefox_55` 等）禁用该扩展，`extension_order` 不再把它补在末尾，ClientHello 与 uTLS 一致。这些档案的配置只启用 TLS1.2，shaped-rustls 的 `apply_extension_plan` 只在该条件下允许省略。`utls_tls_shaping_tests::tls12_era_profiles_emit_the_utls_hello_without_supported_versions` 对照 oracle 夹具校验套件、扩展类型与长度和握手长度。
+
+本包不是 workspace 成员；测试需在 worker 的工作副本里临时把 `third_party/xray-transport` 加入根 `Cargo.toml` 的 `members` 并移出 `exclude`，再运行 `cargo test -p xray-transport`。

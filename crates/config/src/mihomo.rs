@@ -656,7 +656,9 @@ const TYPES: &[ProxyType] = &[
 
 /// Mihomo `client-fingerprint` 名到 xray-transport uTLS 档案名，按 Mihomo 所用 metacubex/utls
 /// 的 `*_Auto` 别名对齐版本（如 Firefox 120、Safari 16.0）。不在表中的名字 Mihomo 提示后发送原生
-/// ClientHello，kerlico 同样处理；`360`（360 7.5）只提供本实现没有的密码套件，同样提示后不整形。
+/// ClientHello，kerlico 同样处理。`android`（Android 11 OkHttp）与 uTLS 一样不带 supported_versions，
+/// 只协商 TLS 1.2。`360`（360 7.5）只有 CBC、RC4、3DES 套件，本实现一个都不支持，照列只会让每次握手
+/// 失败，所以同样提示后不整形（阻塞点见 `third_party/shaped-rustls/PATCHES.md`）。
 const FINGERPRINTS: &[(&str, &str)] = &[
     ("chrome", "chrome"),
     ("firefox", "hellofirefox_120"),

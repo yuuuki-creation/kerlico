@@ -377,19 +377,9 @@ mod utls_tls_shaping_tests {
                 "{fingerprint}: the override must offer the ALPN uTLS offers"
             );
 
-            // Same single divergence Task 5A pinned: rustls emits
-            // `supported_versions` on every hello it builds and cannot be made
-            // to leave it out, so a TLS-1.2-era shape carries it at the tail
-            // and uTLS' own order stays an exact prefix.
-            let mut expected = shape.extension_order;
-            let supported_versions = format!("0x{EXT_SUPPORTED_VERSIONS:04x}");
-            if !expected.contains(&supported_versions) {
-                expected.push(supported_versions);
-            }
-
             assert_eq!(
                 extension_order(&hello),
-                expected,
+                shape.extension_order,
                 "{fingerprint}: the override must leave the extension order where uTLS puts it, \
                  an appended ALPN included"
             );
@@ -713,28 +703,7 @@ mod utls_tls_shaping_tests {
     /// `extension_order` field does: `GREASE` for any GREASE value, a
     /// `0x`-prefixed hex type otherwise.
     fn extension_order(hello: &[u8]) -> Vec<String> {
-        let mut cursor = 5 + 4 + 2 + 32;
-        cursor += 1 + usize::from(hello[cursor]);
-        let cipher_suites_len = usize::from(u16::from_be_bytes([hello[cursor], hello[cursor + 1]]));
-        cursor += 2 + cipher_suites_len;
-        cursor += 1 + usize::from(hello[cursor]);
-        let extensions_len = usize::from(u16::from_be_bytes([hello[cursor], hello[cursor + 1]]));
-        cursor += 2;
-        let end = cursor + extensions_len;
-
-        let mut order = Vec::new();
-        while cursor + 4 <= end {
-            let extension_type = u16::from_be_bytes([hello[cursor], hello[cursor + 1]]);
-            let payload_len =
-                usize::from(u16::from_be_bytes([hello[cursor + 2], hello[cursor + 3]]));
-            cursor += 4 + payload_len;
-            order.push(if is_grease(extension_type) {
-                "GREASE".to_owned()
-            } else {
-                format!("0x{extension_type:04x}")
-            });
-        }
-        order
+        extensions(hello).into_iter().map(|(name, _)| name).collect()
     }
 
     /// The HPKE AEAD id inside the ECH GREASE extension, if the profile emits
@@ -805,54 +774,95 @@ mod utls_tls_shaping_tests {
         high == low && high & 0x0f == 0x0a
     }
 
-    fn oracle_extension_order(shape_json: &str) -> (String, Vec<String>) {
-        let shape: serde_json::Value =
-            serde_json::from_str(shape_json).expect("uTLS shape fixture should decode");
-        let fingerprint = shape["fingerprint"]
-            .as_str()
-            .expect("fixture names its fingerprint")
-            .to_owned();
-        let order = shape["extension_order"]
-            .as_array()
-            .expect("fixture carries an extension order")
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .expect("extension order entries are strings")
-                    .to_owned()
-            })
-            .collect();
-        (fingerprint, order)
-    }
-
     /// The TLS-1.2-era profiles -- the ones whose uTLS hello carries no
-    /// `supported_versions` extension -- must still emit their extensions in
-    /// uTLS' order.
-    ///
-    /// rustls emits `supported_versions` on every ClientHello it builds, TLS
-    /// 1.2-only configs included, and refuses both to have it disabled and to
-    /// have it left out of a pinned order. So the one permitted divergence is
-    /// that single extension, kept at the very end: everything before it is
-    /// uTLS' own order, byte for byte.
+    /// `supported_versions` extension -- emit uTLS' hello as the oracle
+    /// recorded it: the same cipher suites, the same extensions with the same
+    /// lengths in the same order, and so the same handshake length.
     #[test]
-    fn tls12_era_profiles_pin_the_utls_extension_order() {
+    fn tls12_era_profiles_emit_the_utls_hello_without_supported_versions() {
+        #[derive(serde::Deserialize)]
+        struct Extension {
+            #[serde(rename = "type")]
+            extension_type: String,
+            length: usize,
+        }
+        #[derive(serde::Deserialize)]
+        struct Shape {
+            fingerprint: String,
+            handshake_length: usize,
+            cipher_suites: Vec<String>,
+            extensions: Vec<Extension>,
+        }
+
         for shape_json in [
             CLIENTHELLO_SHAPE_ANDROID_JSON,
             CLIENTHELLO_SHAPE_HELLOCHROME_58_JSON,
         ] {
-            let (fingerprint, mut expected) = oracle_extension_order(shape_json);
-            assert!(
-                !expected.contains(&format!("0x{EXT_SUPPORTED_VERSIONS:04x}")),
-                "{fingerprint}: fixture is meant to be a TLS-1.2-era shape"
-            );
-            expected.push(format!("0x{EXT_SUPPORTED_VERSIONS:04x}"));
-
-            let hello = plain_tls_client_hello_bytes(&config(&fingerprint, &[]))
+            let shape: Shape =
+                serde_json::from_str(shape_json).expect("uTLS shape fixture should decode");
+            let fingerprint = shape.fingerprint.as_str();
+            let hello = plain_tls_client_hello_bytes(&config(fingerprint, &[]))
                 .unwrap_or_else(|error| panic!("{fingerprint}: ClientHello: {error}"));
 
-            assert_eq!(extension_order(&hello), expected, "{fingerprint}");
+            assert_eq!(
+                extension_payload(&hello, EXT_SUPPORTED_VERSIONS),
+                None,
+                "{fingerprint}: uTLS sends no supported_versions for this parrot"
+            );
+            let suites = cipher_suites(&hello)
+                .into_iter()
+                .map(|suite| {
+                    if is_grease(suite) {
+                        "GREASE".to_owned()
+                    } else {
+                        format!("0x{suite:04x}")
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(suites, shape.cipher_suites, "{fingerprint}: cipher suites");
+            assert_eq!(
+                extensions(&hello),
+                shape
+                    .extensions
+                    .iter()
+                    .map(|extension| (extension.extension_type.clone(), extension.length))
+                    .collect::<Vec<_>>(),
+                "{fingerprint}: extensions"
+            );
+            assert_eq!(
+                hello.len() - 5,
+                shape.handshake_length,
+                "{fingerprint}: handshake length"
+            );
         }
+    }
+
+    /// Each extension's type (GREASE collapsed to `"GREASE"`) and payload
+    /// length, in wire order.
+    fn extensions(hello: &[u8]) -> Vec<(String, usize)> {
+        let mut cursor = 5 + 4 + 2 + 32;
+        cursor += 1 + usize::from(hello[cursor]);
+        let cipher_suites_len = usize::from(u16::from_be_bytes([hello[cursor], hello[cursor + 1]]));
+        cursor += 2 + cipher_suites_len;
+        cursor += 1 + usize::from(hello[cursor]);
+        let extensions_len = usize::from(u16::from_be_bytes([hello[cursor], hello[cursor + 1]]));
+        cursor += 2;
+        let end = cursor + extensions_len;
+
+        let mut extensions = Vec::new();
+        while cursor + 4 <= end {
+            let extension_type = u16::from_be_bytes([hello[cursor], hello[cursor + 1]]);
+            let payload_len =
+                usize::from(u16::from_be_bytes([hello[cursor + 2], hello[cursor + 3]]));
+            cursor += 4 + payload_len;
+            let name = if is_grease(extension_type) {
+                "GREASE".to_owned()
+            } else {
+                format!("0x{extension_type:04x}")
+            };
+            extensions.push((name, payload_len));
+        }
+        extensions
     }
 
     /// A ClientHello whose extension order is reshuffled per connection is

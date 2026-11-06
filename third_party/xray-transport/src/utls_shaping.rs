@@ -422,13 +422,9 @@ pub(crate) fn apply_alpn_override(
 /// it twice.
 ///
 /// The order has to name every extension rustls emits, or rustls rejects it.
-/// That is why `supported_versions` is appended for TLS-1.2-era profiles that
-/// never declared it: rustls builds that extension into every ClientHello --
-/// even a TLS-1.2-only one, where it carries just `0x0303` -- and neither the
-/// extension plan (which calls it required) nor the finalizer (which may only
-/// rewrite the legacy session id) can take it back out. Appending it keeps the
-/// whole of uTLS' real order intact as a prefix and confines the one extension
-/// we cannot suppress to the tail.
+/// A TLS-1.2-era profile never declares `supported_versions`, and
+/// `extension_plan` disables it for exactly those profiles, so the order is
+/// uTLS' own.
 fn extension_order(
     profile: &UtlsClientHelloProfile,
     appended_alpn: bool,
@@ -442,9 +438,6 @@ fn extension_order(
     if appended_alpn {
         order.push(EXT_ALPN);
     }
-    if !profile_has_extension(profile, EXT_SUPPORTED_VERSIONS) {
-        order.push(EXT_SUPPORTED_VERSIONS);
-    }
 
     ClientHelloExtensionOrder::try_from(order)
 }
@@ -453,7 +446,7 @@ fn extension_plan(
     profile: &UtlsClientHelloProfile,
     appended_alpn: bool,
 ) -> Result<ClientHelloExtensionPlan, RustlsError> {
-    let disabled = STRUCTURED_OPTIONAL_EXTENSIONS
+    let mut disabled = STRUCTURED_OPTIONAL_EXTENSIONS
         .iter()
         .copied()
         .filter(|extension_type| !profile_has_extension(profile, *extension_type))
@@ -463,6 +456,12 @@ fn extension_plan(
         })
         .filter(|extension_type| !appended_alpn || *extension_type != EXT_ALPN)
         .collect::<Vec<_>>();
+    // uTLS sends no `supported_versions` when the parrot lists none; such a
+    // profile pins the config to TLS 1.2, the one case shaped-rustls lets the
+    // plan drop the extension.
+    if !profile_has_extension(profile, EXT_SUPPORTED_VERSIONS) {
+        disabled.push(EXT_SUPPORTED_VERSIONS);
+    }
 
     ClientHelloExtensionPlan::try_from(disabled)
 }
