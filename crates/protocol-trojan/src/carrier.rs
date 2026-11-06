@@ -21,7 +21,7 @@ use crate::{
     invalid,
 };
 use kerlico_core::{Address, BoxStream, Destination, Error, Result};
-use std::{io::Cursor, sync::Arc};
+use std::sync::Arc;
 use xray_routing::{Network, Target, TargetAddr};
 use xray_transport::stream::{
     GrpcConfig, GrpcTransport, HttpUpgradeConfig, TransportLayer, WebSocketConfig,
@@ -161,12 +161,27 @@ impl Carrier {
                 server_name,
                 ca_pem,
                 insecure,
+                fingerprint,
             } => {
                 let name = server_name.unwrap_or_else(|| server.host());
                 xray_transport::validate_tls_server_name(&name).map_err(|_| invalid())?;
-                let mut config = client_config(ca_pem, insecure)?;
-                config.resumption = rustls::client::Resumption::disabled();
-                config.alpn_protocols = transport.alpn();
+                if ca_pem.as_ref().is_some_and(|pem| pem.len() > 1024 * 1024) {
+                    return Err(invalid());
+                }
+                let alpn: Vec<String> = transport
+                    .alpn()
+                    .into_iter()
+                    .map(|v| String::from_utf8_lossy(&v).into_owned())
+                    .collect();
+                let config = kerlico_net::TlsClientOptions {
+                    protocol: "Trojan",
+                    server_name: &name,
+                    ca_pem: ca_pem.as_deref(),
+                    insecure,
+                    fingerprint: fingerprint.as_deref(),
+                    alpn: &alpn,
+                }
+                .client_config()?;
                 dialer = TransportDialer::with_tls_connector(
                     TlsConnector::with_pinned_client_config(Arc::new(config)),
                 );
@@ -309,35 +324,4 @@ impl Carrier {
             self.owner.as_ref().ok_or_else(invalid)?.wrap(stream),
         ))
     }
-}
-
-fn client_config(ca_pem: Option<String>, insecure: bool) -> Result<rustls::ClientConfig> {
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(|_| invalid())?;
-    if insecure {
-        kerlico_net::warn_insecure_tls("Trojan");
-        return Ok(builder
-            .dangerous()
-            .with_custom_certificate_verifier(kerlico_net::insecure_verifier(provider))
-            .with_no_client_auth());
-    }
-    let mut roots =
-        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    if let Some(pem) = ca_pem {
-        if pem.len() > 1024 * 1024 {
-            return Err(invalid());
-        }
-        let certs = rustls_pemfile::certs(&mut Cursor::new(pem))
-            .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|_| invalid())?;
-        if certs.is_empty() {
-            return Err(invalid());
-        }
-        for cert in certs {
-            roots.add(cert).map_err(|_| invalid())?;
-        }
-    }
-    Ok(builder.with_root_certificates(roots).with_no_client_auth())
 }

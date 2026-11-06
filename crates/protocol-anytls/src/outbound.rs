@@ -45,6 +45,9 @@ struct Tls {
     ca_pem: Option<String>,
     #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
     insecure: bool,
+    /// uTLS ClientHello 指纹，对应 Mihomo `client-fingerprint`。
+    #[serde(default)]
+    fingerprint: Option<String>,
 }
 fn idle_default() -> u64 {
     30000
@@ -96,16 +99,17 @@ impl OutboundFactory for AnyTlsFactory {
         }
         let server = Destination::new(&options.server.host, options.server.port)?;
         let password = Sha256::digest(options.password.as_bytes()).into();
-        let connector = if options.tls.insecure {
-            kerlico_net::warn_insecure_tls("AnyTLS");
-            TcpConnector::tls_insecure(&options.tls.server_name, kerlico_core::current_compile_dialer())?
-        } else {
-            TcpConnector::tls(
-                &options.tls.server_name,
-                options.tls.ca_pem.as_deref(),
-                kerlico_core::current_compile_dialer(),
-            )?
-        };
+        let connector = TcpConnector::tls_client(
+            &kerlico_net::TlsClientOptions {
+                protocol: "AnyTLS",
+                server_name: &options.tls.server_name,
+                ca_pem: options.tls.ca_pem.as_deref(),
+                insecure: options.tls.insecure,
+                fingerprint: options.tls.fingerprint.as_deref(),
+                alpn: &[],
+            },
+            kerlico_core::current_compile_dialer(),
+        )?;
         let idle = std::time::Duration::from_millis(options.idle_session_timeout_ms);
         let max_sessions = options.max_sessions;
         Padding::parse(padding::DEFAULT)?;

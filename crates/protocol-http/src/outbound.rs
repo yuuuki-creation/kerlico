@@ -158,12 +158,17 @@ impl OutboundFactory for HttpFactory {
             headers.push((name, value));
         }
         let connector = if let Some(tls) = options.tls {
-            if tls.insecure {
-                kerlico_net::warn_insecure_tls("HTTP");
-                TcpConnector::tls_insecure(&tls.server_name, kerlico_core::current_compile_dialer())?
-            } else {
-                TcpConnector::tls(&tls.server_name, tls.ca_pem.as_deref(), kerlico_core::current_compile_dialer())?
-            }
+            TcpConnector::tls_client(
+                &kerlico_net::TlsClientOptions {
+                    protocol: "HTTP",
+                    server_name: &tls.server_name,
+                    ca_pem: tls.ca_pem.as_deref(),
+                    insecure: tls.insecure,
+                    fingerprint: None,
+                    alpn: &[],
+                },
+                kerlico_core::current_compile_dialer(),
+            )?
         } else {
             TcpConnector::plain(kerlico_core::current_compile_dialer())
         };

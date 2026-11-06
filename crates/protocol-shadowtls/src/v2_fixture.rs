@@ -98,6 +98,7 @@ async fn fixture(tls13: bool, tickets: usize) -> Fixture {
             insecure: false,
             version: if tls13 { "1.3" } else { "1.2" }.into(),
             alpn: vec!["http/1.1".into()],
+            fingerprint: None,
         },
         2,
         false,

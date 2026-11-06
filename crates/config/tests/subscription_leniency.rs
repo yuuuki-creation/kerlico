@@ -1,6 +1,6 @@
 //! 真实订阅形状：常见附加字段加 `override` 块，与 Mihomo 一样只跳过语义无法实现的成员。
 
-use kerlico_config::ProxyProviderSpec;
+use kerlico_config::{ProxyProviderSpec, parse_config_value};
 use serde_json::{Value, json};
 
 const SUBSCRIPTION: &str = r#"
@@ -116,4 +116,40 @@ fn real_world_subscription_loads_supported_members_and_lists_the_rest() {
         failure.contains("DE 07") && failure.contains("ech-opts"),
         "{failure}"
     );
+}
+
+#[test]
+fn global_client_fingerprint_is_the_default_for_proxies_and_providers() {
+    let yaml = "global-client-fingerprint: firefox
+proxies:
+  - {name: own, type: trojan, server: t.example.com, port: 443, password: pw, client-fingerprint: chrome}
+  - {name: inherit, type: vmess, server: v.example.com, port: 443, uuid: 11111111-2222-3333-4444-555555555555, tls: true}
+proxy-providers:
+  sub:
+    type: inline
+    payload:
+      - {name: member, type: anytls, server: a.example.com, port: 443, password: pw}
+";
+    let value = parse_config_value(yaml.as_bytes()).unwrap();
+    let outbound = |tag: &str| -> Value {
+        value["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == tag)
+            .unwrap()["options"]
+            .clone()
+    };
+    assert_eq!(outbound("own")["security"]["fingerprint"], "chrome");
+    assert_eq!(
+        outbound("inherit")["tls"]["fingerprint"],
+        "hellofirefox_120"
+    );
+    let providers = value
+        .get("proxy-providers")
+        .or_else(|| value.get("proxy_providers"))
+        .expect("provider kept");
+    let spec: ProxyProviderSpec = serde_json::from_value(providers["sub"].clone()).unwrap();
+    let (_, specs) = spec.compile("sub").unwrap();
+    assert_eq!(specs[0].options["tls"]["fingerprint"], "hellofirefox_120");
 }

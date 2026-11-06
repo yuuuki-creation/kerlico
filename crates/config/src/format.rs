@@ -624,6 +624,7 @@ fn normalize_yaml_root(root: &mut Value) -> Result<()> {
     if !obj.contains_key("version") {
         obj.insert("version".into(), Value::Number(Number::from(2u64)));
     }
+    apply_global_client_fingerprint(obj);
     if !obj.contains_key("outbounds")
         && let Some(Value::Array(proxies)) = obj.remove("proxies")
     {
@@ -667,6 +668,32 @@ fn normalize_yaml_root(root: &mut Value) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `global-client-fingerprint` 作为未写 `client-fingerprint` 的代理的默认值（Mihomo v1.18 语义；
+/// v1.19 起 Mihomo 删除了该键）。顶层 `proxies` 直接补写，订阅提供者在成员映射前补写。
+fn apply_global_client_fingerprint(root: &mut Map<String, Value>) {
+    let Some(Value::String(fingerprint)) = root.remove("global-client-fingerprint") else {
+        return;
+    };
+    if fingerprint.trim().is_empty() {
+        return;
+    }
+    if let Some(Value::Array(proxies)) = root.get_mut("proxies") {
+        for proxy in proxies {
+            crate::mihomo::default_client_fingerprint(proxy, &fingerprint);
+        }
+    }
+    for key in ["proxy-providers", "proxy_providers"] {
+        if let Some(Value::Object(providers)) = root.get_mut(key) {
+            for provider in providers.values_mut() {
+                if let Value::Object(spec) = provider {
+                    spec.entry("global-client-fingerprint")
+                        .or_insert_with(|| Value::String(fingerprint.clone()));
+                }
+            }
+        }
+    }
 }
 
 /// 代理名是否出现在某个 `proxy-groups[].proxies` 或某条规则的目标中。映射失败的代理被引用时

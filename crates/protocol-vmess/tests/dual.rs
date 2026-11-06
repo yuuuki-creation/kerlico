@@ -370,3 +370,26 @@ async fn self_signed_server_is_rejected_unless_tls_insecure() {
     }
     task.abort();
 }
+
+#[tokio::test]
+async fn fingerprinted_tls_completes_on_every_transport() {
+    let (target, task) = tcp_echo("127.0.0.1").await;
+    for transport in [
+        json!({"type":"tcp"}),
+        json!({"type":"ws","path":"/vmess"}),
+        json!({"type":"httpupgrade","path":"/vmess"}),
+        json!({"type":"grpc","service_name":"proxy"}),
+    ] {
+        for fingerprint in ["chrome", "firefox", "safari", "android"] {
+            let f = fixture("aes-128-gcm", transport.clone(), true, "127.0.0.1", 13).await;
+            let mut options = f.options.clone();
+            options["tls"]["fingerprint"] = json!(fingerprint);
+            let outbound = support::outbound(&VmessFactory, &options).unwrap();
+            assert!(
+                echoes(&outbound, &target).await,
+                "{transport} {fingerprint}"
+            );
+        }
+    }
+    task.abort();
+}

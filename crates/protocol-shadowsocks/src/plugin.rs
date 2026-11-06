@@ -246,9 +246,6 @@ impl Plugin {
                 )));
             }
         }
-        if opts.tls && opts.skip_cert_verify {
-            kerlico_net::warn_insecure_tls(&format!("Shadowsocks {name}"));
-        }
         Ok(Self::V2ray {
             transport: if opts.v2ray_http_upgrade {
                 V2rayTransport::HttpUpgrade
@@ -304,14 +301,18 @@ impl StreamConnector for PluginConnector {
                         } => {
                             let host = host.clone().unwrap_or_else(|| endpoint.host().clone());
                             let carrier = if *tls {
-                                let connector = if *skip_cert_verify {
-                                    kerlico_net::TcpConnector::tls_insecure(&host, self.dialer.clone())?
-                                } else {
-                                    kerlico_net::TcpConnector::tls(&host, None, self.dialer.clone())?
-                                };
-                                connector
-                                    .connect(endpoint)
-                                    .await?
+                                let connector = kerlico_net::TcpConnector::tls_client(
+                                    &kerlico_net::TlsClientOptions {
+                                        protocol: "Shadowsocks plugin",
+                                        server_name: &host,
+                                        ca_pem: None,
+                                        insecure: *skip_cert_verify,
+                                        fingerprint: None,
+                                        alpn: &[],
+                                    },
+                                    self.dialer.clone(),
+                                )?;
+                                connector.connect(endpoint).await?
                             } else {
                                 self.dialer.connect(endpoint).await?
                             };

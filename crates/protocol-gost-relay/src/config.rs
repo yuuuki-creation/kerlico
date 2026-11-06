@@ -36,6 +36,9 @@ struct Tls {
     ca_pem: Option<String>,
     #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
     insecure: bool,
+    /// uTLS ClientHello 指纹，对应 Mihomo `client-fingerprint`。
+    #[serde(default)]
+    fingerprint: Option<String>,
 }
 
 pub(crate) struct Config {
@@ -59,12 +62,17 @@ impl Options {
                 if self.allow_insecure {
                     return Err(Error::Config("TLS 模式不接受明文许可字段".into()));
                 }
-                if tls.insecure {
-                    kerlico_net::warn_insecure_tls("Gost Relay");
-                    TcpConnector::tls_insecure(&tls.server_name, kerlico_core::current_compile_dialer())?
-                } else {
-                    TcpConnector::tls(&tls.server_name, tls.ca_pem.as_deref(), kerlico_core::current_compile_dialer())?
-                }
+                TcpConnector::tls_client(
+                    &kerlico_net::TlsClientOptions {
+                        protocol: "Gost Relay",
+                        server_name: &tls.server_name,
+                        ca_pem: tls.ca_pem.as_deref(),
+                        insecure: tls.insecure,
+                        fingerprint: tls.fingerprint.as_deref(),
+                        alpn: &[],
+                    },
+                    kerlico_core::current_compile_dialer(),
+                )?
             }
             None => {
                 if !server.is_loopback() && !self.allow_insecure {

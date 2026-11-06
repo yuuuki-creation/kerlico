@@ -414,3 +414,122 @@ async fn self_signed_server_is_rejected_unless_security_insecure() {
         assert!(echoes(&insecure, &harness.tcp).await, "{transport}");
     }
 }
+
+#[tokio::test]
+async fn fingerprinted_tls_completes_on_every_transport() {
+    for transport in [
+        json!("tcp"),
+        json!({"type":"ws","path":"/trojan"}),
+        json!({"type":"grpc","service_name":"trojan"}),
+    ] {
+        for fingerprint in ["chrome", "firefox", "safari", "ios", "edge", "random"] {
+            let (harness, mut options) = Harness::new(transport.clone(), true, false).await;
+            options["security"]["fingerprint"] = json!(fingerprint);
+            let outbound = support::outbound(&TrojanFactory, &options).unwrap();
+            assert!(
+                echoes(&outbound, &harness.tcp).await,
+                "{transport} {fingerprint}"
+            );
+        }
+    }
+}
+
+/// ClientHello 中与指纹相关、不随连接变化的部分：GREASE 去除，扩展按类型排序（Chrome 会打乱扩展顺序）。
+#[derive(Debug, PartialEq)]
+struct HelloShape {
+    ciphers: Vec<u16>,
+    extensions: Vec<u16>,
+    groups: Vec<u16>,
+    signature_algorithms: Vec<u16>,
+}
+
+fn hello_shape(record: &[u8]) -> HelloShape {
+    let grease = |v: u16| v & 0x0f0f == 0x0a0a;
+    let u16_at = |b: &[u8], i: usize| u16::from_be_bytes([b[i], b[i + 1]]);
+    let list = |b: &[u8]| -> Vec<u16> {
+        let len = u16_at(b, 0) as usize;
+        (0..len / 2)
+            .map(|i| u16_at(b, 2 + 2 * i))
+            .filter(|v| !grease(*v))
+            .collect()
+    };
+    assert_eq!(record[0], 0x16, "TLS 握手记录");
+    let hello = &record[5..];
+    assert_eq!(hello[0], 1, "ClientHello");
+    let mut at = 4 + 2 + 32;
+    at += 1 + hello[at] as usize;
+    let ciphers = list(&hello[at..]);
+    at += 2 + u16_at(hello, at) as usize;
+    at += 1 + hello[at] as usize;
+    let end = at + 2 + u16_at(hello, at) as usize;
+    at += 2;
+    let (mut extensions, mut groups, mut signature_algorithms) =
+        (Vec::new(), Vec::new(), Vec::new());
+    while at < end {
+        let kind = u16_at(hello, at);
+        let len = u16_at(hello, at + 2) as usize;
+        let body = &hello[at + 4..at + 4 + len];
+        match kind {
+            0x000a => groups = list(body),
+            0x000d => signature_algorithms = list(body),
+            _ => {}
+        }
+        if !grease(kind) {
+            extensions.push(kind);
+        }
+        at += 4 + len;
+    }
+    extensions.sort_unstable();
+    HelloShape {
+        ciphers,
+        extensions,
+        groups,
+        signature_algorithms,
+    }
+}
+
+async fn captured_hello(fingerprint: Option<&str>) -> Vec<u8> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let outbound = support::outbound(
+        &TrojanFactory,
+        &json!({"server":{"host":"127.0.0.1","port":port},"password":"synthetic","security":{"type":"tls","server_name":"example.com","fingerprint":fingerprint}}),
+    )
+    .unwrap();
+    let target = Destination::new("example.com", 443).unwrap();
+    let client = tokio::spawn(async move {
+        let _ = outbound
+            .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(3)))
+            .await;
+    });
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut header = [0; 5];
+    socket.read_exact(&mut header).await.unwrap();
+    let mut record = header.to_vec();
+    record.resize(5 + u16::from_be_bytes([header[3], header[4]]) as usize, 0);
+    socket.read_exact(&mut record[5..]).await.unwrap();
+    drop(socket);
+    client.abort();
+    record
+}
+
+#[tokio::test]
+async fn captured_client_hello_matches_the_utls_profile() {
+    for fingerprint in ["chrome", "firefox"] {
+        let captured = hello_shape(&captured_hello(Some(fingerprint)).await);
+        let reference = hello_shape(
+            &xray_transport::plain_tls_client_hello_bytes(&xray_transport::TlsClientConfig {
+                server_name: "example.com".into(),
+                allow_insecure: false,
+                pinned_peer_cert_sha256: Vec::new(),
+                verify_peer_cert_by_name: Vec::new(),
+                alpn: Vec::new(),
+                fingerprint: Some(fingerprint.into()),
+            })
+            .unwrap(),
+        );
+        assert_eq!(captured, reference, "{fingerprint}");
+        let unshaped = hello_shape(&captured_hello(None).await);
+        assert_ne!(captured.extensions, unshaped.extensions, "{fingerprint}");
+    }
+}

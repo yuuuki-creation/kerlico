@@ -150,6 +150,9 @@ pub(crate) enum ClientSecurity {
         ca_pem: Option<String>,
         #[serde(default, alias = "allow_insecure", alias = "skip_cert_verify")]
         insecure: bool,
+        /// uTLS ClientHello 指纹，对应 Mihomo `client-fingerprint`。
+        #[serde(default)]
+        fingerprint: Option<String>,
     },
     #[default]
     None,

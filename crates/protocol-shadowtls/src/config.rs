@@ -35,6 +35,9 @@ pub(crate) struct Tls {
     /// auto、1.2、1.3；v1 自动固定 1.2。
     #[serde(default = "auto")]
     pub version: String,
+    /// uTLS ClientHello 指纹，对应 Mihomo ss `client-fingerprint`；v3 仍在其上写入认证会话 ID。
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

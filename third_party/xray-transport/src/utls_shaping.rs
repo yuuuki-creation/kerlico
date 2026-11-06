@@ -19,7 +19,7 @@
 use rand::{rngs::OsRng, RngCore};
 use rustls::{
     client::{
-        ClientHelloAdvertisedSupportedGroups, ClientHelloAdvertisedSupportedVersions,
+        ClientHelloAdvertisedCipherSuites, ClientHelloAdvertisedSupportedGroups, ClientHelloAdvertisedSupportedVersions,
         ClientHelloAlpnProtocols, ClientHelloCertificateCompressionAlgorithms,
         ClientHelloCipherSuites, ClientHelloContext, ClientHelloExactExtension,
         ClientHelloExactExtensions, ClientHelloExtensionOrder, ClientHelloExtensionPlan,
@@ -87,10 +87,18 @@ pub(crate) fn apply_utls_profile(
     context: ClientHelloContext<'_>,
 ) -> Result<ClientHelloPlan, RustlsError> {
     let supported_versions = supported_versions(profile)?;
-    let cipher_suites = cipher_suites(profile, context, supported_versions.as_slice())?;
-    plan = plan
-        .with_cipher_suites(cipher_suites)
-        .with_supported_versions(supported_versions);
+    plan = match advertised_cipher_suites(profile) {
+        // The hello carries the profile's whole list, as uTLS sends it; a suite
+        // the provider lacks is offered but never negotiated (rustls refuses a
+        // server that picks one).
+        Some(advertised) => plan.with_advertised_cipher_suites(advertised),
+        None => plan.with_cipher_suites(cipher_suites(
+            profile,
+            context,
+            supported_versions.as_slice(),
+        )?),
+    }
+    .with_supported_versions(supported_versions);
 
     if !profile.supported_versions.is_empty() {
         plan = plan.with_advertised_supported_versions(advertised_supported_versions(profile)?);
@@ -154,6 +162,21 @@ fn cipher_suites(
             .map(CipherSuite::from)
             .collect::<Vec<_>>(),
     )
+}
+
+/// The profile's non-GREASE suites in order, or `None` when one of them has no
+/// rustls identifier and so cannot be advertised.
+fn advertised_cipher_suites(
+    profile: &UtlsClientHelloProfile,
+) -> Option<ClientHelloAdvertisedCipherSuites> {
+    let suites: Vec<CipherSuite> = profile
+        .cipher_suites
+        .iter()
+        .copied()
+        .filter(|suite| !is_grease_value(*suite))
+        .map(CipherSuite::from)
+        .collect();
+    ClientHelloAdvertisedCipherSuites::try_from(suites).ok()
 }
 
 fn provider_supports_cipher_suite(
@@ -671,10 +694,16 @@ fn grease_plan(
         .position(|suite| is_grease_value(*suite))
     {
         let supported_versions = supported_versions(profile)?;
+        let advertised = advertised_cipher_suites(profile).is_some();
         let position = profile.cipher_suites[..grease_index]
             .iter()
             .filter(|suite| {
-                provider_supports_cipher_suite(**suite, context, supported_versions.as_slice())
+                advertised
+                    || provider_supports_cipher_suite(
+                        **suite,
+                        context,
+                        supported_versions.as_slice(),
+                    )
             })
             .count();
         grease = grease.with_cipher_suite_position(position);

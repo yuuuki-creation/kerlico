@@ -249,6 +249,9 @@ pub(crate) struct ClientTls {
     pub private_key_pem: Option<String>,
     #[serde(default)]
     pub version: Version,
+    /// uTLS ClientHello 指纹，对应 Mihomo `client-fingerprint`；与 Mihomo 一样只作用于 TCP 上的 TLS，H3 忽略。
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -301,6 +304,34 @@ pub(crate) fn client_tls(
         return Err(invalid());
     }
     rustls::pki_types::ServerName::try_from(tls.server_name.clone()).map_err(|_| invalid())?;
+    if let Some(fingerprint) = tls.fingerprint.as_deref()
+        && transport != Transport::H3
+    {
+        if tls.certificate_pem.is_some()
+            || tls.private_key_pem.is_some()
+            || !matches!(tls.version, Version::Auto)
+        {
+            return Err(Error::Config(
+                "TrustTunnel TLS 指纹不能与客户端证书或固定 TLS 版本同时使用".into(),
+            ));
+        }
+        let alpn: Vec<String> = transport
+            .alpn()
+            .into_iter()
+            .map(|v| String::from_utf8_lossy(&v).into_owned())
+            .collect();
+        let mut config = kerlico_net::TlsClientOptions {
+            protocol: "TrustTunnel",
+            server_name: &tls.server_name,
+            ca_pem: tls.ca_pem.as_deref(),
+            insecure: tls.insecure,
+            fingerprint: Some(fingerprint),
+            alpn: &alpn,
+        }
+        .client_config()?;
+        config.enable_early_data = false;
+        return Ok((Arc::new(config), tls.server_name));
+    }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&versions(tls.version, transport)?)

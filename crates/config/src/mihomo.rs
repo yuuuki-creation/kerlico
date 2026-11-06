@@ -49,7 +49,6 @@ const SECURITY_FIELDS: &[&str] = &[
     "fingerprint",
     "certificate",
     "private-key",
-    "client-fingerprint",
     "ech-opts",
     "reality-opts",
     "shadow-tls-opts",
@@ -655,6 +654,24 @@ const TYPES: &[ProxyType] = &[
     },
 ];
 
+/// Mihomo `client-fingerprint` 名到 xray-transport uTLS 档案名，按 Mihomo 所用 metacubex/utls
+/// 的 `*_Auto` 别名对齐版本（如 Firefox 120、Safari 16.0）。不在表中的名字 Mihomo 提示后发送原生
+/// ClientHello，kerlico 同样处理；`360`（360 7.5）只提供本实现没有的密码套件，同样提示后不整形。
+const FINGERPRINTS: &[(&str, &str)] = &[
+    ("chrome", "chrome"),
+    ("firefox", "hellofirefox_120"),
+    ("safari", "hellosafari_16_0"),
+    ("ios", "ios"),
+    ("android", "android"),
+    ("edge", "edge"),
+    ("qq", "qq"),
+    ("random", "random"),
+    ("randomized", "randomized"),
+    ("chrome120", "hellochrome_120"),
+    ("firefox120", "hellofirefox_120"),
+    ("safari16", "hellosafari_16_0"),
+];
+
 /// Mihomo 结构解码器的键匹配：先精确匹配，再忽略大小写并把 `_` 视为 `-`。
 fn canonical_key(key: &str) -> String {
     key.to_ascii_lowercase().replace('_', "-")
@@ -688,6 +705,25 @@ pub(crate) fn member_outbound(raw: Value) -> Result<(String, String, Value)> {
             let out = translate_proxy(raw)?;
             Ok((out.name, out.kind.to_owned(), out.options))
         }
+    }
+}
+
+/// 未写或写空 `client-fingerprint` 的 Mihomo 代理映射补上 `global-client-fingerprint`；原生条目不变。
+pub(crate) fn default_client_fingerprint(member: &mut Value, fingerprint: &str) {
+    let Value::Object(map) = member else {
+        return;
+    };
+    if map.contains_key("tag") || map.contains_key("options") {
+        return;
+    }
+    let unset = map
+        .get("client-fingerprint")
+        .is_none_or(|value| value.as_str().is_some_and(str::is_empty) || value.is_null());
+    if unset {
+        map.insert(
+            "client-fingerprint".into(),
+            Value::String(fingerprint.into()),
+        );
     }
 }
 
@@ -870,6 +906,23 @@ impl Proxy {
             })),
             Some(_) => Err(self.bad_type(key)),
         }
+    }
+    /// `client-fingerprint` 写到出站的 uTLS 指纹选项 `path`；空值与 `none` 不整形。
+    fn fingerprint(&mut self, opts: &mut Opts, path: &str) -> Result<()> {
+        let Some(name) = self.string("client-fingerprint")? else {
+            return Ok(());
+        };
+        let name = name.trim().to_ascii_lowercase();
+        if name.is_empty() || name == "none" {
+            return Ok(());
+        }
+        match FINGERPRINTS.iter().find(|(mihomo, _)| *mihomo == name) {
+            Some((_, profile)) => opts.set(path, *profile),
+            None => self
+                .unimplemented
+                .push(format!("client-fingerprint={name}")),
+        }
+        Ok(())
     }
     /// `skip-cert-verify: true` 写到出站的跳过证书校验选项 `path`。
     fn insecure(&mut self, opts: &mut Opts, path: &str) -> Result<()> {
@@ -1116,6 +1169,7 @@ fn shadowsocks(p: &mut Proxy) -> Result<(&'static str, Opts)> {
             st.set("tls.alpn", alpn);
         }
         po.insecure(&mut st, "tls.insecure")?;
+        p.fingerprint(&mut st, "tls.fingerprint")?;
         po.finish()?;
         p.noop_bool("udp-over-tcp", false)?;
         st.set(
@@ -1371,6 +1425,7 @@ fn vmess(p: &mut Proxy) -> Result<(&'static str, Opts)> {
         opts.set("tls.type", "tls");
         opts.set("tls.server_name", sni.unwrap_or(host));
         p.insecure(&mut opts, "tls.insecure")?;
+        p.fingerprint(&mut opts, "tls.fingerprint")?;
     } else {
         p.drop_tls_fields();
     }
@@ -1407,7 +1462,6 @@ fn vless(p: &mut Proxy) -> Result<(&'static str, Opts)> {
         opts.set("packet_encoding", enc);
     }
     let sni = p.sni()?;
-    let fingerprint = p.string("client-fingerprint")?;
     let tls = p.boolean("tls")?.unwrap_or(false);
     if let Some(mut reality) = p.nested("reality-opts")? {
         opts.set("security.type", "reality");
@@ -1423,9 +1477,7 @@ fn vless(p: &mut Proxy) -> Result<(&'static str, Opts)> {
             opts.set("security.short_id", sid);
         }
         reality.finish()?;
-        if let Some(fp) = fingerprint {
-            opts.set("security.fingerprint", fp);
-        }
+        p.fingerprint(&mut opts, "security.fingerprint")?;
         // REALITY 不走证书链校验，Mihomo 不读取 skip-cert-verify。
         p.map.remove("skip-cert-verify");
     } else if tls {
@@ -1433,9 +1485,7 @@ fn vless(p: &mut Proxy) -> Result<(&'static str, Opts)> {
         if let Some(name) = sni {
             opts.set("security.server_name", name);
         }
-        if let Some(fp) = fingerprint {
-            opts.set("security.fingerprint", fp);
-        }
+        p.fingerprint(&mut opts, "security.fingerprint")?;
         if let Some(alpn) = p.strings("alpn")? {
             opts.set("security.alpn", alpn);
         }
@@ -1459,6 +1509,7 @@ fn trojan(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     opts.set("security.type", "tls");
     opts.set("security.server_name", p.sni()?.unwrap_or(host));
     p.insecure(&mut opts, "security.insecure")?;
+    p.fingerprint(&mut opts, "security.fingerprint")?;
     if let Some(mut ss) = p.nested("ss-opts")? {
         ss.noop_bool("enabled", false)?;
         ss.map.clear();
@@ -1478,6 +1529,7 @@ fn anytls(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     opts.set("password", p.required_string("password")?);
     opts.set("tls.server_name", p.sni()?.unwrap_or(host));
     p.insecure(&mut opts, "tls.insecure")?;
+    p.fingerprint(&mut opts, "tls.fingerprint")?;
     if let Some(secs) = p.integer("idle-session-timeout")? {
         opts.set("idle_session_timeout_ms", secs.saturating_mul(1000));
     }
@@ -1982,6 +2034,7 @@ fn trusttunnel(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     opts.set("auth.password", p.required_string("password")?);
     opts.set("tls.server_name", p.sni()?.unwrap_or(host));
     p.insecure(&mut opts, "tls.insecure")?;
+    p.fingerprint(&mut opts, "tls.fingerprint")?;
     if p.boolean("quic")? == Some(true) {
         opts.set("transport", "h3");
     }
@@ -2015,6 +2068,7 @@ fn gost_relay(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     if p.boolean("tls")? == Some(true) {
         opts.set("tls.server_name", sni.unwrap_or(host));
         p.insecure(&mut opts, "tls.insecure")?;
+        p.fingerprint(&mut opts, "tls.fingerprint")?;
     } else {
         p.drop_tls_fields();
         opts.set("allow_insecure", true);
@@ -2215,7 +2269,6 @@ mod tests {
         let base = "name: s\ntype: trojan\nserver: a.example.com\nport: 443\npassword: p\n";
         for extra in [
             "ip-version: ipv6\n",
-            "client-fingerprint: chrome\n",
             "fingerprint: ab12\n",
             "ech-opts:\n  enable: true\n",
             "reality-opts:\n  public-key: k\n",
@@ -2240,6 +2293,55 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("tls"), "{err}");
+    }
+
+    #[test]
+    fn client_fingerprint_maps_to_each_tls_carrier() {
+        for (yaml, path) in [
+            (
+                "type: vmess\nuuid: 11111111-1111-1111-1111-111111111111\ntls: true\n",
+                "/tls/fingerprint",
+            ),
+            ("type: trojan\npassword: p\n", "/security/fingerprint"),
+            (
+                "type: vless\nuuid: 11111111-1111-1111-1111-111111111111\ntls: true\n",
+                "/security/fingerprint",
+            ),
+            ("type: anytls\npassword: p\n", "/tls/fingerprint"),
+            (
+                "type: trusttunnel\nusername: u\npassword: p\n",
+                "/tls/fingerprint",
+            ),
+            ("type: gost-relay\ntls: true\n", "/tls/fingerprint"),
+            (
+                "type: ss\ncipher: aes-128-gcm\npassword: p\nplugin: shadow-tls\nplugin-opts:\n  host: a.example.com\n  password: x\n",
+                "/tls/fingerprint",
+            ),
+        ] {
+            for (mihomo, profile) in [
+                ("chrome", "chrome"),
+                ("Firefox", "hellofirefox_120"),
+                ("chrome120", "hellochrome_120"),
+            ] {
+                let out = map(&format!(
+                    "name: n\nserver: a.example.com\nport: 443\nclient-fingerprint: {mihomo}\n{yaml}"
+                ))
+                .unwrap_or_else(|e| panic!("{yaml}: {e}"));
+                assert_eq!(out.options.pointer(path), Some(&json!(profile)), "{yaml}");
+            }
+        }
+        for unshaped in ["none", "\"\"", "chrome_psk"] {
+            let out = map(&format!(
+                "name: n\ntype: trojan\nserver: a.example.com\nport: 443\npassword: p\nclient-fingerprint: {unshaped}\n"
+            ))
+            .unwrap();
+            assert!(
+                out.options["security"].get("fingerprint").is_none(),
+                "{unshaped}"
+            );
+        }
+        let plain = map("name: n\ntype: vmess\nserver: a\nport: 1\nuuid: 11111111-1111-1111-1111-111111111111\nclient-fingerprint: chrome\n").unwrap();
+        assert!(plain.options.get("tls").is_none());
     }
 
     #[test]

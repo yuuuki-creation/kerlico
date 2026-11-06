@@ -1,9 +1,9 @@
 //! 共享 TCP/TLS 连接器与基础直连/拒绝处理器。
 
+mod client_tls;
 pub mod fallback;
 pub mod generate;
-mod insecure_tls;
-pub use insecure_tls::{insecure_verifier, warn_insecure_tls};
+pub use client_tls::{TlsClientOptions, insecure_verifier, warn_insecure_tls};
 pub mod lazy_response;
 pub mod ntp;
 pub mod sing_mux;

@@ -227,6 +227,9 @@ pub struct ProxyProviderSpec {
     pub exclude_type: Option<String>,
     #[serde(default, rename = "override")]
     pub override_opts: Option<ProxyProviderOverrideSpec>,
+    /// 顶层 `global-client-fingerprint` 由配置解析写入：成员未写 `client-fingerprint` 时的默认值。
+    #[serde(alias = "global-client-fingerprint")]
+    pub global_client_fingerprint: Option<String>,
     #[serde(alias = "health-check")]
     pub health_check: HealthCheckSpec,
     #[serde(alias = "health-check-enable")]
@@ -348,6 +351,15 @@ impl ProxyProviderSpec {
             self.exclude_filter.as_deref(),
             self.exclude_type.as_deref(),
         )?;
+        if let Some(fingerprint) = self
+            .global_client_fingerprint
+            .as_deref()
+            .filter(|f| !f.trim().is_empty())
+        {
+            for member in &mut members {
+                crate::mihomo::default_client_fingerprint(member, fingerprint);
+            }
+        }
         if let Some(ov) = &self.override_opts {
             let ov = ov.compile()?;
             for member in &mut members {

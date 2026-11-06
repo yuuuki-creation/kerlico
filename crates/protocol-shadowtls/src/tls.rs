@@ -52,18 +52,25 @@ impl FinalizesClientHello for Signer {
         Ok(())
     }
 }
+/// v3 认证：在 `inner`（uTLS 指纹）给出的 ClientHello 形状上改写会话 ID 并签名。
 #[derive(Debug)]
 struct Customize {
     signer: Arc<Signer>,
+    inner: Option<Arc<dyn ClientHelloCustomizer>>,
 }
 impl ClientHelloCustomizer for Customize {
     fn build_client_hello_plan(
         &self,
-        _context: ClientHelloContext<'_>,
+        context: ClientHelloContext<'_>,
     ) -> std::result::Result<Option<ClientHelloPlan>, rustls::Error> {
+        let plan = match &self.inner {
+            Some(inner) => inner
+                .build_client_hello_plan(context)?
+                .unwrap_or_else(ClientHelloPlan::new),
+            None => ClientHelloPlan::new(),
+        };
         Ok(Some(
-            ClientHelloPlan::new()
-                .with_session_id(ClientHelloSessionId::try_from(vec![0; 32])?)
+            plan.with_session_id(ClientHelloSessionId::try_from(vec![0; 32])?)
                 .with_finalizer(self.signer.clone()),
         ))
     }
@@ -84,6 +91,29 @@ pub(crate) fn settings(value: &config::Tls, version: u8, strict: bool) -> Result
         (_, _, "auto") => vec![&rustls::version::TLS13, &rustls::version::TLS12],
         _ => return Err(config::invalid()),
     };
+    if value.alpn.len() > 16 || value.alpn.iter().any(|p| p.is_empty() || p.len() > 255) {
+        return Err(config::invalid());
+    }
+    let name = rustls::pki_types::ServerName::try_from(value.server_name.clone())
+        .map_err(|_| config::invalid())?;
+    if let Some(fingerprint) = value.fingerprint.as_deref() {
+        if version == 1 || value.version != "auto" {
+            return Err(kerlico_core::Error::Config(
+                "ShadowTLS TLS 指纹只支持 v2、v3 且 TLS 版本为 auto".into(),
+            ));
+        }
+        let mut config = kerlico_net::TlsClientOptions {
+            protocol: "ShadowTLS",
+            server_name: &value.server_name,
+            ca_pem: value.ca_pem.as_deref(),
+            insecure: value.insecure,
+            fingerprint: Some(fingerprint),
+            alpn: &value.alpn,
+        }
+        .client_config()?;
+        config.enable_early_data = false;
+        return Ok(Settings { config, name });
+    }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&versions)
@@ -116,12 +146,7 @@ pub(crate) fn settings(value: &config::Tls, version: u8, strict: bool) -> Result
     };
     config.resumption = rustls::client::Resumption::disabled();
     config.enable_early_data = false;
-    if value.alpn.len() > 16 || value.alpn.iter().any(|p| p.is_empty() || p.len() > 255) {
-        return Err(config::invalid());
-    }
     config.alpn_protocols = value.alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
-    let name = rustls::pki_types::ServerName::try_from(value.server_name.clone())
-        .map_err(|_| config::invalid())?;
     Ok(Settings { config, name })
 }
 pub(crate) struct Outcome {
@@ -149,11 +174,13 @@ pub(crate) async fn handshake(
 ) -> Result<Outcome> {
     let mut config = settings.config.clone();
     if version == 3 {
+        let inner = config.client_hello_customizer.take();
         config.client_hello_customizer = Some(Arc::new(Customize {
             signer: Arc::new(Signer {
                 key: key.clone(),
                 session: Mutex::new(None),
             }),
+            inner,
         }));
     }
     let mut session = ClientConnection::new(Arc::new(config), settings.name.clone())
@@ -241,6 +268,7 @@ pub(crate) fn signed_hello_for_replay_test(key: &[u8]) -> Vec<u8> {
             key: Arc::from(key),
             session: Mutex::new(None),
         }),
+        inner: None,
     }));
     let mut session = ClientConnection::new(
         Arc::new(config),
