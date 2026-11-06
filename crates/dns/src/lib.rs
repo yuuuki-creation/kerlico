@@ -973,6 +973,25 @@ impl DnsResolver {
         self.reverse_mapping.as_ref()?.lookup(ip)
     }
 
+    /// 清空全部上游解析器的应答缓存（`POST /cache/dns/flush`）；DoH 上游不缓存。
+    pub fn flush_cache(&self) {
+        let tagged = self
+            .tagged_upstreams
+            .values()
+            .filter_map(|backend| match backend {
+                UpstreamBackend::Hickory(resolver) => Some(&**resolver),
+                UpstreamBackend::DoH(_) | UpstreamBackend::FakeIp => None,
+            });
+        for resolver in self
+            .default_upstream
+            .iter()
+            .chain(self.proxy_resolver.iter())
+            .chain(tagged)
+        {
+            resolver.clear_cache();
+        }
+    }
+
     pub fn flush_fake_ip(&self) -> Result<()> {
         if let Some(pool) = &self.fakeip_pool {
             pool.flush()?;

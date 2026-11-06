@@ -1593,7 +1593,13 @@ impl Registry {
         let mut services = Vec::new();
         let mut profiles = BTreeMap::new();
         let mut detours = BTreeMap::new();
-        let _ = config.log.normalized_level(config.log_level.as_deref())?;
+        let log = plan::log_output(&config.log, config.log_level.as_deref())?;
+        let mode = plan::run_mode(
+            config.mode.as_deref().or(config
+                .control
+                .as_ref()
+                .and_then(|c| c.default_mode.as_deref())),
+        )?;
         let mut compiled_providers = BTreeMap::new();
         let mut provider_outbounds = Vec::new();
         for (prov_key, prov_spec) in &config.proxy_providers {
@@ -1607,6 +1613,8 @@ impl Registry {
             provider_outbounds.extend(specs);
         }
         let mut existing_tags: BTreeSet<String> =
+            config.outbounds.iter().map(|s| s.tag.clone()).collect();
+        let declared_outbounds: Vec<String> =
             config.outbounds.iter().map(|s| s.tag.clone()).collect();
         for spec in provider_outbounds {
             if existing_tags.insert(spec.tag.clone()) {
@@ -1640,7 +1648,8 @@ impl Registry {
                     .values()
                     .flatten()
                     .any(|r| r.outbound == builtin_tag);
-            if referenced
+            let always = matches!(builtin_tag, "DIRECT" | "REJECT");
+            if (referenced || always)
                 && !existing_tags.contains(builtin_tag)
                 && !group_tags.contains(builtin_tag)
                 && self.factories.contains_key(builtin_kind)
@@ -1699,6 +1708,28 @@ impl Registry {
             for bal in &route_block.balancers {
                 all_group_specs.push(bal.to_group_spec());
             }
+        }
+        if !existing_tags.contains(GLOBAL_GROUP)
+            && !all_group_specs.iter().any(|g| g.name == GLOBAL_GROUP)
+        {
+            let members = ["DIRECT", "REJECT"]
+                .into_iter()
+                .map(str::to_owned)
+                .filter(|tag| existing_tags.contains(tag) && !declared_outbounds.contains(tag))
+                .chain(declared_outbounds.iter().cloned())
+                .chain(config.proxy_groups.iter().map(|g| g.name.clone()));
+            let mut proxies = Vec::new();
+            for tag in members {
+                if !proxies.contains(&tag) {
+                    proxies.push(tag);
+                }
+            }
+            all_group_specs.push(
+                serde_json::from_value(serde_json::json!({
+                    "name": GLOBAL_GROUP, "type": "select", "proxies": proxies,
+                }))
+                .map_err(|_| Error::Config("GLOBAL 策略组无法生成".into()))?,
+            );
         }
         let mut compiled_groups = Vec::with_capacity(all_group_specs.len());
         for gspec in &all_group_specs {
@@ -2201,8 +2232,9 @@ impl Registry {
                 rule_providers: rule_providers_counts,
                 resources,
                 store_selected_path,
-                log: config.log,
+                mode,
             },
+            log,
             inbounds: config.inbounds,
             limits: config.limits,
             nodes,

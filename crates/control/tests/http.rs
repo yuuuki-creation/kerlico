@@ -458,8 +458,7 @@ async fn m4_clash_xray_ssm_endpoints_and_websocket_token_auth() {
         get(addr, "/dns/query?name=example.com&type=A", sec).await.0,
         200
     );
-    assert_eq!(get(addr, "/memory", sec).await.0, 200);
-    assert_eq!(get(addr, "/logs", sec).await.0, 200);
+    assert!(first_streamed_line(addr, "/memory?token=m4-secret").await["inuse"].is_u64());
     assert_eq!(get(addr, "/observatory/status", sec).await.0, 200);
     let (status, rtest) = request_json(
         addr,
@@ -638,7 +637,7 @@ async fn connections_lists_a_live_direct_flow_and_delete_closes_it() {
     assert!(table["downloadTotal"].as_u64().unwrap() >= 4);
     if cfg!(target_os = "linux") {
         assert!(table["memory"].as_u64().unwrap() > 0);
-        let (_, memory) = get(running.control, "/memory", None).await;
+        let memory = first_streamed_line(running.control, "/memory").await;
         assert!(memory["inuse"].as_u64().unwrap() > 0);
     }
 
@@ -763,5 +762,236 @@ async fn dns_query_answers_from_the_runtime_resolver_hosts() {
     assert_eq!(reply["Answer"][0]["data"], "fd00::5");
     let (status, _) = request_json(running.control, "GET", "/dns/query", None, None).await;
     assert_ne!(status, 200, "缺少 name 参数应被拒绝");
+    running.stop().await.unwrap();
+}
+
+/// 读取 HTTP 推送响应的第一行 JSON（分块编码：长度行、数据、`\r\n`）。
+async fn first_streamed_line(address: SocketAddr, path: &str) -> Value {
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: control\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "推送响应提前结束");
+            bytes.extend_from_slice(&buffer[..read]);
+            let text = String::from_utf8_lossy(&bytes);
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+                assert!(
+                    head.to_ascii_lowercase()
+                        .contains("transfer-encoding: chunked")
+                );
+                if let Some((_, chunk)) = body.split_once("\r\n")
+                    && let Some((line, _)) = chunk.split_once('\n')
+                {
+                    return serde_json::from_str(line).unwrap();
+                }
+            }
+        }
+    })
+    .await
+    .expect("推送响应应在期限内给出第一行")
+}
+
+type Socket = tokio_tungstenite::WebSocketStream<TcpStream>;
+
+async fn websocket(address: SocketAddr, path: &str) -> Socket {
+    let tcp = TcpStream::connect(address).await.unwrap();
+    let (socket, response) = tokio_tungstenite::client_async(format!("ws://{address}{path}"), tcp)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 101);
+    socket
+}
+
+/// 读取文本帧直到 `accept` 返回真，返回该帧的 JSON。
+async fn next_matching(socket: &mut Socket, accept: impl Fn(&Value) -> bool) -> Value {
+    use futures_util::StreamExt;
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                let value: Value = serde_json::from_str(&text).unwrap();
+                if accept(&value) {
+                    return value;
+                }
+            }
+        }
+    })
+    .await
+    .expect("期限内应收到匹配的推送")
+}
+
+#[tokio::test]
+async fn websocket_feeds_push_traffic_logs_memory_and_connection_snapshots() {
+    let (port, echo) = echo_server().await;
+    let mut config = forward_to(port);
+    config["route"] = json!({"rules":[{"port":[port],"outbound":"exit"}]});
+    let running = start(config).await;
+    let control = running.control;
+    let mut logs = websocket(control, "/logs?level=info").await;
+    let mut traffic = websocket(control, "/traffic").await;
+    let mut memory = websocket(control, "/memory").await;
+    let mut connections = websocket(control, "/connections?interval=200").await;
+
+    let mut client = echoing_client(running.forward).await;
+    let line = next_matching(&mut logs, |v| {
+        v["payload"]
+            .as_str()
+            .is_some_and(|p| p.starts_with("[TCP] 127.0.0.1:") && p.contains(&port.to_string()))
+    })
+    .await;
+    assert_eq!(line["type"], "info");
+    assert!(
+        line["payload"].as_str().unwrap().ends_with(&format!(
+            "--> 127.0.0.1:{port} match DstPort({port}) using exit"
+        )),
+        "{line}"
+    );
+    let snapshot = next_matching(&mut connections, |v| {
+        v["connections"].as_array().is_some_and(|c| c.len() == 1)
+    })
+    .await;
+    assert_eq!(snapshot["connections"][0]["chains"], json!(["exit"]));
+
+    let payload = vec![7u8; 64 * 1024];
+    client.write_all(&payload).await.unwrap();
+    let mut echoed = vec![0u8; payload.len()];
+    client.read_exact(&mut echoed).await.unwrap();
+    let rate = next_matching(&mut traffic, |v| v["up"].as_u64() > Some(0)).await;
+    assert!(rate["upTotal"].as_u64().unwrap() >= 64 * 1024);
+    assert!(rate["down"].is_u64() && rate["downTotal"].is_u64());
+    let used = next_matching(&mut memory, |v| v["inuse"].is_u64()).await;
+    assert_eq!(used["oslimit"], 0);
+
+    drop(client);
+    echo.abort();
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn websocket_requires_the_token_when_a_secret_is_set() {
+    let mut registry = Registry::default();
+    registry.register(DirectFactory).unwrap();
+    let config = json!({
+        "version": 2, "outbounds": [{"tag":"exit","type":"direct"}],
+        "inbounds": [{"tag":"entry","type":"tcp-forward","listen":"127.0.0.1:0",
+            "target":{"host":"127.0.0.1","port":9},"outbound":"exit"}]
+    });
+    let engine = Engine::bind(
+        registry
+            .prepare(parse(&serde_json::to_vec(&config).unwrap()).unwrap())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let spec = ControlSpec {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        secret: Some("ws-secret".into()),
+        ..Default::default()
+    };
+    let server = ControlServer::bind(&spec, &engine).await.unwrap();
+    let address = server.local_addr().unwrap();
+    let stop = CancellationToken::new();
+    let serving = tokio::spawn(server.serve(stop.clone()));
+
+    let tcp = TcpStream::connect(address).await.unwrap();
+    let refused = tokio_tungstenite::client_async(format!("ws://{address}/traffic"), tcp).await;
+    assert!(refused.is_err(), "缺少 token 的握手应被拒绝");
+    let mut socket = websocket(address, "/memory?token=ws-secret").await;
+    next_matching(&mut socket, |v| v["inuse"].is_u64()).await;
+
+    stop.cancel();
+    serving.await.unwrap();
+}
+
+#[tokio::test]
+async fn http_traffic_and_logs_stream_json_lines() {
+    let running = start(forward_to(9)).await;
+    let rate = first_streamed_line(running.control, "/traffic").await;
+    assert!(rate["up"].is_u64() && rate["downTotal"].is_u64());
+    let logs = tokio::spawn(first_streamed_line(running.control, "/logs?level=warning"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    kerlico_core::log::info("below the requested level");
+    kerlico_core::log::warning("streamed log line");
+    let line = logs.await.unwrap();
+    assert_eq!(
+        line,
+        json!({"type": "warning", "payload": "streamed log line"})
+    );
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn mode_patch_routes_through_global_and_direct() {
+    let (port, echo) = echo_server().await;
+    let mut config = json!({
+        "outbounds": [{"tag":"exit-a","type":"direct"},{"tag":"exit-b","type":"direct"}],
+        "proxy_groups": [{"name":"pick","type":"select","proxies":["exit-a","exit-b"]}],
+        "route": {"rules":[{"port":[port],"outbound":"pick"}]},
+    });
+    config["inbounds"] = forward_to(port)["inbounds"].clone();
+    config["inbounds"][0]["outbound"] = json!("exit-a");
+    let running = start(config).await;
+    let control = running.control;
+
+    let (_, proxies) = get(control, "/proxies", None).await;
+    let global = &proxies["proxies"]["GLOBAL"];
+    assert_eq!(global["all"], json!(["DIRECT", "exit-a", "exit-b", "pick"]));
+    assert_eq!(global["now"], "DIRECT");
+    assert_eq!(get(control, "/configs", None).await.1["mode"], "rule");
+
+    let client = echoing_client(running.forward).await;
+    let table = live_connections(control, 1).await;
+    assert_eq!(table["connections"][0]["chains"], json!(["exit-a", "pick"]));
+    drop(client);
+    live_connections(control, 0).await;
+
+    let patch = |body: Value| request_json(control, "PATCH", "/configs", None, Some(body));
+    assert_eq!(patch(json!({"mode": "global"})).await.0, 204);
+    assert_eq!(get(control, "/configs", None).await.1["mode"], "global");
+    let (status, _) = request_json(
+        control,
+        "PUT",
+        "/proxies/GLOBAL",
+        None,
+        Some(json!({"name":"exit-b"})),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let client = echoing_client(running.forward).await;
+    let table = live_connections(control, 1).await;
+    assert_eq!(
+        table["connections"][0]["chains"],
+        json!(["exit-b", "GLOBAL"])
+    );
+    drop(client);
+    live_connections(control, 0).await;
+
+    assert_eq!(patch(json!({"mode": "direct"})).await.0, 204);
+    let client = echoing_client(running.forward).await;
+    let table = live_connections(control, 1).await;
+    assert_eq!(table["connections"][0]["chains"], json!(["DIRECT"]));
+    drop(client);
+
+    assert_eq!(patch(json!({"mode": "script"})).await.0, 400);
+    assert_eq!(patch(json!({"log-level": "warning"})).await.0, 204);
+    assert_eq!(
+        get(control, "/configs", None).await.1["log-level"],
+        "warning"
+    );
+    assert_eq!(patch(json!({"log-level": "info"})).await.0, 204);
+    assert_eq!(
+        patch(json!({"mixed-port": 7890})).await.0,
+        501,
+        "没有重载循环时不能重建监听"
+    );
+
+    echo.abort();
     running.stop().await.unwrap();
 }

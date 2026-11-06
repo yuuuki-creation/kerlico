@@ -5,9 +5,12 @@ use crate::{
     telemetry::{FlowKind, FlowRecord, Telemetry},
 };
 use kerlico_config::{
-    CompiledProxyGroup, CompiledProxyProvider, LoadBalanceStrategy, LogSpec, ProxyGroupKind,
+    CompiledProxyGroup, CompiledProxyProvider, LoadBalanceStrategy, ProxyGroupKind, RunMode,
 };
-use kerlico_core::{Address, Destination, Error, OriginalTarget, OutId, Result, Source};
+use kerlico_core::{
+    Address, Destination, Error, OriginalTarget, OutId, Result, Source,
+    log::{rfc3339_ms as rfc3339, unix_ms as now_ms},
+};
 use kerlico_routing::{Network, RouteContext, RouteTable, RuleLabel};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -16,14 +19,12 @@ use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, RwLock,
+        atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 const MAX_DELAY_HISTORY: usize = 20;
-const MAX_LOG_ENTRIES: usize = 512;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DelaySample {
@@ -58,14 +59,6 @@ pub(crate) enum HealthOwner {
     Provider,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StructuredLogEntry {
-    pub time: String,
-    #[serde(rename = "type")]
-    pub level: String,
-    pub payload: String,
-}
-
 struct InnerControlPlane {
     groups: RwLock<BTreeMap<OutId, GroupRuntimeEntry>>,
     proxies: RwLock<BTreeMap<OutId, ProxyRuntimeInfo>>,
@@ -73,13 +66,10 @@ struct InnerControlPlane {
     rule_providers: RwLock<BTreeMap<String, usize>>,
     routes: RwLock<RouteTable>,
     store_selected_path: Option<PathBuf>,
-    log_spec: RwLock<LogSpec>,
-    logs: Mutex<VecDeque<StructuredLogEntry>>,
+    mode: AtomicU8,
     telemetry: Telemetry,
     dynamic_inbounds: RwLock<BTreeMap<String, BTreeMap<String, Value>>>,
     resolver: Arc<dyn Resolver>,
-    config_reloads: AtomicU64,
-    geo_updates: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -94,7 +84,7 @@ impl ControlPlane {
         rule_providers: BTreeMap<String, usize>,
         routes: RouteTable,
         store_selected_path: Option<String>,
-        log_spec: LogSpec,
+        mode: RunMode,
         resolver: Arc<dyn Resolver>,
         telemetry: Telemetry,
     ) -> Self {
@@ -162,13 +152,6 @@ impl ControlPlane {
             .map(|p| (p.name.clone(), p))
             .collect();
 
-        let mut logs = VecDeque::new();
-        logs.push_back(StructuredLogEntry {
-            time: now_iso_string(),
-            level: log_spec.level.clone().unwrap_or_else(|| "info".to_owned()),
-            payload: "kerlico control plane initialized".into(),
-        });
-
         Self(Arc::new(InnerControlPlane {
             groups: RwLock::new(groups),
             proxies: RwLock::new(proxies),
@@ -176,14 +159,23 @@ impl ControlPlane {
             rule_providers: RwLock::new(rule_providers),
             routes: RwLock::new(routes),
             store_selected_path: store_selected_path.map(PathBuf::from),
-            log_spec: RwLock::new(log_spec),
-            logs: Mutex::new(logs),
+            mode: AtomicU8::new(mode as u8),
             telemetry,
             dynamic_inbounds: RwLock::new(BTreeMap::new()),
             resolver,
-            config_reloads: AtomicU64::new(0),
-            geo_updates: AtomicU64::new(0),
         }))
+    }
+
+    pub fn mode(&self) -> RunMode {
+        match self.0.mode.load(Ordering::Relaxed) {
+            1 => RunMode::Global,
+            2 => RunMode::Direct,
+            _ => RunMode::Rule,
+        }
+    }
+
+    pub fn set_mode(&self, mode: RunMode) {
+        self.0.mode.store(mode as u8, Ordering::Relaxed);
     }
 
     pub fn is_group(&self, id: &OutId) -> bool {
@@ -926,44 +918,8 @@ impl ControlPlane {
         self.0.resolver.flush_fake_ip()
     }
 
-    pub fn push_log(&self, level: &str, payload: impl Into<String>) {
-        let mut logs = self.0.logs.lock().unwrap_or_else(|e| e.into_inner());
-        if logs.len() >= MAX_LOG_ENTRIES {
-            logs.pop_front();
-        }
-        logs.push_back(StructuredLogEntry {
-            time: now_iso_string(),
-            level: level.to_owned(),
-            payload: payload.into(),
-        });
-    }
-
-    pub fn logs_json(&self, level_filter: Option<&str>) -> Value {
-        let logs = self.0.logs.lock().unwrap_or_else(|e| e.into_inner());
-        let filtered: Vec<StructuredLogEntry> = logs
-            .iter()
-            .filter(|e| {
-                level_filter
-                    .filter(|f| !f.is_empty())
-                    .is_none_or(|f| e.level.eq_ignore_ascii_case(f))
-            })
-            .cloned()
-            .collect();
-        json!({ "logs": filtered })
-    }
-
-    pub fn record_config_reload(&self, log_level: Option<String>) {
-        self.0.config_reloads.fetch_add(1, Ordering::Relaxed);
-        if let Some(lvl) = log_level {
-            let mut spec = self.0.log_spec.write().unwrap_or_else(|e| e.into_inner());
-            spec.level = Some(lvl);
-        }
-        self.push_log("info", "configuration reloaded");
-    }
-
-    pub fn record_geo_update(&self) {
-        self.0.geo_updates.fetch_add(1, Ordering::Relaxed);
-        self.push_log("info", "geodata database updated");
+    pub fn flush_dns_cache(&self) {
+        self.0.resolver.flush_dns_cache();
     }
 
     pub fn handler_overview_json(&self, static_nodes: &[String]) -> Value {
@@ -1111,50 +1067,6 @@ pub fn resident_memory_bytes() -> u64 {
         .map_or(0, |kib| kib.saturating_mul(1024))
 }
 
-/// Unix 毫秒转 RFC 3339 UTC 文本（公历换算按 Howard Hinnant 的 civil_from_days）。
-fn rfc3339(ms: u64) -> String {
-    let secs = ms / 1000;
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60,
-        ms % 1000
-    )
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 fn now_iso_string() -> String {
     rfc3339(now_ms())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::rfc3339;
-
-    #[test]
-    fn rfc3339_formats_unix_milliseconds_in_utc() {
-        assert_eq!(rfc3339(0), "1970-01-01T00:00:00.000Z");
-        assert_eq!(rfc3339(1_700_000_000_123), "2023-11-14T22:13:20.123Z");
-        assert_eq!(rfc3339(951_782_400_000), "2000-02-29T00:00:00.000Z");
-    }
 }

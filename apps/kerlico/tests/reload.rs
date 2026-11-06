@@ -400,3 +400,51 @@ fn connections_follow_the_reloaded_engine() {
     assert!(matches!(client.read(&mut byte), Ok(0) | Err(_)));
     live_connections(control, 0);
 }
+
+#[test]
+fn patch_configs_moves_the_mixed_port_and_applies_mode_and_log_level() {
+    let directory = Directory::new();
+    let path = directory.0.join("config.json");
+    let log = directory.0.join("kerlico.log");
+    let echo = TcpListener::bind("127.0.0.1:0").unwrap();
+    let echo_port = echo.local_addr().unwrap().port();
+    let (forward, first, second, control) = (free_port(), free_port(), free_port(), free_port());
+    let mut value = config(forward, echo_port, control);
+    value["mixed-port"] = json!(first);
+    value["log"] = json!({"output": log, "timestamp": true});
+    fs::write(&path, value.to_string()).unwrap();
+    let _child = start(&path);
+    TcpStream::connect(("127.0.0.1", first)).unwrap();
+
+    let moved = json!({"mixed-port": second, "mode": "global"});
+    assert_eq!(http(control, "PATCH", "/configs", Some(&moved)).0, 204);
+    assert_refuses(first);
+    TcpStream::connect(("127.0.0.1", second)).unwrap();
+    let configs = http(control, "GET", "/configs", None).1;
+    assert_eq!(configs["mixed-port"], second);
+    assert_eq!(configs["mode"], "global");
+
+    let level = json!({"log-level": "debug"});
+    assert_eq!(http(control, "PATCH", "/configs", Some(&level)).0, 204);
+    assert_eq!(
+        http(control, "GET", "/configs", None).1["log-level"],
+        "debug"
+    );
+    assert_eq!(reloads(control)["succeeded"], 1, "只改级别不重建引擎");
+
+    assert_forwards(forward, &echo);
+    let expected = format!("--> 127.0.0.1:{echo_port} using GLOBAL");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = fs::read_to_string(&log).unwrap_or_default();
+        if let Some(line) = text.lines().find(|line| line.contains(&expected)) {
+            assert!(line.contains("Z INFO [TCP] 127.0.0.1:"), "{line}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "log file lacks the connection line: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

@@ -1,34 +1,43 @@
 //! 运行期 HTTP 控制接口：健康状态、用量、在线来源、访问记录、策略组、提供者、连接与动态用户管理。
+mod settings;
+mod stream;
+
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::{
     Method, Request, Response, StatusCode, body::Incoming, header, server::conn::http1,
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
 use kerlico_config::{ControlSpec, GeoFile, ResourceKey};
-use kerlico_core::{CancellationToken, Error, OutId, Result};
+use kerlico_core::{CancellationToken, Error, OutId, Result, log};
 use kerlico_egress::{
     ControlPlane, DEFAULT_TEST_URL, ProbeError, ProbeResult, ProbeSpec, Prober, Refreshed,
     Refresher, StoredFlow, Telemetry,
 };
 use kerlico_engine::{Engine, FailedNodes, Stats};
 use serde_json::{Value, json};
+pub use settings::ConfigPatch;
 use std::{
     collections::BTreeMap,
+    convert::Infallible,
     net::SocketAddr,
     path::PathBuf,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
+use stream::{Feed, LineBody};
 use tokio::{
     net::TcpListener,
     sync::{mpsc, oneshot},
     task::JoinSet,
 };
+use tokio_util::task::TaskTracker;
+
+type ReplyBody = BoxBody<Bytes, Infallible>;
 
 const MAX_CONNECTIONS: usize = 64;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -43,6 +52,8 @@ pub enum ReloadSource {
     Current,
     Path(PathBuf),
     Payload(String),
+    /// `PATCH /configs`：改写当前配置值；`restarts()` 为假时只记录、不重建引擎。
+    Patch(ConfigPatch),
 }
 
 /// 交给进程级重载循环的请求；`done` 在新配置生效或确认失败后回复。
@@ -92,12 +103,24 @@ impl Source {
 
 struct Shared {
     source: RwLock<Arc<Source>>,
+    /// 当前运行的规范化配置值，`GET /configs` 读取监听相关字段。
+    config: RwLock<Arc<Value>>,
     reloads: Option<mpsc::Sender<ReloadRequest>>,
+    /// 推送生产者与升级后的 WebSocket 会话；控制接口停止时取消并等待。
+    pushes: TaskTracker,
+    stop: CancellationToken,
 }
 
 impl Shared {
     fn current(&self) -> Arc<Source> {
         self.source
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn config(&self) -> Arc<Value> {
+        self.config
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
@@ -120,12 +143,14 @@ impl ControlHandle {
         let spec = spec.unwrap_or(&previous.spec);
         let source = Source::new(spec, engine, previous.reloads.clone());
         if spec.listen != previous.spec.listen {
-            source.control_plane.push_log(
-                "warning",
-                "control.listen 变化需重启进程才生效，控制接口仍在原地址服务",
-            );
+            log::warning("control.listen 变化需重启进程才生效，控制接口仍在原地址服务");
         }
         *self.0.source.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(source);
+    }
+
+    /// 记录当前运行的配置值，供 `GET /configs` 读取。
+    pub fn set_config(&self, config: Value) {
+        *self.0.config.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(config);
     }
 
     pub fn record_reload(&self, outcome: &Result<()>) {
@@ -133,7 +158,6 @@ impl ControlHandle {
         match outcome {
             Ok(()) => {
                 source.reloads.succeeded.fetch_add(1, Ordering::Relaxed);
-                source.control_plane.push_log("info", "配置重载完成");
             }
             Err(error) => {
                 source.reloads.failed.fetch_add(1, Ordering::Relaxed);
@@ -142,9 +166,7 @@ impl ControlHandle {
                     .last_error
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = Some(error.code());
-                source
-                    .control_plane
-                    .push_log("warning", format!("配置重载失败：{}", error.code()));
+                log::warning(format!("配置重载失败：{}", error.code()));
             }
         }
     }
@@ -156,21 +178,21 @@ impl ControlServer {
             listener: TcpListener::bind(spec.listen).await?,
             shared: Arc::new(Shared {
                 source: RwLock::new(Arc::new(Source::new(spec, engine, Arc::default()))),
+                config: RwLock::new(Arc::new(Value::Null)),
                 reloads: None,
+                pushes: TaskTracker::new(),
+                stop: CancellationToken::new(),
             }),
         })
     }
 
-    /// `PUT /configs` 与 `POST /restart` 把重载请求交给 `reloads` 的接收方；未设置时这两个端点返回 501。
-    pub fn with_reloads(self, reloads: mpsc::Sender<ReloadRequest>) -> Self {
-        let source = self.shared.current();
-        Self {
-            listener: self.listener,
-            shared: Arc::new(Shared {
-                source: RwLock::new(source),
-                reloads: Some(reloads),
-            }),
-        }
+    /// `PUT /configs`、`POST /restart` 与需要重建监听的 `PATCH /configs` 把重载请求交给 `reloads`
+    /// 的接收方；未设置时这些请求返回 501。须在取得 `handle()` 之前调用。
+    pub fn with_reloads(mut self, reloads: mpsc::Sender<ReloadRequest>) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .expect("取得句柄前设置重载通道")
+            .reloads = Some(reloads);
+        self
     }
 
     pub fn handle(&self) -> ControlHandle {
@@ -201,21 +223,34 @@ impl ControlServer {
                     }
                     let shared = self.shared.clone();
                     connections.spawn(async move {
+                        let streaming = Arc::new(AtomicBool::new(false));
+                        let flag = streaming.clone();
                         let service = service_fn(move |request| {
                             let shared = shared.clone();
-                            async move { Ok::<_, std::convert::Infallible>(respond(&shared, request).await) }
+                            let flag = flag.clone();
+                            async move { Ok::<_, Infallible>(respond(&shared, request, &flag).await) }
                         });
-                        let _ = tokio::time::timeout(
-                            CONNECTION_TIMEOUT,
-                            http1::Builder::new().serve_connection(TokioIo::new(stream), service),
-                        )
-                        .await;
+                        let connection = http1::Builder::new()
+                            .serve_connection(TokioIo::new(stream), service)
+                            .with_upgrades();
+                        tokio::pin!(connection);
+                        tokio::select! {
+                            _ = &mut connection => {}
+                            _ = tokio::time::sleep(CONNECTION_TIMEOUT) => {
+                                if streaming.load(Ordering::Relaxed) {
+                                    let _ = connection.await;
+                                }
+                            }
+                        }
                     });
                 }
             }
         }
+        self.shared.stop.cancel();
         connections.abort_all();
         while connections.join_next().await.is_some() {}
+        self.shared.pushes.close();
+        self.shared.pushes.wait().await;
     }
 }
 
@@ -523,28 +558,15 @@ async fn route(
                 "premium": true,
             }),
         ))),
-        (&Method::GET, _, "/configs") => Ok(Some(ApiReply::Json(
-            StatusCode::OK,
-            json!({
-                "mode": source.spec.default_mode.as_deref().unwrap_or("rule"),
-                "log-level": "info",
-                "ipv6": true,
-            }),
-        ))),
-        (&Method::PATCH, _, "/configs") => {
-            let log_level = body
-                .and_then(|b| b.get("log-level").or_else(|| b.get("level")))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            source.control_plane.record_config_reload(log_level);
-            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
-        }
         (&Method::POST, _, "/configs/geo" | "/upgrade/geo") => Ok(Some(update_geo(source).await)),
         (&Method::POST, _, "/cache/fakeip/flush") => {
             source.control_plane.flush_fake_ip()?;
             Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
         }
-        (&Method::POST, _, "/cache/dns/flush") => Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT))),
+        (&Method::POST, _, "/cache/dns/flush") => {
+            source.control_plane.flush_dns_cache();
+            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
+        }
         (&Method::GET, _, "/dns/query") => {
             let name = query_str(query, "name")
                 .filter(|name| !name.is_empty())
@@ -555,13 +577,6 @@ async fn route(
                 source.control_plane.dns_query(name, qtype).await,
             )))
         }
-        (&Method::GET, _, "/memory") => Ok(Some(ApiReply::Json(
-            StatusCode::OK,
-            json!({
-                "inuse": kerlico_egress::resident_memory_bytes(),
-                "oslimit": 0u64,
-            }),
-        ))),
         (&Method::GET, _, "/profile/tracing") => Ok(Some(ApiReply::Json(
             StatusCode::OK,
             json!({
@@ -586,13 +601,6 @@ async fn route(
         (&Method::GET, _, "/ui") => Ok(Some(serve_ui_asset(&source.spec, "index.html"))),
         (&Method::GET, _, p) if p.starts_with("/ui/") => {
             Ok(Some(serve_ui_asset(&source.spec, &p["/ui/".len()..])))
-        }
-        (&Method::GET, _, "/logs") => {
-            let level = query_str(query, "level");
-            Ok(Some(ApiReply::Json(
-                StatusCode::OK,
-                source.control_plane.logs_json(level),
-            )))
         }
         (&Method::GET, _, "/rules" | "/routing/rules") => Ok(Some(ApiReply::Json(
             StatusCode::OK,
@@ -970,7 +978,7 @@ async fn update_geo(source: &Source) -> ApiReply {
         }
     }
     if failures.is_empty() {
-        source.control_plane.record_geo_update();
+        log::info("Geo 数据库已更新");
         ApiReply::Empty(StatusCode::NO_CONTENT)
     } else {
         ApiReply::Json(
@@ -1002,7 +1010,54 @@ fn annotate_all(refresher: &Refresher, all: &mut Value, key: fn(String) -> Resou
     }
 }
 
-async fn respond(shared: &Shared, request: Request<Incoming>) -> Response<Full<Bytes>> {
+fn is_websocket(request: &Request<Incoming>) -> bool {
+    request.method() == Method::GET
+        && request
+            .headers()
+            .get(header::UPGRADE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+        && request.headers().contains_key(header::SEC_WEBSOCKET_KEY)
+}
+
+/// `mode` 与 `log-level` 就地生效；监听字段交给重载循环重建引擎。两种情况都把改动写进运行配置值。
+async fn patch_configs(shared: &Shared, source: &Source, body: Option<&Value>) -> ApiReply {
+    let patch = match body.map(ConfigPatch::parse) {
+        Some(Ok(patch)) => patch,
+        Some(Err(error)) => {
+            return ApiReply::Json(
+                StatusCode::BAD_REQUEST,
+                json!({"message": error.to_string()}),
+            );
+        }
+        None => return bad_request(),
+    };
+    for key in &patch.ignored {
+        log::warning(format!("PATCH /configs 不支持字段 {key}，已忽略"));
+    }
+    if !patch.restarts() {
+        if let Some(mode) = patch.mode {
+            source.control_plane.set_mode(mode);
+            log::info(format!("[API] 运行模式切换为 {}", mode.as_str()));
+        }
+        if let Some(level) = patch.log_level {
+            log::set_level(level);
+        }
+    }
+    if shared.reloads.is_none() && !patch.restarts() {
+        let mut config = (*shared.config()).clone();
+        patch.apply(&mut config);
+        *shared.config.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(config);
+        return ApiReply::Empty(StatusCode::NO_CONTENT);
+    }
+    send_reload(shared, ReloadSource::Patch(patch)).await
+}
+
+async fn respond(
+    shared: &Arc<Shared>,
+    mut request: Request<Incoming>,
+    streaming: &AtomicBool,
+) -> Response<ReplyBody> {
     let source = shared.current();
     let source = &*source;
     let origin_hdr = request
@@ -1044,21 +1099,22 @@ async fn respond(shared: &Shared, request: Request<Incoming>) -> Response<Full<B
         builder
     };
 
+    let full = |bytes: Bytes| Full::new(bytes).boxed();
     let reply_json = |status: StatusCode, body: Value| {
         apply_cors(Response::builder().status(status))
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Full::new(Bytes::from(body.to_string())))
+            .body(full(Bytes::from(body.to_string())))
             .expect("固定响应头合法")
     };
     let reply_empty = |status: StatusCode| {
         apply_cors(Response::builder().status(status))
-            .body(Full::new(Bytes::new()))
+            .body(full(Bytes::new()))
             .expect("固定响应头合法")
     };
     let reply_static = |status: StatusCode, mime: &'static str, bytes: Vec<u8>| {
         apply_cors(Response::builder().status(status))
             .header(header::CONTENT_TYPE, mime)
-            .body(Full::new(Bytes::from(bytes)))
+            .body(full(Bytes::from(bytes)))
             .expect("固定响应头合法")
     };
 
@@ -1077,6 +1133,41 @@ async fn respond(shared: &Shared, request: Request<Incoming>) -> Response<Full<B
         query,
     ) {
         return reply_json(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
+    }
+    let clean_path = uri.path().strip_prefix("/v1").unwrap_or(uri.path());
+    let websocket = is_websocket(&request);
+    if request.method() == Method::GET
+        && let Some(feed) = Feed::parse(clean_path, query, websocket)
+    {
+        if shared.pushes.len() >= MAX_CONNECTIONS {
+            return reply_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": "too many streams"}),
+            );
+        }
+        let lines = feed.spawn(&shared.pushes, shared.clone(), shared.stop.clone());
+        if !websocket {
+            streaming.store(true, Ordering::Relaxed);
+            return apply_cors(Response::builder().status(StatusCode::OK))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(LineBody(lines).boxed())
+                .expect("固定响应头合法");
+        }
+        let accept = request
+            .headers()
+            .get(header::SEC_WEBSOCKET_KEY)
+            .map(|key| tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes()))
+            .unwrap_or_default();
+        let upgrade = hyper::upgrade::on(&mut request);
+        shared
+            .pushes
+            .spawn(stream::serve_websocket(upgrade, lines, shared.stop.clone()));
+        return apply_cors(Response::builder().status(StatusCode::SWITCHING_PROTOCOLS))
+            .header(header::UPGRADE, "websocket")
+            .header(header::CONNECTION, "Upgrade")
+            .header(header::SEC_WEBSOCKET_ACCEPT, accept)
+            .body(full(Bytes::new()))
+            .expect("固定响应头合法");
     }
     let method = request.method().clone();
     if !matches!(
@@ -1109,10 +1200,16 @@ async fn respond(shared: &Shared, request: Request<Incoming>) -> Response<Full<B
     } else {
         None
     };
-    let clean_path = uri.path().strip_prefix("/v1").unwrap_or(uri.path());
     let reply = match (&method, clean_path) {
         (&Method::PUT, "/configs") | (&Method::POST, "/restart") => {
             Ok(Some(request_reload(shared, body_val.as_ref()).await))
+        }
+        (&Method::GET, "/configs") => Ok(Some(ApiReply::Json(
+            StatusCode::OK,
+            settings::configs_json(&shared.config(), source.control_plane.mode()),
+        ))),
+        (&Method::PATCH, "/configs") => {
+            Ok(Some(patch_configs(shared, source, body_val.as_ref()).await))
         }
         (&Method::PUT, p)
             if p.strip_prefix("/providers/proxies/")

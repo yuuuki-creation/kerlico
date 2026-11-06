@@ -29,6 +29,11 @@ impl ConfigInputs {
         let format = self.format.as_deref();
         match source {
             ReloadSource::Current => Ok(current.clone()),
+            ReloadSource::Patch(patch) => {
+                let mut value = current.clone();
+                patch.apply(&mut value);
+                Ok(value)
+            }
             ReloadSource::Startup => {
                 kerlico_config::load_and_merge_configs(&self.files, &self.dirs, format)
             }
@@ -119,6 +124,7 @@ struct Supervisor<'a> {
 
 impl Supervisor<'_> {
     async fn bind(&self, prepared: PreparedConfig) -> Result<Engine> {
+        kerlico_core::log::configure(prepared.log())?;
         let device = self.device.lease(&prepared).await?;
         let engine = Engine::bind_with_options(
             prepared,
@@ -142,6 +148,7 @@ impl Supervisor<'_> {
         let engine = self.bind(prepared).await?;
         if let Some(control) = &self.control {
             control.attach(spec.as_ref(), &engine);
+            control.set_config(value.clone());
         }
         Ok(launch(engine, value))
     }
@@ -257,7 +264,9 @@ pub async fn serve(
                 Language::ZhCn => println!("控制接口已监听 {address}"),
                 Language::En => println!("Control interface is listening on {address}"),
             }
-            supervisor.control = Some(server.handle());
+            let handle = server.handle();
+            handle.set_config(value.clone());
+            supervisor.control = Some(handle);
             Some(tokio::spawn(server.serve(stop_control.clone())))
         }
         None => {
@@ -292,6 +301,15 @@ pub async fn serve(
             Event::Shutdown(signal) => {
                 let stopped = current.take().expect("运行中必有当前引擎").stop().await;
                 break signal.and(stopped);
+            }
+            Event::Reload(ReloadSource::Patch(patch), done) if !patch.restarts() => {
+                patch.apply(&mut generation.value);
+                if let Some(control) = &supervisor.control {
+                    control.set_config(generation.value.clone());
+                }
+                if let Some(done) = done {
+                    let _ = done.send(Ok(()));
+                }
             }
             Event::Reload(source, done) => {
                 let (outcome, fatal) = match supervisor.reload(&mut current, &source).await {

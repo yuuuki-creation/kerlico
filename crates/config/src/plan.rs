@@ -1,10 +1,75 @@
-use crate::{ControlSpec, DeviceSpec, DnsSpec, ForwardSpec, HistorySpec, Limits};
+use crate::{ControlSpec, DeviceSpec, DnsSpec, ForwardSpec, HistorySpec, Limits, LogSpec};
 use kerlico_core::{
-    BoxFuture, Capabilities, CredentialIssuer, FamilyMode, InboundProtocol, NodeId, OutId,
+    BoxFuture, Capabilities, CredentialIssuer, Error, FamilyMode, InboundProtocol, NodeId, OutId,
     Outbound, Result, ServiceContext, TargetPolicy,
+    log::{LogLevel, LogOutput, LogTarget},
 };
 use kerlico_routing::RouteTable;
 use std::{net::SocketAddr, sync::Arc};
+
+/// 未配置同名策略组或出站时自动生成的全局选择组，成员顺序同 Mihomo：DIRECT、REJECT、出站、策略组。
+pub const GLOBAL_GROUP: &str = "GLOBAL";
+pub const DIRECT_OUTBOUND: &str = "DIRECT";
+
+/// Mihomo 顶层 `mode`：`rule` 按规则分流，`global` 全部交给 `GLOBAL` 组，`direct` 全部直连。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RunMode {
+    #[default]
+    Rule,
+    Global,
+    Direct,
+}
+
+impl RunMode {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "rule" => Some(Self::Rule),
+            "global" => Some(Self::Global),
+            "direct" => Some(Self::Direct),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rule => "rule",
+            Self::Global => "global",
+            Self::Direct => "direct",
+        }
+    }
+}
+
+pub(crate) fn run_mode(raw: Option<&str>) -> Result<RunMode> {
+    raw.map_or(Ok(RunMode::Rule), |raw| {
+        RunMode::parse(raw).ok_or_else(|| Error::Config(format!("mode 不合法：{raw}")))
+    })
+}
+
+/// `log.level` 优先于顶层 `log-level`；`disabled` 折算为 `silent`；`output`（或 Xray `error`）为
+/// `stdout`、`stderr` 或文件路径。
+pub(crate) fn log_output(spec: &LogSpec, top_level: Option<&str>) -> Result<LogOutput> {
+    let level = LogLevel::parse(&spec.normalized_level(top_level)?)
+        .ok_or_else(|| Error::Config("日志级别不合法".into()))?;
+    let target = match spec
+        .output
+        .as_deref()
+        .or(spec.error.as_deref())
+        .map(str::trim)
+    {
+        None | Some("" | "stdout") => LogTarget::Stdout,
+        Some("stderr") => LogTarget::Stderr,
+        Some(path) => LogTarget::File(path.into()),
+    };
+    Ok(LogOutput {
+        level: if spec.disabled {
+            LogLevel::Silent
+        } else {
+            level
+        },
+        target,
+        timestamp: spec.timestamp,
+    })
+}
 
 type ServiceStarter =
     Box<dyn FnOnce(ServiceContext) -> BoxFuture<'static, Result<Arc<dyn Outbound>>> + Send>;
@@ -91,7 +156,7 @@ pub struct EgressPlan {
     pub(crate) rule_providers: std::collections::BTreeMap<String, usize>,
     pub(crate) resources: Vec<crate::ResourceSpec>,
     pub(crate) store_selected_path: Option<String>,
-    pub(crate) log: crate::LogSpec,
+    pub(crate) mode: RunMode,
 }
 impl EgressPlan {
     pub fn dns(&self) -> Option<&DnsSpec> {
@@ -113,8 +178,8 @@ impl EgressPlan {
     pub fn store_selected_path(&self) -> Option<&str> {
         self.store_selected_path.as_deref()
     }
-    pub fn log(&self) -> &crate::LogSpec {
-        &self.log
+    pub fn mode(&self) -> RunMode {
+        self.mode
     }
     pub fn into_parts(
         self,
@@ -144,6 +209,7 @@ pub struct PreparedConfig {
     pub(crate) limits: Limits,
     pub(crate) nodes: Vec<PreparedNode>,
     pub(crate) lan_filter: kerlico_core::IpFilter,
+    pub(crate) log: LogOutput,
 }
 pub struct EnginePlanParts {
     pub history: Option<HistorySpec>,
@@ -166,6 +232,9 @@ impl PreparedConfig {
     }
     pub fn control(&self) -> Option<&ControlSpec> {
         self.control.as_ref()
+    }
+    pub fn log(&self) -> &LogOutput {
+        &self.log
     }
     pub fn into_parts(self) -> EnginePlanParts {
         EnginePlanParts {

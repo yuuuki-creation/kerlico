@@ -1,12 +1,15 @@
 //! 一个 Engine 的唯一命名出站所有者、可信目标调度与业务计量边界。
 
-use kerlico_config::{EgressPlan, IngressPlan, Network, RouteTable};
+use kerlico_config::{
+    DIRECT_OUTBOUND, EgressPlan, GLOBAL_GROUP, IngressPlan, Network, RouteTable, RunMode,
+};
 use kerlico_core::{
     Address, AddressedDatagram, BoxFuture, Capabilities, ConnectContext,
     DatagramAssociationReceiver, DatagramAssociationSender, DatagramReceiver, Destination, Error,
     FamilyMode, FixedUdpFlow, FlowOpen, IngressBinding, NodeId, OpenedTcp, OriginalTarget, OutId,
     Outbound, Result, RuntimeOptions, ServiceContext, ServiceRetirement, SessionDispatcher,
     SessionIdentity, ShutdownReport, TargetPolicy, TcpConnectInfo, TcpFlow, UdpAssociation,
+    log::{self, LogLevel},
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -26,9 +29,7 @@ mod probe;
 pub mod process;
 mod resource;
 mod telemetry;
-pub use group::{
-    ControlPlane, DelaySample, ProxyRuntimeInfo, StructuredLogEntry, resident_memory_bytes,
-};
+pub use group::{ControlPlane, DelaySample, ProxyRuntimeInfo, resident_memory_bytes};
 pub use history::{
     BandwidthSample, HistoryQuery, HistoryReader, HistoryScope, HistoryWriter, OnlineSource,
     StoredFlow, StoredUsage,
@@ -61,6 +62,8 @@ pub trait Resolver: Send + Sync {
     fn flush_fake_ip(&self) -> Result<()> {
         Ok(())
     }
+    /// 清空解析应答缓存；不带缓存的解析器无事可做。
+    fn flush_dns_cache(&self) {}
 }
 struct SystemResolver;
 impl Resolver for SystemResolver {
@@ -92,6 +95,9 @@ impl Resolver for kerlico_dns::DnsResolver {
     }
     fn flush_fake_ip(&self) -> Result<()> {
         kerlico_dns::DnsResolver::flush_fake_ip(self)
+    }
+    fn flush_dns_cache(&self) {
+        kerlico_dns::DnsResolver::flush_cache(self);
     }
 }
 
@@ -200,7 +206,7 @@ impl EgressRuntime {
         let compiled_providers = plan.providers().to_vec();
         let rule_providers = plan.rule_providers().clone();
         let store_selected_path = plan.store_selected_path().map(str::to_owned);
-        let log_spec = plan.log().clone();
+        let mode = plan.mode();
         let (plans, bindings, routes_table, max_flows, detour_table) = plan.into_parts();
         let RuntimeOptions { device, language } = options;
         let run = NEXT_RUN
@@ -291,7 +297,7 @@ impl EgressRuntime {
             rule_providers,
             routes_table.clone(),
             store_selected_path,
-            log_spec,
+            mode,
             resolver.clone(),
             telemetry.clone(),
         );
@@ -309,9 +315,7 @@ impl EgressRuntime {
             _device: device,
         });
         for reason in rejected_jobs {
-            dispatcher
-                .control_plane
-                .push_log("warning", format!("健康检查未启用：{reason}"));
+            kerlico_core::log::warning(format!("健康检查未启用：{reason}"));
         }
         let mut ingresses = BTreeMap::new();
         for binding in bindings {
@@ -338,9 +342,7 @@ impl EgressRuntime {
             let task =
                 probe::run_health_job(Arc::downgrade(&dispatcher), job, dispatcher.health.cancel());
             if let Err(error) = dispatcher.health.spawn(task) {
-                dispatcher
-                    .control_plane
-                    .push_log("warning", format!("健康检查任务启动失败：{error}"));
+                kerlico_core::log::warning(format!("健康检查任务启动失败：{error}"));
             }
         }
         Ok(Self {
@@ -463,6 +465,52 @@ impl EgressRuntime {
         report
     }
 }
+fn network_label(network: Network) -> &'static str {
+    match network {
+        Network::Tcp => "TCP",
+        Network::Udp => "UDP",
+    }
+}
+
+fn source_text(source: Option<std::net::SocketAddr>) -> String {
+    source.map_or_else(|| "unknown".to_owned(), |address| address.to_string())
+}
+
+/// 同 Mihomo 隧道的连接日志：`[TCP] 源 --> 目标 match 规则(载荷) using 组[出站]`。
+fn connection_log(
+    mode: RunMode,
+    source: Option<std::net::SocketAddr>,
+    request: Option<(&OriginalTarget, Network)>,
+    outbound: &OutId,
+    route: &FlowRoute,
+) -> String {
+    let (network, target) = request.map_or(("UDP", String::new()), |(original, network)| {
+        (network_label(network), original.target().to_string())
+    });
+    let chain = match route.groups.first() {
+        Some(group) => format!("{group}[{outbound}]"),
+        None => outbound.to_string(),
+    };
+    let source = source_text(source);
+    match (mode, &route.rule) {
+        (RunMode::Global, _) => format!("[{network}] {source} --> {target} using GLOBAL"),
+        (RunMode::Direct, _) => format!("[{network}] {source} --> {target} using DIRECT"),
+        (RunMode::Rule, Some(rule)) if !rule.payload.is_empty() => format!(
+            "[{network}] {source} --> {target} match {}({}) using {chain}",
+            rule.kind, rule.payload
+        ),
+        (RunMode::Rule, Some(rule)) if rule.kind != "Match" => {
+            format!(
+                "[{network}] {source} --> {target} match {} using {chain}",
+                rule.kind
+            )
+        }
+        (RunMode::Rule, _) => {
+            format!("[{network}] {source} --> {target} doesn't match any rule using {chain}")
+        }
+    }
+}
+
 fn startup(primary: Error, cleanup: ShutdownReport) -> Error {
     Error::Startup {
         primary: Box::new(primary),
@@ -538,6 +586,20 @@ impl Dispatcher {
                 .and_then(|(_, p)| (!p.is_empty()).then_some(p.as_str())),
         };
         let decision = self.routes.evaluate(&ctx);
+        let decision = match self.control_plane.mode() {
+            RunMode::Rule => decision,
+            mode => kerlico_routing::RouteDecision {
+                outbound: OutId::parse(if mode == RunMode::Global {
+                    GLOBAL_GROUP
+                } else {
+                    DIRECT_OUTBOUND
+                })
+                .ok(),
+                hijack_dns: decision.hijack_dns,
+                sniff: decision.sniff,
+                ..Default::default()
+            },
+        };
         let selected = if let Some(btag) = &decision.balancer_tag
             && let Ok(bid) = OutId::parse(btag)
         {
@@ -647,6 +709,15 @@ impl Dispatcher {
             self.route(identity, request)
                 .and_then(|(service, mode, decision, route)| {
                     capable(service)?;
+                    let announce = log::enabled(LogLevel::Info).then(|| {
+                        connection_log(
+                            self.control_plane.mode(),
+                            identity.observed_source(),
+                            request,
+                            &service.id,
+                            &route,
+                        )
+                    });
                     let ledger = self.telemetry.open(
                         identity,
                         &service.id,
@@ -655,11 +726,22 @@ impl Dispatcher {
                         route,
                         context.cancel.child_token(),
                     )?;
+                    if let Some(line) = announce {
+                        log::info(line);
+                    }
                     Ok((service, mode, ledger, decision))
                 });
         if let Err(error) = &admitted
             && let Some(outbound) = self.selected_outbound(identity, request)
         {
+            if log::enabled(LogLevel::Warning) {
+                log::warning(format!(
+                    "[{}] dial {outbound} {} --> {} error: {error}",
+                    request.map_or("UDP", |(_, network)| network_label(network)),
+                    source_text(identity.observed_source()),
+                    request.map_or_else(String::new, |(target, _)| target.target().to_string()),
+                ));
+            }
             self.telemetry.open_failed(
                 identity.source(),
                 &outbound,
@@ -1346,7 +1428,7 @@ pub mod testing {
                 BTreeMap::new(),
                 RouteTable::default(),
                 None,
-                kerlico_config::LogSpec::default(),
+                kerlico_config::RunMode::Rule,
                 resolver.clone(),
                 telemetry.clone(),
             ),

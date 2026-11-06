@@ -4,6 +4,7 @@ use std::{fmt, future::Future, io, net::IpAddr, pin::Pin, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
 /// 可克隆的协作取消信号；克隆共享取消状态，子令牌用于限制取消传播范围。
 pub use tokio_util::sync::CancellationToken;
+pub mod log;
 mod relay;
 pub use relay::{as_splice_io, relay_streams, relay_tcp, relay_tcp_io, stream_supports_splice};
 mod flow;

@@ -1,4 +1,4 @@
-use kerlico_config::{CompiledProxyGroup, LoadBalanceStrategy, LogSpec, ProxyGroupKind};
+use kerlico_config::{CompiledProxyGroup, LoadBalanceStrategy, ProxyGroupKind, RunMode};
 use kerlico_core::{BoxFuture, OutId, Result};
 use kerlico_dns::FakeIpPool;
 use kerlico_egress::{ControlPlane, Resolver, Telemetry};
@@ -49,7 +49,7 @@ fn control_plane(path: &Path) -> ControlPlane {
         BTreeMap::new(),
         RouteTable::default(),
         Some(path.to_string_lossy().into_owned()),
-        LogSpec::default(),
+        RunMode::Rule,
         Arc::new(NoResolver),
         Telemetry::new(16),
     )

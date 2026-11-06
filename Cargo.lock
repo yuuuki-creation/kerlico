@@ -4299,6 +4299,7 @@ name = "kerlico-control"
 version = "1.13.0"
 dependencies = [
  "bytes",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -4309,6 +4310,8 @@ dependencies = [
  "kerlico-net",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
 ]
 
 [[package]]

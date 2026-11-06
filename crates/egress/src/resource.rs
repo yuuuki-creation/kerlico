@@ -11,7 +11,7 @@ use crate::{
 use kerlico_config::{Accepted, OutboundFactory, ResourceKey, ResourceKind, ResourceSpec};
 use kerlico_core::{
     BoxStream, CancellationToken, ConnectContext, Error, OutId, Outbound, Result, RuntimeOptions,
-    ServiceContext, TargetPolicy,
+    ServiceContext, TargetPolicy, log,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -297,12 +297,6 @@ impl Hub {
             .cloned()
     }
 
-    fn log(&self, level: &str, message: String) {
-        if let Some(dispatcher) = self.dispatcher.upgrade() {
-            dispatcher.control_plane.push_log(level, message);
-        }
-    }
-
     fn notify_provider_change(&self) {
         self.provider_changes.send_modify(|count| *count += 1);
     }
@@ -420,12 +414,9 @@ impl EgressRuntime {
                     if required && !cached {
                         fatal.get_or_insert(Error::Config(format!("{key} 没有可用内容：{error}")));
                     } else if cached {
-                        hub.log(
-                            "warning",
-                            format!("{key} 刷新失败，继续使用旧缓存：{error}"),
-                        );
+                        log::warning(format!("{key} 刷新失败，继续使用旧缓存：{error}"));
                     } else {
-                        hub.log("error", format!("{key} 没有可用内容：{error}"));
+                        log::error(format!("{key} 没有可用内容：{error}"));
                     }
                 }
             }
@@ -456,7 +447,7 @@ impl EgressRuntime {
                 self.dispatcher.health.cancel(),
             );
             if let Err(error) = self.dispatcher.health.spawn(task) {
-                hub.log("warning", format!("{key} 周期刷新任务启动失败：{error}"));
+                log::warning(format!("{key} 周期刷新任务启动失败：{error}"));
             }
         }
         Ok(Refresher(hub))
@@ -482,14 +473,11 @@ async fn run_refresh_job(
                 if matches!(entry.spec.kind, ResourceKind::ProxyProvider(_)) {
                     hub.notify_provider_change();
                 }
-                hub.log("info", format!("{key} 已更新"));
+                log::info(format!("{key} 已更新"));
             }
             Ok(Refreshed::Unchanged) => {}
             Err(error) => {
-                hub.log(
-                    "warning",
-                    format!("{key} 刷新失败，继续使用当前内容：{error}"),
-                );
+                log::warning(format!("{key} 刷新失败，继续使用当前内容：{error}"));
             }
         }
         wait = interval;
