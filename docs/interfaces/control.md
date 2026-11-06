@@ -81,7 +81,7 @@
 
 ### 规则表
 
-`GET /rules` 每行是 `{"index", "type", "payload", "proxy", "size": -1, "extra": {"disabled": false}}`。`type` 使用 Mihomo 规则类型名（`Domain`、`DomainSuffix`、`DomainKeyword`、`IPCIDR`、`GeoIP`、`DstPort`、`SrcIPCIDR`、`Network`、`RuleSet`、`Process` 等）。同一条规则有多个条件字段时显示为 `AND`，载荷为 `(类型,值),(类型,值)`；逻辑规则显示 `AND`/`OR`，`invert` 显示 `NOT`。`proxy` 为路由目标；`reject` 动作为 `REJECT`，其他非路由动作为动作名。只列顶层规则，`sub-rule` 行的 `proxy` 是子规则名。
+`GET /rules` 每行是 `{"index", "type", "payload", "proxy", "size": -1, "extra": {"disabled": false, "hitCount", "hitAt", "missCount", "missAt"}}`，与 Mihomo v1.19.33 形状一致。每条流决定出站时，参与求值的顶层规则各计一次命中或未命中，`Match` 行在落到最终出站时计命中；`sub-rule` 行只在子规则命中时算命中。`hitAt`/`missAt` 是 RFC 3339 UTC 时间，从未发生时为 `1970-01-01T00:00:00.000Z`。DNS 上游选路、`/v1/route/test` 等查询不计数，`global`/`direct` 模式不计数，重载配置后归零。`type` 使用 Mihomo 规则类型名（`Domain`、`DomainSuffix`、`DomainKeyword`、`IPCIDR`、`GeoIP`、`DstPort`、`SrcIPCIDR`、`Network`、`RuleSet`、`Process` 等）。同一条规则有多个条件字段时显示为 `AND`，载荷为 `(类型,值),(类型,值)`；逻辑规则显示 `AND`/`OR`，`invert` 显示 `NOT`。`proxy` 为路由目标；`reject` 动作为 `REJECT`，其他非路由动作为动作名。只列顶层规则，`sub-rule` 行的 `proxy` 是子规则名。
 
 ### DNS 查询
 

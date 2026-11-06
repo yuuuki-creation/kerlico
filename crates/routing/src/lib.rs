@@ -31,7 +31,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -503,11 +506,52 @@ impl RuleLabel {
     }
 }
 
-/// 顶层规则表的一行：展示标签与动作目标。
+/// 顶层规则表的一行：展示标签、动作目标与命中统计。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuleEntry {
     pub label: RuleLabel,
     pub proxy: String,
+    pub stats: RuleStats,
+}
+
+/// Mihomo `RuleWrapper` 的统计：顶层规则每次参与路由求值时计一次命中或未命中，
+/// 时间为 Unix 毫秒，从未发生时为 0。路由表重新编译（重载配置）后归零。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RuleStats {
+    pub hit_count: u64,
+    pub hit_at_ms: u64,
+    pub miss_count: u64,
+    pub miss_at_ms: u64,
+}
+
+#[derive(Debug, Default)]
+struct RuleCounter {
+    hit_count: AtomicU64,
+    hit_at_ms: AtomicU64,
+    miss_count: AtomicU64,
+    miss_at_ms: AtomicU64,
+}
+
+impl RuleCounter {
+    fn record(&self, hit: bool) {
+        let now = kerlico_core::log::unix_ms();
+        if hit {
+            self.hit_count.fetch_add(1, Ordering::Relaxed);
+            self.hit_at_ms.store(now, Ordering::Relaxed);
+        } else {
+            self.miss_count.fetch_add(1, Ordering::Relaxed);
+            self.miss_at_ms.store(now, Ordering::Relaxed);
+        }
+    }
+
+    fn snapshot(&self) -> RuleStats {
+        RuleStats {
+            hit_count: self.hit_count.load(Ordering::Relaxed),
+            hit_at_ms: self.hit_at_ms.load(Ordering::Relaxed),
+            miss_count: self.miss_count.load(Ordering::Relaxed),
+            miss_at_ms: self.miss_at_ms.load(Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1252,10 +1296,21 @@ impl RuleSetSlot {
     }
 }
 
+/// 一次求值在规则树中的位置：嵌套深度、所属顶层规则序号、解析模式与是否计入统计。
+#[derive(Clone, Copy)]
+struct Scope {
+    depth: usize,
+    top: usize,
+    mode: Resolution,
+    record: bool,
+}
+
 /// 按配置顺序匹配，非终结动作（`sniff`、`resolve`、`route-options`）累积后继续，首条终结动作生效。
 #[derive(Clone, Debug, Default)]
 pub struct RouteTable {
     rules: Vec<Rule>,
+    /// 每条顶层规则一个计数器，末尾一个给最终出站（`Match` 行）；克隆共享。
+    counters: Arc<[RuleCounter]>,
     sets: HashMap<String, RuleSetSlot>,
     geo: GeoSlot,
     sub_rules: HashMap<String, Vec<Rule>>,
@@ -1271,8 +1326,10 @@ impl RouteTable {
         specs: &[RuleSpec],
         sets: HashMap<String, CompiledRuleSet>,
     ) -> Result<Self> {
+        let rules: Vec<Rule> = specs.iter().map(Rule::compile).collect::<Result<_>>()?;
         Ok(Self {
-            rules: specs.iter().map(Rule::compile).collect::<Result<_>>()?,
+            counters: (0..=rules.len()).map(|_| RuleCounter::default()).collect(),
+            rules,
             sets: sets
                 .into_iter()
                 .map(|(tag, set)| (tag, RuleSetSlot::new(set)))
@@ -1456,6 +1513,12 @@ impl RouteTable {
         self.evaluate_with(ctx, Resolution::Never)
     }
 
+    /// 同 [`Self::evaluate_with`]，并把本次求值计入顶层规则的命中统计；
+    /// 每条流只在决定出站时调用一次。
+    pub fn evaluate_recorded(&self, ctx: &RouteContext<'_>, mode: Resolution) -> RouteDecision {
+        self.evaluate_inner(ctx, mode, true)
+    }
+
     /// 是否有规则可能要求解析域名目标（Mihomo IP 规则或 `resolve` 动作）。
     pub fn has_resolving_rules(&self) -> bool {
         self.rules
@@ -1467,10 +1530,24 @@ impl RouteTable {
     /// `Resolution::Pending` 下遇到需要 IP 的规则即停止并在 `resolve_at` 给出顶层规则序号；
     /// 调用方解析后以 `Resolution::From(序号)` 重算，解析结果只对该序号起的规则可见。
     pub fn evaluate_with(&self, ctx: &RouteContext<'_>, mode: Resolution) -> RouteDecision {
+        self.evaluate_inner(ctx, mode, false)
+    }
+
+    fn evaluate_inner(
+        &self,
+        ctx: &RouteContext<'_>,
+        mode: Resolution,
+        record: bool,
+    ) -> RouteDecision {
         let mut decision = RouteDecision::default();
         let geo = self.geo.load();
-        let matched_terminal =
-            self.evaluate_slice(&self.rules, ctx, &geo, &mut decision, 0, 0, mode);
+        let scope = Scope {
+            depth: 0,
+            top: 0,
+            mode,
+            record,
+        };
+        let matched_terminal = self.evaluate_slice(&self.rules, ctx, &geo, &mut decision, scope);
         if decision.resolve_at.is_some() {
             return decision;
         }
@@ -1478,22 +1555,28 @@ impl RouteTable {
             decision.outbound = self.final_outbound.clone();
             if decision.outbound.is_some() {
                 decision.rule = Some(RuleLabel::matched_final());
+                if record && let Some(counter) = self.counters.get(self.rules.len()) {
+                    counter.record(true);
+                }
             }
         }
         decision
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn evaluate_slice(
         &self,
         rules: &[Rule],
         ctx: &RouteContext<'_>,
         geo: &GeoData,
         decision: &mut RouteDecision,
-        depth: usize,
-        top: usize,
-        mode: Resolution,
+        scope: Scope,
     ) -> bool {
+        let Scope {
+            depth,
+            top,
+            mode,
+            record,
+        } = scope;
         if depth > 8 {
             return false;
         }
@@ -1511,8 +1594,18 @@ impl RouteTable {
                 Resolution::From(from) if top < from => &hidden,
                 _ => ctx,
             };
+            let counter = self.counters.get(top).filter(|_| record && depth == 0);
             if !rule.matches_ctx(visible, &self.sets, geo) {
+                if let Some(counter) = counter {
+                    counter.record(false);
+                }
                 continue;
+            }
+            // SUB-RULE 同 Mihomo，只在子规则命中时算命中，见下方分支。
+            if let Some(counter) = counter
+                && !matches!(rule.action, RouteAction::SubRule { .. })
+            {
+                counter.record(true);
             }
             match &rule.action {
                 RouteAction::Sniff { sniffer, timeout } => {
@@ -1541,9 +1634,20 @@ impl RouteTable {
                     }
                 }
                 RouteAction::SubRule { name } => {
-                    if let Some(sub) = self.sub_rules.get(name)
-                        && self.evaluate_slice(sub, visible, geo, decision, depth + 1, top, mode)
-                    {
+                    let inner = Scope {
+                        depth: depth + 1,
+                        top,
+                        mode,
+                        record,
+                    };
+                    let hit = self
+                        .sub_rules
+                        .get(name)
+                        .is_some_and(|sub| self.evaluate_slice(sub, visible, geo, decision, inner));
+                    if let Some(counter) = counter {
+                        counter.record(hit);
+                    }
+                    if hit {
                         return true;
                     }
                 }
@@ -1584,7 +1688,9 @@ impl RouteTable {
         let mut out: Vec<RuleEntry> = self
             .rules
             .iter()
-            .map(|rule| RuleEntry {
+            .zip(self.counters.iter())
+            .map(|(rule, counter)| RuleEntry {
+                stats: counter.snapshot(),
                 label: rule.label.clone(),
                 proxy: match &rule.action {
                     RouteAction::Route {
@@ -1609,6 +1715,11 @@ impl RouteTable {
             out.push(RuleEntry {
                 label: RuleLabel::matched_final(),
                 proxy: final_outbound.to_string(),
+                stats: self
+                    .counters
+                    .get(self.rules.len())
+                    .map(RuleCounter::snapshot)
+                    .unwrap_or_default(),
             });
         }
         out
@@ -1870,6 +1981,53 @@ mod tests {
             "没有 GeoIP 数据时 private 不命中"
         );
         assert_eq!(pick(&table, "100.64.0.1", 443, Network::Tcp, &source), None);
+    }
+
+    #[test]
+    fn recorded_evaluation_counts_top_level_rules_like_mihomo() {
+        let mut subs = std::collections::BTreeMap::new();
+        subs.insert(
+            "sub".to_owned(),
+            vec![
+                parse_clash_rule_line("DST-PORT,80,inner")
+                    .unwrap()
+                    .0
+                    .unwrap(),
+            ],
+        );
+        let table = RouteTable::compile(&[
+            parse_clash_rule_line("SUB-RULE,(NETWORK,tcp),sub")
+                .unwrap()
+                .0
+                .unwrap(),
+            parse_clash_rule_line("DOMAIN,a.test,a").unwrap().0.unwrap(),
+        ])
+        .unwrap()
+        .with_sub_rules(&subs)
+        .unwrap()
+        .with_final_outbound(Some(OutId::parse("last").unwrap()));
+        let source = local("n");
+        let run = |host: &str, port: u16| {
+            let target = Destination::new(host, port).unwrap();
+            let ctx = RouteContext::simple(&target, Network::Tcp, &source);
+            table.evaluate_recorded(&ctx, Resolution::Never)
+        };
+        run("a.test", 80);
+        run("a.test", 443);
+        run("b.test", 443);
+        let target = Destination::new("a.test", 443).unwrap();
+        table.evaluate(&RouteContext::simple(&target, Network::Tcp, &source));
+        let counts: Vec<(u64, u64)> = table
+            .rules()
+            .iter()
+            .map(|row| (row.stats.hit_count, row.stats.miss_count))
+            .collect();
+        assert_eq!(
+            counts,
+            [(1, 2), (1, 1), (1, 0)],
+            "SUB-RULE 子规则未命中算未命中"
+        );
+        assert!(table.rules()[0].stats.hit_at_ms > 0);
     }
 
     #[test]

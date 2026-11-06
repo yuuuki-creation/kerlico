@@ -844,6 +844,21 @@ impl Dispatcher {
         Option<OutId>,
         Option<(String, String)>,
     ) {
+        self.evaluate_route_with(identity, request, ips, false)
+    }
+
+    /// `record` 只在为流决定出站时为真，规则命中统计每条流计一次；全局与直连模式不计。
+    fn evaluate_route_with(
+        &self,
+        identity: &SessionIdentity,
+        request: Option<(&OriginalTarget, Network)>,
+        ips: &RuleIps,
+        record: bool,
+    ) -> (
+        kerlico_routing::RouteDecision,
+        Option<OutId>,
+        Option<(String, String)>,
+    ) {
         let binding_out = self
             .bindings
             .get(identity.source().node())
@@ -869,8 +884,13 @@ impl Dispatcher {
                 .as_ref()
                 .and_then(|(_, p)| (!p.is_empty()).then_some(p.as_str())),
         };
-        let decision = self.routes.evaluate_with(&ctx, ips.mode);
-        let decision = match self.control_plane.mode() {
+        let mode = self.control_plane.mode();
+        let decision = if record && mode == RunMode::Rule {
+            self.routes.evaluate_recorded(&ctx, ips.mode)
+        } else {
+            self.routes.evaluate_with(&ctx, ips.mode)
+        };
+        let decision = match mode {
             RunMode::Rule => decision,
             mode => kerlico_routing::RouteDecision {
                 outbound: OutId::parse(if mode == RunMode::Global {
@@ -946,7 +966,7 @@ impl Dispatcher {
             .bindings
             .get(identity.source().node())
             .ok_or(Error::Rejected)?;
-        let (decision, outbound, process) = self.evaluate_route(identity, request, ips);
+        let (decision, outbound, process) = self.evaluate_route_with(identity, request, ips, true);
         if decision.reject {
             return Err(Error::Rejected);
         }

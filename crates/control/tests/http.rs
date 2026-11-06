@@ -737,6 +737,49 @@ async fn rules_reflect_the_compiled_route_table() {
     ]
     .map(|(kind, payload, proxy)| (kind.to_owned(), payload.to_owned(), proxy.to_owned()));
     assert_eq!(rows, expected);
+    assert_eq!(rules["rules"][3]["index"], 3);
+    assert_eq!(rules["rules"][0]["extra"]["hitCount"], 0);
+    assert_eq!(
+        rules["rules"][0]["extra"]["hitAt"],
+        "1970-01-01T00:00:00.000Z"
+    );
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn rules_count_hits_and_misses_per_flow() {
+    let (port, echo) = echo_server().await;
+    let mut config = forward_to(port);
+    config["route"] = json!({
+        "rules": [
+            {"domain_suffix":["example.com"],"outbound":"exit"},
+            {"port":[port],"outbound":"exit"}
+        ],
+        "final": "exit"
+    });
+    let running = start(config).await;
+    for _ in 0..2 {
+        drop(echoing_client(running.forward).await);
+    }
+    let rules = timeout(Duration::from_secs(5), async {
+        loop {
+            let (_, rules) = get(running.control, "/rules", None).await;
+            if rules["rules"][1]["extra"]["hitCount"] == 2 {
+                return rules;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("两条流各计一次命中");
+    let extra = |index: usize, field: &str| rules["rules"][index]["extra"][field].clone();
+    assert_eq!(extra(0, "hitCount"), 0);
+    assert_eq!(extra(0, "missCount"), 2);
+    assert_eq!(extra(1, "missCount"), 0);
+    assert_eq!(extra(2, "hitCount"), 0, "前面规则命中时不到 Match");
+    assert_ne!(extra(1, "hitAt"), "1970-01-01T00:00:00.000Z");
+    assert_eq!(extra(1, "missAt"), "1970-01-01T00:00:00.000Z");
+    echo.abort();
     running.stop().await.unwrap();
 }
 

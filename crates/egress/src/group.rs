@@ -789,13 +789,20 @@ impl ControlPlane {
             .into_iter()
             .enumerate()
             .map(|(index, entry)| {
+                let stats = entry.stats;
                 json!({
                     "index": index,
                     "type": entry.label.kind,
                     "payload": entry.label.payload,
                     "proxy": entry.proxy,
                     "size": -1,
-                    "extra": { "disabled": false },
+                    "extra": {
+                        "disabled": false,
+                        "hitCount": stats.hit_count,
+                        "hitAt": kerlico_core::log::rfc3339_ms(stats.hit_at_ms),
+                        "missCount": stats.miss_count,
+                        "missAt": kerlico_core::log::rfc3339_ms(stats.miss_at_ms),
+                    },
                 })
             })
             .collect();
