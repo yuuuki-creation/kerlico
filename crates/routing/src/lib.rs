@@ -370,10 +370,6 @@ struct Rule {
     process_path: Vec<String>,
     process_name_regex: Vec<Regex>,
     process_path_regex: Vec<Regex>,
-    in_type: Vec<String>,
-    in_port: Vec<u16>,
-    dscp: Vec<u8>,
-    uid: Vec<u32>,
     invert: bool,
     logical: Option<(LogicalMode, Vec<Rule>)>,
     node: Vec<NodeId>,
@@ -412,6 +408,15 @@ impl Rule {
     }
 
     fn compile_inner(spec: &RuleSpec, is_child: bool) -> Result<Self> {
+        if !spec.in_type.is_empty()
+            || !spec.in_port.is_empty()
+            || !spec.dscp.is_empty()
+            || !spec.uid.is_empty()
+        {
+            return Err(Error::Config(
+                "路由条件 in_type、in_port、dscp、uid 尚未支持".into(),
+            ));
+        }
         let action = if is_child {
             RouteAction::Route {
                 outbound: None,
@@ -539,10 +544,6 @@ impl Rule {
                 process_path: Vec::new(),
                 process_name_regex: Vec::new(),
                 process_path_regex: Vec::new(),
-                in_type: Vec::new(),
-                in_port: Vec::new(),
-                dscp: Vec::new(),
-                uid: Vec::new(),
                 invert: spec.invert,
                 logical: Some((mode, children)),
                 node: spec
@@ -685,15 +686,6 @@ impl Rule {
                 .iter()
                 .map(|v| Regex::new(v).map_err(|_| invalid()))
                 .collect::<Result<_>>()?,
-            in_type: spec
-                .in_type
-                .iter()
-                .map(|v| v.trim().to_ascii_lowercase())
-                .filter(|v| !v.is_empty())
-                .collect(),
-            in_port: spec.in_port.clone(),
-            dscp: spec.dscp.clone(),
-            uid: spec.uid.clone(),
             invert: spec.invert,
             logical: None,
             node: spec
@@ -729,10 +721,6 @@ impl Rule {
             && rule.process_path.is_empty()
             && rule.process_name_regex.is_empty()
             && rule.process_path_regex.is_empty()
-            && rule.in_type.is_empty()
-            && rule.in_port.is_empty()
-            && rule.dscp.is_empty()
-            && rule.uid.is_empty()
             && rule.node.is_empty()
             && rule.user.is_empty()
             && !matches!(
@@ -1424,6 +1412,22 @@ mod tests {
         table
             .select(&Destination::new(host, port).unwrap(), network, source)
             .map(ToString::to_string)
+    }
+
+    #[test]
+    fn unsupported_conditions_are_rejected_instead_of_matching_everything() {
+        for line in [
+            "IN-PORT,7890,REJECT",
+            "IN-TYPE,SOCKS,REJECT",
+            "UID,1000,REJECT",
+            "DSCP,4,REJECT",
+        ] {
+            let (spec, _) = parse_clash_rule_line(line).unwrap();
+            assert!(
+                RouteTable::compile(&[spec.unwrap()]).is_err(),
+                "{line} must not compile into a match-all rule"
+            );
+        }
     }
 
     #[test]
