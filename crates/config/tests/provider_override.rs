@@ -106,6 +106,21 @@ fn skip_cert_verify_uses_the_per_type_tls_field() {
 }
 
 #[test]
+fn skip_cert_verify_maps_for_hysteria2_and_is_inert_for_shadowsocks() {
+    let specs = compile(
+        vec![members().remove(3), members().remove(0)],
+        json!({"skip-cert-verify": true}),
+    )
+    .unwrap();
+    assert_eq!(by_tag(&specs, "hy2-sg").options["tls"]["insecure"], true);
+    let ss = by_tag(&specs, "ss-hk");
+    assert_eq!(
+        ss.options,
+        compile_plain(members().remove(0)).unwrap().options
+    );
+}
+
+#[test]
 fn hysteria2_up_down_are_mapped() {
     let specs = compile(
         vec![members().remove(3)],

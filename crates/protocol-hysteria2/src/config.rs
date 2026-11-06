@@ -35,10 +35,12 @@ impl Limits {
         }
         Ok(())
     }
+    /// `rate` 为 0 时用配置的控制器；带宽协商后写入发送速率，连接切换为 Brutal。
     pub(crate) fn transport(
         &self,
         maximum: usize,
         obfs: bool,
+        rate: crate::congestion::SendRate,
     ) -> Result<Arc<quinn::TransportConfig>> {
         let mut value = quinn::TransportConfig::default();
         value.max_concurrent_bidi_streams((self.max_streams.min(maximum) as u32).into());
@@ -54,15 +56,19 @@ impl Limits {
         value.datagram_receive_buffer_size(Some(256 * 1024));
         value.datagram_send_buffer_size(256 * 1024);
         value.advertised_datagram_frame_size(Some(1200));
-        if self.congestion == "bbr" {
-            let mut bbr = quinn::congestion::BbrConfig::default();
-            bbr.initial_window(1024 * 1024);
-            value.congestion_controller_factory(Arc::new(bbr));
-        } else {
-            let mut reno = quinn::congestion::NewRenoConfig::default();
-            reno.initial_window(1024 * 1024);
-            value.congestion_controller_factory(Arc::new(reno));
-        }
+        let fallback: Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> =
+            if self.congestion == "bbr" {
+                let mut bbr = quinn::congestion::BbrConfig::default();
+                bbr.initial_window(1024 * 1024);
+                Arc::new(bbr)
+            } else {
+                let mut reno = quinn::congestion::NewRenoConfig::default();
+                reno.initial_window(1024 * 1024);
+                Arc::new(reno)
+            };
+        value.congestion_controller_factory(Arc::new(crate::congestion::SwitchFactory::new(
+            fallback, rate,
+        )));
         if obfs {
             let mut mtu = quinn::MtuDiscoveryConfig::default();
             mtu.upper_bound(1444);
@@ -117,30 +123,55 @@ pub(crate) enum BandwidthSpec {
     Text(String),
 }
 impl BandwidthSpec {
+    /// 转为字节每秒。无单位为 Mbps；位单位（`bps`、`kbps`、`mbps`、`gbps`、`tbps` 及简写
+    /// `k`、`m`、`kb`、`mb` 等）不分大小写，同 apernet/hysteria；字节单位写作 `MB/s`
+    /// 或大写 B 的 `MBps`（Mihomo 写法）。倍率按十进制。
     pub fn to_bps(&self) -> Result<u64> {
         match self {
             Self::Mbps(mbps) => mbps.checked_mul(125_000).ok_or_else(invalid),
-            Self::Text(text) => {
-                let text = text.trim().to_ascii_lowercase();
-                if text.is_empty() {
-                    return Err(invalid());
-                }
-                let split = text
-                    .find(|ch: char| !ch.is_ascii_digit())
-                    .unwrap_or(text.len());
-                let number: u64 = text[..split].trim().parse().map_err(|_| invalid())?;
-                let unit = text[split..].trim();
-                let multiplier = match unit {
-                    "" | "mbps" | "m" => 125_000u64,
-                    "bps" | "b" => 1u64,
-                    "kbps" | "k" => 125u64,
-                    "gbps" | "g" => 125_000_000u64,
-                    _ => return Err(invalid()),
-                };
-                number.checked_mul(multiplier).ok_or_else(invalid)
-            }
+            Self::Text(text) => parse_bandwidth(text).ok_or_else(invalid),
         }
     }
+}
+fn parse_bandwidth(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let split = text
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(text.len());
+    let number: u64 = text[..split].parse().ok()?;
+    let unit = text[split..].trim();
+    let (prefix, bytes) =
+        if let Some(prefix) = unit.strip_suffix("/s").or_else(|| unit.strip_suffix("/S")) {
+            match prefix.strip_suffix('B') {
+                Some(prefix) => (prefix, true),
+                None => (prefix.strip_suffix('b')?, false),
+            }
+        } else if let Some(prefix) = unit.strip_suffix("Bps") {
+            (prefix, true)
+        } else {
+            let lower = unit.to_ascii_lowercase();
+            let prefix = lower
+                .strip_suffix("bps")
+                .or_else(|| lower.strip_suffix('b'))
+                .unwrap_or(&lower);
+            if unit.is_empty() {
+                return number.checked_mul(125_000);
+            }
+            let scale = scale(prefix)?;
+            return number.checked_mul(scale).map(|bits| bits / 8);
+        };
+    let value = number.checked_mul(scale(&prefix.to_ascii_lowercase())?)?;
+    Some(if bytes { value } else { value / 8 })
+}
+fn scale(prefix: &str) -> Option<u64> {
+    Some(match prefix {
+        "" => 1,
+        "k" => 1_000,
+        "m" => 1_000_000,
+        "g" => 1_000_000_000,
+        "t" => 1_000_000_000_000,
+        _ => return None,
+    })
 }
 #[derive(Clone, Deserialize)]
 #[serde(untagged)]
@@ -190,7 +221,7 @@ pub(crate) struct MasqueradeObject {
     pub content: Option<String>,
     pub directory: Option<String>,
     pub url: Option<String>,
-    #[serde(alias = "rewrite-host")]
+    #[serde(alias = "rewrite-host", alias = "rewriteHost")]
     pub rewrite_host: bool,
     pub insecure: bool,
     #[serde(alias = "status-code")]
@@ -210,8 +241,9 @@ pub(crate) enum MasqueradePlan {
         headers: Vec<(http::HeaderName, http::HeaderValue)>,
     },
     Proxy {
-        url: String,
+        url: http::Uri,
         rewrite_host: bool,
+        insecure: bool,
         headers: Vec<(http::HeaderName, http::HeaderValue)>,
     },
 }
@@ -255,7 +287,7 @@ impl NodeOptions {
                 rewrite_host: self.masquerade_rewrite_host.unwrap_or(false),
                 status_code: self.masquerade_status_code,
                 headers: self.masquerade_headers.clone().unwrap_or_default(),
-                insecure: false,
+                insecure: self.masquerade_insecure.unwrap_or(false),
             },
         };
         let headers = compile_headers(&obj.headers)?;
@@ -293,13 +325,19 @@ impl NodeOptions {
                 })
             }
             "proxy" => {
-                let url = obj.url.ok_or_else(invalid)?;
-                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                let url: http::Uri = obj
+                    .url
+                    .ok_or_else(invalid)?
+                    .parse()
+                    .map_err(|_| invalid())?;
+                if !matches!(url.scheme_str(), Some("http" | "https")) || url.authority().is_none()
+                {
                     return Err(invalid());
                 }
                 Ok(MasqueradePlan::Proxy {
                     url,
                     rewrite_host: obj.rewrite_host,
+                    insecure: obj.insecure,
                     headers,
                 })
             }
@@ -382,6 +420,9 @@ pub(crate) struct ClientTls {
     pub server_name: String,
     #[serde(default)]
     pub ca_pem: Option<String>,
+    /// 不校验服务端证书链与名称，对应 Mihomo `skip-cert-verify`。
+    #[serde(default)]
+    pub insecure: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -395,6 +436,12 @@ pub(crate) struct NodeOptions {
     pub up: Option<BandwidthSpec>,
     #[serde(default, alias = "down_mbps", alias = "down-mbps")]
     pub down: Option<BandwidthSpec>,
+    #[serde(
+        default,
+        alias = "ignore-client-bandwidth",
+        alias = "ignoreClientBandwidth"
+    )]
+    pub ignore_client_bandwidth: bool,
     #[serde(default)]
     pub masquerade: Option<MasqueradeSpec>,
     #[serde(default, alias = "masquerade-type")]
@@ -407,6 +454,8 @@ pub(crate) struct NodeOptions {
     pub masquerade_url: Option<String>,
     #[serde(default, alias = "masquerade-rewrite-host")]
     pub masquerade_rewrite_host: Option<bool>,
+    #[serde(default, alias = "masquerade-insecure")]
+    pub masquerade_insecure: Option<bool>,
     #[serde(default, alias = "masquerade-status-code")]
     pub masquerade_status_code: Option<u16>,
     #[serde(default, alias = "masquerade-headers")]
@@ -470,17 +519,66 @@ pub(crate) fn client_tls(options: &ClientTls) -> Result<Arc<rustls::ClientConfig
             roots.add(cert).map_err(|_| invalid())?;
         }
     }
-    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(|_| invalid())?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|_| invalid())?;
+    let mut tls = if options.insecure {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))
+            .with_no_client_auth()
+    } else {
+        builder.with_root_certificates(roots).with_no_client_auth()
+    };
     tls.resumption = rustls::client::Resumption::disabled();
     tls.alpn_protocols = vec![b"h3".to_vec()];
     tls.enable_early_data = false;
     Ok(Arc::new(tls))
+}
+/// 接受任意证书链与名称，仍校验握手签名确认对端持有证书私钥。
+#[derive(Debug)]
+pub(crate) struct AnyCertificate(pub Arc<rustls::crypto::CryptoProvider>);
+impl rustls::client::danger::ServerCertVerifier for AnyCertificate {
+    fn verify_server_cert(
+        &self,
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &[rustls::pki_types::CertificateDer<'_>],
+        _: &rustls::pki_types::ServerName<'_>,
+        _: &[u8],
+        _: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
 }
 fn pem(inline: Option<String>, file: Option<String>) -> Result<String> {
     match (inline, file) {
@@ -520,4 +618,36 @@ pub(crate) fn server_tls(options: ServerTls) -> Result<Arc<rustls::ServerConfig>
 #[serde(deny_unknown_fields)]
 pub(crate) struct Auth {
     pub auth: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BandwidthSpec;
+
+    fn bps(text: &str) -> Option<u64> {
+        BandwidthSpec::Text(text.into()).to_bps().ok()
+    }
+
+    #[test]
+    fn bandwidth_units_follow_hysteria_and_mihomo() {
+        assert_eq!(BandwidthSpec::Mbps(100).to_bps().unwrap(), 12_500_000);
+        assert_eq!(bps("100"), Some(12_500_000));
+        assert_eq!(bps("100 Mbps"), Some(12_500_000));
+        assert_eq!(bps("100mbps"), Some(12_500_000));
+        assert_eq!(bps("100 m"), Some(12_500_000));
+        assert_eq!(bps("100 mb"), Some(12_500_000), "hysteria 的 mb 是兆位");
+        assert_eq!(bps("100 Mb/s"), Some(12_500_000));
+        assert_eq!(bps("512 kbps"), Some(64_000));
+        assert_eq!(bps("1 Gbps"), Some(125_000_000));
+        assert_eq!(bps("1 tbps"), Some(125_000_000_000));
+        assert_eq!(bps("800 bps"), Some(100));
+        assert_eq!(bps("20 MB/s"), Some(20_000_000));
+        assert_eq!(bps("20 MBps"), Some(20_000_000));
+        assert_eq!(bps("20MBps"), Some(20_000_000));
+        assert_eq!(bps("3 KB/s"), Some(3_000));
+        assert_eq!(bps("7 B/s"), Some(7));
+        for bad in ["", "Mbps", "100 xbps", "1.5 Gbps", "-1", "100 MB/h"] {
+            assert_eq!(bps(bad), None, "{bad}");
+        }
+    }
 }

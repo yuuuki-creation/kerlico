@@ -37,12 +37,21 @@ def material(root):
     return cert, key
 
 
+BANDWIDTH = None
+
+
 def options(host, port, auth, cert, obfs, congestion):
-    return {"server": {"host": host, "port": port}, "auth": auth, "tls": {"server_name": "localhost", "ca_pem": cert.read_text()}, "salamander_password": obfs, "limits": {"congestion": congestion}}
+    value = {"server": {"host": host, "port": port}, "auth": auth, "tls": {"server_name": "localhost", "ca_pem": cert.read_text()}, "salamander_password": obfs, "limits": {"congestion": congestion}}
+    if BANDWIDTH:
+        value.update(up=f"{BANDWIDTH} Mbps", down=f"{BANDWIDTH} Mbps")
+    return value
 
 
 def server_options(auth, cert, key, obfs, congestion):
-    return {"auth": auth, "tls": {"certificate_file": str(cert), "private_key_file": str(key)}, "salamander_password": obfs, "limits": {"congestion": congestion}}
+    value = {"auth": auth, "tls": {"certificate_file": str(cert), "private_key_file": str(key)}, "salamander_password": obfs, "limits": {"congestion": congestion}}
+    if BANDWIDTH:
+        value.update(up=f"{BANDWIDTH} Mbps", down=f"{BANDWIDTH} Mbps")
+    return value
 
 
 def kerlico_server(host, port, auth, cert, key, obfs, congestion):
@@ -61,12 +70,23 @@ def peer_config(kind, direction, host, port, forward, target_host, target_port, 
         return kerlico_server(host, port, auth, cert, key, obfs, congestion) if direction == "server" else kerlico_client(forward, host, port, target_host, target_port, auth, cert, obfs, congestion)
     if kind == "native":
         if direction == "server":
-            config = {"listen": h.endpoint(host, port), "tls": {"cert": str(cert), "key": str(key)}, "auth": {"type": "password", "password": auth}, "ignoreClientBandwidth": True}
+            config = {"listen": h.endpoint(host, port), "tls": {"cert": str(cert), "key": str(key)}, "auth": {"type": "password", "password": auth}, "ignoreClientBandwidth": not BANDWIDTH}
         else:
             config = {"server": h.endpoint(host, port), "auth": auth, "tls": {"sni": "localhost", "ca": str(cert)}, "tcpForwarding": [{"listen": h.endpoint("127.0.0.1", forward), "remote": h.endpoint(target_host, target_port)}], "udpForwarding": [{"listen": h.endpoint("127.0.0.1", forward), "remote": h.endpoint(target_host, target_port), "timeout": "5s"}]}
+        if BANDWIDTH:
+            config["bandwidth"] = {"up": f"{BANDWIDTH} mbps", "down": f"{BANDWIDTH} mbps"}
         if obfs:
             config["obfs"] = {"type": "salamander", "salamander": {"password": obfs}}
         return config
+    if kind == "mihomo":
+        if direction != "server":
+            raise ValueError("mihomo 只作为服务端")
+        listener = {"name": "hy2-in", "type": "hysteria2", "listen": host, "port": port, "users": {"user": auth}, "certificate": str(cert), "private-key": str(key), "alpn": ["h3"]}
+        if BANDWIDTH:
+            listener.update({"up": BANDWIDTH, "down": BANDWIDTH, "ignore-client-bandwidth": False})
+        if obfs:
+            listener.update({"obfs": "salamander", "obfs-password": obfs})
+        return {"mode": "direct", "log-level": "error", "ipv6": True, "listeners": [listener]}
     if kind == "sing-box":
         if direction == "server":
             inbound = {"type": "hysteria2", "listen": host, "listen_port": port, "users": [{"password": auth}], "tls": {"enabled": True, "certificate_path": str(cert), "key_path": str(key)}}
@@ -89,11 +109,36 @@ def peer_config(kind, direction, host, port, forward, target_host, target_port, 
     return {"log": {"loglevel": "none"}, "inbounds": [{"listen": "127.0.0.1", "port": forward, "protocol": "dokodemo-door", "settings": {"address": target_host, "port": target_port, "network": "tcp,udp"}}], "outbounds": [{"protocol": "hysteria", "settings": {"version": 2, "address": host, "port": port}, "streamSettings": stream}]}
 
 
+async def bulk(forward, size):
+    """经转发入口回显 size 字节，返回 MiB/s；设置带宽时双方 Brutal 把速率限在协商值附近。"""
+    reader, writer = await asyncio.open_connection("127.0.0.1", forward)
+    data = os.urandom(size)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    async def send():
+        writer.write(data)
+        await writer.drain()
+
+    sender = asyncio.create_task(send())
+    try:
+        got = await asyncio.wait_for(reader.readexactly(size), 60)
+        await sender
+    finally:
+        writer.close()
+        await writer.wait_closed()
+    if got != data:
+        raise RuntimeError("TCP 内容不符")
+    return round(size / 1048576 / (loop.time() - started), 2)
+
+
 async def start(binary, kind, direction, config, log, forward):
     handle = log.open("wb")
     os.chmod(log, 0o600)
     if kind == "native":
         command = [binary, direction, "--disable-update-check", "--log-level", "error", "--config", str(config)]
+    elif kind == "mihomo":
+        command = [binary, "-d", str(config.parent), "-f", str(config)]
     elif kind == "xray":
         command = [binary, "run", "-config", str(config)]
     else:
@@ -162,6 +207,15 @@ async def main(args):
                                         record.update({"pass": False, "error": type(error).__name__})
                                     records.append(record)
                                     print(json.dumps(record, ensure_ascii=False), flush=True)
+                                if BANDWIDTH:
+                                    record = {"case": label, "network": "bulk", "payload_bytes": 8 << 20, "limit_mib_s": round(BANDWIDTH * 1e6 / 8 / 1048576, 2)}
+                                    try:
+                                        record["mib_s"] = await bulk(forward, 8 << 20)
+                                        record["pass"] = True
+                                    except Exception as error:
+                                        record.update({"pass": False, "error": type(error).__name__})
+                                    records.append(record)
+                                    print(json.dumps(record, ensure_ascii=False), flush=True)
                             except Exception as error:
                                 records.append({"case": label, "network": "startup", "pass": False, "error": type(error).__name__})
                             finally:
@@ -174,7 +228,7 @@ async def main(args):
                         udp.close()
                         tcp.close()
                         await tcp.wait_closed()
-    summary = {"peer_kind": args.peer_kind, "records": records, "passed": sum(record["pass"] for record in records), "failed": sum(not record["pass"] for record in records)}
+    summary = {"peer_kind": args.peer_kind, "bandwidth_mbps": BANDWIDTH, "records": records, "passed": sum(record["pass"] for record in records), "failed": sum(not record["pass"] for record in records)}
     h.save(root, "summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False))
     if summary["failed"]:
@@ -185,7 +239,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hysteria2 双端与原生 UDP 互通矩阵")
     parser.add_argument("--kerlico", required=True)
     parser.add_argument("--peer", required=True)
-    parser.add_argument("--peer-kind", choices=["kerlico", "xray", "sing-box", "native"], required=True)
+    parser.add_argument("--peer-kind", choices=["kerlico", "xray", "sing-box", "native", "mihomo"], required=True)
+    parser.add_argument("--bandwidth", type=int, default=0, help="双方 up/down，Mbit/s；0 为不设（服务端忽略客户端带宽）")
     parser.add_argument("--work", required=True)
     parser.add_argument("--directions", default="client,server")
     parser.add_argument("--modes", default="native,salamander")
@@ -193,4 +248,6 @@ if __name__ == "__main__":
     parser.add_argument("--node-hosts", default="127.0.0.1,::1")
     parser.add_argument("--target-hosts", default="127.0.0.1,::1")
     parser.add_argument("--udp-sizes", default="3,2000,4000")
-    asyncio.run(main(parser.parse_args()))
+    arguments = parser.parse_args()
+    BANDWIDTH = arguments.bandwidth
+    asyncio.run(main(arguments))

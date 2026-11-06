@@ -64,4 +64,27 @@ Xray 临时 freedom 配置仅允许当前 echo 的目标 IP/port。独立参考�
 
 `tools/interop_hysteria2.py` 接受 `--kerlico`、`--peer`、`--peer-kind`、`--work`，并用 directions/modes/congestion/node-hosts/target-hosts/udp-sizes 精确选择范围。默认独立对端矩阵即上表的 128 项；自端使用 `--udp-sizes 0,3,4096,64000`。
 
-已验证范围不包含：Hysteria v1、Gecko、Brutal 固定速率、端口跳跃、Realm、noise、ECH、指纹模仿、HTTP/外部认证或反向伪装代理。客户端收到非零固定速率协商会明确拒绝，不接受后忽略。长期压测、丢包性能、跨地域链路、其他 OS/架构和当前整树最终发行验证未由本表证明。
+已验证范围不包含：Hysteria v1、Gecko、Realm、noise、ECH、指纹模仿、HTTP/外部认证。长期压测、丢包性能、跨地域链路、其他 OS/架构和当前整树最终发行验证未由本表证明。
+
+## 带宽协商与 Brutal（2026-11-07，perf-01）
+
+`--bandwidth <Mbit/s>` 让双方设置 `up`/`down`（官方服务端同时关闭 `ignoreClientBandwidth`），并在每个用例追加 8 MiB 回显 `bulk`，记录 MiB/s。
+
+| 对端 | 方向 | 模式 | 结果 | bulk（限 16 Mbit/s = 1.91 MiB/s） |
+| --- | --- | --- | --- | --- |
+| 官方 Hysteria v2.13.0 | 客户端、服务端 | 普通、Salamander | 20/20 | 1.84–1.85 MiB/s |
+| 官方 Hysteria v2.13.0，`--bandwidth 400` | 客户端 | 普通 | 5/5 | 43.45 MiB/s（限 47.68） |
+| Mihomo v1.19.33 服务端 | 客户端 | 普通、Salamander，IPv4/IPv6 | UDP 24/24；客户端先发的 TCP 0/8 | 未测 |
+
+Mihomo 的 Hysteria2 服务端在目标返回首批数据后才写 TCP 响应，kerlico 客户端在收到响应前不发送载荷，客户端先发的 TCP 互相等待，不设带宽时同样失败；目标先发数据时可通（手工复现）。这是客户端 TCP 建立语义的问题，与带宽无关，待修。
+
+`tools/netem_lab.py --protocol hysteria2` 在两个 netns 间回显，单程延迟 30 ms，`--hy2-up/--hy2-down` 为 0 时用 BBR：
+
+| netem | BBR | Brutal（设定速率） |
+| --- | --- | --- |
+| 随机丢包 5%，不限速，32 MiB | 33.15 MiB/s | 5.49 MiB/s（50 Mbit/s = 5.96） |
+| 随机丢包 10%，不限速，32 MiB | 28.07 MiB/s | 5.43 MiB/s（5.96） |
+| 随机丢包 10%，限 100 Mbit/s，64 MiB，3 次 | 9.21–9.75 MiB/s | 8.46–8.66 MiB/s（80 Mbit/s = 9.54） |
+| Gilbert 突发丢包 3%/30%，抖动 10 ms，限 100 Mbit/s，64 MiB，2 次 | 8.70–9.68 MiB/s | 8.56–8.72 MiB/s（9.54） |
+
+Brutal 在 5%–10% 随机丢包与突发丢包下保持设定速率的 89%–92%。Quinn 的 BBR 不因随机丢包降速，这些场景下吞吐不低于 Brutal；Brutal 的作用是按协商速率固定发送，与官方实现和 Mihomo 客户端行为一致。

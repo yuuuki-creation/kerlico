@@ -52,7 +52,7 @@
 | TUN 自动化 | `strict-route`、`auto-redirect`、出口防回环、IPv6 默认路由未生效 | L | 待做 |
 | TProxy UDP | 未取原始目标地址 | M | 待做 |
 | VLESS Reverse | 出站不向服务端注册隧道 | M | 待做 |
-| Hysteria2 | 上行带宽丢弃，无 Brutal；masquerade `proxy` 不访问上游 | M | 待做 |
+| Hysteria2 | 上行带宽丢弃，无 Brutal；masquerade `proxy` 不访问上游 | M | 已修复：`Hysteria-CC-RX` 双向协商，Brutal 为每连接 Quinn 控制器，`ignore_client_bandwidth`；`proxy` 为真实反向代理，支持 `rewrite_host`、`insecure` |
 | OpenVPN 服务端字段 | 多数字段解析后不读，`PUSH_REPLY` 为固定字符串 | M | 待做 |
 | 其余 | MASQUE 服务端地址池、EasyTier `secure-mode`、XHTTP 服务端字段、全局信任库、嗅探覆盖入站、用户标签等 | S–M | 待做 |
 

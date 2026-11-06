@@ -55,7 +55,7 @@ cargo build --locked --release -p kerlico
 
 - 映射表未列出的字段一律报错，错误信息给出代理名和字段路径（如 `ws-opts.bogus`），不会静默丢弃或原样透传。
 - 公共字段：`interface-name`、`routing-mark`、`dialer-proxy`、`tfo` 交给拨号层。以下取值无效果、允许出现：`udp: true`、`skip-cert-verify: false`、`mptcp: false`、`ip-version: dual`、`smux.enabled: false`；其他取值报错。kerlico 按协议能力承载 UDP，未写 `udp` 的节点也会承载 UDP；`udp: false` 只在 SSR、Hysteria、TrustTunnel、Sudoku 上映射为关闭 UDP，其他类型报错。HTTP、SSH 的 `udp` 任意取值都忽略（Mihomo 同样不为它们承载 UDP）。
-- `skip-cert-verify: true` 与 `client-fingerprint` 只在 VLESS 上支持，其他类型报错；`fingerprint`（证书指纹）均不支持。`alpn` 只在 VLESS、Hysteria、TUIC、ShadowQUIC 上支持；Hysteria2 只接受 `[h3]`。
+- `skip-cert-verify: true` 在 VLESS 与 Hysteria2 上支持（Hysteria2 映射为 `tls.insecure`），Shadowsocks 顶层取值无效果（Mihomo 只在 `plugin-opts` 内读取），其他类型报错；`client-fingerprint` 只在 VLESS 上支持；`fingerprint`（证书指纹）均不支持。`alpn` 只在 VLESS、Hysteria、TUIC、ShadowQUIC 上支持；Hysteria2 只接受 `[h3]`。
 - 不支持的类型：`masque`（Mihomo 的 WARP 式密钥认证与 kerlico MASQUE 客户端不同）、`rematch`。
 
 | Mihomo `type` | kerlico 类型 | 支持的字段 | 报错的常见字段 |
@@ -70,7 +70,7 @@ cargo build --locked --release -p kerlico
 | `http` | `http` | `username`、`password`、`tls`、`sni`、`headers` | `fingerprint` |
 | `socks5` | `socks` | `username`、`password`、`udp` | `tls: true`、`fingerprint` |
 | `hysteria` | `hysteria1` | `ports`、`hop-interval`、`auth-str`、`auth`、`up`/`down`（或 `up-speed`/`down-speed`，无单位为 Mbps，必填）、`obfs`、`protocol`/`obfs-protocol`（`udp`、`wechat-video`）、`sni`、`alpn`、`ca-str`、`udp` | `protocol: faketcp`、`ca`（路径）、`recv-window*`、`fast-open: true` |
-| `hysteria2` | `hysteria2` | `ports`、`hop-interval`（整数或 `15-30`）、`password`、`up`、`down`、`obfs: salamander`、`obfs-password`、`sni`、`ca-str` | `obfs: gecko`、`realm-opts`、`bbr-profile`、各接收窗口、`cwnd`、`udp-mtu` |
+| `hysteria2` | `hysteria2` | `ports`、`hop-interval`（整数或 `15-30`）、`password`、`up`、`down`（设置后协商为 Brutal，单位见 [Hysteria2 接口](interfaces/hysteria2.md)）、`skip-cert-verify`、`obfs: salamander`、`obfs-password`、`sni`、`ca-str` | `obfs: gecko`、`realm-opts`、`bbr-profile`、各接收窗口、`cwnd`、`udp-mtu` |
 | `tuic` | `tuic` | `token`（V4）或 `uuid` + `password`（V5）、`ip`、`ports`、`hop-interval`、`sni`、`alpn`、`ca-str`、`heartbeat-interval`、`udp-relay-mode`、`congestion-controller`（`cubic`、`new_reno`、`bbr`） | `disable-sni: true`、`reduce-rtt: true`、`request-timeout`、`max-udp-relay-packet-size`、`max-open-streams`、`udp-over-stream: true` |
 | `shadowquic` | `shadowquic` | `username`、`password`、`sni`、`alpn`、`udp-over-stream`、`congestion-controller` | `zero-rtt: true`、`quic-versions`、`up`、`down`、窗口类字段 |
 | `wireguard` | `wireguard` | `ip`、`ipv6`（去掉前缀长度）、`private-key`、`public-key`、`pre-shared-key`、`reserved`、`allowed-ips`（默认 `0.0.0.0/0`、`::/0`）、`persistent-keepalive`、`mtu`、单个 `peers` 条目 | 多个 `peers`、`dns`、`remote-dns-resolve: true`、`amnezia-wg-option`、`ip-stack`、`workers` |

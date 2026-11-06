@@ -1,6 +1,9 @@
 use crate::{
-    config::{self, Limits, MasqueradePlan, NodeOptions},
-    dispatch, invalid, udp, wire,
+    config::{self, Limits, NodeOptions},
+    congestion::{SendRate, server_send_rate},
+    dispatch, invalid,
+    masquerade::Masquerade,
+    udp, wire,
 };
 use bytes::Bytes;
 use http::Response;
@@ -14,7 +17,6 @@ use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::{
     future::Future,
-    path::Component,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -32,8 +34,8 @@ pub struct Hysteria2Node {
     tls: Arc<rustls::ServerConfig>,
     salamander: Option<Arc<String>>,
     udp: bool,
-    up_bps: Option<u64>,
-    masquerade: Arc<MasqueradePlan>,
+    bandwidth: Bandwidth,
+    masquerade: Arc<Masquerade>,
     mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
     limits: Limits,
 }
@@ -42,16 +44,15 @@ impl Hysteria2Node {
         let options: NodeOptions = serde_json::from_value(input.options().clone())
             .map_err(|_| Error::Config("Hysteria2 节点字段不合法".into()))?;
         options.limits.validate()?;
-        if let Some(down) = &options.down {
-            down.to_bps()?;
-        }
-        let up_bps = options
-            .up
-            .as_ref()
-            .map(|up| up.to_bps())
-            .transpose()?
-            .filter(|bps| *bps > 0);
-        let masquerade = Arc::new(options.masquerade_plan()?);
+        let bps = |spec: &Option<config::BandwidthSpec>| {
+            spec.as_ref().map_or(Ok(0), config::BandwidthSpec::to_bps)
+        };
+        let bandwidth = Bandwidth {
+            up: bps(&options.up)?,
+            down: bps(&options.down)?,
+            ignore_client: options.ignore_client_bandwidth,
+        };
+        let masquerade = Arc::new(Masquerade::new(options.masquerade_plan()?)?);
         let mux = kerlico_net::sing_mux::SingMuxInboundConfig::effective_with_padding(
             options.multiplex.as_ref(),
             options.mux_option_padding,
@@ -71,7 +72,7 @@ impl Hysteria2Node {
             tls: config::server_tls(options.tls)?,
             salamander: config::obfs(options.salamander_password)?,
             udp: options.udp,
-            up_bps,
+            bandwidth,
             masquerade,
             mux,
             limits: options.limits,
@@ -94,11 +95,7 @@ impl Hysteria2Node {
         ));
         let crypto = quinn::crypto::rustls::QuicServerConfig::try_from((*self.tls).clone())
             .map_err(|_| invalid())?;
-        let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-        config.transport_config(
-            self.limits
-                .transport(context.max_streams, self.salamander.is_some())?,
-        );
+        let config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
         let duplicated = socket2::SockRef::from(socket.as_ref()).try_clone()?;
         let standard: std::net::UdpSocket = duplicated.into();
         let runtime = crate::runtime::NodeRuntime::new(&context.cancel, context.tasks.clone());
@@ -107,7 +104,7 @@ impl Hysteria2Node {
         context.cancel = runtime.cancel();
         let endpoint = quinn::Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
-            Some(config),
+            Some(config.clone()),
             crate::socket::wrap(standard, self.salamander.clone())?,
             runtime.clone(),
         )?;
@@ -122,12 +119,16 @@ impl Hysteria2Node {
                 incoming=endpoint.accept()=>{
                     let Some(incoming)=incoming else{break};let Ok(lease)=context.stream_budget.try_acquire() else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};
                     let mut context=context.clone();let access=access.clone();let limits=self.limits.clone();let auth=self.auth.clone();let udp=self.udp;
-                    let up_bps=self.up_bps;let masquerade=self.masquerade.clone();let mux=self.mux.clone();
+                    let bandwidth=self.bandwidth;let masquerade=self.masquerade.clone();let mux=self.mux.clone();
+                    let rate=SendRate::default();let mut per_connection=config.clone();
+                    let Ok(transport)=self.limits.transport(context.max_streams,self.salamander.is_some(),rate.clone()) else{incoming.refuse();context.events.record(NodeEvent::Dropped);continue;};
+                    per_connection.transport_config(transport);
+                    let Ok(connecting)=incoming.accept_with(Arc::new(per_connection)) else{context.events.record(NodeEvent::Dropped);continue;};
                     crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut connections, async move{
                         let _lease=lease;context.events.record(NodeEvent::Accepted);
                         let result=async {
-                            let connection=tokio::time::timeout(context.connect_timeout,incoming).await.map_err(|_|Error::Timeout)?.map_err(|_|invalid())?;
-                            context.peer_addr=Some(connection.remote_address());connection_loop(connection,access,context.clone(),limits,auth,udp,up_bps,masquerade,mux).await
+                            let connection=tokio::time::timeout(context.connect_timeout,connecting).await.map_err(|_|Error::Timeout)?.map_err(|_|invalid())?;
+                            context.peer_addr=Some(connection.remote_address());connection_loop(connection,access,context.clone(),limits,auth,udp,Negotiation{bandwidth,rate},masquerade,mux).await
                         }.await;
                         context.events.record(if result.is_ok(){NodeEvent::Completed}else{NodeEvent::Failed});
                     }, |_| ())?;
@@ -237,80 +238,28 @@ impl H3Control {
         }
     }
 }
-fn resolve_masquerade(
-    plan: &MasqueradePlan,
-    request_path: &str,
-) -> (
-    http::StatusCode,
-    Vec<(http::HeaderName, http::HeaderValue)>,
-    Bytes,
-) {
-    match plan {
-        MasqueradePlan::Default404 => (
-            http::StatusCode::NOT_FOUND,
-            vec![(
-                http::header::CONTENT_TYPE,
-                http::HeaderValue::from_static("text/plain; charset=utf-8"),
-            )],
-            Bytes::from_static("资源不存在".as_bytes()),
-        ),
-        MasqueradePlan::String {
-            status_code,
-            headers,
-            content,
-        } => (*status_code, headers.clone(), content.clone()),
-        MasqueradePlan::File { directory, headers } => {
-            let trimmed = request_path.trim_start_matches('/');
-            let relative = if trimmed.is_empty() {
-                "index.html"
-            } else {
-                trimmed
-            };
-            let rel_path = std::path::Path::new(relative);
-            if rel_path
-                .components()
-                .any(|comp| !matches!(comp, Component::Normal(_)))
-            {
-                return (
-                    http::StatusCode::NOT_FOUND,
-                    headers.clone(),
-                    Bytes::from_static(b"Not Found"),
-                );
-            }
-            let full_path = directory.join(rel_path);
-            let final_path = if full_path.is_dir() {
-                full_path.join("index.html")
-            } else {
-                full_path
-            };
-            match std::fs::read(&final_path) {
-                Ok(bytes) if bytes.len() <= 4 * 1024 * 1024 => {
-                    (http::StatusCode::OK, headers.clone(), Bytes::from(bytes))
-                }
-                _ => (
-                    http::StatusCode::NOT_FOUND,
-                    headers.clone(),
-                    Bytes::from_static(b"Not Found"),
-                ),
-            }
-        }
-        MasqueradePlan::Proxy {
-            url,
-            rewrite_host,
-            headers,
-        } => {
-            let mut resp_headers = headers.clone();
-            if *rewrite_host
-                && let Ok(parsed) = url.parse::<http::Uri>()
-                && let Some(host) = parsed.authority()
-                && let Ok(val) = http::HeaderValue::from_str(host.as_str())
-            {
-                resp_headers.push((http::header::HOST, val));
-            }
-            if let Ok(loc) = http::HeaderValue::from_str(url) {
-                resp_headers.push((http::header::LOCATION, loc));
-            }
-            (http::StatusCode::OK, resp_headers, Bytes::new())
+/// 服务端带宽配置，字节每秒，0 表示未设置。
+#[derive(Clone, Copy)]
+struct Bandwidth {
+    up: u64,
+    down: u64,
+    ignore_client: bool,
+}
+#[derive(Clone)]
+struct Negotiation {
+    bandwidth: Bandwidth,
+    rate: SendRate,
+}
+impl Negotiation {
+    /// 按客户端下行设置本端发送速率，返回应答头 `Hysteria-CC-RX`。
+    fn apply(&self, client_rx: u64) -> String {
+        let b = self.bandwidth;
+        self.rate
+            .set(server_send_rate(client_rx, b.up, b.ignore_client));
+        if b.ignore_client {
+            "auto".into()
+        } else {
+            b.down.to_string()
         }
     }
 }
@@ -322,8 +271,8 @@ async fn connection_loop(
     limits: Limits,
     auth: CredentialSet<[u8; 32]>,
     udp_enabled: bool,
-    up_bps: Option<u64>,
-    masquerade: Arc<MasqueradePlan>,
+    negotiation: Negotiation,
+    masquerade: Arc<Masquerade>,
     mux: Option<kerlico_net::sing_mux::SingMuxInboundConfig>,
 ) -> Result<()> {
     let _guard = ConnectionGuard(connection.clone());
@@ -395,16 +344,19 @@ async fn connection_loop(
                     ControlEvent::NativeProgress=>continue,
                 };
                 let authenticated=authenticated.clone();let ready=ready.clone();let context=context.clone();let auth=auth.clone();let ingress=access.clone();let peer=peer.clone();
-                let masquerade=masquerade.clone();
+                let masquerade=masquerade.clone();let negotiation=negotiation.clone();
                 crate::runtime::spawn_owned(context.tasks.clone(), context.events.clone(), &mut tasks, async move{
+                    let budget=crate::budget(&context);
+                    let (request,mut stream)=budget.run(async{resolver.resolve_request().await.map_err(|_|invalid())}).await?;
                     let operation=async {
-                        let (request,mut stream)=resolver.resolve_request().await.map_err(|_|invalid())?;
                         let one=|name:&str|{let mut values=request.headers().get_all(name).iter();let first=values.next();if values.next().is_some(){None}else{first}};
-                        let credential=one("hysteria-auth");let bandwidth=one("hysteria-cc-rx").and_then(|value|value.to_str().ok());
-                        let valid_bandwidth=bandwidth.is_some_and(|value|!value.is_empty()&&value.bytes().all(|byte|byte.is_ascii_digit())&&value.parse::<u64>().is_ok());
+                        let credential=one("hysteria-auth");
+                        let client_rx=one("hysteria-cc-rx").and_then(|value|value.to_str().ok()).filter(|value|!value.is_empty()&&value.bytes().all(|byte|byte.is_ascii_digit())).and_then(|value|value.parse::<u64>().ok());
                         let verified=credential.ok_or(Error::Rejected).and_then(|value|{let actual:[u8;32]=Sha256::digest(value.as_bytes()).into();auth.verify(&actual,|expected,actual|Ok(bool::from(actual.ct_eq(expected)).then_some(*expected)))});
-                        let is_auth=request.method()==http::Method::POST&&request.uri().path()=="/auth"&&request.uri().authority().is_some_and(|authority|authority.as_str()=="hysteria")&&valid_bandwidth&&verified.is_ok();
-                        if is_auth {
+                        let is_auth=request.method()==http::Method::POST&&request.uri().path()=="/auth"&&request.uri().authority().is_some_and(|authority|authority.as_str()=="hysteria")&&client_rx.is_some()&&verified.is_ok();
+                        if !is_auth {
+                            return Ok(false);
+                        }
                             let (authenticated_peer, identity) = ingress.authenticated(verified?, &context)?;
                             {
                                 let mut current = peer.lock().map_err(|_|invalid())?;
@@ -415,27 +367,15 @@ async fn connection_loop(
                             }
                             authenticated.store(true,Ordering::Release);if udp_enabled{ready.notify_one();}
                             let padding:String=rand::thread_rng().sample_iter(rand::distributions::Alphanumeric).take(256).map(char::from).collect();
-                            let cc_rx = match up_bps {
-                                Some(bps) => bps.to_string(),
-                                None => "auto".into(),
-                            };
+                            let cc_rx = negotiation.apply(client_rx.unwrap_or(0));
                             let response=Response::builder().status(233).header("hysteria-udp",if udp_enabled{"true"}else{"false"}).header("hysteria-cc-rx",cc_rx).header("hysteria-padding",padding).body(()).map_err(|_|invalid())?;
                             stream.send_response(response).await.map_err(|_|invalid())?;
-                        } else {
-                            let (status, headers, body) = resolve_masquerade(&masquerade, request.uri().path());
-                            let mut builder = Response::builder().status(status);
-                            for (name, val) in headers {
-                                builder = builder.header(name, val);
-                            }
-                            let response = builder.body(()).map_err(|_|invalid())?;
-                            stream.send_response(response).await.map_err(|_|invalid())?;
-                            if !body.is_empty() {
-                                stream.send_data(body).await.map_err(|_|invalid())?;
-                            }
-                        }
-                        stream.finish().await.map_err(|_|invalid())?;Ok(())
+                        stream.finish().await.map_err(|_|invalid())?;Ok(true)
                     };
-                    crate::budget(&context).run(operation).await
+                    if budget.run(operation).await? {
+                        return Ok(());
+                    }
+                    masquerade.serve(request,&mut stream,&context).await
                 }, Err)?;
             }
         }

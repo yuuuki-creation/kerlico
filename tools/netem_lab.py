@@ -3,6 +3,7 @@
 
 客户端在 A，节点和回显在 B。netem 只装在脚本自己创建的 veth 上，退出时删除 netns。
 需要 root。用法：tools/netem_lab.py --binary <kerlico> --protocol wireguard --loss 2 --delay 30
+Hysteria2：--protocol hysteria2 --hy2-up 50 --hy2-down 50 让双方协商为 Brutal；两者为 0 时为 BBR。
 """
 import argparse
 import hashlib
@@ -109,6 +110,21 @@ def wireguard_configs(args):
     return node_cfg, client_cfg
 
 
+def hysteria2_configs(args, workdir):
+    cert, key = Path(workdir) / "cert.pem", Path(workdir) / "key.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "extendedKeyUsage=serverAuth", "-keyout", str(key), "-out", str(cert)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    auth = "synthetic-" + uuid.uuid4().hex
+    node = {"tag": "node", "type": "hysteria2", "listen": f"0.0.0.0:{NODE_PORT}", "outbound": "direct", "options": {"tls": {"certificate_file": str(cert), "private_key_file": str(key)}}}
+    node_cfg = {"version": 2, "outbounds": [{"tag": "direct", "type": "direct"}], "inbounds": [], "nodes": [node], "limits": LIMITS}
+    bind_members(node_cfg, node, [{"auth": auth}])
+    client = {"server": {"host": B_ADDR, "port": NODE_PORT}, "auth": auth, "tls": {"server_name": "localhost", "ca_pem": cert.read_text()}}
+    for key_name, value in (("up", args.hy2_up), ("down", args.hy2_down)):
+        if value:
+            client[key_name] = f"{value} Mbps"
+    client_cfg = {"version": 2, "outbounds": [{"tag": "proxy", "type": "hysteria2", "options": client}], "local_inbounds": [{"tag": "socks", "type": "socks", "listen": f"127.0.0.1:{SOCKS_PORT}", "outbound": "proxy", "options": {"version": "5"}}], "inbounds": [], "limits": LIMITS}
+    return node_cfg, client_cfg
+
+
 def echo_main(port):
     server = socket.create_server(("0.0.0.0", port), reuse_port=True, backlog=64)
 
@@ -187,7 +203,9 @@ def main():
     watch.add_argument("size", type=int)
     watch.add_argument("stall", type=float)
     parser.add_argument("--binary")
-    parser.add_argument("--protocol", choices=["kernel", "wireguard"], default="wireguard")
+    parser.add_argument("--protocol", choices=["kernel", "wireguard", "hysteria2"], default="wireguard")
+    parser.add_argument("--hy2-up", type=int, default=0, help="Hysteria2 客户端 up，Mbit/s；0 为不设")
+    parser.add_argument("--hy2-down", type=int, default=0, help="Hysteria2 客户端 down，Mbit/s；0 为不设")
     parser.add_argument("--workdir", default="/tmp")
     parser.add_argument("--loss", type=float, default=0.0, help="每个方向的丢包百分比；配 --burst 时是进入坏状态的概率")
     parser.add_argument("--burst", type=float, default=0.0, help="坏状态每包回到好状态的百分比")
@@ -215,8 +233,8 @@ def main():
     try:
         lab.up()
         lab.spawn(lab.b, "echo", [sys.executable, me, "_echo", str(ECHO_PORT)])
-        if args.protocol == "wireguard":
-            node_cfg, client_cfg = wireguard_configs(args)
+        if args.protocol in ("wireguard", "hysteria2"):
+            node_cfg, client_cfg = wireguard_configs(args) if args.protocol == "wireguard" else hysteria2_configs(args, lab.dir)
             for name, cfg, ns in (("node", node_cfg, lab.b), ("client", client_cfg, lab.a)):
                 path = Path(lab.dir) / f"{name}.json"
                 path.write_text(json.dumps(cfg))
@@ -229,7 +247,8 @@ def main():
         result = subprocess.run(["ip", "netns", "exec", lab.a, sys.executable, me, "_watch", mode, host, str(ECHO_PORT), str(SOCKS_PORT), str(args.size), str(args.stall)], capture_output=True, text=True)
         if result.returncode:
             print(result.stderr[-1500:])
-        print(f"netem=[{netem_args(args)}] mtu={args.mtu} tunnel_mtu={args.tunnel_mtu} protocol={args.protocol} {result.stdout.strip()}", flush=True)
+        extra = f" hy2_up={args.hy2_up} hy2_down={args.hy2_down}" if args.protocol == "hysteria2" else ""
+        print(f"netem=[{netem_args(args)}] mtu={args.mtu} tunnel_mtu={args.tunnel_mtu} protocol={args.protocol}{extra} {result.stdout.strip()}", flush=True)
         if args.keep_logs and args.protocol != "kernel":
             for name in ("client", "node"):
                 for line in lab.tail(name, args.keep_logs):

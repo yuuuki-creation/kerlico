@@ -143,6 +143,32 @@ async fn start_fixture(
     udp: bool,
     permits: usize,
 ) -> Fixture {
+    start_fixture_with(
+        ipv6,
+        salamander,
+        congestion,
+        udp,
+        permits,
+        json!({}),
+        json!({}),
+    )
+    .await
+}
+fn merge(mut base: Value, extra: Value) -> Value {
+    for (key, value) in extra.as_object().unwrap() {
+        base[key] = value.clone();
+    }
+    base
+}
+async fn start_fixture_with(
+    ipv6: bool,
+    salamander: bool,
+    congestion: &str,
+    udp: bool,
+    permits: usize,
+    node_extra: Value,
+    client_extra: Value,
+) -> Fixture {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let certificate = cert.cert.pem();
     let key = cert.signing_key.serialize_pem();
@@ -156,10 +182,16 @@ async fn start_fixture(
     };
     let input = shared::node_input(
         "hysteria2",
-        &json!({"auth":"synthetic-node-password","tls":{"certificate_pem":certificate,"private_key_pem":key},"salamander_password":obfs,"udp":udp,"limits":{"congestion":congestion}}),
+        &merge(
+            json!({"auth":"synthetic-node-password","tls":{"certificate_pem":certificate,"private_key_pem":key},"salamander_password":obfs,"udp":udp,"limits":{"congestion":congestion}}),
+            node_extra,
+        ),
     );
     let node = Hysteria2Node::from_options(&input).unwrap();
-    let options = json!({"server":{"host":host,"port":port},"auth":"synthetic-node-password","tls":{"server_name":"localhost","ca_pem":certificate},"salamander_password":obfs,"limits":{"congestion":congestion}});
+    let options = merge(
+        json!({"server":{"host":host,"port":port},"auth":"synthetic-node-password","tls":{"server_name":"localhost","ca_pem":certificate},"salamander_password":obfs,"limits":{"congestion":congestion}}),
+        client_extra,
+    );
     let outbound = shared::outbound(&kerlico_hysteria2::Hysteria2Factory, &options)
         .await
         .unwrap();
@@ -715,4 +747,186 @@ async fn real_hysteria2_idle_association_records_timeout_after_zero_packet() {
     assert_eq!(records[0].usage.download_packets, 1);
     drop(channel);
     close(fixture).await;
+}
+
+async fn exchange(
+    sender: &mut h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>,
+    request: http::Request<()>,
+) -> (http::Response<()>, Vec<u8>) {
+    use bytes::Buf;
+    let mut stream = sender.send_request(request).await.unwrap();
+    stream.finish().await.unwrap();
+    let response = stream.recv_response().await.unwrap();
+    let mut body = Vec::new();
+    while let Some(mut data) = stream.recv_data().await.unwrap() {
+        while data.has_remaining() {
+            let chunk = data.chunk().to_vec();
+            data.advance(chunk.len());
+            body.extend(chunk);
+        }
+    }
+    (response, body)
+}
+fn auth_request(client_rx: &str) -> http::Request<()> {
+    http::Request::builder()
+        .method("POST")
+        .uri("https://hysteria/auth")
+        .header("hysteria-auth", "synthetic-node-password")
+        .header("hysteria-cc-rx", client_rx)
+        .body(())
+        .unwrap()
+}
+async fn close_h3(
+    endpoint: quinn::Endpoint,
+    connection: quinn::Connection,
+    driver: tokio::task::JoinHandle<()>,
+) {
+    connection.close(0x100u32.into(), b"");
+    endpoint.close(0x100u32.into(), b"");
+    driver.abort();
+}
+#[tokio::test]
+async fn auth_reply_advertises_the_node_receive_rate_or_auto() {
+    for (extra, expected) in [
+        (json!({}), "0"),
+        (json!({"up":"1 Gbps","down":"20 MB/s"}), "20000000"),
+        (json!({"down":100,"ignore_client_bandwidth":true}), "auto"),
+    ] {
+        let fixture = start_fixture_with(false, false, "bbr", true, 128, extra, json!({})).await;
+        let (endpoint, connection, mut sender, driver) = native_h3(&fixture).await;
+        let (response, _) = exchange(&mut sender, auth_request("12500000")).await;
+        assert_eq!(response.status().as_u16(), 233);
+        assert_eq!(response.headers()["hysteria-cc-rx"], expected);
+        close_h3(endpoint, connection, driver).await;
+        close(fixture).await;
+    }
+}
+/// 上传 1.5 MB 并读回回显，返回耗时秒数。
+async fn upload_seconds(client_extra: Value) -> f64 {
+    let fixture = start_fixture_with(false, false, "bbr", true, 128, json!({}), client_extra).await;
+    let target = Destination::new("127.0.0.1", 443).unwrap();
+    let mut stream = fixture
+        .outbound
+        .connect_tcp(&target, &ConnectContext::new(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .stream;
+    let mut banner = [0; 12];
+    stream.read_exact(&mut banner).await.unwrap();
+    let data = vec![0x5a; 1_500_000];
+    let started = std::time::Instant::now();
+    let (mut read, mut write) = tokio::io::split(stream);
+    let writer = tokio::spawn(async move {
+        write.write_all(&data).await.unwrap();
+        write.shutdown().await.unwrap();
+    });
+    let mut received = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), read.read_to_end(&mut received))
+        .await
+        .unwrap()
+        .unwrap();
+    writer.await.unwrap();
+    let elapsed = started.elapsed().as_secs_f64();
+    assert_eq!(received.len(), 1_500_000);
+    close(fixture).await;
+    elapsed
+}
+#[tokio::test]
+async fn client_up_paces_the_upload_with_brutal() {
+    let bbr = upload_seconds(json!({})).await;
+    let brutal = upload_seconds(json!({"up":"8 Mbps"})).await;
+    println!("bbr={bbr:.2}s brutal={brutal:.2}s");
+    assert!(bbr < 1.0, "BBR 回环上传 {bbr:.2}s");
+    assert!(
+        (1.2..4.0).contains(&brutal),
+        "Brutal 8 Mbps 上传 1.5 MB 用时 {brutal:.2}s"
+    );
+}
+async fn http_upstream() -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if socket.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let line = head.lines().next().unwrap_or_default().to_owned();
+                let host = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("host: "))
+                    .unwrap_or_default()
+                    .to_owned();
+                let body = format!("{line}|{host}");
+                let reply = format!(
+                    "HTTP/1.1 201 Created\r\ncontent-length: {}\r\nx-upstream: yes\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+    (port, task)
+}
+async fn masquerade_get(masquerade: Value, uri: &str) -> (http::Response<()>, Vec<u8>) {
+    let fixture = start_fixture_with(
+        false,
+        false,
+        "bbr",
+        true,
+        128,
+        json!({ "masquerade": masquerade }),
+        json!({}),
+    )
+    .await;
+    let (endpoint, connection, mut sender, driver) = native_h3(&fixture).await;
+    let request = http::Request::builder().uri(uri).body(()).unwrap();
+    let result = exchange(&mut sender, request).await;
+    close_h3(endpoint, connection, driver).await;
+    close(fixture).await;
+    result
+}
+#[tokio::test]
+async fn masquerade_proxy_forwards_to_the_upstream() {
+    let (port, upstream) = http_upstream().await;
+    for (rewrite, host) in [(false, "front.invalid"), (true, "127.0.0.1")] {
+        let (response, body) = masquerade_get(
+            json!({"type":"proxy","url":format!("http://127.0.0.1:{port}/base/"),"rewrite_host":rewrite,"headers":{"x-extra":"1"}}),
+            "https://front.invalid/page?q=1",
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 201);
+        assert_eq!(response.headers()["x-upstream"], "yes");
+        assert_eq!(response.headers()["x-extra"], "1");
+        assert!(response.headers().get("connection").is_none());
+        let body = String::from_utf8(body).unwrap();
+        assert!(body.starts_with("GET /base/page?q=1 HTTP/1.1|"), "{body}");
+        assert!(body.split('|').nth(1).unwrap().starts_with(host), "{body}");
+    }
+    upstream.abort();
+    let _ = upstream.await;
+    let (response, _) = masquerade_get(
+        json!({"type":"proxy","url":format!("http://127.0.0.1:{port}/")}),
+        "https://front.invalid/",
+    )
+    .await;
+    assert_eq!(response.status().as_u16(), 502);
+}
+#[tokio::test]
+async fn masquerade_string_and_default_still_answer_locally() {
+    let (response, body) = masquerade_get(
+        json!({"type":"string","content":"hello","status_code":418}),
+        "https://front.invalid/x",
+    )
+    .await;
+    assert_eq!(response.status().as_u16(), 418);
+    assert_eq!(body, b"hello");
+    let (response, _) = masquerade_get(Value::Null, "https://front.invalid/x").await;
+    assert_eq!(response.status().as_u16(), 404);
 }

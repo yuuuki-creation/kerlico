@@ -88,6 +88,7 @@ pub struct Hysteria2Outbound {
     port_ranges: Vec<RangeInclusive<u16>>,
     hop_interval: Duration,
     hop_interval_max: Duration,
+    up_bps: u64,
     down_bps: u64,
     name: String,
     tls: quinn::ClientConfig,
@@ -162,9 +163,10 @@ impl Hysteria2Outbound {
                     .and_then(|fm| fm.brutal_up.as_ref())
             })
             .or_else(|| fm_quic.and_then(|q| q.brutal_up.as_ref()));
-        if let Some(up) = up_spec {
-            up.to_bps()?;
-        }
+        let up_bps = match up_spec {
+            Some(up) => up.to_bps()?,
+            None => 0,
+        };
         let down_spec = options
             .down
             .as_ref()
@@ -187,12 +189,12 @@ impl Hysteria2Outbound {
         let tls = config::client_tls(&options.tls)?;
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from((*tls).clone())
             .map_err(|_| invalid())?;
-        let mut tls = quinn::ClientConfig::new(Arc::new(crypto));
-        tls.transport_config(
-            options
-                .limits
-                .transport(options.limits.max_streams, salamander.is_some())?,
-        );
+        let tls = quinn::ClientConfig::new(Arc::new(crypto));
+        options.limits.transport(
+            options.limits.max_streams,
+            salamander.is_some(),
+            crate::congestion::SendRate::default(),
+        )?;
         Ok(OutboundPlan::new(
             Capabilities {
                 tcp: true,
@@ -208,6 +210,7 @@ impl Hysteria2Outbound {
                         port_ranges,
                         hop_interval,
                         hop_interval_max,
+                        up_bps,
                         down_bps,
                         name,
                         tls,
@@ -260,7 +263,13 @@ impl Hysteria2Outbound {
             crate::socket::wrap_hopping(socket, self.salamander.clone(), hop)?,
             crate::runtime::ServiceRuntime::new(self.host.clone()),
         )?;
+        let send_rate = crate::congestion::SendRate::default();
         let mut tls = self.tls.clone();
+        tls.transport_config(self.limits.transport(
+            self.limits.max_streams,
+            self.salamander.is_some(),
+            send_rate.clone(),
+        )?);
         tls.token_store(Arc::new(quinn::TokenMemoryCache::default()));
         endpoint.set_default_client_config(tls);
         let mut pending = Pending {
@@ -320,12 +329,15 @@ impl Hysteria2Outbound {
             _ => return Err(invalid()),
         };
         let rate = one("hysteria-cc-rx")?;
-        if rate != "auto" {
+        let server_rx = if rate == "auto" {
+            None
+        } else {
             if rate.is_empty() || !rate.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(invalid());
             }
-            let _rate: u64 = rate.parse().map_err(|_| invalid())?;
-        }
+            Some(rate.parse::<u64>().map_err(|_| invalid())?)
+        };
+        send_rate.set(crate::congestion::client_send_rate(server_rx, self.up_bps));
         stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
         drop(stream);
         let registry = udp::Registry::new(self.limits.clone());

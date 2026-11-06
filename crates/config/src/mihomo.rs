@@ -365,6 +365,8 @@ fn shadowsocks(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     let cipher = p.required_string("cipher")?.to_ascii_lowercase();
     let password = p.required_string("password")?;
     let plugin = p.string("plugin")?;
+    // Mihomo 的 ss 只在 plugin-opts 内读 skip-cert-verify，顶层取值无效果（订阅 override 会写入）。
+    p.boolean("skip-cert-verify")?;
     let mut opts = Opts::default();
     let ss2022 = cipher.starts_with("2022-");
     opts.set("server", server.clone());
@@ -948,6 +950,9 @@ fn hysteria2(p: &mut Proxy) -> Result<(&'static str, Opts)> {
         Some(other) => return Err(p.bad_value("obfs", other)),
     }
     quic_tls(p, &mut opts, &host, false)?;
+    if p.boolean("skip-cert-verify")? == Some(true) {
+        opts.set("tls.insecure", true);
+    }
     if let Some(alpn) = p.strings("alpn")?
         && alpn != ["h3"]
     {

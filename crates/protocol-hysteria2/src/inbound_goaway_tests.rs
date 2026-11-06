@@ -432,7 +432,11 @@ async fn fixture(backend: Arc<Backend>) -> Fixture {
     .unwrap();
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from((*tls).clone()).unwrap();
     let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
-    client_config.transport_config(Limits::default().transport(32, false).unwrap());
+    client_config.transport_config(
+        Limits::default()
+            .transport(32, false, Default::default())
+            .unwrap(),
+    );
     let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
     endpoint.set_default_client_config(client_config);
     let connection = endpoint

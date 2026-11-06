@@ -1,10 +1,12 @@
 //! Hysteria2 原生 QUIC 双端，业务目标访问统一交给核心服务。
 
 mod config;
+mod congestion;
 mod dispatch;
 mod flow;
 mod inbound;
 mod io;
+mod masquerade;
 mod outbound;
 mod runtime;
 mod socket;

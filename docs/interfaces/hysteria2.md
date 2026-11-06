@@ -10,10 +10,11 @@
 - QUIC v1、TLS 1.3、ALPN h3，双端 HTTP/3 鉴权；无认证或错误认证请求返回静态 404 页面。
 - 原生 TCP 业务流，目标成功响应后返回流，保留写端 FIN 和反向排空。
 - 原生 QUIC UDP datagram，固定目标与同一 Session ID 的多目标关联，支持空包、分片、乱序重组、冲突/缺片/超时丢弃与实际来源地址回写。
-- 普通 QUIC 与 Salamander 两种载体；自适应 BBR、NewReno 两种拥塞配置。
+- 普通 QUIC 与 Salamander 两种载体；握手前用 BBR 或 NewReno，带宽协商出发送速率后切换为 Brutal。
+- 未认证请求的伪装应答：默认 404、`string`、`file` 与反向代理 `proxy`。
 - 独立 IPv4/IPv6 节点凭据、节点/全局资源预算、统一目标访问、空闲回收、取消与退出。
 
-具体结果见[验证记录](../testing/hysteria2.md)。Hysteria v1、Gecko、Brutal 固定速率、端口跳跃、Realm、noise、ECH、指纹模仿、外部认证与反向伪装代理尚未实现，不提供无效开关。
+具体结果见[验证记录](../testing/hysteria2.md)。Hysteria v1（见 hysteria1 接口）、Gecko、Realm、noise、ECH、指纹模仿与外部认证尚未实现。
 
 ## 配置
 
@@ -23,7 +24,9 @@
 {
   "server": {"host":"127.0.0.1","port":8443},
   "auth":"synthetic-node-secret",
-  "tls": {"server_name":"localhost","ca_pem":"PEM 内容"},
+  "tls": {"server_name":"localhost","ca_pem":"PEM 内容","insecure":false},
+  "up":"50 Mbps",
+  "down":"200 Mbps",
   "salamander_password":null,
   "limits": {"congestion":"bbr"},
   "finalmask": {"brutal_up":10000000,"brutal_down":50000000,"udp_hop":{"remote_ports":[8443,8444],"interval":30}},
@@ -37,6 +40,10 @@
 {
   "tls": {"certificate_file":"certificate.pem","private_key_file":"private-key.pem"},
   "udp":true,
+  "up":"1 Gbps",
+  "down":"1 Gbps",
+  "ignore_client_bandwidth":false,
+  "masquerade": {"type":"proxy","url":"https://www.example.com/","rewrite_host":true,"insecure":false},
   "salamander_password":null,
   "limits": {"congestion":"bbr"},
   "finalmask": {"brutal_up":10000000,"brutal_down":50000000,"udp_hop":{"remote_ports":[8443,8444],"interval":30}},
@@ -44,11 +51,27 @@
 }
 ```
 
-同一节点的客户端与服务端 auth 必须一致，IPv4/IPv6 不同节点分别设置独立 auth。节点 TLS 每种材料分别选择 `_pem` 或 `_file`，不得同时填写；单份材料最多 1 MiB。客户端不设 ca_pem 时信任内置公共根；不接受 insecure 跳过验证。auth 必须为非空、至多 4096 字节的合法 HTTP 字段值，拒绝首尾空白。Salamander 密码为可选的 4–4096 字节字符串，必须双端一致，它不替代 auth。
+同一节点的客户端与服务端 auth 必须一致，IPv4/IPv6 不同节点分别设置独立 auth。节点 TLS 每种材料分别选择 `_pem` 或 `_file`，不得同时填写；单份材料最多 1 MiB。客户端不设 ca_pem 时信任内置公共根；`tls.insecure: true`（Mihomo `skip-cert-verify`）不校验证书链与名称，仍校验 TLS 1.3 握手签名。auth 必须为非空、至多 4096 字节的合法 HTTP 字段值，拒绝首尾空白。Salamander 密码为可选的 4–4096 字节字符串，必须双端一致，它不替代 auth。
 
-`limits` 默认值：max_streams=64、udp_queue_packets=16、udp_queue_bytes=4194304、idle_timeout_ms=30000、congestion=bbr。允许 max_streams 1–1024、UDP 队列 1–64 包、队列字节 65536–16777216、空闲时间 100–86400000 毫秒。congestion 仅接受 bbr 或 reno；实际使用 Quinn 对应控制器，不是官方 BBR/Brutal 实现。
+`limits` 默认值：max_streams=64、udp_queue_packets=16、udp_queue_bytes=4194304、idle_timeout_ms=30000、congestion=bbr。允许 max_streams 1–1024、UDP 队列 1–64 包、队列字节 65536–16777216、空闲时间 100–86400000 毫秒。congestion 仅接受 bbr 或 reno，是带宽未协商时使用的 Quinn 控制器。
 
-客户端 auth 请求通告接收速率 0；服务端返回 auto，采用自适应控制。客户端接收对端的 0/auto；收到非零固定速率会明确拒绝，避免接受但忽略尚未实现的协商限制。
+### 带宽与 Brutal
+
+`up`、`down` 为字节每秒的来源，规则同 apernet/hysteria：整数为 Mbps；字符串为数字加单位，位单位 `bps`、`kbps`、`mbps`、`gbps`、`tbps` 及简写 `b`、`k`、`kb`、`m`、`mb`、`g`、`t` 不分大小写；字节单位写 `MB/s`、`KB/s` 等，或大写 B 的 `MBps`（Mihomo 写法）。无单位字符串按 Mbps。倍率为十进制；Mihomo 按 1024 换算 `K`/`M`/`G`，同一数值两者相差约 5%。不接受小数。旧字段 `finalmask.brutal_up`/`brutal_down` 仍作为 `up`/`down` 的后备来源。
+
+协商同官方实现：
+
+- 客户端认证请求头 `Hysteria-CC-RX` 为本端 `down`（未设为 0）。
+- 服务端发送速率取客户端 `down`，以服务端 `up` 为上限；客户端 `down` 为 0 或设置 `ignore_client_bandwidth` 时用 BBR/NewReno。服务端应答 `Hysteria-CC-RX` 为本端 `down`（未设为 0），设置 `ignore_client_bandwidth` 时为 `auto`。
+- 客户端收到 `auto` 或本端未设 `up` 时用 BBR/NewReno；否则发送速率取 min(服务端接收上限, 本端 `up`)，服务端接收上限为 0 时取本端 `up`。
+
+Brutal 为每连接的 Quinn 控制器，与 hysteria `congestion/brutal` 相同：按协商速率除以最近 5 秒确认率发送（样本少于 50 个时确认率按 1，下限 0.8），拥塞窗口为速率 × 平滑 RTT × 2 ÷ 确认率。窗口下限为 10240 字节，上游为一个数据报；回环或同机房这类 RTT 远小于延迟确认时间的路径上，单包窗口会让发送等对端的延迟确认，实测 8 Mbps 回环上传 1.5 MB 超过 20 秒，下限 10240 字节后按速率完成。客户端每次新建 QUIC 连接、服务端每个入站连接各有独立的速率句柄，鉴权后切换，同一连接内不影响其他连接。
+
+### 伪装应答
+
+未认证或非认证路径的 HTTP/3 请求按 `masquerade` 应答。`string` 返回固定状态码、头与正文；`file` 从目录读取（拒绝 `..` 等非普通路径分量，单文件至多 4 MiB，目录取 `index.html`）；未配置时返回 404。
+
+`proxy` 是反向代理：上游 URL 为配置 URL 的协议与主机，路径与查询拼接在配置路径后；默认保留原请求 `Host`，`rewrite_host: true` 时改为上游主机；`insecure: true` 不校验上游证书；不跟随重定向，不读取环境代理。请求体至多 4 MiB。上游在 `connect_timeout` 内未返回响应头时应答 502；响应体按块转发，单块等待受 `idle_timeout` 约束。逐跳头（`Connection`、`Transfer-Encoding` 等）不转发，配置的 `headers` 追加到响应。上游连接由节点直接拨出，不经出站调度器。也可用扁平字段 `masquerade_type`、`masquerade_url`、`masquerade_rewrite_host`、`masquerade_insecure` 等，或 `masquerade: "https://..."` 简写。
 
 ## 节点、服务和生命周期
 
