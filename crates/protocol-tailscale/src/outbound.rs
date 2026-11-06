@@ -8,13 +8,13 @@ use crate::{
 use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     Address, BoxFuture, Capabilities, ConnectContext, DatagramAssociation, DatagramChannel,
-    Destination, Error, OpenedTcp, Outbound, Result, ServiceContext, ServiceFailure, ServiceStatus,
-    TargetPolicy,
+    Destination, DialerOptions, Error, OpenedTcp, Outbound, Result, ServiceContext, ServiceFailure,
+    ServiceStatus, TargetPolicy,
 };
 use kerlico_wireguard::ip::{ClientTunnel, StackLimits, StackOptions};
 use serde_json::Value;
 use std::{
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
 };
 use tokio::{net::UdpSocket, sync::watch, time::timeout};
@@ -154,10 +154,7 @@ async fn start(prepared: Prepared, host: ServiceContext) -> Result<Arc<dyn Outbo
         cancel,
     )?;
     let (udp4, udp6) = if prepared.direct {
-        (
-            UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await.ok(),
-            UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).await.ok(),
-        )
+        direct_sockets(&prepared.dialer)?
     } else {
         (None, None)
     };
@@ -190,6 +187,18 @@ async fn start(prepared: Prepared, host: ServiceContext) -> Result<Arc<dyn Outbo
         routes,
         status: host.status(),
     }))
+}
+
+/// 直连路径的两族 UDP 套接字。IPv4 失败即报错；标记与出口网卡与地址族无关，IPv4 已施加成功时
+/// IPv6 失败只说明本机缺 IPv6，按无 IPv6 直连处理，除非显式配置了 IPv6 源地址。
+fn direct_sockets(dialer: &DialerOptions) -> Result<(Option<UdpSocket>, Option<UdpSocket>)> {
+    let v4 = dialer.udp_socket_for(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))?;
+    let v6 = match dialer.udp_socket_for(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))) {
+        Ok(socket) => Some(UdpSocket::from_std(socket)?),
+        Err(_) if dialer.bind_v6.is_none() => None,
+        Err(error) => return Err(error.into()),
+    };
+    Ok((Some(UdpSocket::from_std(v4)?), v6))
 }
 
 /// 通道关闭表示控制任务已因不可重试的错误结束。

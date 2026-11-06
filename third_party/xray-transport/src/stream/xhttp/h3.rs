@@ -29,6 +29,7 @@ use tokio::time::{sleep_until, Instant};
 
 use crate::{
     canonicalize_socket_addr, HappyEyeballsConfig, SocketHandle, SocketProtector, TransportError,
+    UdpSocketFactory,
 };
 
 const QUIC_V1: u32 = 0x0000_0001;
@@ -217,6 +218,8 @@ pub struct H3ConnectConfig {
     pub server_name: String,
     pub tls_config: Arc<rustls::ClientConfig>,
     pub socket_protector: Option<Arc<dyn SocketProtector>>,
+    /// `None` binds a wildcard socket of the peer's address family.
+    pub udp_socket_factory: Option<UdpSocketFactory>,
     pub quic: H3QuicConfig,
 }
 
@@ -228,6 +231,7 @@ impl fmt::Debug for H3ConnectConfig {
             .field("server_name", &self.server_name)
             .field("alpn_protocols", &self.tls_config.alpn_protocols)
             .field("socket_protector", &self.socket_protector.is_some())
+            .field("udp_socket_factory", &self.udp_socket_factory.is_some())
             .field("quic", &self.quic)
             .finish()
     }
@@ -505,7 +509,11 @@ pub(crate) async fn connect_quic_transport_with_datagrams(
         IpAddr::V4(_) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
         IpAddr::V6(_) => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
     };
-    let socket = StdUdpSocket::bind(bind_addr).map_err(|source| H3Error::UdpBind {
+    let socket = match &config.udp_socket_factory {
+        Some(factory) => factory(remote_addr),
+        None => StdUdpSocket::bind(bind_addr),
+    }
+    .map_err(|source| H3Error::UdpBind {
         addr: bind_addr,
         source,
     })?;

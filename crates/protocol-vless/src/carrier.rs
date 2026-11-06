@@ -373,45 +373,7 @@ impl Carrier {
                 }
             }
         };
-        if !dialer_opts.is_default() {
-            let opts = dialer_opts.clone();
-            let server_dest = server.clone();
-            dialer = dialer.with_resolved_tcp_connector(Arc::new(
-                xray_transport::FnResolvedTcpConnector(
-                    move |target: Target, candidates: Vec<SocketAddr>| {
-                        let opts = opts.clone();
-                        let server_dest = server_dest.clone();
-                        async move {
-                            let dest = if let Some(addr) = candidates.first()
-                                && opts.detour.is_none()
-                            {
-                                Destination::new(&addr.ip().to_string(), addr.port())
-                                    .unwrap_or(server_dest)
-                            } else {
-                                match &target.addr {
-                                    TargetAddr::Ip(ip) => {
-                                        Destination::new(&ip.to_string(), target.port)
-                                            .unwrap_or(server_dest)
-                                    }
-                                    TargetAddr::Domain(d) => {
-                                        Destination::new(d, target.port).unwrap_or(server_dest)
-                                    }
-                                }
-                            };
-                            let stream =
-                                kerlico_net::TcpConnector::connect_raw_with_dialer(&dest, &opts)
-                                    .await
-                                    .map_err(|e| {
-                                        xray_transport::TransportError::ChainedOutbound(
-                                            e.to_string(),
-                                        )
-                                    })?;
-                            Ok(Box::new(DialerTransportStream(stream)) as BoxedTransportStream)
-                        }
-                    },
-                ),
-            ));
-        }
+        dialer = install_dialer(dialer, &dialer_opts, &server);
         if let Some(frag) = &fragment_input
             && !frag.packets.is_empty()
         {
@@ -564,6 +526,20 @@ impl Carrier {
                 xhttp(settings, &connector, &authority, fragment_input.as_ref())?
             }
         };
+        if dialer_opts.has_detour()
+            && matches!(
+                layer,
+                LayerPlan::Xhttp {
+                    version: XhttpHttpVersion::Http3,
+                    ..
+                }
+            )
+        {
+            return Err(Error::Config(
+                "XHTTP HTTP/3 不能与 detour 同用：QUIC 套接字由传输库同步创建，无法接入链式 UDP 中继"
+                    .into(),
+            ));
+        }
         Ok(Self {
             server,
             connector,
@@ -597,11 +573,13 @@ impl Carrier {
             let server_name = config.server_name.clone();
             let tls = self.quic_tls.clone().ok_or_else(invalid)?;
             let quic = transport.h3_quic_config().clone();
+            let opts = self.dialer_opts.clone();
             return Ok(XhttpModeDial::Http3(Arc::new(move || {
                 let server_name = server_name.clone();
                 let tls = tls.clone();
                 let candidates = candidates.clone();
                 let quic = quic.clone();
+                let opts = opts.clone();
                 Box::pin(async move {
                     let remote_addr = *candidates.first().ok_or(
                         xray_transport::stream::xhttp_h3_test_only::H3Error::NoResolvedCandidate,
@@ -612,6 +590,9 @@ impl Carrier {
                             server_name,
                             tls_config: tls,
                             socket_protector: None,
+                            udp_socket_factory: Some(Arc::new(move |peer| {
+                                opts.udp_socket_for(peer)
+                            })),
                             quic,
                         },
                         &candidates,
@@ -1037,6 +1018,56 @@ fn load_custom_ca_der(
         }
     }
     Ok(out)
+}
+
+/// 让 xray 载体的 TCP 与 QUIC 套接字都经 `opts` 建立，不走库内默认的系统套接字。
+fn install_dialer(
+    dialer: TransportDialer,
+    opts: &kerlico_core::DialerOptions,
+    server: &Destination,
+) -> TransportDialer {
+    let tcp_opts = opts.clone();
+    let server = server.clone();
+    let dialer =
+        dialer.with_resolved_tcp_connector(Arc::new(xray_transport::FnResolvedTcpConnector(
+            move |target: Target, candidates: Vec<SocketAddr>| {
+                let opts = tcp_opts.clone();
+                let server = server.clone();
+                async move { dial_resolved(&opts, &server, target, candidates).await }
+            },
+        )));
+    if opts.has_detour() {
+        return dialer;
+    }
+    let udp_opts = opts.clone();
+    dialer.with_udp_socket_factory(Arc::new(move |peer| udp_opts.udp_socket_for(peer)))
+}
+
+async fn dial_resolved(
+    opts: &kerlico_core::DialerOptions,
+    server: &Destination,
+    target: Target,
+    candidates: Vec<SocketAddr>,
+) -> std::result::Result<BoxedTransportStream, xray_transport::TransportError> {
+    let chained = |e: Error| xray_transport::TransportError::ChainedOutbound(e.to_string());
+    let stream: kerlico_core::BoxStream = if opts.has_detour() || candidates.is_empty() {
+        let dest = match &target.addr {
+            TargetAddr::Ip(ip) => Destination::new(&ip.to_string(), target.port),
+            TargetAddr::Domain(d) => Destination::new(d, target.port),
+        }
+        .unwrap_or_else(|_| server.clone());
+        opts.connect(&dest).await.map_err(chained)?
+    } else {
+        let (tcp, _) = kerlico_core::dialer::happy_eyeballs(
+            candidates,
+            opts.fallback_delay(),
+            |peer| async move { Ok(opts.connect_addr(peer).await?) },
+        )
+        .await
+        .map_err(chained)?;
+        Box::new(tcp)
+    };
+    Ok(Box::new(DialerTransportStream(stream)))
 }
 
 struct DialerTransportStream(kerlico_core::BoxStream);

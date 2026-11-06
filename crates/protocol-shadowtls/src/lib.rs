@@ -22,6 +22,9 @@ impl OutboundFactory for ShadowTlsFactory {
     fn kind(&self) -> &'static str {
         "shadowtls"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         let value: config::Client = config::parse(options)?;
         let key = value.validate()?;
@@ -31,6 +34,7 @@ impl OutboundFactory for ShadowTlsFactory {
             key,
             settings: tls::settings(&value.tls, value.version, value.strict())?,
             host: std::sync::OnceLock::new(),
+            dialer: kerlico_core::current_compile_dialer(),
         });
         let plan = match value.inner.kind.as_str() {
             "shadowsocks" => kerlico_shadowsocks::ShadowsocksOutbound::compile_with_connector(

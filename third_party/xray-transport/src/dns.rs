@@ -970,6 +970,7 @@ pub async fn exchange_dns_quic_candidates(
             server_name: server_name.clone(),
             tls_config: Arc::clone(&tls_config),
             socket_protector: socket_protector.clone(),
+            udp_socket_factory: None,
             quic: crate::stream::H3QuicConfig::default(),
         };
         let (endpoint, connection, _) =

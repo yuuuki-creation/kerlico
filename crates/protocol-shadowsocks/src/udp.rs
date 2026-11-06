@@ -29,6 +29,7 @@ fn nonce_len(method: CipherKind) -> usize {
 }
 struct ClientSender {
     socket: Arc<UdpSocket>,
+    _relay: Arc<Option<kerlico_core::dialer::RelayGuard>>,
     config: Arc<ServerConfig>,
     crypto: SharedContext,
     target: Address,
@@ -36,6 +37,7 @@ struct ClientSender {
 }
 struct ClientReceiver {
     socket: Arc<UdpSocket>,
+    _relay: Arc<Option<kerlico_core::dialer::RelayGuard>>,
     config: Arc<ServerConfig>,
     crypto: SharedContext,
     target: Address,
@@ -47,24 +49,18 @@ pub(crate) async fn connect(
     target: &Destination,
     cancel: CancellationToken,
 ) -> Result<DatagramChannel> {
-    let mut peers: Vec<_> =
-        kerlico_core::lookup_host((outbound.server.host().as_str(), outbound.server.port()))
-            .await?
-            .collect();
-    peers.sort_by_key(|peer| peer.is_ipv6());
-    let peer = peers.first().ok_or(Error::InvalidAddress)?;
-    let socket = Arc::new(
-        UdpSocket::bind(if peer.is_ipv6() {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        })
-        .await?,
-    );
+    let kerlico_core::UdpPeer {
+        socket,
+        peer,
+        relay,
+    } = outbound.dialer.udp_peer(&outbound.server).await?;
+    let socket = Arc::new(UdpSocket::from_std(socket)?);
     socket.connect(peer).await?;
+    let relay = Arc::new(relay);
     Ok(DatagramChannel {
         sender: Box::new(ClientSender {
             socket: socket.clone(),
+            _relay: relay.clone(),
             config: outbound.config.clone(),
             crypto: outbound.crypto.clone(),
             target: address(target),
@@ -72,6 +68,7 @@ pub(crate) async fn connect(
         }),
         receiver: Box::new(ClientReceiver {
             socket,
+            _relay: relay,
             config: outbound.config.clone(),
             crypto: outbound.crypto.clone(),
             target: address(target),

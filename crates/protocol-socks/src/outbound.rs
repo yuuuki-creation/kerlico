@@ -11,15 +11,16 @@ use kerlico_core::{
 };
 use serde_json::Value;
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr},
     sync::{Arc, Mutex},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpStream, UdpSocket},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::UdpSocket,
 };
 
 struct SocksOutbound {
+    dialer: kerlico_core::DialerOptions,
     server: Destination,
     version: Version,
     auth: Option<Auth>,
@@ -28,7 +29,10 @@ struct SocksOutbound {
     tasks: Mutex<Vec<ServiceTask<()>>>,
 }
 
-async fn negotiate(stream: &mut TcpStream, auth: &Option<Auth>) -> Result<()> {
+async fn negotiate(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin + ?Sized),
+    auth: &Option<Auth>,
+) -> Result<()> {
     let method = if auth.is_some() { 2 } else { 0 };
     stream.write_all(&[5, 1, method]).await?;
     let mut response = [0; 2];
@@ -50,7 +54,7 @@ async fn negotiate(stream: &mut TcpStream, auth: &Option<Auth>) -> Result<()> {
     Ok(())
 }
 
-async fn reply(stream: &mut TcpStream) -> Result<(String, u16)> {
+async fn reply(stream: &mut (impl AsyncRead + Unpin + ?Sized)) -> Result<(String, u16)> {
     let mut bytes = [0; 3];
     stream.read_exact(&mut bytes).await?;
     if bytes[0] != 5 || bytes[2] != 0 {
@@ -100,12 +104,7 @@ impl Outbound for SocksOutbound {
         Box::pin(async move {
             context
                 .run(async {
-                    let mut stream = kerlico_core::connect_host((
-                        self.server.host().as_str(),
-                        self.server.port(),
-                    ))
-                    .await?;
-                    stream.set_nodelay(true)?;
+                    let mut stream = self.dialer.connect(&self.server).await?;
                     let info = if self.version == Version::Five {
                         negotiate(&mut stream, &self.auth).await?;
                         let mut request = vec![5, 1, 0];
@@ -168,12 +167,7 @@ impl Outbound for SocksOutbound {
             }
             context
                 .run(async {
-                    let mut stream =
-                        kerlico_core::connect_host((self.server.host().as_str(), self.server.port()))
-                            .await?;
-                    stream.set_nodelay(true)?;
-                    let peer = stream.peer_addr()?;
-                    let local = stream.local_addr()?;
+                    let mut stream = self.dialer.connect(&self.server).await?;
                     negotiate(&mut stream, &self.auth).await?;
                     // 使用全零地址让服务端从控制连接确定来源，并固定首个合法 UDP 端口。
                     stream.write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
@@ -181,24 +175,21 @@ impl Outbound for SocksOutbound {
                     if port == 0 {
                         return Err(wire::invalid());
                     }
-                    let relay = match host.parse::<IpAddr>() {
-                        Ok(ip) => {
-                            SocketAddr::new(if ip.is_unspecified() { peer.ip() } else { ip }, port)
-                        }
-                        Err(_) => tokio::net::lookup_host((host.as_str(), port))
-                            .await?
-                            .min_by_key(|addr| addr.is_ipv4() != peer.is_ipv4())
-                            .ok_or(Error::InvalidAddress)?,
+                    // 服务端报告全零地址时，中继与控制连接的服务端同址。
+                    let relay_host = match host.parse::<IpAddr>() {
+                        Ok(ip) if ip.is_unspecified() => self.server.host(),
+                        _ => host,
                     };
-                    let bind_ip = if relay.is_ipv4() == local.is_ipv4() {
-                        local.ip()
-                    } else if relay.is_ipv4() {
-                        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-                    } else {
-                        IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
-                    };
-                    let socket = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
-                    socket.connect(relay).await?;
+                    let kerlico_core::UdpPeer {
+                        socket,
+                        peer,
+                        relay: detour_relay,
+                    } = self
+                        .dialer
+                        .udp_peer(&Destination::new(&relay_host, port)?)
+                        .await?;
+                    let socket = UdpSocket::from_std(socket)?;
+                    socket.connect(peer).await?;
                     let cancel = context.cancel.child_token();
                     let stopped = cancel.clone();
                     let service = self.host.cancel();
@@ -208,7 +199,10 @@ impl Outbound for SocksOutbound {
                         stopped.cancel();
                     })?;
                     { let mut tasks = self.tasks.lock().map_err(|_|wire::invalid())?; tasks.retain(|task|!task.is_finished()); tasks.push(task); }
-                    let guard = Arc::new(Control { cancel });
+                    let guard = Arc::new(Control {
+                        cancel,
+                        _relay: detour_relay,
+                    });
                     let socket = Arc::new(socket);
                     Ok(DatagramAssociation {
                         sender: Box::new(AssociationSender {
@@ -251,6 +245,7 @@ impl Outbound for SocksOutbound {
 
 struct Control {
     cancel: CancellationToken,
+    _relay: Option<kerlico_core::dialer::RelayGuard>,
 }
 impl Drop for Control {
     fn drop(&mut self) {
@@ -330,7 +325,11 @@ impl OutboundFactory for SocksFactory {
     fn kind(&self) -> &'static str {
         "socks"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
+        let dialer = kerlico_core::current_compile_dialer();
         let options: OutOptions = serde_json::from_value(options.clone())
             .map_err(|_| Error::Config("SOCKS 出站字段不合法".into()))?;
         config::validate(options.version, &options.auth, &options.userid)?;
@@ -347,6 +346,7 @@ impl OutboundFactory for SocksFactory {
             move |host| {
                 Box::pin(async move {
                     Ok(Arc::new(SocksOutbound {
+                        dialer,
                         server,
                         version: options.version,
                         auth: options.auth,

@@ -38,6 +38,9 @@ impl OutboundFactory for NaiveFactory {
             None,
         )
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
 }
 impl NodeFactory for NaiveNodeFactory {
     fn kind(&self) -> &'static str {

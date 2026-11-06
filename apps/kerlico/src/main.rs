@@ -869,7 +869,7 @@ impl Device {
         let runtime = match Self::wanted(prepared) {
             Some(spec) => {
                 let directory = spec.state_directory.clone();
-                let options = match spec.registration {
+                let mut options = match spec.registration {
                     kerlico_config::DeviceRegistration::CreateOnce => {
                         kerlico_device::DeviceOptions::new(directory.clone())
                     }
@@ -877,6 +877,7 @@ impl Device {
                         kerlico_device::DeviceOptions::existing(directory.clone())
                     }
                 };
+                options.dialer = prepared.global_dialer().clone();
                 Some((directory, kerlico_device::DeviceRuntime::start(options)?))
             }
             None => None,

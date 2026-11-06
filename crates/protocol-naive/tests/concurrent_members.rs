@@ -58,7 +58,7 @@ impl StreamConnector for Gate {
                     .run(std::future::pending::<Result<BoxStream>>())
                     .await
             } else {
-                kerlico_net::TcpConnector::plain()
+                kerlico_net::TcpConnector::plain(Default::default())
                     .connect_tcp(endpoint, context)
                     .await
             }

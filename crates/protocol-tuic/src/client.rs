@@ -54,10 +54,12 @@ pub(crate) struct Client {
     heartbeat: Duration,
     host: ServiceContext,
     current: tokio::sync::Mutex<HashMap<ResourceKey, Arc<MemberConnection>>>,
+    dialer: kerlico_core::DialerOptions,
 }
 pub(crate) struct Connection {
     pub quic: quinn::Connection,
     _endpoint: quinn::Endpoint,
+    _relay: Option<kerlico_core::dialer::RelayGuard>,
     version: u8,
     mode: Mode,
     next: AtomicU32,
@@ -345,6 +347,12 @@ impl Client {
             }
             None => hop_interval,
         };
+        let dialer = kerlico_core::current_compile_dialer();
+        if dialer.has_detour() && !port_ranges.is_empty() {
+            return Err(Error::Config(
+                "TUIC 端口跳跃不能与 detour 同用：链式 UDP 中继只转发到固定服务端端口".into(),
+            ));
+        }
         let credential = Credential::parse(
             options.version,
             options.token,
@@ -375,25 +383,31 @@ impl Client {
                         heartbeat,
                         host,
                         current: tokio::sync::Mutex::new(HashMap::new()),
+                        dialer,
                     }) as Arc<dyn Outbound>)
                 })
             },
         ))
     }
     async fn dial_connection(&self, initial_active: usize) -> Result<Arc<Connection>> {
-        let candidates =
-            kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
+        let mut detoured = if self.dialer.has_detour() {
+            Some(self.dialer.udp_peer(&self.server).await?)
+        } else {
+            None
+        };
+        let candidates = match &detoured {
+            Some(relayed) => vec![relayed.peer],
+            None => kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
                 .await?
                 .take(32)
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>(),
+        };
         let mut last = Error::InvalidAddress;
         for peer in candidates {
-            let socket = std::net::UdpSocket::bind(if peer.is_ipv6() {
-                "[::]:0"
-            } else {
-                "0.0.0.0:0"
-            })?;
-            socket.set_nonblocking(true)?;
+            let (socket, relay) = match detoured.take() {
+                Some(relayed) => (relayed.socket, relayed.relay),
+                None => (self.dialer.udp_socket_for(peer)?, None),
+            };
             let hop = if self.port_ranges.is_empty() {
                 None
             } else {
@@ -426,6 +440,7 @@ impl Client {
             let connection = Arc::new(Connection {
                 quic,
                 _endpoint: endpoint,
+                _relay: relay,
                 version: self.credential.version(),
                 mode: self.mode,
                 next: AtomicU32::new(1),

@@ -151,7 +151,7 @@ where
         result = storage_task => Arc::new(result??),
     };
     let owner = TaskOwner::new(host.clone(), storage.clone(), prepared.shutdown_timeout)?;
-    let runtime = owner.runtime(prepared.carrier_timeout)?;
+    let runtime = owner.runtime(prepared.carrier_timeout, prepared.dialer)?;
     let fatal_owner = owner.clone();
     let client_task = host.spawn_blocking_tracked(move || {
         let config = storage.config()?;
@@ -208,5 +208,9 @@ impl OutboundFactory for TorFactory {
             TargetPolicy::Remote,
             move |host| Box::pin(start(prepared, host)),
         ))
+    }
+
+    fn supports_detour(&self) -> bool {
+        true
     }
 }

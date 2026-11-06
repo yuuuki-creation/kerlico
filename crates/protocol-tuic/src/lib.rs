@@ -22,6 +22,9 @@ impl OutboundFactory for TuicFactory {
         let options = serde_json::from_value(value.clone()).map_err(|_| config::invalid())?;
         client::Client::compile(options)
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
 }
 impl NodeFactory for TuicNodeFactory {
     fn kind(&self) -> &'static str {

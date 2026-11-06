@@ -119,6 +119,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+kerlico-core = { workspace = true, features = ["dialer-probe"] }
 
 [lints]
 workspace = true

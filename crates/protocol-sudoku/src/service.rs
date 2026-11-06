@@ -46,7 +46,11 @@ impl Runtime {
         );
         let cover = if let Some(cover) = config.fallback.as_ref() {
             let target = cover.server.destination()?;
-            let endpoint = Arc::new(crate::carrier::endpoint::Endpoint::new(target));
+            // 入站回落到伪装站点，入站侧没有出站拨号配置。
+            let endpoint = Arc::new(crate::carrier::endpoint::Endpoint::new(
+                target,
+                kerlico_core::DialerOptions::default(),
+            ));
             Some(crate::carrier::http::transport::HttpClient::cover(
                 cover.host.clone(),
                 cover.compiled_tls.clone(),

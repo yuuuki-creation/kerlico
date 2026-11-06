@@ -38,6 +38,7 @@ struct Options {
     obfs_uri: Option<String>,
 }
 struct SnellOutbound {
+    connector: kerlico_net::TcpConnector,
     server: Destination,
     settings: Arc<Settings>,
     userkey: Vec<u8>,
@@ -49,7 +50,11 @@ impl OutboundFactory for SnellFactory {
     fn kind(&self) -> &'static str {
         "snell"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
+        let connector = kerlico_net::TcpConnector::plain(kerlico_core::current_compile_dialer());
         let options: Options = serde_json::from_value(options.clone()).map_err(|_| invalid())?;
         let settings = Arc::new(
             Settings::new(
@@ -80,6 +85,7 @@ impl OutboundFactory for SnellFactory {
             move |host| {
                 Box::pin(async move {
                     Ok(Arc::new(SnellOutbound {
+                        connector,
                         server,
                         settings,
                         userkey,
@@ -110,9 +116,7 @@ impl SnellOutbound {
                 return Ok(session);
             }
         }
-        let stream = kerlico_net::TcpConnector::plain()
-            .connect(&self.server)
-            .await?;
+        let stream = self.connector.connect(&self.server).await?;
         let stream = obfs::wrap(stream, &self.settings, false).await?;
         Ok(Session::new(stream, self.settings.clone())?)
     }

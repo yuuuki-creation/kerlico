@@ -47,6 +47,9 @@ impl OutboundFactory for MasqueFactory {
             },
         ))
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
 }
 
 /// 同一作用域的并发建立在槽内串行，只产生一条隧道。

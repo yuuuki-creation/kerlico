@@ -5,8 +5,8 @@ use crate::{
 use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
     BoxFuture, CancellationToken, Capabilities, ConnectContext, DatagramAssociation,
-    DatagramChannel, Destination, Error, OpenedTcp, Outbound, Result, ServiceContext,
-    ServiceFailure, ServiceStatus, TargetPolicy, is_peer_path_error,
+    DatagramChannel, Destination, DialerOptions, Error, OpenedTcp, Outbound, Result,
+    ServiceContext, ServiceFailure, ServiceStatus, TargetPolicy, is_peer_path_error,
 };
 use kerlico_wireguard::ip::ClientTunnel;
 use serde_json::Value;
@@ -129,24 +129,30 @@ impl OutboundFactory for ZeroTierFactory {
         let options: ClientOptions = serde_json::from_value(options.clone())
             .map_err(|_| Error::Config("ZeroTier出站字段不合法".into()))?;
         let prepared = options.prepare()?;
+        let dialer = kerlico_core::current_compile_dialer();
         Ok(OutboundPlan::new(
             CAPABILITIES,
             true,
             TargetPolicy::Local,
-            move |host| Box::pin(start(prepared, host)),
+            move |host| Box::pin(start(prepared, dialer, host)),
         ))
     }
 }
 
 /// 身份生成可能耗时数秒，放进后台任务，启动不因此超时；期间连接等待加入完成。
-async fn start(prepared: Prepared, host: ServiceContext) -> Result<Arc<dyn Outbound>> {
+async fn start(
+    prepared: Prepared,
+    dialer: DialerOptions,
+    host: ServiceContext,
+) -> Result<Arc<dyn Outbound>> {
     let cancel = host.cancel();
     let (link_sender, link) = watch::channel(Link::Joining);
     let status = host.status();
     let runtime_host = host.clone();
     let outbound_cancel = cancel.clone();
     host.spawn(async move {
-        if let Err(error) = drive(prepared, link_sender, &runtime_host, cancel.clone()).await
+        if let Err(error) =
+            drive(prepared, dialer, link_sender, &runtime_host, cancel.clone()).await
             && !matches!(error, Error::Cancelled)
         {
             runtime_host.fail(runtime_failure(error));
@@ -162,6 +168,7 @@ async fn start(prepared: Prepared, host: ServiceContext) -> Result<Arc<dyn Outbo
 
 async fn drive(
     prepared: Prepared,
+    dialer: DialerOptions,
     link: watch::Sender<Link>,
     host: &ServiceContext,
     cancel: CancellationToken,
@@ -180,7 +187,7 @@ async fn drive(
     let mut driver = Driver {
         clock: Clock::new(),
         node,
-        sockets: Sockets::bind(bind, stable_port(node_address)).await?,
+        sockets: Sockets::bind(&dialer, bind, stable_port(node_address))?,
         tcp_fallback_mode,
         tcp_fallback_relay,
         interface: None,
@@ -239,31 +246,47 @@ fn stable_port(address: Address) -> u16 {
     20000 + (address.value() % 45000) as u16
 }
 
-async fn bind_preferring(ip: IpAddr, port: u16) -> Option<UdpSocket> {
-    match UdpSocket::bind((ip, port)).await {
-        Ok(socket) => Some(socket),
-        Err(_) => UdpSocket::bind((ip, 0)).await.ok(),
-    }
+fn bind_preferring(dialer: &DialerOptions, ip: IpAddr, port: u16) -> std::io::Result<UdpSocket> {
+    let socket = match dialer.udp_socket(SocketAddr::new(ip, port)) {
+        Ok(socket) => socket,
+        Err(_) => dialer.udp_socket(SocketAddr::new(ip, 0))?,
+    };
+    UdpSocket::from_std(socket)
+}
+
+fn bind_exact(dialer: &DialerOptions, address: SocketAddr) -> Result<Option<UdpSocket>> {
+    Ok(Some(UdpSocket::from_std(dialer.udp_socket(address)?)?))
 }
 
 impl Sockets {
-    async fn bind(bind: Option<SocketAddr>, default_port: u16) -> Result<Self> {
+    fn bind(dialer: &DialerOptions, bind: Option<SocketAddr>, default_port: u16) -> Result<Self> {
         match bind {
             Some(address) if address.is_ipv4() => Ok(Self {
-                v4: Some(UdpSocket::bind(address).await?),
+                v4: bind_exact(dialer, address)?,
                 v6: None,
             }),
             Some(address) => Ok(Self {
                 v4: None,
-                v6: Some(UdpSocket::bind(address).await?),
+                v6: bind_exact(dialer, address)?,
             }),
             None => {
-                let v4 = bind_preferring(IpAddr::V4(Ipv4Addr::UNSPECIFIED), default_port).await;
-                let v6 = bind_preferring(IpAddr::V6(Ipv6Addr::UNSPECIFIED), default_port).await;
-                if v4.is_none() && v6.is_none() {
-                    return Err(Error::Protocol("ZeroTier载体绑定地址不合法"));
+                let v4 = bind_preferring(
+                    dialer,
+                    IpAddr::V4(dialer.bind_v4.unwrap_or(Ipv4Addr::UNSPECIFIED)),
+                    default_port,
+                );
+                let v6 = bind_preferring(
+                    dialer,
+                    IpAddr::V6(dialer.bind_v6.unwrap_or(Ipv6Addr::UNSPECIFIED)),
+                    default_port,
+                );
+                match (v4, v6) {
+                    (Err(error), Err(_)) => Err(error.into()),
+                    (v4, v6) => Ok(Self {
+                        v4: v4.ok(),
+                        v6: v6.ok(),
+                    }),
                 }
-                Ok(Self { v4, v6 })
             }
         }
     }

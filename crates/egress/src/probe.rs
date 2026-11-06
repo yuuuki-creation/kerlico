@@ -82,7 +82,9 @@ impl ProbeTarget {
             destination: Destination::new(host, port)?,
             authority: authority.to_owned(),
             path,
-            tls: secure.then(|| TcpConnector::tls(host, None)).transpose()?,
+            tls: secure
+                .then(|| TcpConnector::tls(host, None, kerlico_core::DialerOptions::default()))
+                .transpose()?,
         })
     }
 

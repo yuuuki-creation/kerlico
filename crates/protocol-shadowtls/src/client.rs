@@ -1,12 +1,14 @@
 use crate::{stream, tls, wire};
 use kerlico_core::{BoxFuture, BoxStream, ConnectContext, Destination, Result, StreamConnector};
 use std::sync::{Arc, OnceLock};
+
 pub(crate) struct Connector {
     pub version: u8,
     pub strict: bool,
     pub key: Arc<[u8]>,
     pub settings: tls::Settings,
     pub host: OnceLock<kerlico_core::ServiceContext>,
+    pub dialer: kerlico_core::DialerOptions,
 }
 impl StreamConnector for Connector {
     fn tcp_eof(&self) -> bool {
@@ -25,12 +27,9 @@ impl StreamConnector for Connector {
                 .ok_or(kerlico_core::Error::Protocol("ShadowTLS 出站尚未启动"))?;
             context
                 .run(async {
-                    let tcp =
-                        kerlico_core::connect_host((endpoint.host().as_str(), endpoint.port()))
-                            .await?;
-                    tcp.set_nodelay(true)?;
+                    let tcp = self.dialer.connect(endpoint).await?;
                     let outcome = tls::handshake(
-                        Box::new(tcp),
+                        tcp,
                         &self.settings,
                         self.version,
                         self.strict,

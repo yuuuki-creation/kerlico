@@ -219,6 +219,7 @@ struct DnsUpstreamDialer {
     known: HashSet<String>,
     dispatcher: std::sync::OnceLock<std::sync::Weak<Dispatcher>>,
     timeout: Duration,
+    sockets: kerlico_core::DialerOptions,
 }
 impl DnsUpstreamDialer {
     fn service(
@@ -270,6 +271,9 @@ async fn dns_upstream_target(policy: TargetPolicy, target: &Destination) -> Resu
 impl kerlico_dns::DnsDialer for DnsUpstreamDialer {
     fn knows(&self, outbound: &str) -> bool {
         self.known.contains(outbound)
+    }
+    fn sockets(&self) -> kerlico_core::DialerOptions {
+        self.sockets.clone()
     }
     fn connect_tcp<'a>(
         &'a self,
@@ -423,6 +427,7 @@ impl EgressRuntime {
         let rule_providers = plan.rule_providers().clone();
         let store_selected_path = plan.store_selected_path().map(str::to_owned);
         let mode = plan.mode();
+        let dns_sockets_options = plan.global_dialer().clone();
         let (plans, bindings, routes_table, max_flows, detour_table) = plan.into_parts();
         let RuntimeOptions { device, language } = options;
         let run = NEXT_RUN
@@ -444,6 +449,7 @@ impl EgressRuntime {
             known,
             dispatcher: std::sync::OnceLock::new(),
             timeout: Duration::from_secs(5),
+            sockets: dns_sockets_options,
         });
         resolver.bind_runtime(
             Arc::new(RouteSets(routes_table.clone())),
@@ -1540,30 +1546,24 @@ impl Drop for PendingLookup<'_> {
     }
 }
 /// 依次尝试已解析的候选地址；非末位候选最多占用 1 秒，仅 I/O 与超时错误换下一个。
+/// 本地出网按 RFC 8305 竞速候选地址：两族交错，前一个失败或等待后端的 `fallback_delay`
+/// 后启动下一个，首个成功者胜出，其余被取消。
 async fn connect_candidates(
     backend: &dyn Outbound,
     candidates: &[Destination],
     scoped: &ConnectContext,
 ) -> Result<(OpenedTcp, Destination)> {
-    let mut last = Error::InvalidAddress;
-    for (index, target) in candidates.iter().enumerate() {
-        let remaining = scoped.remaining();
-        if remaining.is_zero() {
-            return Err(Error::Timeout);
-        }
-        let budget = if index + 1 < candidates.len() {
-            remaining.min(Duration::from_secs(1))
-        } else {
-            remaining
-        };
-        let attempt = scoped.with_timeout(budget);
-        match attempt.run(backend.connect_tcp(target, &attempt)).await {
-            Ok(stream) => return Ok((stream, target.clone())),
-            Err(error @ (Error::Io(_) | Error::Timeout)) => last = error,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(last)
+    let ordered = kerlico_core::dialer::interleave_families(
+        candidates.to_vec(),
+        |target| matches!(target.address(), Address::Ip(ip) if ip.is_ipv6()),
+    );
+    scoped
+        .run(kerlico_core::dialer::happy_eyeballs(
+            ordered,
+            backend.fallback_delay(),
+            |target| async move { backend.connect_tcp(&target, scoped).await },
+        ))
+        .await
 }
 async fn recorded_candidates(
     resolver: &dyn Resolver,
@@ -1904,6 +1904,64 @@ mod tests {
         assert_eq!(
             updated.target(),
             &Destination::new("new.example.com", 8443).unwrap()
+        );
+    }
+
+    /// IPv6 目标连接永远挂起（黑洞），IPv4 目标立即成功。
+    struct BlackholeV6;
+    impl Outbound for BlackholeV6 {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                tcp: true,
+                tcp_eof: true,
+                udp: false,
+            }
+        }
+        fn fallback_delay(&self) -> Duration {
+            Duration::from_millis(50)
+        }
+        fn connect_tcp<'a>(
+            &'a self,
+            target: &'a Destination,
+            _context: &'a ConnectContext,
+        ) -> BoxFuture<'a, Result<OpenedTcp>> {
+            Box::pin(async move {
+                if matches!(target.address(), Address::Ip(ip) if ip.is_ipv6()) {
+                    std::future::pending::<()>().await;
+                }
+                let (stream, _) = tokio::io::duplex(64);
+                Ok(OpenedTcp {
+                    stream: Box::new(stream),
+                    info: kerlico_core::TcpConnectInfo::unknown(),
+                })
+            })
+        }
+        fn connect_udp<'a>(
+            &'a self,
+            _target: &'a Destination,
+            _context: &'a ConnectContext,
+        ) -> BoxFuture<'a, Result<kerlico_core::DatagramChannel>> {
+            Box::pin(async { Err(Error::Unsupported("测试后端不提供 UDP")) })
+        }
+    }
+
+    #[tokio::test]
+    async fn happy_eyeballs_picks_ipv4_when_ipv6_blackholes() {
+        let candidates = vec![
+            Destination::new("2001:db8::1", 443).unwrap(),
+            Destination::new("2001:db8::2", 443).unwrap(),
+            Destination::new("192.0.2.1", 443).unwrap(),
+        ];
+        let context = ConnectContext::new(Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        let (_, picked) = connect_candidates(&BlackholeV6, &candidates, &context)
+            .await
+            .unwrap();
+        assert_eq!(picked, Destination::new("192.0.2.1", 443).unwrap());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "IPv4 候选应在一个 fallback_delay 后启动，实际耗时 {:?}",
+            started.elapsed()
         );
     }
 }

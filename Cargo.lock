@@ -4315,8 +4315,10 @@ version = "1.13.0"
 dependencies = [
  "futures-util",
  "idna",
+ "nix 0.30.1",
  "rand 0.8.8",
  "rustix 1.1.6",
+ "socket2 0.6.5",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

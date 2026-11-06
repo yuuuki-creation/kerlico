@@ -69,6 +69,20 @@ fn identity_and_addresses_are_validated_at_compile_time() {
 }
 
 #[test]
+fn dialer_options_that_cannot_reach_upstream_sockets_are_rejected() {
+    use kerlico_config::OutboundFactory;
+    let marked = kerlico_core::DialerOptions {
+        routing_mark: Some(0x2333),
+        ..kerlico_core::DialerOptions::default()
+    };
+    let result = kerlico_core::with_compile_dialer(marked, || {
+        crate::EasyTierFactory.compile(&options(json!({})))
+    });
+    assert!(matches!(result, Err(Error::Config(_))));
+    assert!(crate::EasyTierFactory.compile(&options(json!({}))).is_ok());
+}
+
+#[test]
 fn packet_target_reads_ipv4_and_ipv6_destination() {
     let mut ipv4 = [0u8; 20];
     ipv4[0] = 0x45;

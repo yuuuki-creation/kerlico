@@ -8,21 +8,21 @@ use crate::{
 use bytes::Bytes;
 use kerlico_config::{OutboundFactory, OutboundPlan};
 use kerlico_core::{
-    Address, BoxFuture, CancellationToken, Capabilities, ConnectContext, DatagramAssociation,
-    DatagramChannel, Destination, Error, OpenedTcp, Outbound, Result, ServiceContext,
-    ServiceFailure, ServiceStatus, TargetPolicy,
+    Address, BoxFuture, BoxStream, CancellationToken, Capabilities, ConnectContext,
+    DatagramAssociation, DatagramChannel, Destination, Error, OpenedTcp, Outbound, Result,
+    ServiceContext, ServiceFailure, ServiceStatus, TargetPolicy,
 };
 use kerlico_wireguard::ip::{ClientTunnel, StackLimits, StackOptions};
 use serde_json::Value;
 use std::{
     collections::VecDeque,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpStream, UdpSocket, tcp::WriteHalf},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
+    net::UdpSocket,
     sync::watch,
     time::MissedTickBehavior,
 };
@@ -53,6 +53,9 @@ impl OutboundFactory for OpenVpnFactory {
             TargetPolicy::Local,
             move |host| Box::pin(start(prepared, host)),
         ))
+    }
+    fn supports_detour(&self) -> bool {
+        true
     }
 }
 
@@ -353,8 +356,31 @@ fn open_tunnel(
 }
 
 enum Carrier {
-    Udp { socket: UdpSocket, buffer: Vec<u8> },
-    Tcp { stream: TcpStream, buffer: Vec<u8> },
+    Udp {
+        socket: UdpSocket,
+        buffer: Vec<u8>,
+    },
+    Tcp {
+        reader: ReadHalf<BoxStream>,
+        writer: WriteHalf<BoxStream>,
+        buffer: Vec<u8>,
+    },
+}
+impl Carrier {
+    fn udp(socket: UdpSocket) -> Self {
+        Self::Udp {
+            socket,
+            buffer: vec![0; 65536],
+        }
+    }
+    fn tcp(stream: BoxStream) -> Self {
+        let (reader, writer) = tokio::io::split(stream);
+        Self::Tcp {
+            reader,
+            writer,
+            buffer: Vec::with_capacity(65538),
+        }
+    }
 }
 enum LinkEvent {
     Received(Vec<u8>),
@@ -366,48 +392,66 @@ struct Link {
     pending: VecDeque<Bytes>,
     pending_since: Option<Instant>,
     host: ServiceContext,
+    _relay: Option<kerlico_core::dialer::RelayGuard>,
 }
 impl Link {
-    fn new(carrier: Carrier, host: ServiceContext) -> Self {
+    fn new(
+        carrier: Carrier,
+        relay: Option<kerlico_core::dialer::RelayGuard>,
+        host: ServiceContext,
+    ) -> Self {
         Self {
             carrier,
             pending: VecDeque::new(),
             pending_since: None,
             host,
+            _relay: relay,
         }
     }
     async fn connect(prepared: &Prepared, attempt: usize, host: ServiceContext) -> Result<Self> {
         let (remote, proto) = &prepared.remotes[attempt % prepared.remotes.len()];
-        let endpoint = resolve(remote, prepared.bind).await?;
-        let bind = prepared.bind.unwrap_or_else(|| {
-            let any = if endpoint.is_ipv4() {
-                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-            } else {
-                IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        let dialer = &prepared.dialer;
+        if let Some(bind) = prepared.bind {
+            let endpoint = resolve(remote, Some(bind)).await?;
+            let carrier = match proto {
+                Proto::Udp => {
+                    let socket = UdpSocket::from_std(dialer.udp_socket(bind)?)?;
+                    socket.connect(endpoint).await?;
+                    Carrier::udp(socket)
+                }
+                Proto::Tcp => {
+                    let socket = dialer.tcp_socket(endpoint)?;
+                    socket.bind(bind)?;
+                    let stream = socket.connect(endpoint).await?;
+                    stream.set_nodelay(true)?;
+                    Carrier::tcp(Box::new(stream))
+                }
             };
-            SocketAddr::new(any, 0)
-        });
+            return Ok(Self::new(carrier, None, host));
+        }
+        // 链式拨号时服务端域名交给上游解析。
+        let server = if dialer.has_detour() {
+            remote.clone()
+        } else {
+            let endpoint = resolve(remote, None).await?;
+            Destination::new(&endpoint.ip().to_string(), endpoint.port())?
+        };
         match proto {
             Proto::Udp => {
-                let socket = UdpSocket::bind(bind).await?;
-                socket.connect(endpoint).await?;
-                let buffer = vec![0; 65536];
-                Ok(Self::new(Carrier::Udp { socket, buffer }, host))
+                let kerlico_core::UdpPeer {
+                    socket,
+                    peer,
+                    relay,
+                } = dialer.udp_peer(&server).await?;
+                let socket = UdpSocket::from_std(socket)?;
+                socket.connect(peer).await?;
+                Ok(Self::new(Carrier::udp(socket), relay, host))
             }
-            Proto::Tcp => {
-                let socket = if endpoint.is_ipv4() {
-                    tokio::net::TcpSocket::new_v4()?
-                } else {
-                    tokio::net::TcpSocket::new_v6()?
-                };
-                if prepared.bind.is_some() {
-                    socket.bind(bind)?;
-                }
-                let stream = socket.connect(endpoint).await?;
-                stream.set_nodelay(true)?;
-                let buffer = Vec::with_capacity(65538);
-                Ok(Self::new(Carrier::Tcp { stream, buffer }, host))
-            }
+            Proto::Tcp => Ok(Self::new(
+                Carrier::tcp(dialer.connect(&server).await?),
+                None,
+                host,
+            )),
         }
     }
     fn idle(&self) -> bool {
@@ -441,6 +485,7 @@ impl Link {
             pending,
             pending_since,
             host,
+            ..
         } = self;
         match carrier {
             Carrier::Udp { socket, buffer } => {
@@ -457,7 +502,11 @@ impl Link {
                     }
                 }
             }
-            Carrier::Tcp { stream, buffer } => loop {
+            Carrier::Tcp {
+                reader,
+                writer,
+                buffer,
+            } => loop {
                 if let Some((length, rest)) = buffer.split_first_chunk::<2>() {
                     let length = usize::from(u16::from_be_bytes(*length));
                     if rest.len() >= length {
@@ -466,9 +515,8 @@ impl Link {
                         return Ok(LinkEvent::Received(packet));
                     }
                 }
-                let (mut reader, mut writer) = stream.split();
                 tokio::select! {
-                    sent = drain_tcp(&mut writer, pending), if !pending.is_empty() => {
+                    sent = drain_tcp(writer, pending), if !pending.is_empty() => {
                         sent?;
                         *pending_since = None;
                         return Ok(LinkEvent::Drained);
@@ -492,8 +540,8 @@ async fn drain_udp(socket: &UdpSocket, pending: &mut VecDeque<Bytes>) -> std::io
     }
     Ok(())
 }
-async fn drain_tcp(
-    writer: &mut WriteHalf<'_>,
+async fn drain_tcp<W: AsyncWrite + Unpin>(
+    writer: &mut W,
     pending: &mut VecDeque<Bytes>,
 ) -> std::io::Result<()> {
     while let Some(frame) = pending.front_mut() {
@@ -521,7 +569,10 @@ async fn resolve(remote: &Destination, bind: Option<SocketAddr>) -> Result<Socke
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::{net::TcpListener, time::timeout};
+    use tokio::{
+        net::{TcpListener, TcpStream},
+        time::timeout,
+    };
 
     /// 对端完全不读时，发送队列写不完，读取仍要继续，并在时限后判定停滞。
     #[tokio::test]
@@ -531,8 +582,11 @@ mod tests {
             .await
             .unwrap();
         let (mut peer, _) = listener.accept().await.unwrap();
-        let buffer = Vec::with_capacity(65538);
-        let mut link = Link::new(Carrier::Tcp { stream, buffer }, ServiceContext::for_test());
+        let mut link = Link::new(
+            Carrier::tcp(Box::new(stream)),
+            None,
+            ServiceContext::for_test(),
+        );
         for _ in 0..2048 {
             link.queue(vec![0; 60000]).unwrap();
         }
@@ -555,8 +609,11 @@ mod tests {
             .await
             .unwrap();
         let (mut peer, _) = listener.accept().await.unwrap();
-        let buffer = Vec::with_capacity(65538);
-        let mut link = Link::new(Carrier::Tcp { stream, buffer }, ServiceContext::for_test());
+        let mut link = Link::new(
+            Carrier::tcp(Box::new(stream)),
+            None,
+            ServiceContext::for_test(),
+        );
         link.queue(b"abc".to_vec()).unwrap();
         let event = timeout(Duration::from_secs(5), link.next()).await.unwrap();
         assert!(matches!(event, Ok(LinkEvent::Drained)));

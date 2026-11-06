@@ -19,6 +19,7 @@ pub struct Ss2022Outbound {
     pub(crate) server: Destination,
     pub(crate) crypto: SharedContext,
     connector: Option<Arc<dyn StreamConnector>>,
+    pub(crate) dialer: kerlico_core::DialerOptions,
 }
 
 impl Ss2022Outbound {
@@ -29,6 +30,7 @@ impl Ss2022Outbound {
         let parsed = serde_json::from_value(options.clone())
             .map_err(|_| Error::Config("Ss2022 出站字段不合法".into()))?;
         let (config, server) = config::client(parsed)?;
+        let dialer = kerlico_core::current_compile_dialer();
         let capabilities = Capabilities {
             tcp: true,
             tcp_eof: connector
@@ -47,6 +49,7 @@ impl Ss2022Outbound {
                         server,
                         crypto: Context::new_shared(ServerType::Local),
                         connector,
+                        dialer,
                     }) as Arc<dyn Outbound>)
                 })
             },
@@ -76,13 +79,7 @@ impl Outbound for Ss2022Outbound {
                     let carrier: BoxStream = if let Some(connector) = &self.connector {
                         connector.connect_tcp(&self.server, context).await?
                     } else {
-                        let tcp = kerlico_core::connect_host((
-                            self.server.host().as_str(),
-                            self.server.port(),
-                        ))
-                        .await?;
-                        tcp.set_nodelay(true)?;
-                        Box::new(tcp)
+                        self.dialer.connect(&self.server).await?
                     };
                     let mut stream = ProxyClientStream::from_stream(
                         self.crypto.clone(),
@@ -124,6 +121,9 @@ pub struct Ss2022Factory;
 impl OutboundFactory for Ss2022Factory {
     fn kind(&self) -> &'static str {
         "ss2022"
+    }
+    fn supports_detour(&self) -> bool {
+        true
     }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         Ss2022Outbound::compile_with_connector(options, None)

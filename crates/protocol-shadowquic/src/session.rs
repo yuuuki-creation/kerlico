@@ -58,6 +58,7 @@ impl Maps {
 pub(crate) struct EndpointOwner {
     pub endpoint: jls_quinn::Endpoint,
     pub runtime: Arc<ScopedRuntime>,
+    pub _relay: Option<kerlico_core::dialer::RelayGuard>,
 }
 impl Drop for EndpointOwner {
     fn drop(&mut self) {

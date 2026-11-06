@@ -106,6 +106,7 @@ async fn pair_with_options(
         server_name: "localhost".to_owned(),
         tls_config: client_tls,
         socket_protector,
+        udp_socket_factory: None,
         quic: H3QuicConfig::default(),
     })
     .await
@@ -324,6 +325,7 @@ fn h3_network_dial(
                 server_name: "localhost".to_owned(),
                 tls_config: client_tls,
                 socket_protector: None,
+                udp_socket_factory: None,
                 quic: H3QuicConfig::default(),
             })
             .await
@@ -2184,6 +2186,7 @@ async fn invalid_sni_precedes_socket_protection_and_protection_failure_stops_can
         server_name: "invalid server name".to_owned(),
         tls_config: Arc::clone(&client_tls),
         socket_protector: Some(recording.clone()),
+        udp_socket_factory: None,
         quic: H3QuicConfig::default(),
     })
     .await
@@ -2209,6 +2212,7 @@ async fn invalid_sni_precedes_socket_protection_and_protection_failure_stops_can
             server_name: "localhost".to_owned(),
             tls_config: client_tls,
             socket_protector: Some(failing.clone()),
+            udp_socket_factory: None,
             quic: H3QuicConfig::default(),
         },
         &[server_addr, server_addr],

@@ -104,7 +104,12 @@ impl StreamConnector for RecordedConnector {
     ) -> BoxFuture<'a, Result<BoxStream>> {
         Box::pin(async move {
             self.endpoints.lock().unwrap().push(endpoint.clone());
-            StreamConnector::connect_tcp(&TcpConnector::plain(), endpoint, context).await
+            StreamConnector::connect_tcp(
+                &TcpConnector::plain(Default::default()),
+                endpoint,
+                context,
+            )
+            .await
         })
     }
 }

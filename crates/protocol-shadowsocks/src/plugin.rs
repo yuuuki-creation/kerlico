@@ -284,11 +284,7 @@ impl StreamConnector for PluginConnector {
                 .run(async {
                     match &self.plugin {
                         Plugin::ObfsHttp { host, path } => {
-                            let raw = kerlico_net::TcpConnector::connect_raw_with_dialer(
-                                endpoint,
-                                &self.dialer,
-                            )
-                            .await?;
+                            let raw = self.dialer.connect(endpoint).await?;
                             let host = host.clone().unwrap_or_else(|| endpoint.host().clone());
                             Ok(Box::new(HttpObfsStream::new(raw, host, path.clone())) as BoxStream)
                         }
@@ -301,16 +297,11 @@ impl StreamConnector for PluginConnector {
                         } => {
                             let host = host.clone().unwrap_or_else(|| endpoint.host().clone());
                             let carrier = if *tls {
-                                kerlico_net::TcpConnector::tls(&host, None)?
-                                    .with_dialer(self.dialer.clone())
+                                kerlico_net::TcpConnector::tls(&host, None, self.dialer.clone())?
                                     .connect(endpoint)
                                     .await?
                             } else {
-                                kerlico_net::TcpConnector::connect_raw_with_dialer(
-                                    endpoint,
-                                    &self.dialer,
-                                )
-                                .await?
+                                self.dialer.connect(endpoint).await?
                             };
                             match transport {
                                 V2rayTransport::WebSocket => {

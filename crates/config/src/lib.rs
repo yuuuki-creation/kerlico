@@ -484,6 +484,11 @@ pub trait NodeFactory: Send + Sync {
 }
 pub trait OutboundFactory: Send + Sync {
     fn kind(&self) -> &'static str;
+    /// 出站的全部载体套接字是否经 `DialerOptions::connect`/`udp_peer` 建立，从而能经
+    /// `detour` 上游承载。返回 `false` 时配置了 `detour` 的出站在加载阶段被拒绝。
+    fn supports_detour(&self) -> bool {
+        false
+    }
     fn compile(&self, options: &Value) -> Result<OutboundPlan>;
 }
 
@@ -635,6 +640,14 @@ pub struct GlobalDialerSpec {
     pub tcp_keep_alive_idle: Option<DurationSpec>,
     #[serde(alias = "keep-alive-interval", alias = "tcp-keep-alive-interval")]
     pub tcp_keep_alive_interval: Option<DurationSpec>,
+    #[serde(alias = "tcp_multi_path", alias = "tcp-multi-path")]
+    pub mptcp: bool,
+    #[serde(alias = "fallback-delay")]
+    pub fallback_delay: Option<DurationSpec>,
+    #[serde(alias = "inet4-bind-address")]
+    pub inet4_bind_address: Option<std::net::Ipv4Addr>,
+    #[serde(alias = "inet6-bind-address")]
+    pub inet6_bind_address: Option<std::net::Ipv6Addr>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1041,7 +1054,39 @@ fn apply_dialer_map(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| Error::Config("绑定网卡名须为非空字符串".into()))?;
-            out.interface = Some(s.to_owned());
+            out.interface = Some(kerlico_core::InterfaceBinding::Named(s.to_owned()));
+        }
+    }
+    for key in ["inet4_bind_address", "inet4-bind-address"] {
+        if let Some(val) = map.remove(key) {
+            out.bind_v4 = Some(
+                val.as_str()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| Error::Config("inet4_bind_address 须为 IPv4 地址".into()))?,
+            );
+        }
+    }
+    for key in ["inet6_bind_address", "inet6-bind-address"] {
+        if let Some(val) = map.remove(key) {
+            out.bind_v6 = Some(
+                val.as_str()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| Error::Config("inet6_bind_address 须为 IPv6 地址".into()))?,
+            );
+        }
+    }
+    for key in ["mptcp", "tcp_multi_path", "tcp-multi-path"] {
+        if let Some(val) = map.remove(key) {
+            out.mptcp = val
+                .as_bool()
+                .ok_or_else(|| Error::Config("mptcp 须为布尔值".into()))?;
+        }
+    }
+    for key in ["fallback_delay", "fallback-delay"] {
+        if let Some(val) = map.remove(key) {
+            let spec: DurationSpec = serde_json::from_value(val)
+                .map_err(|_| Error::Config("fallback_delay 时长不合法".into()))?;
+            out.fallback_delay = Some(spec.to_duration()?);
         }
     }
     for key in ["detour", "dialer_proxy", "dialer-proxy"] {
@@ -1123,6 +1168,46 @@ fn apply_dialer_map(
         }
     }
     Ok(())
+}
+
+/// 全局出口网卡：显式网卡名（Mihomo `interface-name`、`dialer.interface`、sing-box
+/// `route.default_interface`）优先；否则 `auto_detect_interface` 取默认路由网卡并跳过本配置的 TUN。
+fn global_interface(config: &Config) -> Option<kerlico_core::InterfaceBinding> {
+    let named = [
+        config.interface_name.as_deref(),
+        config.dialer.interface.as_deref(),
+        config
+            .route
+            .as_ref()
+            .and_then(|r| r.default_interface.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|name| !name.is_empty());
+    if let Some(name) = named {
+        return Some(kerlico_core::InterfaceBinding::Named(name.to_owned()));
+    }
+    let auto = config.dialer.auto_detect_interface
+        || config
+            .route
+            .as_ref()
+            .is_some_and(|r| r.auto_detect_interface);
+    auto.then(|| kerlico_core::InterfaceBinding::AutoDetect {
+        exclude: config
+            .local_inbounds
+            .iter()
+            .chain(&config.nodes)
+            .filter(|node| node.kind == "tun")
+            .map(|node| {
+                ["name", "interface_name", "interface-name", "device"]
+                    .iter()
+                    .find_map(|key| node.options.get(key).and_then(Value::as_str))
+                    .unwrap_or("kerlico0")
+                    .to_owned()
+            })
+            .collect(),
+    })
 }
 
 fn extract_dialer_options(
@@ -1429,27 +1514,21 @@ impl Registry {
             }
         }
         let detour_table = kerlico_core::DetourTable::new();
-        let route_mark = config.route.as_ref().and_then(|r| r.default_mark);
         let global_dialer = kerlico_core::DialerOptions {
             detour: None,
-            interface: config
-                .interface_name
-                .clone()
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    config
-                        .dialer
-                        .interface
-                        .as_ref()
-                        .map(|s| s.trim().to_owned())
-                        .filter(|s| !s.is_empty())
-                }),
+            interface: global_interface(&config),
             routing_mark: config
                 .routing_mark
                 .or(config.dialer.routing_mark)
-                .or(route_mark),
+                .or(config.route.as_ref().and_then(|r| r.default_mark)),
+            bind_v4: config.dialer.inet4_bind_address,
+            bind_v6: config.dialer.inet6_bind_address,
             tcp_fast_open: config.dialer.tcp_fast_open,
+            mptcp: config.dialer.mptcp,
+            fallback_delay: match &config.dialer.fallback_delay {
+                Some(spec) => Some(spec.to_duration()?),
+                None => None,
+            },
             disable_tcp_keep_alive: config.disable_keep_alive
                 || config.dialer.disable_tcp_keep_alive,
             tcp_keep_alive_idle: match config
@@ -1689,7 +1768,14 @@ impl Registry {
                 .get(spec.kind.as_str())
                 .ok_or_else(|| Error::Config("出站类型未注册或未编译".into()))?;
             let dialer = extract_dialer_options(&mut spec.options, &global_dialer)?;
+            dialer.validate_platform()?;
             if let Some(upstream) = &dialer.detour {
+                if !factory.supports_detour() {
+                    return Err(Error::Config(format!(
+                        "出站类型 {} 不支持 detour/dialer-proxy",
+                        spec.kind
+                    )));
+                }
                 detours.insert(id.clone(), upstream.clone());
             }
             let plan =
@@ -2237,6 +2323,7 @@ impl Registry {
             None
         };
         Ok(PreparedConfig {
+            global_dialer: global_dialer.clone(),
             history: config.telemetry,
             device: config.device,
             control: config.control,
@@ -2253,6 +2340,7 @@ impl Registry {
                 resources,
                 store_selected_path,
                 mode,
+                global_dialer: global_dialer.clone(),
             },
             log,
             inbounds: config.inbounds,
@@ -2408,6 +2496,9 @@ mod tests {
     impl OutboundFactory for DummyDirectFactory {
         fn kind(&self) -> &'static str {
             "direct"
+        }
+        fn supports_detour(&self) -> bool {
+            true
         }
         fn compile(&self, _options: &Value) -> Result<OutboundPlan> {
             Ok(OutboundPlan::new(

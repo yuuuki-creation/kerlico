@@ -1,14 +1,21 @@
 #![cfg(target_os = "linux")]
 
 use kerlico_config::OutboundFactory;
-use kerlico_core::{ConnectContext, Destination, ServiceContext};
+use kerlico_core::{
+    ConnectContext, Destination, DialerOptions, InterfaceBinding, ServiceContext,
+    with_compile_dialer,
+};
 use kerlico_net::DirectFactory;
 use serde_json::json;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
 async fn connect(interface: &str, port: u16) -> kerlico_core::Result<()> {
-    let plan = DirectFactory.compile(&json!({"interface": interface}))?;
+    let dialer = DialerOptions {
+        interface: Some(InterfaceBinding::Named(interface.into())),
+        ..DialerOptions::default()
+    };
+    let plan = with_compile_dialer(dialer, || DirectFactory.compile(&json!({})))?;
     let outbound = plan.start(ServiceContext::for_test()).await?;
     let target = Destination::new("127.0.0.1", port)?;
     outbound
@@ -26,13 +33,8 @@ async fn direct_uses_the_configured_interface() {
 }
 
 #[test]
-fn direct_rejects_unknown_fields_and_bad_names() {
+fn direct_rejects_options_because_the_dialer_owns_them() {
     assert!(DirectFactory.compile(&json!({"unknown": true})).is_err());
-    assert!(DirectFactory.compile(&json!({"interface": ""})).is_err());
-    assert!(
-        DirectFactory
-            .compile(&json!({"interface": "this-name-is-too-long"}))
-            .is_err()
-    );
+    assert!(DirectFactory.compile(&json!({"interface": "lo"})).is_err());
     assert!(DirectFactory.compile(&json!({})).is_ok());
 }

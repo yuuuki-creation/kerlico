@@ -132,6 +132,9 @@ impl OutboundFactory for VlessFactory {
     fn kind(&self) -> &'static str {
         "vless"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         crate::profile::compile(options)
     }

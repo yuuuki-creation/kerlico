@@ -75,6 +75,7 @@ pub(crate) struct Prepared {
     pub headers: http::HeaderMap,
     pub max_tunnels: usize,
     pub idle: Duration,
+    pub dialer: kerlico_core::DialerOptions,
 }
 impl ClientOptions {
     pub fn prepare(self) -> Result<Prepared> {
@@ -119,6 +120,7 @@ impl ClientOptions {
             headers,
             max_tunnels: self.limits.max_tunnels,
             idle: Duration::from_millis(self.limits.idle_timeout_ms),
+            dialer: kerlico_core::current_compile_dialer(),
         })
     }
 }

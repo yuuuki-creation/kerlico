@@ -13,7 +13,6 @@ use kerlico_core::{
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    net::SocketAddr,
     sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
@@ -30,6 +29,7 @@ pub(crate) struct Connection {
     pub udp: bool,
     pub limits: Limits,
     _socket: crate::socket::Close,
+    _relay: Option<kerlico_core::dialer::RelayGuard>,
     control: Mutex<Option<QuicIo>>,
     tasks: Mutex<Vec<ServiceTask<()>>>,
     host: ServiceContext,
@@ -113,6 +113,7 @@ struct Client {
     slots: Arc<Semaphore>,
     connected: tokio::sync::Mutex<HashMap<ResourceKey, Arc<Cache>>>,
     host: ServiceContext,
+    dialer: kerlico_core::DialerOptions,
 }
 impl OutboundFactory for Hysteria1Factory {
     fn kind(&self) -> &'static str {
@@ -141,6 +142,12 @@ impl OutboundFactory for Hysteria1Factory {
                 })
             }
         };
+        let dialer = kerlico_core::current_compile_dialer();
+        if dialer.has_detour() && hop.is_some() {
+            return Err(Error::Config(
+                "Hysteria 端口跳跃不能与 detour 同用：链式 UDP 中继只转发到固定服务端端口".into(),
+            ));
+        }
         let socket = Arc::new(crate::socket::Settings {
             carrier: options.transport,
             key: config::obfs(options.obfs)?,
@@ -172,10 +179,14 @@ impl OutboundFactory for Hysteria1Factory {
                         slots,
                         connected: tokio::sync::Mutex::new(HashMap::new()),
                         host,
+                        dialer,
                     }) as Arc<dyn Outbound>)
                 })
             },
         ))
+    }
+    fn supports_detour(&self) -> bool {
+        true
     }
 }
 impl Client {
@@ -197,18 +208,11 @@ impl Client {
             return Ok(state.clone());
         }
         cached.take();
-        let mut addresses: Vec<SocketAddr> =
-            kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
-                .await?
-                .collect();
-        addresses.sort_by_key(|address| address.is_ipv6());
-        let remote = addresses.first().copied().ok_or(Error::InvalidAddress)?;
-        let socket = std::net::UdpSocket::bind(if remote.is_ipv6() {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        })?;
-        socket.set_nonblocking(true)?;
+        let kerlico_core::UdpPeer {
+            socket,
+            peer: remote,
+            relay,
+        } = self.dialer.udp_peer(&self.server).await?;
         let (socket, socket_close) = crate::socket::wrap(socket, self.socket.clone())?;
         let mut endpoint_config = quinn::EndpointConfig::default();
         endpoint_config.supported_versions(vec![1]);
@@ -246,6 +250,7 @@ impl Client {
             udp,
             limits: self.limits.clone(),
             _socket: socket_close,
+            _relay: relay,
             control: Mutex::new(Some(control)),
             tasks: Mutex::new(Vec::new()),
             host: self.host.clone(),

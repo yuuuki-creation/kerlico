@@ -403,6 +403,7 @@ impl HysteriaClient {
                 server_name: config.tls.server_name.clone(),
                 tls_config,
                 socket_protector: tls.socket_protector_arc(),
+                udp_socket_factory: None,
                 quic: config.quic.clone(),
             },
             b"h3",

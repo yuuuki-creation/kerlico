@@ -1,5 +1,9 @@
 use crate::{
-    TorFactory, error::Failure, network::CarrierProvider, runtime::TaskOwner, storage::StateLease,
+    TorFactory,
+    error::Failure,
+    network::{CarrierProvider, CarrierRoute},
+    runtime::TaskOwner,
+    storage::StateLease,
     stream::TorStream,
 };
 use futures::{FutureExt as _, task::SpawnExt as _};
@@ -300,10 +304,34 @@ async fn tor_service_failure_keeps_first_cause_after_another_failure_and_close()
 }
 
 #[tokio::test]
+async fn tor_carrier_with_dialer_options_bypasses_the_device() {
+    let fixture = Fixture::new();
+    let dialer = kerlico_core::DialerOptions {
+        disable_tcp_keep_alive: true,
+        ..kerlico_core::DialerOptions::default()
+    };
+    let provider = CarrierProvider::new(
+        CarrierRoute::Dialer(dialer),
+        fixture.host.cancel(),
+        fixture.host.status(),
+        Duration::from_secs(1),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let _stream = provider
+        .connect(&address, &TcpConnectOptions::default())
+        .await
+        .unwrap();
+    let (_peer, _) = listener.accept().await.unwrap();
+    assert_eq!(fixture.device.calls.load(Ordering::Acquire), 0);
+    fixture.owner.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn tor_carrier_uses_device_literal_address_and_service_cancellation() {
     let fixture = Fixture::new();
     let provider = CarrierProvider::new(
-        DeviceLease::borrow(fixture.device.clone()),
+        CarrierRoute::Device(DeviceLease::borrow(fixture.device.clone())),
         fixture.host.cancel(),
         fixture.host.status(),
         Duration::from_secs(1),
@@ -344,7 +372,7 @@ async fn tor_carrier_uses_device_literal_address_and_service_cancellation() {
 async fn tor_carrier_rejects_new_admission_and_pending_io_after_fatal() {
     let fixture = Fixture::new();
     let provider = CarrierProvider::new(
-        DeviceLease::borrow(fixture.device.clone()),
+        CarrierRoute::Device(DeviceLease::borrow(fixture.device.clone())),
         fixture.host.cancel(),
         fixture.host.status(),
         Duration::from_secs(1),

@@ -1,9 +1,13 @@
-use crate::{error::Failure, network::CarrierProvider, storage::StateLease};
+use crate::{
+    error::Failure,
+    network::{CarrierProvider, CarrierRoute},
+    storage::StateLease,
+};
 use futures::{
     future::FutureObj,
     task::{Spawn, SpawnError},
 };
-use kerlico_core::{BoxFuture, CancellationToken, Error, Result, ServiceContext};
+use kerlico_core::{BoxFuture, CancellationToken, DialerOptions, Error, Result, ServiceContext};
 use std::{
     future::Future,
     sync::{Arc, Mutex},
@@ -61,19 +65,24 @@ impl TaskOwner {
         })))
     }
 
-    pub fn runtime(&self, carrier_timeout: Duration) -> Result<TorRuntime> {
-        let device = self
-            .0
-            .host
-            .device()
-            .ok_or(Error::Unsupported("Tor出站需要设备TCP连接能力"))?;
+    pub fn runtime(&self, carrier_timeout: Duration, dialer: DialerOptions) -> Result<TorRuntime> {
+        let route = if dialer.is_default() {
+            CarrierRoute::Device(
+                self.0
+                    .host
+                    .device()
+                    .ok_or(Error::Unsupported("Tor出站需要设备TCP连接能力"))?,
+            )
+        } else {
+            CarrierRoute::Dialer(dialer)
+        };
         if rustls::crypto::CryptoProvider::get_default().is_none() {
             let _ = rustls::crypto::ring::default_provider().install_default();
         }
         let base =
             TokioRustlsRuntime::current().map_err(|_| Error::Protocol("Tor运行环境不可用"))?;
         let carrier =
-            CarrierProvider::new(device, self.cancel(), self.0.host.status(), carrier_timeout);
+            CarrierProvider::new(route, self.cancel(), self.0.host.status(), carrier_timeout);
         Ok(CompoundRuntime::new(
             self.clone(),
             base.clone(),

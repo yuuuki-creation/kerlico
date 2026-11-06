@@ -14,7 +14,6 @@ use kerlico_http_carrier::{BodyIo, Reader, Writer};
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    net::SocketAddr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -39,6 +38,7 @@ pub(crate) struct Carrier {
     driver: Mutex<Option<ServiceTask<()>>>,
     maintenance: Mutex<Option<ServiceTask<()>>>,
     quic: Option<(quinn::Endpoint, quinn::Connection)>,
+    _relay: Option<kerlico_core::dialer::RelayGuard>,
 }
 impl Carrier {
     pub fn touch(&self) {
@@ -142,6 +142,7 @@ struct Client {
     h1: Arc<Semaphore>,
     pool: tokio::sync::Mutex<HashMap<ResourceKey, Arc<MemberPool>>>,
     host: ServiceContext,
+    dialer: kerlico_core::DialerOptions,
 }
 impl OutboundFactory for TrustTunnelFactory {
     fn kind(&self) -> &'static str {
@@ -169,6 +170,7 @@ impl OutboundFactory for TrustTunnelFactory {
             tcp_eof: false,
             udp: options.udp,
         };
+        let dialer = kerlico_core::current_compile_dialer();
         Ok(OutboundPlan::new(
             capabilities,
             false,
@@ -190,17 +192,19 @@ impl OutboundFactory for TrustTunnelFactory {
                         limits: options.limits,
                         pool: tokio::sync::Mutex::new(HashMap::new()),
                         host,
+                        dialer,
                     }) as Arc<dyn Outbound>)
                 })
             },
         ))
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
 }
 impl Client {
     async fn tls(&self) -> Result<BoxStream> {
-        let stream =
-            kerlico_core::connect_host((self.server.host().as_str(), self.server.port())).await?;
-        stream.set_nodelay(true)?;
+        let stream = self.dialer.connect(&self.server).await?;
         let name = rustls::pki_types::ServerName::try_from(self.name.clone())
             .map_err(|_| crate::invalid())?;
         let stream = tokio_rustls::TlsConnector::from(self.tls.clone())
@@ -221,6 +225,7 @@ impl Client {
         let closed = Arc::new(AtomicBool::new(false));
         let mark = closed.clone();
         let mut quic = None;
+        let mut relay = None;
         let (sender, driver) = if self.transport == Transport::H2 {
             let io = self.tls().await?;
             let (sender, connection) = h2::client::Builder::new()
@@ -238,24 +243,12 @@ impl Client {
             })?;
             (Sender::H2(sender), driver)
         } else {
-            let mut peers: Vec<SocketAddr> =
-                kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
-                    .await?
-                    .collect();
-            peers.sort_by_key(SocketAddr::is_ipv6);
-            let peer = peers.first().copied().ok_or(Error::InvalidAddress)?;
-            let bind: SocketAddr = if peer.is_ipv6() {
-                "[::]:0"
-            } else {
-                "0.0.0.0:0"
-            }
-            .parse()
-            .map_err(|_| crate::invalid())?;
-            let socket = std::net::UdpSocket::bind(bind)?;
+            let udp = self.dialer.udp_peer(&self.server).await?;
+            let (socket, peer) = (udp.socket, udp.peer);
+            relay = udp.relay;
             let sock_ref = socket2::SockRef::from(&socket);
             let _ = sock_ref.set_recv_buffer_size(8 * 1024 * 1024);
             let _ = sock_ref.set_send_buffer_size(8 * 1024 * 1024);
-            socket.set_nonblocking(true)?;
             let mut endpoint = quinn::Endpoint::new(
                 quinn::EndpointConfig::default(),
                 None,
@@ -298,6 +291,7 @@ impl Client {
             driver: Mutex::new(Some(driver)),
             maintenance: Mutex::new(None),
             quic,
+            _relay: relay,
         });
         let weak = Arc::downgrade(&carrier);
         let idle = self.limits.idle();
@@ -527,6 +521,7 @@ impl Outbound for Client {
 mod alpn_tests {
     use super::*;
     use serde_json::json;
+    use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

@@ -54,6 +54,7 @@ fn pack(target: &Destination, payload: &[u8]) -> Vec<u8> {
 }
 struct Lease {
     _permit: OwnedSemaphorePermit,
+    _relay: Option<kerlico_core::dialer::RelayGuard>,
 }
 struct PacketSender {
     socket: Arc<UdpSocket>,
@@ -80,25 +81,20 @@ async fn open(
         .clone()
         .try_acquire_owned()
         .map_err(|_| Error::ResourceLimit)?;
-    let mut candidates: Vec<_> =
-        kerlico_core::lookup_host((outbound.server.host().as_str(), outbound.server.port()))
-            .await?
-            .collect();
-    candidates.sort_by_key(|peer| peer.is_ipv6());
-    let peer = candidates.first().ok_or(Error::InvalidAddress)?;
-    let socket = Arc::new(
-        UdpSocket::bind(if peer.is_ipv6() {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        })
-        .await?,
-    );
+    let kerlico_core::UdpPeer {
+        socket,
+        peer,
+        relay,
+    } = outbound.dialer.udp_peer(&outbound.server).await?;
+    let socket = Arc::new(UdpSocket::from_std(socket)?);
     socket.connect(peer).await?;
     Ok((
         socket,
         Arc::new(UdpCodec::new(outbound.cfg.clone())),
-        Arc::new(Lease { _permit: permit }),
+        Arc::new(Lease {
+            _permit: permit,
+            _relay: relay,
+        }),
     ))
 }
 pub(crate) async fn fixed(

@@ -498,7 +498,10 @@ async fn session_cancel_and_shared_shutdown_close_both_real_http_driver_connecti
                 ..Default::default()
             },
             store: Arc::new(HttpStorage {
-                client: super::http::Client::new(super::http::tls(None).unwrap()),
+                client: super::http::Client::new(
+                    super::http::tls(None).unwrap(),
+                    Default::default(),
+                ),
                 base: format!("http://{address}/"),
             }),
         });

@@ -1,13 +1,10 @@
-use kerlico_core::{BoxFuture, CancellationToken};
+use kerlico_core::{BoxFuture, BoxStream, CancellationToken};
 use std::{
     io,
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
-    net::TcpStream,
-};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pub(crate) struct ConnectionGuard(pub CancellationToken);
 impl Drop for ConnectionGuard {
@@ -17,7 +14,7 @@ impl Drop for ConnectionGuard {
 }
 
 pub(crate) struct Transport {
-    stream: TcpStream,
+    stream: BoxStream,
     read_cancel: BoxFuture<'static, ()>,
     write_cancel: BoxFuture<'static, ()>,
 }
@@ -25,7 +22,7 @@ fn cancelled() -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionAborted, "SSH 连接已回收")
 }
 impl Transport {
-    pub fn new(stream: TcpStream, cancel: &CancellationToken) -> Self {
+    pub fn new(stream: BoxStream, cancel: &CancellationToken) -> Self {
         Self {
             stream,
             read_cancel: Box::pin(cancel.clone().cancelled_owned()),

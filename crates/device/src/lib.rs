@@ -5,9 +5,9 @@ mod storage;
 use kerlico_config::{DeviceRequirements, OutboundFactory};
 use kerlico_core::{
     Address, BoxFuture, ConnectContext, DatagramAssociation, DatagramAssociationReceiver,
-    DatagramAssociationSender, DatagramChannel, Destination, DeviceLease, DeviceNetwork, Error,
-    FamilyMode, OpenedTcp, OutId, Outbound, Result, ServiceContext, ServiceFailure, ServiceStatus,
-    ShutdownReport,
+    DatagramAssociationSender, DatagramChannel, Destination, DeviceLease, DeviceNetwork,
+    DialerOptions, Error, FamilyMode, OpenedTcp, OutId, Outbound, Result, ServiceContext,
+    ServiceFailure, ServiceStatus, ShutdownReport,
 };
 use std::{
     future::Future,
@@ -34,15 +34,12 @@ pub struct NativeCapabilities {
     pub ipv6: NativeFamily,
 }
 impl NativeCapabilities {
-    /// 不发包的内核路由选择，只证明存在可选源地址，不宣称公网连通。
-    pub fn detect() -> Result<Self> {
-        fn probe(target: SocketAddr) -> Result<NativeFamily> {
+    /// 不发包的内核路由选择，只证明存在可选源地址，不宣称公网连通。探测套接字带设备拨号选项，
+    /// 路由标记与出口网卡参与选路。
+    pub fn detect(dialer: &DialerOptions) -> Result<Self> {
+        let probe = |target: SocketAddr| -> Result<NativeFamily> {
             let operation = || -> std::io::Result<SocketAddr> {
-                let socket = std::net::UdpSocket::bind(if target.is_ipv4() {
-                    "0.0.0.0:0"
-                } else {
-                    "[::]:0"
-                })?;
+                let socket = dialer.udp_socket_for(target)?;
                 socket.connect(target)?;
                 socket.local_addr()
             };
@@ -63,7 +60,7 @@ impl NativeCapabilities {
                 }
                 Err(error) => Err(error.into()),
             }
-        }
+        };
         Ok(Self {
             ipv4: probe("1.1.1.1:443".parse().unwrap())?,
             ipv6: probe("[2606:4700:4700::1111]:443".parse().unwrap())?,
@@ -86,6 +83,8 @@ pub struct DeviceOptions {
     pub state_directory: PathBuf,
     pub preparation_timeout: Duration,
     pub registration_policy: RegistrationPolicy,
+    /// 设备自身载体（能力探测、WARP 注册、WARP UDP）的拨号选项，取全局默认的路由标记与出口网卡。
+    pub dialer: DialerOptions,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegistrationPolicy {
@@ -98,6 +97,7 @@ impl DeviceOptions {
             state_directory,
             preparation_timeout: Duration::from_secs(45),
             registration_policy: RegistrationPolicy::CreateOnce,
+            dialer: DialerOptions::default(),
         }
     }
     /// 复用模式先验证现有身份与响应匹配，缺失时绝不注册。
@@ -232,13 +232,15 @@ impl State {
                         &store,
                         self.capabilities,
                         self.options.registration_policy,
+                        &self.options.dialer,
                     )
                     .await;
                     let options = result?;
-                    kerlico_wireguard::WireGuardFactory
-                        .compile(&options)?
-                        .start(self.host.clone())
-                        .await
+                    kerlico_core::with_compile_dialer(self.options.dialer.clone(), || {
+                        kerlico_wireguard::WireGuardFactory.compile(&options)
+                    })?
+                    .start(self.host.clone())
+                    .await
                 };
                 let result = tokio::time::timeout(self.options.preparation_timeout, operation)
                     .await
@@ -260,7 +262,8 @@ impl State {
 }
 impl DeviceRuntime {
     pub fn start(options: DeviceOptions) -> Result<Self> {
-        Self::start_with_capabilities(options, NativeCapabilities::detect()?)
+        let capabilities = NativeCapabilities::detect(&options.dialer)?;
+        Self::start_with_capabilities(options, capabilities)
     }
     pub fn start_with_capabilities(
         options: DeviceOptions,

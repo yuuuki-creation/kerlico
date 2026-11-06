@@ -1,4 +1,4 @@
-use kerlico_core::{Destination, Error, Result};
+use kerlico_core::{Destination, DialerOptions, Error, Result};
 use kerlico_net::TcpConnector;
 use serde::Deserialize;
 use std::{path::PathBuf, time::Duration};
@@ -63,6 +63,8 @@ pub struct Prepared {
     pub ca_pem: Option<String>,
     pub start_timeout: Duration,
     pub advertise_tags: Vec<String>,
+    /// 编译期取得的拨号选项，控制面、DERP、STUN 与直连 UDP 套接字共用。
+    pub dialer: DialerOptions,
 }
 
 impl Options {
@@ -99,7 +101,8 @@ impl Options {
         {
             return Err(Error::Config("Tailscale advertise_tags不合法".into()));
         }
-        let control = parse_control(&self.control_url, self.ca_pem.as_deref())?;
+        let dialer = kerlico_core::current_compile_dialer();
+        let control = parse_control(&self.control_url, self.ca_pem.as_deref(), &dialer)?;
         Ok(Prepared {
             control,
             auth_key: Zeroizing::new(self.auth_key),
@@ -114,11 +117,16 @@ impl Options {
             ca_pem: self.ca_pem,
             start_timeout: Duration::from_millis(self.start_timeout_ms),
             advertise_tags: self.advertise_tags,
+            dialer,
         })
     }
 }
 
-fn parse_control(url: &str, ca_pem: Option<&str>) -> Result<ControlEndpoint> {
+fn parse_control(
+    url: &str,
+    ca_pem: Option<&str>,
+    dialer: &DialerOptions,
+) -> Result<ControlEndpoint> {
     let invalid = || Error::Config("Tailscale control_url不合法".into());
     let uri: http::Uri = url.parse().map_err(|_| invalid())?;
     if !matches!(uri.path(), "" | "/") || uri.query().is_some() {
@@ -137,9 +145,9 @@ fn parse_control(url: &str, ca_pem: Option<&str>) -> Result<ControlEndpoint> {
     let port = authority.port_u16().unwrap_or(if tls { 443 } else { 80 });
     Ok(ControlEndpoint {
         connector: if tls {
-            TcpConnector::tls(host, ca_pem)?
+            TcpConnector::tls(host, ca_pem, dialer.clone())?
         } else {
-            TcpConnector::plain()
+            TcpConnector::plain(dialer.clone())
         },
         destination: Destination::new(host, port)?,
         authority: authority.as_str().to_owned(),

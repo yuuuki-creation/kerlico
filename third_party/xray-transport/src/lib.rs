@@ -325,6 +325,11 @@ where
     }
 }
 
+/// Creates the bound UDP socket used to reach one QUIC peer, replacing the
+/// default wildcard bind so the embedding application can apply its own
+/// socket options (routing mark, bound interface, source address).
+pub type UdpSocketFactory = Arc<dyn Fn(SocketAddr) -> io::Result<StdUdpSocket> + Send + Sync>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SocketHandle {
     raw: i64,

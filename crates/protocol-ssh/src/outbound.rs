@@ -219,11 +219,10 @@ async fn drive(
     service: CancellationToken,
     ready: tokio::sync::oneshot::Sender<Result<ChannelStream<client::Msg>>>,
 ) {
-    let server_host = prepared.server.host();
     let socket = tokio::select! {
         biased;
         error = interrupted(&context, &service, &cancel) => Err(error),
-        result = kerlico_core::connect_host((server_host.as_str(), prepared.server.port())) => result.map_err(Error::Io),
+        result = prepared.dialer.connect(&prepared.server) => result,
     };
     let stream = match socket {
         Ok(stream) => stream,
@@ -232,10 +231,6 @@ async fn drive(
             return;
         }
     };
-    if let Err(error) = stream.set_nodelay(true) {
-        let _ = ready.send(Err(Error::Io(error)));
-        return;
-    }
     let mut handshake = Box::pin(client::connect_stream(
         prepared.ssh.clone(),
         Transport::new(stream, &cancel),
@@ -281,10 +276,13 @@ impl OutboundFactory for SshFactory {
     fn kind(&self) -> &'static str {
         "ssh"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         let options: Options = serde_json::from_value(options.clone())
             .map_err(|_| Error::Config("SSH 出站字段不合法".into()))?;
-        let prepared = options.prepare()?;
+        let prepared = options.prepare(kerlico_core::current_compile_dialer())?;
         Ok(OutboundPlan::new(
             Capabilities {
                 tcp: true,

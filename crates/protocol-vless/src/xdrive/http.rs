@@ -11,6 +11,7 @@ use url::Url;
 #[derive(Clone)]
 pub(crate) struct Client {
     tls: Arc<rustls::ClientConfig>,
+    dialer: kerlico_core::DialerOptions,
 }
 pub(crate) struct Request {
     client: Client,
@@ -65,8 +66,8 @@ pub(crate) fn tls(ca: Option<&str>) -> Result<Arc<rustls::ClientConfig>> {
     Ok(Arc::new(config))
 }
 impl Client {
-    pub fn new(tls: Arc<rustls::ClientConfig>) -> Self {
-        Self { tls }
+    pub fn new(tls: Arc<rustls::ClientConfig>, dialer: kerlico_core::DialerOptions) -> Self {
+        Self { tls, dialer }
     }
     pub fn request(&self, method: Method, url: Url) -> Request {
         self.build(method, Some(url))
@@ -184,8 +185,11 @@ impl Request {
             url::Host::Ipv6(host) => host.to_string(),
         };
         let port = url.port_or_known_default().ok_or_else(invalid)?;
-        let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
-        tcp.set_nodelay(true)?;
+        let tcp = self
+            .client
+            .dialer
+            .connect(&kerlico_core::Destination::new(&host, port)?)
+            .await?;
         let stream: BoxStream = if url.scheme() == "https" {
             let name = rustls::pki_types::ServerName::try_from(host).map_err(|_| invalid())?;
             Box::new(
@@ -194,7 +198,7 @@ impl Request {
                     .await?,
             )
         } else {
-            Box::new(tcp)
+            tcp
         };
         let mut path = url.path().to_owned();
         if let Some(query) = url.query() {
@@ -354,7 +358,7 @@ mod tests {
                 .unwrap();
             stream.shutdown().await.unwrap();
         });
-        let response = Client::new(tls(Some(&ca)).unwrap())
+        let response = Client::new(tls(Some(&ca)).unwrap(), Default::default())
             .request(
                 Method::GET,
                 Url::parse(&format!("https://{address}/segment")).unwrap(),
@@ -400,7 +404,7 @@ mod tests {
             assert_eq!(body, b"grant_type=refresh_token&value=a%26b");
             stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://unused.invalid/\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\none\r\n3\r\ntwo\r\n0\r\n\r\n").await.unwrap();
         });
-        let client = Client::new(tls(None).unwrap());
+        let client = Client::new(tls(None).unwrap(), Default::default());
         let mut response = client
             .post(format!("http://{address}/token?q=a%20b"))
             .basic_auth("synthetic".into(), Some("password".into()))
@@ -428,7 +432,7 @@ mod tests {
                 }
             }
         });
-        let client = Client::new(tls(None).unwrap());
+        let client = Client::new(tls(None).unwrap(), Default::default());
         {
             let request = client.post(format!("http://{address}/blocked")).send();
             tokio::pin!(request);
@@ -465,7 +469,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let client = Client::new(tls(None).unwrap());
+        let client = Client::new(tls(None).unwrap(), Default::default());
         let credentials = ["synthetic", "pass%3Aword"].join(":");
         let response = client
             .post(format!(

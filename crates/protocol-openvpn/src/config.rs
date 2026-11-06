@@ -7,7 +7,7 @@ use crate::{
     tls::client_config,
     wrap::{AuthDigest, StaticKey, WrapKeys},
 };
-use kerlico_core::{CancellationToken, Destination, Error, Result};
+use kerlico_core::{CancellationToken, Destination, DialerOptions, Error, Result};
 use kerlico_wireguard::ip::{ClientTunnel, StackLimits, StackOptions};
 use serde::Deserialize;
 use std::{
@@ -102,6 +102,7 @@ pub(crate) struct Prepared {
     pub allowed_ips: Option<Vec<String>>,
     pub mtu: usize,
     pub mss_fix: Option<u16>,
+    pub dialer: DialerOptions,
 }
 
 fn invalid() -> Error {
@@ -188,7 +189,14 @@ impl ClientOptions {
         validate_stack(self.allowed_ips.as_deref(), self.mtu)?;
         let options = options_string(proto, &wrap, ciphers[0], self.mtu);
         let peer_info = peer_info(&ciphers);
+        let dialer = kerlico_core::current_compile_dialer();
+        if self.bind.is_some() && dialer.has_detour() {
+            return Err(Error::Config(
+                "OpenVPN 载体绑定地址不能与链式拨号同时配置".into(),
+            ));
+        }
         Ok(Prepared {
+            dialer,
             remotes,
             bind: self.bind,
             settings: Arc::new(Settings {

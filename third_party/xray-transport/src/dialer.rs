@@ -6,7 +6,7 @@ use crate::{
     connect_tcp_happy_eyeballs, connect_tcp_stream, connect_tcp_target, BoxedTransportStream,
     ConnectorConfig, HappyEyeballsConfig, RealityRuntimeEngine, RealityTlsEngine,
     ResolvedTcpConnector, RustlsRealityTlsSessionProvider, SocketProtector, TlsConnector,
-    TransportError,
+    TransportError, UdpSocketFactory,
 };
 use xray_routing::{Target, TargetAddr};
 
@@ -16,6 +16,7 @@ pub struct TransportDialer {
     reality: Option<Arc<dyn RealityTlsEngine>>,
     socket_protector: Option<Arc<dyn SocketProtector>>,
     resolved_tcp_connector: Option<Arc<dyn ResolvedTcpConnector>>,
+    udp_socket_factory: Option<UdpSocketFactory>,
     tcp_fragment: Option<Arc<crate::TcpFragmentConfig>>,
 }
 
@@ -24,6 +25,7 @@ pub(crate) struct H3DialMaterial {
     pub(crate) server_name: String,
     pub(crate) tls_config: Arc<rustls::ClientConfig>,
     pub(crate) socket_protector: Option<Arc<dyn SocketProtector>>,
+    pub(crate) udp_socket_factory: Option<UdpSocketFactory>,
 }
 
 impl fmt::Debug for TransportDialer {
@@ -64,6 +66,7 @@ impl TransportDialer {
             reality: Some(Arc::new(reality)),
             socket_protector,
             resolved_tcp_connector: None,
+            udp_socket_factory: None,
             tcp_fragment: None,
         })
     }
@@ -75,6 +78,7 @@ impl TransportDialer {
             reality: None,
             socket_protector,
             resolved_tcp_connector: None,
+            udp_socket_factory: None,
             tcp_fragment: None,
         }
     }
@@ -92,6 +96,15 @@ impl TransportDialer {
 
     pub fn with_resolved_tcp_connector(mut self, connector: Arc<dyn ResolvedTcpConnector>) -> Self {
         self.resolved_tcp_connector = Some(connector);
+        self
+    }
+
+    /// Supplies the UDP socket for each QUIC destination instead of a wildcard bind.
+    ///
+    /// With a resolved TCP connector installed, HTTP/3 is allowed only when this
+    /// factory is present: the caller then owns both carrier socket kinds.
+    pub fn with_udp_socket_factory(mut self, factory: UdpSocketFactory) -> Self {
+        self.udp_socket_factory = Some(factory);
         self
     }
 
@@ -122,7 +135,7 @@ impl TransportDialer {
                 "TCP fragmentation over QUIC",
             ));
         }
-        if self.resolved_tcp_connector.is_some() {
+        if self.resolved_tcp_connector.is_some() && self.udp_socket_factory.is_none() {
             return Err(TransportError::UnsupportedChainedTransport("XHTTP HTTP/3"));
         }
         match config {
@@ -130,6 +143,7 @@ impl TransportDialer {
                 server_name: tls.server_name.clone(),
                 tls_config: self.tls.http3_client_config_for(tls)?,
                 socket_protector: self.socket_protector.clone(),
+                udp_socket_factory: self.udp_socket_factory.clone(),
             }),
             ConnectorConfig::Tcp => Err(TransportError::UnsupportedHttp3Security("TCP")),
             ConnectorConfig::Reality(_) => Err(TransportError::UnsupportedHttp3Security("REALITY")),

@@ -13,18 +13,14 @@ use kerlico_core::{
     DatagramChannel, Destination, Error, Outbound, ResourceKey, Result, ServiceContext,
     TargetPolicy,
 };
-use std::{
-    collections::HashMap,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
-    net::{TcpStream, UdpSocket},
+    net::UdpSocket,
     sync::{Mutex, Semaphore},
 };
 type MemberPool = Mutex<Vec<Arc<Link>>>;
 pub(crate) struct Client {
+    dialer: kerlico_core::DialerOptions,
     server: Destination,
     ports: std::ops::RangeInclusive<u16>,
     user: Arc<User>,
@@ -42,6 +38,7 @@ pub(crate) struct Client {
 }
 impl Client {
     pub fn compile(options: ClientOptions) -> Result<OutboundPlan> {
+        let dialer = kerlico_core::current_compile_dialer();
         let transport = Transport::parse(&options.transport, options.unsafe_udp_compatibility)?;
         let (server, ports) = options.server.destination_and_ports(options.port_range)?;
         if transport == Transport::LocalUnsafeUdp && !options.allow_insecure {
@@ -62,6 +59,7 @@ impl Client {
             move |host| {
                 Box::pin(async move {
                     Ok(Arc::new(Self {
+                        dialer,
                         server,
                         ports,
                         user,
@@ -103,17 +101,7 @@ impl Client {
             let span = u32::from(self.ports.end() - self.ports.start()) + 1;
             *self.ports.start() + (rand::random::<u32>() % span) as u16
         };
-        let endpoint = match self.server.address() {
-            Address::Ip(ip) => SocketAddr::new(*ip, port),
-            Address::Domain(name) => {
-                let mut addresses = kerlico_core::lookup_host((name.as_str(), port))
-                    .await?
-                    .take(32)
-                    .collect::<Vec<_>>();
-                addresses.sort_by_key(|address| address.is_ipv6());
-                *addresses.first().ok_or(Error::InvalidAddress)?
-            }
-        };
+        let endpoint = Destination::new(&self.server.host(), port)?;
         let scope = Scope::shared(&self.host);
         let key = Key::new(self.user.clone(), crypto::epoch(crypto::now()?));
         let settings = TcpSettings {
@@ -125,10 +113,9 @@ impl Client {
         };
         let link = match self.transport {
             Transport::Tcp => {
-                let stream = TcpStream::connect(endpoint).await?;
-                stream.set_nodelay(true)?;
+                let stream = self.dialer.connect(&endpoint).await?;
                 session::tcp_link(
-                    Box::new(stream),
+                    stream,
                     StreamCipher::new(key.clone()),
                     StreamCipher::new(key),
                     scope,
@@ -137,32 +124,38 @@ impl Client {
                 )
             }
             Transport::LocalUnsafeUdp => {
-                if !self.allow_insecure
-                    && (!endpoint.ip().is_loopback()
-                        || endpoint.ip().to_canonical() != endpoint.ip())
-                {
-                    return Err(config::invalid());
-                }
-                let bind = if endpoint.is_ipv6() {
-                    SocketAddr::new(
-                        IpAddr::V6(if self.allow_insecure {
-                            std::net::Ipv6Addr::UNSPECIFIED
-                        } else {
-                            std::net::Ipv6Addr::LOCALHOST
-                        }),
-                        0,
-                    )
+                // 非 allow_insecure 时服务端已在编译阶段限定为字面回环，本地端也必须绑定回环。
+                let kerlico_core::UdpPeer {
+                    socket,
+                    peer,
+                    relay,
+                } = if self.allow_insecure || self.dialer.has_detour() {
+                    self.dialer.udp_peer(&endpoint).await?
                 } else {
-                    SocketAddr::new(
-                        IpAddr::V4(if self.allow_insecure {
-                            std::net::Ipv4Addr::UNSPECIFIED
-                        } else {
-                            std::net::Ipv4Addr::LOCALHOST
-                        }),
-                        0,
-                    )
+                    let peer = std::net::SocketAddr::new(
+                        config::require_literal_loopback(&self.server)?,
+                        port,
+                    );
+                    let local = if peer.is_ipv6() {
+                        std::net::Ipv6Addr::LOCALHOST.into()
+                    } else {
+                        std::net::Ipv4Addr::LOCALHOST.into()
+                    };
+                    kerlico_core::UdpPeer {
+                        socket: self
+                            .dialer
+                            .udp_socket(std::net::SocketAddr::new(local, 0))?,
+                        peer,
+                        relay: None,
+                    }
                 };
-                let socket = Arc::new(UdpSocket::bind(bind).await?);
+                if let Some(relay) = relay {
+                    scope.spawn(async move {
+                        let _relay = relay;
+                        std::future::pending::<()>().await
+                    });
+                }
+                let socket = Arc::new(UdpSocket::from_std(socket)?);
                 packet::start(
                     socket,
                     scope,
@@ -170,7 +163,7 @@ impl Client {
                         common: settings,
                         mtu: self.mtu,
                         key: Some(key),
-                        peer: Some(endpoint),
+                        peer: Some(peer),
                         users: None,
                         replay: None,
                         allow_insecure: self.allow_insecure,

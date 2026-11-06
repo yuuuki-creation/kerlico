@@ -16,13 +16,13 @@ use rustls::{
 };
 use std::{
     io::Cursor,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpStream, UdpSocket},
+    net::UdpSocket,
     sync::Mutex,
 };
 use tokio_rustls::TlsConnector;
@@ -41,6 +41,10 @@ pub trait DnsDialer: Send + Sync {
         via: &'a Via,
         target: &'a Destination,
     ) -> BoxFuture<'a, Result<DatagramChannel>>;
+    /// 直连上游套接字的拨号选项（全局路由标记、出口网卡等）。
+    fn sockets(&self) -> kerlico_core::DialerOptions {
+        kerlico_core::DialerOptions::default()
+    }
 }
 
 pub(crate) type DialerSlot = Arc<OnceLock<Arc<dyn DnsDialer>>>;
@@ -389,6 +393,15 @@ impl Upstream {
             .ok_or_else(|| Error::Config("DNS 上游经出站拨号需要出站调度器".into()))
     }
 
+    /// 直连上游的套接字选项；调度器装配前（`bind` 之前）为默认值。
+    fn sockets(&self) -> kerlico_core::DialerOptions {
+        self.net
+            .dialer
+            .get()
+            .map(|dialer| dialer.sockets())
+            .unwrap_or_default()
+    }
+
     async fn tcp(&self, ep: &Endpoint) -> Result<BoxStream> {
         if self.via != Via::Direct {
             return self
@@ -397,8 +410,9 @@ impl Upstream {
                 .await;
         }
         let mut last = Error::InvalidAddress;
+        let sockets = self.sockets();
         for addr in self.addrs(ep).await? {
-            match TcpStream::connect(addr).await {
+            match sockets.connect_addr(addr).await {
                 Ok(stream) => {
                     stream.set_nodelay(true)?;
                     return Ok(Box::new(stream));
@@ -446,13 +460,13 @@ impl Upstream {
             }
         }
         let addr = *self.addrs(ep).await?.first().ok_or(Error::InvalidAddress)?;
-        udp_direct(addr, query).await
+        udp_direct(&self.sockets(), addr, query).await
     }
 
     async fn system(&self, servers: &[SocketAddr], query: &[u8]) -> Result<Vec<u8>> {
         let mut last = io_err("系统 DNS 不可用");
         for addr in servers {
-            match udp_direct(*addr, query).await {
+            match udp_direct(&self.sockets(), *addr, query).await {
                 Ok(reply) => return Ok(reply),
                 Err(e) => last = e,
             }
@@ -596,12 +610,12 @@ impl Upstream {
         dial: &QuicDial,
     ) -> Result<(quinn::Endpoint, quinn::Connection)> {
         let addr = *self.addrs(ep).await?.first().ok_or(Error::InvalidAddress)?;
-        let bind: SocketAddr = if addr.is_ipv6() {
-            (Ipv6Addr::UNSPECIFIED, 0).into()
-        } else {
-            (Ipv4Addr::UNSPECIFIED, 0).into()
-        };
-        let endpoint = quinn::Endpoint::client(bind)?;
+        let endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            None,
+            self.sockets().udp_socket_for(addr)?,
+            Arc::new(quinn::TokioRuntime),
+        )?;
         let connection = endpoint
             .connect_with(dial.config.clone(), addr, &dial.sni)
             .map_err(|_| invalid())?
@@ -663,13 +677,12 @@ fn doh_request(doh: &Doh) -> Result<http::Request<()>> {
     builder.body(()).map_err(|_| invalid())
 }
 
-async fn udp_direct(addr: SocketAddr, query: &[u8]) -> Result<Vec<u8>> {
-    let bind: SocketAddr = if addr.is_ipv6() {
-        (Ipv6Addr::UNSPECIFIED, 0).into()
-    } else {
-        (Ipv4Addr::UNSPECIFIED, 0).into()
-    };
-    let socket = UdpSocket::bind(bind).await?;
+async fn udp_direct(
+    sockets: &kerlico_core::DialerOptions,
+    addr: SocketAddr,
+    query: &[u8],
+) -> Result<Vec<u8>> {
+    let socket = UdpSocket::from_std(sockets.udp_socket_for(addr)?)?;
     socket.connect(addr).await?;
     socket.send(query).await?;
     let id = wire::id(query);

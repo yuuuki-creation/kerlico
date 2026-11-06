@@ -44,6 +44,9 @@ impl OutboundFactory for OpenConnectFactory {
             },
         ))
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
 }
 
 type Slot = Arc<Mutex<Option<Arc<Session>>>>;

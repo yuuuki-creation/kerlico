@@ -491,6 +491,7 @@ mod tests {
             &config,
             Arc::new(crate::carrier::endpoint::Endpoint::new(
                 config.server.clone(),
+                kerlico_core::DialerOptions::default(),
             )),
             scope.clone(),
             false,
@@ -597,6 +598,7 @@ mod tests {
             &config,
             Arc::new(crate::carrier::endpoint::Endpoint::new(
                 config.server.clone(),
+                kerlico_core::DialerOptions::default(),
             )),
             scope.clone(),
             true,
@@ -696,6 +698,7 @@ mod tests {
             &config,
             Arc::new(crate::carrier::endpoint::Endpoint::new(
                 config.server.clone(),
+                kerlico_core::DialerOptions::default(),
             )),
             scope.clone(),
             false,

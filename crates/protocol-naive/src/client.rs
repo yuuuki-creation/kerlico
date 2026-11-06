@@ -35,6 +35,7 @@ struct Session {
     last: Mutex<Instant>,
     endpoint: Mutex<Option<quinn::Endpoint>>,
     driver: Mutex<Option<ServiceTask<()>>>,
+    _relay: Option<kerlico_core::dialer::RelayGuard>,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -131,6 +132,7 @@ pub(crate) struct Client {
     idle: Duration,
     congestion: String,
     connector: Arc<dyn StreamConnector>,
+    dialer: kerlico_core::DialerOptions,
     sessions: AsyncMutex<HashMap<ResourceKey, Arc<MemberPool>>>,
     h1: Arc<Semaphore>,
     cancel: CancellationToken,
@@ -169,6 +171,9 @@ impl Client {
             tcp_eof: false,
             udp: options.udp_over_tcp.enabled,
         };
+        let dialer = kerlico_core::current_compile_dialer();
+        let connector =
+            connector.unwrap_or_else(|| Arc::new(kerlico_net::TcpConnector::plain(dialer.clone())));
         Ok(OutboundPlan::new(
             capabilities,
             options.udp_over_tcp.enabled,
@@ -188,8 +193,8 @@ impl Client {
                         max_streams: options.max_streams,
                         idle,
                         congestion: options.congestion_control,
-                        connector: connector
-                            .unwrap_or_else(|| Arc::new(kerlico_net::TcpConnector::plain())),
+                        connector,
+                        dialer,
                         sessions: AsyncMutex::new(HashMap::new()),
                         h1: Arc::new(Semaphore::new(options.max_sessions)),
                         cancel: bridges.cancel(),
@@ -242,6 +247,7 @@ impl Client {
                 last,
                 endpoint: Mutex::new(None),
                 driver: Mutex::new(None),
+                _relay: None,
             });
             session.start(
                 &self.host,
@@ -253,20 +259,13 @@ impl Client {
             )?;
             Ok(session)
         } else {
-            let mut addresses = kerlico_core::lookup_host((self.server.host(), self.server.port()))
-                .await?
-                .collect::<Vec<_>>();
-            addresses.sort_by_key(|a| a.is_ipv6());
-            let address = *addresses.first().ok_or(Error::InvalidAddress)?;
-            let bind = if address.is_ipv4() {
-                "0.0.0.0:0"
-            } else {
-                "[::]:0"
-            };
+            let kerlico_core::UdpPeer {
+                socket,
+                peer: address,
+                relay,
+            } = self.dialer.udp_peer(&self.server).await?;
             let mut endpoint_config = quinn::EndpointConfig::default();
             endpoint_config.supported_versions(vec![1]);
-            let socket = std::net::UdpSocket::bind(bind)?;
-            socket.set_nonblocking(true)?;
             let mut endpoint = quinn::Endpoint::new(
                 endpoint_config,
                 None,
@@ -296,6 +295,7 @@ impl Client {
                 last,
                 endpoint: Mutex::new(Some(endpoint)),
                 driver: Mutex::new(None),
+                _relay: relay,
             });
             session.start(
                 &self.host,

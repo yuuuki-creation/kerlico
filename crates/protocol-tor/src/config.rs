@@ -1,4 +1,4 @@
-use kerlico_core::{Error, Result};
+use kerlico_core::{DialerOptions, Error, Result};
 use serde::Deserialize;
 use std::{
     path::{Component, Path, PathBuf},
@@ -32,6 +32,8 @@ pub(crate) struct Prepared {
     pub bootstrap_timeout: Duration,
     pub carrier_timeout: Duration,
     pub shutdown_timeout: Duration,
+    /// 编译期取得的拨号选项，Tor 载体 TCP 经它建立。
+    pub dialer: DialerOptions,
 }
 
 fn valid_directory(path: &Path) -> bool {
@@ -75,6 +77,7 @@ impl Options {
             bootstrap_timeout: Duration::from_millis(self.bootstrap_timeout_ms),
             carrier_timeout: Duration::from_millis(self.carrier_timeout_ms),
             shutdown_timeout: Duration::from_millis(self.shutdown_timeout_ms),
+            dialer: kerlico_core::current_compile_dialer(),
         })
     }
 }

@@ -293,7 +293,13 @@ impl Proxy {
 
     /// 所有类型共有的拨号字段。`interface-name` 等交给 `apply_dialer_map` 处理。
     fn common(&mut self, opts: &mut Opts) -> Result<()> {
-        for key in ["interface-name", "routing-mark", "dialer-proxy", "tfo"] {
+        for key in [
+            "interface-name",
+            "routing-mark",
+            "dialer-proxy",
+            "tfo",
+            "mptcp",
+        ] {
             if let Some(v) = self.take(key) {
                 opts.set(key, v);
             }
@@ -303,7 +309,6 @@ impl Proxy {
         {
             return Err(self.bad_value("ip-version", v));
         }
-        self.noop_bool("mptcp", false)?;
         self.noop_bool("skip-cert-verify", false)?;
         // `udp: true` 在 kerlico 中由协议能力决定是否承载 UDP，取值 true 无效果。
         self.noop_bool("udp", true)?;

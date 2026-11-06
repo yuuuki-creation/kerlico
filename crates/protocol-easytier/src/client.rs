@@ -49,6 +49,12 @@ impl OutboundFactory for EasyTierFactory {
         let options: ClientOptions =
             serde_json::from_value(options.clone()).map_err(|_| invalid())?;
         let prepared = options.prepare()?;
+        // 上游连接管理器按 URL 自建套接字，没有注入点；拨号选项无法施加时拒绝，避免路由标记静默失效。
+        if !kerlico_core::current_compile_dialer().is_default() {
+            return Err(Error::Config(
+                "EasyTier出站不支持路由标记、出口网卡、源地址等拨号选项".into(),
+            ));
+        }
         Ok(OutboundPlan::new(
             CAPABILITIES,
             true,

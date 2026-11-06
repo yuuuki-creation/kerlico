@@ -1,7 +1,10 @@
 use crate::error::cancelled;
 use async_trait::async_trait;
 use futures::{AsyncRead, AsyncWrite};
-use kerlico_core::{BoxFuture, BoxStream, CancellationToken, DeviceLease, Error, ServiceStatus};
+use kerlico_core::{
+    BoxFuture, BoxStream, CancellationToken, Destination, DeviceLease, DialerOptions, Error,
+    ServiceStatus,
+};
 use std::{
     io,
     net::SocketAddr,
@@ -17,9 +20,28 @@ use tor_rtcompat::{
     UdpProvider, UdpSocket, UnixConnectOptions, UnixListenOptions,
 };
 
+/// Tor 载体 TCP 的建立途径：出站配置了拨号选项时经编译期 [`DialerOptions`]，否则经共享设备。
+#[derive(Clone)]
+pub(crate) enum CarrierRoute {
+    Device(DeviceLease),
+    Dialer(DialerOptions),
+}
+
+impl CarrierRoute {
+    async fn connect(&self, address: SocketAddr) -> kerlico_core::Result<BoxStream> {
+        match self {
+            Self::Device(device) => Ok(device.connect_tcp(address).await?.stream),
+            Self::Dialer(dialer) => {
+                let server = Destination::new(&address.ip().to_string(), address.port())?;
+                dialer.connect(&server).await
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CarrierProvider {
-    device: DeviceLease,
+    route: CarrierRoute,
     cancel: CancellationToken,
     status: ServiceStatus,
     timeout: Duration,
@@ -27,13 +49,13 @@ pub(crate) struct CarrierProvider {
 
 impl CarrierProvider {
     pub fn new(
-        device: DeviceLease,
+        route: CarrierRoute,
         cancel: CancellationToken,
         status: ServiceStatus,
         timeout: Duration,
     ) -> Self {
         Self {
-            device,
+            route,
             cancel,
             status,
             timeout,
@@ -173,10 +195,10 @@ impl NetStreamProvider<SocketAddr> for CarrierProvider {
         let result = tokio::select! {
             biased;
             _ = self.cancel.cancelled() => { self.check()?; return Err(cancelled()); }
-            result = tokio::time::timeout(self.timeout, self.device.connect_tcp(*address)) => result,
+            result = tokio::time::timeout(self.timeout, self.route.connect(*address)) => result,
         };
-        let opened = match result {
-            Ok(Ok(opened)) => opened,
+        let stream = match result {
+            Ok(Ok(stream)) => stream,
             Ok(Err(Error::Cancelled)) => return Err(cancelled()),
             Ok(Err(Error::Timeout)) | Err(_) => {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, Error::Timeout));
@@ -190,7 +212,7 @@ impl NetStreamProvider<SocketAddr> for CarrierProvider {
         };
         self.check()?;
         Ok(CarrierStream::new(
-            opened.stream,
+            stream,
             &self.cancel,
             self.status.clone(),
         ))

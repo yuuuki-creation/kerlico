@@ -79,6 +79,9 @@ impl OutboundFactory for AnyTlsFactory {
     fn kind(&self) -> &'static str {
         "anytls"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         let options: Options = serde_json::from_value(options.clone())
             .map_err(|_| Error::Config("AnyTLS 出站字段不合法".into()))?;
@@ -91,7 +94,11 @@ impl OutboundFactory for AnyTlsFactory {
         }
         let server = Destination::new(&options.server.host, options.server.port)?;
         let password = Sha256::digest(options.password.as_bytes()).into();
-        let connector = TcpConnector::tls(&options.tls.server_name, options.tls.ca_pem.as_deref())?;
+        let connector = TcpConnector::tls(
+            &options.tls.server_name,
+            options.tls.ca_pem.as_deref(),
+            kerlico_core::current_compile_dialer(),
+        )?;
         let idle = std::time::Duration::from_millis(options.idle_session_timeout_ms);
         let max_sessions = options.max_sessions;
         Padding::parse(padding::DEFAULT)?;

@@ -56,7 +56,7 @@ async fn tcp_tls_reads_response_after_first_application_write() {
         VlessOutbound::compile(
             Destination::new("127.0.0.1", address.port()).unwrap(),
             UserId::from_bytes([0; 16]),
-            TcpConnector::tls("localhost", Some(&pem)).unwrap(),
+            TcpConnector::tls("localhost", Some(&pem), Default::default()).unwrap(),
         )
         .unwrap(),
     )
@@ -100,7 +100,7 @@ async fn udp_tls_halves_can_send_and_receive_concurrently() {
         VlessOutbound::compile(
             Destination::new("127.0.0.1", port).unwrap(),
             UserId::from_bytes([0; 16]),
-            TcpConnector::tls("localhost", Some(&pem)).unwrap(),
+            TcpConnector::tls("localhost", Some(&pem), Default::default()).unwrap(),
         )
         .unwrap(),
     )
@@ -148,6 +148,7 @@ async fn rejects_untrusted_or_wrong_name_certificates() {
                 "localhost"
             },
             if trusted { Some(&pem) } else { None },
+            Default::default(),
         )
         .unwrap();
         let outbound = support::start(
@@ -182,7 +183,7 @@ async fn handshake_uses_one_timeout_and_cancellation_budget() {
         VlessOutbound::compile(
             Destination::new("127.0.0.1", port).unwrap(),
             UserId::from_bytes([0; 16]),
-            TcpConnector::tls("localhost", None).unwrap(),
+            TcpConnector::tls("localhost", None, Default::default()).unwrap(),
         )
         .unwrap(),
     )
@@ -237,7 +238,7 @@ fn configuration_fails_closed_and_user_ids_are_redacted() {
             .destination()
             .unwrap(),
             UserId::from_bytes([0; 16]),
-            TcpConnector::plain()
+            TcpConnector::plain(Default::default())
         )
         .is_err()
     );

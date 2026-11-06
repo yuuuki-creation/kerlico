@@ -600,6 +600,7 @@ impl XhttpTransport {
                             server_name: material.server_name,
                             tls_config: material.tls_config,
                             socket_protector: material.socket_protector,
+                            udp_socket_factory: material.udp_socket_factory,
                             quic,
                         },
                         &candidates,

@@ -14,7 +14,7 @@ use kerlico_http_carrier::{BodyIo, Reader, Writer, runtime::ServiceRuntime};
 use kerlico_wireguard::ip::{ClientTunnel, StackLimits, StackOptions};
 use std::{
     future::{Future, poll_fn},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::IpAddr,
     sync::{
         Arc, RwLock,
         atomic::{AtomicBool, Ordering},
@@ -74,15 +74,6 @@ impl Tunnel {
         self.in_use.store(true, Ordering::Relaxed);
         &self.ip
     }
-}
-
-async fn resolve(server: &Destination) -> Result<SocketAddr> {
-    let mut peers: Vec<SocketAddr> =
-        kerlico_core::lookup_host((server.host().as_str(), server.port()))
-            .await?
-            .collect();
-    peers.sort_by_key(SocketAddr::is_ipv6);
-    peers.first().copied().ok_or(Error::InvalidAddress)
 }
 
 fn request(prepared: &Prepared) -> Result<http::Request<()>> {
@@ -170,14 +161,11 @@ async fn open(
 
 /// 建立期间不产生后台任务；调用方丢弃该 future 即回收全部资源。
 pub(crate) async fn establish(prepared: &Prepared, host: &ServiceContext) -> Result<Arc<Tunnel>> {
-    let peer = resolve(&prepared.server).await?;
-    let bind = if peer.is_ipv4() {
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
-    } else {
-        SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
-    };
-    let socket = std::net::UdpSocket::bind(bind)?;
-    socket.set_nonblocking(true)?;
+    let kerlico_core::UdpPeer {
+        socket,
+        peer,
+        relay,
+    } = prepared.dialer.udp_peer(&prepared.server).await?;
     let (socket, socket_close) = kerlico_http_carrier::socket::wrap(socket)?;
     let endpoint = quinn::Endpoint::new_with_abstract_socket(
         quinn::EndpointConfig::default(),
@@ -246,6 +234,7 @@ pub(crate) async fn establish(prepared: &Prepared, host: &ServiceContext) -> Res
         // 留出发送 CONNECTION_CLOSE 的时间，代理才能立刻回收这条隧道的地址。
         let _ = timeout(kerlico_core::QUIC_CLOSE_GRACE, endpoint.wait_idle()).await;
         socket_close.close();
+        drop(relay);
     })?;
     Ok(tunnel)
 }

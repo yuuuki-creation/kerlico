@@ -16,7 +16,7 @@ pub struct ShadowsocksOutbound {
     pub(crate) server: Destination,
     pub(crate) crypto: SharedContext,
     connector: Option<Arc<dyn StreamConnector>>,
-    dialer: kerlico_core::DialerOptions,
+    pub(crate) dialer: kerlico_core::DialerOptions,
     uot_version: Option<u8>,
     mux: Option<Arc<kerlico_net::sing_mux::SingMuxClient>>,
 }
@@ -82,7 +82,7 @@ impl ShadowsocksOutbound {
         let mut carrier: BoxStream = if let Some(connector) = &self.connector {
             connector.connect_tcp(&self.server, context).await?
         } else {
-            kerlico_net::TcpConnector::connect_raw_with_dialer(&self.server, &self.dialer).await?
+            self.dialer.connect(&self.server).await?
         };
         if self.config.method() == shadowsocks::crypto::CipherKind::NONE {
             let mut buf = bytes::BytesMut::new();
@@ -221,6 +221,9 @@ pub struct ShadowsocksFactory;
 impl OutboundFactory for ShadowsocksFactory {
     fn kind(&self) -> &'static str {
         "shadowsocks"
+    }
+    fn supports_detour(&self) -> bool {
+        true
     }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         ShadowsocksOutbound::compile_with_connector(options, None)

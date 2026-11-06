@@ -57,7 +57,11 @@ impl Options {
                 if self.allow_insecure {
                     return Err(Error::Config("TLS 模式不接受明文许可字段".into()));
                 }
-                TcpConnector::tls(&tls.server_name, tls.ca_pem.as_deref())?
+                TcpConnector::tls(
+                    &tls.server_name,
+                    tls.ca_pem.as_deref(),
+                    kerlico_core::current_compile_dialer(),
+                )?
             }
             None => {
                 if !server.is_loopback() && !self.allow_insecure {
@@ -65,7 +69,7 @@ impl Options {
                         "非字面回环的明文 Relay 需要 allow_insecure".into(),
                     ));
                 }
-                TcpConnector::plain()
+                TcpConnector::plain(kerlico_core::current_compile_dialer())
             }
         };
         let forward = self.forward_target.map(|s| s.destination()).transpose()?;

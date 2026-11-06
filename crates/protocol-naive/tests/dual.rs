@@ -238,7 +238,7 @@ async fn configuration_rejects_unimplemented_flags_and_invalid_combinations() {
     assert!(
         NaiveFactory::compile_with_connector(
             &options,
-            Arc::new(kerlico_net::TcpConnector::plain())
+            Arc::new(kerlico_net::TcpConnector::plain(Default::default()))
         )
         .is_err()
     );

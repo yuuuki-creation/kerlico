@@ -159,8 +159,13 @@ pub struct EgressPlan {
     pub(crate) resources: Vec<crate::ResourceSpec>,
     pub(crate) store_selected_path: Option<String>,
     pub(crate) mode: RunMode,
+    pub(crate) global_dialer: kerlico_core::DialerOptions,
 }
 impl EgressPlan {
+    /// 全局默认拨号选项，供不经命名出站的 DNS 直连上游使用。
+    pub fn global_dialer(&self) -> &kerlico_core::DialerOptions {
+        &self.global_dialer
+    }
     pub fn dns(&self) -> Option<&DnsSpec> {
         self.dns.as_ref()
     }
@@ -212,6 +217,7 @@ pub struct PreparedConfig {
     pub(crate) nodes: Vec<PreparedNode>,
     pub(crate) lan_filter: kerlico_core::IpFilter,
     pub(crate) log: LogOutput,
+    pub(crate) global_dialer: kerlico_core::DialerOptions,
 }
 pub struct EnginePlanParts {
     pub history: Option<HistorySpec>,
@@ -231,6 +237,10 @@ pub struct DeviceRequirements {
 impl PreparedConfig {
     pub fn device(&self) -> Option<&DeviceSpec> {
         self.device.as_ref()
+    }
+    /// 全局默认拨号选项（不含 detour），供不属于某个出站的套接字（例如 WARP 设备）使用。
+    pub fn global_dialer(&self) -> &kerlico_core::DialerOptions {
+        &self.global_dialer
     }
     pub fn control(&self) -> Option<&ControlSpec> {
         self.control.as_ref()

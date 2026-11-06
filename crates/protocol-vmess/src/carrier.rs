@@ -25,6 +25,33 @@ use xray_transport::{
     BoxedTransportStream, ConnectorConfig, TlsClientConfig, TlsConnector, TransportDialer,
 };
 
+/// xray 载体的 TCP 一律经 `d` 建立：有 detour 时交给上游出站，否则对全部候选做 Happy Eyeballs。
+async fn dial_resolved(
+    d: &kerlico_core::DialerOptions,
+    target: xray_routing::Target,
+    candidates: Vec<std::net::SocketAddr>,
+) -> std::result::Result<BoxedTransportStream, xray_transport::TransportError> {
+    let chained = |e: Error| xray_transport::TransportError::ChainedOutbound(e.to_string());
+    let stream: BoxStream = if d.has_detour() || candidates.is_empty() {
+        let host = match &target.addr {
+            xray_routing::TargetAddr::Ip(ip) => ip.to_string(),
+            xray_routing::TargetAddr::Domain(domain) => domain.clone(),
+        };
+        let dest = Destination::new(&host, target.port).map_err(chained)?;
+        d.connect(&dest).await.map_err(chained)?
+    } else {
+        let (tcp, _) = kerlico_core::dialer::happy_eyeballs(
+            candidates,
+            d.fallback_delay(),
+            |peer| async move { Ok(d.connect_addr(peer).await?) },
+        )
+        .await
+        .map_err(chained)?;
+        Box::new(tcp)
+    };
+    Ok(Box::new(BridgedStream(stream)))
+}
+
 #[derive(Clone, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum Transport {
@@ -317,49 +344,14 @@ impl Client {
         let layer = transport.layer(host)?;
         let compile_dialer = kerlico_core::current_compile_dialer();
         let has_detour = compile_dialer.has_detour();
-        if !compile_dialer.is_default() {
-            let d = compile_dialer.clone();
-            dialer = dialer.with_resolved_tcp_connector(Arc::new(
-                xray_transport::FnResolvedTcpConnector(
-                    move |target: xray_routing::Target, candidates: Vec<std::net::SocketAddr>| {
-                        let d = d.clone();
-                        async move {
-                            let dest = if d.has_detour() {
-                                let host = match &target.addr {
-                                    xray_routing::TargetAddr::Ip(ip) => ip.to_string(),
-                                    xray_routing::TargetAddr::Domain(domain) => domain.clone(),
-                                };
-                                Destination::new(&host, target.port).map_err(|e| {
-                                    xray_transport::TransportError::ChainedOutbound(e.to_string())
-                                })?
-                            } else {
-                                let first = candidates.first().copied().ok_or_else(|| {
-                                    xray_transport::TransportError::ChainedOutbound(
-                                        "无可用候选地址".into(),
-                                    )
-                                })?;
-                                Destination::new(&first.ip().to_string(), first.port()).map_err(
-                                    |e| {
-                                        xray_transport::TransportError::ChainedOutbound(
-                                            e.to_string(),
-                                        )
-                                    },
-                                )?
-                            };
-                            let stream =
-                                kerlico_net::TcpConnector::connect_raw_with_dialer(&dest, &d)
-                                    .await
-                                    .map_err(|e| {
-                                        xray_transport::TransportError::ChainedOutbound(
-                                            e.to_string(),
-                                        )
-                                    })?;
-                            Ok(Box::new(BridgedStream(stream)) as BoxedTransportStream)
-                        }
-                    },
-                ),
-            ));
-        }
+        let d = compile_dialer;
+        dialer =
+            dialer.with_resolved_tcp_connector(Arc::new(xray_transport::FnResolvedTcpConnector(
+                move |target: xray_routing::Target, candidates: Vec<std::net::SocketAddr>| {
+                    let d = d.clone();
+                    async move { dial_resolved(&d, target, candidates).await }
+                },
+            )));
         Ok(Self {
             server,
             dialer,

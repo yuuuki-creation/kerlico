@@ -36,7 +36,11 @@ impl OutboundFactory for SudokuFactory {
     fn kind(&self) -> &'static str {
         "sudoku"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, value: &Value) -> Result<OutboundPlan> {
+        let dialer = kerlico_core::current_compile_dialer();
         let options: OutOptions = serde_json::from_value(value.clone())
             .map_err(|_| Error::Config("Sudoku出站字段不合法".into()))?;
         let config = options.prepare()?;
@@ -50,9 +54,9 @@ impl OutboundFactory for SudokuFactory {
             config.protocol.udp_enabled,
             TargetPolicy::Remote,
             move |host| {
-                Box::pin(
-                    async move { Ok(Arc::new(Client::new(config, host)) as Arc<dyn Outbound>) },
-                )
+                Box::pin(async move {
+                    Ok(Arc::new(Client::new(config, host, dialer)) as Arc<dyn Outbound>)
+                })
             },
         ))
     }
@@ -73,8 +77,8 @@ impl Drop for Client {
     }
 }
 impl Client {
-    fn new(config: OutConfig, host: ServiceContext) -> Self {
-        let endpoint = Arc::new(Endpoint::new(config.server.clone()));
+    fn new(config: OutConfig, host: ServiceContext, dialer: kerlico_core::DialerOptions) -> Self {
+        let endpoint = Arc::new(Endpoint::new(config.server.clone(), dialer));
         Self {
             config: Arc::new(config),
             endpoint,

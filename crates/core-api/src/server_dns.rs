@@ -58,15 +58,3 @@ pub async fn lookup_host<H: AsRef<str>>(
             .into_iter()),
     }
 }
-
-/// 解析代理服务器域名后依次尝试连接；与 `TcpStream::connect((host, port))` 同形。
-pub async fn connect_host<H: AsRef<str>>(target: (H, u16)) -> io::Result<tokio::net::TcpStream> {
-    let mut last = None;
-    for addr in lookup_host(target).await? {
-        match tokio::net::TcpStream::connect(addr).await {
-            Ok(stream) => return Ok(stream),
-            Err(e) => last = Some(e),
-        }
-    }
-    Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "代理服务器域名没有地址")))
-}

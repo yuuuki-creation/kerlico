@@ -14,7 +14,6 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     future::poll_fn,
-    net::UdpSocket,
     ops::RangeInclusive,
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
@@ -31,6 +30,7 @@ struct Session {
     registry: Arc<udp::Registry>,
     tcp_slots: Arc<Semaphore>,
     udp_enabled: bool,
+    _relay: Option<kerlico_core::dialer::RelayGuard>,
 }
 impl Session {
     fn alive(&self) -> bool {
@@ -64,6 +64,7 @@ struct Pending {
     endpoint: Option<quinn::Endpoint>,
     connection: Option<quinn::Connection>,
     driver: Option<ServiceTask<()>>,
+    relay: Option<kerlico_core::dialer::RelayGuard>,
 }
 impl Drop for Pending {
     fn drop(&mut self) {
@@ -97,6 +98,7 @@ pub struct Hysteria2Outbound {
     limits: Limits,
     pool: Mutex<HashMap<ResourceKey, Arc<MemberSession>>>,
     host: ServiceContext,
+    dialer: kerlico_core::DialerOptions,
 }
 impl Hysteria2Outbound {
     fn compile(options: &Value) -> Result<OutboundPlan> {
@@ -124,6 +126,12 @@ impl Hysteria2Outbound {
             Some(spec) => spec.parse()?,
             None => Vec::new(),
         };
+        let dialer = kerlico_core::current_compile_dialer();
+        if dialer.has_detour() && !port_ranges.is_empty() {
+            return Err(Error::Config(
+                "Hysteria2 端口跳跃不能与 detour 同用：链式 UDP 中继只转发到固定服务端端口".into(),
+            ));
+        }
         let hop_interval = if let Some(ms) = options.hop_interval_ms {
             if !(10..=86_400_000).contains(&ms) {
                 return Err(invalid());
@@ -219,6 +227,7 @@ impl Hysteria2Outbound {
                         limits: options.limits,
                         pool: Mutex::new(HashMap::new()),
                         host,
+                        dialer,
                     }) as Arc<dyn Outbound>)
                 })
             },
@@ -237,18 +246,11 @@ impl Hysteria2Outbound {
             return Ok(session.clone());
         }
         pool.take();
-        let mut peers: Vec<_> =
-            kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
-                .await?
-                .collect();
-        peers.sort_by_key(|peer| peer.is_ipv6());
-        let peer = *peers.first().ok_or(Error::InvalidAddress)?;
-        let socket = UdpSocket::bind(if peer.is_ipv6() {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        })?;
-        socket.set_nonblocking(true)?;
+        let kerlico_core::UdpPeer {
+            socket,
+            peer,
+            relay,
+        } = self.dialer.udp_peer(&self.server).await?;
         let hop = (!self.port_ranges.is_empty()).then(|| {
             (
                 peer,
@@ -276,6 +278,7 @@ impl Hysteria2Outbound {
             endpoint: Some(endpoint),
             connection: None,
             driver: None,
+            relay,
         };
         let connection = pending
             .endpoint
@@ -355,6 +358,7 @@ impl Hysteria2Outbound {
             registry,
             tcp_slots: Arc::new(Semaphore::new(self.limits.max_streams)),
             udp_enabled,
+            _relay: pending.relay.take(),
         });
         *pool = Some(session.clone());
         Ok(session)
@@ -489,5 +493,8 @@ impl OutboundFactory for Hysteria2Factory {
     }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         Hysteria2Outbound::compile(options)
+    }
+    fn supports_detour(&self) -> bool {
+        true
     }
 }

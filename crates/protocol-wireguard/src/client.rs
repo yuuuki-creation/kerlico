@@ -16,7 +16,7 @@ use kerlico_core::{
 };
 use serde_json::Value;
 use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -139,12 +139,21 @@ impl OutboundFactory for WireGuardFactory {
         {
             return Err(Error::Config("WireGuard载体绑定地址不合法".into()));
         }
+        let dialer = kerlico_core::current_compile_dialer();
+        if options.bind.is_some() && dialer.has_detour() {
+            return Err(Error::Config(
+                "WireGuard载体绑定地址不能与链式拨号同时配置".into(),
+            ));
+        }
         Ok(OutboundPlan::new(
             CAPABILITIES,
             true,
             TargetPolicy::Local,
-            move |host| Box::pin(start(prepared, peer, endpoint, options.bind, host)),
+            move |host| Box::pin(start(prepared, peer, endpoint, options.bind, dialer, host)),
         ))
+    }
+    fn supports_detour(&self) -> bool {
+        true
     }
 }
 
@@ -153,27 +162,15 @@ async fn start(
     peer: PeerConfig,
     endpoint: Destination,
     bind: Option<SocketAddr>,
+    dialer: kerlico_core::DialerOptions,
     host: ServiceContext,
 ) -> Result<Arc<dyn Outbound>> {
     let cancel = host.cancel();
-    let selected = tokio::select! { biased;
+    let (socket, selected, relay) = tokio::select! { biased;
         _ = cancel.cancelled() => return Err(Error::Cancelled),
-        result = resolve_endpoint(&endpoint, bind) => result?,
+        result = open_carrier(&endpoint, bind, &dialer) => result?,
     };
-    let bind = bind.unwrap_or_else(|| {
-        SocketAddr::new(
-            if selected.is_ipv4() {
-                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-            } else {
-                IpAddr::V6(Ipv6Addr::UNSPECIFIED)
-            },
-            0,
-        )
-    });
-    if bind.is_ipv4() != selected.is_ipv4() {
-        return Err(Error::Config("WireGuard载体绑定与对端地址族不一致".into()));
-    }
-    let socket = UdpSocket::bind(bind).await?;
+    let socket = UdpSocket::from_std(socket)?;
     let sock_ref = socket2::SockRef::from(&socket);
     let _ = sock_ref.set_recv_buffer_size(8 * 1024 * 1024);
     let _ = sock_ref.set_send_buffer_size(8 * 1024 * 1024);
@@ -191,6 +188,7 @@ async fn start(
     let crypto = CryptoPeer::new(&prepared, &peer, 1, Some(selected), index.limiter.clone());
     let carrier = Carrier::Outbound(host.clone());
     host.spawn(async move {
+        let _relay = relay;
         let guard = StackGuard(runtime_stack.clone());
         if let Err(error) = run(
             socket,
@@ -227,6 +225,34 @@ impl Drop for StackGuard {
     fn drop(&mut self) {
         self.0.close();
     }
+}
+
+/// 建立载体套接字，返回套接字、发往的对端地址与链式中继句柄。显式 `bind` 只用于直连。
+async fn open_carrier(
+    endpoint: &Destination,
+    bind: Option<SocketAddr>,
+    dialer: &kerlico_core::DialerOptions,
+) -> Result<(
+    std::net::UdpSocket,
+    SocketAddr,
+    Option<kerlico_core::dialer::RelayGuard>,
+)> {
+    if let Some(bind) = bind {
+        let selected = resolve_endpoint(endpoint, Some(bind)).await?;
+        return Ok((dialer.udp_socket(bind)?, selected, None));
+    }
+    let server = if dialer.has_detour() {
+        endpoint.clone()
+    } else {
+        let selected = resolve_endpoint(endpoint, None).await?;
+        Destination::new(&selected.ip().to_string(), selected.port())?
+    };
+    let kerlico_core::UdpPeer {
+        socket,
+        peer,
+        relay,
+    } = dialer.udp_peer(&server).await?;
+    Ok((socket, peer, relay))
 }
 
 async fn resolve_endpoint(endpoint: &Destination, bind: Option<SocketAddr>) -> Result<SocketAddr> {

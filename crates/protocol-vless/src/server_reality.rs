@@ -113,7 +113,7 @@ impl Reality {
         })
     }
     async fn cover(&self) -> Result<BoxStream> {
-        kerlico_net::TcpConnector::plain()
+        kerlico_net::TcpConnector::plain(kerlico_core::DialerOptions::default())
             .connect(&self.cover)
             .await
     }

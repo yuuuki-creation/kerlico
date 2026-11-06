@@ -103,6 +103,7 @@ pub fn spawn_region(
         region: region.clone(),
         secret: node_secret,
         ca_pem: prepared.ca_pem.clone(),
+        dialer: prepared.dialer.clone(),
         preferred,
         inbound,
         outgoing,
@@ -126,6 +127,7 @@ struct RegionTask {
     region: DerpRegion,
     secret: Secret,
     ca_pem: Option<String>,
+    dialer: kerlico_core::DialerOptions,
     preferred: bool,
     inbound: mpsc::Sender<Received>,
     outgoing: mpsc::Receiver<(NodeKey, Vec<u8>)>,
@@ -161,7 +163,7 @@ impl RegionTask {
         } else {
             &node.cert_name
         };
-        let connector = TcpConnector::tls(name, self.ca_pem.as_deref())?;
+        let connector = TcpConnector::tls(name, self.ca_pem.as_deref(), self.dialer.clone())?;
         let mut last = Error::InvalidAddress;
         let mut connected = None;
         for host in node.dial_hosts() {

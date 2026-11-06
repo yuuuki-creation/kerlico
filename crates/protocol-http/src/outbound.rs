@@ -125,6 +125,9 @@ impl OutboundFactory for HttpFactory {
     fn kind(&self) -> &'static str {
         "http"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         let options: Options = serde_json::from_value(options.clone())
             .map_err(|_| Error::Config("HTTP 出站字段不合法".into()))?;
@@ -155,9 +158,13 @@ impl OutboundFactory for HttpFactory {
             headers.push((name, value));
         }
         let connector = if let Some(tls) = options.tls {
-            TcpConnector::tls(&tls.server_name, tls.ca_pem.as_deref())?
+            TcpConnector::tls(
+                &tls.server_name,
+                tls.ca_pem.as_deref(),
+                kerlico_core::current_compile_dialer(),
+            )?
         } else {
-            TcpConnector::plain()
+            TcpConnector::plain(kerlico_core::current_compile_dialer())
         };
         let server = options.server.destination()?;
         Ok(OutboundPlan::new(

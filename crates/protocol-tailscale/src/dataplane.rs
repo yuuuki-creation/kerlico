@@ -9,7 +9,7 @@ use crate::{
     netmap::{DerpMap, DerpRegion, NetMap, Routes},
     stun,
 };
-use kerlico_core::{Error, Result, ServiceContext};
+use kerlico_core::{Destination, DialerOptions, Error, Result, ServiceContext};
 use kerlico_wireguard::ip::{ClientTunnel, PacketClassifier, PacketRoute, PeerCrypto};
 use rand::{RngCore, rngs::OsRng};
 use std::{
@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    net::{TcpStream, UdpSocket, lookup_host},
+    net::{UdpSocket, lookup_host},
     sync::{mpsc, watch},
     task::JoinSet,
     time::{Instant, MissedTickBehavior, interval, timeout},
@@ -587,8 +587,9 @@ impl Dataplane {
             return;
         }
         let sender = state.home_sender.clone();
+        let dialer = self.prepared.dialer.clone();
         let spawned = self.host.spawn(async move {
-            let _ = sender.send(probe_regions(regions).await).await;
+            let _ = sender.send(probe_regions(regions, dialer).await).await;
         });
         if spawned.is_ok() {
             state.home_probing = true;
@@ -631,17 +632,21 @@ async fn receive(socket: Option<&UdpSocket>, buffer: &mut [u8]) -> io::Result<(u
 }
 
 /// 以 TCP 建连耗时代替上游 netcheck 的 STUN 延迟，先建连者作为首选区域。
-async fn probe_regions(regions: Vec<DerpRegion>) -> Option<HomeChoice> {
+async fn probe_regions(regions: Vec<DerpRegion>, dialer: DialerOptions) -> Option<HomeChoice> {
     let mut probes = JoinSet::new();
     for region in regions {
         let Some(node) = region.nodes.into_iter().find(|node| !node.stun_only) else {
             continue;
         };
         let id = region.id;
+        let dialer = dialer.clone();
         probes.spawn(async move {
             let port = node.tls_port()?;
             for host in node.dial_hosts() {
-                let connect = TcpStream::connect((host.as_str(), port));
+                let Ok(server) = Destination::new(&host, port) else {
+                    continue;
+                };
+                let connect = dialer.connect(&server);
                 if matches!(timeout(HOME_PROBE, connect).await, Ok(Ok(_))) {
                     return Some((id, node));
                 }
@@ -664,7 +669,7 @@ async fn probe_regions(regions: Vec<DerpRegion>) -> Option<HomeChoice> {
         .and_then(std::result::Result::ok)
         .and_then(|mut addresses| addresses.find(SocketAddr::is_ipv4));
     let local_ip = match resolved {
-        Some(target) => outbound_ip(target).await,
+        Some(target) => outbound_ip(&dialer, target).await,
         None => None,
     };
     Some(HomeChoice {
@@ -675,8 +680,8 @@ async fn probe_regions(regions: Vec<DerpRegion>) -> Option<HomeChoice> {
 }
 
 /// 不发送数据的已连接 UDP 套接字由路由表选出本机对外地址。
-async fn outbound_ip(target: SocketAddr) -> Option<IpAddr> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await.ok()?;
+async fn outbound_ip(dialer: &DialerOptions, target: SocketAddr) -> Option<IpAddr> {
+    let socket = UdpSocket::from_std(dialer.udp_socket_for(target).ok()?).ok()?;
     socket.connect(target).await.ok()?;
     let ip = socket.local_addr().ok()?.ip();
     (!ip.is_unspecified() && !ip.is_loopback()).then_some(ip)

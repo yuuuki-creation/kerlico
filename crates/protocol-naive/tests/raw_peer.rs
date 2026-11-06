@@ -131,7 +131,7 @@ async fn connector_injection_is_used_for_h2_and_does_not_change_target() {
             self.0.fetch_add(1, Ordering::AcqRel);
             Box::pin(async move {
                 kerlico_core::StreamConnector::connect_tcp(
-                    &kerlico_net::TcpConnector::plain(),
+                    &kerlico_net::TcpConnector::plain(Default::default()),
                     target,
                     context,
                 )

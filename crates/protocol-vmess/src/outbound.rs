@@ -55,6 +55,9 @@ impl OutboundFactory for VmessFactory {
     fn kind(&self) -> &'static str {
         "vmess"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, value: &Value) -> Result<OutboundPlan> {
         let options: Options = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
         if options.global_padding && !options.chunk_masking {

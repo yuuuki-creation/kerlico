@@ -52,6 +52,7 @@ pub(crate) struct Prepared {
     pub pins: Arc<Vec<String>>,
     pub auth: Authentication,
     pub ssh: Arc<client::Config>,
+    pub dialer: kerlico_core::DialerOptions,
 }
 
 fn invalid() -> Error {
@@ -94,7 +95,7 @@ fn key_material(pem: Option<String>, path: Option<String>) -> Result<String> {
 }
 
 impl Options {
-    pub fn prepare(self) -> Result<Prepared> {
+    pub fn prepare(self, dialer: kerlico_core::DialerOptions) -> Result<Prepared> {
         if self.username.trim().is_empty()
             || self.username.len() > 255
             || self.username.chars().any(char::is_control)
@@ -164,6 +165,7 @@ impl Options {
             pins: Arc::new(self.host_key_sha256),
             auth,
             ssh: Arc::new(ssh),
+            dialer,
         })
     }
 }

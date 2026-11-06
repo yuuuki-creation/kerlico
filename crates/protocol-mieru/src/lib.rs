@@ -18,6 +18,9 @@ impl OutboundFactory for MieruFactory {
     fn kind(&self) -> &'static str {
         "mieru"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, value: &Value) -> Result<OutboundPlan> {
         let options = serde_json::from_value(value.clone()).map_err(|_| config::invalid())?;
         client::Client::compile(options)

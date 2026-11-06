@@ -57,6 +57,7 @@ fn safe(name: &str) -> bool {
 pub(crate) struct Plan {
     backend: Backend,
     tls: Arc<rustls::ClientConfig>,
+    dialer: kerlico_core::DialerOptions,
     concurrency: usize,
 }
 #[derive(Clone)]
@@ -85,7 +86,7 @@ impl Plan {
         let inner: Arc<dyn Storage> = if let Backend::Local(root) = &self.backend {
             Arc::new(Local { root: root.clone() })
         } else {
-            let client = Client::new(self.tls.clone());
+            let client = Client::new(self.tls.clone(), self.dialer.clone());
             match &self.backend {
                 Backend::S3 {
                     base,
@@ -188,6 +189,7 @@ pub(crate) fn compile(settings: &Settings, ca: Option<&str>) -> Result<Plan> {
     Ok(Plan {
         backend,
         tls,
+        dialer: kerlico_core::current_compile_dialer(),
         concurrency: settings.concurrency,
     })
 }

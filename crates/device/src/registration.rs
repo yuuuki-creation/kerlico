@@ -4,7 +4,7 @@ use crate::{
     storage::{Record, StateStore},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use kerlico_core::{Error, Result};
+use kerlico_core::{Destination, DialerOptions, Error, Result};
 use rustls::{
     CipherSuite, ClientConfig, NamedGroup, RootCertStore,
     client::{
@@ -19,10 +19,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug)]
 struct WarpHello;
@@ -85,12 +82,14 @@ fn tls() -> Result<ClientConfig> {
     config.client_hello_customizer = Some(Arc::new(WarpHello));
     Ok(config)
 }
-async fn register(public_key: &str) -> Result<Value> {
+async fn register(public_key: &str, dialer: &DialerOptions) -> Result<Value> {
     let timestamp = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .map_err(|_| invalid())?;
     let body = serde_json::to_vec(&json!({ "fcm_token":"", "install_id":"", "key":public_key, "locale":"en_US", "model":"PC", "tos":timestamp, "serial_number":"", "os_version":"16.0.0", "key_type":"curve25519", "tunnel_type":"wireguard" })).map_err(|_| invalid())?;
-    let stream = TcpStream::connect(("api.cloudflareclient.com", 443)).await?;
+    let stream = dialer
+        .connect(&Destination::new("api.cloudflareclient.com", 443)?)
+        .await?;
     let name = rustls::pki_types::ServerName::try_from("api.cloudflareclient.com").unwrap();
     let mut stream = tokio_rustls::TlsConnector::from(Arc::new(tls()?))
         .connect(name, stream)
@@ -289,9 +288,10 @@ pub(crate) async fn prepare(
     store: &StateStore,
     capabilities: NativeCapabilities,
     policy: RegistrationPolicy,
+    dialer: &DialerOptions,
 ) -> Result<Value> {
     prepare_with(store, capabilities, policy, |public| async move {
-        register(&public).await
+        register(&public, dialer).await
     })
     .await
 }

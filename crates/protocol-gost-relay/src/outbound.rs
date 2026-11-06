@@ -20,6 +20,9 @@ impl OutboundFactory for GostRelayFactory {
     fn kind(&self) -> &'static str {
         "gost-relay"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, value: &Value) -> Result<OutboundPlan> {
         let options: Options = serde_json::from_value(value.clone())
             .map_err(|_| Error::Config("Gost Relay 出站字段不合法".into()))?;

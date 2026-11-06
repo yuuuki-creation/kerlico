@@ -671,3 +671,100 @@ async fn shared_service_failure_is_returned_by_business_open_and_shutdown() {
     assert!(!report.timed_out);
     assert!(host.retirement().is_finished());
 }
+
+/// 记录固定目标 UDP 通道调用次数并转交直连出站的上游。
+struct CountingUpstream {
+    inner: Arc<dyn Outbound>,
+    udp: AtomicUsize,
+}
+impl Outbound for CountingUpstream {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    fn connect_tcp<'a>(
+        &'a self,
+        target: &'a Destination,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<OpenedTcp>> {
+        self.inner.connect_tcp(target, context)
+    }
+    fn connect_udp<'a>(
+        &'a self,
+        target: &'a Destination,
+        context: &'a ConnectContext,
+    ) -> BoxFuture<'a, Result<DatagramChannel>> {
+        self.udp.fetch_add(1, Ordering::SeqCst);
+        self.inner.connect_udp(target, context)
+    }
+}
+
+fn detour_dialer(upstream: Arc<dyn Outbound>) -> kerlico_core::DialerOptions {
+    let table = kerlico_core::DetourTable::new();
+    let id = kerlico_core::OutId::parse("wg-upstream").unwrap();
+    table.insert(id.clone(), upstream);
+    kerlico_core::DialerOptions {
+        detour: Some(id),
+        detour_resolver: Some(table),
+        ..kerlico_core::DialerOptions::default()
+    }
+}
+
+#[tokio::test]
+async fn detour_carries_the_wireguard_carrier_through_the_upstream_outbound() {
+    let mut rig = Rig::start(false, Some(9), true).await;
+    let upstream_host = ServiceContext::for_test();
+    let upstream = Arc::new(CountingUpstream {
+        inner: kerlico_net::DirectFactory
+            .compile(&json!({}))
+            .unwrap()
+            .start(upstream_host.clone())
+            .await
+            .unwrap(),
+        udp: AtomicUsize::new(0),
+    });
+    let options = json!({
+        "tunnel": tunnel(3, 3), "peer": peer(2, None, Some(9)),
+        "endpoint": {"host": rig.endpoint.ip().to_string(), "port": rig.endpoint.port()}
+    });
+    let plan = kerlico_core::with_compile_dialer(detour_dialer(upstream.clone()), || {
+        crate::WireGuardFactory.compile(&options)
+    })
+    .unwrap();
+    let host = ServiceContext::for_test();
+    let outbound = plan.start(host.clone()).await.unwrap();
+    tcp_echo(&*outbound, "192.0.2.5", 8080, 64 * 1024).await;
+    assert_eq!(
+        upstream.udp.load(Ordering::SeqCst),
+        1,
+        "载体应经上游的一条固定目标 UDP 通道"
+    );
+    outbound.shutdown().await.unwrap();
+    assert!(
+        host.shutdown(Instant::now() + Duration::from_secs(2))
+            .await
+            .is_clean()
+    );
+    rig.stop().await;
+}
+
+#[test]
+fn explicit_bind_with_detour_is_rejected_at_compile() {
+    let upstream: Arc<dyn Outbound> = Arc::new(CountingUpstream {
+        inner: Arc::new(EchoOutbound {
+            tasks: NodeTasks::new(
+                NodeId::parse("unused").unwrap(),
+                kerlico_core::CancellationToken::new(),
+            ),
+            associations: AtomicUsize::new(0),
+        }),
+        udp: AtomicUsize::new(0),
+    });
+    let options = json!({
+        "tunnel": tunnel(1, 2), "peer": peer(2, None, None),
+        "endpoint": {"host": "127.0.0.1", "port": 51820}, "bind": "127.0.0.1:0"
+    });
+    let result = kerlico_core::with_compile_dialer(detour_dialer(upstream), || {
+        crate::WireGuardFactory.compile(&options)
+    });
+    assert!(matches!(result, Err(Error::Config(_))));
+}

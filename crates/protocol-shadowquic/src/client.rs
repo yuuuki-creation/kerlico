@@ -22,6 +22,7 @@ pub(crate) struct Client {
     crypto: jls_quinn::ClientConfig,
     host: ServiceContext,
     current: tokio::sync::Mutex<HashMap<ResourceKey, Arc<MemberConnection>>>,
+    dialer: kerlico_core::DialerOptions,
 }
 impl Client {
     pub fn compile(options: ClientOptions) -> Result<OutboundPlan> {
@@ -41,6 +42,7 @@ impl Client {
         let server = options.server.destination()?;
         let crypto =
             config::client_crypto(&user, config::alpn_bytes(options.alpn)?, transport, version)?;
+        let dialer = kerlico_core::current_compile_dialer();
         Ok(OutboundPlan::new(
             Capabilities {
                 tcp: true,
@@ -59,6 +61,7 @@ impl Client {
                         crypto,
                         host,
                         current: tokio::sync::Mutex::new(HashMap::new()),
+                        dialer,
                     }) as Arc<dyn Outbound>)
                 })
             },
@@ -79,21 +82,13 @@ impl Client {
         {
             return Ok(value.clone());
         }
-        let mut candidates =
-            kerlico_core::lookup_host((self.server.host().as_str(), self.server.port()))
-                .await?
-                .take(32)
-                .collect::<Vec<_>>();
-        candidates.sort_by_key(|address| address.is_ipv6());
-        let peer = *candidates.first().ok_or(Error::InvalidAddress)?;
+        let kerlico_core::UdpPeer {
+            socket,
+            peer,
+            relay,
+        } = self.dialer.udp_peer(&self.server).await?;
         let runtime = ScopedRuntime::shared(&self.host);
         let mut guard = RuntimeGuard::new(runtime.clone());
-        let socket = std::net::UdpSocket::bind(if peer.is_ipv6() {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        })?;
-        socket.set_nonblocking(true)?;
         let socket = runtime.wrap_udp_socket(socket)?;
         let endpoint = jls_quinn::Endpoint::new_with_jls_socket(
             config::endpoint(vec![self.version])?,
@@ -115,7 +110,11 @@ impl Client {
         }
         let value = Connection::new(
             connection,
-            Some(EndpointOwner { endpoint, runtime }),
+            Some(EndpointOwner {
+                endpoint,
+                runtime,
+                _relay: relay,
+            }),
             None,
             None,
             Some(self.host.clone()),

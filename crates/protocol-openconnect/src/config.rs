@@ -124,6 +124,7 @@ impl Options {
             self.tls.ca_pem.as_deref(),
             cert_pem.as_deref(),
             key_pem.as_deref(),
+            kerlico_core::current_compile_dialer(),
         )?;
         Ok(Config {
             server,

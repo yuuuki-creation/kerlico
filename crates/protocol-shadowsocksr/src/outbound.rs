@@ -13,11 +13,13 @@ pub struct ShadowsocksROutbound {
     pub(crate) cfg: Arc<Shared>,
     pub(crate) server: Destination,
     pub(crate) slots: Arc<Semaphore>,
+    pub(crate) dialer: kerlico_core::DialerOptions,
 }
 impl ShadowsocksROutbound {
     pub fn compile(options: &Value) -> Result<OutboundPlan> {
         let (cfg, server) = Shared::client(options)?;
         let udp = cfg.udp;
+        let dialer = kerlico_core::current_compile_dialer();
         Ok(OutboundPlan::new(
             Capabilities {
                 tcp: true,
@@ -32,6 +34,7 @@ impl ShadowsocksROutbound {
                         slots: Arc::new(Semaphore::new(cfg.limits.max_sessions)),
                         cfg,
                         server,
+                        dialer,
                     }) as Arc<dyn Outbound>)
                 })
             },
@@ -63,14 +66,9 @@ impl Outbound for ShadowsocksROutbound {
                             .clone()
                             .try_acquire_owned()
                             .map_err(|_| Error::ResourceLimit)?;
-                        let raw = kerlico_core::connect_host((
-                            self.server.host().as_str(),
-                            self.server.port(),
-                        ))
-                        .await?;
-                        raw.set_nodelay(true)?;
+                        let raw = self.dialer.connect(&self.server).await?;
                         let mut plain = stream::Stream::new(
-                            Box::new(raw),
+                            raw,
                             self.cfg.clone(),
                             Role::Client,
                             context.cancel.clone(),
@@ -118,6 +116,9 @@ pub struct ShadowsocksRFactory;
 impl OutboundFactory for ShadowsocksRFactory {
     fn kind(&self) -> &'static str {
         "shadowsocksr"
+    }
+    fn supports_detour(&self) -> bool {
+        true
     }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         ShadowsocksROutbound::compile(options)

@@ -36,6 +36,9 @@ impl OutboundFactory for TrojanFactory {
     fn kind(&self) -> &'static str {
         "trojan"
     }
+    fn supports_detour(&self) -> bool {
+        true
+    }
     fn compile(&self, options: &Value) -> Result<OutboundPlan> {
         let options: Options = serde_json::from_value(options.clone()).map_err(|_| invalid())?;
         let key = key(&options.password)?;
