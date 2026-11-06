@@ -1,12 +1,12 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use kerlico_config::{Registry, parse};
-use kerlico_core::{CancellationToken, Error, Language, Result};
-use kerlico_engine::Engine;
+use kerlico_config::Registry;
+use kerlico_core::{Error, Language, Result};
 use kerlico_net::{
     DirectFactory, DnsFactory, RedirectNodeFactory, RejectFactory, TproxyNodeFactory,
 };
 use std::path::PathBuf;
 mod cli;
+mod supervisor;
 
 #[derive(Parser)]
 #[command(name = "kerlico", version, about = "模块化代理内核")]
@@ -645,11 +645,7 @@ async fn execute(args: Args, language: Language) -> Result<()> {
         );
         return Ok(());
     }
-    let parsed_config = kerlico_config::parse_from_value(merged_value)?;
-    let prepared = registry.prepare(parsed_config)?;
-    if cfg!(not(feature = "warp")) && prepared.device().is_some() {
-        return Err(Error::Config("此构建未启用 warp".into()));
-    }
+    let prepared = supervisor::prepare(&registry, merged_value.clone())?;
     if !run {
         println!(
             "{}",
@@ -657,15 +653,14 @@ async fn execute(args: Args, language: Language) -> Result<()> {
         );
         return Ok(());
     }
-    let primary_path = config_files
-        .first()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from("config.json"));
-    let device = Device::start(&prepared)?;
-    let result = match device.lease(&prepared).await {
-        Ok(lease) => serve(prepared, primary_path, lease, language).await,
-        Err(error) => Err(error),
+    let inputs = supervisor::ConfigInputs {
+        files: config_files,
+        dirs: config_dirs,
+        format: format_opt,
     };
+    let device = Device::start(&prepared)?;
+    let result =
+        supervisor::serve(registry, inputs, merged_value, prepared, &device, language).await;
     let retired = device.shutdown().await;
     result.and(retired)
 }
@@ -1131,106 +1126,54 @@ fn run_xray(target: &str, seed: Option<&str>, domain: &str, months: u32) -> Resu
     }
 }
 
-async fn serve(
-    prepared: kerlico_config::PreparedConfig,
-    config_path: PathBuf,
-    device: kerlico_core::DeviceLease,
-    language: Language,
-) -> Result<()> {
-    let control = prepared.control().cloned();
-    let engine =
-        Engine::bind_with_options(prepared, kerlico_core::RuntimeOptions { device, language })
-            .await?;
-    for (tag, address) in engine.listeners()? {
-        match language {
-            Language::ZhCn => println!("入口 {tag} 已监听 {address}"),
-            Language::En => println!("Inbound {tag} is listening on {address}"),
-        }
-    }
-    let stop_control = CancellationToken::new();
-    let control = match control {
-        Some(spec) => {
-            let server = kerlico_control::ControlServer::bind(&spec, &engine).await?;
-            let address = server.local_addr()?;
-            match language {
-                Language::ZhCn => println!("控制接口已监听 {address}"),
-                Language::En => println!("Control interface is listening on {address}"),
-            }
-            Some(tokio::spawn(server.serve(stop_control.clone())))
-        }
-        None => None,
-    };
-    let token = CancellationToken::new();
-    let control_plane = engine.control_plane().clone();
-    let running = engine.run(token.clone());
-    tokio::pin!(running);
-    #[cfg(unix)]
-    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-    let result = loop {
-        #[cfg(unix)]
-        tokio::select! {
-            result = &mut running => break result,
-            signal = shutdown_signal() => {
-                signal?;
-                token.cancel();
-                break running.await;
-            }
-            _ = sighup.recv() => {
-                if let Ok(bytes) = std::fs::read(&config_path)
-                    && let Ok(parsed) = parse(&bytes)
-                    && let Ok(reg) = registry()
-                    && reg.prepare(parsed).is_ok()
-                {
-                    control_plane.record_config_reload(Some(config_path.display().to_string()));
-                    control_plane.push_log("info", "SIGHUP 配置重载校验完成");
-                } else {
-                    control_plane.push_log("warning", "SIGHUP 配置重载校验失败");
-                }
-            }
-        }
-        #[cfg(not(unix))]
-        tokio::select! {
-            result = &mut running => break result,
-            signal = shutdown_signal() => {
-                let _ = (&config_path, &control_plane);
-                signal?;
-                token.cancel();
-                break running.await;
-            }
-        }
-    };
-    stop_control.cancel();
-    if let Some(control) = control {
-        let _ = control.await;
-    }
-    result
-}
-
 /// 配置了 `device` 且有 `dual-stack` 本地出网时才持有 WARP 所有者，其余情况用原生设备。
 struct Device {
     #[cfg(feature = "warp")]
-    runtime: Option<kerlico_device::DeviceRuntime>,
+    runtime: Option<(PathBuf, kerlico_device::DeviceRuntime)>,
 }
 
 impl Device {
     #[cfg(feature = "warp")]
+    fn wanted(prepared: &kerlico_config::PreparedConfig) -> Option<&kerlico_config::DeviceSpec> {
+        prepared
+            .device()
+            .filter(|_| prepared.device_requirements().auto_warp)
+    }
+
+    #[cfg(feature = "warp")]
     fn start(prepared: &kerlico_config::PreparedConfig) -> Result<Self> {
-        let runtime = match prepared.device() {
-            Some(spec) if prepared.device_requirements().auto_warp => {
+        let runtime = match Self::wanted(prepared) {
+            Some(spec) => {
                 let directory = spec.state_directory.clone();
                 let options = match spec.registration {
                     kerlico_config::DeviceRegistration::CreateOnce => {
-                        kerlico_device::DeviceOptions::new(directory)
+                        kerlico_device::DeviceOptions::new(directory.clone())
                     }
                     kerlico_config::DeviceRegistration::ExistingOnly => {
-                        kerlico_device::DeviceOptions::existing(directory)
+                        kerlico_device::DeviceOptions::existing(directory.clone())
                     }
                 };
-                Some(kerlico_device::DeviceRuntime::start(options)?)
+                Some((directory, kerlico_device::DeviceRuntime::start(options)?))
             }
-            _ => None,
+            None => None,
         };
         Ok(Self { runtime })
+    }
+
+    /// 设备所有者跨重载保留，新配置须与它要求同一个状态目录（或同样不要设备）。
+    #[cfg(feature = "warp")]
+    fn admits(&self, prepared: &kerlico_config::PreparedConfig) -> Result<()> {
+        let wanted = Self::wanted(prepared).map(|spec| &spec.state_directory);
+        if wanted == self.runtime.as_ref().map(|(directory, _)| directory) {
+            Ok(())
+        } else {
+            Err(Error::Config("设备配置变化需重启进程".into()))
+        }
+    }
+
+    #[cfg(not(feature = "warp"))]
+    fn admits(&self, _: &kerlico_config::PreparedConfig) -> Result<()> {
+        Ok(())
     }
 
     #[cfg(not(feature = "warp"))]
@@ -1243,7 +1186,7 @@ impl Device {
         prepared: &kerlico_config::PreparedConfig,
     ) -> Result<kerlico_core::DeviceLease> {
         #[cfg(feature = "warp")]
-        if let Some(runtime) = &self.runtime {
+        if let Some((_, runtime)) = &self.runtime {
             return runtime.prepare(prepared.device_requirements()).await;
         }
         let _ = prepared;
@@ -1252,7 +1195,7 @@ impl Device {
 
     async fn shutdown(self) -> Result<()> {
         #[cfg(feature = "warp")]
-        if let Some(runtime) = self.runtime {
+        if let Some((_, runtime)) = self.runtime {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
             let report = runtime.shutdown_at(deadline).await;
             if !report.is_clean() {

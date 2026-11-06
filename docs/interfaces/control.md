@@ -21,13 +21,14 @@
 
 | 路径 | 方法 | 返回与行为 |
 | --- | --- | --- |
-| `/v1/health` | `GET` | `status`、本次运行的 `run`、已停止入口的标签 `failed_nodes`。全部入口运行时 `status` 为 `ok`，有入口停止时为 `degraded`，HTTP 状态都是 200 |
+| `/v1/health` | `GET` | `status`、本次运行的 `run`、已停止入口的标签 `failed_nodes`，以及配置重载计数 `reloads`（`succeeded`、`failed`、最近一次失败的错误码 `last_error`）。全部入口运行时 `status` 为 `ok`，有入口停止时为 `degraded`，HTTP 状态都是 200 |
 | `/v1/usage` | `GET` | `engine`、`users`、`nodes`、`outbounds` 四个用量视图，以及 `active_flows`、`retained_records`、`evicted_records` |
 | `/v1/online` | `GET` | 在线来源：`user`、`node`、`address`、`active_flows`。`address` 遮罩为 IPv4 `/24`、IPv6 `/48`，同一网段合并计数 |
 | `/v1/flows?after=<序号>&limit=<数量>` | `GET` | 内存中保留的访问记录，来源地址已遮罩。`limit` 为 1 至 4096，默认 1000 |
 | `/v1/stats` | `GET` | Engine 和各节点的处理单元计数 |
 | `/version` | `GET` | 内核版本号与兼容标志 |
-| `/configs` | `GET` / `PUT` / `PATCH` | 读取当前运行模式与日志级别、触发配置重载记录或动态更新模式与日志级别 |
+| `/configs` | `GET` / `PUT` / `PATCH` | `GET` 读取当前运行模式与日志级别；`PUT` 重载整份配置，见[配置重载](#配置重载)；`PATCH` 只更新日志级别 |
+| `/restart` | `POST` | 重读启动配置并重载，等同不带请求体的 `PUT /configs` |
 | `/configs/geo`、`/upgrade/geo` | `POST` | 触发 GeoIP / GeoSite 数据库更新时间戳记录 |
 | `/cache/fakeip/flush` | `POST` | 清空 Fake-IP 映射表及持久化缓存 |
 | `/logs` | `GET` | 返回控制面环形日志缓冲条目 |
@@ -47,4 +48,29 @@
 
 接口只读内存账本，不查询 SQLite，随进程退出停止。历史数据用 `kerlico history` 查询，见[统计历史](history.md)。
 
-入口运行中失败时，kerlico 立即向标准错误打印 `[错误码] 入口 <tag> 已停止：<原因>`，并把标签加入 `failed_nodes`。入口不会自行恢复，其余入口继续运行，重启进程才清除记录。
+入口运行中失败时，kerlico 立即向标准错误打印 `[错误码] 入口 <tag> 已停止：<原因>`，并把标签加入 `failed_nodes`。入口不会自行恢复，其余入口继续运行，重载配置或重启进程才清除记录。
+
+## 配置重载
+
+`PUT /configs`、`POST /restart` 与 Unix `SIGHUP` 进入同一个重载循环，请求按到达顺序逐个执行，HTTP 请求在新配置生效或确认失败后才返回。
+
+`PUT /configs` 的请求体同 Mihomo：
+
+| 字段 | 行为 |
+| --- | --- |
+| `payload` | 非空时按配置文本解析（JSON、JSONC 或 YAML；启动时带 `--format` 则按该格式），优先于 `path` |
+| `path` | 绝对路径，须位于启动时 `-c` 文件所在目录或 `-C` 目录内 |
+| 都缺省 | 重读启动命令的 `-c` 与 `-C` 来源 |
+
+查询参数 `force` 可带可不带：kerlico 每次都重建全部监听。成功返回 204，失败返回 400 和错误码。
+
+重载步骤：
+
+1. 读取并校验新配置。失败时旧引擎不受影响，返回 `configuration.invalid` 等错误码。
+2. 停止旧引擎：关闭全部入站监听，已有会话在 `limits.drain_timeout_ms` 内排空，统计历史完成最终提交。
+3. 用新配置启动引擎并绑定监听。从步骤 2 关闭监听到此步绑定完成之间，新连接被拒绝。
+4. 新引擎启动失败（如端口被占用）时，用上一份配置重新启动并返回 `startup.failed`。上一份配置也无法启动时进程以错误退出。
+
+跨重载保留的只有控制接口监听器、`reloads` 计数与设备（WARP）所有者。出站、策略组运行态、内存用量视图、`failed_nodes` 与控制面日志随新引擎重建；统计历史 SQLite、Fake-IP 缓存文件和 `store-selected` 选择文件由新引擎按新配置重新打开，未配置 `store-selected` 时策略组选择回到默认值。
+
+`control.listen` 变化、增删 `control` 段和改变 `device` 设置需重启进程：前两者在新配置中被忽略，控制接口仍在原地址服务；`device` 变化使重载以 `configuration.invalid` 失败。`secret`、CORS 与面板等其余 `control` 字段随重载生效。

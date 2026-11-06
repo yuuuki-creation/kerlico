@@ -118,7 +118,13 @@ curl -H 'Authorization: Bearer <secret>' http://127.0.0.1:9090/v1/usage
 curl -H 'Authorization: Bearer <secret>' http://127.0.0.1:9090/proxies
 ```
 
-详见[控制接口](interfaces/control.md)。
+修改配置文件后发送 `kill -HUP <pid>`，或调用 `PUT /configs`，kerlico 重读配置并替换运行中的引擎。新配置无效时继续用旧配置服务；切换期间监听短暂关闭，新连接被拒绝，已有会话按 `limits.drain_timeout_ms` 排空。结果见 `/v1/health` 的 `reloads` 计数：
+
+```sh
+curl -X PUT -H 'Authorization: Bearer <secret>' -d '{}' http://127.0.0.1:9090/configs
+```
+
+详见[控制接口](interfaces/control.md)与[配置重载](interfaces/control.md#配置重载)。
 
 ## 统计
 

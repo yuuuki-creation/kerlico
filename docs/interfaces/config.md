@@ -101,7 +101,7 @@
 | --- | --- |
 | `kerlico modules` | 按 `outbound/<kind>` 与 `inbound/<kind>` 列出当前构建实际注册的模块 |
 | `kerlico check -c <file>` | 校验配置文件（上限 1 MiB）并编译装配计划，不绑定端口、不拨号或创建状态目录 |
-| `kerlico run -c <file>` | 启动唯一共享出站服务并绑定全部入站入口；收到 `Ctrl-C` 或 Unix `SIGTERM` 时停止准入并有限排空，收到 Unix `SIGHUP` 时校验并记录配置热重载 |
+| `kerlico run -c <file>` | 启动唯一共享出站服务并绑定全部入站入口；收到 `Ctrl-C` 或 Unix `SIGTERM` 时停止准入并有限排空，收到 Unix `SIGHUP` 时重读配置并替换运行中的引擎，新配置无效或启动失败时保留或恢复上一份配置，见[配置重载](control.md#配置重载) |
 | `kerlico account-new --prefix <name>` | 从标准输入读取 12–1024 字节管理密码，输出带 `<prefix>_<uuid>` 用户名与 Argon2id 摘要的账户 JSON |
 | `kerlico history --kind <usage\|flows\|bandwidth\|events>` | 只读查询统计历史，输出 JSON，见[统计历史](history.md) |
 | `kerlico generate <target>` | 生成 `uuid`、`rand`/`rand-base64`/`rand-hex`、`reality-keypair`/`vless-x25519`、`wg-keypair`、`ech-keypair`、`tls-keypair`（含 `--months`）、`vless-mlkem768`、`mldsa65`、`vlessenc` 与 `sudoku-keypair` |

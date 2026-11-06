@@ -14,16 +14,47 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
-    sync::{Arc, atomic::Ordering},
+    path::PathBuf,
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
-use tokio::{net::TcpListener, task::JoinSet};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+};
 
 const MAX_CONNECTIONS: usize = 64;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BODY_BYTES: usize = 65_536;
 
+/// 配置重载的来源，语义同 Mihomo `PUT /configs`：`payload` 优先，其次 `path`，都缺省时重读启动配置。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReloadSource {
+    Startup,
+    Path(PathBuf),
+    Payload(String),
+}
+
+/// 交给进程级重载循环的请求；`done` 在新配置生效或确认失败后回复。
+pub struct ReloadRequest {
+    pub source: ReloadSource,
+    pub done: oneshot::Sender<Result<()>>,
+}
+
+/// 跨引擎代际保留的重载计数，SIGHUP 与控制接口触发的重载都计入。
+#[derive(Default)]
+struct ReloadStats {
+    succeeded: AtomicU64,
+    failed: AtomicU64,
+    last_error: Mutex<Option<&'static str>>,
+}
+
+/// 绑定到某一代引擎的观测句柄；重载时整体替换，监听器与重载计数保留。
 struct Source {
     secret: Option<String>,
     spec: ControlSpec,
@@ -32,27 +63,109 @@ struct Source {
     stats: Arc<Stats>,
     nodes: BTreeMap<String, Arc<Stats>>,
     failed: FailedNodes,
+    reloads: Arc<ReloadStats>,
+}
+
+impl Source {
+    fn new(spec: &ControlSpec, engine: &Engine, reloads: Arc<ReloadStats>) -> Self {
+        Self {
+            secret: spec.secret.clone(),
+            spec: spec.clone(),
+            telemetry: engine.telemetry(),
+            control_plane: engine.control_plane(),
+            stats: engine.stats(),
+            nodes: engine.node_stats(),
+            failed: engine.failed_nodes(),
+            reloads,
+        }
+    }
+}
+
+struct Shared {
+    source: RwLock<Arc<Source>>,
+    reloads: Option<mpsc::Sender<ReloadRequest>>,
+}
+
+impl Shared {
+    fn current(&self) -> Arc<Source> {
+        self.source
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 }
 
 pub struct ControlServer {
     listener: TcpListener,
-    source: Arc<Source>,
+    shared: Arc<Shared>,
+}
+
+/// 引擎重载后让控制接口继续服务的句柄。
+#[derive(Clone)]
+pub struct ControlHandle(Arc<Shared>);
+
+impl ControlHandle {
+    /// 改为观测新一代引擎；新配置没有 `control` 段时沿用原规格，`listen` 变化需重启进程才生效。
+    pub fn attach(&self, spec: Option<&ControlSpec>, engine: &Engine) {
+        let previous = self.0.current();
+        let spec = spec.unwrap_or(&previous.spec);
+        let source = Source::new(spec, engine, previous.reloads.clone());
+        if spec.listen != previous.spec.listen {
+            source.control_plane.push_log(
+                "warning",
+                "control.listen 变化需重启进程才生效，控制接口仍在原地址服务",
+            );
+        }
+        *self.0.source.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(source);
+    }
+
+    pub fn record_reload(&self, outcome: &Result<()>) {
+        let source = self.0.current();
+        match outcome {
+            Ok(()) => {
+                source.reloads.succeeded.fetch_add(1, Ordering::Relaxed);
+                source.control_plane.push_log("info", "配置重载完成");
+            }
+            Err(error) => {
+                source.reloads.failed.fetch_add(1, Ordering::Relaxed);
+                *source
+                    .reloads
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(error.code());
+                source
+                    .control_plane
+                    .push_log("warning", format!("配置重载失败：{}", error.code()));
+            }
+        }
+    }
 }
 
 impl ControlServer {
     pub async fn bind(spec: &ControlSpec, engine: &Engine) -> Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(spec.listen).await?,
-            source: Arc::new(Source {
-                secret: spec.secret.clone(),
-                spec: spec.clone(),
-                telemetry: engine.telemetry(),
-                control_plane: engine.control_plane(),
-                stats: engine.stats(),
-                nodes: engine.node_stats(),
-                failed: engine.failed_nodes(),
+            shared: Arc::new(Shared {
+                source: RwLock::new(Arc::new(Source::new(spec, engine, Arc::default()))),
+                reloads: None,
             }),
         })
+    }
+
+    /// `PUT /configs` 与 `POST /restart` 把重载请求交给 `reloads` 的接收方；未设置时这两个端点返回 501。
+    pub fn with_reloads(self, reloads: mpsc::Sender<ReloadRequest>) -> Self {
+        let source = self.shared.current();
+        Self {
+            listener: self.listener,
+            shared: Arc::new(Shared {
+                source: RwLock::new(source),
+                reloads: Some(reloads),
+            }),
+        }
+    }
+
+    pub fn handle(&self) -> ControlHandle {
+        ControlHandle(self.shared.clone())
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -77,11 +190,11 @@ impl ControlServer {
                     if connections.len() >= MAX_CONNECTIONS {
                         continue;
                     }
-                    let source = self.source.clone();
+                    let shared = self.shared.clone();
                     connections.spawn(async move {
                         let service = service_fn(move |request| {
-                            let source = source.clone();
-                            async move { Ok::<_, std::convert::Infallible>(respond(&source, request).await) }
+                            let shared = shared.clone();
+                            async move { Ok::<_, std::convert::Infallible>(respond(&shared, request).await) }
                         });
                         let _ = tokio::time::timeout(
                             CONNECTION_TIMEOUT,
@@ -222,6 +335,11 @@ fn route(
                     "status": if failed.is_empty() { "ok" } else { "degraded" },
                     "run": source.telemetry.run_id().to_string(),
                     "failed_nodes": failed,
+                    "reloads": {
+                        "succeeded": source.reloads.succeeded.load(Ordering::Relaxed),
+                        "failed": source.reloads.failed.load(Ordering::Relaxed),
+                        "last_error": *source.reloads.last_error.lock().unwrap_or_else(|e| e.into_inner()),
+                    },
                 }),
             )))
         }
@@ -284,7 +402,7 @@ fn route(
                 "ipv6": true,
             }),
         ))),
-        (&Method::PUT | &Method::PATCH, _, "/configs") => {
+        (&Method::PATCH, _, "/configs") => {
             let log_level = body
                 .and_then(|b| b.get("log-level").or_else(|| b.get("level")))
                 .and_then(Value::as_str)
@@ -349,10 +467,6 @@ fn route(
             StatusCode::OK,
             json!({ "status": "ok" }),
         ))),
-        (&Method::POST, _, "/restart") => {
-            source.control_plane.record_config_reload(None);
-            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
-        }
         (&Method::POST, _, "/upgrade/ui") => {
             if source.spec.external_ui.is_none() && source.spec.dashboard_path.is_none() {
                 return Err(Error::Config("更新面板前须配置 external-ui".into()));
@@ -674,7 +788,55 @@ fn route(
     }
 }
 
-async fn respond(source: &Source, request: Request<Incoming>) -> Response<Full<Bytes>> {
+fn reload_source(body: Option<&Value>) -> Result<ReloadSource> {
+    let field = |name| {
+        body.and_then(|b| b.get(name))
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(payload) = field("payload") {
+        return Ok(ReloadSource::Payload(payload.to_owned()));
+    }
+    match field("path") {
+        Some(path) if std::path::Path::new(path).is_absolute() => {
+            Ok(ReloadSource::Path(PathBuf::from(path)))
+        }
+        Some(_) => Err(Error::Config("配置路径须为绝对路径".into())),
+        None => Ok(ReloadSource::Startup),
+    }
+}
+
+async fn request_reload(shared: &Shared, body: Option<&Value>) -> ApiReply {
+    let Some(reloads) = &shared.reloads else {
+        return ApiReply::Json(
+            StatusCode::NOT_IMPLEMENTED,
+            json!({"error": "reload unavailable"}),
+        );
+    };
+    let outcome = match reload_source(body) {
+        Ok(source) => {
+            let (done, finished) = oneshot::channel();
+            if reloads.send(ReloadRequest { source, done }).await.is_err() {
+                return ApiReply::Json(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error": "shutting down"}),
+                );
+            }
+            finished
+                .await
+                .unwrap_or(Err(Error::Protocol("重载循环已退出")))
+        }
+        Err(error) => Err(error),
+    };
+    match outcome {
+        Ok(()) => ApiReply::Empty(StatusCode::NO_CONTENT),
+        Err(error) => ApiReply::Json(StatusCode::BAD_REQUEST, json!({"error": error.code()})),
+    }
+}
+
+async fn respond(shared: &Shared, request: Request<Incoming>) -> Response<Full<Bytes>> {
+    let source = shared.current();
+    let source = &*source;
     let origin_hdr = request
         .headers()
         .get(header::ORIGIN)
@@ -779,7 +941,14 @@ async fn respond(source: &Source, request: Request<Incoming>) -> Response<Full<B
     } else {
         None
     };
-    match route(source, &method, uri.path(), query, body_val.as_ref()) {
+    let clean_path = uri.path().strip_prefix("/v1").unwrap_or(uri.path());
+    let reply = match (&method, clean_path) {
+        (&Method::PUT, "/configs") | (&Method::POST, "/restart") => {
+            Ok(Some(request_reload(shared, body_val.as_ref()).await))
+        }
+        _ => route(source, &method, uri.path(), query, body_val.as_ref()),
+    };
+    match reply {
         Ok(Some(ApiReply::Json(status, body))) => reply_json(status, body),
         Ok(Some(ApiReply::Empty(status))) => reply_empty(status),
         Ok(Some(ApiReply::Static(status, mime, bytes))) => reply_static(status, mime, bytes),

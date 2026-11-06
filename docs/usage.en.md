@@ -120,6 +120,14 @@ curl -H 'Authorization: Bearer <secret>' http://127.0.0.1:9090/proxies
 
 A non-loopback `listen` address requires `secret`.
 
+After editing the configuration, send `kill -HUP <pid>` or call `PUT /configs`. kerlico reads the configuration again and replaces the running engine. If the new configuration is invalid, the old one keeps serving. During the switch the listeners close briefly and new connections are refused; existing sessions drain within `limits.drain_timeout_ms`. The `reloads` counters in `/v1/health` show the result:
+
+```sh
+curl -X PUT -H 'Authorization: Bearer <secret>' -d '{}' http://127.0.0.1:9090/configs
+```
+
+`PUT /configs` also accepts `payload` (configuration text) or an absolute `path` inside the startup configuration directory, as in Mihomo. Changes to `control.listen`, adding or removing the `control` section, and `device` changes need a process restart.
+
 ## Statistics
 
 With `telemetry` configured, usage, bandwidth, access records, DNS and error events go to SQLite:
