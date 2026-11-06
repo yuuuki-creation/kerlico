@@ -1,6 +1,6 @@
 # 核心接口
 
-更新日期：2026-11-04（Asia/Shanghai）
+更新日期：2026-11-07（Asia/Shanghai）
 
 本文描述 `kerlico-core`、`kerlico-net`、`kerlico-egress` 与 `kerlico-engine` 当前源码实现的运行装配、拨号选项与链式代理、通用复用与 UoT、身份鉴别、业务流完成权（`FlowOpen`）、唯一业务计量与生命周期契约。
 
@@ -8,6 +8,33 @@
 
 - **`Registry::prepare(Config)`**：校验 JSON v2 配置、编译原生凭据与证书资产，返回不可克隆的 `PreparedConfig`。`OutboundFactory::compile` 在 `with_compile_dialer` 注入的 `DialerOptions` 上下文中执行，返回 `OutboundPlan`（含 `Capabilities`、`TargetPolicy` 与一次性启动闭包），此阶段不创建运行后端、监听器或网络任务。
 - **`Engine::bind(PreparedConfig)`**：消费装配计划，构造唯一 `EgressRuntime`、共享 `DetourTable` 与私有 `Dispatcher`。每个命名出站计划调用一次 `start(ServiceContext)`，并登记到 `DetourTable` 供链式拨号（`detour` / `dialer-proxy` / `proxySettings`）解析上游出站，随后绑定全部入站监听器。节点支持 `accept_proxy_protocol` 在外层监听器剥离 PROXY protocol v1/v2 头并更新观测来源与本地地址。
+
+## 出站套接字工厂
+
+出站的全部载体套接字经 `kerlico_core::DialerOptions` 创建（`crates/core-api/src/dialer.rs`）。出站在 `OutboundFactory::compile` 中调用一次 `current_compile_dialer()` 取得选项并保存，运行期按保存的选项建套接字。`crates/core-api/tests/socket_factory_lint.rs` 扫描生产代码，出站直接调用 `TcpStream::connect`、`UdpSocket::bind`、`TcpSocket::new_v4/v6` 或 `socket2::Socket::new` 时测试失败；入站监听、本机回环与用户态协议栈在该测试的 `ALLOWED` 表中逐项写明原因。
+
+| 方法 | 用途 |
+| --- | --- |
+| `connect(&Destination) -> BoxStream` | 到代理端点的 TCP。配置 `detour` 时经上游出站的 `connect_tcp`；否则解析域名，按 RFC 8305 交错地址族，以 `fallback_delay`（默认 300ms）为间隔竞速 |
+| `connect_addr(SocketAddr) -> TcpStream` / `tcp_socket(SocketAddr)` | 字面地址的操作系统 TCP，不处理 `detour` |
+| `udp_peer(&Destination) -> UdpPeer` | 固定对端 UDP（QUIC、WireGuard、SS UDP 等）。配置 `detour` 时 `peer` 是本机回环中继，中继经上游出站的 `connect_udp` 固定目标通道转发，服务端域名交给上游解析；`relay` 句柄丢弃即停止中继 |
+| `udp_socket` / `udp_socket_for` / `udp_socket_dual` | 多对端 UDP，不处理 `detour` |
+
+每个套接字施加 `routing_mark`（Linux `SO_MARK`）、出口网卡（Linux `SO_BINDTODEVICE`，macOS `IP_BOUND_IF`）、`inet4_bind_address` / `inet6_bind_address`、`tcp_fast_open`（Linux `TCP_FASTOPEN_CONNECT`）、`mptcp`（Linux `IPPROTO_MPTCP`，内核不支持时改用普通 TCP，与 Go 相同）与 Keep-Alive。选项施加失败时返回错误。当前平台不支持的选项在配置加载阶段拒绝（`DialerOptions::validate_platform`）。`auto_detect_interface` 每次建套接字时读取 `/proc/net/route` 与 `/proc/net/ipv6_route` 的默认路由网卡，结果缓存 1 秒，跳过本配置的 TUN 网卡。
+
+`OutboundFactory::supports_detour()` 默认 `false`；全部载体套接字都经 `connect` / `udp_peer` 建立的出站覆盖为 `true`。为 `false` 的出站配置 `detour` 时加载失败。下列组合同样在加载阶段拒绝 `detour`：
+
+| 出站 | 原因 |
+| --- | --- |
+| Tailscale、ZeroTier | 多对端 UDP（DERP、直连打洞、根服务器），无法用固定目标中继表示 |
+| EasyTier | 上游连接管理器按 URL 自建套接字，没有注入点；同时拒绝 `routing_mark`、出口网卡、源地址等任何拨号选项 |
+| Hysteria、Hysteria2、TUIC 的端口跳跃 | 中继只转发到固定服务端端口 |
+| VLESS / Trojan / VMess 的 XHTTP HTTP/3 | QUIC 套接字由传输库同步创建，无法接入中继；不带 `detour` 时经工厂建套接字 |
+| WireGuard 显式 `bind` | 显式绑定的套接字直连对端 |
+
+WARP 设备（`kerlico-device`）的能力探测、注册与 UDP 载体使用全局默认拨号选项（`PreparedConfig::global_dialer`）。DNS 直连上游（UDP、TCP、DoT、DoH HTTP/2 与 HTTP/3、DoQ、系统上游）同样经全局默认选项建套接字（`EgressPlan::global_dialer` 经 `DnsDialer::sockets` 传入）；`#出站`、`RULES` 与 `respect-rules` 上游经对应出站拨号，套接字带该出站的选项。代理服务器域名经 `kerlico_core::lookup_host` 走 DNS 管线后再由工厂连接。`dns.listen` 是入站监听，不经工厂。本地出网（`Local`）对多个候选地址同样按 RFC 8305 竞速，间隔取直连出站的 `fallback_delay`（`Outbound::fallback_delay`）。
+
+测试：`kerlico-core` 的 `dialer-probe` 特性记录工厂套接字从内核读回的标记与 TFO 状态。`apps/kerlico/tests/dialer_marks.rs` 对每个 Mihomo 样例出站注入唯一标记，启动并连接一次后断言出现带该标记的套接字；`tools/dialer_netns_e2e.py` 在临时网络命名空间中验证 `ip rule fwmark` 按标记选路，以及 Hysteria2、WireGuard 经 SOCKS5 出站 `detour` 的 UDP 承载。
 
 ## 身份与访问
 

@@ -54,7 +54,7 @@ cargo build --locked --release -p kerlico
 顶层 `proxies`、`proxy-providers` 成员（Mihomo YAML）与分享链接走同一张字段映射表（`crates/config/src/mihomo.rs`），同一节点三种写法得到相同的 kerlico `options`。带 `tag` 或 `options` 键的条目（如 JSON 订阅 `[{"tag":"n1","type":"direct"}]`）视为 kerlico 原生出站，原样保留；原生条目只允许 `tag`（带 `options` 时也可写 `name`）、`type`、`options`，其他字段报错。
 
 - 映射表未列出的字段一律报错，错误信息给出代理名和字段路径（如 `ws-opts.bogus`），不会静默丢弃或原样透传。
-- 公共字段：`interface-name`、`routing-mark`、`dialer-proxy`、`tfo` 交给拨号层。以下取值无效果、允许出现：`udp: true`、`skip-cert-verify: false`、`mptcp: false`、`ip-version: dual`、`smux.enabled: false`；其他取值报错。kerlico 按协议能力承载 UDP，未写 `udp` 的节点也会承载 UDP；`udp: false` 只在 SSR、Hysteria、TrustTunnel、Sudoku 上映射为关闭 UDP，其他类型报错。HTTP、SSH 的 `udp` 任意取值都忽略（Mihomo 同样不为它们承载 UDP）。
+- 公共字段：`interface-name`、`routing-mark`、`dialer-proxy`、`tfo`、`mptcp` 交给拨号层，作用于该节点的全部 TCP 与 UDP 载体套接字；`dialer-proxy` 对 UDP/QUIC 协议经上游出站的 UDP 通道承载，不支持的组合（见[核心接口](interfaces/core.md#出站套接字工厂)）加载时报错。以下取值无效果、允许出现：`udp: true`、`skip-cert-verify: false`、`ip-version: dual`、`smux.enabled: false`；其他取值报错。kerlico 按协议能力承载 UDP，未写 `udp` 的节点也会承载 UDP；`udp: false` 只在 SSR、Hysteria、TrustTunnel、Sudoku 上映射为关闭 UDP，其他类型报错。HTTP、SSH 的 `udp` 任意取值都忽略（Mihomo 同样不为它们承载 UDP）。
 - `skip-cert-verify: true` 在 VLESS 与 Hysteria2 上支持（Hysteria2 映射为 `tls.insecure`），Shadowsocks 顶层取值无效果（Mihomo 只在 `plugin-opts` 内读取），其他类型报错；`client-fingerprint` 只在 VLESS 上支持；`fingerprint`（证书指纹）均不支持。`alpn` 只在 VLESS、Hysteria、TUIC、ShadowQUIC 上支持；Hysteria2 只接受 `[h3]`。
 - 不支持的类型：`masque`（Mihomo 的 WARP 式密钥认证与 kerlico MASQUE 客户端不同）、`rematch`。
 
