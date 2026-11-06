@@ -368,87 +368,87 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | OpenVPN 服务端端点 |  | 有 |  | 部分 | 未测 | 取值：`openvpn-server`<br>约束：自 sing-box 1.14.0 起<br>约束：配置在顶层 endpoints，同时具备入站和出站行为 |
+| `protocol` | OpenVPN 服务端端点 |  | 有 |  | 部分 | 通过 | 取值：`openvpn-server`<br>约束：自 sing-box 1.14.0 起<br>约束：配置在顶层 endpoints，同时具备入站和出站行为 |
 | `combo` | OpenVPN 服务端端点的模式、传输、客户端校验和推送组合 |  | 有 |  | 部分 | 未测 | mode：`static_key`、`tls`<br>network：`tcp`、`udp`<br>topology：`net30`、`p2p`、`subnet`<br>control_wrap：`none`、`tls_auth`、`tls_crypt`、`tls_crypt_v2`<br>data_cipher_class：`aead`、`cbc`、`cfb`、`none`、`ofb`<br>certificate_profile：`insecure`、`legacy`、`preferred`、`suiteb`<br>mss_fix_mode：``、`fixed`、`mtu`<br>interface：`internal`、`system`<br>verify_client_certificate：`none`、`optional`、`require`<br>auth：`certificate`、`certificate+users`、`peer_fingerprint`、`users`<br>push：`block_outside_dns`、`dhcp_options`、`dns`、`dns_servers`、`ping_interval`、`ping_restart`、`redirect_gateway`、`routes`、`search_domains`<br>force_cookie：`off`、`on`<br>约束：UDP static_key 模式 remote、remote_port 必填<br>约束：address 必填，IPv4、IPv6 前缀各至多一个<br>约束：cipher 仅 static_key 模式<br>约束：control_wrap.direction 仅 tls_auth<br>约束：duplicate_cn、users、data_ciphers、renegotiate_*、handshake_window 仅 TLS 模式<br>约束：force_cookie 仅 tls_crypt_v2<br>约束：push.redirect_gateway_flags 仅在 push.redirect_gateway 开启时可用，默认 def1<br>约束：static_key 模式 max_clients 只能 0 或 1<br>约束：verify_client_certificate 为 require 或 optional 时 client_certificate、client_certificate_path、peer_fingerprint 必有其一<br>约束：每个端点只服务一种 network，同时服务 TCP、UDP 要配两个端点和不同 address |
-| `address` | OpenVPN 服务器地址前缀列表。 |  | 有 |  | 部分 | 未测 | 约束：必填<br>约束：自 sing-box 1.14.0 起 |
+| `address` | OpenVPN 服务器地址前缀列表。 |  | 有 |  | 已实现 | 通过 | 约束：必填<br>约束：自 sing-box 1.14.0 起 |
 | `auth` | OpenVPN 数据信道认证摘要。 |  | 有 |  | 部分 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `SHA1`，仅对非 AEAD 数据信道加密方式和 `tls_auth` 生效。 |
 | `cipher` | `static_key` 模式使用的数据信道加密方式。 |  | 有 |  | 未实现 | 未测 | 约束：为空时使用上游静态密钥模式的默认值 `BF-CBC`。<br>约束：仅在 `static_key` 模式下可用。<br>约束：自 sing-box 1.14.0 起 |
-| `data-ciphers` | 允许的 OpenVPN 数据信道加密方式。 |  | 有 |  | 部分 | 未测 | 约束：CFB 和 OFB 仅可用于 TLS 模式。<br>约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `AES-256-GCM`、`AES-128-GCM` 和 `CHACHA20-POLY1305`。 |
-| `data-ciphers-fallback` | 用于不支持加密方式协商的遗留客户端的 OpenVPN 数据信道加密方式。 |  | 有 |  | 未实现 | 未测 | 约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
-| `duplicate-cn` | 允许具有相同认证证书 common name 或用户名的多个客户端同时在线。 |  | 有 |  | 未实现 | 未测 | 约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
-| `handshake-window` | 初始 TLS 握手和每次 TLS 重协商允许使用的最长时间。 |  | 有 |  | 未实现 | 未测 | 约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1m`。 |
+| `data-ciphers` | 允许的 OpenVPN 数据信道加密方式。 |  | 有 |  | 已实现 | 通过 | 约束：CFB 和 OFB 仅可用于 TLS 模式。<br>约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `AES-256-GCM`、`AES-128-GCM` 和 `CHACHA20-POLY1305`。 |
+| `data-ciphers-fallback` | 用于不支持加密方式协商的遗留客户端的 OpenVPN 数据信道加密方式。 |  | 有 |  | 已实现 | 未测 | 约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
+| `duplicate-cn` | 允许具有相同认证证书 common name 或用户名的多个客户端同时在线。 |  | 有 |  | 已实现 | 通过 | 约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
+| `handshake-window` | 初始 TLS 握手和每次 TLS 重协商允许使用的最长时间。 |  | 有 |  | 已实现 | 通过 | 约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1m`。 |
 | `key-direction` | 静态密钥方向，`server` 或 `client` 之一。 |  | 有 |  | 未实现 | 未测 | 取值：`client`、`server`<br>约束：仅在 `static_key` 模式下可用。<br>约束：自 sing-box 1.14.0 起 |
-| `max-clients` | 已建立与握手中的 TLS 客户端会话的最大数量。 |  | 有 |  | 未实现 | 未测 | 约束：在 `static_key` 模式下必须为 `0` 或 `1`。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1024`。 |
-| `mode` | OpenVPN 会话模式，`tls` 或 `static_key` 之一。 |  | 有 |  | 未实现 | 未测 | 取值：`static_key`、`tls`<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `tls`。 |
+| `max-clients` | 已建立与握手中的 TLS 客户端会话的最大数量。 |  | 有 |  | 已实现 | 通过 | 约束：在 `static_key` 模式下必须为 `0` 或 `1`。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1024`。 |
+| `mode` | OpenVPN 会话模式，`tls` 或 `static_key` 之一。 |  | 有 |  | 部分 | 通过 | 取值：`static_key`、`tls`<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `tls`。 |
 | `mss-fix` | 用于限制 TCP MSS 的最大封装数据包大小。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认 MTU 下使用上游默认值 `1492` 计算。 |
 | `mss-fix-disabled` | 禁用 MSS 限制，包括默认限制。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
 | `mss-fix-mode` | 显式 `mss_fix` 的计算模式，`mtu` 或 `fixed` 之一。 |  | 有 |  | 未实现 | 未测 | 取值：`fixed`、`mtu`<br>约束：自 sing-box 1.14.0 起<br>约束：需要 `mss_fix`。 |
 | `mtu` | OpenVPN 接口 MTU。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1500`。 |
 | `name` | 系统接口的自定义接口名称。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用自动生成的 `ovpn` 接口名称。 |
-| `network` | OpenVPN 传输网络，`udp` 或 `tcp` 之一。 |  | 有 |  | 已实现 | 未测 | 取值：`tcp`、`udp`<br>约束：每个端点仅服务一种传输网络；如需同时服务 TCP 与 UDP，需要配置两个端点并使用互不重叠的 `address` 子网。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `udp`。 |
+| `network` | OpenVPN 传输网络，`udp` 或 `tcp` 之一。 |  | 有 |  | 已实现 | 通过 | 取值：`tcp`、`udp`<br>约束：每个端点仅服务一种传输网络；如需同时服务 TCP 与 UDP，需要配置两个端点并使用互不重叠的 `address` 子网。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `udp`。 |
 | `peer-address` | IPv4 隧道对端地址。 |  | 有 |  | 未实现 | 未测 | 约束：在 `static_key` 模式下配置 IPv4 `address` 时必填。<br>约束：自 sing-box 1.14.0 起 |
 | `peer-address-ipv6` | IPv6 隧道对端地址。 |  | 有 |  | 未实现 | 未测 | 约束：在 `static_key` 模式下配置 IPv6 `address` 时必填。<br>约束：自 sing-box 1.14.0 起 |
-| `ping-interval` | 服务器未向客户端发送任何 packet 时，发送 data channel ping 的间隔。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：该值必须使用整秒。<br>约束：默认禁用。 |
-| `ping-restart` | 服务器未收到任何 packet 后关闭客户端会话的时间。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：该值必须使用整秒。<br>约束：默认禁用。 |
-| `push` | 推送给客户端的选项。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `push-block-outside-dns` | 向客户端推送 `block-outside-dns`，在 Windows 客户端上阻止 VPN 之外的 DNS 查询。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `push-dhcp-options` | 推送的额外传统 `dhcp-option` 值，不包含 `dhcp-option` 前缀。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `push-dns` | 推送给客户端的 DNS 服务器地址。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `push-dns-servers` | 推送的现代 OpenVPN DNS 服务器组。 |  | 有 |  | 未实现 | 未测 | 约束：OpenVPN 客户端仅应用优先级数字最低的服务器组。<br>约束：OpenVPN 客户端只应用优先级数字最小的一组<br>约束：dnssec 取 yes、optional、no<br>约束：transport 取 plain、dot、doh<br>约束：自 sing-box 1.14.0 起 |
-| `push-dns-servers-addresses` | OpenVPN 推送的现代 DNS 服务器组字段：DNS 服务器地址，IP 或 IP:port，IPv6 端口写 [IPv6]:port |  | 有 |  | 未实现 | 未测 |  |
-| `push-dns-servers-dnssec` | OpenVPN 推送的现代 DNS 服务器组字段：DNSSEC 模式 |  | 有 |  | 未实现 | 未测 | 取值：`no`、`optional`、`yes` |
-| `push-dns-servers-priority` | OpenVPN 推送的现代 DNS 服务器组字段：优先级，数字最小的一组生效 |  | 有 |  | 未实现 | 未测 |  |
-| `push-dns-servers-resolve-domains` | OpenVPN 推送的现代 DNS 服务器组字段：由这组服务器解析的域名 |  | 有 |  | 未实现 | 未测 |  |
-| `push-dns-servers-sni` | OpenVPN 推送的现代 DNS 服务器组字段：TLS SNI |  | 有 |  | 未实现 | 未测 |  |
-| `push-dns-servers-transport` | OpenVPN 推送的现代 DNS 服务器组字段：传输方式 |  | 有 |  | 未实现 | 未测 | 取值：`doh`、`dot`、`plain` |
-| `push-ping-interval` | 推送给客户端的 OpenVPN `ping` 间隔。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：该值必须使用整秒。<br>约束：默认禁用。 |
-| `push-ping-restart` | 推送给客户端的 OpenVPN `ping-restart` 超时。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：该值必须使用整秒。<br>约束：默认禁用。 |
-| `push-redirect-gateway` | 向客户端推送 `redirect-gateway`，根据 `push.redirect_gateway_flags` 通过 VPN 路由客户端流量。 |  | 有 |  | 未实现 | 未测 | 约束：当 `push.redirect_gateway_flags` 为空时，默认使用 `def1`。<br>约束：自 sing-box 1.14.0 起 |
-| `push-redirect-gateway-flags` | 向客户端推送的 OpenVPN `redirect-gateway` flag。 |  | 有 |  | 未实现 | 未测 | 约束：仅当启用 `push.redirect_gateway` 时可用。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `def1`。 |
-| `push-routes` | 推送给客户端的路由。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `push-search-domains` | 推送的现代 OpenVPN 搜索域。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
+| `ping-interval` | 服务器未向客户端发送任何 packet 时，发送 data channel ping 的间隔。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：该值必须使用整秒。<br>约束：默认禁用。 |
+| `ping-restart` | 服务器未收到任何 packet 后关闭客户端会话的时间。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：该值必须使用整秒。<br>约束：默认禁用。 |
+| `push` | 推送给客户端的选项。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
+| `push-block-outside-dns` | 向客户端推送 `block-outside-dns`，在 Windows 客户端上阻止 VPN 之外的 DNS 查询。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
+| `push-dhcp-options` | 推送的额外传统 `dhcp-option` 值，不包含 `dhcp-option` 前缀。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
+| `push-dns` | 推送给客户端的 DNS 服务器地址。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
+| `push-dns-servers` | 推送的现代 OpenVPN DNS 服务器组。 |  | 有 |  | 已实现 | 通过 | 约束：OpenVPN 客户端仅应用优先级数字最低的服务器组。<br>约束：OpenVPN 客户端只应用优先级数字最小的一组<br>约束：dnssec 取 yes、optional、no<br>约束：transport 取 plain、dot、doh<br>约束：自 sing-box 1.14.0 起 |
+| `push-dns-servers-addresses` | OpenVPN 推送的现代 DNS 服务器组字段：DNS 服务器地址，IP 或 IP:port，IPv6 端口写 [IPv6]:port |  | 有 |  | 已实现 | 通过 |  |
+| `push-dns-servers-dnssec` | OpenVPN 推送的现代 DNS 服务器组字段：DNSSEC 模式 |  | 有 |  | 已实现 | 未测 | 取值：`no`、`optional`、`yes` |
+| `push-dns-servers-priority` | OpenVPN 推送的现代 DNS 服务器组字段：优先级，数字最小的一组生效 |  | 有 |  | 已实现 | 通过 |  |
+| `push-dns-servers-resolve-domains` | OpenVPN 推送的现代 DNS 服务器组字段：由这组服务器解析的域名 |  | 有 |  | 已实现 | 通过 |  |
+| `push-dns-servers-sni` | OpenVPN 推送的现代 DNS 服务器组字段：TLS SNI |  | 有 |  | 已实现 | 通过 |  |
+| `push-dns-servers-transport` | OpenVPN 推送的现代 DNS 服务器组字段：传输方式 |  | 有 |  | 已实现 | 通过 | 取值：`doh`、`dot`、`plain` |
+| `push-ping-interval` | 推送给客户端的 OpenVPN `ping` 间隔。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：该值必须使用整秒。<br>约束：默认禁用。 |
+| `push-ping-restart` | 推送给客户端的 OpenVPN `ping-restart` 超时。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：该值必须使用整秒。<br>约束：默认禁用。 |
+| `push-redirect-gateway` | 向客户端推送 `redirect-gateway`，根据 `push.redirect_gateway_flags` 通过 VPN 路由客户端流量。 |  | 有 |  | 已实现 | 通过 | 约束：当 `push.redirect_gateway_flags` 为空时，默认使用 `def1`。<br>约束：自 sing-box 1.14.0 起 |
+| `push-redirect-gateway-flags` | 向客户端推送的 OpenVPN `redirect-gateway` flag。 |  | 有 |  | 已实现 | 通过 | 约束：仅当启用 `push.redirect_gateway` 时可用。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `def1`。 |
+| `push-routes` | 推送给客户端的路由。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
+| `push-search-domains` | 推送的现代 OpenVPN 搜索域。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
 | `remote` | UDP `static_key` 服务器的固定远端地址。 |  | 有 |  | 未实现 | 未测 | 约束：在 UDP `static_key` 模式下与 `remote_port` 一起必填。<br>约束：自 sing-box 1.14.0 起 |
 | `remote-port` | UDP `static_key` 服务器的固定远端端口。 |  | 有 |  | 未实现 | 未测 | 约束：在 UDP `static_key` 模式下与 `remote` 一起必填。<br>约束：自 sing-box 1.14.0 起 |
-| `renegotiate-bytes` | 传输指定字节数后重新协商数据通道密钥。 |  | 有 |  | 未实现 | 未测 | 约束：`0` 使用与密码算法相关的 OpenVPN 默认值。<br>约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起 |
-| `renegotiate-disabled` | 禁用基于时间的 TLS 重协商，包括默认间隔。 |  | 有 |  | 未实现 | 未测 | 约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起 |
-| `renegotiate-interval` | OpenVPN TLS 重协商间隔。 |  | 有 |  | 未实现 | 未测 | 约束：为空时使用 OpenVPN 默认值 `1h`。<br>约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起 |
-| `renegotiate-packets` | 传输指定数据包数后重新协商数据通道密钥。 |  | 有 |  | 未实现 | 未测 | 约束：`0` 使用与密码算法相关的 OpenVPN 默认值。<br>约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起 |
-| `replay-window` | UDP 数据通道重放窗口大小。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `64`。 |
-| `replay-window-time` | UDP 重放窗口时长。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：该值必须使用整秒。<br>约束：默认使用 `15s`。 |
+| `renegotiate-bytes` | 传输指定字节数后重新协商数据通道密钥。 |  | 有 |  | 已实现 | 未测 | 约束：`0` 使用与密码算法相关的 OpenVPN 默认值。<br>约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起 |
+| `renegotiate-disabled` | 禁用基于时间的 TLS 重协商，包括默认间隔。 |  | 有 |  | 已实现 | 未测 | 约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起 |
+| `renegotiate-interval` | OpenVPN TLS 重协商间隔。 |  | 有 |  | 已实现 | 通过 | 约束：为空时使用 OpenVPN 默认值 `1h`。<br>约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起 |
+| `renegotiate-packets` | 传输指定数据包数后重新协商数据通道密钥。 |  | 有 |  | 已实现 | 未测 | 约束：`0` 使用与密码算法相关的 OpenVPN 默认值。<br>约束：仅在 TLS 模式下可用。<br>约束：自 sing-box 1.14.0 起 |
+| `replay-window` | UDP 数据通道重放窗口大小。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `64`。 |
+| `replay-window-time` | UDP 重放窗口时长。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：该值必须使用整秒。<br>约束：默认使用 `15s`。 |
 | `static-key` | OpenVPN 静态密钥内容。 |  | 有 |  | 未实现 | 未测 | 约束：与 `static_key_path` 冲突。<br>约束：在 `static_key` 模式下必填。<br>约束：自 sing-box 1.14.0 起 |
 | `static-key-path` | OpenVPN 静态密钥路径。 |  | 有 |  | 未实现 | 未测 | 约束：与 `static_key` 冲突。<br>约束：在 `static_key` 模式下未设置 `static_key` 时必填。<br>约束：自 sing-box 1.14.0 起 |
 | `system` | 使用系统接口。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：需要特权且不能与已有系统接口冲突。 |
-| `tls` | 在 TLS 模式下必填。 |  | 有 |  | 部分 | 未测 | 约束：自 sing-box 1.14.0 起 |
+| `tls` | 在 TLS 模式下必填。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
 | `tls-certificate` | TLS 服务器证书内容。 |  | 有 |  | 已实现 | 通过 | 约束：`tls.certificate` 或 `tls.certificate_path` 必填其一。<br>约束：与 `tls.certificate_path` 冲突。<br>约束：自 sing-box 1.14.0 起 |
 | `tls-certificate-path` | TLS 服务器证书路径。 |  | 有 |  | 已实现 | 通过 | 约束：`tls.certificate` 或 `tls.certificate_path` 必填其一。<br>约束：与 `tls.certificate` 冲突。<br>约束：自 sing-box 1.14.0 起 |
 | `tls-certificate-profile` | 证书 profile，可选值为 `insecure`、`legacy`、`preferred` 或 `suiteb`。 |  | 有 |  | 未实现 | 未测 | 取值：`insecure`、`legacy`、`preferred`、`suiteb`<br>约束：`insecure` 为兼容不可变对端而接受使用 MD5 或 SHA-1 签名的证书链和较小的旧密钥，仅应在对端无法升级时使用。<br>约束：自 sing-box 1.14.0 起<br>约束：选择 `suiteb` 且 `tls.cipher` 为空时，TLS 1.2 cipher 列表默认使用 Suite B ECDHE-ECDSA AES-GCM 套件。<br>约束：默认使用 `legacy`。 |
-| `tls-cipher` | TLS 1.2 及更低版本允许的 OpenSSL cipher suite 名称，以冒号分隔。 |  | 有 |  | 未实现 | 未测 | 约束：为空时使用默认 TLS cipher suite。<br>约束：自 sing-box 1.14.0 起 |
-| `tls-client-certificate` | TLS CA 证书内容，用于验证客户端证书。 |  | 有 |  | 未实现 | 未测 | 约束：与 `tls.client_certificate_path` 冲突。<br>约束：当 `tls.verify_client_certificate` 为 `require` 或 `optional` 时，`tls.client_certificate`、`tls.client_certificate_path` 或 `tls.peer_fingerprint` 必填其一。<br>约束：自 sing-box 1.14.0 起 |
-| `tls-client-certificate-path` | TLS CA 证书路径，用于验证客户端证书。 |  | 有 |  | 未实现 | 未测 | 约束：与 `tls.client_certificate` 冲突。<br>约束：当 `tls.verify_client_certificate` 为 `require` 或 `optional` 时，`tls.client_certificate`、`tls.client_certificate_path` 或 `tls.peer_fingerprint` 必填其一。<br>约束：自 sing-box 1.14.0 起 |
-| `tls-client-name` | 期望的客户端证书名称。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `tls-client-name-type` | tls.client_name 匹配的证书字段 |  | 有 |  | 未实现 | 未测 | 取值：`name`、`name-prefix`、`subject`<br>约束：自 sing-box 1.14.0 起<br>约束：配置 `tls.client_name` 时默认使用 `name`。 |
-| `tls-control-wrap` | OpenVPN 控制信道包装。 |  | 有 |  | 部分 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
-| `tls-control-wrap-direction` | OpenVPN `tls-auth` 密钥方向，`server` 或 `client` 之一。 |  | 有 |  | 部分 | 未测 | 取值：`client`、`server`<br>约束：仅当 `tls.control_wrap.type` 为 `tls_auth` 时可用。<br>约束：自 sing-box 1.14.0 起 |
+| `tls-cipher` | TLS 1.2 及更低版本允许的 OpenSSL cipher suite 名称，以冒号分隔。 |  | 有 |  | 已实现 | 通过 | 约束：为空时使用默认 TLS cipher suite。<br>约束：自 sing-box 1.14.0 起 |
+| `tls-client-certificate` | TLS CA 证书内容，用于验证客户端证书。 |  | 有 |  | 已实现 | 通过 | 约束：与 `tls.client_certificate_path` 冲突。<br>约束：当 `tls.verify_client_certificate` 为 `require` 或 `optional` 时，`tls.client_certificate`、`tls.client_certificate_path` 或 `tls.peer_fingerprint` 必填其一。<br>约束：自 sing-box 1.14.0 起 |
+| `tls-client-certificate-path` | TLS CA 证书路径，用于验证客户端证书。 |  | 有 |  | 已实现 | 通过 | 约束：与 `tls.client_certificate` 冲突。<br>约束：当 `tls.verify_client_certificate` 为 `require` 或 `optional` 时，`tls.client_certificate`、`tls.client_certificate_path` 或 `tls.peer_fingerprint` 必填其一。<br>约束：自 sing-box 1.14.0 起 |
+| `tls-client-name` | 期望的客户端证书名称。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
+| `tls-client-name-type` | tls.client_name 匹配的证书字段 |  | 有 |  | 已实现 | 通过 | 取值：`name`、`name-prefix`、`subject`<br>约束：自 sing-box 1.14.0 起<br>约束：配置 `tls.client_name` 时默认使用 `name`。 |
+| `tls-control-wrap` | OpenVPN 控制信道包装。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
+| `tls-control-wrap-direction` | OpenVPN `tls-auth` 密钥方向，`server` 或 `client` 之一。 |  | 有 |  | 已实现 | 通过 | 取值：`client`、`server`<br>约束：仅当 `tls.control_wrap.type` 为 `tls_auth` 时可用。<br>约束：自 sing-box 1.14.0 起 |
 | `tls-control-wrap-force-cookie` | 要求 UDP 上的 `tls-crypt-v2` 客户端支持无状态 session cookie。 |  | 有 |  | 未实现 | 未测 | 约束：仅当 `tls.control_wrap.type` 为 `tls_crypt_v2` 时可用。<br>约束：禁用时，不支持 cookie 的客户端会按照上游 `allow-noncookie` 行为被接受。<br>约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
 | `tls-control-wrap-key` | 控制信道包装密钥内容。 |  | 有 |  | 已实现 | 通过 | 约束：`tls.control_wrap.key` 或 `tls.control_wrap.key_path` 必填其一。<br>约束：与 `tls.control_wrap.key_path` 冲突。<br>约束：自 sing-box 1.14.0 起 |
 | `tls-control-wrap-key-path` | 控制信道包装密钥路径。 |  | 有 |  | 已实现 | 通过 | 约束：`tls.control_wrap.key` 或 `tls.control_wrap.key_path` 必填其一。<br>约束：与 `tls.control_wrap.key` 冲突。<br>约束：自 sing-box 1.14.0 起 |
-| `tls-control-wrap-type` | 控制信道包装类型，`tls_auth`、`tls_crypt` 或 `tls_crypt_v2` 之一。 |  | 有 |  | 部分 | 未测 | 取值：`tls_auth`、`tls_crypt`、`tls_crypt_v2`<br>约束：必填<br>约束：自 sing-box 1.14.0 起 |
-| `tls-crl-path` | 用于拒绝已吊销客户端证书的证书吊销列表路径。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `tls-groups` | 按偏好顺序排列的 TLS key exchange group，以冒号分隔。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
+| `tls-control-wrap-type` | 控制信道包装类型，`tls_auth`、`tls_crypt` 或 `tls_crypt_v2` 之一。 |  | 有 |  | 已实现 | 通过 | 取值：`tls_auth`、`tls_crypt`、`tls_crypt_v2`<br>约束：必填<br>约束：自 sing-box 1.14.0 起 |
+| `tls-crl-path` | 用于拒绝已吊销客户端证书的证书吊销列表路径。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
+| `tls-groups` | 按偏好顺序排列的 TLS key exchange group，以冒号分隔。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
 | `tls-key` | TLS 服务器私钥内容。 |  | 有 |  | 已实现 | 通过 | 约束：`tls.key` 或 `tls.key_path` 必填其一。<br>约束：与 `tls.key_path` 冲突。<br>约束：自 sing-box 1.14.0 起 |
 | `tls-key-path` | TLS 服务器私钥路径。 |  | 有 |  | 已实现 | 通过 | 约束：`tls.key` 或 `tls.key_path` 必填其一。<br>约束：与 `tls.key` 冲突。<br>约束：自 sing-box 1.14.0 起 |
 | `tls-ns-certificate-type` | 已弃用的 Netscape 证书类型检查，`server` 或 `client` 之一。 |  | 废弃 |  | 未实现 | 未测 | 取值：`client`、`server`<br>约束：自 sing-box 1.14.0 起 |
-| `tls-peer-fingerprint` | 允许的客户端叶证书 SHA-256 指纹。 |  | 有 |  | 未实现 | 未测 | 约束：可以在没有客户端 CA 时仅使用指纹验证。<br>约束：自 sing-box 1.14.0 起 |
-| `tls-remote-certificate-eku` | 客户端证书所需的 Extended Key Usage。 |  | 有 |  | 未实现 | 未测 | 约束：与显式配置的 `tls.remote_certificate_tls` 冲突。<br>约束：自 sing-box 1.14.0 起 |
-| `tls-remote-certificate-ku` | OpenVPN `remote-cert-ku` 格式的客户端证书 Key Usage mask。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `tls-remote-certificate-tls` | 客户端证书用途检查，`server`、`client` 或 `none` 之一。 |  | 有 |  | 未实现 | 未测 | 取值：`client`、`none`、`server`<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `client`。 |
-| `tls-verify-client-certificate` | OpenVPN 客户端证书策略，`require`、`optional` 或 `none` 之一。 |  | 有 |  | 未实现 | 未测 | 取值：`none`、`optional`、`require`<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `require`。 |
-| `tls-version-max` | 最高 TLS 版本。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用支持的最高版本。 |
-| `tls-version-min` | 最低 TLS 版本。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1.2`。 |
-| `topology` | 推送给客户端的 OpenVPN topology，`subnet`、`p2p` 或 `net30` 之一。 |  | 有 |  | 未实现 | 未测 | 取值：`net30`、`p2p`、`subnet`<br>约束：TLS 模式默认使用 `subnet`，`static_key` 模式默认使用 `p2p`。<br>约束：自 sing-box 1.14.0 起 |
+| `tls-peer-fingerprint` | 允许的客户端叶证书 SHA-256 指纹。 |  | 有 |  | 已实现 | 通过 | 约束：可以在没有客户端 CA 时仅使用指纹验证。<br>约束：自 sing-box 1.14.0 起 |
+| `tls-remote-certificate-eku` | 客户端证书所需的 Extended Key Usage。 |  | 有 |  | 已实现 | 未测 | 约束：与显式配置的 `tls.remote_certificate_tls` 冲突。<br>约束：自 sing-box 1.14.0 起 |
+| `tls-remote-certificate-ku` | OpenVPN `remote-cert-ku` 格式的客户端证书 Key Usage mask。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
+| `tls-remote-certificate-tls` | 客户端证书用途检查，`server`、`client` 或 `none` 之一。 |  | 有 |  | 已实现 | 通过 | 取值：`client`、`none`、`server`<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `client`。 |
+| `tls-verify-client-certificate` | OpenVPN 客户端证书策略，`require`、`optional` 或 `none` 之一。 |  | 有 |  | 已实现 | 通过 | 取值：`none`、`optional`、`require`<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `require`。 |
+| `tls-version-max` | 最高 TLS 版本。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用支持的最高版本。 |
+| `tls-version-min` | 最低 TLS 版本。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1.2`。 |
+| `topology` | 推送给客户端的 OpenVPN topology，`subnet`、`p2p` 或 `net30` 之一。 |  | 有 |  | 已实现 | 通过 | 取值：`net30`、`p2p`、`subnet`<br>约束：TLS 模式默认使用 `subnet`，`static_key` 模式默认使用 `p2p`。<br>约束：自 sing-box 1.14.0 起 |
 | `users` | OpenVPN 用户名/密码用户列表。 |  | 有 |  | 已实现 | 通过 | 约束：仅在 TLS 模式下可用。<br>约束：如果设置，客户端除了通过 `tls.verify_client_certificate` 配置的证书策略外，还必须通过用户名/密码认证。<br>约束：自 sing-box 1.14.0 起 |
-| `users-password` | 密码。 |  | 有 |  | 部分 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `users-username` | 用户名。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
+| `users-password` | 密码。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
+| `users-username` | 用户名。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
 
 ## redirect
 

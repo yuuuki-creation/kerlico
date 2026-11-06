@@ -25,9 +25,9 @@
 | `path` | 规则集的文件路径。 |  | 有 |  | 已实现 | 未测 | 约束：必填<br>约束：自 sing-box 1.8.0 起 |
 | `rules` | 一组 无头规则. |  | 有 |  | 已实现 | 通过 | 约束：必填<br>约束：自 sing-box 1.10.0 起 |
 | `tag` | 规则集的标签。 |  | 有 |  | 已实现 | 通过 | 约束：`path`、`url` 或 `initial_path` 中的 `{tag}` 占位符将被替换为每个标签，设置多个标签时必填。<br>约束：多个标签与 `type: inline` 冲突。<br>约束：必填<br>约束：自 sing-box 1.14.0 起 |
-| `type` | 规则集类型， `local` 或 `remote`。 |  | 有 |  | 部分 | 未测 | 取值：`inline`、`local`、`remote`<br>约束：必填<br>约束：自 sing-box 1.8.0 起 |
-| `update-interval` | 规则集的更新间隔。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.8.0 起<br>约束：默认使用 `1d`。 |
-| `url` | 规则集的下载 URL。 |  | 有 |  | 未实现 | 未测 | 约束：必填<br>约束：自 sing-box 1.8.0 起 |
+| `type` | 规则集类型， `local` 或 `remote`。 |  | 有 |  | 已实现 | 通过 | 取值：`inline`、`local`、`remote`<br>约束：必填<br>约束：自 sing-box 1.8.0 起 |
+| `update-interval` | 规则集的更新间隔。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.8.0 起<br>约束：默认使用 `1d`。 |
+| `url` | 规则集的下载 URL。 |  | 有 |  | 已实现 | 通过 | 约束：必填<br>约束：自 sing-box 1.8.0 起 |
 
 ## content
 
@@ -47,16 +47,16 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `geo-auto-update` | 自动更新 GEO | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `geo-update-interval` | GEO 更新间隔，单位小时 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
+| `geo-auto-update` | 自动更新 GEO | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `geo-update-interval` | GEO 更新间隔，单位小时 | 有 |  |  | 部分 | 未测 | 取值：`整数` |
 | `geodata-loader` | GEO 文件加载器，默认 memconservative | 有 |  |  | 未实现 | 未测 | 取值：`memconservative`、`standard` |
 | `geodata-mode` | GEOIP 文件类型：true 用 dat，默认 false 用 mmdb | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `geoip-geosite` | GeoIP、Geosite 数据库 1.12.0 移除，改用规则集；CLI geoip、geosite 子命令可转换 |  | 已移除 |  | 不适用 | 未测 | 取值：`geoip`、`geosite`<br>约束：用 sing-box geoip export、sing-box geosite export 转成规则集 |
 | `geosite-matcher` | GeoSite 匹配器实现，默认 succinct | 有 |  |  | 未实现 | 未测 | 取值：`mph`、`succinct` |
 | `geox-url-asn` | GeoLite2-ASN.mmdb 下载地址 | 有 |  |  | 未实现 | 未测 | 取值：`URL` |
-| `geox-url-geoip` | geoip.dat 下载地址 | 有 |  |  | 未实现 | 未测 | 取值：`URL` |
-| `geox-url-geosite` | geosite.dat 下载地址 | 有 |  |  | 未实现 | 未测 | 取值：`URL` |
-| `geox-url-mmdb` | country.mmdb 下载地址 | 有 |  |  | 未实现 | 未测 | 取值：`URL` |
+| `geox-url-geoip` | geoip.dat 下载地址 | 有 |  |  | 部分 | 未测 | 取值：`URL` |
+| `geox-url-geosite` | geosite.dat 下载地址 | 有 |  |  | 部分 | 未测 | 取值：`URL` |
+| `geox-url-mmdb` | country.mmdb 下载地址 | 有 |  |  | 部分 | 未测 | 取值：`URL` |
 
 ## geodata
 
@@ -121,15 +121,15 @@
 | `behavior` | 行为 | 有 |  |  | 已实现 | 未测 | 取值：`classical`、`domain`、`ipcidr` |
 | `format` | 格式，默认 yaml | 有 |  |  | 未实现 | 未测 | 取值：`mrs`、`text`、`yaml`<br>约束：mrs 的 behavior 仅 domain、ipcidr |
 | `header` | 自定义请求头 | 有 |  |  | 未实现 | 未测 | 取值：`映射` |
-| `interval` | 更新间隔秒 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
+| `interval` | 更新间隔秒 | 有 |  |  | 已实现 | 未测 | 取值：`整数` |
 | `name` | 必须，不能重复 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
 | `path` | 可选，文件路径，不填用 url MD5 | 有 |  |  | 已实现 | 未测 | 取值：`路径`<br>约束：限制在 HomeDir；其他位置需 SAFE_PATHS |
 | `path-in-bundle` | 本地无文件时从 BundleMRS.7z 解压的路径 | 有 |  |  | 未实现 | 未测 | 取值：`路径` |
 | `payload` | 内容，仅 inline 生效 | 有 |  |  | 已实现 | 通过 | 取值：`列表` |
-| `proxy` | 经指定代理下载 | 有 |  |  | 未实现 | 未测 | 取值：`出站名` |
-| `size-limit` | 下载大小上限字节，0 不限 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `type` | 必须 | 有 |  |  | 部分 | 未测 | 取值：`file`、`http`、`inline` |
-| `url` | http 类型必须 | 有 |  |  | 未实现 | 未测 | 取值：`URL` |
+| `proxy` | 经指定代理下载 | 有 |  |  | 已实现 | 未测 | 取值：`出站名` |
+| `size-limit` | 下载大小上限字节，0 不限 | 有 |  |  | 已实现 | 未测 | 取值：`整数` |
+| `type` | 必须 | 有 |  |  | 已实现 | 未测 | 取值：`file`、`http`、`inline` |
+| `url` | http 类型必须 | 有 |  |  | 已实现 | 未测 | 取值：`URL` |
 
 ## source
 

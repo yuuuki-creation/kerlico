@@ -10,32 +10,32 @@
 {"key": "api/clash/access-control-allow-private-network", "kerlico": "yes", "note": "允许从私有网络访问；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
 {"key": "api/clash/cache-file", "kerlico": "na", "note": "sing-box 已移除字段，已迁到 cache_file"}
 {"key": "api/clash/cache-id", "kerlico": "na", "note": "sing-box 已移除字段，已迁到 cache_file"}
-{"key": "api/clash/combo", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "M11 审计（夸大）：[U-INTROSPECT] fix the stub endpoints in this list; then re-evaluate"}
+{"key": "api/clash/combo", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "proxies、group、providers、connections、rules、dns/query、memory、延迟测试、PUT /configs、/restart 为真实实现；logs、PATCH /configs、脚本、UI 下载仍是占位；无 WebSocket、无 Clash 面板"}
 {"key": "api/clash/default-mode", "kerlico": "no", "note": "M11 审计（空壳）：[U-RELOAD] implement mode switch in RouteTable or drop key"}
-{"key": "api/clash/delete-connections", "kerlico": "no", "note": "M11 审计（空壳）：[U-CONN] register every flow in the Dispatcher with a CancellationToken and cancel on DELETE"}
-{"key": "api/clash/delete-connections-id", "kerlico": "no", "note": "M11 审计（空壳）：[U-CONN] register every flow in the Dispatcher with a CancellationToken and cancel on DELETE"}
+{"key": "api/clash/delete-connections", "kerlico": "yes", "note": "关闭全部连接；测试只覆盖按 id 关闭"}
+{"key": "api/clash/delete-connections-id", "kerlico": "yes", "note": "按 id 关闭对应流，被关闭的连接收不到后续数据"}
 {"key": "api/clash/external-controller", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`control.listen`"}
 {"key": "api/clash/external-ui", "kerlico": "yes", "note": "到静态网页资源目录的相对路径或绝对路径；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
 {"key": "api/clash/external-ui-download-detour", "kerlico": "no", "note": "M11 审计（空壳）：[U-FETCH] download+unzip UI archive on startup/interval through selected outbound"}
 {"key": "api/clash/external-ui-download-url", "kerlico": "no", "note": "M11 审计（空壳）：[U-FETCH] download+unzip UI archive on startup/interval through selected outbound"}
 {"key": "api/clash/get", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/health` 用作存活检查；没有根路径"}
-{"key": "api/clash/get-configs", "kerlico": "no", "note": "M11 审计（空壳）：[U-RELOAD] return real mode/ports/log-level/ipv6 from live config"}
-{"key": "api/clash/get-dns-query", "kerlico": "no", "note": "M11 审计（空壳）：[U-INTROSPECT] call DnsResolver and return real answer"}
+{"key": "api/clash/get-configs", "kerlico": "partial", "note": "mode 取自配置，log-level 与 ipv6 为常量"}
+{"key": "api/clash/get-dns-query", "kerlico": "partial", "note": "经运行时解析器应答（hosts 与首个上游），不经 DNS 规则；缺 name 参数被拒"}
 {"key": "api/clash/get-group", "kerlico": "yes", "note": "Clash API：列出策略组；建议实现：随策略组提供，手动切节点要靠它"}
 {"key": "api/clash/get-group-name", "kerlico": "yes", "note": "Clash API：读取策略组；建议实现：随策略组提供，手动切节点要靠它"}
-{"key": "api/clash/get-group-name-delay", "kerlico": "no", "note": "M11 审计（空壳）：[U-PROBE] real URL probe per candidate through its outbound"}
+{"key": "api/clash/get-group-name-delay", "kerlico": "yes", "note": "对组内各成员经其出站实测，返回成员到延迟的映射；无 HTTPS 互通测试"}
 {"key": "api/clash/get-logs", "kerlico": "no", "note": "M11 审计（空壳）：[U-LOG] install log sink feeding ControlPlane::push_log from all crates, stream via WS/chunked"}
-{"key": "api/clash/get-memory", "kerlico": "no", "note": "M11 审计（空壳）：[U-INTROSPECT] read process RSS (procfs) and stream per second"}
+{"key": "api/clash/get-memory", "kerlico": "partial", "note": "返回进程驻留内存 inuse，oslimit 恒为 0；一次性返回，无每秒推送"}
 {"key": "api/clash/get-profile-tracing", "kerlico": "no", "note": "M11 审计（空壳）：[U-INTROSPECT] remove or back with real trace events"}
-{"key": "api/clash/get-providers-proxies", "kerlico": "partial", "note": "M11 审计（夸大）：[U-PROBE] fill with real subscription/update/health data"}
-{"key": "api/clash/get-providers-proxies-name", "kerlico": "partial", "note": "M11 审计（夸大）：[U-PROBE] fill with real subscription/update/health data"}
-{"key": "api/clash/get-providers-proxies-name-healthcheck", "kerlico": "no", "note": "M11 审计（空壳）：[U-PROBE] real probe"}
-{"key": "api/clash/get-providers-rules", "kerlico": "partial", "note": "M11 审计（夸大）：[U-INTROSPECT] report real provider type, behavior, format, updatedAt"}
-{"key": "api/clash/get-providers-rules-name", "kerlico": "partial", "note": "M11 审计（夸大）：[U-INTROSPECT] report real provider type, behavior, format, updatedAt"}
-{"key": "api/clash/get-proxies", "kerlico": "partial", "note": "M11 审计（夸大）：[U-PROBE] derive from real outbound options and probe results"}
-{"key": "api/clash/get-proxies-name", "kerlico": "partial", "note": "M11 审计（夸大）：[U-PROBE] derive from real outbound options and probe results"}
-{"key": "api/clash/get-proxies-name-delay", "kerlico": "no", "note": "M11 审计（空壳）：[U-PROBE] real HTTP probe via outbound with url/timeout query"}
-{"key": "api/clash/get-rules", "kerlico": "no", "note": "M11 审计（空壳）：[U-INTROSPECT] serialize real rule type/payload from RouteTable"}
+{"key": "api/clash/get-providers-proxies", "kerlico": "yes", "note": "成员取自当前出站；列表与单成员端点没有测试"}
+{"key": "api/clash/get-providers-proxies-name", "kerlico": "yes", "note": "成员取自当前出站，下载失败时写入 error"}
+{"key": "api/clash/get-providers-proxies-name-healthcheck", "kerlico": "yes", "note": "对集合成员经其出站实测；端点本身没有测试"}
+{"key": "api/clash/get-providers-rules", "kerlico": "partial", "note": "ruleCount、updatedAt、error 取自运行状态；type 与 behavior 为固定值"}
+{"key": "api/clash/get-providers-rules-name", "kerlico": "partial", "note": "ruleCount、updatedAt、error 取自运行状态；type 与 behavior 为固定值"}
+{"key": "api/clash/get-proxies", "kerlico": "partial", "note": "alive 与延迟历史来自实测探测；type、udp 等其余字段未逐项核对"}
+{"key": "api/clash/get-proxies-name", "kerlico": "partial", "note": "alive 与延迟历史来自实测探测；type、udp 等其余字段未逐项核对"}
+{"key": "api/clash/get-proxies-name-delay", "kerlico": "yes", "note": "经所选出站向 url 发 HEAD 实测延迟，支持 url、timeout、expected 参数，状态码不符回 503；无 HTTPS 互通测试"}
+{"key": "api/clash/get-rules", "kerlico": "yes", "note": "类型与载荷取自已编译的路由表"}
 {"key": "api/clash/get-ui", "kerlico": "partial", "note": "M11 审计（夸大）：[U-FETCH] document: no built-in UI; return 404 when absent"}
 {"key": "api/clash/get-version", "kerlico": "yes", "note": "Clash API：版本；建议实现：kerlico 版本只能从 `kerlico --version` 读，控制接口查版本实现量很小"}
 {"key": "api/clash/patch-configs", "kerlico": "no", "note": "M11 审计（空壳）：[U-RELOAD] apply mode/log-level/ports to live engine"}
@@ -45,21 +45,21 @@
 {"key": "api/clash/post-script", "kerlico": "no", "note": "M11 审计（空壳）：[U-INTROSPECT] drop key"}
 {"key": "api/clash/post-upgrade-ui", "kerlico": "no", "note": "M11 审计（空壳）：[U-FETCH] download external_ui_url zip"}
 {"key": "api/clash/protocol", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "kerlico 自有只读 HTTP 接口，路径和字段不兼容 Clash"}
-{"key": "api/clash/put-configs", "kerlico": "no", "note": "M11 审计（空壳）：[U-RELOAD] reload config and swap engine components"}
-{"key": "api/clash/put-providers-proxies-name", "kerlico": "no", "note": "M11 审计（空壳）：[U-FETCH] fetch and recompile provider"}
-{"key": "api/clash/put-providers-rules-name", "kerlico": "no", "note": "M11 审计（空壳）：[U-FETCH] fetch and recompile provider"}
+{"key": "api/clash/put-configs", "kerlico": "yes", "note": "PUT /configs 按 payload 或 path 重载并替换运行中的引擎，启动失败回滚"}
+{"key": "api/clash/put-providers-proxies-name", "kerlico": "yes", "note": "经出站下载并写缓存，成员变化时重建引擎；下载失败回 503 并沿用旧成员"}
+{"key": "api/clash/put-providers-rules-name", "kerlico": "yes", "note": "经 Refresher 下载并替换规则集；端点本身没有测试，下载逻辑见 resources 测试"}
 {"key": "api/clash/put-proxies-name", "kerlico": "yes", "note": "Clash API：切换 selector；建议实现：随策略组提供，手动切节点要靠它"}
 {"key": "api/clash/secret", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`control.secret`，比较时不短路"}
 {"key": "api/clash/store-fakeip", "kerlico": "na", "note": "sing-box 已移除字段，已迁到 cache_file"}
 {"key": "api/clash/store-mode", "kerlico": "na", "note": "sing-box 已移除字段，已迁到 cache_file"}
 {"key": "api/clash/store-selected", "kerlico": "na", "note": "sing-box 已移除字段，已迁到 cache_file"}
-{"key": "api/configs-geo/post-configs-geo", "kerlico": "no", "note": "M11 审计（空壳）：[U-FETCH] download geoip/geosite from geox_url, reload matcher"}
-{"key": "api/configs/get-configs", "kerlico": "no", "note": "M11 审计（空壳）：[U-RELOAD] return real mode/ports/log-level/ipv6 from live config"}
+{"key": "api/configs-geo/post-configs-geo", "kerlico": "partial", "note": "按 geox-url 经下载器取文件并落盘，未配置 geox-url 回 400；运行时仍用内置 GeoIP/GeoSite 表"}
+{"key": "api/configs/get-configs", "kerlico": "partial", "note": "mode 取自配置，log-level 与 ipv6 为常量"}
 {"key": "api/configs/patch-configs", "kerlico": "no", "note": "M11 审计（空壳）：[U-RELOAD] apply mode/log-level/ports to live engine"}
-{"key": "api/configs/put-configs", "kerlico": "no", "note": "M11 审计（空壳）：[U-RELOAD] reload config and swap engine components"}
-{"key": "api/connections-id/delete-connections-id", "kerlico": "no", "note": "M11 审计（空壳）：[U-CONN] register every flow in the Dispatcher with a CancellationToken and cancel on DELETE"}
-{"key": "api/connections/delete-connections", "kerlico": "no", "note": "M11 审计（空壳）：[U-CONN] register every flow in the Dispatcher with a CancellationToken and cancel on DELETE"}
-{"key": "api/connections/get-connections", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "M11 审计（夸大）：[U-CONN] feed registry (see U-CONN) and real totals"}
+{"key": "api/configs/put-configs", "kerlico": "yes", "note": "PUT /configs 按 payload 或 path 重载并替换运行中的引擎，启动失败回滚"}
+{"key": "api/connections-id/delete-connections-id", "kerlico": "yes", "note": "按 id 关闭对应流，被关闭的连接收不到后续数据"}
+{"key": "api/connections/delete-connections", "kerlico": "yes", "note": "关闭全部连接；测试只覆盖按 id 关闭"}
+{"key": "api/connections/get-connections", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "列出真实流量（chains、规则、元数据、上下行字节）；无 WebSocket 推送"}
 {"key": "api/controller/combo", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "只有明文 HTTP 监听和 Bearer；缺 TLS、Unix socket、CORS"}
 {"key": "api/controller/external-controller", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`control.listen`"}
 {"key": "api/controller/external-controller-cors-allow-origins", "kerlico": "yes", "note": "API CORS 允许来源；建议暂不实现：kerlico 没有 Web 面板，面板生态依赖 Clash 兼容接口，要先决定是否兼容"}
@@ -72,9 +72,9 @@
 {"key": "api/controller/secret", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`control.secret`；回环监听可省略"}
 {"key": "api/debug-gc/put-debug-gc", "kerlico": "na", "note": "Go 运行时调试接口，Rust 没有对应物"}
 {"key": "api/debug-pprof/get-debug-pprof", "kerlico": "na", "note": "Go 运行时调试接口，Rust 没有对应物"}
-{"key": "api/dns-query/get-dns-query", "kerlico": "no", "note": "M11 审计（空壳）：[U-INTROSPECT] call DnsResolver and return real answer"}
+{"key": "api/dns-query/get-dns-query", "kerlico": "partial", "note": "经运行时解析器应答（hosts 与首个上游），不经 DNS 规则；缺 name 参数被拒"}
 {"key": "api/doh/post-get", "kerlico": "no", "note": "external-doh-server 路径 DoH；建议暂不实现：kerlico 还没有 DNS 服务端，先做 dns/global/listen"}
-{"key": "api/group-name-delay/get-group-name-delay", "kerlico": "no", "note": "M11 审计（空壳）：[U-PROBE] real URL probe per candidate through its outbound"}
+{"key": "api/group-name-delay/get-group-name-delay", "kerlico": "yes", "note": "对组内各成员经其出站实测，返回成员到延迟的映射；无 HTTPS 互通测试"}
 {"key": "api/group-name/get-group-name", "kerlico": "yes", "note": "读取具体策略组；建议实现：随策略组提供，手动切节点要靠它"}
 {"key": "api/group/get-group", "kerlico": "yes", "note": "策略组列表；建议实现：随策略组提供，手动切节点要靠它"}
 {"key": "api/handler-service/add-inbound", "kerlico": "no", "note": "运行中添加入站；建议暂不实现：kerlico 不支持运行中增删入站和出站，配置重载更简单且够用"}
@@ -124,38 +124,38 @@
 {"key": "api/lua-routing-context/get-local-ips", "kerlico": "na", "note": "Xray Lua 运行时专属函数，kerlico 没有 Lua；脚本能力见 route/routing/script、dns/dns/script"}
 {"key": "api/lua-routing-context/get-source-ips", "kerlico": "na", "note": "Xray Lua 运行时专属函数，kerlico 没有 Lua；脚本能力见 route/routing/script、dns/dns/script"}
 {"key": "api/lua-routing-context/get-target-ips", "kerlico": "na", "note": "Xray Lua 运行时专属函数，kerlico 没有 Lua；脚本能力见 route/routing/script、dns/dns/script"}
-{"key": "api/memory/get-memory", "kerlico": "no", "note": "M11 审计（空壳）：[U-INTROSPECT] read process RSS (procfs) and stream per second"}
+{"key": "api/memory/get-memory", "kerlico": "partial", "note": "返回进程驻留内存 inuse，oslimit 恒为 0；一次性返回，无每秒推送"}
 {"key": "api/metrics/debug-pprof", "kerlico": "na", "note": "Go 运行时调试接口，Rust 没有对应物"}
 {"key": "api/metrics/debug-vars", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/usage`、`/v1/stats` 提供统计 JSON；缺 observatory"}
 {"key": "api/metrics/listen", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "`control.listen`，和控制接口同一端口"}
 {"key": "api/metrics/tag", "kerlico": "no", "note": "对应出站 tag，配 tunnel 入站与路由访问；建议暂不实现：配 tunnel 入站经路由访问；kerlico 控制接口直接监听，不经路由"}
 {"key": "api/observatory-service/get-outbound-status", "kerlico": "no", "note": "M11 审计（空壳）：[U-PROBE] needs real observatory loop"}
-{"key": "api/providers-proxies-name-healthcheck/get-providers-proxies-name-healthcheck", "kerlico": "no", "note": "M11 审计（空壳）：[U-PROBE] real probe"}
-{"key": "api/providers-proxies-name-proxy-healthcheck/get-providers-proxies-name-proxy-healthcheck", "kerlico": "no", "note": "M11 审计（空壳）：[U-PROBE] real probe"}
-{"key": "api/providers-proxies-name-proxy/get-providers-proxies-name-proxy", "kerlico": "partial", "note": "M11 审计（夸大）：[U-PROBE] fill with real subscription/update/health data"}
-{"key": "api/providers-proxies-name/get-providers-proxies-name", "kerlico": "partial", "note": "M11 审计（夸大）：[U-PROBE] fill with real subscription/update/health data"}
-{"key": "api/providers-proxies-name/put-providers-proxies-name", "kerlico": "no", "note": "M11 审计（空壳）：[U-FETCH] fetch and recompile provider"}
-{"key": "api/providers-proxies/get-providers-proxies", "kerlico": "partial", "note": "M11 审计（夸大）：[U-PROBE] fill with real subscription/update/health data"}
-{"key": "api/providers-rules-name/put-providers-rules-name", "kerlico": "no", "note": "M11 审计（空壳）：[U-FETCH] fetch and recompile provider"}
-{"key": "api/providers-rules/get-providers-rules", "kerlico": "partial", "note": "M11 审计（夸大）：[U-INTROSPECT] report real provider type, behavior, format, updatedAt"}
-{"key": "api/proxies-name-delay/get-proxies-name-delay", "kerlico": "no", "note": "M11 审计（空壳）：[U-PROBE] real HTTP probe via outbound with url/timeout query"}
+{"key": "api/providers-proxies-name-healthcheck/get-providers-proxies-name-healthcheck", "kerlico": "yes", "note": "对集合成员经其出站实测；端点本身没有测试"}
+{"key": "api/providers-proxies-name-proxy-healthcheck/get-providers-proxies-name-proxy-healthcheck", "kerlico": "yes", "note": "对集合成员经其出站实测；端点本身没有测试"}
+{"key": "api/providers-proxies-name-proxy/get-providers-proxies-name-proxy", "kerlico": "yes", "note": "成员取自当前出站；列表与单成员端点没有测试"}
+{"key": "api/providers-proxies-name/get-providers-proxies-name", "kerlico": "yes", "note": "成员取自当前出站，下载失败时写入 error"}
+{"key": "api/providers-proxies-name/put-providers-proxies-name", "kerlico": "yes", "note": "经出站下载并写缓存，成员变化时重建引擎；下载失败回 503 并沿用旧成员"}
+{"key": "api/providers-proxies/get-providers-proxies", "kerlico": "yes", "note": "成员取自当前出站；列表与单成员端点没有测试"}
+{"key": "api/providers-rules-name/put-providers-rules-name", "kerlico": "yes", "note": "经 Refresher 下载并替换规则集；端点本身没有测试，下载逻辑见 resources 测试"}
+{"key": "api/providers-rules/get-providers-rules", "kerlico": "partial", "note": "ruleCount、updatedAt、error 取自运行状态；type 与 behavior 为固定值"}
+{"key": "api/proxies-name-delay/get-proxies-name-delay", "kerlico": "yes", "note": "经所选出站向 url 发 HEAD 实测延迟，支持 url、timeout、expected 参数，状态码不符回 503；无 HTTPS 互通测试"}
 {"key": "api/proxies-name/delete-proxies-name", "kerlico": "yes", "note": "清除 fixed 选择（Selector 除外），204；建议实现：随策略组提供，手动切节点要靠它"}
-{"key": "api/proxies-name/get-proxies-name", "kerlico": "partial", "note": "M11 审计（夸大）：[U-PROBE] derive from real outbound options and probe results"}
+{"key": "api/proxies-name/get-proxies-name", "kerlico": "partial", "note": "alive 与延迟历史来自实测探测；type、udp 等其余字段未逐项核对"}
 {"key": "api/proxies-name/put-proxies-name", "kerlico": "yes", "note": "选择代理，204；建议实现：随策略组提供，手动切节点要靠它"}
-{"key": "api/proxies/get-proxies", "kerlico": "partial", "note": "M11 审计（夸大）：[U-PROBE] derive from real outbound options and probe results"}
+{"key": "api/proxies/get-proxies", "kerlico": "partial", "note": "alive 与延迟历史来自实测探测；type、udp 等其余字段未逐项核对"}
 {"key": "api/reflection-service/list", "kerlico": "na", "note": "gRPC 反射，kerlico 没有 gRPC 接口"}
-{"key": "api/restart/post-restart", "kerlico": "no", "note": "M11 审计（空壳）：[U-RELOAD] re-exec or full engine rebuild"}
+{"key": "api/restart/post-restart", "kerlico": "yes", "note": "POST /restart 重读配置并重建引擎，不重启进程"}
 {"key": "api/root/get", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/health` 用作存活检查；没有根路径"}
 {"key": "api/routing-service/add-rule", "kerlico": "no", "note": "运行中添加路由规则；建议暂不实现：kerlico 先做整体重载，运行中增删规则不急"}
 {"key": "api/routing-service/get-balancer-info", "kerlico": "yes", "note": "查询负载均衡器状态；建议实现：随负载均衡器提供"}
-{"key": "api/routing-service/list-rule", "kerlico": "no", "note": "M11 审计（空壳）：[U-INTROSPECT] serialize real rule type/payload from RouteTable"}
+{"key": "api/routing-service/list-rule", "kerlico": "yes", "note": "类型与载荷取自已编译的路由表"}
 {"key": "api/routing-service/override-balancer-target", "kerlico": "yes", "note": "强制负载均衡器选择出站；建议实现：随负载均衡器提供"}
 {"key": "api/routing-service/overview", "kerlico": "no", "note": "增删改规则、查询均衡器、封来源 IP；建议暂不实现：kerlico 先做整体重载，运行中增删规则不急"}
 {"key": "api/routing-service/remove-rule", "kerlico": "no", "note": "运行中删除路由规则；建议暂不实现：kerlico 先做整体重载，运行中增删规则不急"}
 {"key": "api/routing-service/subscribe-routing-stats", "kerlico": "no", "note": "订阅选路统计；建议暂不实现：kerlico 的 `/v1/flows` 已能看选路结果，订阅推送不急"}
 {"key": "api/routing-service/test-route", "kerlico": "yes", "note": "测试一条路由的选路结果；建议实现：给定目标、节点和用户查命中哪条规则，排障很有用；`RouteTable::select` 已是纯函数，实现量小"}
 {"key": "api/rules-disable/patch-rules-disable", "kerlico": "no", "note": "临时禁用规则，重启失效，204；建议暂不实现：kerlico 先做整体重载，临时禁用规则不急"}
-{"key": "api/rules/get-rules", "kerlico": "no", "note": "M11 审计（空壳）：[U-INTROSPECT] serialize real rule type/payload from RouteTable"}
+{"key": "api/rules/get-rules", "kerlico": "yes", "note": "类型与载荷取自已编译的路由表"}
 {"key": "api/singbox-grpc-managed/get-system-proxy-status", "kerlico": "na", "note": "sing-box 图形客户端专属 gRPC 方法，kerlico 没有图形客户端"}
 {"key": "api/singbox-grpc-managed/reload-service", "kerlico": "na", "note": "sing-box 图形客户端专属 gRPC 方法，kerlico 没有图形客户端"}
 {"key": "api/singbox-grpc-managed/set-system-proxy-enabled", "kerlico": "na", "note": "sing-box 图形客户端专属 gRPC 方法，kerlico 没有图形客户端"}
@@ -239,7 +239,7 @@
 {"key": "api/storage-key/put-storage-key", "kerlico": "no", "note": "写存储值，合法 JSON，最大 1MB，204；建议暂不实现：只服务面板存放设置，kerlico 没有面板"}
 {"key": "api/traffic/get-traffic", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/usage` 给累计量；没有每秒 WebSocket 推送"}
 {"key": "api/ui/get", "kerlico": "partial", "note": "M11 审计（夸大）：[U-FETCH] document: no built-in UI; return 404 when absent"}
-{"key": "api/upgrade-geo/post-upgrade-geo", "kerlico": "no", "note": "M11 审计（空壳）：[U-FETCH] download geoip/geosite from geox_url, reload matcher"}
+{"key": "api/upgrade-geo/post-upgrade-geo", "kerlico": "partial", "note": "按 geox-url 经下载器取文件并落盘，未配置 geox-url 回 400；运行时仍用内置 GeoIP/GeoSite 表"}
 {"key": "api/upgrade-ui/post-upgrade-ui", "kerlico": "no", "note": "M11 审计（空壳）：[U-FETCH] download external_ui_url zip"}
 {"key": "api/upgrade/post-upgrade", "kerlico": "no", "note": "更新内核，返回 status ok；建议暂不实现：内核自更新由部署工具负责，kerlico 进程不替换自身"}
 {"key": "api/v2ray/get-stats", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/usage` 整体返回，HTTP JSON 不是 gRPC"}
@@ -262,7 +262,7 @@
 {"key": "cache/file/store-fakeip", "kerlico": "yes", "note": "将 fakeip 存储在缓存文件中；建议实现：FakeIP 映射重启丢失会让客户端拿到失效地址，实现 FakeIP 时要一起持久化"}
 {"key": "cache/file/store-rdrc", "kerlico": "na", "note": "sing-box 已废弃字段，1.16.0 移除，改用 store_dns"}
 {"key": "cache/profile/store-fake-ip", "kerlico": "yes", "note": "储存 fakeip 映射表，域名再次连接时用原映射；建议实现：FakeIP 映射重启丢失会让客户端拿到失效地址，实现 FakeIP 时要一起持久化"}
-{"key": "cache/profile/store-selected", "kerlico": "partial", "note": "M11 审计（夸大）：split cache into one namespaced store (or per-feature files) and add a restart round-trip test"}
+{"key": "cache/profile/store-selected", "kerlico": "yes", "note": "选中节点与 Fake-IP 由单一持有者分区写入同一文件，重启后恢复，互不覆盖"}
 {"key": "cert/dns01-acmedns/password", "kerlico": "no", "note": "acmedns DNS01 提供者的 password 字段；建议暂不实现：先做 Cloudflare 这一家 DNS01"}
 {"key": "cert/dns01-acmedns/server-url", "kerlico": "no", "note": "acmedns DNS01 提供者的 server_url 字段；建议暂不实现：先做 Cloudflare 这一家 DNS01"}
 {"key": "cert/dns01-acmedns/subdomain", "kerlico": "no", "note": "acmedns DNS01 提供者的 subdomain 字段；建议暂不实现：先做 Cloudflare 这一家 DNS01"}
@@ -454,7 +454,7 @@
 {"key": "cli/command/generate-reality-keypair", "kerlico": "yes", "note": "生成 REALITY 密钥对；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/command/generate-sudoku-keypair", "kerlico": "yes", "note": "生成 Sudoku 密钥对；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/command/generate-uuid", "kerlico": "yes", "note": "生成 UUID；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
-{"key": "cli/command/generate-vless-mlkem768", "kerlico": "no", "note": "M11 审计（空壳）：[U-KEYGEN] use ml-kem (already in workspace) KeyGen from seed"}
+{"key": "cli/command/generate-vless-mlkem768", "kerlico": "yes", "note": "输出真实 ML-KEM-768 密钥对，种子向量与 Xray 一致"}
 {"key": "cli/command/generate-vless-x25519", "kerlico": "yes", "note": "生成 vless encryption X25519；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/command/generate-wg-keypair", "kerlico": "yes", "note": "生成 WireGuard 密钥对；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/convert/json", "kerlico": "no", "note": "typedMessage 转 JSON；建议暂不实现：kerlico 只有 JSON 配置，没有转换目标"}
@@ -484,8 +484,8 @@
 {"key": "cli/generate/generate-rand-hex", "kerlico": "yes", "note": "generate rand 的 --hex：十六进制输出；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/generate/generate-reality-keypair", "kerlico": "yes", "note": "生成 REALITY 密钥对；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/generate/generate-tailcat-keypair", "kerlico": "no", "note": "生成 Tailcat 密钥对；建议暂不实现：kerlico 没有 tailcat，也不用 VAPID"}
-{"key": "cli/generate/generate-tls-keypair", "kerlico": "partial", "note": "M11 审计（夸大）：[U-KEYGEN] params.not_before/not_after from months"}
-{"key": "cli/generate/generate-tls-keypair-months", "kerlico": "no", "note": "M11 审计（空壳）：[U-KEYGEN] set validity"}
+{"key": "cli/generate/generate-tls-keypair", "kerlico": "yes", "note": "自签证书有效期由 --months 决定"}
+{"key": "cli/generate/generate-tls-keypair-months", "kerlico": "yes", "note": "自签证书有效期由 --months 决定"}
 {"key": "cli/generate/generate-uuid", "kerlico": "yes", "note": "生成 UUID；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/generate/generate-vapid-keypair", "kerlico": "no", "note": "生成 VAPID 密钥对；建议暂不实现：kerlico 没有 tailcat，也不用 VAPID"}
 {"key": "cli/generate/generate-wg-keypair", "kerlico": "yes", "note": "生成 WireGuard 密钥对；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
@@ -533,7 +533,7 @@
 {"key": "cli/run/test", "kerlico": "yes", "where": "apps/kerlico/src/main.rs", "note": "`kerlico check -c <文件>`"}
 {"key": "cli/schema/schema", "kerlico": "no", "note": "生成配置 JSON Schema；建议暂不实现：协议选项是不透明的 `options`，要先统一类型才能生成"}
 {"key": "cli/schema/schema-output", "kerlico": "no", "note": "schema 的 --output：写入文件；建议暂不实现：协议选项是不透明的 `options`，要先统一类型才能生成"}
-{"key": "cli/tls/cert", "kerlico": "partial", "note": "M11 审计（夸大）：[U-KEYGEN] params.not_before/not_after from months"}
+{"key": "cli/tls/cert", "kerlico": "yes", "note": "自签证书有效期由 --months 决定"}
 {"key": "cli/tls/cert-chain-hash", "kerlico": "na", "note": "Xray 已移除的旧命令名，能力见 cli/tls/hash"}
 {"key": "cli/tls/ech", "kerlico": "no", "note": "生成 ECH 密钥和配置；建议暂不实现：kerlico 的 TLS 没有 ECH"}
 {"key": "cli/tls/hash", "kerlico": "yes", "note": "计算证书 SHA256；建议实现：算证书 SHA256 实现量小，配合证书校验配置"}
@@ -563,13 +563,13 @@
 {"key": "cli/xray/ed25519", "kerlico": "na", "note": "Xray 已移除或未注册的命令"}
 {"key": "cli/xray/help", "kerlico": "yes", "where": "apps/kerlico/src/main.rs", "note": "`kerlico help [命令]`、`--help`，中英双语"}
 {"key": "cli/xray/lua", "kerlico": "na", "note": "Xray 已移除或未注册的命令"}
-{"key": "cli/xray/mldsa65", "kerlico": "no", "note": "M11 审计（空壳）：[U-KEYGEN] use ml-dsa (already in third_party/xray-transport) keygen"}
-{"key": "cli/xray/mlkem768", "kerlico": "no", "note": "M11 审计（空壳）：[U-KEYGEN] use ml-kem (already in workspace) KeyGen from seed"}
+{"key": "cli/xray/mldsa65", "kerlico": "yes", "note": "输出真实 ML-DSA-65 密钥对，签名可用打印的验证密钥校验"}
+{"key": "cli/xray/mlkem768", "kerlico": "yes", "note": "输出真实 ML-KEM-768 密钥对，种子向量与 Xray 一致"}
 {"key": "cli/xray/run", "kerlico": "partial", "where": "apps/kerlico/src/main.rs", "note": "`kerlico run -c <文件>`，必须写子命令；缺 `-confdir` 和默认配置路径"}
 {"key": "cli/xray/tls", "kerlico": "yes", "note": "TLS 工具；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/xray/uuid", "kerlico": "yes", "note": "生成 UUID；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/xray/version", "kerlico": "yes", "where": "apps/kerlico/src/cli.rs", "note": "`kerlico --version`、`-V`"}
-{"key": "cli/xray/vlessenc", "kerlico": "no", "note": "M11 审计（空壳）：[U-KEYGEN] build real X25519 + ML-KEM-768 key blocks"}
+{"key": "cli/xray/vlessenc", "kerlico": "partial", "note": "输出配对的真实服务端与客户端密钥（X25519 与 ML-KEM-768）；Hash32 用 BLAKE3，未与 Xray 源码核对"}
 {"key": "cli/xray/wg", "kerlico": "yes", "note": "生成 WireGuard 密钥对；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "cli/xray/x25519", "kerlico": "yes", "note": "生成 X25519 密钥对；建议实现：kerlico 配置要各种密钥，目前只有 `account-new`，新手得借别家工具生成；密钥生成实现量小"}
 {"key": "config/build-tag/badlinkname", "kerlico": "na", "note": "sing-box 的 Go 构建标签；kerlico 用 Cargo feature，见 `apps/kerlico/Cargo.toml`"}
@@ -702,7 +702,7 @@
 {"key": "config/migration/tun-stack", "kerlico": "na", "note": "sing-box 的版本迁移说明，描述其旧配置，对 kerlico 不成立"}
 {"key": "config/migration/wireguard-outbound", "kerlico": "na", "note": "sing-box 的版本迁移说明，描述其旧配置，对 kerlico 不成立"}
 {"key": "config/overview/sections", "kerlico": "na", "note": "配置总览页索引，不是能力"}
-{"key": "config/reload/sighup", "kerlico": "no", "note": "M11 审计（空壳）：[U-RELOAD] diff and apply reload (listeners, routes, groups) or restart sub-engine"}
+{"key": "config/reload/sighup", "kerlico": "yes", "note": "SIGHUP 重读配置并替换引擎，无效配置时保持原引擎运行；仅 Unix"}
 {"key": "config/root/certificate", "kerlico": "no", "note": "M11 审计（空壳）：[U-ROOTSTUB] load into rustls roots for all TLS clients"}
 {"key": "config/root/certificate-providers", "kerlico": "no", "note": "M11 审计（空壳）：[U-ROOTSTUB] ACME/CF-origin issuance"}
 {"key": "config/root/dns", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "顶层 `dns`"}
@@ -1021,8 +1021,8 @@
 {"key": "dns/upstream/tcp", "kerlico": "yes", "where": "crates/dns/src/lib.rs", "note": "`tcp://IP[:端口]`，只接受字面 IP"}
 {"key": "dns/upstream/tcp-local", "kerlico": "yes", "where": "crates/dns/src/lib.rs", "note": "kerlico 的 `tcp://` 上游恒从系统路由直出，不经命名出站，就是本地模式"}
 {"key": "dns/upstream/udp", "kerlico": "yes", "where": "crates/dns/src/lib.rs", "note": "`udp://IP[:端口]`，只接受字面 IP"}
-{"key": "experimental/config/cache-file", "kerlico": "partial", "note": "M11 审计（夸大）：[U-MISC] separate files or one store"}
-{"key": "experimental/config/clash-api", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "`control` 段，只读，不兼容 Clash"}
+{"key": "experimental/config/cache-file", "kerlico": "yes", "note": "cache_file 单一持有者，选中节点与 Fake-IP 分区存储；旧格式 Fake-IP 记录不再读取"}
+{"key": "experimental/config/clash-api", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "`control` 段提供 Clash 兼容端点子集，路径与字段以 Clash 为准；日志流、PATCH /configs、UI 下载未实现"}
 {"key": "experimental/config/debug", "kerlico": "na", "note": "Go 运行时调试接口，Rust 没有对应物"}
 {"key": "experimental/config/v2ray-api", "kerlico": "no", "note": "V2Ray API 配置对象；建议暂不实现：kerlico 控制面是只读 HTTP JSON，不做 gRPC"}
 {"key": "experimental/debug/gc-percent", "kerlico": "na", "note": "Go 运行时调试接口，Rust 没有对应物"}
@@ -1055,7 +1055,7 @@
 {"key": "group/common/empty-fallback", "kerlico": "partial", "note": "M11 审计（夸大）：use a real built-in direct outbound id"}
 {"key": "group/common/exclude-filter", "kerlico": "partial", "note": "M11 审计（夸大）：replace matches_pattern with regex crate, split on backtick"}
 {"key": "group/common/exclude-type", "kerlico": "yes", "note": "按类型排除，| 分隔，无视大小写，不支持正则；建议实现：按名称和类型批量引入节点是订阅配合策略组的基础用法"}
-{"key": "group/common/expected-status", "kerlico": "no", "note": "M11 审计（空壳）：implement HealthChecker (HTTP GET via named outbound, interval/lazy/timeout/expected-status/max-failed, idle-timeout) updating ProxyRuntimeInfo"}
+{"key": "group/common/expected-status", "kerlico": "yes", "note": "状态码不在期望集合内视为失败，语法同 Mihomo"}
 {"key": "group/common/filter", "kerlico": "partial", "note": "M11 审计（夸大）：replace matches_pattern with regex crate, split on backtick"}
 {"key": "group/common/hidden", "kerlico": "no", "note": "API 返回 hidden；建议暂不实现：只影响 Clash 面板展示，kerlico 没有面板"}
 {"key": "group/common/icon", "kerlico": "no", "note": "API 返回 icon；建议暂不实现：只影响 Clash 面板展示，kerlico 没有面板"}
@@ -1063,17 +1063,17 @@
 {"key": "group/common/include-all-providers", "kerlico": "yes", "note": "引入所有集合，按名称排序；建议实现：按名称和类型批量引入节点是订阅配合策略组的基础用法"}
 {"key": "group/common/include-all-proxies", "kerlico": "yes", "note": "引入所有出站，按名称排序；建议实现：按名称和类型批量引入节点是订阅配合策略组的基础用法"}
 {"key": "group/common/interface-name", "kerlico": "na", "note": "Mihomo 已废弃字段，组上不再配置拨号属性"}
-{"key": "group/common/interval", "kerlico": "no", "note": "M11 审计（空壳）：implement HealthChecker (HTTP GET via named outbound, interval/lazy/timeout/expected-status/max-failed, idle-timeout) updating ProxyRuntimeInfo"}
-{"key": "group/common/lazy", "kerlico": "no", "note": "M11 审计（空壳）：implement HealthChecker (HTTP GET via named outbound, interval/lazy/timeout/expected-status/max-failed, idle-timeout) updating ProxyRuntimeInfo"}
+{"key": "group/common/interval", "kerlico": "yes", "note": "启动即测一轮，之后按间隔；测试只覆盖首轮"}
+{"key": "group/common/lazy", "kerlico": "yes", "note": "周期内未被路由使用的组跳过本轮；没有测试"}
 {"key": "group/common/max-failed-times", "kerlico": "no", "note": "M11 审计（空壳）：implement HealthChecker (HTTP GET via named outbound, interval/lazy/timeout/expected-status/max-failed, idle-timeout) updating ProxyRuntimeInfo"}
 {"key": "group/common/name", "kerlico": "yes", "note": "策略组名称；建议实现：kerlico 每个入口绑定一个出站，只靠规则分流，多节点切换和容灾都缺策略组这一层"}
 {"key": "group/common/proxies", "kerlico": "yes", "note": "引入出站或其他组；建议实现：kerlico 每个入口绑定一个出站，只靠规则分流，多节点切换和容灾都缺策略组这一层"}
 {"key": "group/common/routing-mark", "kerlico": "na", "note": "Mihomo 已废弃字段，组上不再配置拨号属性"}
-{"key": "group/common/timeout", "kerlico": "no", "note": "M11 审计（空壳）：implement HealthChecker (HTTP GET via named outbound, interval/lazy/timeout/expected-status/max-failed, idle-timeout) updating ProxyRuntimeInfo"}
+{"key": "group/common/timeout", "kerlico": "yes", "note": "探测超时毫秒；没有超时失败的测试"}
 {"key": "group/common/type", "kerlico": "yes", "note": "策略组类型；建议实现：kerlico 每个入口绑定一个出站，只靠规则分流，多节点切换和容灾都缺策略组这一层"}
-{"key": "group/common/url", "kerlico": "no", "note": "M11 审计（空壳）：implement HealthChecker (HTTP GET via named outbound, interval/lazy/timeout/expected-status/max-failed, idle-timeout) updating ProxyRuntimeInfo"}
+{"key": "group/common/url", "kerlico": "yes", "note": "探测发往该地址，Remote 出站收到未解析的域名"}
 {"key": "group/common/use", "kerlico": "yes", "note": "引入代理集合；建议实现：按名称和类型批量引入节点是订阅配合策略组的基础用法"}
-{"key": "group/fallback/protocol", "kerlico": "no", "note": "M11 审计（空壳）：implement HealthChecker (HTTP GET via named outbound, interval/lazy/timeout/expected-status/max-failed, idle-timeout) updating ProxyRuntimeInfo"}
+{"key": "group/fallback/protocol", "kerlico": "yes", "note": "按顺序选第一个探测成功的成员，失败成员标为 not alive"}
 {"key": "group/global/protocol", "kerlico": "no", "note": "预置 GLOBAL 组，可自定义；建议暂不实现：只服务 Mihomo 的 global 模式，kerlico 没有运行模式"}
 {"key": "group/least-load/baselines", "kerlico": "no", "note": "最高可接受 RTT 标准差；建议暂不实现：kerlico 先按 select、url-test、fallback、load-balance 实现策略组，Xray 的 balancer 配置形态后续只做映射"}
 {"key": "group/least-load/costs", "kerlico": "no", "note": "出站权重数组；建议暂不实现：kerlico 先按 select、url-test、fallback、load-balance 实现策略组，Xray 的 balancer 配置形态后续只做映射"}
@@ -1099,18 +1099,18 @@
 {"key": "group/round-robin/round-robin", "kerlico": "no", "note": "轮询选节点的负载均衡策略；建议暂不实现：kerlico 先按 select、url-test、fallback、load-balance 实现策略组，Xray 的 balancer 配置形态后续只做映射；能力由 load-balance 覆盖"}
 {"key": "group/select/combo", "kerlico": "yes", "note": "selector 组的默认值和切换行为组合；建议实现：kerlico 每个入口绑定一个出站，只靠规则分流，多节点切换和容灾都缺策略组这一层，手动切节点还要配合可写控制接口"}
 {"key": "group/select/default", "kerlico": "yes", "note": "默认的出站标签；建议实现：kerlico 每个入口绑定一个出站，只靠规则分流，多节点切换和容灾都缺策略组这一层，手动切节点还要配合可写控制接口"}
-{"key": "group/select/interrupt-exist-connections", "kerlico": "no", "note": "M11 审计（空壳）：register ActiveConnection in Dispatcher::tcp/udp and trigger close on url-test switch"}
+{"key": "group/select/interrupt-exist-connections", "kerlico": "yes", "note": "切换选中成员后关闭经过旧成员的流，新成员上的流不受影响"}
 {"key": "group/select/outbounds", "kerlico": "yes", "note": "用于选择的出站标签列表；建议实现：kerlico 每个入口绑定一个出站，只靠规则分流，多节点切换和容灾都缺策略组这一层，手动切节点还要配合可写控制接口"}
 {"key": "group/select/protocol", "kerlico": "yes", "note": "手动选择；建议实现：kerlico 每个入口绑定一个出站，只靠规则分流，多节点切换和容灾都缺策略组这一层，手动切节点还要配合可写控制接口"}
 {"key": "group/types/combo", "kerlico": "partial", "note": "M11 审计（夸大）"}
-{"key": "group/url-test/combo", "kerlico": "partial", "note": "M11 审计（夸大）"}
+{"key": "group/url-test/combo", "kerlico": "partial", "note": "url、interval、tolerance、lazy 生效；idle_timeout、max_failed_times 解析后未使用"}
 {"key": "group/url-test/idle-timeout", "kerlico": "no", "note": "M11 审计（空壳）：implement HealthChecker (HTTP GET via named outbound, interval/lazy/timeout/expected-status/max-failed, idle-timeout) updating ProxyRuntimeInfo"}
-{"key": "group/url-test/interrupt-exist-connections", "kerlico": "no", "note": "M11 审计（空壳）：register ActiveConnection in Dispatcher::tcp/udp and trigger close on url-test switch"}
-{"key": "group/url-test/interval", "kerlico": "no", "note": "M11 审计（空壳）：implement HealthChecker (HTTP GET via named outbound, interval/lazy/timeout/expected-status/max-failed, idle-timeout) updating ProxyRuntimeInfo"}
+{"key": "group/url-test/interrupt-exist-connections", "kerlico": "yes", "note": "自动切换时同一函数关闭旧成员的流；测试只覆盖 select 组"}
+{"key": "group/url-test/interval", "kerlico": "yes", "note": "启动即测一轮，之后按间隔；测试只覆盖首轮"}
 {"key": "group/url-test/outbounds", "kerlico": "yes", "note": "用于测试的出站标签列表；建议实现：kerlico 每个入口绑定一个出站，只靠规则分流，多节点切换和容灾都缺策略组这一层，自动选延迟最低的节点是客户端最常用的组"}
-{"key": "group/url-test/protocol", "kerlico": "no", "note": "M11 审计（空壳）：implement HealthChecker (HTTP GET via named outbound, interval/lazy/timeout/expected-status/max-failed, idle-timeout) updating ProxyRuntimeInfo"}
-{"key": "group/url-test/tolerance", "kerlico": "partial", "note": "M11 审计（夸大）：health-check unit"}
-{"key": "group/url-test/url", "kerlico": "no", "note": "M11 审计（空壳）：implement HealthChecker (HTTP GET via named outbound, interval/lazy/timeout/expected-status/max-failed, idle-timeout) updating ProxyRuntimeInfo"}
+{"key": "group/url-test/protocol", "kerlico": "yes", "note": "按实测延迟选最快成员"}
+{"key": "group/url-test/tolerance", "kerlico": "yes", "note": "新成员须比当前成员快过容差才切换；没有测试"}
+{"key": "group/url-test/url", "kerlico": "yes", "note": "探测发往该地址"}
 {"key": "log/api/structured", "kerlico": "no", "note": "M11 审计（空壳）：[U-LOG] structured fields once log pipeline exists"}
 {"key": "log/config/disabled", "kerlico": "no", "note": "禁用日志，启动后不输出日志；建议暂不实现：kerlico 默认只把启动和入口失败写到标准输出、标准错误，要静默可重定向"}
 {"key": "log/config/level", "kerlico": "no", "note": "M11 审计（空壳）：[U-LOG] level-filtered log sink"}
@@ -1272,18 +1272,18 @@
 {"key": "provider/content/format", "kerlico": "yes", "note": "集合文件内容格式；建议实现：kerlico 只能在配置文件里写死出站，改节点要手改配置并重启，客户端场景缺订阅"}
 {"key": "provider/outbound/unsupported", "kerlico": "na", "note": "记录 sing-box 文档没有提供者配置，不是一项能力；能力见 provider/proxy/type"}
 {"key": "provider/proxy/age-secret-key", "kerlico": "no", "note": "解密 age armor 配置；建议暂不实现：先做订阅拉取和筛选，覆写字段等基础能力稳定后再说"}
-{"key": "provider/proxy/combo", "kerlico": "partial", "note": "M11 审计（夸大）：implement HTTP fetcher with cache file, interval refresh, size-limit, header, proxy detour"}
+{"key": "provider/proxy/combo", "kerlico": "partial", "note": "http 下载与缓存、健康检查已实现；订阅解析覆盖面见 Mihomo 映射"}
 {"key": "provider/proxy/exclude-filter", "kerlico": "partial", "note": "M11 审计（夸大）：replace matches_pattern with regex crate, split on backtick"}
 {"key": "provider/proxy/exclude-type", "kerlico": "yes", "note": "按配置 type 排除，| 分隔；建议实现：kerlico 只能在配置文件里写死出站，改节点要手改配置并重启，客户端场景缺订阅"}
 {"key": "provider/proxy/filter", "kerlico": "partial", "note": "M11 审计（夸大）：replace matches_pattern with regex crate, split on backtick"}
-{"key": "provider/proxy/header", "kerlico": "no", "note": "M11 审计（空壳）：HTTP fetcher unit"}
-{"key": "provider/proxy/health-check-enable", "kerlico": "no", "note": "M11 审计（空壳）：HealthChecker unit"}
-{"key": "provider/proxy/health-check-expected-status", "kerlico": "no", "note": "M11 审计（空壳）：HealthChecker unit"}
-{"key": "provider/proxy/health-check-interval", "kerlico": "no", "note": "M11 审计（空壳）：HealthChecker unit"}
-{"key": "provider/proxy/health-check-lazy", "kerlico": "no", "note": "M11 审计（空壳）：HealthChecker unit"}
-{"key": "provider/proxy/health-check-timeout", "kerlico": "no", "note": "M11 审计（空壳）：HealthChecker unit"}
-{"key": "provider/proxy/health-check-url", "kerlico": "no", "note": "M11 审计（空壳）：HealthChecker unit"}
-{"key": "provider/proxy/interval", "kerlico": "no", "note": "M11 审计（空壳）：HTTP fetcher unit"}
+{"key": "provider/proxy/header", "kerlico": "yes", "note": "下载请求附带自定义请求头；没有测试"}
+{"key": "provider/proxy/health-check-enable", "kerlico": "yes", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "provider/proxy/health-check-expected-status", "kerlico": "yes", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "provider/proxy/health-check-interval", "kerlico": "yes", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "provider/proxy/health-check-lazy", "kerlico": "yes", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "provider/proxy/health-check-timeout", "kerlico": "yes", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "provider/proxy/health-check-url", "kerlico": "yes", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "provider/proxy/interval", "kerlico": "yes", "note": "启动时缓存过期即刷新，之后按间隔刷新；提供者间隔没有单独测试"}
 {"key": "provider/proxy/name", "kerlico": "yes", "note": "代理集合名称；建议实现：kerlico 只能在配置文件里写死出站，改节点要手改配置并重启，客户端场景缺订阅"}
 {"key": "provider/proxy/override-additional-prefix", "kerlico": "no", "note": "节点名前缀；建议暂不实现：先做订阅拉取和筛选，覆写字段等基础能力稳定后再说"}
 {"key": "provider/proxy/override-additional-suffix", "kerlico": "no", "note": "节点名后缀；建议暂不实现：先做订阅拉取和筛选，覆写字段等基础能力稳定后再说"}
@@ -1303,10 +1303,10 @@
 {"key": "provider/proxy/override-up", "kerlico": "no", "note": "覆写 hysteria up；建议暂不实现：先做订阅拉取和筛选，覆写字段等基础能力稳定后再说"}
 {"key": "provider/proxy/path", "kerlico": "yes", "note": "订阅文件路径；建议实现：kerlico 只能在配置文件里写死出站，改节点要手改配置并重启，客户端场景缺订阅"}
 {"key": "provider/proxy/payload", "kerlico": "yes", "note": "内联节点内容，http、file 解析失败时作备用；建议实现：kerlico 只能在配置文件里写死出站，改节点要手改配置并重启，客户端场景缺订阅"}
-{"key": "provider/proxy/proxy", "kerlico": "no", "note": "M11 审计（空壳）：HTTP fetcher unit"}
-{"key": "provider/proxy/size-limit", "kerlico": "partial", "note": "M11 审计（夸大）：HTTP fetcher unit"}
-{"key": "provider/proxy/type", "kerlico": "partial", "note": "M11 审计（夸大）：implement HTTP fetcher with cache file, interval refresh, size-limit, header, proxy detour"}
-{"key": "provider/proxy/url", "kerlico": "no", "note": "M11 审计（空壳）：HTTP fetcher unit"}
+{"key": "provider/proxy/proxy", "kerlico": "yes", "note": "经命名出站下载，目标域名不在本机解析；规则集路径有测试，提供者无单独测试"}
+{"key": "provider/proxy/size-limit", "kerlico": "yes", "note": "按内容长度与解压后大小限制下载，0 取默认上限；没有端到端测试"}
+{"key": "provider/proxy/type", "kerlico": "yes", "note": "http 经出站下载订阅并写缓存，成员变化通知引擎重建；file、inline 照旧"}
+{"key": "provider/proxy/url", "kerlico": "yes", "note": "订阅地址经出站下载，失败沿用缓存"}
 {"key": "route/action/bypass", "kerlico": "no", "note": "`bypass` 在预匹配中为 auto redirect 连接在内核层面绕过 sing-box；建议暂不实现：auto redirect 未实现，TUN 不接管路由"}
 {"key": "route/action/client-subnet", "kerlico": "no", "note": "默认情况下，将带有指定 IP 前缀的 `edns0-subnet` OPT 附加记录附加到每个查询；建议暂不实现：属于 resolve 动作的查询选项，先做 resolve 本身"}
 {"key": "route/action/compatible", "kerlico": "no", "note": "策略组筛选不出节点时出现，等效 DIRECT；建议暂不实现：依赖策略组；kerlico 引用不存在的出站时在配置检查阶段报错"}
@@ -1411,7 +1411,7 @@
 {"key": "route/rule/geosite", "kerlico": "partial", "note": "M11 审计（夸大）：load geoip.dat/geosite.dat/mmdb at runtime and wire into RouteTable"}
 {"key": "route/rule/geosite-attr", "kerlico": "no", "note": "按属性筛选 geosite；建议暂不实现：先做基础 geosite，属性筛选后补"}
 {"key": "route/rule/in-name", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`node`，填节点或入口标签"}
-{"key": "route/rule/in-port", "kerlico": "no", "where": "crates/routing/src/lib.rs", "note": "M11 审计（空壳）：implement in_port/in_type/dscp/uid conditions or reject them at compile time"}
+{"key": "route/rule/in-port", "kerlico": "no", "where": "crates/routing/src/lib.rs", "note": "in_port、in_type、dscp、uid 条件在编译期被拒绝，不会匹配全部流量；真实匹配未实现"}
 {"key": "route/rule/in-type", "kerlico": "no", "note": "入站类型；建议暂不实现：`node` 已能按标签指定入口，按协议类型匹配是便利写法"}
 {"key": "route/rule/in-user", "kerlico": "partial", "where": "crates/routing/src/lib.rs", "note": "`user` 匹配已鉴权管理账户的 UUID，不接受用户名"}
 {"key": "route/rule/inbound", "kerlico": "yes", "where": "crates/routing/src/lib.rs", "note": "`node`，填节点或入口标签"}
@@ -1504,23 +1504,23 @@
 {"key": "ruleset/config/path", "kerlico": "yes", "note": "规则集的文件路径；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/config/rules", "kerlico": "yes", "note": "内联规则集的规则；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/config/tag", "kerlico": "yes", "note": "规则集的标签；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/config/type", "kerlico": "partial", "note": "M11 审计（夸大）：fetcher"}
-{"key": "ruleset/config/update-interval", "kerlico": "no", "note": "M11 审计（空壳）：fetcher"}
-{"key": "ruleset/config/url", "kerlico": "no", "note": "M11 审计（空壳）：fetcher"}
+{"key": "ruleset/config/type", "kerlico": "yes", "note": "remote 经出站下载并写缓存，启动加载并可运行中刷新；local 读本地文件"}
+{"key": "ruleset/config/update-interval", "kerlico": "yes", "note": "缓存过期启动即刷新，之后按间隔；失败沿用旧缓存"}
+{"key": "ruleset/config/url", "kerlico": "yes", "note": "规则集下载地址，经 download_detour 出站，ETag 命中保持原规则集"}
 {"key": "ruleset/content/classical", "kerlico": "partial", "note": "M11 审计（夸大）：support remaining classical rule types"}
 {"key": "ruleset/content/domain", "kerlico": "yes", "note": "domain 内容遵守 Clash 通配符；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/content/ipcidr", "kerlico": "yes", "note": "ipcidr 内容为 CIDR；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/ext/file-tag", "kerlico": "no", "note": "ext:file:tag 外部 dat；建议暂不实现：Xray 专属 dat 引用写法，先支持 geoip.dat、geosite.dat"}
-{"key": "ruleset/geo/geo-auto-update", "kerlico": "no", "note": "M11 审计（空壳）：geo updater: HTTP fetch + atomic replace + reload"}
-{"key": "ruleset/geo/geo-update-interval", "kerlico": "no", "note": "M11 审计（空壳）：geo updater: HTTP fetch + atomic replace + reload"}
+{"key": "ruleset/geo/geo-auto-update", "kerlico": "partial", "note": "按间隔下载 geo 文件并落盘；运行时仍用内置 GeoIP/GeoSite 表，无 HTTPS 与 gzip 真实服务测试"}
+{"key": "ruleset/geo/geo-update-interval", "kerlico": "partial", "note": "按间隔下载 geo 文件并落盘；运行时仍用内置 GeoIP/GeoSite 表，无 HTTPS 与 gzip 真实服务测试"}
 {"key": "ruleset/geo/geodata-loader", "kerlico": "no", "note": "GEO 文件加载器；建议暂不实现：Mihomo 内部数据格式和加载器的选项，kerlico 选定一种格式即可"}
 {"key": "ruleset/geo/geodata-mode", "kerlico": "no", "note": "GEOIP 文件类型：true 用 dat；建议暂不实现：Mihomo 内部数据格式和加载器的选项，kerlico 选定一种格式即可"}
 {"key": "ruleset/geo/geoip-geosite", "kerlico": "na", "note": "sing-box 已移除的 GeoIP、Geosite 数据库说明，能力见 route/rule/geoip、route/rule/geosite"}
 {"key": "ruleset/geo/geosite-matcher", "kerlico": "no", "note": "GeoSite 匹配器实现；建议暂不实现：Mihomo 内部数据格式和加载器的选项，kerlico 选定一种格式即可"}
 {"key": "ruleset/geo/geox-url-asn", "kerlico": "no", "note": "GeoLite2-ASN.mmdb 下载地址；建议暂不实现：ASN 规则暂不实现，数据文件也不需要"}
-{"key": "ruleset/geo/geox-url-geoip", "kerlico": "no", "note": "M11 审计（空壳）：geo updater: HTTP fetch + atomic replace + reload"}
-{"key": "ruleset/geo/geox-url-geosite", "kerlico": "no", "note": "M11 审计（空壳）：geo updater: HTTP fetch + atomic replace + reload"}
-{"key": "ruleset/geo/geox-url-mmdb", "kerlico": "no", "note": "M11 审计（空壳）：geo updater: HTTP fetch + atomic replace + reload"}
+{"key": "ruleset/geo/geox-url-geoip", "kerlico": "partial", "note": "按间隔下载 geo 文件并落盘；运行时仍用内置 GeoIP/GeoSite 表，无 HTTPS 与 gzip 真实服务测试"}
+{"key": "ruleset/geo/geox-url-geosite", "kerlico": "partial", "note": "按间隔下载 geo 文件并落盘；运行时仍用内置 GeoIP/GeoSite 表，无 HTTPS 与 gzip 真实服务测试"}
+{"key": "ruleset/geo/geox-url-mmdb", "kerlico": "partial", "note": "按间隔下载 geo 文件并落盘；运行时仍用内置 GeoIP/GeoSite 表，无 HTTPS 与 gzip 真实服务测试"}
 {"key": "ruleset/geodata/assets", "kerlico": "no", "note": "要下载替换的文件列表；建议暂不实现：Xray 的 cron 定时替换文件；kerlico 优先做规则集式的 `update_interval`"}
 {"key": "ruleset/geodata/cron", "kerlico": "no", "note": "5 段 cron，本地时区；建议暂不实现：Xray 的 cron 定时替换文件；kerlico 优先做规则集式的 `update_interval`"}
 {"key": "ruleset/geodata/file", "kerlico": "no", "note": "geodata 写入文件名；建议暂不实现：Xray 的 cron 定时替换文件；kerlico 优先做规则集式的 `update_interval`"}
@@ -1560,15 +1560,15 @@
 {"key": "ruleset/rule-provider/combo", "kerlico": "partial", "note": "M11 审计（夸大）：fetcher + .mrs reader"}
 {"key": "ruleset/rule-provider/format", "kerlico": "no", "note": "M11 审计（空壳）：implement sing-box .srs (zlib+varint) and mihomo .mrs (zstd) readers; else error out"}
 {"key": "ruleset/rule-provider/header", "kerlico": "no", "note": "自定义请求头；建议暂不实现：基础能力之后再补，需求小"}
-{"key": "ruleset/rule-provider/interval", "kerlico": "no", "note": "M11 审计（空壳）：fetcher"}
+{"key": "ruleset/rule-provider/interval", "kerlico": "yes", "note": "与 sing-box 远程规则集同一下载路径；测试用 sing-box 写法，未用 Mihomo rule-providers 写法"}
 {"key": "ruleset/rule-provider/name", "kerlico": "yes", "note": "规则集名称；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/rule-provider/path", "kerlico": "yes", "note": "规则集文件路径；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/rule-provider/path-in-bundle", "kerlico": "no", "note": "本地无文件时从 BundleMRS.7z 解压的路径；建议暂不实现：基础能力之后再补，需求小"}
 {"key": "ruleset/rule-provider/payload", "kerlico": "yes", "note": "内容，仅 inline 生效；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
-{"key": "ruleset/rule-provider/proxy", "kerlico": "no", "note": "M11 审计（空壳）：fetcher"}
-{"key": "ruleset/rule-provider/size-limit", "kerlico": "no", "note": "M11 审计（空壳）：fetcher"}
-{"key": "ruleset/rule-provider/type", "kerlico": "partial", "note": "M11 审计（夸大）：fetcher"}
-{"key": "ruleset/rule-provider/url", "kerlico": "no", "note": "M11 审计（空壳）：fetcher"}
+{"key": "ruleset/rule-provider/proxy", "kerlico": "yes", "note": "与 sing-box 远程规则集同一下载路径；测试用 sing-box 写法，未用 Mihomo rule-providers 写法"}
+{"key": "ruleset/rule-provider/size-limit", "kerlico": "yes", "note": "与 sing-box 远程规则集同一下载路径；测试用 sing-box 写法，未用 Mihomo rule-providers 写法"}
+{"key": "ruleset/rule-provider/type", "kerlico": "yes", "note": "与 sing-box 远程规则集同一下载路径；测试用 sing-box 写法，未用 Mihomo rule-providers 写法"}
+{"key": "ruleset/rule-provider/url", "kerlico": "yes", "note": "与 sing-box 远程规则集同一下载路径；测试用 sing-box 写法，未用 Mihomo rule-providers 写法"}
 {"key": "ruleset/source/rules", "kerlico": "yes", "note": "源格式规则集的规则；建议实现：kerlico 规则只能逐条写在配置里，这是规则集的基本字段"}
 {"key": "ruleset/source/version", "kerlico": "no", "note": "规则集版本；建议暂不实现：版本号服务 sing-box 自身的格式演进，kerlico 第一版不需要"}
 {"key": "ruleset/source/version-values", "kerlico": "no", "note": "源格式规则集版本；建议暂不实现：版本号服务 sing-box 自身的格式演进，kerlico 第一版不需要"}
@@ -1590,7 +1590,7 @@
 {"key": "stats/policy/stats-user-downlink", "kerlico": "partial", "where": "crates/egress/src/telemetry.rs", "note": "内存计数恒开，不能按等级关闭"}
 {"key": "stats/policy/stats-user-online", "kerlico": "partial", "where": "crates/control/src/lib.rs", "note": "`/v1/online` 恒开，按活动连接算在线，地址遮罩为 /24、/48；不是 20 秒窗口"}
 {"key": "stats/policy/stats-user-uplink", "kerlico": "partial", "where": "crates/egress/src/telemetry.rs", "note": "内存计数恒开，不能按等级关闭"}
-{"key": "stats/proxies/delay-history", "kerlico": "no", "note": "M11 审计（空壳）：[U-PROBE] needs U-PROBE"}
+{"key": "stats/proxies/delay-history", "kerlico": "yes", "note": "history 记录每次实测延迟，探测失败记 0"}
 {"key": "stats/rules/hit-count", "kerlico": "no", "note": "/rules extra 的 disabled、hitCount、hitAt、missCount、missAt；建议暂不实现：kerlico 的访问记录不带规则下标，要改 `FlowRecord`，需求不急"}
 {"key": "stats/splice/lag", "kerlico": "na", "note": "描述 Xray 用 Splice 时的统计延迟，kerlico 中继不走 splice"}
 {"key": "stats/ssm/stats", "kerlico": "no", "note": "SSM API 流量统计，GET /server/v1/stats，clear=true 读后清零；建议暂不实现：kerlico 有 `/v1/usage` 和 `history`，不照搬 SSM"}

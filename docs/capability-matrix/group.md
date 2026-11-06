@@ -35,7 +35,7 @@
 | `empty-fallback` | 组为空时回退，默认 COMPATIBLE | 有 |  |  | 部分 | 未测 | 取值：`proxy 名`<br>约束：不支持填代理组 |
 | `exclude-filter` | 排除节点，` 分隔多个正则 | 有 |  |  | 部分 | 未测 | 取值：`正则` |
 | `exclude-type` | 按类型排除，\| 分隔，无视大小写，不支持正则 | 有 |  |  | 已实现 | 未测 | 取值：`Shadowsocks\|Http`<br>约束：仅排除引入的出站代理 |
-| `expected-status` | 健康检查期望状态码，默认 * | 有 |  |  | 未实现 | 未测 | 取值：`*`、`200/302`、`200/302/400-503`、`204`、`400-503` |
+| `expected-status` | 健康检查期望状态码，默认 * | 有 |  |  | 已实现 | 通过 | 取值：`*`、`200/302`、`200/302/400-503`、`204`、`400-503` |
 | `filter` | 筛选节点，` 分隔多个正则 | 有 |  |  | 部分 | 未测 | 取值：`正则`<br>约束：仅作用于引入集合与 include-all-proxies |
 | `hidden` | API 返回 hidden | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `icon` | API 返回 icon | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
@@ -43,22 +43,22 @@
 | `include-all-providers` | 引入所有集合，按名称排序 | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true`<br>约束：会使 use 失效 |
 | `include-all-proxies` | 引入所有出站，按名称排序 | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true`<br>约束：不含策略组 |
 | `interface-name` | 组出站接口，已弃用 | 废弃 |  |  | 不适用 | 未测 | 取值：`接口名` |
-| `interval` | 健康检查间隔秒，不为 0 启用定时测试 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `lazy` | 懒惰，默认 true | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `interval` | 健康检查间隔秒，不为 0 启用定时测试 | 有 |  |  | 已实现 | 未测 | 取值：`整数` |
+| `lazy` | 懒惰，默认 true | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true` |
 | `max-failed-times` | 最大失败次数，超过强制健康检查，默认 5 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `name` | 必须，组名 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
 | `proxies` | 引入出站或其他组 | 有 |  |  | 已实现 | 通过 | 取值：`列表` |
 | `routing-mark` | 组路由标记，已弃用 | 废弃 |  |  | 不适用 | 未测 | 取值：`整数` |
-| `timeout` | 健康检查超时，毫秒 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
+| `timeout` | 健康检查超时，毫秒 | 有 |  |  | 已实现 | 未测 | 取值：`整数` |
 | `type` | 必须，组类型 | 有 |  |  | 已实现 | 通过 | 取值：`fallback`、`load-balance`、`relay`、`select`、`url-test` |
-| `url` | 健康检查地址 | 有 |  |  | 未实现 | 未测 | 取值：`URL`<br>约束：只检查 proxies 字段，不检查 use 引入的节点 |
+| `url` | 健康检查地址 | 有 |  |  | 已实现 | 通过 | 取值：`URL`<br>约束：只检查 proxies 字段，不检查 use 引入的节点 |
 | `use` | 引入代理集合 | 有 |  |  | 已实现 | 未测 | 取值：`列表` |
 
 ## fallback
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | 当前节点超时时按顺序选第一个可用 | 有 |  |  | 未实现 | 未测 | 取值：`fallback` |
+| `protocol` | 当前节点超时时按顺序选第一个可用 | 有 |  |  | 已实现 | 通过 | 取值：`fallback` |
 
 ## global
 
@@ -130,7 +130,7 @@
 | `protocol` | 手动选择 | 有 | 有 |  | 已实现 | 通过 | 取值：`select`、`selector`<br>约束：目前只能通过 Clash API 控制 |
 | `combo` | selector 组的默认值和切换行为组合 |  | 有 |  | 已实现 | 通过 | default：`first`、`named`<br>interrupt_exist_connections：`off`、`on`<br>control：`clash-api`、`cli:api group select`、`sing-box-api`<br>约束：outbounds 必填<br>约束：切换时内部连接总被中断，interrupt_exist_connections 只影响入站连接 |
 | `default` | 默认的出站标签。 |  | 有 |  | 已实现 | 通过 | 约束：默认使用第一个出站。 |
-| `interrupt-exist-connections` | 当选定的出站发生更改时，中断现有连接。 |  | 有 |  | 未实现 | 未测 | 约束：仅入站连接受此设置影响，内部连接将始终被中断。 |
+| `interrupt-exist-connections` | 当选定的出站发生更改时，中断现有连接。 |  | 有 |  | 已实现 | 通过 | 约束：仅入站连接受此设置影响，内部连接将始终被中断。 |
 | `outbounds` | 用于选择的出站标签列表。 |  | 有 |  | 已实现 | 通过 | 约束：必填 |
 
 ## types
@@ -143,11 +143,11 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | 按延迟自动选择 | 有 | 有 |  | 未实现 | 未测 | 取值：`url-test`、`urltest`<br>约束：interval 必须不大于 idle_timeout（source:protocol/group/urltest.go） |
+| `protocol` | 按延迟自动选择 | 有 | 有 |  | 已实现 | 通过 | 取值：`url-test`、`urltest`<br>约束：interval 必须不大于 idle_timeout（source:protocol/group/urltest.go） |
 | `combo` | urltest 组的测速参数组合 |  | 有 |  | 部分 | 未测 | url：`custom`、`default`<br>interval：`custom`、`default-3m`<br>tolerance：`custom`、`default-50ms`<br>idle_timeout：`custom`、`default-30m`<br>interrupt_exist_connections：`off`、`on`<br>约束：interval 必须不大于 idle_timeout（source:protocol/group/urltest.go）<br>约束：outbounds 必填 |
 | `idle-timeout` | 空闲超时。 |  | 有 |  | 未实现 | 未测 | 约束：默认使用 `30m`。 |
-| `interrupt-exist-connections` | 当选定的出站发生更改时，中断现有连接。 |  | 有 |  | 未实现 | 未测 | 约束：仅入站连接受此设置影响，内部连接将始终被中断。 |
-| `interval` | 测试间隔。 |  | 有 |  | 未实现 | 未测 | 约束：默认使用 `3m`。 |
+| `interrupt-exist-connections` | 当选定的出站发生更改时，中断现有连接。 |  | 有 |  | 已实现 | 未测 | 约束：仅入站连接受此设置影响，内部连接将始终被中断。 |
+| `interval` | 测试间隔。 |  | 有 |  | 已实现 | 未测 | 约束：默认使用 `3m`。 |
 | `outbounds` | 用于测试的出站标签列表。 |  | 有 |  | 已实现 | 未测 | 约束：必填 |
-| `tolerance` | 切换容差 ms | 有 | 有 |  | 部分 | 未测 | 取值：`整数`<br>约束：默认使用 `50`。 |
-| `url` | 用于测试的链接。 |  | 有 |  | 未实现 | 未测 | 约束：默认使用 `https://www.gstatic.com/generate_204`。 |
+| `tolerance` | 切换容差 ms | 有 | 有 |  | 已实现 | 未测 | 取值：`整数`<br>约束：默认使用 `50`。 |
+| `url` | 用于测试的链接。 |  | 有 |  | 已实现 | 通过 | 约束：默认使用 `https://www.gstatic.com/generate_204`。 |

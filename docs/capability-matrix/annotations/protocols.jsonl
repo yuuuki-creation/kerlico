@@ -280,87 +280,87 @@
 {"key": "inbound/naive/users", "kerlico": "yes", "where": "crates/protocol-naive/src/server.rs", "note": "节点 `members`"}
 {"key": "inbound/naive/users-password", "kerlico": "yes", "where": "crates/protocol-naive/src/config.rs", "note": "成员 `native_credential` 的 `password`"}
 {"key": "inbound/naive/users-username", "kerlico": "yes", "where": "crates/protocol-naive/src/config.rs", "note": "成员 `native_credential` 的 `username`"}
-{"key": "inbound/openvpn/address", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Allocate client IPs from address pool and use it for StackOptions/PUSH_REPLY ifconfig"}
+{"key": "inbound/openvpn/address", "kerlico": "yes", "where": "", "note": "服务端地址与前缀构成地址池，官方客户端各取不同地址"}
 {"key": "inbound/openvpn/auth", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）"}
-{"key": "inbound/openvpn/cipher", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add static_key data-channel cipher (BF-CBC/AES-CBC + HMAC)"}
-{"key": "inbound/openvpn/combo", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）"}
-{"key": "inbound/openvpn/data-ciphers", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Negotiate cipher from peer_info IV_CIPHERS intersect list"}
-{"key": "inbound/openvpn/data-ciphers-fallback", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add field and legacy fallback cipher"}
-{"key": "inbound/openvpn/duplicate-cn", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Track active sessions by CN/username and reject duplicates unless enabled"}
-{"key": "inbound/openvpn/handshake-window", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Enforce handshake deadline in tick and drop session"}
-{"key": "inbound/openvpn/key-direction", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Accept key_direction alias and apply to static-key data keys"}
-{"key": "inbound/openvpn/max-clients", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Reject new sessions over max_clients (default 1024) and evict closed ones"}
-{"key": "inbound/openvpn/mode", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Implement real static_key mode (no TLS, data keys from static key)"}
-{"key": "inbound/openvpn/mss-fix", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Clamp SYN MSS option in tunnel ingress/egress"}
-{"key": "inbound/openvpn/mss-fix-disabled", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add field together with MSS clamp"}
-{"key": "inbound/openvpn/mss-fix-mode", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add mtu/fixed mode with MSS clamp"}
+{"key": "inbound/openvpn/cipher", "kerlico": "no", "where": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/combo", "kerlico": "partial", "where": "", "note": "TLS 模式下传输、客户端校验、推送、换钥可组合，官方客户端互通；static_key、系统 TUN、MSS 钳制未实现"}
+{"key": "inbound/openvpn/data-ciphers", "kerlico": "yes", "where": "", "note": "NCP 按服务端顺序取客户端声明中的第一个算法"}
+{"key": "inbound/openvpn/data-ciphers-fallback", "kerlico": "yes", "where": "", "note": "协商失败时使用的算法，仍无结果回 AUTH_FAILED；没有测试"}
+{"key": "inbound/openvpn/duplicate-cn", "kerlico": "yes", "where": "", "note": "关闭时同一身份再次登录顶掉旧会话并接手地址，开启时并存"}
+{"key": "inbound/openvpn/handshake-window", "kerlico": "yes", "where": "", "note": "首次握手与换钥超时关闭会话"}
+{"key": "inbound/openvpn/key-direction", "kerlico": "no", "where": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/max-clients", "kerlico": "yes", "where": "", "note": "握手中与已建立会话总数受限，退出后释放名额"}
+{"key": "inbound/openvpn/mode", "kerlico": "partial", "where": "", "note": "只接受 tls，static_key 在配置阶段报未实现"}
+{"key": "inbound/openvpn/mss-fix", "kerlico": "no", "where": "", "note": "只校验范围，没有 MSS 钳制"}
+{"key": "inbound/openvpn/mss-fix-disabled", "kerlico": "no", "where": "", "note": "没有该字段，配置报未知字段"}
+{"key": "inbound/openvpn/mss-fix-mode", "kerlico": "no", "where": "", "note": "没有该字段，配置报未知字段"}
 {"key": "inbound/openvpn/mtu", "kerlico": "yes", "where": "", "note": "OpenVPN 接口 MTU。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/name", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Implement system TUN with name or drop claim"}
-{"key": "inbound/openvpn/network", "kerlico": "yes", "where": "", "note": "OpenVPN 传输网络，`udp` 或 `tcp` 之一。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/peer-address", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add field for static_key p2p ifconfig"}
-{"key": "inbound/openvpn/peer-address-ipv6", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add field and IPv6 ifconfig-ipv6"}
-{"key": "inbound/openvpn/ping-interval", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Send PING on idle in tick"}
-{"key": "inbound/openvpn/ping-restart", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Track last-receive and drop session after ping_restart"}
-{"key": "inbound/openvpn/protocol", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）"}
-{"key": "inbound/openvpn/push", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
-{"key": "inbound/openvpn/push-block-outside-dns", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
-{"key": "inbound/openvpn/push-dhcp-options", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
-{"key": "inbound/openvpn/push-dns", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
-{"key": "inbound/openvpn/push-dns-servers", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
-{"key": "inbound/openvpn/push-dns-servers-addresses", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
-{"key": "inbound/openvpn/push-dns-servers-dnssec", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
-{"key": "inbound/openvpn/push-dns-servers-priority", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
-{"key": "inbound/openvpn/push-dns-servers-resolve-domains", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
-{"key": "inbound/openvpn/push-dns-servers-sni", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
-{"key": "inbound/openvpn/push-dns-servers-transport", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
-{"key": "inbound/openvpn/push-ping-interval", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
-{"key": "inbound/openvpn/push-ping-restart", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
-{"key": "inbound/openvpn/push-redirect-gateway", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
-{"key": "inbound/openvpn/push-redirect-gateway-flags", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add flags and emit redirect-gateway <flags>"}
-{"key": "inbound/openvpn/push-routes", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
-{"key": "inbound/openvpn/push-search-domains", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add field and emit dns search-domains push line"}
-{"key": "inbound/openvpn/remote", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add UDP static_key fixed remote"}
-{"key": "inbound/openvpn/remote-port", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add UDP static_key fixed remote port"}
-{"key": "inbound/openvpn/renegotiate-bytes", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Trigger SoftReset rekey after byte count"}
-{"key": "inbound/openvpn/renegotiate-disabled", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add with rekey implementation"}
-{"key": "inbound/openvpn/renegotiate-interval", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Implement timed rekey with new key_id"}
-{"key": "inbound/openvpn/renegotiate-packets", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Trigger rekey after packet count"}
-{"key": "inbound/openvpn/replay-window", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Size ReplayWindow from config"}
-{"key": "inbound/openvpn/replay-window-time", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Add time window to ReplayWindow"}
-{"key": "inbound/openvpn/static-key", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Derive data keys from static key in static_key mode"}
-{"key": "inbound/openvpn/static-key-path", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Same unit as static-key"}
-{"key": "inbound/openvpn/system", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Implement system TUN or drop claim"}
-{"key": "inbound/openvpn/tls", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：reject tls mode without certificate+key instead of generating self-signed"}
+{"key": "inbound/openvpn/name", "kerlico": "no", "where": "", "note": "不创建系统 TUN，入站为每客户端一个用户态 IP 栈"}
+{"key": "inbound/openvpn/network", "kerlico": "yes", "where": "", "note": "udp、tcp 或两者，共用一个地址池"}
+{"key": "inbound/openvpn/peer-address", "kerlico": "no", "where": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/peer-address-ipv6", "kerlico": "no", "where": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/ping-interval", "kerlico": "yes", "where": "", "note": "空闲时服务端发保活包"}
+{"key": "inbound/openvpn/ping-restart", "kerlico": "yes", "where": "", "note": "超时未收到包关闭会话"}
+{"key": "inbound/openvpn/protocol", "kerlico": "partial", "where": "", "note": "只实现 TLS 模式；static_key、系统 TUN 未实现；官方客户端互通 10 个用例"}
+{"key": "inbound/openvpn/push", "kerlico": "yes", "where": "", "note": "按字段生成 PUSH_REPLY，成员可追加"}
+{"key": "inbound/openvpn/push-block-outside-dns", "kerlico": "yes", "where": "", "note": "推送 block-outside-dns"}
+{"key": "inbound/openvpn/push-dhcp-options", "kerlico": "yes", "where": "", "note": "原样写成 dhcp-option"}
+{"key": "inbound/openvpn/push-dns", "kerlico": "yes", "where": "", "note": "IPv4 写 dhcp-option DNS，IPv6 写 DNS6"}
+{"key": "inbound/openvpn/push-dns-servers", "kerlico": "yes", "where": "", "note": "写成 dns server N 行，2.6 起的客户端识别"}
+{"key": "inbound/openvpn/push-dns-servers-addresses", "kerlico": "yes", "where": "", "note": "dns server N address"}
+{"key": "inbound/openvpn/push-dns-servers-dnssec", "kerlico": "yes", "where": "", "note": "dnssec 取 yes、optional、no 并写入 dns server 行；没有测试"}
+{"key": "inbound/openvpn/push-dns-servers-priority", "kerlico": "yes", "where": "", "note": "dns server 的优先级序号"}
+{"key": "inbound/openvpn/push-dns-servers-resolve-domains", "kerlico": "yes", "where": "", "note": "dns server N resolve-domains"}
+{"key": "inbound/openvpn/push-dns-servers-sni", "kerlico": "yes", "where": "", "note": "dns server N sni"}
+{"key": "inbound/openvpn/push-dns-servers-transport", "kerlico": "yes", "where": "", "note": "dns server N transport"}
+{"key": "inbound/openvpn/push-ping-interval", "kerlico": "yes", "where": "", "note": "覆盖推送的 ping 间隔"}
+{"key": "inbound/openvpn/push-ping-restart", "kerlico": "yes", "where": "", "note": "覆盖推送的 ping-restart"}
+{"key": "inbound/openvpn/push-redirect-gateway", "kerlico": "yes", "where": "", "note": "推送 redirect-gateway，默认 def1"}
+{"key": "inbound/openvpn/push-redirect-gateway-flags", "kerlico": "yes", "where": "", "note": "redirect-gateway 的 flag 列表"}
+{"key": "inbound/openvpn/push-routes", "kerlico": "yes", "where": "", "note": "IPv4 写 route，IPv6 写 route-ipv6"}
+{"key": "inbound/openvpn/push-search-domains", "kerlico": "yes", "where": "", "note": "推送 dns search-domains"}
+{"key": "inbound/openvpn/remote", "kerlico": "no", "where": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/remote-port", "kerlico": "no", "where": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/renegotiate-bytes", "kerlico": "yes", "where": "", "note": "配置生效；没有单独测试"}
+{"key": "inbound/openvpn/renegotiate-disabled", "kerlico": "yes", "where": "", "note": "配置生效；没有单独测试"}
+{"key": "inbound/openvpn/renegotiate-interval", "kerlico": "yes", "where": "", "note": "服务端按间隔发起换钥，双方切到新 key_id"}
+{"key": "inbound/openvpn/renegotiate-packets", "kerlico": "yes", "where": "", "note": "配置生效；没有单独测试"}
+{"key": "inbound/openvpn/replay-window", "kerlico": "yes", "where": "", "note": "配置生效；没有单独测试"}
+{"key": "inbound/openvpn/replay-window-time", "kerlico": "yes", "where": "", "note": "配置生效；没有单独测试"}
+{"key": "inbound/openvpn/static-key", "kerlico": "no", "where": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/static-key-path", "kerlico": "no", "where": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/system", "kerlico": "no", "where": "", "note": "不创建系统 TUN，入站为每客户端一个用户态 IP 栈"}
+{"key": "inbound/openvpn/tls", "kerlico": "yes", "where": "", "note": "TLS 模式必须配证书与私钥，缺少时配置报错，不再生成自签证书"}
 {"key": "inbound/openvpn/tls-certificate", "kerlico": "yes", "where": "", "note": "TLS 服务器证书内容。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
 {"key": "inbound/openvpn/tls-certificate-path", "kerlico": "yes", "where": "", "note": "TLS 服务器证书路径。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-certificate-profile", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：map profile to rustls provider/sig-scheme restrictions"}
-{"key": "inbound/openvpn/tls-cipher", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：filter provider cipher_suites from config"}
-{"key": "inbound/openvpn/tls-client-certificate", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build WebPkiClientVerifier from CA"}
-{"key": "inbound/openvpn/tls-client-certificate-path", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build WebPkiClientVerifier from CA"}
-{"key": "inbound/openvpn/tls-client-name", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：check client leaf name in custom verifier"}
-{"key": "inbound/openvpn/tls-client-name-type", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：check client leaf name in custom verifier"}
-{"key": "inbound/openvpn/tls-control-wrap", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：accept `type` as the selector"}
-{"key": "inbound/openvpn/tls-control-wrap-direction", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：map server->0 client->1"}
-{"key": "inbound/openvpn/tls-control-wrap-force-cookie", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：implement stateless cookie for HARD_RESET_CLIENT_V3"}
+{"key": "inbound/openvpn/tls-certificate-profile", "kerlico": "no", "where": "", "note": "没有该字段，配置报未知字段"}
+{"key": "inbound/openvpn/tls-cipher", "kerlico": "yes", "where": "", "note": "限制 rustls 的协议版本、套件与密钥交换组"}
+{"key": "inbound/openvpn/tls-client-certificate", "kerlico": "yes", "where": "", "note": "按 CA 校验客户端证书，无证书、他 CA、过期用途不符的客户端被拒"}
+{"key": "inbound/openvpn/tls-client-certificate-path", "kerlico": "yes", "where": "", "note": "按 CA 校验客户端证书，无证书、他 CA、过期用途不符的客户端被拒"}
+{"key": "inbound/openvpn/tls-client-name", "kerlico": "yes", "where": "", "note": "按 name、name-prefix、subject 比较客户端证书"}
+{"key": "inbound/openvpn/tls-client-name-type", "kerlico": "yes", "where": "", "note": "按 name、name-prefix、subject 比较客户端证书"}
+{"key": "inbound/openvpn/tls-control-wrap", "kerlico": "yes", "where": "", "note": "无包装、tls-auth、tls-crypt、tls-crypt-v2；官方客户端用 tls-crypt-v2 互通"}
+{"key": "inbound/openvpn/tls-control-wrap-direction", "kerlico": "yes", "where": "", "note": "tls-auth 的 key-direction；官方客户端用 tls-crypt-v2 互通"}
+{"key": "inbound/openvpn/tls-control-wrap-force-cookie", "kerlico": "no", "where": "", "note": "force_cookie 在配置阶段报未实现"}
 {"key": "inbound/openvpn/tls-control-wrap-key", "kerlico": "yes", "where": "", "note": "TLS 控制信道包装密钥内容。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
 {"key": "inbound/openvpn/tls-control-wrap-key-path", "kerlico": "yes", "where": "", "note": "TLS 控制信道包装密钥路径。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-control-wrap-type", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：implement tls-crypt-v2 server key unwrap of client WKc"}
-{"key": "inbound/openvpn/tls-crl-path", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：load CRL into WebPkiClientVerifier with_crls"}
-{"key": "inbound/openvpn/tls-groups", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：filter provider kx_groups from config"}
+{"key": "inbound/openvpn/tls-control-wrap-type", "kerlico": "yes", "where": "", "note": "tls_auth、tls_crypt、tls_crypt_v2；官方客户端用 tls-crypt-v2 互通"}
+{"key": "inbound/openvpn/tls-crl-path", "kerlico": "yes", "where": "", "note": "只检查叶证书是否被吊销，需配合 CA"}
+{"key": "inbound/openvpn/tls-groups", "kerlico": "yes", "where": "", "note": "限制 rustls 的协议版本、套件与密钥交换组"}
 {"key": "inbound/openvpn/tls-key", "kerlico": "yes", "where": "", "note": "TLS 服务器私钥内容。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
 {"key": "inbound/openvpn/tls-key-path", "kerlico": "yes", "where": "", "note": "TLS 服务器私钥路径。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-ns-certificate-type", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：custom verifier check nsCertType"}
-{"key": "inbound/openvpn/tls-peer-fingerprint", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：custom verifier compare leaf SHA-256"}
-{"key": "inbound/openvpn/tls-remote-certificate-eku", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：custom verifier check EKU"}
-{"key": "inbound/openvpn/tls-remote-certificate-ku", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：custom verifier check KU mask"}
-{"key": "inbound/openvpn/tls-remote-certificate-tls", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：custom verifier check clientAuth EKU"}
-{"key": "inbound/openvpn/tls-verify-client-certificate", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：require/optional/none -> verifier allow_unauthenticated"}
-{"key": "inbound/openvpn/tls-version-max", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：pass versions to builder_with_protocol_versions"}
-{"key": "inbound/openvpn/tls-version-min", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：pass versions to builder_with_protocol_versions"}
-{"key": "inbound/openvpn/topology", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Use configured topology in PUSH_REPLY and ifconfig format"}
-{"key": "inbound/openvpn/users", "kerlico": "yes", "where": "", "note": "OpenVPN 用户名/密码用户列表。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/users-password", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Same unit as users"}
-{"key": "inbound/openvpn/users-username", "kerlico": "yes", "where": "", "note": "用户名。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
+{"key": "inbound/openvpn/tls-ns-certificate-type", "kerlico": "no", "where": "", "note": "没有该字段，配置报未知字段"}
+{"key": "inbound/openvpn/tls-peer-fingerprint", "kerlico": "yes", "where": "", "note": "按叶证书 SHA-256 指纹放行，可不配 CA"}
+{"key": "inbound/openvpn/tls-remote-certificate-eku", "kerlico": "yes", "where": "", "note": "自定义 EKU 与 keyUsage 掩码校验已实现；没有单独测试"}
+{"key": "inbound/openvpn/tls-remote-certificate-ku", "kerlico": "yes", "where": "", "note": "自定义 EKU 与 keyUsage 掩码校验已实现；没有单独测试"}
+{"key": "inbound/openvpn/tls-remote-certificate-tls", "kerlico": "yes", "where": "", "note": "要求 clientAuth EKU 与 keyUsage，仅 serverAuth 的证书被拒"}
+{"key": "inbound/openvpn/tls-verify-client-certificate", "kerlico": "yes", "where": "", "note": "require 拒绝无有效证书的客户端；optional、none 没有单独测试"}
+{"key": "inbound/openvpn/tls-version-max", "kerlico": "yes", "where": "", "note": "限制 rustls 的协议版本、套件与密钥交换组"}
+{"key": "inbound/openvpn/tls-version-min", "kerlico": "yes", "where": "", "note": "限制 rustls 的协议版本、套件与密钥交换组"}
+{"key": "inbound/openvpn/topology", "kerlico": "yes", "where": "", "note": "subnet、net30、p2p 三种拓扑写入 ifconfig 与 route-gateway"}
+{"key": "inbound/openvpn/users", "kerlico": "yes", "where": "", "note": "未配成员的节点拒绝启动，无内置账号；口令按常数时间比较，错误口令被拒"}
+{"key": "inbound/openvpn/users-password", "kerlico": "yes", "where": "", "note": "未配成员的节点拒绝启动，无内置账号；口令按常数时间比较，错误口令被拒"}
+{"key": "inbound/openvpn/users-username", "kerlico": "yes", "where": "", "note": "未配成员的节点拒绝启动，无内置账号；口令按常数时间比较，错误口令被拒"}
 {"key": "inbound/redirect/combo", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "`RedirectNodeFactory` 通过 `SO_ORIGINAL_DST` / `IP6T_SO_ORIGINAL_DST`（或 `InboundContext::original_dst`）提取原始目标并建立 TCP 代理流"}
 {"key": "inbound/redirect/protocol", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "入站 `type = \"redirect\"`（`RedirectNodeFactory`）"}
 {"key": "inbound/shadowquic/alpn", "kerlico": "yes", "where": "crates/protocol-shadowquic/src/config.rs", "note": "`alpn`"}
@@ -1458,7 +1458,7 @@
 {"key": "outbound/openvpn/tls-control-wrap-type", "kerlico": "partial", "where": "crates/protocol-openvpn/src/config.rs", "note": "tls_auth、tls_crypt；tls_crypt_v2 没有"}
 {"key": "outbound/openvpn/tls-crl-path", "kerlico": "no", "where": "", "note": "TLS 用于拒绝已吊销服务器证书的 PEM 或 DER CRL 文件路径。建议：暂不实现，证书校验细项由 rustls 默认行为决定，等真实对端需要再加"}
 {"key": "outbound/openvpn/tls-crypt", "kerlico": "yes", "where": "crates/protocol-openvpn/src/config.rs", "note": "`tls_crypt_key`"}
-{"key": "outbound/openvpn/tls-crypt-v2", "kerlico": "partial", "where": "crates/protocol-openvpn/src/wrap.rs", "note": "M11 审计（夸大）：WKc length read from first 2 bytes; upstream stores net_len in last 2 bytes, so genuine `--genkey tls-crypt-v2-client` keys are rejected (from upstream tls_crypt.c memory, verify); kerlico server treats v2 as plain tls-crypt (server.rs:905); add interop case vs openvpn --tls-crypt-v2"}
+{"key": "outbound/openvpn/tls-crypt-v2", "kerlico": "yes", "where": "crates/protocol-openvpn/src/wrap.rs", "note": "读取官方 --genkey tls-crypt-v2-client 生成的密钥文件，WKc 长度取自文件末尾；对官方服务端互通"}
 {"key": "outbound/openvpn/tls-groups", "kerlico": "no", "where": "", "note": "按偏好顺序排列的 TLS key exchange group，以冒号分隔。建议：暂不实现，证书校验细项由 rustls 默认行为决定，等真实对端需要再加"}
 {"key": "outbound/openvpn/tls-ns-certificate-type", "kerlico": "no", "where": "", "note": "TLS 已弃用的 Netscape 证书类型检查，`server` 或 `client` 之一。建议：暂不实现，Netscape 证书类型检查已弃用"}
 {"key": "outbound/openvpn/tls-peer-fingerprint", "kerlico": "no", "where": "", "note": "TLS 允许的服务器 leaf certificate 的 SHA-256 fingerprint。建议：暂不实现，kerlico 的证书校验不可跳过，指纹固定放到安全层统一做"}
@@ -1500,71 +1500,71 @@
 {"key": "outbound/shadowsocks/address", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`server`"}
 {"key": "outbound/shadowsocks/cipher", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`AEAD_METHODS`、`LEGACY_METHODS`，2022 系列走 type `ss2022`；缺 aes-192-gcm、aegis、lea、deoxys 等"}
 {"key": "outbound/shadowsocks/client-fingerprint", "kerlico": "no", "where": "", "note": "shadow-tls、restls、jls 插件 uTLS 指纹。建议：暂不实现，只有 VLESS 有 `fingerprint`，其他协议要先抽出共用 TLS 整形层"}
-{"key": "outbound/shadowsocks/combo", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/combo", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "支持 obfs http、v2ray-plugin、gost-plugin 的 websocket 与 HTTP Upgrade；其余插件与参数在配置阶段报错；shadow-tls 经 Mihomo 映射为 shadowtls 出站"}
 {"key": "outbound/shadowsocks/email", "kerlico": "no", "where": "", "note": "出站用户的邮箱标识。建议：暂不实现，kerlico 的出站凭据不带用户标识，统计按命名出站投影"}
 {"key": "outbound/shadowsocks/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
 {"key": "outbound/shadowsocks/method", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`method`，同 cipher"}
 {"key": "outbound/shadowsocks/multiplex", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U2 sing-mux：yamux 补窗口更新/ping、h2mux 改真 HTTP/2(HEADERS+HPACK+WINDOW_UPDATE)，加对 sing-box 的互通用例"}
 {"key": "outbound/shadowsocks/network", "kerlico": "no", "where": "crates/protocol-shadowsocks/src/outbound.rs", "note": "M11 审计（缺失）：U7 出站 network(tcp/udp)/udp 开关：在各协议 Options 增加字段并裁剪 Capabilities"}
 {"key": "outbound/shadowsocks/password", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`password`"}
-{"key": "outbound/shadowsocks/plugin", "kerlico": "no", "where": "crates/protocol-shadowtls/src/config.rs", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts", "kerlico": "no", "where": "crates/protocol-shadowtls/src/config.rs", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-fingerprint", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-headers", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-host", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mode", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mux", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-name-cert-verify", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-path", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-skip-cert-verify", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-tls", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-jls-alpn", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-jls-host", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-jls-password", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-jls-username", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-acknodelay", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-autoexpire", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-conn", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-crypt", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-datashard", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-dscp", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-framesize", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-interval", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-keepalive", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-key", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-mode", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-mtu", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-nocomp", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-nodelay", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-parityshard", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-ratelimit", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-rcvwnd", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-resend", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-scavengettl", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxbuf", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxver", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-sndwnd", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-sockbuf", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-streambuf", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-obfs-host", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-obfs-mode", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-restls-host", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-restls-password", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-restls-restls-script", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-restls-version-hint", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-host", "kerlico": "partial", "where": "crates/protocol-shadowtls/src/config.rs", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-password", "kerlico": "partial", "where": "crates/protocol-shadowtls/src/config.rs", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-version", "kerlico": "partial", "where": "crates/protocol-shadowtls/src/config.rs", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-fingerprint", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-headers", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-host", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mode", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mux", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-name-cert-verify", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-path", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-skip-cert-verify", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-tls", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-v2ray-http-upgrade", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin", "kerlico": "partial", "where": "crates/protocol-shadowtls/src/config.rs", "note": "支持 obfs http、v2ray-plugin、gost-plugin 的 websocket 与 HTTP Upgrade；其余插件与参数在配置阶段报错；未与真实插件互通"}
+{"key": "outbound/shadowsocks/plugin-opts", "kerlico": "partial", "where": "crates/protocol-shadowtls/src/config.rs", "note": "mode、host、path、tls、headers、v2ray-http-upgrade；其余参数配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-fingerprint", "kerlico": "no", "where": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-headers", "kerlico": "yes", "where": "", "note": "握手请求附带自定义头"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-host", "kerlico": "yes", "where": "", "note": "作为握手 Host 与 TLS 服务器名；没有断言 Host 头的测试"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mode", "kerlico": "partial", "where": "", "note": "只有 websocket，其他 mode 配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mux", "kerlico": "no", "where": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-name-cert-verify", "kerlico": "no", "where": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-path", "kerlico": "yes", "where": "", "note": "握手请求使用该路径"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-skip-cert-verify", "kerlico": "no", "where": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-tls", "kerlico": "yes", "where": "", "note": "wss 经 TLS 连接；没有测试"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-alpn", "kerlico": "no", "where": "", "note": "jls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-host", "kerlico": "no", "where": "", "note": "jls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-password", "kerlico": "no", "where": "", "note": "jls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-username", "kerlico": "no", "where": "", "note": "jls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-acknodelay", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-autoexpire", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-conn", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-crypt", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-datashard", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-dscp", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-framesize", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-interval", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-keepalive", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-key", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-mode", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-mtu", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-nocomp", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-nodelay", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-parityshard", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-ratelimit", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-rcvwnd", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-resend", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-scavengettl", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxbuf", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxver", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-sndwnd", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-sockbuf", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-streambuf", "kerlico": "no", "where": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-obfs-host", "kerlico": "yes", "where": "", "note": "作为伪装 HTTP 请求的 Host；没有断言 Host 头的测试"}
+{"key": "outbound/shadowsocks/plugin-opts-obfs-mode", "kerlico": "partial", "where": "", "note": "只有 http，tls 模式配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-host", "kerlico": "no", "where": "", "note": "restls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-password", "kerlico": "no", "where": "", "note": "restls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-restls-script", "kerlico": "no", "where": "", "note": "restls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-version-hint", "kerlico": "no", "where": "", "note": "restls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-host", "kerlico": "yes", "where": "crates/protocol-shadowtls/src/config.rs", "note": "Mihomo 的 shadow-tls 映射为 shadowtls 出站，host 写入 tls.server_name"}
+{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-password", "kerlico": "yes", "where": "crates/protocol-shadowtls/src/config.rs", "note": "Mihomo 的 shadow-tls 映射为 shadowtls 出站的 password；映射测试未断言该字段"}
+{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-version", "kerlico": "yes", "where": "crates/protocol-shadowtls/src/config.rs", "note": "Mihomo 的 shadow-tls 映射为 shadowtls 出站的 version；映射测试未断言该字段"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-fingerprint", "kerlico": "no", "where": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-headers", "kerlico": "yes", "where": "", "note": "握手请求附带自定义头"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-host", "kerlico": "yes", "where": "", "note": "作为握手 Host 与 TLS 服务器名；没有断言 Host 头的测试"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mode", "kerlico": "partial", "where": "", "note": "只有 websocket，其他 mode 配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mux", "kerlico": "no", "where": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-name-cert-verify", "kerlico": "no", "where": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-path", "kerlico": "yes", "where": "", "note": "握手请求使用该路径"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-skip-cert-verify", "kerlico": "no", "where": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-tls", "kerlico": "yes", "where": "", "note": "wss 经 TLS 连接；没有测试"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-v2ray-http-upgrade", "kerlico": "yes", "where": "", "note": "改用 HTTP Upgrade 握手；测试只覆盖非 101 响应被拒"}
 {"key": "outbound/shadowsocks/port", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`port`"}
 {"key": "outbound/shadowsocks/protocol", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/outbound.rs", "note": "出站 type `shadowsocks`，2022 系列为 `ss2022`"}
 {"key": "outbound/shadowsocks/server", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`server`"}

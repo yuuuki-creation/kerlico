@@ -146,7 +146,7 @@
 | `generate-reality-keypair` | 生成 REALITY 密钥对 | 有 |  |  | 已实现 | 通过 |  |
 | `generate-sudoku-keypair` | 生成 Sudoku 密钥对 | 有 |  |  | 已实现 | 未测 |  |
 | `generate-uuid` | 生成 UUID | 有 |  |  | 已实现 | 通过 |  |
-| `generate-vless-mlkem768` | 生成 vless encryption ML-KEM-768 | 有 |  |  | 未实现 | 未测 |  |
+| `generate-vless-mlkem768` | 生成 vless encryption ML-KEM-768 | 有 |  |  | 已实现 | 通过 |  |
 | `generate-vless-x25519` | 生成 vless encryption X25519 | 有 |  |  | 已实现 | 通过 |  |
 | `generate-wg-keypair` | 生成 WireGuard 密钥对 | 有 |  |  | 已实现 | 通过 |  |
 
@@ -196,8 +196,8 @@
 | `generate-rand-hex` | generate rand 的 --hex：十六进制输出 |  | 有 |  | 已实现 | 通过 | 取值：`--hex` |
 | `generate-reality-keypair` | 生成 REALITY 密钥对 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box generate reality-keypair` |
 | `generate-tailcat-keypair` | 生成 Tailcat 密钥对 |  | 有 |  | 未实现 | 未测 | 取值：`sing-box generate tailcat-keypair` |
-| `generate-tls-keypair` | 生成 TLS 自签密钥对 |  | 有 |  | 部分 | 未测 | 取值：`sing-box generate tls-keypair` |
-| `generate-tls-keypair-months` | generate tls-keypair 的 --months：有效月数 |  | 有 |  | 未实现 | 未测 | 取值：`--months`、`-m` |
+| `generate-tls-keypair` | 生成 TLS 自签密钥对 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box generate tls-keypair` |
+| `generate-tls-keypair-months` | generate tls-keypair 的 --months：有效月数 |  | 有 |  | 已实现 | 通过 | 取值：`--months`、`-m` |
 | `generate-uuid` | 生成 UUID |  | 有 |  | 已实现 | 通过 | 取值：`sing-box generate uuid` |
 | `generate-vapid-keypair` | 生成 VAPID 密钥对 |  | 有 |  | 未实现 | 未测 | 取值：`sing-box generate vapid-keypair` |
 | `generate-wg-keypair` | 生成 WireGuard 密钥对 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box generate wg-keypair` |
@@ -290,7 +290,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `cert` | 生成 TLS 证书 |  |  | 有 | 部分 | 未测 | 取值：`--ca`、`--domain`、`--expire`、`--file`、`--json`、`--name`、`--org` |
+| `cert` | 生成 TLS 证书 |  |  | 有 | 已实现 | 通过 | 取值：`--ca`、`--domain`、`--expire`、`--file`、`--json`、`--name`、`--org` |
 | `cert-chain-hash` | tls hash 旧名 |  |  | 已移除 | 不适用 | 未测 | 约束：源码未注册，用 tls hash |
 | `ech` | 生成 ECH 密钥和配置 |  |  | 有 | 未实现 | 未测 | 取值：`--pem`、`--serverName`、`-i`<br>约束：command.md 未列；docs/config/transports/tls.md 有说明 |
 | `hash` | 计算证书 SHA256 |  |  | 有 | 已实现 | 通过 | 取值：`--cert`<br>约束：command.md 仍写旧名 certChainHash |
@@ -335,12 +335,12 @@
 | `ed25519` | Ed25519 密钥命令，当前未注册 |  |  | 已移除 | 不适用 | 未测 | 取值：`-i` |
 | `help` | 显示可用命令 |  |  | 有 | 已实现 | 通过 | 取值：`xray help <command>` |
 | `lua` | Lua 脚本签名命令，当前未注册 |  |  | 已移除 | 不适用 | 未测 | 取值：`lua sign [-key seed] [-o file] <input>` |
-| `mldsa65` | 生成 ML-DSA-65 密钥对 |  |  | 有 | 未实现 | 未测 | 取值：`-i` |
-| `mlkem768` | 生成 ML-KEM-768 密钥对 |  |  | 有 | 未实现 | 未测 | 取值：`-i` |
+| `mldsa65` | 生成 ML-DSA-65 密钥对 |  |  | 有 | 已实现 | 通过 | 取值：`-i` |
+| `mlkem768` | 生成 ML-KEM-768 密钥对 |  |  | 有 | 已实现 | 通过 | 取值：`-i` |
 | `run` | 运行配置，默认命令 |  |  | 有 | 部分 | 通过 | 取值：`xray run [-c config.json] [-confdir dir]` |
 | `tls` | TLS 工具 |  |  | 有 | 已实现 | 通过 |  |
 | `uuid` | 生成 UUID |  |  | 有 | 已实现 | 通过 | 取值：`-i` |
 | `version` | 输出版本 |  |  | 有 | 已实现 | 未测 |  |
-| `vlessenc` | 生成 VLESS Encryption 配置对 |  |  | 有 | 未实现 | 未测 |  |
+| `vlessenc` | 生成 VLESS Encryption 配置对 |  |  | 有 | 部分 | 通过 |  |
 | `wg` | 生成 WireGuard 密钥对 |  |  | 有 | 已实现 | 通过 | 取值：`-i` |
 | `x25519` | 生成 X25519 密钥对 |  |  | 有 | 已实现 | 通过 | 取值：`--std-encoding`、`-i` |

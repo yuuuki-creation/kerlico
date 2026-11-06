@@ -23,14 +23,14 @@
 | `exclude-filter` | 排除节点，` 分隔多个正则 | 有 |  |  | 部分 | 未测 | 取值：`正则` |
 | `exclude-type` | 按配置 type 排除，\| 分隔 | 有 |  |  | 已实现 | 未测 | 取值：`ss\|http` |
 | `filter` | 筛选节点，` 分隔多个正则 | 有 |  |  | 部分 | 未测 | 取值：`正则` |
-| `header` | 请求头 | 有 |  |  | 未实现 | 未测 | 取值：`映射` |
-| `health-check-enable` | 启用健康检查 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `health-check-expected-status` | 期望状态码 | 有 |  |  | 未实现 | 未测 | 取值：`同 group.common.expected-status` |
-| `health-check-interval` | 间隔秒 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `health-check-lazy` | 懒惰，默认 true | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `health-check-timeout` | 超时毫秒 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `health-check-url` | 健康检查地址 | 有 |  |  | 未实现 | 未测 | 取值：`https://cp.cloudflare.com`、`https://www.gstatic.com/generate_204` |
-| `interval` | 更新间隔秒 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
+| `header` | 请求头 | 有 |  |  | 已实现 | 未测 | 取值：`映射` |
+| `health-check-enable` | 启用健康检查 | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true` |
+| `health-check-expected-status` | 期望状态码 | 有 |  |  | 已实现 | 未测 | 取值：`同 group.common.expected-status` |
+| `health-check-interval` | 间隔秒 | 有 |  |  | 已实现 | 未测 | 取值：`整数` |
+| `health-check-lazy` | 懒惰，默认 true | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true` |
+| `health-check-timeout` | 超时毫秒 | 有 |  |  | 已实现 | 未测 | 取值：`整数` |
+| `health-check-url` | 健康检查地址 | 有 |  |  | 已实现 | 未测 | 取值：`https://cp.cloudflare.com`、`https://www.gstatic.com/generate_204` |
+| `interval` | 更新间隔秒 | 有 |  |  | 已实现 | 未测 | 取值：`整数` |
 | `name` | 必须，不能重复，建议不与策略组重名 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
 | `override-additional-prefix` | 节点名前缀 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `override-additional-suffix` | 节点名后缀 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
@@ -50,7 +50,7 @@
 | `override-up` | 覆写 hysteria up | 有 |  |  | 未实现 | 未测 | 取值：`50 Mbps` |
 | `path` | 可选，文件路径，不填用 url MD5 | 有 |  |  | 已实现 | 通过 | 取值：`路径`<br>约束：限制在 HomeDir；其他位置需 SAFE_PATHS |
 | `payload` | inline 内容；http、file 解析失败时作备用 | 有 |  |  | 已实现 | 通过 | 取值：`列表` |
-| `proxy` | 经指定代理下载 | 有 |  |  | 未实现 | 未测 | 取值：`出站名` |
-| `size-limit` | 下载上限字节，0 不限 | 有 |  |  | 部分 | 未测 | 取值：`整数` |
-| `type` | 必须 | 有 |  |  | 部分 | 未测 | 取值：`file`、`http`、`inline` |
-| `url` | http 类型需配置 | 有 |  |  | 未实现 | 未测 | 取值：`URL` |
+| `proxy` | 经指定代理下载 | 有 |  |  | 已实现 | 未测 | 取值：`出站名` |
+| `size-limit` | 下载上限字节，0 不限 | 有 |  |  | 已实现 | 未测 | 取值：`整数` |
+| `type` | 必须 | 有 |  |  | 已实现 | 通过 | 取值：`file`、`http`、`inline` |
+| `url` | http 类型需配置 | 有 |  |  | 已实现 | 通过 | 取值：`URL` |

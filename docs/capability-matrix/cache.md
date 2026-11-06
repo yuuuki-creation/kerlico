@@ -28,4 +28,4 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `store-fake-ip` | 储存 fakeip 映射表，域名再次连接时用原映射 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
-| `store-selected` | 储存 API 对策略组的选择供下次启动使用 | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `store-selected` | 储存 API 对策略组的选择供下次启动使用 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |

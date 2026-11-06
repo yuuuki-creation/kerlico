@@ -176,7 +176,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `sighup` | systemd ExecReload 发 SIGHUP 让 mihomo 重载 | 有 |  |  | 未实现 | 未测 | 取值：`SIGHUP` |
+| `sighup` | systemd ExecReload 发 SIGHUP 让 mihomo 重载 | 有 |  |  | 已实现 | 通过 | 取值：`SIGHUP` |
 
 ## root
 

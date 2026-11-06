@@ -35,7 +35,8 @@
 | HTTP 下载器 | http 订阅、远程规则集、Geo 自动更新只读本地文件 | L | 已修复：经出站下载、ETag、失败沿用缓存、运行中刷新；订阅成员变化时重建引擎；Geo 文件下载后运行时仍用内置表；HTTPS 与 gzip 未对真实服务验证 |
 | 连接表 | 见下 | M | 已修复：`/connections` 列出真实流量并可断开，`interrupt-exist-connections` 生效，`/rules`、`/memory`、`/dns/query` 用真实数据；无 WebSocket 推送 |
 | OpenVPN 服务端 | 见下 | M | 已修复：客户端证书、地址池、推送、NCP、换钥、tls-crypt-v2，官方客户端 10 个互通用例通过；`static_key` 模式改为拒绝；出站 tls-crypt-v2 的 WKc 长度读错位置已改正 |
-| Mihomo YAML 直通 | 见下 | M | 进行中 |
+| Mihomo YAML 直通 | 见下 | M | 已修复：按类型映射字段，顶层、订阅成员与分享链接共用；不支持的字段报错；订阅 `override` 的 `skip-cert-verify`/`udp` 仍原样写入 |
+| 能力总表复核 | 已修复单元涉及的 228 个键按当前代码复核，结果在 [recheck.jsonl](recheck.jsonl) | — | 已完成 |
 | DNS 管线 | 本地出网解析只用 hosts 与第一个 UDP/TCP/DoT 上游；DNS 规则、DoH、Fake-IP 只作用于劫持的报文；无 DoQ、乐观缓存、ECS；`dns.listen` 不监听；`detour` 不生效 | L | 待做 |
 | 规则集与 Geo 格式 | `.srs`/`.mrs` 是私有格式，真实文件返回空集；运行时 GeoIP/GeoSite 是内置小表 | L | 待做 |
 | 路由解析 IP | `resolved_ips` 恒为空，`resolve` 动作后 IP/GeoIP 规则不匹配域名目标 | M | 待做 |

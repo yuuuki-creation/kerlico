@@ -546,7 +546,7 @@
 | `tls-control-wrap-type` | 控制通道封装类型，可选值为 `tls_auth`、`tls_crypt` 或 `tls_crypt_v2`。 |  | 有 |  | 部分 | 通过 | 取值：`tls_auth`、`tls_crypt`、`tls_crypt_v2`<br>约束：自 sing-box 1.14.0 起 |
 | `tls-crl-path` | 用于拒绝已吊销服务器证书的 PEM 或 DER CRL 文件路径。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
 | `tls-crypt` | 可选，TLS 加密密钥 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`<br>约束：与 tls-auth、tls-crypt-v2 互斥 |
-| `tls-crypt-v2` | 可选，客户端密钥 | 有 |  |  | 部分 | 未测 | 取值：`PEM`<br>约束：与 tls-auth、tls-crypt 互斥 |
+| `tls-crypt-v2` | 可选，客户端密钥 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`<br>约束：与 tls-auth、tls-crypt 互斥 |
 | `tls-groups` | 按偏好顺序排列的 TLS key exchange group，以冒号分隔。 |  | 有 |  | 未实现 | 未测 | 约束：为空时使用默认 TLS group。<br>约束：自 sing-box 1.14.0 起 |
 | `tls-ns-certificate-type` | 已弃用的 Netscape 证书类型检查，`server` 或 `client` 之一。 |  | 废弃 |  | 未实现 | 未测 | 取值：`client`、`server`<br>约束：自 sing-box 1.14.0 起<br>约束：默认禁用。 |
 | `tls-peer-fingerprint` | 允许的服务器 leaf certificate 的 SHA-256 fingerprint。 |  | 有 |  | 未实现 | 未测 | 约束：每个 fingerprint 必须是不带分隔符的 64 字符小写十六进制字符串。<br>约束：自 sing-box 1.14.0 起 |
@@ -612,17 +612,17 @@
 | `multiplex` | 参阅 多路复用。 |  | 有 |  | 部分 | 未测 |  |
 | `network` | 启用的网络协议`tcp` 或 `udp`。 |  | 有 |  | 未实现 | 未测 | 取值：`tcp`、`udp`<br>约束：默认所有。 |
 | `password` | 密码 | 有 | 有 | 有 | 已实现 | 通过 | 取值：`字符串`<br>约束：必填<br>约束：SS2022 预共享密钥：128-gcm 16 字节，其他 32 字节 |
-| `plugin` | 插件 | 有 | 有 |  | 未实现 | 未测 | 取值：`gost-plugin`、`jls`、`kcptun`、`obfs`、`obfs-local`、`restls`、`shadow-tls`、`v2ray-plugin`<br>约束：仅支持 `obfs-local` 和 `v2ray-plugin`。 |
-| `plugin-opts` | Shadowsocks SIP003 插件参数。 |  | 有 |  | 未实现 | 未测 |  |
+| `plugin` | 插件 | 有 | 有 |  | 部分 | 通过 | 取值：`gost-plugin`、`jls`、`kcptun`、`obfs`、`obfs-local`、`restls`、`shadow-tls`、`v2ray-plugin`<br>约束：仅支持 `obfs-local` 和 `v2ray-plugin`。 |
+| `plugin-opts` | Shadowsocks SIP003 插件参数。 |  | 有 |  | 部分 | 通过 |  |
 | `plugin-opts-gost-plugin-fingerprint` | 证书指纹 | 有 |  |  | 未实现 | 未测 | 取值：`sha256` |
-| `plugin-opts-gost-plugin-headers` | 请求头 | 有 |  |  | 部分 | 未测 | 取值：`映射` |
-| `plugin-opts-gost-plugin-host` | 主机 | 有 |  |  | 部分 | 未测 | 取值：`域名` |
-| `plugin-opts-gost-plugin-mode` | gost-plugin 模式 | 有 |  |  | 未实现 | 未测 | 取值：`websocket` |
+| `plugin-opts-gost-plugin-headers` | 请求头 | 有 |  |  | 已实现 | 通过 | 取值：`映射` |
+| `plugin-opts-gost-plugin-host` | 主机 | 有 |  |  | 已实现 | 未测 | 取值：`域名` |
+| `plugin-opts-gost-plugin-mode` | gost-plugin 模式 | 有 |  |  | 部分 | 通过 | 取值：`websocket` |
 | `plugin-opts-gost-plugin-mux` | 多路复用 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `plugin-opts-gost-plugin-name-cert-verify` | 校验名 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
-| `plugin-opts-gost-plugin-path` | 路径 | 有 |  |  | 部分 | 未测 | 取值：`路径` |
+| `plugin-opts-gost-plugin-path` | 路径 | 有 |  |  | 已实现 | 通过 | 取值：`路径` |
 | `plugin-opts-gost-plugin-skip-cert-verify` | 跳过验证 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `plugin-opts-gost-plugin-tls` | wss | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `plugin-opts-gost-plugin-tls` | wss | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true` |
 | `plugin-opts-jls-alpn` | ALPN | 有 |  |  | 未实现 | 未测 | 取值：`h2`、`http/1.1` |
 | `plugin-opts-jls-host` | JLS 域名 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
 | `plugin-opts-jls-password` | JLS 密码 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
@@ -651,25 +651,25 @@
 | `plugin-opts-kcptun-sndwnd` | 发送窗口（包数） | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `plugin-opts-kcptun-sockbuf` | 每 socket 缓冲字节 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `plugin-opts-kcptun-streambuf` | 每流接收缓冲，smux v2+ | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `plugin-opts-obfs-host` | obfs 域名 | 有 |  |  | 部分 | 未测 | 取值：`域名` |
-| `plugin-opts-obfs-mode` | obfs 模式 | 有 |  |  | 部分 | 未测 | 取值：`http`、`tls` |
+| `plugin-opts-obfs-host` | obfs 域名 | 有 |  |  | 已实现 | 未测 | 取值：`域名` |
+| `plugin-opts-obfs-mode` | obfs 模式 | 有 |  |  | 部分 | 通过 | 取值：`http`、`tls` |
 | `plugin-opts-restls-host` | 应为 TLS 1.3 服务器 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
 | `plugin-opts-restls-password` | Restls 密码 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `plugin-opts-restls-restls-script` | 握手后行为脚本 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `plugin-opts-restls-version-hint` | 版本提示 | 有 |  |  | 未实现 | 未测 | 取值：`tls12`、`tls13` |
-| `plugin-opts-shadow-tls-host` | ShadowTLS 域名 | 有 |  |  | 部分 | 未测 | 取值：`域名` |
-| `plugin-opts-shadow-tls-password` | ShadowTLS 密码 | 有 |  |  | 部分 | 未测 | 取值：`字符串` |
-| `plugin-opts-shadow-tls-version` | ShadowTLS 版本 | 有 |  |  | 部分 | 未测 | 取值：`1`、`2`、`3` |
+| `plugin-opts-shadow-tls-host` | ShadowTLS 域名 | 有 |  |  | 已实现 | 通过 | 取值：`域名` |
+| `plugin-opts-shadow-tls-password` | ShadowTLS 密码 | 有 |  |  | 已实现 | 未测 | 取值：`字符串` |
+| `plugin-opts-shadow-tls-version` | ShadowTLS 版本 | 有 |  |  | 已实现 | 未测 | 取值：`1`、`2`、`3` |
 | `plugin-opts-v2ray-plugin-fingerprint` | 证书指纹 | 有 |  |  | 未实现 | 未测 | 取值：`sha256` |
-| `plugin-opts-v2ray-plugin-headers` | 请求头 | 有 |  |  | 部分 | 未测 | 取值：`映射` |
-| `plugin-opts-v2ray-plugin-host` | 主机 | 有 |  |  | 部分 | 未测 | 取值：`域名` |
-| `plugin-opts-v2ray-plugin-mode` | v2ray-plugin 模式 | 有 |  |  | 未实现 | 未测 | 取值：`websocket`<br>约束：no QUIC now |
+| `plugin-opts-v2ray-plugin-headers` | 请求头 | 有 |  |  | 已实现 | 通过 | 取值：`映射` |
+| `plugin-opts-v2ray-plugin-host` | 主机 | 有 |  |  | 已实现 | 未测 | 取值：`域名` |
+| `plugin-opts-v2ray-plugin-mode` | v2ray-plugin 模式 | 有 |  |  | 部分 | 通过 | 取值：`websocket`<br>约束：no QUIC now |
 | `plugin-opts-v2ray-plugin-mux` | 多路复用 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `plugin-opts-v2ray-plugin-name-cert-verify` | 校验名 | 有 |  |  | 未实现 | 未测 | 取值：`域名` |
-| `plugin-opts-v2ray-plugin-path` | 路径 | 有 |  |  | 部分 | 未测 | 取值：`路径` |
+| `plugin-opts-v2ray-plugin-path` | 路径 | 有 |  |  | 已实现 | 通过 | 取值：`路径` |
 | `plugin-opts-v2ray-plugin-skip-cert-verify` | 跳过验证 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `plugin-opts-v2ray-plugin-tls` | wss | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
-| `plugin-opts-v2ray-plugin-v2ray-http-upgrade` | http upgrade | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `plugin-opts-v2ray-plugin-tls` | wss | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true` |
+| `plugin-opts-v2ray-plugin-v2ray-http-upgrade` | http upgrade | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true` |
 | `port` | 服务端端口，必填 |  |  | 有 | 已实现 | 通过 |  |
 | `server` | 服务器地址。 |  | 有 |  | 已实现 | 通过 | 约束：必填 |
 | `server-port` | 服务器端口。 |  | 有 |  | 已实现 | 通过 | 约束：必填 |

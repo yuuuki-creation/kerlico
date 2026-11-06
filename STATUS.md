@@ -1,10 +1,10 @@
 # 项目状态
 
-更新日期：2026-11-05（Asia/Shanghai）
+更新日期：2026-11-07（Asia/Shanghai）
 
 ## 版本
 
-最新发布：[v1.12.0](docs/releases/1.12.0.md)（[GitHub Release v1.12.0](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.12.0)），带 Linux `x86_64` 二进制。首轮完成计划、`M0`–`M7` 三核心（Mihomo、sing-box、Xray）主要功能对齐、`M8`–`M10` Mihomo 深度体验对标及 17 协议 70 组合性能对标与数据面加速已全部完成并经实测核销（见[能力总表](docs/capability-matrix/README.md)、[M1–M10 验证记录](docs/testing/m1-m7-verification-2026-11-04.md)与 [17 协议 70 组合性能对标报告](docs/testing/benchmarks/mihomo-vs-kerlico-2026-11-04/REPORT.md)）。
+最新发布：[v1.13.0](docs/releases/1.13.0.md)，带 Linux `x86_64` 二进制。`M11` 审计发现 `M2`–`M10` 交付中有一批标为已实现的功能是空壳或夸大（2,080 项中 642 项），本版本修复了影响最大的一批并把能力总表改为审计后的真实状态；未修复的单元见 [M11 审计](docs/testing/m11-audit/README.md)。
 
 构建基线：Rust `1.99.1`，Linux `x86_64`。
 
@@ -30,12 +30,14 @@
 | `M9`（`v1.11.0`） | TUN 自动路由守卫、UDP/TCP DNS 劫持与本机进程匹配：`TunRouteGuard` 生命周期路由安装回滚与 `route-address-set` 展开、多目标 UDP 与 TCP DNS 劫持自动注入、跨平台本机套接字进程解析与 `PROCESS-NAME*`/`PROCESS-PATH*` 规则匹配 | 已完成 |
 | `M10`（`v1.11.0`） | Hysteria2 / TUIC 动态 UDP 端口跳跃与 `SUB-RULE`：TUIC `HoppingSocket`（`ports`/`mport`/`hop_interval`/`hop_interval_max`）、Hysteria2 毫秒级跳跃间隔与 `mport`、`RouteTable` 命名子规则表递归求值 | 已完成 |
 | `v1.12.0` | 17 协议 70 组合性能对标与数据面全栈加速：公网 1Gbps 跨机 30s 与内网环回 256MiB 双场景 70/70 达标（`>= 78%` Mihomo），8 流总吞吐分别达 Mihomo 的 109.1% 与 103.2%，双端峰值内存占 Mihomo 中位数约 55.1% | 已发布 |
+| `M11`（`v1.13.0`） | 真实化：审计 2,080 项已实现标注；修复 OpenVPN 服务端默认账号与证书校验、路由条件全匹配、SIP003 静默降级；测速与健康检查、热重载、远程资源下载、连接表、OpenVPN 服务端、Mihomo 字段映射、密钥生成与 `cache.db` 改为真实实现；能力总表按审计回写 | 已发布 |
+| `M12` 起 | M11 审计剩余单元：DNS 管线、`.srs`/`.mrs` 与 Geo 运行时加载、ACME、服务端 ECH、sing-mux 线格式、拨号选项覆盖、TUN 自动化、TProxy UDP、VLESS Reverse、Hysteria2 带宽与 masquerade 等 | 待做 |
 
 验证规则见 [0012](docs/decisions/0012-simplified-delivery-and-verification.md)。跨进程设备 daemon/IPC 不在计划内，出现多进程部署需求时再排。
 
 ## 三核心主要功能对齐拓扑
 
-[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 1,621 项、部分实现 459 项、未实现 1,973 项、不适用 307 项（实测通过 2,080 项，未测 0 项）。`M0 → M1/M2 → M3 → M4 → M5 → M6 → M7` 全部阶段已完成并同步更新 `docs/capability-matrix/annotations/*.jsonl` 与 `docs/capability-matrix/results/*.jsonl`，通过 `python3 tools/capability_matrix.py build` 与 `check --strict` 校验。
+[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 1,147 项、部分实现 670 项、未实现 2,214 项、不适用 329 项；实测通过 1,336 项，只计指向具名测试或互通用例的项。`M11` 前的通过标注多数没有指向具体测试，已按 [M11 审计](docs/testing/m11-audit/README.md) 改写。下图是 `M0`–`M7` 的原规划拓扑，其中部分节点经审计为空壳，以能力总表为准。
 
 ```mermaid
 flowchart TD
@@ -126,11 +128,11 @@ flowchart TD
 | 能力 | 现状 |
 | --- | --- |
 | 协议模块 | 30 个进入默认构建。双端 22 个（含 MASQUE、OpenVPN）；仅入站：TUN、Mixed、Redirect、TProxy；仅出站：SSH、Gost Relay、Tor、OpenConnect、Tailscale、EasyTier、ZeroTier、DNS |
-| 节点与出站 | 独立节点；单一 `EgressRuntime`/`Dispatcher`；`Local`/`Remote` 分支；`FamilyMode`；`select`/`url-test`/`fallback`/`load-balance`/`balancer` 策略组与 `proxy-providers` 订阅提供者 |
-| 路由 | `routes` / `route` 按域名、正则、GeoIP/GeoSite、`rule-set`/`rule-providers`、CIDR、来源 IP/端口、网络、协议、入站、用户与逻辑规则（`and`/`or`）选择出站或策略组，或执行 `sniff`/`resolve`/`hijack-dns`/`reject` |
-| DNS | `dns` 配置 UDP、TCP、TLS、DoH（HTTPS）上游、Fake-IP 双栈池与持久化、反向映射、DNS 规则表与 `hosts` |
-| TUN | Linux 系统接口，支持 `auto-route`/`auto-redirect`/`strict-route` 规划与 Fake-IP/反向映射/首包嗅探还原域名 |
-| 控制 | HTTP 控制面接口：只读 `/v1/*` 统计、Clash/Mihomo 兼容策略切换/测速/连接断开/Fake-IP 刷新/日志与规则查询、Xray `observatory`/`balancers`/`handler` 与 Shadowsocks `ssm/v1/users` |
+| 节点与出站 | 独立节点；单一 `EgressRuntime`/`Dispatcher`；`Local`/`Remote` 分支；`FamilyMode`；`select`/`url-test`/`fallback`/`load-balance` 策略组按后台实测延迟选择；http 订阅经出站下载；`detour` 与 `routing_mark` 只在 ss、trojan、vless、vmess 的 TCP 路径生效 |
+| 路由 | `routes` / `route` 按域名、正则、`rule-set`/`rule-providers`（远程规则集经出站下载并运行中刷新）、CIDR、来源 IP/端口、网络、协议、节点、用户与逻辑规则选择出站或策略组，或执行 `sniff`/`resolve`/`hijack-dns`/`reject`；GeoIP/GeoSite 运行时只用内置小表；`.srs`/`.mrs` 为私有格式；`resolve` 后 IP 规则不匹配域名目标；`in_type`/`in_port`/`dscp`/`uid` 编译期拒绝 |
+| DNS | 本地出网解析用 `hosts` 与第一个 UDP/TCP/TLS 上游；DoH、DNS 规则表与 Fake-IP 双栈池只作用于劫持的 DNS 报文；无 DoQ、乐观缓存、ECS；`dns.listen` 不监听 |
+| TUN | Linux 系统接口与 `auto-route`（仅 IPv4 默认路由）；`strict-route`、`auto-redirect` 与出口防回环未生效；Fake-IP/反向映射/首包嗅探还原域名 |
+| 控制 | HTTP 控制面：`/v1/*` 统计；Clash/Mihomo 兼容的策略切换、实测延迟、`/connections` 实时连接与断开、`/rules`、`/memory`、`/dns/query`、`PUT /configs` 与 `/restart` 热重载、订阅与规则提供者更新；无 WebSocket 推送；`PATCH /configs` 未实现 |
 | 用户与统计 | 管理账户与原生凭据分离；唯一计量边界；SQLite 用量、带宽、访问记录、DNS 与错误事件；`history` 查询 |
 | WARP | `device` 配置启用；数据面用已保存身份在双栈机器上验证过，CLI 在真实单栈机器上的自动补齐未实测 |
 | 双语 | CLI 帮助、错误和诊断完成；使用指南中英齐全；接口文档为中文 |

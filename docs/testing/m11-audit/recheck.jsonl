@@ -1,0 +1,228 @@
+{"key": "api/clash/get-proxies-name-delay", "kerlico": "yes", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "note": "经所选出站向 url 发 HEAD 实测延迟，支持 url、timeout、expected 参数，状态码不符回 503；无 HTTPS 互通测试"}
+{"key": "api/proxies-name-delay/get-proxies-name-delay", "kerlico": "yes", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "note": "经所选出站向 url 发 HEAD 实测延迟，支持 url、timeout、expected 参数，状态码不符回 503；无 HTTPS 互通测试"}
+{"key": "api/clash/get-group-name-delay", "kerlico": "yes", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "note": "对组内各成员经其出站实测，返回成员到延迟的映射；无 HTTPS 互通测试"}
+{"key": "api/group-name-delay/get-group-name-delay", "kerlico": "yes", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "note": "对组内各成员经其出站实测，返回成员到延迟的映射；无 HTTPS 互通测试"}
+{"key": "api/clash/get-providers-proxies-name-healthcheck", "kerlico": "yes", "test": null, "evidence": "", "note": "对集合成员经其出站实测；端点本身没有测试"}
+{"key": "api/providers-proxies-name-healthcheck/get-providers-proxies-name-healthcheck", "kerlico": "yes", "test": null, "evidence": "", "note": "对集合成员经其出站实测；端点本身没有测试"}
+{"key": "api/providers-proxies-name-proxy-healthcheck/get-providers-proxies-name-proxy-healthcheck", "kerlico": "yes", "test": null, "evidence": "", "note": "对集合成员经其出站实测；端点本身没有测试"}
+{"key": "api/clash/delete-connections-id", "kerlico": "yes", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "note": "按 id 关闭对应流，被关闭的连接收不到后续数据"}
+{"key": "api/connections-id/delete-connections-id", "kerlico": "yes", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "note": "按 id 关闭对应流，被关闭的连接收不到后续数据"}
+{"key": "api/clash/delete-connections", "kerlico": "yes", "test": null, "evidence": "", "note": "关闭全部连接；测试只覆盖按 id 关闭"}
+{"key": "api/connections/delete-connections", "kerlico": "yes", "test": null, "evidence": "", "note": "关闭全部连接；测试只覆盖按 id 关闭"}
+{"key": "api/connections/get-connections", "kerlico": "partial", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "note": "列出真实流量（chains、规则、元数据、上下行字节）；无 WebSocket 推送"}
+{"key": "api/clash/get-rules", "kerlico": "yes", "test": "pass", "evidence": "crates/control/tests/http.rs::rules_reflect_the_compiled_route_table", "note": "类型与载荷取自已编译的路由表"}
+{"key": "api/rules/get-rules", "kerlico": "yes", "test": "pass", "evidence": "crates/control/tests/http.rs::rules_reflect_the_compiled_route_table", "note": "类型与载荷取自已编译的路由表"}
+{"key": "api/routing-service/list-rule", "kerlico": "yes", "test": "pass", "evidence": "crates/control/tests/http.rs::rules_reflect_the_compiled_route_table", "note": "类型与载荷取自已编译的路由表"}
+{"key": "api/clash/get-dns-query", "kerlico": "partial", "test": "pass", "evidence": "crates/control/tests/http.rs::dns_query_answers_from_the_runtime_resolver_hosts", "note": "经运行时解析器应答（hosts 与首个上游），不经 DNS 规则；缺 name 参数被拒"}
+{"key": "api/dns-query/get-dns-query", "kerlico": "partial", "test": "pass", "evidence": "crates/control/tests/http.rs::dns_query_answers_from_the_runtime_resolver_hosts", "note": "经运行时解析器应答（hosts 与首个上游），不经 DNS 规则；缺 name 参数被拒"}
+{"key": "api/clash/get-memory", "kerlico": "partial", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "note": "返回进程驻留内存 inuse，oslimit 恒为 0；一次性返回，无每秒推送"}
+{"key": "api/memory/get-memory", "kerlico": "partial", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "note": "返回进程驻留内存 inuse，oslimit 恒为 0；一次性返回，无每秒推送"}
+{"key": "api/clash/get-proxies", "kerlico": "partial", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "note": "alive 与延迟历史来自实测探测；type、udp 等其余字段未逐项核对"}
+{"key": "api/proxies/get-proxies", "kerlico": "partial", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "note": "alive 与延迟历史来自实测探测；type、udp 等其余字段未逐项核对"}
+{"key": "api/clash/get-proxies-name", "kerlico": "partial", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "note": "alive 与延迟历史来自实测探测；type、udp 等其余字段未逐项核对"}
+{"key": "api/proxies-name/get-proxies-name", "kerlico": "partial", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "note": "alive 与延迟历史来自实测探测；type、udp 等其余字段未逐项核对"}
+{"key": "stats/proxies/delay-history", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "note": "history 记录每次实测延迟，探测失败记 0"}
+{"key": "api/clash/put-configs", "kerlico": "yes", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::put_configs_reloads_payload_and_path_and_rolls_back_a_failed_start", "note": "PUT /configs 按 payload 或 path 重载并替换运行中的引擎，启动失败回滚"}
+{"key": "api/configs/put-configs", "kerlico": "yes", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::put_configs_reloads_payload_and_path_and_rolls_back_a_failed_start", "note": "PUT /configs 按 payload 或 path 重载并替换运行中的引擎，启动失败回滚"}
+{"key": "api/restart/post-restart", "kerlico": "yes", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::put_configs_reloads_payload_and_path_and_rolls_back_a_failed_start", "note": "POST /restart 重读配置并重建引擎，不重启进程"}
+{"key": "config/reload/sighup", "kerlico": "yes", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::sighup_reload_moves_the_listener_and_keeps_serving_on_invalid_config", "note": "SIGHUP 重读配置并替换引擎，无效配置时保持原引擎运行；仅 Unix"}
+{"key": "api/clash/get-configs", "kerlico": "partial", "test": null, "evidence": "", "note": "mode 取自配置，log-level 与 ipv6 为常量"}
+{"key": "api/configs/get-configs", "kerlico": "partial", "test": null, "evidence": "", "note": "mode 取自配置，log-level 与 ipv6 为常量"}
+{"key": "api/clash/put-providers-proxies-name", "kerlico": "yes", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "note": "经出站下载并写缓存，成员变化时重建引擎；下载失败回 503 并沿用旧成员"}
+{"key": "api/providers-proxies-name/put-providers-proxies-name", "kerlico": "yes", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "note": "经出站下载并写缓存，成员变化时重建引擎；下载失败回 503 并沿用旧成员"}
+{"key": "api/clash/put-providers-rules-name", "kerlico": "yes", "test": null, "evidence": "", "note": "经 Refresher 下载并替换规则集；端点本身没有测试，下载逻辑见 resources 测试"}
+{"key": "api/providers-rules-name/put-providers-rules-name", "kerlico": "yes", "test": null, "evidence": "", "note": "经 Refresher 下载并替换规则集；端点本身没有测试，下载逻辑见 resources 测试"}
+{"key": "api/clash/get-providers-proxies-name", "kerlico": "yes", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "note": "成员取自当前出站，下载失败时写入 error"}
+{"key": "api/providers-proxies-name/get-providers-proxies-name", "kerlico": "yes", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "note": "成员取自当前出站，下载失败时写入 error"}
+{"key": "api/clash/get-providers-proxies", "kerlico": "yes", "test": null, "evidence": "", "note": "成员取自当前出站；列表与单成员端点没有测试"}
+{"key": "api/providers-proxies/get-providers-proxies", "kerlico": "yes", "test": null, "evidence": "", "note": "成员取自当前出站；列表与单成员端点没有测试"}
+{"key": "api/providers-proxies-name-proxy/get-providers-proxies-name-proxy", "kerlico": "yes", "test": null, "evidence": "", "note": "成员取自当前出站；列表与单成员端点没有测试"}
+{"key": "api/clash/get-providers-rules", "kerlico": "partial", "test": null, "evidence": "", "note": "ruleCount、updatedAt、error 取自运行状态；type 与 behavior 为固定值"}
+{"key": "api/clash/get-providers-rules-name", "kerlico": "partial", "test": null, "evidence": "", "note": "ruleCount、updatedAt、error 取自运行状态；type 与 behavior 为固定值"}
+{"key": "api/providers-rules/get-providers-rules", "kerlico": "partial", "test": null, "evidence": "", "note": "ruleCount、updatedAt、error 取自运行状态；type 与 behavior 为固定值"}
+{"key": "api/upgrade-geo/post-upgrade-geo", "kerlico": "partial", "test": null, "evidence": "", "note": "按 geox-url 经下载器取文件并落盘，未配置 geox-url 回 400；运行时仍用内置 GeoIP/GeoSite 表"}
+{"key": "api/configs-geo/post-configs-geo", "kerlico": "partial", "test": null, "evidence": "", "note": "按 geox-url 经下载器取文件并落盘，未配置 geox-url 回 400；运行时仍用内置 GeoIP/GeoSite 表"}
+{"key": "ruleset/geo/geo-auto-update", "kerlico": "partial", "test": null, "evidence": "", "note": "按间隔下载 geo 文件并落盘；运行时仍用内置 GeoIP/GeoSite 表，无 HTTPS 与 gzip 真实服务测试"}
+{"key": "ruleset/geo/geo-update-interval", "kerlico": "partial", "test": null, "evidence": "", "note": "按间隔下载 geo 文件并落盘；运行时仍用内置 GeoIP/GeoSite 表，无 HTTPS 与 gzip 真实服务测试"}
+{"key": "ruleset/geo/geox-url-geoip", "kerlico": "partial", "test": null, "evidence": "", "note": "按间隔下载 geo 文件并落盘；运行时仍用内置 GeoIP/GeoSite 表，无 HTTPS 与 gzip 真实服务测试"}
+{"key": "ruleset/geo/geox-url-geosite", "kerlico": "partial", "test": null, "evidence": "", "note": "按间隔下载 geo 文件并落盘；运行时仍用内置 GeoIP/GeoSite 表，无 HTTPS 与 gzip 真实服务测试"}
+{"key": "ruleset/geo/geox-url-mmdb", "kerlico": "partial", "test": null, "evidence": "", "note": "按间隔下载 geo 文件并落盘；运行时仍用内置 GeoIP/GeoSite 表，无 HTTPS 与 gzip 真实服务测试"}
+{"key": "api/clash/combo", "kerlico": "partial", "test": null, "evidence": "", "note": "proxies、group、providers、connections、rules、dns/query、memory、延迟测试、PUT /configs、/restart 为真实实现；logs、PATCH /configs、脚本、UI 下载仍是占位；无 WebSocket、无 Clash 面板"}
+{"key": "experimental/config/clash-api", "kerlico": "partial", "test": null, "evidence": "", "note": "`control` 段提供 Clash 兼容端点子集，路径与字段以 Clash 为准；日志流、PATCH /configs、UI 下载未实现"}
+{"key": "provider/proxy/type", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/resources.rs::http_provider_download_writes_the_cache_and_signals_new_members", "note": "http 经出站下载订阅并写缓存，成员变化通知引擎重建；file、inline 照旧"}
+{"key": "provider/proxy/url", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/resources.rs::http_provider_download_writes_the_cache_and_signals_new_members", "note": "订阅地址经出站下载，失败沿用缓存"}
+{"key": "provider/proxy/interval", "kerlico": "yes", "test": null, "evidence": "", "note": "启动时缓存过期即刷新，之后按间隔刷新；提供者间隔没有单独测试"}
+{"key": "provider/proxy/proxy", "kerlico": "yes", "test": null, "evidence": "", "note": "经命名出站下载，目标域名不在本机解析；规则集路径有测试，提供者无单独测试"}
+{"key": "provider/proxy/header", "kerlico": "yes", "test": null, "evidence": "", "note": "下载请求附带自定义请求头；没有测试"}
+{"key": "provider/proxy/size-limit", "kerlico": "yes", "test": null, "evidence": "", "note": "按内容长度与解压后大小限制下载，0 取默认上限；没有端到端测试"}
+{"key": "provider/proxy/combo", "kerlico": "partial", "test": null, "evidence": "", "note": "http 下载与缓存、健康检查已实现；订阅解析覆盖面见 Mihomo 映射"}
+{"key": "provider/proxy/health-check-enable", "kerlico": "yes", "test": null, "evidence": "", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "provider/proxy/health-check-url", "kerlico": "yes", "test": null, "evidence": "", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "provider/proxy/health-check-interval", "kerlico": "yes", "test": null, "evidence": "", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "provider/proxy/health-check-lazy", "kerlico": "yes", "test": null, "evidence": "", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "provider/proxy/health-check-timeout", "kerlico": "yes", "test": null, "evidence": "", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "provider/proxy/health-check-expected-status", "kerlico": "yes", "test": null, "evidence": "", "note": "集合成员经其出站实测，启动即测一轮并按间隔重复；集合没有单独测试"}
+{"key": "ruleset/config/type", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/resources.rs::remote_rule_set_loads_at_startup_and_refresh_swaps_routing", "note": "remote 经出站下载并写缓存，启动加载并可运行中刷新；local 读本地文件"}
+{"key": "ruleset/config/url", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/resources.rs::remote_rule_set_loads_at_startup_and_refresh_swaps_routing", "note": "规则集下载地址，经 download_detour 出站，ETag 命中保持原规则集"}
+{"key": "ruleset/config/update-interval", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/resources.rs::failed_download_keeps_the_stale_cache", "note": "缓存过期启动即刷新，之后按间隔；失败沿用旧缓存"}
+{"key": "ruleset/rule-provider/type", "kerlico": "yes", "test": null, "evidence": "", "note": "与 sing-box 远程规则集同一下载路径；测试用 sing-box 写法，未用 Mihomo rule-providers 写法"}
+{"key": "ruleset/rule-provider/url", "kerlico": "yes", "test": null, "evidence": "", "note": "与 sing-box 远程规则集同一下载路径；测试用 sing-box 写法，未用 Mihomo rule-providers 写法"}
+{"key": "ruleset/rule-provider/interval", "kerlico": "yes", "test": null, "evidence": "", "note": "与 sing-box 远程规则集同一下载路径；测试用 sing-box 写法，未用 Mihomo rule-providers 写法"}
+{"key": "ruleset/rule-provider/proxy", "kerlico": "yes", "test": null, "evidence": "", "note": "与 sing-box 远程规则集同一下载路径；测试用 sing-box 写法，未用 Mihomo rule-providers 写法"}
+{"key": "ruleset/rule-provider/size-limit", "kerlico": "yes", "test": null, "evidence": "", "note": "与 sing-box 远程规则集同一下载路径；测试用 sing-box 写法，未用 Mihomo rule-providers 写法"}
+{"key": "group/common/url", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "note": "探测发往该地址，Remote 出站收到未解析的域名"}
+{"key": "group/common/expected-status", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::direct_probe_measures_and_rejects_unexpected_status", "note": "状态码不在期望集合内视为失败，语法同 Mihomo"}
+{"key": "group/common/interval", "kerlico": "yes", "test": null, "evidence": "", "note": "启动即测一轮，之后按间隔；测试只覆盖首轮"}
+{"key": "group/url-test/interval", "kerlico": "yes", "test": null, "evidence": "", "note": "启动即测一轮，之后按间隔；测试只覆盖首轮"}
+{"key": "group/common/timeout", "kerlico": "yes", "test": null, "evidence": "", "note": "探测超时毫秒；没有超时失败的测试"}
+{"key": "group/common/lazy", "kerlico": "yes", "test": null, "evidence": "", "note": "周期内未被路由使用的组跳过本轮；没有测试"}
+{"key": "group/url-test/url", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "note": "探测发往该地址"}
+{"key": "group/url-test/protocol", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "note": "按实测延迟选最快成员"}
+{"key": "group/url-test/tolerance", "kerlico": "yes", "test": null, "evidence": "", "note": "新成员须比当前成员快过容差才切换；没有测试"}
+{"key": "group/url-test/combo", "kerlico": "partial", "test": null, "evidence": "", "note": "url、interval、tolerance、lazy 生效；idle_timeout、max_failed_times 解析后未使用"}
+{"key": "group/fallback/protocol", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::fallback_skips_a_candidate_whose_probe_fails", "note": "按顺序选第一个探测成功的成员，失败成员标为 not alive"}
+{"key": "group/select/interrupt-exist-connections", "kerlico": "yes", "test": "pass", "evidence": "crates/control/tests/http.rs::switching_an_interrupting_select_group_closes_flows_of_the_old_member", "note": "切换选中成员后关闭经过旧成员的流，新成员上的流不受影响"}
+{"key": "group/url-test/interrupt-exist-connections", "kerlico": "yes", "test": null, "evidence": "", "note": "自动切换时同一函数关闭旧成员的流；测试只覆盖 select 组"}
+{"key": "cache/profile/store-selected", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/cache_file.rs::store_selected_and_fakeip_share_default_cache_file", "note": "选中节点与 Fake-IP 由单一持有者分区写入同一文件，重启后恢复，互不覆盖"}
+{"key": "experimental/config/cache-file", "kerlico": "yes", "test": "pass", "evidence": "crates/egress/tests/cache_file.rs::store_selected_and_fakeip_share_default_cache_file", "note": "cache_file 单一持有者，选中节点与 Fake-IP 分区存储；旧格式 Fake-IP 记录不再读取"}
+{"key": "route/rule/in-port", "kerlico": "no", "test": null, "evidence": "", "note": "in_port、in_type、dscp、uid 条件在编译期被拒绝，不会匹配全部流量；真实匹配未实现"}
+{"key": "cli/command/generate-vless-mlkem768", "kerlico": "yes", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::mlkem768_matches_xray_seed_vector", "note": "输出真实 ML-KEM-768 密钥对，种子向量与 Xray 一致"}
+{"key": "cli/xray/mlkem768", "kerlico": "yes", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::mlkem768_matches_xray_seed_vector", "note": "输出真实 ML-KEM-768 密钥对，种子向量与 Xray 一致"}
+{"key": "cli/xray/mldsa65", "kerlico": "yes", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::mldsa65_seed_signs_and_printed_verify_key_verifies", "note": "输出真实 ML-DSA-65 密钥对，签名可用打印的验证密钥校验"}
+{"key": "cli/xray/vlessenc", "kerlico": "partial", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::vlessenc_pairs_real_server_and_client_keys", "note": "输出配对的真实服务端与客户端密钥（X25519 与 ML-KEM-768）；Hash32 用 BLAKE3，未与 Xray 源码核对"}
+{"key": "cli/generate/generate-tls-keypair", "kerlico": "yes", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::tls_keypair_validity_follows_months", "note": "自签证书有效期由 --months 决定"}
+{"key": "cli/generate/generate-tls-keypair-months", "kerlico": "yes", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::tls_keypair_validity_follows_months", "note": "自签证书有效期由 --months 决定"}
+{"key": "cli/tls/cert", "kerlico": "yes", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::tls_keypair_validity_follows_months", "note": "自签证书有效期由 --months 决定"}
+{"key": "inbound/openvpn/address", "kerlico": "yes", "test": "pass", "evidence": "tools/interop_openvpn_server.py two-clients-get-distinct-addresses", "note": "服务端地址与前缀构成地址池，官方客户端各取不同地址"}
+{"key": "inbound/openvpn/network", "kerlico": "yes", "test": "pass", "evidence": "tools/interop_openvpn_server.py tcp-password-only", "note": "udp、tcp 或两者，共用一个地址池"}
+{"key": "inbound/openvpn/protocol", "kerlico": "partial", "test": "pass", "evidence": "tools/interop_openvpn_server.py udp-tls-crypt-certificate", "note": "只实现 TLS 模式；static_key、系统 TUN 未实现；官方客户端互通 10 个用例"}
+{"key": "inbound/openvpn/combo", "kerlico": "partial", "test": null, "evidence": "", "note": "TLS 模式下传输、客户端校验、推送、换钥可组合，官方客户端互通；static_key、系统 TUN、MSS 钳制未实现"}
+{"key": "inbound/openvpn/mode", "kerlico": "partial", "test": "pass", "evidence": "tools/interop_openvpn_server.py udp-tls-crypt-certificate", "note": "只接受 tls，static_key 在配置阶段报未实现"}
+{"key": "inbound/openvpn/tls", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::config_rejects_what_the_server_does_not_implement", "note": "TLS 模式必须配证书与私钥，缺少时配置报错，不再生成自签证书"}
+{"key": "inbound/openvpn/data-ciphers", "kerlico": "yes", "test": "pass", "evidence": "tools/interop_openvpn_server.py udp-ncp-picks-server-order", "note": "NCP 按服务端顺序取客户端声明中的第一个算法"}
+{"key": "inbound/openvpn/data-ciphers-fallback", "kerlico": "yes", "test": null, "evidence": "", "note": "协商失败时使用的算法，仍无结果回 AUTH_FAILED；没有测试"}
+{"key": "inbound/openvpn/duplicate-cn", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::second_login_with_the_same_name_kicks_the_first_unless_duplicate_cn", "note": "关闭时同一身份再次登录顶掉旧会话并接手地址，开启时并存"}
+{"key": "inbound/openvpn/handshake-window", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::ping_restart_and_handshake_window_close_idle_sessions", "note": "首次握手与换钥超时关闭会话"}
+{"key": "inbound/openvpn/ping-interval", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::server_sends_ping_when_idle", "note": "空闲时服务端发保活包"}
+{"key": "inbound/openvpn/ping-restart", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::ping_restart_and_handshake_window_close_idle_sessions", "note": "超时未收到包关闭会话"}
+{"key": "inbound/openvpn/max-clients", "kerlico": "yes", "test": "pass", "evidence": "tools/interop_openvpn_server.py max-clients-1-released-on-exit", "note": "握手中与已建立会话总数受限，退出后释放名额"}
+{"key": "inbound/openvpn/topology", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::push_reply_carries_configured_routes_dns_topology_and_per_user_address", "note": "subnet、net30、p2p 三种拓扑写入 ifconfig 与 route-gateway"}
+{"key": "inbound/openvpn/mss-fix", "kerlico": "no", "test": null, "evidence": "", "note": "只校验范围，没有 MSS 钳制"}
+{"key": "inbound/openvpn/mss-fix-disabled", "kerlico": "no", "test": null, "evidence": "", "note": "没有该字段，配置报未知字段"}
+{"key": "inbound/openvpn/mss-fix-mode", "kerlico": "no", "test": null, "evidence": "", "note": "没有该字段，配置报未知字段"}
+{"key": "inbound/openvpn/name", "kerlico": "no", "test": null, "evidence": "", "note": "不创建系统 TUN，入站为每客户端一个用户态 IP 栈"}
+{"key": "inbound/openvpn/system", "kerlico": "no", "test": null, "evidence": "", "note": "不创建系统 TUN，入站为每客户端一个用户态 IP 栈"}
+{"key": "inbound/openvpn/cipher", "kerlico": "no", "test": null, "evidence": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/key-direction", "kerlico": "no", "test": null, "evidence": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/static-key", "kerlico": "no", "test": null, "evidence": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/static-key-path", "kerlico": "no", "test": null, "evidence": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/peer-address", "kerlico": "no", "test": null, "evidence": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/peer-address-ipv6", "kerlico": "no", "test": null, "evidence": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/remote", "kerlico": "no", "test": null, "evidence": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/remote-port", "kerlico": "no", "test": null, "evidence": "", "note": "static_key 模式及其字段在配置阶段报未实现"}
+{"key": "inbound/openvpn/replay-window", "kerlico": "yes", "test": null, "evidence": "", "note": "配置生效；没有单独测试"}
+{"key": "inbound/openvpn/replay-window-time", "kerlico": "yes", "test": null, "evidence": "", "note": "配置生效；没有单独测试"}
+{"key": "inbound/openvpn/renegotiate-bytes", "kerlico": "yes", "test": null, "evidence": "", "note": "配置生效；没有单独测试"}
+{"key": "inbound/openvpn/renegotiate-packets", "kerlico": "yes", "test": null, "evidence": "", "note": "配置生效；没有单独测试"}
+{"key": "inbound/openvpn/renegotiate-disabled", "kerlico": "yes", "test": null, "evidence": "", "note": "配置生效；没有单独测试"}
+{"key": "inbound/openvpn/renegotiate-interval", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::server_initiated_renegotiation_moves_both_sides_to_a_new_key_id", "note": "服务端按间隔发起换钥，双方切到新 key_id"}
+{"key": "inbound/openvpn/push", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "按字段生成 PUSH_REPLY，成员可追加"}
+{"key": "inbound/openvpn/push-routes", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "IPv4 写 route，IPv6 写 route-ipv6"}
+{"key": "inbound/openvpn/push-dns", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "IPv4 写 dhcp-option DNS，IPv6 写 DNS6"}
+{"key": "inbound/openvpn/push-redirect-gateway", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "推送 redirect-gateway，默认 def1"}
+{"key": "inbound/openvpn/push-redirect-gateway-flags", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "redirect-gateway 的 flag 列表"}
+{"key": "inbound/openvpn/push-search-domains", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "推送 dns search-domains"}
+{"key": "inbound/openvpn/push-dhcp-options", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "原样写成 dhcp-option"}
+{"key": "inbound/openvpn/push-block-outside-dns", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "推送 block-outside-dns"}
+{"key": "inbound/openvpn/push-ping-interval", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "覆盖推送的 ping 间隔"}
+{"key": "inbound/openvpn/push-ping-restart", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "覆盖推送的 ping-restart"}
+{"key": "inbound/openvpn/push-dns-servers", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "写成 dns server N 行，2.6 起的客户端识别"}
+{"key": "inbound/openvpn/push-dns-servers-addresses", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "dns server N address"}
+{"key": "inbound/openvpn/push-dns-servers-priority", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "dns server 的优先级序号"}
+{"key": "inbound/openvpn/push-dns-servers-resolve-domains", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "dns server N resolve-domains"}
+{"key": "inbound/openvpn/push-dns-servers-sni", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "dns server N sni"}
+{"key": "inbound/openvpn/push-dns-servers-transport", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "note": "dns server N transport"}
+{"key": "inbound/openvpn/push-dns-servers-dnssec", "kerlico": "yes", "test": null, "evidence": "", "note": "dnssec 取 yes、optional、no 并写入 dns server 行；没有测试"}
+{"key": "inbound/openvpn/tls-client-certificate", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "note": "按 CA 校验客户端证书，无证书、他 CA、过期用途不符的客户端被拒"}
+{"key": "inbound/openvpn/tls-client-certificate-path", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "note": "按 CA 校验客户端证书，无证书、他 CA、过期用途不符的客户端被拒"}
+{"key": "inbound/openvpn/tls-crl-path", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "note": "只检查叶证书是否被吊销，需配合 CA"}
+{"key": "inbound/openvpn/tls-client-name", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "note": "按 name、name-prefix、subject 比较客户端证书"}
+{"key": "inbound/openvpn/tls-client-name-type", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "note": "按 name、name-prefix、subject 比较客户端证书"}
+{"key": "inbound/openvpn/tls-remote-certificate-tls", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "note": "要求 clientAuth EKU 与 keyUsage，仅 serverAuth 的证书被拒"}
+{"key": "inbound/openvpn/tls-remote-certificate-eku", "kerlico": "yes", "test": null, "evidence": "", "note": "自定义 EKU 与 keyUsage 掩码校验已实现；没有单独测试"}
+{"key": "inbound/openvpn/tls-remote-certificate-ku", "kerlico": "yes", "test": null, "evidence": "", "note": "自定义 EKU 与 keyUsage 掩码校验已实现；没有单独测试"}
+{"key": "inbound/openvpn/tls-verify-client-certificate", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "note": "require 拒绝无有效证书的客户端；optional、none 没有单独测试"}
+{"key": "inbound/openvpn/tls-peer-fingerprint", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::peer_fingerprint_pins_a_self_signed_client_certificate_without_a_ca", "note": "按叶证书 SHA-256 指纹放行，可不配 CA"}
+{"key": "inbound/openvpn/tls-version-min", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "note": "限制 rustls 的协议版本、套件与密钥交换组"}
+{"key": "inbound/openvpn/tls-version-max", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "note": "限制 rustls 的协议版本、套件与密钥交换组"}
+{"key": "inbound/openvpn/tls-cipher", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "note": "限制 rustls 的协议版本、套件与密钥交换组"}
+{"key": "inbound/openvpn/tls-groups", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "note": "限制 rustls 的协议版本、套件与密钥交换组"}
+{"key": "inbound/openvpn/tls-control-wrap", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_crypt_and_tls_auth_wrapped_logins_succeed", "note": "无包装、tls-auth、tls-crypt、tls-crypt-v2；官方客户端用 tls-crypt-v2 互通"}
+{"key": "inbound/openvpn/tls-control-wrap-type", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_crypt_and_tls_auth_wrapped_logins_succeed", "note": "tls_auth、tls_crypt、tls_crypt_v2；官方客户端用 tls-crypt-v2 互通"}
+{"key": "inbound/openvpn/tls-control-wrap-direction", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_crypt_and_tls_auth_wrapped_logins_succeed", "note": "tls-auth 的 key-direction；官方客户端用 tls-crypt-v2 互通"}
+{"key": "inbound/openvpn/tls-control-wrap-force-cookie", "kerlico": "no", "test": null, "evidence": "", "note": "force_cookie 在配置阶段报未实现"}
+{"key": "inbound/openvpn/tls-certificate-profile", "kerlico": "no", "test": null, "evidence": "", "note": "没有该字段，配置报未知字段"}
+{"key": "inbound/openvpn/tls-ns-certificate-type", "kerlico": "no", "test": null, "evidence": "", "note": "没有该字段，配置报未知字段"}
+{"key": "inbound/openvpn/users", "kerlico": "yes", "test": "pass", "evidence": "tools/interop_openvpn_server.py wrong-password-is-refused", "note": "未配成员的节点拒绝启动，无内置账号；口令按常数时间比较，错误口令被拒"}
+{"key": "inbound/openvpn/users-password", "kerlico": "yes", "test": "pass", "evidence": "tools/interop_openvpn_server.py wrong-password-is-refused", "note": "未配成员的节点拒绝启动，无内置账号；口令按常数时间比较，错误口令被拒"}
+{"key": "inbound/openvpn/users-username", "kerlico": "yes", "test": "pass", "evidence": "tools/interop_openvpn_server.py wrong-password-is-refused", "note": "未配成员的节点拒绝启动，无内置账号；口令按常数时间比较，错误口令被拒"}
+{"key": "outbound/openvpn/tls-crypt-v2", "kerlico": "yes", "test": "pass", "evidence": "tools/interop_openvpn.py udp-tls-crypt-v2-certificate", "note": "读取官方 --genkey tls-crypt-v2-client 生成的密钥文件，WKc 长度取自文件末尾；对官方服务端互通"}
+{"key": "outbound/shadowsocks/plugin", "kerlico": "partial", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "note": "支持 obfs http、v2ray-plugin、gost-plugin 的 websocket 与 HTTP Upgrade；其余插件与参数在配置阶段报错；未与真实插件互通"}
+{"key": "outbound/shadowsocks/plugin-opts", "kerlico": "partial", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::sip003_and_flattened_plugin_opts_parse_supported_variants", "note": "mode、host、path、tls、headers、v2ray-http-upgrade；其余参数配置阶段报错"}
+{"key": "outbound/shadowsocks/combo", "kerlico": "partial", "test": null, "evidence": "", "note": "支持 obfs http、v2ray-plugin、gost-plugin 的 websocket 与 HTTP Upgrade；其余插件与参数在配置阶段报错；shadow-tls 经 Mihomo 映射为 shadowtls 出站"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-path", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "note": "握手请求使用该路径"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-headers", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "note": "握手请求附带自定义头"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mode", "kerlico": "partial", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "note": "只有 websocket，其他 mode 配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-host", "kerlico": "yes", "test": null, "evidence": "", "note": "作为握手 Host 与 TLS 服务器名；没有断言 Host 头的测试"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-tls", "kerlico": "yes", "test": null, "evidence": "", "note": "wss 经 TLS 连接；没有测试"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-fingerprint", "kerlico": "no", "test": null, "evidence": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-skip-cert-verify", "kerlico": "no", "test": null, "evidence": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mux", "kerlico": "no", "test": null, "evidence": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-name-cert-verify", "kerlico": "no", "test": null, "evidence": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-path", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "note": "握手请求使用该路径"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-headers", "kerlico": "yes", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "note": "握手请求附带自定义头"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mode", "kerlico": "partial", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "note": "只有 websocket，其他 mode 配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-host", "kerlico": "yes", "test": null, "evidence": "", "note": "作为握手 Host 与 TLS 服务器名；没有断言 Host 头的测试"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-tls", "kerlico": "yes", "test": null, "evidence": "", "note": "wss 经 TLS 连接；没有测试"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-fingerprint", "kerlico": "no", "test": null, "evidence": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-skip-cert-verify", "kerlico": "no", "test": null, "evidence": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mux", "kerlico": "no", "test": null, "evidence": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-name-cert-verify", "kerlico": "no", "test": null, "evidence": "", "note": "配置阶段报未实现，不会退回明文"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-v2ray-http-upgrade", "kerlico": "yes", "test": null, "evidence": "", "note": "改用 HTTP Upgrade 握手；测试只覆盖非 101 响应被拒"}
+{"key": "outbound/shadowsocks/plugin-opts-obfs-mode", "kerlico": "partial", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::obfs_http_never_reports_header_only_read_as_eof", "note": "只有 http，tls 模式配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-obfs-host", "kerlico": "yes", "test": null, "evidence": "", "note": "作为伪装 HTTP 请求的 Host；没有断言 Host 头的测试"}
+{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-host", "kerlico": "yes", "test": "pass", "evidence": "crates/config/src/mihomo.rs::tests::ss_2022_and_shadow_tls_route_to_dedicated_kinds", "note": "Mihomo 的 shadow-tls 映射为 shadowtls 出站，host 写入 tls.server_name"}
+{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-password", "kerlico": "yes", "test": null, "evidence": "", "note": "Mihomo 的 shadow-tls 映射为 shadowtls 出站的 password；映射测试未断言该字段"}
+{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-version", "kerlico": "yes", "test": null, "evidence": "", "note": "Mihomo 的 shadow-tls 映射为 shadowtls 出站的 version；映射测试未断言该字段"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-acknodelay", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-autoexpire", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-conn", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-crypt", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-datashard", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-dscp", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-framesize", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-interval", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-keepalive", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-key", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-mode", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-mtu", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-nocomp", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-nodelay", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-parityshard", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-ratelimit", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-rcvwnd", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-resend", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-scavengettl", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxbuf", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxver", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-sndwnd", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-sockbuf", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-streambuf", "kerlico": "no", "test": null, "evidence": "", "note": "kcptun 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-host", "kerlico": "no", "test": null, "evidence": "", "note": "restls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-password", "kerlico": "no", "test": null, "evidence": "", "note": "restls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-restls-script", "kerlico": "no", "test": null, "evidence": "", "note": "restls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-version-hint", "kerlico": "no", "test": null, "evidence": "", "note": "restls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-alpn", "kerlico": "no", "test": null, "evidence": "", "note": "jls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-host", "kerlico": "no", "test": null, "evidence": "", "note": "jls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-password", "kerlico": "no", "test": null, "evidence": "", "note": "jls 插件未实现，配置阶段报错"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-username", "kerlico": "no", "test": null, "evidence": "", "note": "jls 插件未实现，配置阶段报错"}
