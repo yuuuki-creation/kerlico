@@ -15,6 +15,10 @@ kerlico-config.workspace = true
 kerlico-dns.workspace = true
 tokio.workspace = true
 rcgen.workspace = true
+time.workspace = true
+blake3 = "1"
+ml-kem = { version = "0.2", features = ["deterministic"] }
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc"] }
 rustls = { workspace = true, features = ["aws_lc_rs"] }
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true

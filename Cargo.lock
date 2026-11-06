@@ -4604,10 +4604,13 @@ dependencies = [
 name = "kerlico-net"
 version = "1.12.0"
 dependencies = [
+ "blake3",
  "bytes",
  "kerlico-config",
  "kerlico-core",
  "kerlico-dns",
+ "ml-dsa",
+ "ml-kem 0.2.3",
  "rand 0.8.8",
  "rcgen",
  "rustls",
@@ -4615,6 +4618,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2 0.6.5",
+ "time",
  "tokio",
  "tokio-rustls",
  "webpki-roots 1.0.11",

@@ -376,11 +376,11 @@ pub fn generate_x25519_keypair(seed_b64: Option<&str>) -> Result<X25519Keypair> 
         }
     };
     let (clamped, public) = x25519_keypair_from_secret(raw_secret);
-    let digest_bytes = sha256(&public);
+    let digest_bytes = blake3::hash(&public);
     Ok(X25519Keypair {
         private_key: encode_base64_url_nopad(&clamped),
         public_key: encode_base64_url_nopad(&public),
-        hash32: encode_base64_url_nopad(&digest_bytes),
+        hash32: encode_base64_url_nopad(digest_bytes.as_bytes()),
         private_key_std: encode_base64_std(&clamped),
         public_key_std: encode_base64_std(&public),
     })
@@ -479,8 +479,25 @@ pub struct TlsKeypairOutput {
     pub months: u32,
 }
 
+/// 按日历月推进；目标月份没有同一日时取该月最后一天。
+fn add_months(at: time::OffsetDateTime, months: u32) -> time::OffsetDateTime {
+    let index = at.month() as i32 - 1 + months as i32;
+    let year = at.year() + index / 12;
+    let month = time::Month::try_from((index % 12 + 1) as u8).expect("月份在 1..=12");
+    let day = at.day().min(month.length(year));
+    at.replace_date(time::Date::from_calendar_date(year, month, day).expect("日期已按月长截断"))
+}
+
 /// 生成自签名 X.509 v3 证书与 PKCS#8 私钥（支持 `--months` 有效期设置）及 SHA-256 指纹。
 pub fn generate_tls_keypair(domain: &str, months: u32) -> TlsKeypairOutput {
+    generate_tls_keypair_at(domain, months, time::OffsetDateTime::now_utc())
+}
+
+fn generate_tls_keypair_at(
+    domain: &str,
+    months: u32,
+    now: time::OffsetDateTime,
+) -> TlsKeypairOutput {
     use rcgen::PublicKeyData;
     let months = months.clamp(1, 1200);
     let domain = if domain.trim().is_empty() {
@@ -491,6 +508,8 @@ pub fn generate_tls_keypair(domain: &str, months: u32) -> TlsKeypairOutput {
     let mut params = rcgen::CertificateParams::new(vec![domain.to_owned()])
         .unwrap_or_else(|_| rcgen::CertificateParams::new(Vec::<String>::new()).unwrap());
     params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    params.not_before = now;
+    params.not_after = add_months(now, months);
     let key_pair = rcgen::KeyPair::generate().expect("rcgen keypair generation");
     let cert = params
         .self_signed(&key_pair)
@@ -539,37 +558,36 @@ pub fn compute_tls_hash(cert_pem_or_path: &str) -> Result<TlsCertHash> {
     })
 }
 
+fn decode_seed<const N: usize>(seed_b64: Option<&str>, name: &str) -> Result<[u8; N]> {
+    match seed_b64 {
+        Some(s) => decode_base64_any(s)
+            .ok_or_else(|| Error::Config(format!("{name} 种子 Base64 不合法")))?
+            .try_into()
+            .map_err(|_| Error::Config(format!("{name} 种子必须为 {N} 字节"))),
+        None => {
+            let mut buf = [0u8; N];
+            rand::rngs::OsRng.fill_bytes(&mut buf);
+            Ok(buf)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MlDsa65Output {
     pub seed: String,
     pub verify_key: String,
 }
 
-/// 生成 ML-DSA-65 种子与校验公钥摘要。
+/// 与 `xray mldsa65` 一致：32 字节种子按 FIPS 204 KeyGen 派生 1952 字节校验公钥，均为 base64url 无填充。
 pub fn generate_mldsa65(seed_b64: Option<&str>) -> Result<MlDsa65Output> {
-    let seed: [u8; 32] = match seed_b64 {
-        Some(s) => {
-            let decoded = decode_base64_any(s)
-                .ok_or_else(|| Error::Config("ML-DSA-65 种子 Base64 不合法".into()))?;
-            decoded
-                .try_into()
-                .map_err(|_| Error::Config("ML-DSA-65 种子必须为 32 字节".into()))?
-        }
-        None => {
-            let mut buf = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut buf);
-            buf
-        }
-    };
-    // 派生确定性验证公钥材料
-    let mut verify = Vec::with_capacity(64);
-    let d1 = sha256(&seed);
-    verify.extend_from_slice(&d1);
-    let d2 = sha256(&d1);
-    verify.extend_from_slice(&d2);
+    use ml_dsa::{Keypair, MlDsa65, Seed, SigningKey};
+    let seed: [u8; 32] = decode_seed(seed_b64, "ML-DSA-65")?;
+    let verify = SigningKey::<MlDsa65>::from_seed(&Seed::from(seed))
+        .verifying_key()
+        .encode();
     Ok(MlDsa65Output {
         seed: encode_base64_url_nopad(&seed),
-        verify_key: encode_base64_url_nopad(&verify),
+        verify_key: encode_base64_url_nopad(verify.as_slice()),
     })
 }
 
@@ -580,33 +598,18 @@ pub struct MlKem768Output {
     pub hash32: String,
 }
 
-/// 生成 ML-KEM-768 64 字节种子、客户端封装公钥及 Hash32。
+/// 与 `xray mlkem768` 一致：64 字节种子 `d || z` 派生 1184 字节封装公钥，Hash32 为公钥的 BLAKE3。
 pub fn generate_mlkem768(seed_b64: Option<&str>) -> Result<MlKem768Output> {
-    let seed: [u8; 64] = match seed_b64 {
-        Some(s) => {
-            let decoded = decode_base64_any(s)
-                .ok_or_else(|| Error::Config("ML-KEM-768 种子 Base64 不合法".into()))?;
-            decoded
-                .try_into()
-                .map_err(|_| Error::Config("ML-KEM-768 种子必须为 64 字节".into()))?
-        }
-        None => {
-            let mut buf = [0u8; 64];
-            rand::rngs::OsRng.fill_bytes(&mut buf);
-            buf
-        }
-    };
-    // 生成确定性客户端封装材料与 32 字节公钥哈希
-    let mut client_bytes = Vec::with_capacity(64);
-    let c1 = sha256(&seed[..32]);
-    let c2 = sha256(&seed[32..]);
-    client_bytes.extend_from_slice(&c1);
-    client_bytes.extend_from_slice(&c2);
-    let h32 = sha256(&client_bytes);
+    use ml_kem::{B32, EncodedSizeUser, KemCore, MlKem768};
+    let seed: [u8; 64] = decode_seed(seed_b64, "ML-KEM-768")?;
+    let d = B32::try_from(&seed[..32]).expect("固定 32 字节切片");
+    let z = B32::try_from(&seed[32..]).expect("固定 32 字节切片");
+    let (_, encapsulation_key) = MlKem768::generate_deterministic(&d, &z);
+    let client = encapsulation_key.as_bytes();
     Ok(MlKem768Output {
         seed: encode_base64_url_nopad(&seed),
-        client: encode_base64_url_nopad(&client_bytes),
-        hash32: encode_base64_url_nopad(&h32),
+        client: encode_base64_url_nopad(client.as_slice()),
+        hash32: encode_base64_url_nopad(blake3::hash(client.as_slice()).as_bytes()),
     })
 }
 
@@ -676,16 +679,97 @@ mod tests {
         let hash = compute_tls_hash(&tls.cert_pem).unwrap();
         assert_eq!(hash.cert_sha256_hex, tls.cert_sha256_hex);
 
-        let mldsa = generate_mldsa65(None).unwrap();
-        assert!(!mldsa.seed.is_empty());
-        assert!(!mldsa.verify_key.is_empty());
-
         let mlkem = generate_mlkem768(None).unwrap();
         let mlkem_re = generate_mlkem768(Some(&mlkem.seed)).unwrap();
         assert_eq!(mlkem.client, mlkem_re.client);
+    }
 
+    fn b64(s: &str) -> Vec<u8> {
+        decode_base64_any(s).unwrap()
+    }
+
+    #[test]
+    fn mlkem768_matches_xray_seed_vector() {
+        let out = generate_mlkem768(Some(&encode_base64_url_nopad(&[0x42; 64]))).unwrap();
+        let client = b64(&out.client);
+        assert_eq!(client.len(), 1184);
+        assert_eq!(
+            blake3::hash(&client).to_hex().as_str(),
+            "fa88246c20b3b266f6dd762098c644f8758af78f1214964c87e50ac969082eb3"
+        );
+        assert_eq!(b64(&out.hash32), blake3::hash(&client).as_bytes());
+    }
+
+    #[test]
+    fn mlkem768_client_key_encapsulates_to_seed_decapsulation_key() {
+        use ml_kem::{
+            B32, Encoded, EncodedSizeUser, KemCore, MlKem768,
+            kem::{Decapsulate, Encapsulate},
+        };
+        type Ek = <MlKem768 as KemCore>::EncapsulationKey;
+        let out = generate_mlkem768(None).unwrap();
+        let seed = b64(&out.seed);
+        assert_eq!(seed.len(), 64);
+        let encoded = Encoded::<Ek>::try_from(b64(&out.client).as_slice()).unwrap();
+        let (ct, sent) = Ek::from_bytes(&encoded)
+            .encapsulate(&mut rand::rngs::OsRng)
+            .unwrap();
+        let (dk, _) = MlKem768::generate_deterministic(
+            &B32::try_from(&seed[..32]).unwrap(),
+            &B32::try_from(&seed[32..]).unwrap(),
+        );
+        assert_eq!(dk.decapsulate(&ct).unwrap(), sent);
+    }
+
+    #[test]
+    fn mldsa65_seed_signs_and_printed_verify_key_verifies() {
+        use ml_dsa::{
+            EncodedVerifyingKey, MlDsa65, Seed, Signer, SigningKey, Verifier, VerifyingKey,
+        };
+        let out = generate_mldsa65(None).unwrap();
+        let seed: [u8; 32] = b64(&out.seed).try_into().unwrap();
+        let again = generate_mldsa65(Some(&out.seed)).unwrap();
+        assert_eq!(again.verify_key, out.verify_key);
+        let vk_bytes = b64(&out.verify_key);
+        assert_eq!(vk_bytes.len(), 1952);
+        let vk = VerifyingKey::<MlDsa65>::decode(
+            &EncodedVerifyingKey::<MlDsa65>::try_from(vk_bytes.as_slice()).unwrap(),
+        );
+        let signature = SigningKey::<MlDsa65>::from_seed(&Seed::from(seed)).sign(b"kerlico");
+        assert!(vk.verify(b"kerlico", &signature).is_ok());
+        assert!(vk.verify(b"tampered", &signature).is_err());
+    }
+
+    #[test]
+    fn vlessenc_pairs_real_server_and_client_keys() {
         let venc = generate_vlessenc().unwrap();
-        assert!(venc.x25519_decryption.starts_with("mlkem768x25519plus."));
-        assert!(venc.mlkem768_encryption.starts_with("mlkem768x25519plus."));
+        let key = |v: &str, prefix: &str| b64(v.strip_prefix(prefix).unwrap());
+        let x_priv: [u8; 32] = key(&venc.x25519_decryption, "mlkem768x25519plus.native.600s.")
+            .try_into()
+            .unwrap();
+        let x_pub = key(&venc.x25519_encryption, "mlkem768x25519plus.native.0rtt.");
+        assert_eq!(x25519_keypair_from_secret(x_priv).1.as_slice(), x_pub);
+        let pq_seed = key(&venc.mlkem768_decryption, "mlkem768x25519plus.native.600s.");
+        let pq_client = key(&venc.mlkem768_encryption, "mlkem768x25519plus.native.0rtt.");
+        assert_eq!(pq_seed.len(), 64);
+        let regenerated = generate_mlkem768(Some(&encode_base64_url_nopad(&pq_seed))).unwrap();
+        assert_eq!(b64(&regenerated.client), pq_client);
+    }
+
+    #[test]
+    fn tls_keypair_validity_follows_months() {
+        let now = time::macros::datetime!(2026-01-31 12:00:00 UTC);
+        let tls = generate_tls_keypair_at("example.com", 1, now);
+        let der = rustls_pemfile::certs(&mut Cursor::new(tls.cert_pem.as_bytes()))
+            .next()
+            .unwrap()
+            .unwrap();
+        let contains = |needle: &[u8]| der.windows(needle.len()).any(|w| w == needle);
+        assert!(contains(b"260131120000Z"), "notBefore");
+        assert!(contains(b"260228120000Z"), "notAfter");
+        assert_eq!(
+            add_months(now, 24),
+            time::macros::datetime!(2028-01-31 12:00:00 UTC)
+        );
     }
 }
