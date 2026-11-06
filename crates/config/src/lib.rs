@@ -18,14 +18,18 @@ mod group;
 pub use group::*;
 mod plan;
 pub use plan::*;
+mod resource;
+pub use resource::{
+    Accepted, DEFAULT_SIZE_LIMIT, Download, GeoFile, ResourceKey, ResourceKind, ResourceSpec,
+};
 mod users;
 pub use kerlico_dns::DnsSpec;
 pub use kerlico_routing::{
     CompiledHeadlessRule, CompiledRuleSet, GeoConfigSpec, GeoIpDat, GeoSiteDat, GeoxUrlSpec,
-    HeadlessRuleSpec, Network, RouteTable, RuleProviderSpec, RuleSetSpec, RuleSpec,
-    SourceRuleSetFile, builtin_geoip_codes, builtin_geosite_codes, compile_ruleset_to_srs,
-    convert_adguard_lines, decompile_ruleset_bytes, export_geoip_ruleset, export_geosite_ruleset,
-    matches_geoip_code, matches_geosite_code, parse_ruleset_bytes,
+    HeadlessRuleSpec, Network, RouteTable, RuleProviderSpec, RuleSetSlot, RuleSetSource,
+    RuleSetSpec, RuleSpec, SourceRuleSetFile, builtin_geoip_codes, builtin_geosite_codes,
+    compile_ruleset_to_srs, convert_adguard_lines, decompile_ruleset_bytes, export_geoip_ruleset,
+    export_geosite_ruleset, matches_geoip_code, matches_geosite_code, parse_ruleset_bytes,
 };
 pub use users::AccountSpec;
 
@@ -1514,30 +1518,49 @@ impl Registry {
             }
         }
         let mut compiled_rule_sets: HashMap<String, CompiledRuleSet> = HashMap::new();
-        for set_spec in config.rule_set.iter().chain(
-            config
-                .route
-                .as_ref()
-                .map(|r| r.rule_set.iter())
-                .into_iter()
-                .flatten(),
-        ) {
-            let compiled = CompiledRuleSet::compile_spec(set_spec)?;
+        let mut rule_set_sources = Vec::new();
+        let sing_box_sets = config
+            .rule_set
+            .iter()
+            .chain(
+                config
+                    .route
+                    .as_ref()
+                    .map(|r| r.rule_set.iter())
+                    .into_iter()
+                    .flatten(),
+            )
+            .map(RuleSetSpec::source);
+        let provider_sets = config.rule_providers.iter().map(|(key, spec)| {
+            spec.source(key).map(|mut source| {
+                key.trim().clone_into(&mut source.tag);
+                source
+            })
+        });
+        for source in sing_box_sets.chain(provider_sets) {
+            let source = source?;
+            let file = match &source.file {
+                None => None,
+                Some(file) => match resource::read_cached(&file.path)? {
+                    Some(bytes) => Some(bytes),
+                    None if file.remote.is_none() => {
+                        return Err(Error::Config(format!(
+                            "规则集文件不存在：{}（{}）",
+                            source.tag,
+                            file.path.display()
+                        )));
+                    }
+                    None => None,
+                },
+            };
+            let compiled = source.compile(file.as_deref())?;
             if compiled_rule_sets
-                .insert(set_spec.tag.trim().to_owned(), compiled)
+                .insert(source.tag.clone(), compiled)
                 .is_some()
             {
                 return Err(Error::Config("rule-set 标签重复".into()));
             }
-        }
-        for (tag, provider_spec) in &config.rule_providers {
-            let compiled = CompiledRuleSet::compile_provider(tag, provider_spec)?;
-            if compiled_rule_sets
-                .insert(tag.trim().to_owned(), compiled)
-                .is_some()
-            {
-                return Err(Error::Config("rule-providers 与 rule-set 标签重复".into()));
-            }
+            rule_set_sources.push(source);
         }
         if let Some(dns) = &config.dns {
             dns.validate()?;
@@ -1790,6 +1813,20 @@ impl Registry {
         }
         if routes.outbounds().any(|id| !profiles.contains_key(id)) {
             return Err(Error::Config("路由规则引用的出站不存在".into()));
+        }
+        let resources = remote_resources(
+            rule_set_sources,
+            &routes,
+            config.dns.as_ref(),
+            &compiled_providers,
+            &geo_spec,
+        )?;
+        if resources
+            .iter()
+            .filter_map(|r| r.download.as_ref()?.detour.as_ref())
+            .any(|id| !profiles.contains_key(id))
+        {
+            return Err(Error::Config("资源下载引用的出站不存在".into()));
         }
         if routes.users().any(|id| !accounts.contains_key(id)) {
             return Err(Error::Config("路由规则引用的管理账户不存在".into()));
@@ -2159,6 +2196,7 @@ impl Registry {
                 groups: compiled_groups,
                 providers: compiled_providers.into_values().collect(),
                 rule_providers: rule_providers_counts,
+                resources,
                 store_selected_path,
                 log: config.log,
             },
@@ -2168,6 +2206,100 @@ impl Registry {
             lan_filter,
         })
     }
+}
+
+/// 文件来源的规则集、file/http 提供者与配置了 URL 的 Geo 数据库，交给运行时加载与刷新。
+fn remote_resources(
+    rule_sets: Vec<RuleSetSource>,
+    routes: &RouteTable,
+    dns: Option<&DnsSpec>,
+    providers: &BTreeMap<String, CompiledProxyProvider>,
+    geo: &GeoConfigSpec,
+) -> Result<Vec<ResourceSpec>> {
+    let mut referenced: BTreeSet<&str> = routes.referenced_rule_sets().into_iter().collect();
+    referenced.extend(
+        dns.into_iter()
+            .flat_map(|dns| dns.rules.iter())
+            .flat_map(|rule| rule.rule_set.iter())
+            .map(|tag| tag.trim()),
+    );
+    let mut resources = Vec::new();
+    for source in rule_sets {
+        let Some(file) = source.file.clone() else {
+            continue;
+        };
+        let download = match file.remote {
+            Some(remote) => Some(Download {
+                url: remote.url,
+                interval: remote.interval,
+                detour: resource::download_detour(remote.detour.as_deref())?,
+                headers: Vec::new(),
+                size_limit: resource::size_limit(remote.size_limit),
+            }),
+            None => None,
+        };
+        let required = referenced.contains(source.tag.as_str());
+        resources.push(ResourceSpec {
+            kind: ResourceKind::RuleSet { source, required },
+            path: file.path,
+            download,
+        });
+    }
+    for provider in providers.values() {
+        let Some(path) = provider.path.as_deref() else {
+            continue;
+        };
+        if provider.kind == "inline" {
+            continue;
+        }
+        let download = match provider.url.as_deref() {
+            Some(url) if provider.kind == "http" => Some(Download {
+                url: url.trim().to_owned(),
+                interval: Duration::from_secs(provider.interval),
+                detour: resource::download_detour(provider.proxy.as_deref())?,
+                headers: provider
+                    .headers
+                    .iter()
+                    .flat_map(|(name, values)| values.iter().map(|v| (name.clone(), v.clone())))
+                    .collect(),
+                size_limit: resource::size_limit(provider.size_limit),
+            }),
+            _ => None,
+        };
+        resources.push(ResourceSpec {
+            kind: ResourceKind::ProxyProvider(provider.name.clone()),
+            path: path.into(),
+            download,
+        });
+    }
+    let interval = if geo.geo_auto_update {
+        Duration::from_secs(u64::from(geo.geo_update_interval.unwrap_or(24)) * 3600)
+    } else {
+        Duration::ZERO
+    };
+    for file in GeoFile::ALL {
+        let url = match file {
+            GeoFile::GeoIp => geo.effective_geoip_url(),
+            GeoFile::GeoSite => geo.effective_geosite_url(),
+            GeoFile::Mmdb => geo.effective_mmdb_url(),
+            GeoFile::Asn => geo.geox_url.as_ref().and_then(|u| u.asn.as_deref()),
+        };
+        let Some(url) = url.map(str::trim).filter(|u| !u.is_empty()) else {
+            continue;
+        };
+        resources.push(ResourceSpec {
+            kind: ResourceKind::Geo(file),
+            path: file.default_path(),
+            download: Some(Download {
+                url: url.to_owned(),
+                interval,
+                detour: None,
+                headers: Vec::new(),
+                size_limit: DEFAULT_SIZE_LIMIT,
+            }),
+        });
+    }
+    Ok(resources)
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Config> {

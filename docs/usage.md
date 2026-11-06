@@ -87,6 +87,16 @@ printf '%s' 'your-admin-password' | kerlico account-new --prefix alice
 
 规则按顺序匹配，首条命中生效，未命中走节点绑定的 `outbound`。可按域名、关键字、正则、CIDR、端口、网络、节点、用户、协议嗅探（TLS SNI、HTTP Host、QUIC SNI、BitTorrent、SSH、RDP）和外部规则集匹配。开启 `sniff` 或 Fake-IP 时，IP 目标可还原域名并参与域名规则匹配。详见[路由规则](interfaces/config.md)。
 
+## 订阅、远程规则集与 Geo 数据
+
+`http` 类型的 `proxy_providers`、`type: remote` 的 `rule_set` 与 `http` 类型的 `rule_providers` 从 URL 下载，缓存到 `path`（未写时为 `proxies/<名称>`、`rules/<标签>`，相对工作目录）。
+
+- **下载路径**：`proxy`、`download_detour` 指定命名出站或策略组时经它下载，目标域名交给该出站；留空或写 `DIRECT` 时直连。支持 HTTP/HTTPS、最多 5 次重定向、gzip、`header` 与 `size-limit`（0 或未写时上限 64 MiB）。上次响应带 `ETag` 或 `Last-Modified` 时发条件请求，304 保留现有内容。
+- **启动**：缓存存在且未超过 `interval` 时直接使用；否则先下载。下载失败而缓存存在时继续用旧缓存并记日志。被路由或 DNS 规则引用的规则集既无缓存又下载失败时拒绝启动；`type: local` 规则集或 `file` 规则提供者的文件不存在时配置检查失败。提供者没有内容时成员为空，`GET /providers/proxies/<name>` 带 `error`，使用它的策略组拒绝连接。
+- **刷新**：按 `interval`（sing-box `update_interval`，默认 `1d`）在后台刷新。规则集原地替换，新连接立即按新内容匹配。提供者内容变化时用当前配置重建引擎，新成员生效，期间入口短暂关闭、已有连接按 `drain_timeout_ms` 排空。内容校验失败（例如提供者没有可用节点）时不覆盖缓存。
+- **手动刷新**：`PUT /providers/proxies/<name>`、`PUT /providers/rules/<name>` 立即刷新，失败回 503 与 `message`。
+- **Geo 数据**：`geox-url` 中配置的 `geoip`、`geosite`、`mmdb`、`asn` 下载到工作目录的 `GeoIP.dat`、`GeoSite.dat`、`Country.mmdb`、`GeoLite2-ASN.mmdb`。`geo-auto-update: true` 时按 `geo-update-interval`（小时，默认 24）刷新；`POST /upgrade/geo` 立即下载。运行时 GeoIP/GeoSite 规则目前仍使用内置分类表，不读这些文件。
+
 ## WARP 补齐
 
 机器只有 IPv4 或只有 IPv6 时，配置 `device` 后，`dual-stack` 节点的 `direct` 流量可经 Cloudflare WARP 访问缺失的地址族：

@@ -4,7 +4,11 @@ use crate::{Network, PortRange, wildcard_domain_matches};
 use kerlico_core::{Address, Cidr, Destination, Error, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    time::Duration,
+};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -494,6 +498,248 @@ impl CompiledHeadlessRule {
     }
 }
 
+/// 规则集文件内容的线格式。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuleSetFormat {
+    /// sing-box 源格式 JSON 或二进制，保留 `format` 原值。
+    SingBox(Option<String>),
+    /// Mihomo rule-provider 的逐行文本或 `payload:` 列表，按 behavior 解释。
+    Lines(String),
+}
+
+impl RuleSetFormat {
+    fn decode(&self, bytes: &[u8]) -> Result<Vec<CompiledHeadlessRule>> {
+        match self {
+            Self::SingBox(format) => parse_ruleset_bytes(bytes, format.as_deref()),
+            Self::Lines(behavior) => {
+                let text = std::str::from_utf8(bytes)
+                    .map_err(|_| Error::Config("rule-provider 文件不是 UTF-8 文本".into()))?;
+                let lines = provider_file_lines(text);
+                if lines.is_empty() {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![compile_provider_lines(&lines, behavior)?])
+            }
+        }
+    }
+}
+
+fn provider_file_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| line.trim().trim_start_matches('-').trim())
+        .map(|line| line.trim_matches('\'').trim_matches('"').trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && *line != "payload:")
+        .map(str::to_owned)
+        .collect()
+}
+
+/// 规则集文件的下载来源；`interval` 为零时只在缓存缺失时下载。
+#[derive(Clone, Debug)]
+pub struct RemoteRuleSet {
+    pub url: String,
+    pub interval: Duration,
+    pub detour: Option<String>,
+    pub size_limit: Option<u64>,
+}
+
+/// 规则集的文件来源：本地文件，或远程内容的缓存文件。
+#[derive(Clone, Debug)]
+pub struct RuleSetFile {
+    pub path: PathBuf,
+    pub remote: Option<RemoteRuleSet>,
+}
+
+/// 一个规则集的内联规则、文件来源与解码方式；启动和每次刷新都用它把文件字节编译为规则集。
+#[derive(Clone, Debug)]
+pub struct RuleSetSource {
+    pub tag: String,
+    pub format: RuleSetFormat,
+    inline: Vec<CompiledHeadlessRule>,
+    pub file: Option<RuleSetFile>,
+}
+
+impl RuleSetSource {
+    /// 内联规则加上文件内容；`file` 为 `None` 表示文件内容尚不可用。
+    pub fn compile(&self, file: Option<&[u8]>) -> Result<CompiledRuleSet> {
+        let mut rules = self.inline.clone();
+        if let Some(bytes) = file {
+            rules.extend(self.format.decode(bytes)?);
+        }
+        Ok(CompiledRuleSet {
+            tag: self.tag.clone(),
+            rules,
+        })
+    }
+}
+
+/// 远程资源未给 `path` 时的默认缓存位置：`<dir>/<name>`，名称中路径分隔符等字符替换为 `_`。
+pub fn default_cache_path(dir: &str, name: &str) -> PathBuf {
+    let file: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let file = match file.trim_start_matches('.') {
+        "" => "_".to_owned(),
+        trimmed => trimmed.to_owned(),
+    };
+    PathBuf::from(dir).join(file)
+}
+
+fn http_url(url: Option<&str>, what: &str) -> Result<String> {
+    let url = url
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| Error::Config(format!("{what} 缺少 url")))?;
+    let lower = url.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return Err(Error::Config(format!("{what} url 必须为 http/https")));
+    }
+    Ok(url.to_owned())
+}
+
+/// sing-box `update_interval` 语法：`1d`、`12h`、`30m`、`90s` 及组合 `1h30m`；纯数字按秒。
+pub fn parse_update_interval(raw: &str) -> Result<Duration> {
+    let invalid = || Error::Config(format!("update_interval 不合法：{raw}"));
+    let raw = raw.trim();
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Ok(Duration::from_secs(secs));
+    }
+    let mut total = 0u64;
+    let mut digits = String::new();
+    for c in raw.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let unit = match c {
+            'd' => 86_400,
+            'h' => 3_600,
+            'm' => 60,
+            's' => 1,
+            _ => return Err(invalid()),
+        };
+        let value: u64 = digits.parse().map_err(|_| invalid())?;
+        total = value
+            .checked_mul(unit)
+            .and_then(|v| total.checked_add(v))
+            .ok_or_else(invalid)?;
+        digits.clear();
+    }
+    if !digits.is_empty() || raw.is_empty() {
+        return Err(invalid());
+    }
+    Ok(Duration::from_secs(total))
+}
+
+impl RuleSetSpec {
+    pub fn source(&self) -> Result<RuleSetSource> {
+        let tag = self.tag.trim();
+        if tag.is_empty() {
+            return Err(Error::Config("rule_set tag 不能为空".into()));
+        }
+        let inline = self
+            .rules
+            .iter()
+            .map(CompiledHeadlessRule::compile)
+            .collect::<Result<Vec<_>>>()?;
+        let file = match self.kind.trim().to_ascii_lowercase().as_str() {
+            "inline" => {
+                if inline.is_empty() {
+                    return Err(Error::Config("inline rule_set 必须包含 rules".into()));
+                }
+                None
+            }
+            "local" => Some(RuleSetFile {
+                path: self
+                    .path
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .ok_or_else(|| Error::Config("local rule_set 缺少 path".into()))?,
+                remote: None,
+            }),
+            "remote" => Some(RuleSetFile {
+                path: self
+                    .path
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| default_cache_path("rules", tag)),
+                remote: Some(RemoteRuleSet {
+                    url: http_url(self.url.as_deref(), "remote rule_set")?,
+                    interval: parse_update_interval(
+                        self.update_interval.as_deref().unwrap_or("1d"),
+                    )?,
+                    detour: self.download_detour.clone(),
+                    size_limit: None,
+                }),
+            }),
+            _ => return Err(Error::Config("rule_set type 不合法".into())),
+        };
+        Ok(RuleSetSource {
+            tag: tag.to_owned(),
+            format: RuleSetFormat::SingBox(self.format.clone()),
+            inline,
+            file,
+        })
+    }
+}
+
+impl RuleProviderSpec {
+    pub fn source(&self, default_name: &str) -> Result<RuleSetSource> {
+        let tag = self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_name.trim())
+            .to_owned();
+        if tag.is_empty() {
+            return Err(Error::Config("rule-provider name 不能为空".into()));
+        }
+        let behavior = self.behavior.trim().to_ascii_lowercase();
+        if !matches!(behavior.as_str(), "domain" | "ipcidr" | "classical") {
+            return Err(Error::Config("rule-provider behavior 不合法".into()));
+        }
+        let mut inline = Vec::new();
+        if !self.payload.is_empty() {
+            inline.push(compile_provider_lines(&self.payload, &behavior)?);
+        }
+        let path = self.path.as_deref().map(PathBuf::from);
+        let file = match self.kind.trim().to_ascii_lowercase().as_str() {
+            "inline" => path.map(|path| RuleSetFile { path, remote: None }),
+            "file" | "local" => Some(RuleSetFile {
+                path: path.ok_or_else(|| Error::Config("file rule-provider 缺少 path".into()))?,
+                remote: None,
+            }),
+            "http" | "remote" => Some(RuleSetFile {
+                path: path.unwrap_or_else(|| default_cache_path("rules", &tag)),
+                remote: Some(RemoteRuleSet {
+                    url: http_url(self.url.as_deref(), "http rule-provider")?,
+                    interval: Duration::from_secs(self.interval.unwrap_or(0)),
+                    detour: self.proxy.clone(),
+                    size_limit: self.size_limit.filter(|limit| *limit > 0),
+                }),
+            }),
+            _ => return Err(Error::Config("rule-provider type 不合法".into())),
+        };
+        let format = match self.format.as_deref().map(str::trim) {
+            Some(f) if f.eq_ignore_ascii_case("mrs") => RuleSetFormat::SingBox(Some("mrs".into())),
+            _ => RuleSetFormat::Lines(behavior),
+        };
+        Ok(RuleSetSource {
+            tag,
+            format,
+            inline,
+            file,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct CompiledRuleSet {
     pub tag: String,
@@ -505,103 +751,6 @@ impl CompiledRuleSet {
         self.rules
             .iter()
             .any(CompiledHeadlessRule::has_process_rules)
-    }
-
-    pub fn compile_spec(spec: &RuleSetSpec) -> Result<Self> {
-        if spec.tag.trim().is_empty() {
-            return Err(Error::Config("rule_set tag 不能为空".into()));
-        }
-        let kind = spec.kind.trim().to_ascii_lowercase();
-        let mut rules = Vec::new();
-        for r in &spec.rules {
-            rules.push(CompiledHeadlessRule::compile(r)?);
-        }
-        match kind.as_str() {
-            "inline" => {
-                if rules.is_empty() {
-                    return Err(Error::Config("inline rule_set 必须包含 rules".into()));
-                }
-            }
-            "local" => {
-                let path = spec
-                    .path
-                    .as_deref()
-                    .ok_or_else(|| Error::Config("local rule_set 缺少 path".into()))?;
-                if let Ok(bytes) = std::fs::read(path) {
-                    rules.extend(parse_ruleset_bytes(&bytes, spec.format.as_deref())?);
-                }
-            }
-            "remote" => {
-                let url = spec
-                    .url
-                    .as_deref()
-                    .ok_or_else(|| Error::Config("remote rule_set 缺少 url".into()))?;
-                if !url.starts_with("http://") && !url.starts_with("https://") {
-                    return Err(Error::Config(
-                        "remote rule_set url 必须为 http/https".into(),
-                    ));
-                }
-                if let Some(path) = &spec.path
-                    && let Ok(bytes) = std::fs::read(path)
-                {
-                    rules.extend(parse_ruleset_bytes(&bytes, spec.format.as_deref())?);
-                }
-            }
-            _ => return Err(Error::Config("rule_set type 不合法".into())),
-        }
-        Ok(Self {
-            tag: spec.tag.clone(),
-            rules,
-        })
-    }
-
-    pub fn compile_provider(default_name: &str, spec: &RuleProviderSpec) -> Result<Self> {
-        let tag = spec
-            .name
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(default_name)
-            .to_owned();
-        if tag.is_empty() {
-            return Err(Error::Config("rule-provider name 不能为空".into()));
-        }
-        let kind = spec.kind.trim().to_ascii_lowercase();
-        if !matches!(
-            kind.as_str(),
-            "file" | "http" | "inline" | "local" | "remote"
-        ) {
-            return Err(Error::Config("rule-provider type 不合法".into()));
-        }
-        let behavior = spec.behavior.trim().to_ascii_lowercase();
-        if !matches!(behavior.as_str(), "domain" | "ipcidr" | "classical") {
-            return Err(Error::Config("rule-provider behavior 不合法".into()));
-        }
-        if matches!(kind.as_str(), "http" | "remote") {
-            let url = spec
-                .url
-                .as_deref()
-                .ok_or_else(|| Error::Config("http rule-provider 缺少 url".into()))?;
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                return Err(Error::Config("rule-provider url 必须为 http/https".into()));
-            }
-        }
-        let mut lines = spec.payload.clone();
-        if let Some(path) = &spec.path
-            && let Ok(text) = std::fs::read_to_string(path)
-        {
-            for line in text.lines() {
-                let t = line.trim().trim_start_matches('-').trim();
-                let t = t.trim_matches('\'').trim_matches('"').trim();
-                if !t.is_empty() && !t.starts_with('#') && t != "payload:" {
-                    lines.push(t.to_owned());
-                }
-            }
-        }
-        let mut rules = Vec::new();
-        if !lines.is_empty() {
-            rules.push(compile_provider_lines(&lines, &behavior)?);
-        }
-        Ok(Self { tag, rules })
     }
 
     pub fn matches(

@@ -279,3 +279,77 @@ fn concurrent_reload_requests_run_one_after_another() {
     let second_open = TcpStream::connect(("127.0.0.1", second)).is_ok();
     assert!(first_open != second_open, "exactly one listener remains");
 }
+
+/// 回环订阅源：返回当前内容，`None` 时回 500。
+fn subscription_origin() -> (u16, std::sync::Arc<std::sync::Mutex<Option<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let shared = body.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let reply = match shared.lock().unwrap().clone() {
+                Some(body) => format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ),
+                None => "HTTP/1.1 500 Broken\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_owned(),
+            };
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    (port, body)
+}
+
+fn provider_members(control: u16) -> Vec<String> {
+    let (status, body) = http(control, "GET", "/providers/proxies/sub", None);
+    assert_eq!(status, 200, "{body}");
+    body["proxies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn provider_update_endpoint_downloads_and_rebuilds_with_new_members() {
+    let directory = Directory::new();
+    let path = directory.0.join("config.json");
+    let (origin, body) = subscription_origin();
+    *body.lock().unwrap() = Some(json!([{"tag": "n1", "type": "direct"}]).to_string());
+    let (listen, control) = (free_port(), free_port());
+    let mut value = config(listen, free_port(), control);
+    value["proxy_providers"] = json!({"sub": {"type": "http",
+        "url": format!("http://127.0.0.1:{origin}/sub"),
+        "path": directory.0.join("sub.json"), "interval": 3600}});
+    value["proxy_groups"] = json!([{"name": "pick", "type": "select", "use": ["sub"]}]);
+    fs::write(&path, value.to_string()).unwrap();
+    let _child = start(&path);
+
+    wait_for_reloads(control, 1, 0);
+    assert_eq!(provider_members(control), ["n1"]);
+
+    *body.lock().unwrap() = Some(json!([{"tag": "n2", "type": "direct"}]).to_string());
+    assert_eq!(http(control, "PUT", "/providers/proxies/sub", None).0, 204);
+    assert_eq!(reloads(control)["succeeded"], 2);
+    assert_eq!(provider_members(control), ["n2"]);
+
+    *body.lock().unwrap() = None;
+    let (status, failure) = http(control, "PUT", "/providers/proxies/sub", None);
+    assert_eq!(status, 503, "{failure}");
+    assert!(failure["message"].as_str().unwrap().contains("500"));
+    assert_eq!(provider_members(control), ["n2"]);
+    let (_, listed) = http(control, "GET", "/providers/proxies/sub", None);
+    assert!(listed["error"].as_str().unwrap().contains("500"));
+}

@@ -136,4 +136,52 @@ pub(super) const DIAGNOSTICS: &[(&str, &str)] = &[
         "；保留注册意图，不自动重试",
         "; the registration intent is retained without automatic retry",
     ),
+    ("规则集文件不存在：", "Rule set file does not exist: "),
+    ("rule-set 标签重复", "Duplicate rule-set tag"),
+    (
+        "资源下载引用的出站不存在",
+        "The download outbound of a resource does not exist",
+    ),
+    (
+        "下载失败：重定向次数过多",
+        "Download failed: too many redirects",
+    ),
+    ("下载失败：", "Download failed: "),
+    (
+        "下载内容超过大小上限 ",
+        "Downloaded content exceeds the size limit of ",
+    ),
+    (" 字节", " bytes"),
+    ("下载出站不可用：", "Download outbound unavailable: "),
+    ("资源文件不存在：", "Resource file does not exist: "),
+    (
+        "资源缓存路径缺少文件名",
+        "Resource cache path has no file name",
+    ),
+    (" 没有可用内容：", " has no usable content: "),
+    (" 内容没有可用节点", " content has no usable proxies"),
+    (" 内容不是 UTF-8", " content is not UTF-8"),
+    (
+        "proxy-provider 文件不是 UTF-8",
+        "proxy-provider file is not UTF-8",
+    ),
+    (
+        "rule-provider 文件不是 UTF-8 文本",
+        "rule-provider file is not UTF-8 text",
+    ),
+    (
+        "file rule-provider 缺少 path",
+        "file rule-provider is missing path",
+    ),
+    (" 缺少 url", " is missing url"),
+    (" url 必须为 http/https", " url must be http/https"),
+    ("update_interval 不合法：", "Invalid update_interval: "),
+    (
+        " 数据库内容为空或格式不符",
+        " database is empty or malformed",
+    ),
+    (
+        "所选命名出站没有 TCP 能力",
+        "The selected named outbound has no TCP capability",
+    ),
 ];

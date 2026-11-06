@@ -4383,6 +4383,11 @@ name = "kerlico-egress"
 version = "1.12.0"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
+ "flate2",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "kerlico-config",
  "kerlico-core",
  "kerlico-dns",
@@ -4671,6 +4676,7 @@ dependencies = [
 name = "kerlico-routing"
 version = "1.12.0"
 dependencies = [
+ "arc-swap",
  "kerlico-core",
  "regex",
  "serde",

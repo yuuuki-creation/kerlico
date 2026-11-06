@@ -87,6 +87,16 @@ Put the output in `accounts`, then use its `user_id` as a node member. Create se
 
 Rules match in order and the first match wins. Unmatched traffic uses the node's `outbound`. Rules can match domain, keyword, regex, CIDR, port, network, node, user, sniffed protocol (TLS SNI, HTTP Host, QUIC SNI, BitTorrent, SSH, RDP), and external rule-sets. When `sniff` or Fake-IP is enabled, IP targets recover their domain name for domain rule matching.
 
+## Subscriptions, remote rule-sets, and Geo data
+
+`proxy_providers` of type `http`, `rule_set` entries with `type: remote`, and `rule_providers` of type `http` download from their URL and cache the content at `path` (default `proxies/<name>` or `rules/<tag>`, relative to the working directory).
+
+- **Download path**: when `proxy` or `download_detour` names an outbound or proxy group, the download goes through it and that outbound receives the target domain. Empty or `DIRECT` downloads directly. HTTP and HTTPS, up to 5 redirects, gzip, `header`, and `size-limit` are supported (0 or unset caps the body at 64 MiB). When the previous response carried `ETag` or `Last-Modified`, the request is conditional and a 304 keeps the current content.
+- **Startup**: a cache younger than `interval` is used as is; otherwise the resource downloads first. If the download fails and a cache exists, the stale cache is used and a log entry is written. A rule-set referenced by route or DNS rules with no cache and a failed download stops startup. A missing file for a `type: local` rule-set or a `file` rule provider fails the configuration check. A provider with no content has no members, `GET /providers/proxies/<name>` reports `error`, and groups that use it reject connections.
+- **Refresh**: resources refresh in the background every `interval` (sing-box `update_interval`, default `1d`). Rule-sets are replaced in place and new connections match the new content immediately. When provider content changes, the engine is rebuilt from the current configuration so new members take effect; inbounds close briefly and existing connections drain within `drain_timeout_ms`. Content that fails validation (for example a provider with no usable proxies) does not overwrite the cache.
+- **Manual refresh**: `PUT /providers/proxies/<name>` and `PUT /providers/rules/<name>` refresh immediately and return 503 with `message` on failure.
+- **Geo data**: the `geoip`, `geosite`, `mmdb`, and `asn` entries of `geox-url` download to `GeoIP.dat`, `GeoSite.dat`, `Country.mmdb`, and `GeoLite2-ASN.mmdb` in the working directory. With `geo-auto-update: true` they refresh every `geo-update-interval` hours (default 24); `POST /upgrade/geo` downloads them immediately. Runtime GeoIP/GeoSite rules still use the built-in category tables and do not read these files yet.
+
 ## WARP fill-in
 
 On an IPv4-only or IPv6-only machine, configure `device` so `direct` traffic from `dual-stack` nodes can reach the missing family through Cloudflare WARP:

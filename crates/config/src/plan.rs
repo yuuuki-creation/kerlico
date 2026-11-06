@@ -89,6 +89,7 @@ pub struct EgressPlan {
     pub(crate) groups: Vec<crate::CompiledProxyGroup>,
     pub(crate) providers: Vec<crate::CompiledProxyProvider>,
     pub(crate) rule_providers: std::collections::BTreeMap<String, usize>,
+    pub(crate) resources: Vec<crate::ResourceSpec>,
     pub(crate) store_selected_path: Option<String>,
     pub(crate) log: crate::LogSpec,
 }
@@ -104,6 +105,10 @@ impl EgressPlan {
     }
     pub fn rule_providers(&self) -> &std::collections::BTreeMap<String, usize> {
         &self.rule_providers
+    }
+    /// 运行时启动后加载与周期刷新的落盘资源。
+    pub fn resources(&self) -> &[crate::ResourceSpec] {
+        &self.resources
     }
     pub fn store_selected_path(&self) -> Option<&str> {
         self.store_selected_path.as_deref()

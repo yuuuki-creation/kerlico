@@ -279,6 +279,7 @@ pub struct Engine {
     history_interval: std::time::Duration,
     language: Language,
     egress: kerlico_egress::EgressRuntime,
+    refresher: kerlico_egress::Refresher,
     inbounds: Vec<Inbound>,
     nodes: Vec<BoundNode>,
     node_stats: BTreeMap<String, Arc<Stats>>,
@@ -314,6 +315,7 @@ impl Engine {
         let limits = config.limits;
         let lan_filter = config.lan_filter;
         let language = options.language;
+        let resources = config.egress.resources().to_vec();
         let egress = kerlico_egress::EgressRuntime::start_with_options(
             config.egress,
             options,
@@ -328,6 +330,7 @@ impl Engine {
                 .map_or(1000, |history| history.sample_interval_ms),
         );
         let bound = async {
+            let refresher = egress.start_resources(resources).await?;
             if let Some(spec) = config.history {
                 history_owner = Some(
                     HistoryOwner::start(
@@ -393,15 +396,16 @@ impl Engine {
                     udp,
                 });
             }
-            Ok::<_, Error>((inbounds, nodes, node_stats))
+            Ok::<_, Error>((refresher, inbounds, nodes, node_stats))
         }
         .await;
         match bound {
-            Ok((inbounds, nodes, node_stats)) => Ok(Self {
+            Ok((refresher, inbounds, nodes, node_stats)) => Ok(Self {
                 history_owner,
                 history_interval,
                 language,
                 egress,
+                refresher,
                 inbounds,
                 nodes,
                 node_stats,
@@ -433,6 +437,10 @@ impl Engine {
     }
     pub fn prober(&self) -> kerlico_egress::Prober {
         self.egress.prober()
+    }
+    /// 远程资源的刷新句柄；`provider_changes` 变化表示提供者内容已更新、需重建引擎代际。
+    pub fn refresher(&self) -> kerlico_egress::Refresher {
+        self.refresher.clone()
     }
     /// 历史存储独立于命名出站；超时后仅收据完成才证明原生写者真实释放。
     pub fn history_retirement(&self) -> Option<ServiceRetirement> {

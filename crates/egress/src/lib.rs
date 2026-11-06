@@ -18,11 +18,13 @@ use std::{
     time::Duration,
 };
 use tokio::time::{Instant, timeout_at};
+mod fetch;
 mod group;
 mod history;
 mod meter;
 mod probe;
 pub mod process;
+mod resource;
 mod telemetry;
 pub use group::{
     ActiveConnection, ControlPlane, DelaySample, ProxyRuntimeInfo, StructuredLogEntry,
@@ -34,6 +36,7 @@ pub use history::{
 pub use probe::{
     DEFAULT_TEST_URL, ExpectedStatus, ProbeError, ProbeResult, ProbeSpec, ProbeTarget, Prober,
 };
+pub use resource::{Refreshed, Refresher, ResourceStatus};
 pub use telemetry::{
     DatagramTargetRecord, EventRecord, FlowEnd, FlowId, FlowKind, FlowRecord, FlowStage, Telemetry,
     Usage, UsageSnapshot,

@@ -8,17 +8,20 @@ pub use geodata::{
     matches_geosite_code,
 };
 pub use ruleset::{
-    CompiledHeadlessRule, CompiledRuleSet, HeadlessRuleSpec, LogicalMode, RuleProviderSpec,
-    RuleSetSpec, SourceRuleSetFile, compile_ruleset_to_srs, convert_adguard_lines,
-    decompile_ruleset_bytes, parse_ruleset_bytes,
+    CompiledHeadlessRule, CompiledRuleSet, HeadlessRuleSpec, LogicalMode, RemoteRuleSet,
+    RuleProviderSpec, RuleSetFile, RuleSetFormat, RuleSetSource, RuleSetSpec, SourceRuleSetFile,
+    compile_ruleset_to_srs, convert_adguard_lines, decompile_ruleset_bytes, default_cache_path,
+    parse_ruleset_bytes, parse_update_interval,
 };
 
+use arc_swap::ArcSwap;
 use kerlico_core::{Address, Cidr, Destination, Error, NodeId, OutId, Result, Source, UserId};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
+    sync::Arc,
     time::Duration,
 };
 
@@ -754,7 +757,7 @@ impl Rule {
         false
     }
 
-    fn matches_ctx(&self, ctx: &RouteContext<'_>, sets: &HashMap<String, CompiledRuleSet>) -> bool {
+    fn matches_ctx(&self, ctx: &RouteContext<'_>, sets: &HashMap<String, RuleSetSlot>) -> bool {
         if let Some((mode, children)) = &self.logical {
             let child_hit = match mode {
                 LogicalMode::And => children.iter().all(|c| c.matches_ctx(ctx, sets)),
@@ -841,8 +844,8 @@ impl Rule {
         });
 
         let ruleset_hit = self.rule_set.iter().any(|tag| {
-            sets.get(tag).is_some_and(|set| {
-                set.matches_with_process(
+            sets.get(tag).is_some_and(|slot| {
+                slot.load().matches_with_process(
                     &candidate_hosts,
                     &candidate_ips,
                     ctx.target.port(),
@@ -976,11 +979,29 @@ pub struct RouteDecision {
     pub sniff: Option<(Vec<String>, Duration)>,
 }
 
+/// 运行中规则集的替换点：路由表的各个克隆共享同一槽，刷新任务整体换入新编译结果，匹配无锁读取。
+#[derive(Clone, Debug)]
+pub struct RuleSetSlot(Arc<ArcSwap<CompiledRuleSet>>);
+
+impl RuleSetSlot {
+    pub fn new(set: CompiledRuleSet) -> Self {
+        Self(Arc::new(ArcSwap::from_pointee(set)))
+    }
+
+    pub fn load(&self) -> Arc<CompiledRuleSet> {
+        self.0.load_full()
+    }
+
+    pub fn replace(&self, set: CompiledRuleSet) {
+        self.0.store(Arc::new(set));
+    }
+}
+
 /// 按配置顺序匹配，非终结动作（`sniff`、`resolve`、`route-options`）累积后继续，首条终结动作生效。
 #[derive(Clone, Debug, Default)]
 pub struct RouteTable {
     rules: Vec<Rule>,
-    sets: HashMap<String, CompiledRuleSet>,
+    sets: HashMap<String, RuleSetSlot>,
     sub_rules: HashMap<String, Vec<Rule>>,
     final_outbound: Option<OutId>,
 }
@@ -996,7 +1017,10 @@ impl RouteTable {
     ) -> Result<Self> {
         Ok(Self {
             rules: specs.iter().map(Rule::compile).collect::<Result<_>>()?,
-            sets,
+            sets: sets
+                .into_iter()
+                .map(|(tag, set)| (tag, RuleSetSlot::new(set)))
+                .collect(),
             sub_rules: HashMap::new(),
             final_outbound: None,
         })
@@ -1038,6 +1062,10 @@ impl RouteTable {
         self.sets.contains_key(tag)
     }
 
+    pub fn rule_set(&self, tag: &str) -> Option<&RuleSetSlot> {
+        self.sets.get(tag)
+    }
+
     pub fn has_sniff_rules(&self) -> bool {
         self.rules
             .iter()
@@ -1057,7 +1085,10 @@ impl RouteTable {
             .iter()
             .chain(self.sub_rules.values().flatten())
             .any(Rule::has_process_rules)
-            || self.sets.values().any(CompiledRuleSet::has_process_rules)
+            || self
+                .sets
+                .values()
+                .any(|slot| slot.load().has_process_rules())
     }
 
     pub fn referenced_rule_sets(&self) -> Vec<&str> {
@@ -1081,7 +1112,7 @@ impl RouteTable {
     pub fn rule_set_cidrs(&self, tag: &str) -> Vec<String> {
         self.sets
             .get(tag)
-            .map(CompiledRuleSet::cidr_strings)
+            .map(|slot| slot.load().cidr_strings())
             .unwrap_or_default()
     }
 
@@ -1573,7 +1604,7 @@ mod tests {
         let mut sets = HashMap::new();
         sets.insert(
             "corp-set".into(),
-            CompiledRuleSet::compile_spec(&set_spec).unwrap(),
+            set_spec.source().unwrap().compile(None).unwrap(),
         );
 
         let specs: Vec<RuleSpec> = serde_json::from_value(json!([

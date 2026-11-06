@@ -6,7 +6,8 @@
 use crate::{Dispatcher, candidates_with_strategy, connect_candidates, group::HealthOwner};
 use kerlico_config::{CompiledProxyGroup, CompiledProxyProvider, ProxyGroupKind};
 use kerlico_core::{
-    BoxStream, CancellationToken, ConnectContext, Destination, Error, OutId, Result, TargetPolicy,
+    BoxStream, CancellationToken, ConnectContext, Destination, Error, OutId, Outbound, Result,
+    TargetPolicy,
 };
 use kerlico_net::TcpConnector;
 use std::{
@@ -28,9 +29,9 @@ const MAX_CONCURRENT_PROBES: usize = 10;
 /// 已解析的 http/https 测试地址；主机保持原文，`Remote` 出站由远端解析。
 pub struct ProbeTarget {
     destination: Destination,
-    authority: String,
-    path: String,
-    tls: Option<TcpConnector>,
+    pub(crate) authority: String,
+    pub(crate) path: String,
+    pub(crate) tls: Option<TcpConnector>,
 }
 
 impl ProbeTarget {
@@ -264,22 +265,10 @@ impl Dispatcher {
         let started = Instant::now();
         let status = context
             .run(async {
-                let opened = match service.policy {
-                    TargetPolicy::Remote => service.backend.connect_tcp(target, &context).await?,
-                    TargetPolicy::Local => {
-                        let candidates = candidates_with_strategy(
-                            self.resolver.as_ref(),
-                            target,
-                            context.target_mode(),
-                            None,
-                        )
-                        .await?;
-                        connect_candidates(service.backend.as_ref(), &candidates, &context)
-                            .await?
-                            .0
-                    }
-                };
-                spec.target.head(opened.stream).await
+                let stream = self
+                    .open_tcp(service.backend.as_ref(), service.policy, target, &context)
+                    .await?;
+                spec.target.head(stream).await
             })
             .await
             .map_err(|error| match error {
@@ -294,6 +283,30 @@ impl Dispatcher {
         } else {
             Err(ProbeError::UnexpectedStatus(status))
         }
+    }
+
+    /// 运行时自身发起的连接（探测、资源下载）：`Remote` 出站收到原始目标，`Local` 出站先经调度器解析。
+    pub(crate) async fn open_tcp(
+        &self,
+        backend: &dyn Outbound,
+        policy: TargetPolicy,
+        target: &Destination,
+        context: &ConnectContext,
+    ) -> Result<BoxStream> {
+        let opened = match policy {
+            TargetPolicy::Remote => backend.connect_tcp(target, context).await?,
+            TargetPolicy::Local => {
+                let candidates = candidates_with_strategy(
+                    self.resolver.as_ref(),
+                    target,
+                    context.target_mode(),
+                    None,
+                )
+                .await?;
+                connect_candidates(backend, &candidates, context).await?.0
+            }
+        };
+        Ok(opened.stream)
     }
 
     /// 并发探测多个出站，最多同时 10 个，结果按输入顺序返回。

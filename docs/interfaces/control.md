@@ -29,7 +29,7 @@
 | `/version` | `GET` | 内核版本号与兼容标志 |
 | `/configs` | `GET` / `PUT` / `PATCH` | `GET` 读取当前运行模式与日志级别；`PUT` 重载整份配置，见[配置重载](#配置重载)；`PATCH` 只更新日志级别 |
 | `/restart` | `POST` | 重读启动配置并重载，等同不带请求体的 `PUT /configs` |
-| `/configs/geo`、`/upgrade/geo` | `POST` | 触发 GeoIP / GeoSite 数据库更新时间戳记录 |
+| `/configs/geo`、`/upgrade/geo` | `POST` | 立即下载 `geox_url` 配置的全部 Geo 数据库；未配置回 400，任一失败回 503 与 `message` |
 | `/cache/fakeip/flush` | `POST` | 清空 Fake-IP 映射表及持久化缓存 |
 | `/logs` | `GET` | 返回控制面环形日志缓冲条目 |
 | `/rules`、`/routing/rules` | `GET` / `POST` / `DELETE` | 查询当前路由规则摘要，动态追加或删除路由规则 |
@@ -37,8 +37,8 @@
 | `/connections`、`/connections/<id>` | `GET` / `DELETE` | 列出活跃连接与累计上下行字节，关闭全部或指定连接 |
 | `/proxies`、`/proxies/<name>`、`/proxies/<name>/delay?url=&timeout=&expected=` | `GET` / `PUT` | 查询全部出站与策略组状态、切换 `Select` 策略组选中项、经该出站实测延迟（见下文“延迟探测”） |
 | `/group`、`/group/<name>`、`/group/<name>/delay?url=&timeout=&expected=` | `GET` | 查询策略组列表、单组详情，或并发实测组内全部候选，返回成功项 `{"<name>": <ms>}`；全部失败时 504 |
-| `/providers/proxies`、`/providers/proxies/<name>`、`/providers/proxies/<name>/healthcheck`、`/providers/proxies/<name>/<proxy>/healthcheck` | `GET` / `PUT` | 查询代理提供者列表与节点、触发订阅刷新，按提供者的 `health-check` 设置实测整组（204）或单个节点（返回 `delay`） |
-| `/providers/rules`、`/providers/rules/<name>` | `GET` / `PUT` | 查询规则集提供者状态并触发刷新计数更新 |
+| `/providers/proxies`、`/providers/proxies/<name>`、`/providers/proxies/<name>/healthcheck`、`/providers/proxies/<name>/<proxy>/healthcheck` | `GET` / `PUT` | 查询代理提供者列表与节点（`updatedAt` 为最近一次成功加载时间，加载失败时带 `error`）；`PUT /providers/proxies/<name>` 立即下载，内容变化时重建引擎后回 204，下载或校验失败回 503 与 `message`；按提供者的 `health-check` 设置实测整组（204）或单个节点（返回 `delay`） |
+| `/providers/rules`、`/providers/rules/<name>` | `GET` / `PUT` | 查询规则集状态（`updatedAt`、失败时 `error`）；`PUT` 立即重新下载或重读文件并原地替换，失败回 503 与 `message` |
 | `/observatory/status` | `GET` | 返回全部出站与策略组节点的观测存活状态与最新 RTT |
 | `/routing/balancers`、`/routing/balancers/<tag>` | `GET` / `PUT` | 查询路由均衡器状态或动态设置覆盖目标出站 |
 | `/handler/inbound/users`、`/handler/inbound/user` | `GET` / `POST` / `DELETE` | 动态查询、添加或移除入站用户记录 |

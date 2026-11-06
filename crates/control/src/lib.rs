@@ -6,11 +6,11 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
-use kerlico_config::ControlSpec;
+use kerlico_config::{ControlSpec, GeoFile, ResourceKey};
 use kerlico_core::{CancellationToken, Error, OutId, Result};
 use kerlico_egress::{
-    ControlPlane, DEFAULT_TEST_URL, ProbeError, ProbeResult, ProbeSpec, Prober, StoredFlow,
-    Telemetry,
+    ControlPlane, DEFAULT_TEST_URL, ProbeError, ProbeResult, ProbeSpec, Prober, Refreshed,
+    Refresher, StoredFlow, Telemetry,
 };
 use kerlico_engine::{Engine, FailedNodes, Stats};
 use serde_json::{Value, json};
@@ -39,6 +39,8 @@ const MAX_BODY_BYTES: usize = 65_536;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReloadSource {
     Startup,
+    /// 重新准备当前运行的配置值，用于提供者内容更新后让成员生效。
+    Current,
     Path(PathBuf),
     Payload(String),
 }
@@ -64,6 +66,7 @@ struct Source {
     telemetry: Telemetry,
     control_plane: ControlPlane,
     prober: Prober,
+    refresher: Refresher,
     stats: Arc<Stats>,
     nodes: BTreeMap<String, Arc<Stats>>,
     failed: FailedNodes,
@@ -78,6 +81,7 @@ impl Source {
             telemetry: engine.telemetry(),
             control_plane: engine.control_plane(),
             prober: engine.prober(),
+            refresher: engine.refresher(),
             stats: engine.stats(),
             nodes: engine.node_stats(),
             failed: engine.failed_nodes(),
@@ -535,10 +539,7 @@ async fn route(
             source.control_plane.record_config_reload(log_level);
             Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
         }
-        (&Method::POST, _, "/configs/geo" | "/upgrade/geo") => {
-            source.control_plane.record_geo_update();
-            Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
-        }
+        (&Method::POST, _, "/configs/geo" | "/upgrade/geo") => Ok(Some(update_geo(source).await)),
         (&Method::POST, _, "/cache/fakeip/flush") => {
             source.control_plane.flush_fake_ip()?;
             Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
@@ -677,10 +678,11 @@ async fn route(
                 .group_by_name_json(name)
                 .map(|v| ApiReply::Json(StatusCode::OK, v)))
         }
-        (&Method::GET, _, "/providers/proxies") => Ok(Some(ApiReply::Json(
-            StatusCode::OK,
-            source.control_plane.proxy_providers_json(),
-        ))),
+        (&Method::GET, _, "/providers/proxies") => {
+            let mut all = source.control_plane.proxy_providers_json();
+            annotate_all(&source.refresher, &mut all, ResourceKey::ProxyProvider);
+            Ok(Some(ApiReply::Json(StatusCode::OK, all)))
+        }
         (&Method::GET, _, p) if p.starts_with("/providers/proxies/") => {
             let rest = &p["/providers/proxies/".len()..];
             if let Some(prov_name) = rest.strip_suffix("/healthcheck") {
@@ -698,42 +700,53 @@ async fn route(
             Ok(source
                 .control_plane
                 .proxy_provider_by_name_json(rest)
-                .map(|v| ApiReply::Json(StatusCode::OK, v)))
+                .map(|mut v| {
+                    annotate(
+                        &source.refresher,
+                        &ResourceKey::ProxyProvider(rest.into()),
+                        &mut v,
+                    );
+                    ApiReply::Json(StatusCode::OK, v)
+                }))
         }
-        (&Method::PUT, _, p) if p.starts_with("/providers/proxies/") => {
-            let name = &p["/providers/proxies/".len()..];
-            if source
-                .control_plane
-                .proxy_provider_by_name_json(name)
-                .is_some()
-            {
-                Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
-            } else {
-                Ok(None)
-            }
+        (&Method::GET, _, "/providers/rules") => {
+            let mut all = source.control_plane.rule_providers_json();
+            annotate_all(&source.refresher, &mut all, ResourceKey::RuleSet);
+            Ok(Some(ApiReply::Json(StatusCode::OK, all)))
         }
-        (&Method::GET, _, "/providers/rules") => Ok(Some(ApiReply::Json(
-            StatusCode::OK,
-            source.control_plane.rule_providers_json(),
-        ))),
         (&Method::GET, _, p) if p.starts_with("/providers/rules/") => {
             let name = &p["/providers/rules/".len()..];
             Ok(source
                 .control_plane
                 .rule_provider_by_name_json(name)
-                .map(|v| ApiReply::Json(StatusCode::OK, v)))
+                .map(|mut v| {
+                    annotate(
+                        &source.refresher,
+                        &ResourceKey::RuleSet(name.into()),
+                        &mut v,
+                    );
+                    ApiReply::Json(StatusCode::OK, v)
+                }))
         }
         (&Method::PUT, _, p) if p.starts_with("/providers/rules/") => {
             let name = &p["/providers/rules/".len()..];
             if source
                 .control_plane
                 .rule_provider_by_name_json(name)
-                .is_some()
+                .is_none()
             {
-                Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
-            } else {
-                Ok(None)
+                return Ok(None);
             }
+            Ok(Some(
+                match source
+                    .refresher
+                    .refresh(&ResourceKey::RuleSet(name.into()))
+                    .await
+                {
+                    None | Some(Ok(_)) => ApiReply::Empty(StatusCode::NO_CONTENT),
+                    Some(Err(error)) => refresh_failed(&error),
+                },
+            ))
         }
         (&Method::GET, _, "/observatory/status") => Ok(Some(ApiReply::Json(
             StatusCode::OK,
@@ -906,30 +919,108 @@ fn reload_source(body: Option<&Value>) -> Result<ReloadSource> {
 }
 
 async fn request_reload(shared: &Shared, body: Option<&Value>) -> ApiReply {
+    match reload_source(body) {
+        Ok(source) => send_reload(shared, source).await,
+        Err(error) => ApiReply::Json(StatusCode::BAD_REQUEST, json!({"error": error.code()})),
+    }
+}
+
+async fn send_reload(shared: &Shared, source: ReloadSource) -> ApiReply {
     let Some(reloads) = &shared.reloads else {
         return ApiReply::Json(
             StatusCode::NOT_IMPLEMENTED,
             json!({"error": "reload unavailable"}),
         );
     };
-    let outcome = match reload_source(body) {
-        Ok(source) => {
-            let (done, finished) = oneshot::channel();
-            if reloads.send(ReloadRequest { source, done }).await.is_err() {
-                return ApiReply::Json(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    json!({"error": "shutting down"}),
-                );
-            }
-            finished
-                .await
-                .unwrap_or(Err(Error::Protocol("重载循环已退出")))
-        }
-        Err(error) => Err(error),
-    };
-    match outcome {
+    let (done, finished) = oneshot::channel();
+    if reloads.send(ReloadRequest { source, done }).await.is_err() {
+        return ApiReply::Json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "shutting down"}),
+        );
+    }
+    match finished
+        .await
+        .unwrap_or(Err(Error::Protocol("重载循环已退出")))
+    {
         Ok(()) => ApiReply::Empty(StatusCode::NO_CONTENT),
         Err(error) => ApiReply::Json(StatusCode::BAD_REQUEST, json!({"error": error.code()})),
+    }
+}
+
+/// Mihomo 在提供者更新失败时回 503 与 `message`。
+fn refresh_failed(error: &Error) -> ApiReply {
+    ApiReply::Json(
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({"message": error.to_string()}),
+    )
+}
+
+/// 下载提供者内容；内容变化时重建引擎代际让新成员生效，完成后才回复。
+async fn update_proxy_provider(shared: &Shared, source: &Source, name: &str) -> Option<ApiReply> {
+    source.control_plane.proxy_provider_by_name_json(name)?;
+    Some(
+        match source
+            .refresher
+            .refresh(&ResourceKey::ProxyProvider(name.into()))
+            .await
+        {
+            None | Some(Ok(Refreshed::Unchanged)) => ApiReply::Empty(StatusCode::NO_CONTENT),
+            Some(Ok(Refreshed::Changed)) => send_reload(shared, ReloadSource::Current).await,
+            Some(Err(error)) => refresh_failed(&error),
+        },
+    )
+}
+
+/// 下载全部配置了 `geox-url` 的 Geo 数据库；任一失败回 503，已成功的文件保留。
+async fn update_geo(source: &Source) -> ApiReply {
+    let keys: Vec<ResourceKey> = GeoFile::ALL
+        .into_iter()
+        .map(ResourceKey::Geo)
+        .filter(|key| source.refresher.status(key).is_some())
+        .collect();
+    if keys.is_empty() {
+        return ApiReply::Json(
+            StatusCode::BAD_REQUEST,
+            json!({"message": "geox-url is not configured"}),
+        );
+    }
+    let mut failures = Vec::new();
+    for key in &keys {
+        if let Some(Err(error)) = source.refresher.refresh(key).await {
+            failures.push(format!("{key}: {error}"));
+        }
+    }
+    if failures.is_empty() {
+        source.control_plane.record_geo_update();
+        ApiReply::Empty(StatusCode::NO_CONTENT)
+    } else {
+        ApiReply::Json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"message": failures.join("; ")}),
+        )
+    }
+}
+
+/// 用资源刷新状态替换提供者 JSON 的 `updatedAt`，失败时加 `error`。
+fn annotate(refresher: &Refresher, key: &ResourceKey, provider: &mut Value) {
+    let Some(status) = refresher.status(key) else {
+        return;
+    };
+    let Some(object) = provider.as_object_mut() else {
+        return;
+    };
+    object.insert("updatedAt".into(), json!(status.updated_at_text()));
+    if let Some(error) = status.error {
+        object.insert("error".into(), json!(error));
+    }
+}
+
+fn annotate_all(refresher: &Refresher, all: &mut Value, key: fn(String) -> ResourceKey) {
+    if let Some(providers) = all.get_mut("providers").and_then(Value::as_object_mut) {
+        for (name, provider) in providers.iter_mut() {
+            annotate(refresher, &key(name.clone()), provider);
+        }
     }
 }
 
@@ -1044,6 +1135,12 @@ async fn respond(shared: &Shared, request: Request<Incoming>) -> Response<Full<B
     let reply = match (&method, clean_path) {
         (&Method::PUT, "/configs") | (&Method::POST, "/restart") => {
             Ok(Some(request_reload(shared, body_val.as_ref()).await))
+        }
+        (&Method::PUT, p)
+            if p.strip_prefix("/providers/proxies/")
+                .is_some_and(|name| !name.is_empty() && !name.contains('/')) =>
+        {
+            Ok(update_proxy_provider(shared, source, &p["/providers/proxies/".len()..]).await)
         }
         _ => route(source, &method, uri.path(), query, body_val.as_ref()).await,
     };

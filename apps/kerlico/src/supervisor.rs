@@ -11,7 +11,10 @@ use kerlico_core::{CancellationToken, Error, Language, Result};
 use kerlico_engine::Engine;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 
 /// 启动命令给出的配置来源；SIGHUP 与不带 `path`/`payload` 的 `PUT /configs` 都按它重读。
 pub struct ConfigInputs {
@@ -21,9 +24,11 @@ pub struct ConfigInputs {
 }
 
 impl ConfigInputs {
-    pub fn load(&self, source: &ReloadSource) -> Result<Value> {
+    /// `current` 是正在运行的配置值，`ReloadSource::Current` 直接重新准备它。
+    pub fn load(&self, source: &ReloadSource, current: &Value) -> Result<Value> {
         let format = self.format.as_deref();
         match source {
+            ReloadSource::Current => Ok(current.clone()),
             ReloadSource::Startup => {
                 kerlico_config::load_and_merge_configs(&self.files, &self.dirs, format)
             }
@@ -71,6 +76,8 @@ struct Generation {
     value: Value,
     token: CancellationToken,
     running: JoinHandle<Result<()>>,
+    /// 提供者内容在后台刷新中变化时计数加一，循环据此用当前配置重建代际。
+    provider_changes: watch::Receiver<u64>,
 }
 
 impl Generation {
@@ -145,7 +152,10 @@ impl Supervisor<'_> {
         current: &mut Option<Generation>,
         source: &ReloadSource,
     ) -> std::result::Result<(), ReloadError> {
-        let (value, prepared) = self.candidate(source).map_err(ReloadError::Rejected)?;
+        let running_value = &current.as_ref().expect("运行中必有当前引擎").value;
+        let (value, prepared) = self
+            .candidate(source, running_value)
+            .map_err(ReloadError::Rejected)?;
         let previous = current.take().expect("运行中必有当前引擎");
         let previous_value = previous.value.clone();
         if let Err(error) = previous.stop().await {
@@ -175,8 +185,8 @@ impl Supervisor<'_> {
         }
     }
 
-    fn candidate(&self, source: &ReloadSource) -> Result<(Value, PreparedConfig)> {
-        let value = self.inputs.load(source)?;
+    fn candidate(&self, source: &ReloadSource, current: &Value) -> Result<(Value, PreparedConfig)> {
+        let value = self.inputs.load(source, current)?;
         let prepared = prepare(&self.registry, value.clone())?;
         self.device.admits(&prepared)?;
         Ok((value, prepared))
@@ -208,11 +218,13 @@ impl Supervisor<'_> {
 
 fn launch(engine: Engine, value: Value) -> Generation {
     let token = CancellationToken::new();
+    let provider_changes = engine.refresher().provider_changes();
     let running = tokio::spawn(engine.run(token.clone()));
     Generation {
         value,
         token,
         running,
+        provider_changes,
     }
 }
 
@@ -257,19 +269,23 @@ pub async fn serve(
     #[cfg(unix)]
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     let result = loop {
-        let running = &mut current.as_mut().expect("运行中必有当前引擎").running;
+        let generation = current.as_mut().expect("运行中必有当前引擎");
+        let running = &mut generation.running;
+        let provider_changes = &mut generation.provider_changes;
         #[cfg(unix)]
         let event = tokio::select! {
             result = running => Event::Exited(joined(result)),
             signal = super::shutdown_signal() => Event::Shutdown(signal),
             _ = sighup.recv() => Event::Reload(ReloadSource::Startup, None),
             Some(request) = reloads.recv() => Event::Reload(request.source, Some(request.done)),
+            Ok(()) = provider_changes.changed() => Event::Reload(ReloadSource::Current, None),
         };
         #[cfg(not(unix))]
         let event = tokio::select! {
             result = running => Event::Exited(joined(result)),
             signal = super::shutdown_signal() => Event::Shutdown(signal),
             Some(request) = reloads.recv() => Event::Reload(request.source, Some(request.done)),
+            Ok(()) = provider_changes.changed() => Event::Reload(ReloadSource::Current, None),
         };
         match event {
             Event::Exited(result) => break result,

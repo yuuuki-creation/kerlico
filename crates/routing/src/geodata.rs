@@ -458,6 +458,10 @@ pub struct GeoIpDat {
 }
 
 impl GeoIpDat {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// 解析 `GeoIPList` (repeated GeoIP entry = 1)。
     pub fn parse(mut bytes: &[u8]) -> Result<Self> {
         let mut entries = HashMap::new();
@@ -550,6 +554,10 @@ pub struct GeoSiteDat {
 }
 
 impl GeoSiteDat {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// 解析 `GeoSiteList` (repeated GeoSite entry = 1)。
     pub fn parse(mut bytes: &[u8]) -> Result<Self> {
         let mut entries = HashMap::new();

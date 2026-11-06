@@ -13,7 +13,7 @@
 | `accounts` | 管理账户数组，`user_id` 与 `username` 分别全局唯一 |
 | `outbounds` | 命名出站数组（`tag` / `type` / `options`）；支持直接声明内联 `selector` 与 `urltest` 策略组出站 |
 | `proxy_groups` | 策略组数组（`select`、`url-test`、`fallback`、`load-balance`、`balancer`），支持 `proxies`、`use`、`filter`/`exclude-filter`/`exclude-type`、`tolerance`、`lazy`、`expected-status`、`hash-key`、`fallback-tag` 与 `store-selected` |
-| `proxy_providers` | 外部与内联代理提供者映射（`file`、`http`、`inline`），支持 JSON/YAML/Base64/URI 订阅解析、`header`、`size-limit`、`etag-support` 与整组健康检查 |
+| `proxy_providers` | 外部与内联代理提供者映射（`file`、`http`、`inline`），支持 JSON/YAML/Base64/URI 订阅解析与整组健康检查。`http` 类型经 `proxy` 指定的出站（留空或 `DIRECT` 为直连）下载到 `path`（默认 `proxies/<名称>`），带 `header`、`size-limit`（默认上限 64 MiB）与 ETag/Last-Modified 条件请求，按 `interval` 秒刷新；内容变化时重建引擎让新成员生效 |
 | `inbounds` | 回环固定目标转发入口，默认空 |
 | `nodes` | 服务端协议节点（需配置真实鉴别成员 `members`），默认空 |
 | `local_inbounds` | 协议工厂显式允许的本地回环入口，默认空 |
@@ -26,9 +26,9 @@
 | `log` / `log_level` | 全局日志级别（`trace`/`debug`/`info`/`warning`/`error`/`fatal`/`panic`/`silent`）、访问与错误日志路径、时间戳及结构化开关 |
 | `certificate` | 根级附加信任证书配置（`certificate_path`），默认空 |
 | `certificate_providers` | 命名证书提供者数组（支持 `acme` 及 Cloudflare DNS-01 质询配置），默认空 |
-| `route` / `rule_providers` | 扩展路由对象（含 `rules`、`rule_set`、`balancers`、`final`、`auto_detect_interface`、`default_interface`、`default_mark`）与外部/内联规则集提供者映射 |
+| `route` / `rule_providers` | 扩展路由对象（含 `rules`、`rule_set`、`balancers`、`final`、`auto_detect_interface`、`default_interface`、`default_mark`）与外部/内联规则集提供者映射。`remote` 规则集与 `http` 规则提供者经 `download_detour`/`proxy` 下载到 `path`（默认 `rules/<标签>`），按 `update_interval`（默认 `1d`）或 `interval` 秒刷新并原地替换；被规则引用却既无缓存又下载失败时拒绝启动，`local`/`file` 文件缺失时配置检查失败 |
 | `sniffer` / `fakedns` / `tun` / `cache_file` / `profile` / `experimental` | 全局首包协议嗅探、顶层 FakeDNS 池、顶层 TUN 入口、选中节点（`store-selected`）与 Fake-IP 缓存持久化配置；两者共用 `cache_file.path`（默认 `cache.db`），JSON 文件中 `selected` 与 `fakeip` 各占一个顶层分区，互不覆盖 |
-| `geodata_mode` / `geodata_loader` / `geosite_matcher` / `geo_auto_update` / `geo_update_interval` / `geox_url` / `etag_support` | GeoIP / GeoSite 数据库加载模式、自动更新与 HTTP ETag 缓存配置 |
+| `geodata_mode` / `geodata_loader` / `geosite_matcher` / `geo_auto_update` / `geo_update_interval` / `geox_url` / `etag_support` | GeoIP / GeoSite 数据库加载模式与自动更新。`geox_url` 的 `geoip`/`geosite`/`mmdb`/`asn` 下载到工作目录 `GeoIP.dat`/`GeoSite.dat`/`Country.mmdb`/`GeoLite2-ASN.mmdb`，`geo_auto_update` 时按 `geo_update_interval` 小时（默认 24）刷新；运行时匹配尚不读取这些文件。条件请求始终启用，`etag_support` 目前不改变行为 |
 | `interface_name` / `routing_mark` / `disable_keep_alive` / `keep_alive_idle` / `keep_alive_interval` | 全局默认出站绑定网卡与套接字选项，可被单条出站 `dialer` / `sockopt` 覆盖 |
 
 - **标签与校验**：`tag` 为 1–64 个 ASCII 字母、数字、`-` 或 `_`；出站拥有独立标签命名空间，所有入站（`inbounds` / `nodes` / `local_inbounds`）共用另一命名空间。未知字段、缺失类型、无效引用或能力不匹配在编译期直接拒绝。

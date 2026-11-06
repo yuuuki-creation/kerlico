@@ -1,13 +1,10 @@
-//! 策略组（`select`、`url-test`、`fallback`、`load-balance`、`balancer`）、代理提供者（`proxy-providers`）、ETag 缓存与日志配置。
+//! 策略组（`select`、`url-test`、`fallback`、`load-balance`、`balancer`）、代理提供者（`proxy-providers`）与日志配置。
 
 use crate::{OutboundSpec, format::parse_yaml_with_anchors};
 use kerlico_core::{Error, OutId, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
-};
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -185,19 +182,25 @@ impl ProxyProviderSpec {
                 raw_specs.push(spec);
             }
         }
-        if kind == "file"
-            && raw_specs.is_empty()
-            && let Some(path) = &self.path
-            && let Ok(bytes) = std::fs::read(path)
+        let path = match self.path.as_deref().map(str::trim) {
+            Some(path) if !path.is_empty() => Some(path.to_owned()),
+            _ if kind == "http" => Some(
+                kerlico_routing::default_cache_path("proxies", &name)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            _ => None,
+        };
+        if kind != "inline"
+            && let Some(path) = &path
+            && let Some(bytes) = crate::resource::read_cached(std::path::Path::new(path))?
         {
-            if let Some(limit) = self.size_limit
-                && bytes.len() as u64 > limit
-            {
+            if bytes.len() as u64 > crate::resource::size_limit(self.size_limit) {
                 return Err(Error::Config("proxy-provider 文件超过 size-limit".into()));
             }
-            if let Ok(text) = std::str::from_utf8(&bytes) {
-                raw_specs.extend(parse_subscription_content(text)?);
-            }
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| Error::Config("proxy-provider 文件不是 UTF-8".into()))?;
+            raw_specs.extend(parse_subscription_content(text)?);
         }
 
         let mut filtered = filter_outbound_specs(
@@ -264,7 +267,7 @@ impl ProxyProviderSpec {
             CompiledProxyProvider {
                 name,
                 kind,
-                path: self.path.clone(),
+                path,
                 url: self.url.clone(),
                 interval: self.interval.unwrap_or(3600),
                 proxy: self.proxy.clone(),
@@ -796,41 +799,6 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-type EtagEntryMap = HashMap<String, (String, Vec<u8>)>;
-
-/// 全局 HTTP ETag 缓存，用于 `rule-providers` 与 `proxy-providers` 条件请求。
-#[derive(Clone, Default)]
-pub struct EtagCache(Arc<Mutex<EtagEntryMap>>);
-
-impl EtagCache {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn get_etag(&self, url: &str) -> Option<String> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(url)
-            .map(|(etag, _)| etag.clone())
-    }
-
-    pub fn get_cached_body(&self, url: &str) -> Option<Vec<u8>> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(url)
-            .map(|(_, body)| body.clone())
-    }
-
-    pub fn store(&self, url: String, etag: String, body: Vec<u8>) {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(url, (etag, body));
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProxyGroupKind {
@@ -1178,7 +1146,8 @@ impl ProxyGroupSpec {
             true
         });
 
-        if candidates.is_empty() && !self.empty_fallback {
+        // 提供者内容可能尚未下载；成员为空的组像 Mihomo COMPATIBLE 一样拒绝连接，内容到达后随引擎重建填入。
+        if candidates.is_empty() && !self.empty_fallback && provider_names.is_empty() {
             return Err(Error::Config(format!(
                 "策略组 {} 候选节点为空且未开启 empty-fallback",
                 self.name

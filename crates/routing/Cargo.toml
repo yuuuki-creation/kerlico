@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 kerlico-core.workspace = true
+arc-swap = "1"
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
