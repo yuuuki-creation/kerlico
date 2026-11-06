@@ -30,6 +30,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UdpSocket,
@@ -554,7 +555,9 @@ impl ServerSession {
                         access.local(context)?
                     } else {
                         match users.verify(&msg, |u, m| {
-                            if u.name == m.username && u.password == m.password {
+                            let name_ok = u.name.as_bytes().ct_eq(m.username.as_bytes());
+                            let pass_ok = u.password.as_bytes().ct_eq(m.password.as_bytes());
+                            if bool::from(name_ok & pass_ok) {
                                 Ok(Some(()))
                             } else {
                                 Ok(None)
@@ -825,11 +828,7 @@ impl NodeFactory for OpenVpnNodeFactory {
             raw_users.push(u);
         }
         if raw_users.is_empty() {
-            raw_users.push(ServerUserConfig {
-                name: "openvpn-default".to_owned(),
-                password: "openvpn-default-pass".to_owned(),
-                ..Default::default()
-            });
+            return Err(invalid());
         }
         let mut seen = BTreeSet::new();
         for u in &raw_users {
@@ -1155,6 +1154,26 @@ mod tests {
         .expect("parse openvpn server options");
         assert_eq!(opts.mode, "tls");
         assert_eq!(opts.users.len(), 1);
+    }
+
+    #[test]
+    fn openvpn_server_without_users_is_rejected() {
+        let build = |members: Vec<Value>| {
+            OpenVpnNodeFactory
+                .build(&NodeBuildContext::for_test(
+                    json!({ "mode": "tls" }),
+                    members,
+                ))
+                .map(|_| ())
+        };
+        assert!(
+            build(Vec::new()).is_err(),
+            "a node without users must not start with a built-in login"
+        );
+        assert!(
+            build(vec![json!({ "name": "alice", "password": "secret" })]).is_ok(),
+            "a node with one member credential builds"
+        );
     }
 
     #[test]
