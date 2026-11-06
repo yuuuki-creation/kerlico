@@ -238,7 +238,7 @@ pub struct RuleSpec {
     pub ip_cidr: Vec<String>,
     #[serde(default)]
     pub geoip: Vec<String>,
-    /// 目标 IP 所属自治系统号（Mihomo `IP-ASN`），查 `GeoLite2-ASN.mmdb`。
+    /// 目标 IP 所属自治系统号（Mihomo `IP-ASN`），查 `ASN.mmdb`（旧名 `GeoLite2-ASN.mmdb`）。
     #[serde(default, alias = "ip-asn")]
     pub ip_asn: Vec<u32>,
     #[serde(

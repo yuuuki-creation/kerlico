@@ -1,5 +1,5 @@
 //! 运行时 GeoIP / GeoSite / IP-ASN 数据：V2Ray `geoip.dat`、`geosite.dat`（ProtoBuf）与
-//! MaxMind `Country.mmdb`、`GeoLite2-ASN.mmdb`。
+//! MaxMind `Country.mmdb`、`ASN.mmdb`（旧名 `GeoLite2-ASN.mmdb`）。
 //!
 //! 路由表编译时收集引用的分类（[`GeoNeeds`]），加载文件时只解码这些分类，缺少分类即报错。
 //! 数据放在共享槽 [`GeoSlot`] 里，文件更新后整体换入，匹配无锁读取。
@@ -117,8 +117,41 @@ impl GeoFile {
             Self::GeoIp => "GeoIP.dat",
             Self::GeoSite => "GeoSite.dat",
             Self::Mmdb => "Country.mmdb",
-            Self::Asn => "GeoLite2-ASN.mmdb",
+            Self::Asn => "ASN.mmdb",
         })
+    }
+
+    /// 同一文件的旧缓存名，按优先级排在 [`Self::default_path`] 之后。
+    fn legacy_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Asn => &["GeoLite2-ASN.mmdb"],
+            _ => &[],
+        }
+    }
+
+    /// `dir` 中实际使用的缓存文件名，文件名比较不区分大小写（同 Mihomo `C.Path.ASN()`）；
+    /// 都不存在时返回 [`Self::default_path`]，下载写入该名。
+    pub fn cache_name_in(self, dir: &std::path::Path) -> PathBuf {
+        let present: Vec<String> = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| !t.is_dir()))
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let wanted = self.default_path();
+        let wanted = wanted.to_str().into_iter();
+        wanted
+            .chain(self.legacy_names().iter().copied())
+            .find_map(|name| present.iter().find(|p| p.eq_ignore_ascii_case(name)))
+            .map_or_else(|| self.default_path(), PathBuf::from)
+    }
+
+    /// 工作目录下的缓存路径，见 [`Self::cache_name_in`]。
+    pub fn cache_path(self) -> PathBuf {
+        self.cache_name_in(std::path::Path::new("."))
     }
 
     /// Mihomo 的默认 `geox-url`。
@@ -965,5 +998,25 @@ mod tests {
         assert!(data.asn_matches(4134, "1.0.1.1".parse().unwrap()));
         assert!(!data.asn_matches(4135, "1.0.1.1".parse().unwrap()));
         assert!(slot.compile(GeoFile::Asn, &country).is_err());
+    }
+
+    #[test]
+    fn asn_cache_prefers_mihomo_name_then_legacy_name() {
+        let dir = std::env::temp_dir().join(format!("kerlico-asn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(GeoFile::Asn.cache_name_in(&dir), PathBuf::from("ASN.mmdb"));
+        std::fs::write(dir.join("GeoLite2-ASN.mmdb"), b"x").unwrap();
+        assert_eq!(
+            GeoFile::Asn.cache_name_in(&dir),
+            PathBuf::from("GeoLite2-ASN.mmdb")
+        );
+        std::fs::write(dir.join("asn.MMDB"), b"x").unwrap();
+        assert_eq!(GeoFile::Asn.cache_name_in(&dir), PathBuf::from("asn.MMDB"));
+        assert_eq!(
+            GeoFile::Mmdb.cache_name_in(&dir),
+            PathBuf::from("Country.mmdb")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

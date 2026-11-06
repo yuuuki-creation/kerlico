@@ -2389,7 +2389,7 @@ fn load_cached_geo(slot: &GeoSlot) -> Result<()> {
         if !slot.requires(file) {
             continue;
         }
-        let path = file.default_path();
+        let path = file.cache_path();
         if let Some(bytes) = resource::read_cached(&path)? {
             let part = slot
                 .compile(file, &bytes)
@@ -2484,7 +2484,7 @@ fn remote_resources(
                 slot: routes.geo().clone(),
                 required,
             },
-            path: file.default_path(),
+            path: file.cache_path(),
             download: Some(Download {
                 url: url.to_owned(),
                 interval,
