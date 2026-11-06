@@ -149,7 +149,9 @@ async fn start(mut config: Value) -> Running {
     registry.register(DirectFactory).unwrap();
     registry.register_node(FailingFactory).unwrap();
     config["version"] = json!(2);
-    config["outbounds"] = json!([{"tag":"exit","type":"direct"}]);
+    if config.get("outbounds").is_none() {
+        config["outbounds"] = json!([{"tag":"exit","type":"direct"}]);
+    }
     config["limits"] = json!({"drain_timeout_ms":1000});
     let engine = Engine::bind(
         registry
@@ -557,5 +559,209 @@ async fn delay_endpoints_measure_through_the_outbound() {
             .0,
         400
     );
+    running.stop().await.unwrap();
+}
+
+async fn echo_server() -> (u16, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 1024];
+                while let Ok(read @ 1..) = stream.read(&mut buffer).await {
+                    if stream.write_all(&buffer[..read]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (port, task)
+}
+
+async fn echoing_client(forward: SocketAddr) -> TcpStream {
+    let mut client = TcpStream::connect(forward).await.unwrap();
+    client.write_all(b"ping").await.unwrap();
+    let mut reply = [0u8; 4];
+    client.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply, b"ping");
+    client
+}
+
+async fn live_connections(control: SocketAddr, count: usize) -> Value {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let (status, table) = get(control, "/connections", None).await;
+            assert_eq!(status, 200);
+            if table["connections"].as_array().unwrap().len() == count {
+                return table;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("连接表应收敛到 {count} 条"))
+}
+
+async fn closed_by_peer(mut client: TcpStream) {
+    let mut byte = [0u8; 1];
+    let read = timeout(Duration::from_secs(5), client.read(&mut byte))
+        .await
+        .expect("关闭连接后客户端应在期限内看到 EOF 或复位");
+    assert!(matches!(read, Ok(0) | Err(_)), "连接关闭后不应再收到数据");
+}
+
+#[tokio::test]
+async fn connections_lists_a_live_direct_flow_and_delete_closes_it() {
+    let (port, echo) = echo_server().await;
+    let mut config = forward_to(port);
+    config["route"] = json!({"rules":[{"port":[port],"outbound":"exit"}]});
+    let running = start(config).await;
+    let client = echoing_client(running.forward).await;
+
+    let table = live_connections(running.control, 1).await;
+    let flow = &table["connections"][0];
+    assert_eq!(flow["chains"], json!(["exit"]));
+    assert_eq!(flow["rule"], "DstPort");
+    assert_eq!(flow["rulePayload"], port.to_string());
+    assert_eq!(flow["metadata"]["network"], "tcp");
+    assert_eq!(flow["metadata"]["inboundName"], "entry");
+    assert_eq!(flow["metadata"]["destinationIP"], "127.0.0.1");
+    assert_eq!(flow["metadata"]["destinationPort"], port.to_string());
+    assert_eq!(flow["metadata"]["sourceIP"], "127.0.0.1");
+    assert!(flow["upload"].as_u64().unwrap() >= 4);
+    assert!(flow["download"].as_u64().unwrap() >= 4);
+    assert!(flow["start"].as_str().unwrap().ends_with('Z'));
+    assert!(table["uploadTotal"].as_u64().unwrap() >= 4);
+    assert!(table["downloadTotal"].as_u64().unwrap() >= 4);
+    if cfg!(target_os = "linux") {
+        assert!(table["memory"].as_u64().unwrap() > 0);
+        let (_, memory) = get(running.control, "/memory", None).await;
+        assert!(memory["inuse"].as_u64().unwrap() > 0);
+    }
+
+    let id = flow["id"].as_str().unwrap();
+    let (status, _) = request_json(
+        running.control,
+        "DELETE",
+        &format!("/connections/{id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 204);
+    closed_by_peer(client).await;
+    live_connections(running.control, 0).await;
+
+    echo.abort();
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn switching_an_interrupting_select_group_closes_flows_of_the_old_member() {
+    let (port, echo) = echo_server().await;
+    let mut config = json!({
+        "outbounds": [{"tag":"exit-a","type":"direct"},{"tag":"exit-b","type":"direct"}],
+        "proxy_groups": [{"name":"pick","type":"select","proxies":["exit-a","exit-b"],
+            "default":"exit-a","interrupt-exist-connections":true}],
+    });
+    config["inbounds"] = forward_to(port)["inbounds"].clone();
+    config["inbounds"][0]["outbound"] = json!("pick");
+    let running = start(config).await;
+
+    let old = echoing_client(running.forward).await;
+    let table = live_connections(running.control, 1).await;
+    assert_eq!(table["connections"][0]["chains"], json!(["exit-a", "pick"]));
+
+    let (status, _) = request_json(
+        running.control,
+        "PUT",
+        "/proxies/pick",
+        None,
+        Some(json!({"name":"exit-b"})),
+    )
+    .await;
+    assert_eq!(status, 204);
+    closed_by_peer(old).await;
+    live_connections(running.control, 0).await;
+
+    let mut current = echoing_client(running.forward).await;
+    let table = live_connections(running.control, 1).await;
+    assert_eq!(table["connections"][0]["chains"], json!(["exit-b", "pick"]));
+    current.write_all(b"pong").await.unwrap();
+    let mut reply = [0u8; 4];
+    current.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply, b"pong", "新成员上的流不受切换影响");
+
+    let (status, _) = request_json(running.control, "DELETE", "/connections", None, None).await;
+    assert_eq!(status, 204);
+    closed_by_peer(current).await;
+    live_connections(running.control, 0).await;
+
+    echo.abort();
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn rules_reflect_the_compiled_route_table() {
+    let mut config = forward_to(9);
+    config["route"] = json!({
+        "rules": [
+            {"domain_suffix":["example.com"],"outbound":"exit"},
+            {"port":[443],"network":"tcp","outbound":"exit"},
+            {"ip_cidr":["10.0.0.0/8"],"action":"reject"}
+        ],
+        "final": "exit"
+    });
+    let running = start(config).await;
+    let (status, rules) = get(running.control, "/rules", None).await;
+    assert_eq!(status, 200);
+    let rows: Vec<(String, String, String)> = rules["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["type"].as_str().unwrap().to_owned(),
+                row["payload"].as_str().unwrap().to_owned(),
+                row["proxy"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let expected = [
+        ("DomainSuffix", "example.com", "exit"),
+        ("AND", "(DstPort,443),(Network,tcp)", "exit"),
+        ("IPCIDR", "10.0.0.0/8", "REJECT"),
+        ("Match", "", "exit"),
+    ]
+    .map(|(kind, payload, proxy)| (kind.to_owned(), payload.to_owned(), proxy.to_owned()));
+    assert_eq!(rows, expected);
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn dns_query_answers_from_the_runtime_resolver_hosts() {
+    let mut config = forward_to(9);
+    config["dns"] = json!({"hosts":{"svc.internal":["10.0.0.5","fd00::5"]}});
+    let running = start(config).await;
+    let (status, reply) = get(running.control, "/dns/query?name=svc.internal&type=A", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(reply["Status"], 0);
+    assert_eq!(reply["Question"][0]["Name"], "svc.internal.");
+    assert_eq!(
+        reply["Answer"],
+        json!([{"name":"svc.internal.","type":1,"TTL":0,"data":"10.0.0.5"}])
+    );
+    let (_, reply) = get(
+        running.control,
+        "/dns/query?name=svc.internal&type=AAAA",
+        None,
+    )
+    .await;
+    assert_eq!(reply["Answer"][0]["data"], "fd00::5");
+    let (status, _) = request_json(running.control, "GET", "/dns/query", None, None).await;
+    assert_ne!(status, 200, "缺少 name 参数应被拒绝");
     running.stop().await.unwrap();
 }

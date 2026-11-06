@@ -77,8 +77,19 @@ pub enum FlowEnd {
     Timeout,
 }
 
+/// 流的路由归属：命中规则、经过的策略组与本机进程；用于连接表和按组中断。
+#[derive(Clone, Debug, Default)]
+pub struct FlowRoute {
+    pub rule: Option<kerlico_routing::RuleLabel>,
+    /// 从规则目标起逐层经过的策略组，不含最终命名出站。
+    pub groups: Vec<OutId>,
+    pub process: Option<(String, String)>,
+}
+
 pub struct FlowLedger {
     id: FlowId,
+    route: FlowRoute,
+    close: kerlico_core::CancellationToken,
     source: Source,
     outbound: OutId,
     original: Option<OriginalTarget>,
@@ -111,6 +122,7 @@ pub struct DatagramTargetRecord {
 #[derive(Clone, Debug)]
 pub struct FlowRecord {
     pub id: FlowId,
+    pub route: FlowRoute,
     pub source: Source,
     pub outbound: OutId,
     pub original: Option<OriginalTarget>,
@@ -231,6 +243,9 @@ impl FlowLedger {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = bind;
     }
+    pub(crate) fn close_token(&self) -> kerlico_core::CancellationToken {
+        self.close.clone()
+    }
     pub(crate) fn finish(&self, reason: FlowEnd) {
         let code = match reason {
             FlowEnd::Completed => 1,
@@ -259,6 +274,7 @@ impl FlowLedger {
     fn record(&self) -> FlowRecord {
         FlowRecord {
             id: self.id,
+            route: self.route.clone(),
             source: self.source.clone(),
             outbound: self.outbound.clone(),
             original: self.original.clone(),
@@ -568,7 +584,7 @@ struct TelemetryInner {
 #[derive(Clone)]
 pub struct Telemetry(Arc<TelemetryInner>);
 impl Telemetry {
-    pub(crate) fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         Self(Arc::new(TelemetryInner {
             run: RunId::generate(),
             next: AtomicU64::new(1),
@@ -593,6 +609,8 @@ impl Telemetry {
         outbound: &OutId,
         original: Option<OriginalTarget>,
         kind: FlowKind,
+        route: FlowRoute,
+        close: kerlico_core::CancellationToken,
     ) -> Result<Arc<FlowLedger>> {
         let mut registry = self
             .0
@@ -635,6 +653,8 @@ impl Telemetry {
                 run: self.0.run,
                 sequence,
             },
+            route,
+            close,
             source: identity.source().clone(),
             outbound: outbound.clone(),
             original,
@@ -672,6 +692,37 @@ impl Telemetry {
             snapshot.account(&record);
         }
         Ok(snapshot)
+    }
+    /// 尚未结束的流；活动流不会被容量淘汰，因此这里是完整的在线连接表。
+    pub fn active(&self) -> Result<Vec<FlowRecord>> {
+        let registry = self
+            .0
+            .registry
+            .lock()
+            .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
+        Ok(registry
+            .records
+            .values()
+            .filter(|flow| flow.end.load(Ordering::Acquire) == 0)
+            .map(|flow| flow.record())
+            .collect())
+    }
+    /// 触发匹配活动流的关闭令牌；流随后在计量边界中止并由租约结束一次。
+    pub(crate) fn close_where(&self, matches: impl Fn(&FlowRecord) -> bool) -> usize {
+        let Ok(registry) = self.0.registry.lock() else {
+            return 0;
+        };
+        let mut closed = 0;
+        for flow in registry.records.values() {
+            if flow.end.load(Ordering::Acquire) == 0
+                && !flow.close.is_cancelled()
+                && matches(&flow.record())
+            {
+                flow.close.cancel();
+                closed += 1;
+            }
+        }
+        closed
     }
     pub fn run_id(&self) -> RunId {
         self.0.run

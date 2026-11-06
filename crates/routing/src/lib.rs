@@ -348,6 +348,127 @@ pub enum RouteAction {
     Reject,
 }
 
+/// 规则在 Clash API 中的展示形式：Mihomo 规则类型名与匹配载荷。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RuleLabel {
+    pub kind: String,
+    pub payload: String,
+}
+
+impl RuleLabel {
+    pub fn matched_final() -> Self {
+        Self {
+            kind: "Match".into(),
+            payload: String::new(),
+        }
+    }
+
+    /// 单字段规则直接取该字段；多字段规则按 sing-box 语义是逻辑与，展示为 `AND`。
+    fn of(spec: &RuleSpec) -> Self {
+        if spec.logical_type.is_some() {
+            let kind = spec
+                .logical_mode
+                .as_deref()
+                .unwrap_or("and")
+                .trim()
+                .to_ascii_uppercase();
+            let payload = spec
+                .logical_rules
+                .iter()
+                .map(|child| Self::of(child).nested())
+                .collect::<Vec<_>>()
+                .join(",");
+            return Self { kind, payload }.inverted(spec.invert);
+        }
+        let mut parts = Vec::new();
+        let mut push = |kind: &str, values: Vec<String>| {
+            if !values.is_empty() {
+                parts.push(Self {
+                    kind: kind.into(),
+                    payload: values.join(","),
+                });
+            }
+        };
+        let text = |values: &[String]| values.to_vec();
+        let shown = |values: &[u16]| values.iter().map(u16::to_string).collect::<Vec<_>>();
+        push("Domain", text(&spec.domain));
+        push("DomainSuffix", text(&spec.domain_suffix));
+        push("DomainKeyword", text(&spec.domain_keyword));
+        push("DomainRegex", text(&spec.domain_regex));
+        push("DomainWildcard", text(&spec.domain_wildcard));
+        push("GeoSite", text(&spec.geosite));
+        push("IPCIDR", text(&spec.ip_cidr));
+        push("GeoIP", text(&spec.geoip));
+        if spec.ip_is_private {
+            push("GeoIP", vec!["private".into()]);
+        }
+        push(
+            "IPVersion",
+            spec.ip_version.iter().map(u8::to_string).collect(),
+        );
+        let mut dst_ports = shown(&spec.port);
+        dst_ports.extend(spec.port_range.iter().cloned());
+        push("DstPort", dst_ports);
+        push("SrcIPCIDR", text(&spec.source_ip_cidr));
+        let mut src_ports = shown(&spec.source_port);
+        src_ports.extend(spec.source_port_range.iter().cloned());
+        push("SrcPort", src_ports);
+        push(
+            "Network",
+            spec.network
+                .iter()
+                .map(|n| match n {
+                    Network::Tcp => "tcp".to_owned(),
+                    Network::Udp => "udp".to_owned(),
+                })
+                .collect(),
+        );
+        push("Protocol", text(&spec.protocol));
+        push("RuleSet", text(&spec.rule_set));
+        push("InName", text(&spec.node));
+        push("InUser", text(&spec.user));
+        push("Process", text(&spec.process_name));
+        push("ProcessPath", text(&spec.process_path));
+        push("ProcessNameRegex", text(&spec.process_name_regex));
+        push("ProcessPathRegex", text(&spec.process_path_regex));
+        push("InType", text(&spec.in_type));
+        push("InPort", shown(&spec.in_port));
+        push("DSCP", spec.dscp.iter().map(u8::to_string).collect());
+        push("Uid", spec.uid.iter().map(u32::to_string).collect());
+        let label = match parts.len() {
+            0 => Self::matched_final(),
+            1 => parts.remove(0),
+            _ => Self {
+                kind: "AND".into(),
+                payload: parts.iter().map(Self::nested).collect::<Vec<_>>().join(","),
+            },
+        };
+        label.inverted(spec.invert)
+    }
+
+    fn nested(&self) -> String {
+        format!("({},{})", self.kind, self.payload)
+    }
+
+    fn inverted(self, invert: bool) -> Self {
+        if invert {
+            Self {
+                kind: "NOT".into(),
+                payload: self.nested(),
+            }
+        } else {
+            self
+        }
+    }
+}
+
+/// 顶层规则表的一行：展示标签与动作目标。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuleEntry {
+    pub label: RuleLabel,
+    pub proxy: String,
+}
+
 #[derive(Clone, Debug)]
 struct Rule {
     action: RouteAction,
@@ -377,6 +498,7 @@ struct Rule {
     logical: Option<(LogicalMode, Vec<Rule>)>,
     node: Vec<NodeId>,
     user: Vec<UserId>,
+    label: RuleLabel,
 }
 
 fn parse_duration_opt(raw: Option<&str>, default_ms: u64) -> Result<Duration> {
@@ -524,6 +646,7 @@ impl Rule {
                 .map(|c| Self::compile_inner(c, true))
                 .collect::<Result<Vec<_>>>()?;
             return Ok(Self {
+                label: RuleLabel::of(spec),
                 action,
                 domain: Vec::new(),
                 domain_suffix: Vec::new(),
@@ -570,6 +693,7 @@ impl Rule {
         }
 
         let rule = Self {
+            label: RuleLabel::of(spec),
             action,
             domain: spec
                 .domain
@@ -977,6 +1101,8 @@ pub struct RouteDecision {
     pub override_port: Option<u16>,
     pub resolve_strategy: Option<ResolveStrategy>,
     pub sniff: Option<(Vec<String>, Duration)>,
+    /// 产生终结动作的规则；命中最终出站时为 `Match`。
+    pub rule: Option<RuleLabel>,
 }
 
 /// 运行中规则集的替换点：路由表的各个克隆共享同一槽，刷新任务整体换入新编译结果，匹配无锁读取。
@@ -1163,6 +1289,9 @@ impl RouteTable {
         let matched_terminal = self.evaluate_slice(&self.rules, ctx, &mut decision, 0);
         if !matched_terminal && decision.outbound.is_none() {
             decision.outbound = self.final_outbound.clone();
+            if decision.outbound.is_some() {
+                decision.rule = Some(RuleLabel::matched_final());
+            }
         }
         decision
     }
@@ -1212,10 +1341,12 @@ impl RouteTable {
                 }
                 RouteAction::HijackDns => {
                     decision.hijack_dns = true;
+                    decision.rule = Some(rule.label.clone());
                     return true;
                 }
                 RouteAction::Reject => {
                     decision.reject = true;
+                    decision.rule = Some(rule.label.clone());
                     return true;
                 }
                 RouteAction::Route {
@@ -1232,11 +1363,47 @@ impl RouteTable {
                     if override_port.is_some() {
                         decision.override_port = *override_port;
                     }
+                    decision.rule = Some(rule.label.clone());
                     return true;
                 }
             }
         }
         false
+    }
+
+    /// 顶层规则按配置顺序展开，最终出站以 `Match` 行收尾。
+    pub fn rules(&self) -> Vec<RuleEntry> {
+        let mut out: Vec<RuleEntry> = self
+            .rules
+            .iter()
+            .map(|rule| RuleEntry {
+                label: rule.label.clone(),
+                proxy: match &rule.action {
+                    RouteAction::Route {
+                        outbound,
+                        balancer_tag,
+                        ..
+                    } => outbound
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .or_else(|| balancer_tag.clone())
+                        .unwrap_or_default(),
+                    RouteAction::RouteOptions { .. } => "route-options".into(),
+                    RouteAction::Resolve { .. } => "resolve".into(),
+                    RouteAction::Sniff { .. } => "sniff".into(),
+                    RouteAction::SubRule { name } => name.clone(),
+                    RouteAction::HijackDns => "hijack-dns".into(),
+                    RouteAction::Reject => "REJECT".into(),
+                },
+            })
+            .collect();
+        if let Some(final_outbound) = &self.final_outbound {
+            out.push(RuleEntry {
+                label: RuleLabel::matched_final(),
+                proxy: final_outbound.to_string(),
+            });
+        }
+        out
     }
 
     pub fn outbounds(&self) -> impl Iterator<Item = &OutId> {

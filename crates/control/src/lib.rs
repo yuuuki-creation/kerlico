@@ -546,38 +546,19 @@ async fn route(
         }
         (&Method::POST, _, "/cache/dns/flush") => Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT))),
         (&Method::GET, _, "/dns/query") => {
-            let name = query_str(query, "name").unwrap_or("example.com");
+            let name = query_str(query, "name")
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| Error::Config("/dns/query 须提供 name 参数".into()))?;
             let qtype = query_str(query, "type").unwrap_or("A");
-            let rtype_num = if qtype.eq_ignore_ascii_case("AAAA") || qtype == "28" {
-                28
-            } else {
-                1
-            };
-            let data = if rtype_num == 28 {
-                "2606:2800:220:1:248:1893:25c8:1946"
-            } else {
-                "93.184.216.34"
-            };
             Ok(Some(ApiReply::Json(
                 StatusCode::OK,
-                json!({
-                    "Status": 0,
-                    "TC": false,
-                    "RD": true,
-                    "RA": true,
-                    "AD": false,
-                    "CD": false,
-                    "Question": [{ "name": name, "type": rtype_num }],
-                    "Answer": [{ "name": name, "type": rtype_num, "TTL": 60, "data": data }],
-                    "Authority": [],
-                    "Additional": [],
-                }),
+                source.control_plane.dns_query(name, qtype).await,
             )))
         }
         (&Method::GET, _, "/memory") => Ok(Some(ApiReply::Json(
             StatusCode::OK,
             json!({
-                "inuse": 16_777_216u64,
+                "inuse": kerlico_egress::resident_memory_bytes(),
                 "oslimit": 0u64,
             }),
         ))),
@@ -619,18 +600,15 @@ async fn route(
         ))),
         (&Method::GET, _, "/connections") => Ok(Some(ApiReply::Json(
             StatusCode::OK,
-            source.control_plane.active_connections_json(),
+            source.control_plane.active_connections_json()?,
         ))),
         (&Method::DELETE, _, "/connections") => {
             source.control_plane.close_all_connections();
             Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
         }
         (&Method::DELETE, _, p) if p.starts_with("/connections/") => {
-            let id_str = &p["/connections/".len()..];
-            if let Ok(id) = id_str.parse::<u64>() {
+            if let Ok(id) = p["/connections/".len()..].parse::<u64>() {
                 source.control_plane.close_connection(id);
-            } else {
-                source.control_plane.close_all_connections();
             }
             Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)))
         }

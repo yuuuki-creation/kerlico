@@ -32,9 +32,11 @@
 | `/configs/geo`、`/upgrade/geo` | `POST` | 立即下载 `geox_url` 配置的全部 Geo 数据库；未配置回 400，任一失败回 503 与 `message` |
 | `/cache/fakeip/flush` | `POST` | 清空 Fake-IP 映射表及持久化缓存 |
 | `/logs` | `GET` | 返回控制面环形日志缓冲条目 |
-| `/rules`、`/routing/rules` | `GET` / `POST` / `DELETE` | 查询当前路由规则摘要，动态追加或删除路由规则 |
+| `/rules`、`/routing/rules` | `GET` | 编译后的顶层路由规则，按配置顺序列出 `type`、`payload`、`proxy`，最终出站以 `Match` 行收尾，见[规则表](#规则表) |
 | `/routing/test` | `POST` | 对给定域名、IP、端口与协议模拟路由匹配并返回选中出站 |
-| `/connections`、`/connections/<id>` | `GET` / `DELETE` | 列出活跃连接与累计上下行字节，关闭全部或指定连接 |
+| `/connections`、`/connections/<id>` | `GET` / `DELETE` | 活动连接表与进程累计上下行字节；`DELETE` 关闭全部或指定连接，见[连接表](#连接表) |
+| `/memory` | `GET` | `inuse` 为进程常驻内存字节数（Linux 读取 `/proc/self/status` 的 `VmRSS`，其他平台为 0），`oslimit` 为 0 |
+| `/dns/query?name=<域名>&type=<A\|AAAA>` | `GET` | 经运行期解析器（hosts、上游与缓存）解析，返回 Mihomo 应答形状，见[DNS 查询](#dns-查询) |
 | `/proxies`、`/proxies/<name>`、`/proxies/<name>/delay?url=&timeout=&expected=` | `GET` / `PUT` | 查询全部出站与策略组状态、切换 `Select` 策略组选中项、经该出站实测延迟（见下文“延迟探测”） |
 | `/group`、`/group/<name>`、`/group/<name>/delay?url=&timeout=&expected=` | `GET` | 查询策略组列表、单组详情，或并发实测组内全部候选，返回成功项 `{"<name>": <ms>}`；全部失败时 504 |
 | `/providers/proxies`、`/providers/proxies/<name>`、`/providers/proxies/<name>/healthcheck`、`/providers/proxies/<name>/<proxy>/healthcheck` | `GET` / `PUT` | 查询代理提供者列表与节点（`updatedAt` 为最近一次成功加载时间，加载失败时带 `error`）；`PUT /providers/proxies/<name>` 立即下载，内容变化时重建引擎后回 204，下载或校验失败回 503 与 `message`；按提供者的 `health-check` 设置实测整组（204）或单个节点（返回 `delay`） |
@@ -43,6 +45,55 @@
 | `/routing/balancers`、`/routing/balancers/<tag>` | `GET` / `PUT` | 查询路由均衡器状态或动态设置覆盖目标出站 |
 | `/handler/inbound/users`、`/handler/inbound/user` | `GET` / `POST` / `DELETE` | 动态查询、添加或移除入站用户记录 |
 | `/ssm/users`（含单用户子路径）、`/ssm/stats` | `GET` / `POST` / `PUT` / `DELETE` | Shadowsocks Server Management (SSM) v1 用户管理与流量统计接口 |
+
+### 连接表
+
+`GET /connections` 返回：
+
+```json
+{
+  "downloadTotal": 1024, "uploadTotal": 512, "memory": 18874368,
+  "connections": [{
+    "id": "7",
+    "metadata": {
+      "network": "tcp", "type": "", "sourceIP": "127.0.0.1", "sourcePort": "50312",
+      "destinationIP": "93.184.216.34", "destinationPort": "443", "host": "example.com",
+      "sniffHost": "", "inboundName": "entry", "inboundUser": "", "process": "", "processPath": "",
+      "remoteDestination": "93.184.216.34:443", "dnsMode": "normal"
+    },
+    "upload": 512, "download": 1024, "start": "2026-11-06T08:00:00.000Z",
+    "chains": ["exit-a", "pick"], "providerChains": [],
+    "rule": "DomainSuffix", "rulePayload": "example.com"
+  }]
+}
+```
+
+- 表项来自唯一业务账本：调度器建立的每条 TCP 流、固定目标 UDP 流与多目标 UDP 关联在开流时登记，租约结束时下线；字节数为计量边界的实时计数。
+- `downloadTotal`、`uploadTotal` 是本次运行的累计业务字节，含已结束的流。
+- `chains` 从最终命名出站开始，逐层列出经过的策略组，最后一项是规则目标。
+- `rule`、`rulePayload` 是产生终结动作的规则；没有规则命中时为 `Match`。多目标 UDP 关联没有单一目标，固定为 `Match`。
+- `process`、`processPath` 只在配置了进程规则时查询。`type` 暂为空串，入站协议类型尚未进入会话身份。
+- 来源地址不遮罩：此表供已鉴权的管理端识别和关闭连接，不落盘。
+- `DELETE /connections/<id>` 触发该流的关闭令牌：计量边界中止读写，转发结束，客户端收到 EOF 或复位。`DELETE /connections` 关闭全部活动流。未知或非数字 `id` 不做任何操作，均返回 204。
+- 策略组开启 `interrupt-exist-connections` 后，`select` 切换选中项、`url-test` 与 `fallback` 因延迟记录改变当前成员时，经过该组但成员不是当前成员的流被关闭。`load-balance` 按流选择成员，不中断。
+- 没有 WebSocket 推送；需要实时刷新时轮询 `GET /connections`。
+
+### 规则表
+
+`GET /rules` 每行是 `{"index", "type", "payload", "proxy", "size": -1, "extra": {"disabled": false}}`。`type` 使用 Mihomo 规则类型名（`Domain`、`DomainSuffix`、`DomainKeyword`、`IPCIDR`、`GeoIP`、`DstPort`、`SrcIPCIDR`、`Network`、`RuleSet`、`Process` 等）。同一条规则有多个条件字段时显示为 `AND`，载荷为 `(类型,值),(类型,值)`；逻辑规则显示 `AND`/`OR`，`invert` 显示 `NOT`。`proxy` 为路由目标；`reject` 动作为 `REJECT`，其他非路由动作为动作名。只列顶层规则，`sub-rule` 行的 `proxy` 是子规则名。
+
+### DNS 查询
+
+```json
+{"Status": 0, "TC": false, "RD": true, "RA": true, "AD": false, "CD": false,
+ "Question": [{"Name": "svc.internal.", "Qtype": 1, "Qclass": 1}],
+ "Answer": [{"name": "svc.internal.", "type": 1, "TTL": 0, "data": "10.0.0.5"}]}
+```
+
+- 缺少 `name` 返回 400；`type` 默认 `A`。
+- 解析失败时 `Status` 为 2（SERVFAIL），无结果时省略 `Answer`。
+- 只支持 `A` 与 `AAAA`，其他类型返回 `Status` 4（NOTIMP）。
+- 解析器只返回地址，不带上游 TTL，`TTL` 固定为 0。
 
 错误响应为 `{"error": "<稳定错误码>"}`，状态码 400、401、404 或 405。
 
@@ -91,6 +142,6 @@
 3. 用新配置启动引擎并绑定监听。从步骤 2 关闭监听到此步绑定完成之间，新连接被拒绝。
 4. 新引擎启动失败（如端口被占用）时，用上一份配置重新启动并返回 `startup.failed`。上一份配置也无法启动时进程以错误退出。
 
-跨重载保留的只有控制接口监听器、`reloads` 计数与设备（WARP）所有者。出站、策略组运行态、内存用量视图、`failed_nodes` 与控制面日志随新引擎重建；统计历史 SQLite、Fake-IP 缓存文件和 `store-selected` 选择文件由新引擎按新配置重新打开，未配置 `store-selected` 时策略组选择回到默认值。
+跨重载保留的只有控制接口监听器、`reloads` 计数与设备（WARP）所有者。出站、策略组运行态、连接表、内存用量视图、`failed_nodes` 与控制面日志随新引擎重建；统计历史 SQLite、Fake-IP 缓存文件和 `store-selected` 选择文件由新引擎按新配置重新打开，未配置 `store-selected` 时策略组选择回到默认值。
 
 `control.listen` 变化、增删 `control` 段和改变 `device` 设置需重启进程：前两者在新配置中被忽略，控制接口仍在原地址服务；`device` 变化使重载以 `configuration.invalid` 失败。`secret`、CORS 与面板等其余 `control` 字段随重载生效。

@@ -27,7 +27,7 @@ pub mod process;
 mod resource;
 mod telemetry;
 pub use group::{
-    ActiveConnection, ControlPlane, DelaySample, ProxyRuntimeInfo, StructuredLogEntry,
+    ControlPlane, DelaySample, ProxyRuntimeInfo, StructuredLogEntry, resident_memory_bytes,
 };
 pub use history::{
     BandwidthSample, HistoryQuery, HistoryReader, HistoryScope, HistoryWriter, OnlineSource,
@@ -38,8 +38,8 @@ pub use probe::{
 };
 pub use resource::{Refreshed, Refresher, ResourceStatus};
 pub use telemetry::{
-    DatagramTargetRecord, EventRecord, FlowEnd, FlowId, FlowKind, FlowRecord, FlowStage, Telemetry,
-    Usage, UsageSnapshot,
+    DatagramTargetRecord, EventRecord, FlowEnd, FlowId, FlowKind, FlowRecord, FlowRoute, FlowStage,
+    Telemetry, Usage, UsageSnapshot,
 };
 use telemetry::{FlowKind as Kind, FlowLease};
 
@@ -283,6 +283,7 @@ impl EgressRuntime {
             .collect();
         let (health_jobs, rejected_jobs) =
             probe::health_jobs(&compiled_groups, &compiled_providers);
+        let telemetry = Telemetry::new(max_flows);
         let control_plane = ControlPlane::new(
             static_meta,
             compiled_groups,
@@ -292,6 +293,7 @@ impl EgressRuntime {
             store_selected_path,
             log_spec,
             resolver.clone(),
+            telemetry.clone(),
         );
         let dispatcher = Arc::new(Dispatcher {
             services,
@@ -299,7 +301,7 @@ impl EgressRuntime {
             bindings: routes,
             routes: routes_table,
             resolver,
-            telemetry: Telemetry::new(max_flows),
+            telemetry,
             control_plane,
             health: ServiceContext::new(OutId::parse("health-check")?),
             closed: AtomicBool::new(false),
@@ -505,13 +507,17 @@ impl Dispatcher {
         &self,
         identity: &SessionIdentity,
         request: Option<(&OriginalTarget, Network)>,
-    ) -> (kerlico_routing::RouteDecision, Option<OutId>) {
+    ) -> (
+        kerlico_routing::RouteDecision,
+        Option<OutId>,
+        Option<(String, String)>,
+    ) {
         let binding_out = self
             .bindings
             .get(identity.source().node())
             .map(|b| b.outbound.clone());
         let Some((original, network)) = request else {
-            return (kerlico_routing::RouteDecision::default(), binding_out);
+            return (kerlico_routing::RouteDecision::default(), binding_out, None);
         };
         let proc_info = if self.routes.has_process_rules() {
             process::resolve_local_process(identity.observed_source(), network)
@@ -539,7 +545,7 @@ impl Dispatcher {
         } else {
             decision.outbound.clone().or(binding_out)
         };
-        (decision, selected)
+        (decision, selected, proc_info)
     }
 
     fn apply_route_overrides(
@@ -573,7 +579,12 @@ impl Dispatcher {
         &self,
         identity: &SessionIdentity,
         request: Option<(&OriginalTarget, Network)>,
-    ) -> Result<(&RunningService, FamilyMode, kerlico_routing::RouteDecision)> {
+    ) -> Result<(
+        &RunningService,
+        FamilyMode,
+        kerlico_routing::RouteDecision,
+        FlowRoute,
+    )> {
         if self.closed.load(Ordering::Acquire)
             || !identity.is_accepting()
             || identity.cancel().is_cancelled()
@@ -585,19 +596,24 @@ impl Dispatcher {
             .bindings
             .get(identity.source().node())
             .ok_or(Error::Rejected)?;
-        let (decision, outbound) = self.evaluate_route(identity, request);
+        let (decision, outbound, process) = self.evaluate_route(identity, request);
         if decision.reject {
             return Err(Error::Rejected);
         }
         let initial_outbound = outbound.ok_or(Error::Rejected)?;
-        let (outbound, _top_group) = self.control_plane.resolve_outbound(
+        let (outbound, groups) = self.control_plane.resolve_outbound(
             &initial_outbound,
             request.map(|(orig, _)| orig),
             identity.observed_source(),
         )?;
         let service = self.services.get(&outbound).ok_or(Error::Rejected)?;
         service.host.check()?;
-        Ok((service, binding.mode, decision))
+        let route = FlowRoute {
+            rule: decision.rule.clone(),
+            groups,
+            process,
+        };
+        Ok((service, binding.mode, decision, route))
     }
 
     fn selected_outbound(
@@ -605,7 +621,7 @@ impl Dispatcher {
         identity: &SessionIdentity,
         request: Option<(&OriginalTarget, Network)>,
     ) -> Option<OutId> {
-        let (_, selected) = self.evaluate_route(identity, request);
+        let (_, selected, _) = self.evaluate_route(identity, request);
         selected
     }
 
@@ -627,13 +643,20 @@ impl Dispatcher {
         if context.cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let admitted = self
-            .route(identity, request)
-            .and_then(|(service, mode, decision)| {
-                capable(service)?;
-                let ledger = self.telemetry.open(identity, &service.id, original, kind)?;
-                Ok((service, mode, ledger, decision))
-            });
+        let admitted =
+            self.route(identity, request)
+                .and_then(|(service, mode, decision, route)| {
+                    capable(service)?;
+                    let ledger = self.telemetry.open(
+                        identity,
+                        &service.id,
+                        original,
+                        kind,
+                        route,
+                        context.cancel.child_token(),
+                    )?;
+                    Ok((service, mode, ledger, decision))
+                });
         if let Err(error) = &admitted
             && let Some(outbound) = self.selected_outbound(identity, request)
         {
@@ -653,7 +676,7 @@ impl Dispatcher {
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, TcpFlow>> {
         let original = self.enrich_original(original);
-        let (decision_pre, _) = self.evaluate_route(identity, Some((&original, Network::Tcp)));
+        let (decision_pre, _, _) = self.evaluate_route(identity, Some((&original, Network::Tcp)));
         if decision_pre.hijack_dns {
             let resolver = self.resolver.clone();
             return Ok(FlowOpen::tcp(
@@ -708,13 +731,15 @@ impl Dispatcher {
         )?;
         let original = Self::apply_route_overrides(original, &decision);
         let resolve_strategy = decision.resolve_strategy;
-        let scoped = context.scoped(
-            &service.host,
-            identity.source(),
-            identity.node_cancel(),
-            identity.cancel(),
-            mode,
-        );
+        let scoped = context
+            .scoped(
+                &service.host,
+                identity.source(),
+                identity.node_cancel(),
+                identity.cancel(),
+                mode,
+            )
+            .with_cancel(ledger.close_token());
         let lease = FlowLease::new(&self.telemetry, ledger.clone(), &scoped, identity);
         let completion = lease.clone();
         Ok(FlowOpen::tcp(
@@ -781,7 +806,7 @@ impl Dispatcher {
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, FixedUdpFlow>> {
         let original = self.enrich_original(original);
-        let (decision_pre, _) = self.evaluate_route(identity, Some((&original, Network::Udp)));
+        let (decision_pre, _, _) = self.evaluate_route(identity, Some((&original, Network::Udp)));
         if decision_pre.hijack_dns {
             let resolver = self.resolver.clone();
             return Ok(FlowOpen::fixed_udp(
@@ -814,13 +839,15 @@ impl Dispatcher {
         )?;
         let original = Self::apply_route_overrides(original, &decision);
         let resolve_strategy = decision.resolve_strategy;
-        let scoped = context.scoped(
-            &service.host,
-            identity.source(),
-            identity.node_cancel(),
-            identity.cancel(),
-            mode,
-        );
+        let scoped = context
+            .scoped(
+                &service.host,
+                identity.source(),
+                identity.node_cancel(),
+                identity.cancel(),
+                mode,
+            )
+            .with_cancel(ledger.close_token());
         let lease = FlowLease::new(&self.telemetry, ledger.clone(), &scoped, identity);
         let completion = lease.clone();
         Ok(FlowOpen::fixed_udp(
@@ -898,13 +925,15 @@ impl Dispatcher {
             None,
             Kind::UdpAssociation,
         )?;
-        let scoped = context.scoped(
-            &service.host,
-            identity.source(),
-            identity.node_cancel(),
-            identity.cancel(),
-            mode,
-        );
+        let scoped = context
+            .scoped(
+                &service.host,
+                identity.source(),
+                identity.node_cancel(),
+                identity.cancel(),
+                mode,
+            )
+            .with_cancel(ledger.close_token());
         let lease = FlowLease::new(&self.telemetry, ledger.clone(), &scoped, identity);
         let completion = lease.clone();
         Ok(FlowOpen::association(
@@ -955,7 +984,7 @@ impl Dispatcher {
 impl SessionDispatcher for Dispatcher {
     fn supports_udp_association(&self, identity: &SessionIdentity) -> bool {
         self.route(identity, None)
-            .is_ok_and(|(service, _, _)| service.association)
+            .is_ok_and(|(service, _, _, _)| service.association)
     }
     fn connect_tcp<'a>(
         &'a self,
@@ -1308,9 +1337,19 @@ pub mod testing {
             service_order: vec![id.clone()],
             bindings: BTreeMap::from([(issuer.node().clone(), Binding { outbound: id, mode })]),
             routes: RouteTable::default(),
-            resolver,
+            resolver: resolver.clone(),
             telemetry: telemetry.clone(),
-            control_plane: ControlPlane::default(),
+            control_plane: ControlPlane::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+                RouteTable::default(),
+                None,
+                kerlico_config::LogSpec::default(),
+                resolver.clone(),
+                telemetry.clone(),
+            ),
             health: ServiceContext::new(OutId::parse("health-check")?),
             closed: AtomicBool::new(false),
             shutdown: tokio::sync::Mutex::new(None),
@@ -1375,6 +1414,7 @@ mod tests {
             sniff: None,
             reject: false,
             hijack_dns: false,
+            rule: None,
         };
         let updated = Dispatcher::apply_route_overrides(orig, &decision);
         assert_eq!(

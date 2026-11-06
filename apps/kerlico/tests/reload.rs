@@ -353,3 +353,50 @@ fn provider_update_endpoint_downloads_and_rebuilds_with_new_members() {
     let (_, listed) = http(control, "GET", "/providers/proxies/sub", None);
     assert!(listed["error"].as_str().unwrap().contains("500"));
 }
+
+fn live_connections(control: u16, count: usize) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, table) = http(control, "GET", "/connections", None);
+        assert_eq!(status, 200);
+        if table["connections"].as_array().map(Vec::len) == Some(count) {
+            return table;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "connection table stayed at {table}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn connections_follow_the_reloaded_engine() {
+    let directory = Directory::new();
+    let path = directory.0.join("config.json");
+    let echo = TcpListener::bind("127.0.0.1:0").unwrap();
+    let echo_port = echo.local_addr().unwrap().port();
+    let (first, second, control) = (free_port(), free_port(), free_port());
+    fs::write(&path, config(first, echo_port, control).to_string()).unwrap();
+    let _child = start(&path);
+
+    let payload = json!({"payload": config(second, echo_port, control).to_string()});
+    assert_eq!(http(control, "PUT", "/configs", Some(&payload)).0, 204);
+
+    let mut client = TcpStream::connect(("127.0.0.1", second)).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let (_peer, _) = echo.accept().unwrap();
+    client.write_all(b"ping").unwrap();
+    let table = live_connections(control, 1);
+    assert_eq!(
+        table["connections"][0]["metadata"]["destinationPort"],
+        echo_port.to_string()
+    );
+
+    assert_eq!(http(control, "DELETE", "/connections", None).0, 204);
+    let mut byte = [0u8; 1];
+    assert!(matches!(client.read(&mut byte), Ok(0) | Err(_)));
+    live_connections(control, 0);
+}

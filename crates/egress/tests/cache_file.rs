@@ -1,7 +1,7 @@
 use kerlico_config::{CompiledProxyGroup, LoadBalanceStrategy, LogSpec, ProxyGroupKind};
 use kerlico_core::{BoxFuture, OutId, Result};
 use kerlico_dns::FakeIpPool;
-use kerlico_egress::{ControlPlane, Resolver};
+use kerlico_egress::{ControlPlane, Resolver, Telemetry};
 use kerlico_routing::RouteTable;
 use std::{collections::BTreeMap, net::IpAddr, path::Path, sync::Arc};
 
@@ -51,6 +51,7 @@ fn control_plane(path: &Path) -> ControlPlane {
         Some(path.to_string_lossy().into_owned()),
         LogSpec::default(),
         Arc::new(NoResolver),
+        Telemetry::new(16),
     )
 }
 

@@ -1,11 +1,14 @@
 //! 策略组运行时（`select`、`url-test`、`fallback`、`load-balance`、`balancer`）、延迟历史、连接中断与控制面状态。
 
-use crate::Resolver;
+use crate::{
+    Resolver,
+    telemetry::{FlowKind, FlowRecord, Telemetry},
+};
 use kerlico_config::{
     CompiledProxyGroup, CompiledProxyProvider, LoadBalanceStrategy, LogSpec, ProxyGroupKind,
 };
-use kerlico_core::{CancellationToken, Destination, Error, OriginalTarget, OutId, Result, Source};
-use kerlico_routing::{Network, RouteContext, RouteTable};
+use kerlico_core::{Address, Destination, Error, OriginalTarget, OutId, Result, Source};
+use kerlico_routing::{Network, RouteContext, RouteTable, RuleLabel};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -63,17 +66,6 @@ pub struct StructuredLogEntry {
     pub payload: String,
 }
 
-#[derive(Clone)]
-pub struct ActiveConnection {
-    pub id: u64,
-    pub outbound: OutId,
-    pub group: Option<OutId>,
-    pub target: Option<String>,
-    pub network: &'static str,
-    pub started_ms: u64,
-    pub cancel: CancellationToken,
-}
-
 struct InnerControlPlane {
     groups: RwLock<BTreeMap<OutId, GroupRuntimeEntry>>,
     proxies: RwLock<BTreeMap<OutId, ProxyRuntimeInfo>>,
@@ -83,7 +75,7 @@ struct InnerControlPlane {
     store_selected_path: Option<PathBuf>,
     log_spec: RwLock<LogSpec>,
     logs: Mutex<VecDeque<StructuredLogEntry>>,
-    active_conns: Mutex<BTreeMap<u64, ActiveConnection>>,
+    telemetry: Telemetry,
     dynamic_inbounds: RwLock<BTreeMap<String, BTreeMap<String, Value>>>,
     resolver: Arc<dyn Resolver>,
     config_reloads: AtomicU64,
@@ -92,21 +84,6 @@ struct InnerControlPlane {
 
 #[derive(Clone)]
 pub struct ControlPlane(Arc<InnerControlPlane>);
-
-impl Default for ControlPlane {
-    fn default() -> Self {
-        Self::new(
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            BTreeMap::new(),
-            RouteTable::default(),
-            None,
-            LogSpec::default(),
-            Arc::new(crate::SystemResolver),
-        )
-    }
-}
 
 impl ControlPlane {
     #[allow(clippy::too_many_arguments)]
@@ -119,6 +96,7 @@ impl ControlPlane {
         store_selected_path: Option<String>,
         log_spec: LogSpec,
         resolver: Arc<dyn Resolver>,
+        telemetry: Telemetry,
     ) -> Self {
         let mut proxies = BTreeMap::new();
         for (id, kind, udp) in static_services {
@@ -200,7 +178,7 @@ impl ControlPlane {
             store_selected_path: store_selected_path.map(PathBuf::from),
             log_spec: RwLock::new(log_spec),
             logs: Mutex::new(logs),
-            active_conns: Mutex::new(BTreeMap::new()),
+            telemetry,
             dynamic_inbounds: RwLock::new(BTreeMap::new()),
             resolver,
             config_reloads: AtomicU64::new(0),
@@ -216,7 +194,7 @@ impl ControlPlane {
             .contains_key(id)
     }
 
-    /// 将可能指向策略组或负载均衡器的 `OutId` 解析为最终具体 `OutId`，同时返回所属顶层策略组。
+    /// 将可能指向策略组或负载均衡器的 `OutId` 解析为最终具体 `OutId`，同时按顺序返回途经的策略组。
     ///
     /// 经过的策略组记为最近使用，`lazy` 健康检查据此决定是否跳过本轮。
     pub fn resolve_outbound(
@@ -224,7 +202,7 @@ impl ControlPlane {
         initial: &OutId,
         original: Option<&OriginalTarget>,
         source_addr: Option<std::net::SocketAddr>,
-    ) -> Result<(OutId, Option<OutId>)> {
+    ) -> Result<(OutId, Vec<OutId>)> {
         self.resolve(initial, original, source_addr, true)
     }
 
@@ -239,24 +217,21 @@ impl ControlPlane {
         original: Option<&OriginalTarget>,
         source_addr: Option<std::net::SocketAddr>,
         touch: bool,
-    ) -> Result<(OutId, Option<OutId>)> {
+    ) -> Result<(OutId, Vec<OutId>)> {
         let now = if touch { now_ms() } else { 0 };
         let groups = self.0.groups.read().unwrap_or_else(|e| e.into_inner());
         let proxies = self.0.proxies.read().unwrap_or_else(|e| e.into_inner());
         let mut current = initial.clone();
-        let mut top_group = None;
+        let mut path = Vec::new();
         for _ in 0..8 {
             let Some(entry) = groups.get(&current) else {
-                return Ok((current, top_group));
+                return Ok((current, path));
             };
-            if top_group.is_none() {
-                top_group = Some(current.clone());
-            }
             if touch {
                 entry.last_touch_ms.store(now, Ordering::Relaxed);
             }
             let next = Self::pick_group_member(entry, &proxies, original, source_addr)?;
-            current = next;
+            path.push(std::mem::replace(&mut current, next));
         }
         Err(Error::Config("策略组嵌套层级超过上限".into()))
     }
@@ -445,12 +420,61 @@ impl ControlPlane {
                 }
             }
         }
+        drop(proxies);
+        let affected: Vec<OutId> = self
+            .0
+            .groups
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, g)| {
+                matches!(
+                    g.spec.kind,
+                    ProxyGroupKind::UrlTest | ProxyGroupKind::Fallback
+                ) && g.spec.candidates.contains(id)
+            })
+            .map(|(gid, _)| gid.clone())
+            .collect();
+        for gid in affected {
+            self.interrupt_stale(&gid);
+        }
+    }
+
+    /// 开启 `interrupt-exist-connections` 时，关闭经过该组但成员不再是当前选择的流。
+    /// 负载均衡类组按流选择成员，不存在“当前成员”，不做中断。
+    pub fn interrupt_stale(&self, group: &OutId) -> usize {
+        let current = {
+            let groups = self.0.groups.read().unwrap_or_else(|e| e.into_inner());
+            let proxies = self.0.proxies.read().unwrap_or_else(|e| e.into_inner());
+            let Some(entry) = groups.get(group) else {
+                return 0;
+            };
+            if !entry.spec.interrupt_exist_connections
+                || matches!(
+                    entry.spec.kind,
+                    ProxyGroupKind::LoadBalance | ProxyGroupKind::Balancer
+                )
+            {
+                return 0;
+            }
+            match Self::pick_group_member(entry, &proxies, None, None) {
+                Ok(member) => member,
+                Err(_) => return 0,
+            }
+        };
+        self.0.telemetry.close_where(|flow| {
+            let groups = &flow.route.groups;
+            groups
+                .iter()
+                .position(|g| g == group)
+                .is_some_and(|at| groups.get(at + 1).unwrap_or(&flow.outbound) != &current)
+        })
     }
 
     pub fn select_in_group(&self, group_name: &str, target_name: &str) -> Result<()> {
         let gid = OutId::parse(group_name)?;
         let tid = OutId::parse(target_name)?;
-        let interrupt = {
+        {
             let mut groups = self.0.groups.write().unwrap_or_else(|e| e.into_inner());
             let entry = groups
                 .get_mut(&gid)
@@ -462,12 +486,9 @@ impl ControlPlane {
             }
             entry.selected = Some(tid.clone());
             entry.fixed = Some(tid);
-            entry.spec.interrupt_exist_connections
-        };
-        self.persist_selections();
-        if interrupt {
-            self.close_group_connections(&gid);
         }
+        self.persist_selections();
+        self.interrupt_stale(&gid);
         Ok(())
     }
 
@@ -483,6 +504,7 @@ impl ControlPlane {
             }
         }
         self.persist_selections();
+        self.interrupt_stale(&gid);
         Ok(())
     }
 
@@ -500,95 +522,30 @@ impl ControlPlane {
         let _ = kerlico_dns::cache_file::store(path, kerlico_dns::cache_file::SELECTED, &map);
     }
 
-    pub fn register_active_connection(&self, conn: ActiveConnection) {
-        self.0
-            .active_conns
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(conn.id, conn);
-    }
-
-    pub fn unregister_active_connection(&self, id: u64) {
-        self.0
-            .active_conns
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id);
-    }
-
     pub fn close_all_connections(&self) -> usize {
-        let mut conns = self
-            .0
-            .active_conns
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let count = conns.len();
-        for conn in conns.values() {
-            conn.cancel.cancel();
-        }
-        conns.clear();
-        count
+        self.0.telemetry.close_where(|_| true)
     }
 
     pub fn close_connection(&self, id: u64) -> bool {
-        let mut conns = self
-            .0
-            .active_conns
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(conn) = conns.remove(&id) {
-            conn.cancel.cancel();
-            true
-        } else {
-            false
-        }
+        self.0.telemetry.close_where(|flow| flow.id.sequence == id) > 0
     }
 
-    pub fn close_group_connections(&self, group_id: &OutId) -> usize {
-        let mut conns = self
+    /// Mihomo `/connections` 形状：进程累计流量、活动流及其规则、链路与实时字节数。
+    pub fn active_connections_json(&self) -> Result<Value> {
+        let totals = self.0.telemetry.usage()?.engine;
+        let connections: Vec<Value> = self
             .0
-            .active_conns
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut closed = 0;
-        conns.retain(|_, conn| {
-            if conn.group.as_ref() == Some(group_id) || &conn.outbound == group_id {
-                conn.cancel.cancel();
-                closed += 1;
-                false
-            } else {
-                true
-            }
-        });
-        closed
-    }
-
-    pub fn active_connections_json(&self) -> Value {
-        let conns = self
-            .0
-            .active_conns
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let list: Vec<Value> = conns
-            .values()
-            .map(|c| {
-                json!({
-                    "id": c.id.to_string(),
-                    "chains": [c.outbound.to_string()],
-                    "rule": "",
-                    "start": c.started_ms,
-                    "metadata": {
-                        "network": c.network,
-                        "destination": c.target,
-                    }
-                })
-            })
+            .telemetry
+            .active()?
+            .iter()
+            .map(connection_json)
             .collect();
-        json!({
-            "downloadTotal": 0,
-            "uploadTotal": 0,
-            "connections": list,
-        })
+        Ok(json!({
+            "downloadTotal": totals.download_bytes,
+            "uploadTotal": totals.upload_bytes,
+            "connections": connections,
+            "memory": resident_memory_bytes(),
+        }))
     }
 
     pub fn proxies_json(&self) -> Value {
@@ -835,18 +792,50 @@ impl ControlPlane {
 
     pub fn rules_json(&self) -> Value {
         let routes = self.0.routes.read().unwrap_or_else(|e| e.into_inner());
-        let mut list = Vec::new();
-        for (idx, out_id) in routes.outbounds().enumerate() {
-            list.push(json!({
-                "index": idx,
-                "type": "Rule",
-                "payload": format!("rule-{idx}"),
-                "proxy": out_id.to_string(),
-                "size": 1,
-                "extra": {},
-            }));
-        }
+        let list: Vec<Value> = routes
+            .rules()
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                json!({
+                    "index": index,
+                    "type": entry.label.kind,
+                    "payload": entry.label.payload,
+                    "proxy": entry.proxy,
+                    "size": -1,
+                    "extra": { "disabled": false },
+                })
+            })
+            .collect();
         json!({ "rules": list })
+    }
+
+    /// Mihomo `/dns/query` 应答形状；经运行期解析器（hosts、上游与缓存）解析 A/AAAA。
+    /// 解析器只返回地址，不带上游 TTL，`TTL` 固定为 0。
+    pub async fn dns_query(&self, name: &str, qtype: &str) -> Value {
+        let rtype: u16 = match qtype.to_ascii_uppercase().as_str() {
+            "A" | "1" => 1,
+            "AAAA" | "28" => 28,
+            _ => {
+                return dns_reply(name, qtype.parse().unwrap_or(0), 4, Vec::new());
+            }
+        };
+        let fqdn = if name.ends_with('.') {
+            name.to_owned()
+        } else {
+            format!("{name}.")
+        };
+        match self.0.resolver.resolve(name).await {
+            Ok(addresses) => {
+                let answers = addresses
+                    .into_iter()
+                    .filter(|ip| ip.is_ipv4() == (rtype == 1))
+                    .map(|ip| json!({ "name": fqdn, "type": rtype, "TTL": 0, "data": ip.to_string() }))
+                    .collect();
+                dns_reply(&fqdn, rtype, 0, answers)
+            }
+            Err(_) => dns_reply(&fqdn, rtype, 2, Vec::new()),
+        }
     }
 
     pub fn test_route(
@@ -1028,6 +1017,123 @@ fn last_delay(info: &ProxyRuntimeInfo) -> Option<u32> {
     info.history.back().map(|s| s.delay).filter(|d| *d > 0)
 }
 
+fn dns_reply(name: &str, rtype: u16, status: u8, answers: Vec<Value>) -> Value {
+    let mut reply = json!({
+        "Status": status,
+        "TC": false,
+        "RD": true,
+        "RA": true,
+        "AD": false,
+        "CD": false,
+        "Question": [{ "Name": name, "Qtype": rtype, "Qclass": 1 }],
+    });
+    if !answers.is_empty() {
+        reply["Answer"] = Value::Array(answers);
+    }
+    reply
+}
+
+fn connection_json(flow: &FlowRecord) -> Value {
+    let target = flow.original.as_ref();
+    let (host, mut destination_ip, destination_port) = match target.map(OriginalTarget::target) {
+        Some(dst) => match dst.address() {
+            Address::Domain(domain) => (domain.clone(), String::new(), dst.port().to_string()),
+            Address::Ip(ip) => (String::new(), ip.to_string(), dst.port().to_string()),
+        },
+        None => (String::new(), String::new(), String::new()),
+    };
+    let remote = flow.observed_target.as_ref();
+    if destination_ip.is_empty()
+        && let Some(Address::Ip(ip)) = remote.map(Destination::address)
+    {
+        destination_ip = ip.to_string();
+    }
+    let chains: Vec<String> = std::iter::once(&flow.outbound)
+        .chain(flow.route.groups.iter().rev())
+        .map(ToString::to_string)
+        .collect();
+    let rule = flow
+        .route
+        .rule
+        .clone()
+        .unwrap_or_else(RuleLabel::matched_final);
+    let (process, process_path) = flow.route.process.clone().unwrap_or_default();
+    json!({
+        "id": flow.id.sequence.to_string(),
+        "metadata": {
+            "network": if flow.kind == FlowKind::Tcp { "tcp" } else { "udp" },
+            "type": "",
+            "sourceIP": flow.observed_source.map(|a| a.ip().to_string()).unwrap_or_default(),
+            "sourcePort": flow.observed_source.map(|a| a.port().to_string()).unwrap_or_default(),
+            "destinationIP": destination_ip,
+            "destinationPort": destination_port,
+            "inboundIP": "",
+            "inboundPort": "",
+            "inboundName": flow.source.node().to_string(),
+            "inboundUser": flow.source.user().map(|u| u.to_string()).unwrap_or_default(),
+            "host": host,
+            "sniffHost": target.and_then(OriginalTarget::sniffed_domain).unwrap_or_default(),
+            "dnsMode": "normal",
+            "process": process,
+            "processPath": process_path,
+            "remoteDestination": remote.map(ToString::to_string).unwrap_or_default(),
+            "specialProxy": "",
+            "specialRules": "",
+            "uid": 0,
+            "dscp": 0,
+        },
+        "upload": flow.usage.upload_bytes,
+        "download": flow.usage.download_bytes,
+        "start": rfc3339(flow.started_ms),
+        "chains": chains,
+        "providerChains": [],
+        "rule": rule.kind,
+        "rulePayload": rule.payload,
+    })
+}
+
+/// 进程常驻内存字节数；Linux 读取 `/proc/self/status` 的 `VmRSS`，其他平台返回 0。
+pub fn resident_memory_bytes() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))
+                .and_then(|rest| {
+                    rest.trim()
+                        .trim_end_matches("kB")
+                        .trim()
+                        .parse::<u64>()
+                        .ok()
+                })
+        })
+        .map_or(0, |kib| kib.saturating_mul(1024))
+}
+
+/// Unix 毫秒转 RFC 3339 UTC 文本（公历换算按 Howard Hinnant 的 civil_from_days）。
+fn rfc3339(ms: u64) -> String {
+    let secs = ms / 1000;
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60,
+        ms % 1000
+    )
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1038,9 +1144,17 @@ fn now_ms() -> u64 {
 }
 
 fn now_iso_string() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{secs}Z")
+    rfc3339(now_ms())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rfc3339;
+
+    #[test]
+    fn rfc3339_formats_unix_milliseconds_in_utc() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(rfc3339(1_700_000_000_123), "2023-11-14T22:13:20.123Z");
+        assert_eq!(rfc3339(951_782_400_000), "2000-02-29T00:00:00.000Z");
+    }
 }
