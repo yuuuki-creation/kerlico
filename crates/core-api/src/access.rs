@@ -24,17 +24,41 @@ pub enum FamilyMode {
     DualV4Preferred,
 }
 
+/// 一条嗅探器配置：协议名为小写规范名，`ports` 为空表示全部端口。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnifferRule {
+    pub protocol: String,
+    pub ports: Vec<(u16, u16)>,
+    pub override_destination: Option<bool>,
+}
+
+/// 哪些连接进入嗅探。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SniffTargets {
+    /// sing-box/Xray 入站语义：每个连接都嗅探。
+    #[default]
+    All,
+    /// Mihomo `sniffer:` 语义：纯 IP 看 `parse-pure-ip`，DNS 映射看 `force-dns-mapping`，
+    /// 域名目标只在命中 `force-domain` 时嗅探。
+    Mihomo {
+        parse_pure_ip: bool,
+        force_dns_mapping: bool,
+    },
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SniffPolicy {
     pub enabled: bool,
-    pub protocols: Vec<String>,
+    /// 按尝试顺序排列；为空表示全部协议、全部端口。
+    pub sniffers: Vec<SnifferRule>,
     pub override_destination: bool,
     pub route_only: bool,
-    pub parse_pure_ip: bool,
+    pub targets: SniffTargets,
     pub timeout: std::time::Duration,
-    pub domains_excluded: Vec<String>,
+    pub skip_domain: Vec<String>,
     pub force_domain: Vec<String>,
-    pub sniff_ports: std::collections::BTreeMap<String, Vec<(u16, u16)>>,
+    pub skip_src_address: Vec<crate::Cidr>,
+    pub skip_dst_address: Vec<crate::Cidr>,
 }
 
 impl SniffPolicy {
@@ -46,53 +70,71 @@ impl SniffPolicy {
         }
     }
 
-    pub fn allows_protocol(&self, proto: &str, port: u16) -> bool {
-        let proto_lower = proto.to_ascii_lowercase();
-        let allowed_by_list = self.protocols.is_empty()
-            || self.protocols.iter().any(|p| {
-                let p = p.to_ascii_lowercase();
-                p == proto_lower
-                    || (proto_lower == "tls" && (p == "https" || p == "ssl"))
-                    || p == "fakedns+others"
-            });
-        if !allowed_by_list {
-            return false;
+    /// 协议在该端口可用时返回是否用嗅探域名覆盖目标。
+    pub fn sniffer(&self, protocol: &str, port: u16) -> Option<bool> {
+        let fallback = self.override_destination && !self.route_only;
+        if self.sniffers.is_empty() {
+            return Some(fallback);
         }
-        if let Some(ranges) = self
-            .sniff_ports
-            .get(&proto_lower)
-            .or_else(|| self.sniff_ports.get(&proto.to_ascii_uppercase()))
-            && !ranges.is_empty()
-        {
-            return ranges
+        let rule = self
+            .sniffers
+            .iter()
+            .find(|rule| rule.protocol.eq_ignore_ascii_case(protocol))?;
+        let in_ports = rule.ports.is_empty()
+            || rule
+                .ports
                 .iter()
                 .any(|(start, end)| (*start..=*end).contains(&port));
-        }
-        true
+        in_ports.then(|| {
+            rule.override_destination
+                .map_or(fallback, |value| value && !self.route_only)
+        })
     }
 
-    pub fn should_sniff_target(&self, target: &Destination) -> bool {
+    /// `mapped` 是 DNS 映射为 IP 目标找回的域名。
+    pub fn wants(
+        &self,
+        target: &Destination,
+        mapped: Option<&str>,
+        source: Option<std::net::IpAddr>,
+    ) -> bool {
         if !self.enabled {
             return false;
         }
-        match target.address() {
-            crate::Address::Ip(_) => true,
-            crate::Address::Domain(domain) => {
-                self.force_domain.is_empty()
-                    || self
-                        .force_domain
-                        .iter()
-                        .any(|pattern| wildcard_domain_match(pattern, domain))
-            }
+        if let crate::Address::Ip(ip) = target.address()
+            && self.skip_dst_address.iter().any(|cidr| cidr.contains(*ip))
+        {
+            return false;
+        }
+        if let Some(ip) = source
+            && self.skip_src_address.iter().any(|cidr| cidr.contains(ip))
+        {
+            return false;
+        }
+        let forced = |domain: &str| {
+            self.force_domain
+                .iter()
+                .any(|pattern| wildcard_domain_match(pattern, domain))
+        };
+        match (self.targets, target.address()) {
+            (SniffTargets::All, _) => true,
+            (
+                SniffTargets::Mihomo {
+                    parse_pure_ip,
+                    force_dns_mapping,
+                },
+                crate::Address::Ip(_),
+            ) => match mapped {
+                None => parse_pure_ip,
+                Some(domain) => force_dns_mapping || forced(domain),
+            },
+            (SniffTargets::Mihomo { .. }, crate::Address::Domain(domain)) => forced(domain),
         }
     }
 
-    pub fn should_override(&self, domain: &str) -> bool {
-        if !self.override_destination || self.route_only {
-            return false;
-        }
-        !self
-            .domains_excluded
+    /// 命中 `skip-domain` 的嗅探域名整体丢弃。
+    pub fn skips_domain(&self, domain: &str) -> bool {
+        self.skip_domain
             .iter()
             .any(|pattern| wildcard_domain_match(pattern, domain))
     }
@@ -187,12 +229,20 @@ pub struct SessionIdentity {
     source: Source,
     observed: Option<SocketAddr>,
     sniff_policy: SniffPolicy,
+    lan_filter: Arc<crate::IpFilter>,
     cancel: CancellationToken,
     node_cancel: CancellationToken,
     peer_lease: Option<PeerLease>,
     admission: Arc<AtomicBool>,
 }
 impl SessionIdentity {
+    /// `lan-allowed-ips`/`lan-disallowed-ips` 对观测到的来源地址生效；未知来源放行。
+    pub fn source_allowed(&self) -> bool {
+        self.lan_filter.is_empty()
+            || self
+                .observed
+                .is_none_or(|addr| self.lan_filter.allows(addr.ip()))
+    }
     pub fn source(&self) -> &Source {
         &self.source
     }
@@ -244,6 +294,7 @@ pub struct IngressBinding {
     issuer: CredentialIssuer,
     local: bool,
     sniff_policy: SniffPolicy,
+    lan_filter: Arc<crate::IpFilter>,
     dispatcher: Arc<dyn SessionDispatcher>,
     association: bool,
     node_cancel: CancellationToken,
@@ -261,6 +312,7 @@ impl IngressBinding {
             issuer,
             local,
             sniff_policy: SniffPolicy::default(),
+            lan_filter: Arc::default(),
             dispatcher,
             association,
             node_cancel: CancellationToken::new(),
@@ -274,6 +326,10 @@ impl IngressBinding {
     }
     pub fn sniff_policy(&self) -> &SniffPolicy {
         &self.sniff_policy
+    }
+    pub fn with_lan_filter(mut self, lan_filter: crate::IpFilter) -> Self {
+        self.lan_filter = Arc::new(lan_filter);
+        self
     }
     /// 只登记本节点实际交接的载体字节；不记用户业务量，也不推算设备开销。
     pub fn record_carrier(&self, sent_bytes: u64, received_bytes: u64) {
@@ -319,6 +375,7 @@ impl IngressBinding {
                 source,
                 observed: context.peer_addr,
                 sniff_policy: self.sniff_policy.clone(),
+                lan_filter: self.lan_filter.clone(),
                 cancel: context.cancel.clone(),
                 node_cancel: self.node_cancel.clone(),
                 peer_lease: context.peer_lease.clone(),

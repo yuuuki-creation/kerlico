@@ -2,14 +2,12 @@
 //!
 //! 语义对齐 sing-box `common/sniff` 与 Mihomo `component/sniffer`；只有 HTTP Host 与 TLS/QUIC SNI 产出域名。
 
-use crate::fallback::PrefixedStream;
-use kerlico_core::{Address, BoxStream, Destination, SniffPolicy};
+use kerlico_core::{Address, Destination};
 use rustls::{
     Side,
     quic::{DirectionalKeys, Version},
 };
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
 
 /// 嗅探缓冲与 CRYPTO 流的统一上限，与 Mihomo `maxCryptoStreamOffset` 一致。
 const MAX_SNIFF_LEN: usize = 64 * 1024;
@@ -943,113 +941,6 @@ pub fn sniff_quic_initial(packet: &[u8]) -> Option<SniffResult> {
         Sniffed::Found(res) => Some(res),
         Sniffed::NeedMore | Sniffed::Miss => None,
     }
-}
-
-/// 按给定协议集合对单块数据进行探测。
-pub fn sniff_bytes(buf: &[u8], udp: bool, policy: &SniffPolicy, port: u16) -> Option<SniffResult> {
-    if udp {
-        if policy.allows_protocol("quic", port) {
-            return sniff_quic_initial(buf);
-        }
-        return None;
-    }
-    if policy.allows_protocol("tls", port)
-        && let Some(res) = sniff_tls_client_hello(buf)
-    {
-        return Some(res);
-    }
-    if policy.allows_protocol("http", port)
-        && let Some(res) = sniff_http_request(buf)
-    {
-        return Some(res);
-    }
-    None
-}
-
-/// 在给定超时内预读 TCP 流首包进行协议嗅探，随后将已读字节无损回放至返回流头部。
-pub async fn sniff_stream(
-    mut stream: BoxStream,
-    policy: &SniffPolicy,
-    port: u16,
-) -> (BoxStream, Option<SniffResult>) {
-    let mut buf = Vec::with_capacity(1024);
-    let mut scratch = [0u8; 1024];
-    let timeout = policy.effective_timeout();
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut result = None;
-
-    while buf.len() < 4096 {
-        let read_fut = stream.read(&mut scratch);
-        match tokio::time::timeout_at(deadline, read_fut).await {
-            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
-            Ok(Ok(n)) => {
-                buf.extend_from_slice(&scratch[..n]);
-                if let Some(sniffed) = sniff_bytes(&buf, false, policy, port) {
-                    result = Some(sniffed);
-                    break;
-                }
-                // 若首字节既不是 TLS Handshake (0x16) 也不是常见 HTTP 方法首字母，提前停止等待
-                if let Some(&first) = buf.first()
-                    && first != 0x16
-                    && !matches!(first, b'G' | b'P' | b'H' | b'D' | b'O' | b'C' | b'T')
-                {
-                    break;
-                }
-            }
-        }
-    }
-
-    let restored: BoxStream = if buf.is_empty() {
-        stream
-    } else {
-        Box::new(PrefixedStream::new(buf, stream))
-    };
-    (restored, result)
-}
-
-/// 根据节点嗅探策略决定是否对 TCP 流首包执行协议嗅探，并构造含嗅探元数据的 `OriginalTarget`。
-pub async fn sniff_and_prepare_tcp(
-    stream: BoxStream,
-    target: &kerlico_core::Destination,
-    policy: &SniffPolicy,
-) -> (BoxStream, kerlico_core::OriginalTarget) {
-    let mut orig = kerlico_core::OriginalTarget::from_destination(target.clone());
-    if !policy.should_sniff_target(target) {
-        return (stream, orig);
-    }
-    let (restored, sniffed) = sniff_stream(stream, policy, target.port()).await;
-    if let Some(res) = sniffed {
-        if let Some(domain) = &res.domain
-            && policy.should_override(domain)
-            && let Ok(new_dst) = kerlico_core::Destination::new(domain, target.port())
-        {
-            orig = orig.with_target(new_dst);
-        }
-        orig = orig.with_sniffed(res.domain, Some(res.protocol.as_str().to_owned()));
-    }
-    (restored, orig)
-}
-
-/// 根据节点嗅探策略对首包 UDP 数据报（QUIC Initial）执行探测，并构造 `OriginalTarget`。
-pub fn sniff_and_prepare_udp(
-    packet: &[u8],
-    target: &kerlico_core::Destination,
-    policy: &SniffPolicy,
-) -> kerlico_core::OriginalTarget {
-    let mut orig = kerlico_core::OriginalTarget::from_destination(target.clone());
-    if !policy.should_sniff_target(target) {
-        return orig;
-    }
-    if let Some(res) = sniff_bytes(packet, true, policy, target.port()) {
-        if let Some(domain) = &res.domain
-            && policy.should_override(domain)
-            && let Ok(new_dst) = kerlico_core::Destination::new(domain, target.port())
-        {
-            orig = orig.with_target(new_dst);
-        }
-        orig = orig.with_sniffed(res.domain, Some(res.protocol.as_str().to_owned()));
-    }
-    orig
 }
 
 #[cfg(test)]

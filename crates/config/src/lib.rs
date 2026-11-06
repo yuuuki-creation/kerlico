@@ -756,6 +756,11 @@ pub struct GlobalSnifferSpec {
     pub sniff: BTreeMap<String, SniffProtoPortSpec>,
     #[serde(default, alias = "sniff-ports")]
     pub sniff_ports: BTreeMap<String, Vec<Value>>,
+    /// Mihomo 旧写法：`sniffing` 协议列表配 `port-whitelist`。
+    #[serde(default)]
+    pub sniffing: Vec<String>,
+    #[serde(default, alias = "port-whitelist")]
+    pub port_whitelist: Vec<Value>,
     pub timeout: Option<DurationSpec>,
 }
 
@@ -777,8 +782,6 @@ pub struct InboundSniffingSpec {
     pub domains_excluded: Vec<String>,
     #[serde(default, alias = "force-domain")]
     pub force_domain: Vec<String>,
-    #[serde(alias = "parse-pure-ip")]
-    pub parse_pure_ip: Option<bool>,
     pub timeout: Option<DurationSpec>,
 }
 
@@ -821,52 +824,117 @@ fn parse_port_range_entry(val: &Value) -> Result<(u16, u16)> {
     }
 }
 
+/// 规范协议名；与 `kerlico_net::sniff::SniffProtocol::parse` 的别名一致。
+fn sniffer_name(raw: &str) -> Result<String> {
+    let name = raw.trim().to_ascii_lowercase();
+    Ok(match name.as_str() {
+        "tls" | "https" | "ssl" => "tls",
+        "http" => "http",
+        "quic" => "quic",
+        "bittorrent" | "bt" => "bittorrent",
+        "dtls" => "dtls",
+        "stun" => "stun",
+        "ssh" => "ssh",
+        "rdp" => "rdp",
+        // Xray `destOverride` 的 fakedns 由 Fake-IP 反查覆盖，不是字节嗅探器。
+        "fakedns" | "fakedns+others" => return Ok(String::new()),
+        _ => return Err(Error::Config(format!("不支持的嗅探协议：{raw}"))),
+    }
+    .to_owned())
+}
+
+/// Mihomo 嗅探器未写端口时的默认端口。
+fn mihomo_default_ports(protocol: &str) -> Vec<(u16, u16)> {
+    match protocol {
+        "tls" | "quic" => vec![(443, 443)],
+        "http" => vec![(80, 80)],
+        _ => Vec::new(),
+    }
+}
+
+fn sniff_cidrs(items: &[String], field: &str) -> Result<Vec<kerlico_core::Cidr>> {
+    let mut cidrs = Vec::new();
+    for item in items {
+        let text = item.trim();
+        if text.starts_with("geoip:") || text.starts_with("rule-set:") {
+            kerlico_core::log::warning(format!("sniffer.{field} 暂不支持 {text}，已忽略"));
+            continue;
+        }
+        cidrs.push(
+            kerlico_core::Cidr::parse(text)
+                .map_err(|_| Error::Config(format!("sniffer.{field} 网段不合法：{text}")))?,
+        );
+    }
+    Ok(cidrs)
+}
+
 impl GlobalSnifferSpec {
+    /// 按 Mihomo `sniffer:` 默认值：`enable` false，`override-destination`、`parse-pure-ip`、
+    /// `force-dns-mapping` 均为 true；超时沿用 Mihomo 的 1 秒首包窗口。
     pub fn to_policy(&self) -> Result<kerlico_core::SniffPolicy> {
+        let override_destination = self.override_destination.unwrap_or(true);
         let mut policy = kerlico_core::SniffPolicy {
-            enabled: self.enable.unwrap_or(true),
-            override_destination: self.override_destination.unwrap_or(false),
-            parse_pure_ip: self.parse_pure_ip.unwrap_or(false),
-            domains_excluded: self.skip_domain.clone(),
+            enabled: self.enable.unwrap_or(false),
+            override_destination,
+            targets: kerlico_core::SniffTargets::Mihomo {
+                parse_pure_ip: self.parse_pure_ip.unwrap_or(true),
+                force_dns_mapping: self.force_dns_mapping.unwrap_or(true),
+            },
+            timeout: std::time::Duration::from_secs(1),
+            skip_domain: self.skip_domain.clone(),
             force_domain: self.force_domain.clone(),
+            skip_src_address: sniff_cidrs(&self.skip_src_address, "skip-src-address")?,
+            skip_dst_address: sniff_cidrs(&self.skip_dst_address, "skip-dst-address")?,
             ..Default::default()
         };
         if let Some(timeout) = &self.timeout {
             policy.timeout = timeout.to_duration()?;
         }
-        for (proto, spec) in &self.sniff {
-            let key = proto.trim().to_ascii_lowercase();
-            if key.is_empty() {
-                return Err(Error::Config("嗅探协议名不能为空".into()));
+        let mut push = |raw: &str, items: &[Value], over: Option<bool>| -> Result<()> {
+            let protocol = sniffer_name(raw)?;
+            if protocol.is_empty() || policy.sniffers.iter().any(|r| r.protocol == protocol) {
+                return Ok(());
             }
-            if !policy.protocols.contains(&key) {
-                policy.protocols.push(key.clone());
+            let mut ports = items
+                .iter()
+                .map(parse_port_range_entry)
+                .collect::<Result<Vec<_>>>()?;
+            if ports.is_empty() {
+                ports = mihomo_default_ports(&protocol);
             }
-            if spec.override_destination == Some(true) {
-                policy.override_destination = true;
+            policy.sniffers.push(kerlico_core::SnifferRule {
+                protocol,
+                ports,
+                override_destination: over,
+            });
+            Ok(())
+        };
+        if !self.sniff.is_empty() {
+            for (proto, spec) in &self.sniff {
+                push(proto, &spec.ports, spec.override_destination)?;
             }
-            let mut ranges = Vec::new();
-            for item in &spec.ports {
-                ranges.push(parse_port_range_entry(item)?);
+        } else {
+            for proto in &self.sniffing {
+                let ports = self.sniff_ports.get(proto).unwrap_or(&self.port_whitelist);
+                push(proto, ports, None)?;
             }
-            if !ranges.is_empty() {
-                policy.sniff_ports.insert(key, ranges);
+            for (proto, items) in &self.sniff_ports {
+                push(proto, items, None)?;
             }
         }
-        for (proto, items) in &self.sniff_ports {
-            let key = proto.trim().to_ascii_lowercase();
-            let mut ranges = Vec::new();
-            for item in items {
-                ranges.push(parse_port_range_entry(item)?);
-            }
-            if !ranges.is_empty() {
-                policy.sniff_ports.insert(key, ranges);
-            }
-        }
+        // Mihomo 按 TLS、HTTP、QUIC 固定顺序尝试，与 map 书写顺序无关。
+        let rank = |p: &str| match p {
+            "tls" => 0,
+            "http" => 1,
+            "quic" => 2,
+            _ => 3,
+        };
+        policy.sniffers.sort_by_key(|rule| rank(&rule.protocol));
         Ok(policy)
     }
 }
 
+/// 入站级 `sniff`/`sniffing`（sing-box、Xray 写法）：嗅探全部连接，覆盖目标需显式开启。
 fn apply_inbound_sniffing(
     policy: &mut kerlico_core::SniffPolicy,
     sniff: Option<bool>,
@@ -874,6 +942,17 @@ fn apply_inbound_sniffing(
     timeout: Option<&DurationSpec>,
     sniffing: Option<&InboundSniffingSpec>,
 ) -> Result<()> {
+    if sniff.is_none() && sniffing.is_none() && override_dest.is_none() && timeout.is_none() {
+        return Ok(());
+    }
+    let inherited = policy.enabled;
+    if sniff.is_some() || sniffing.is_some() {
+        policy.targets = kerlico_core::SniffTargets::All;
+        policy.override_destination = false;
+        if !inherited {
+            policy.sniffers.clear();
+        }
+    }
     if let Some(en) = sniff {
         policy.enabled = en;
     }
@@ -886,11 +965,17 @@ fn apply_inbound_sniffing(
     if let Some(sn) = sniffing {
         policy.enabled = sn.enabled.unwrap_or(true);
         if !sn.dest_override.is_empty() {
-            policy.protocols = sn
-                .dest_override
-                .iter()
-                .map(|p| p.trim().to_ascii_lowercase())
-                .collect();
+            policy.sniffers.clear();
+            for raw in &sn.dest_override {
+                let protocol = sniffer_name(raw)?;
+                if !protocol.is_empty() {
+                    policy.sniffers.push(kerlico_core::SnifferRule {
+                        protocol,
+                        ports: Vec::new(),
+                        override_destination: None,
+                    });
+                }
+            }
             if override_dest.is_none() {
                 policy.override_destination = true;
             }
@@ -899,13 +984,10 @@ fn apply_inbound_sniffing(
             policy.route_only = ro;
         }
         if !sn.domains_excluded.is_empty() {
-            policy.domains_excluded = sn.domains_excluded.clone();
+            policy.skip_domain = sn.domains_excluded.clone();
         }
         if !sn.force_domain.is_empty() {
             policy.force_domain = sn.force_domain.clone();
-        }
-        if let Some(pp) = sn.parse_pure_ip {
-            policy.parse_pure_ip = pp;
         }
         if let Some(tm) = &sn.timeout {
             policy.timeout = tm.to_duration()?;
@@ -1963,7 +2045,6 @@ impl Registry {
         if routes.users().any(|id| !accounts.contains_key(id)) {
             return Err(Error::Config("路由规则引用的管理账户不存在".into()));
         }
-        let route_needs_sniff = routes.has_sniff_rules();
         let mut tags = BTreeSet::new();
         let mut listeners = BTreeSet::new();
         let mut bindings = Vec::new();
@@ -2020,10 +2101,6 @@ impl Registry {
                 spec.sniff_timeout.as_ref(),
                 spec.sniffing.as_ref(),
             )?;
-            if route_needs_sniff && !sniff_policy.enabled {
-                sniff_policy.enabled = true;
-                sniff_policy.route_only = true;
-            }
             bindings.push(IngressPlan {
                 issuer: CredentialIssuer::new(node, config.epoch, Vec::new())?,
                 outbound,
@@ -2050,9 +2127,6 @@ impl Registry {
                 spec.sniff_timeout.as_ref(),
                 spec.sniffing.as_ref(),
             )?;
-            if route_needs_sniff && !sniff_policy.enabled {
-                sniff_policy.enabled = true;
-                sniff_policy.route_only = true;
             }
             let node = NodeId::parse(&spec.tag)?;
             if !tags.insert(node.clone()) {

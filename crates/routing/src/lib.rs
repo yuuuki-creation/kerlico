@@ -1352,6 +1352,11 @@ impl RouteTable {
         self.sets.get(tag)
     }
 
+    /// 是否配置了任何规则；无规则时流量只走节点绑定出站。
+    pub fn has_rules(&self) -> bool {
+        !self.rules.is_empty()
+    }
+
     pub fn has_sniff_rules(&self) -> bool {
         self.rules
             .iter()

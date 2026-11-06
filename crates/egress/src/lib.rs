@@ -28,6 +28,7 @@ mod meter;
 mod probe;
 pub mod process;
 mod resource;
+mod sniff;
 mod telemetry;
 pub use group::{ControlPlane, DelaySample, ProxyRuntimeInfo, resident_memory_bytes};
 pub use history::{
@@ -304,7 +305,7 @@ impl kerlico_dns::DnsDialer for DnsUpstreamDialer {
 }
 
 /// 路由规则所需的域名解析结果；`mode` 决定结果对哪些规则可见。
-struct RuleIps {
+pub(crate) struct RuleIps {
     ips: Vec<IpAddr>,
     mode: kerlico_routing::Resolution,
 }
@@ -349,7 +350,7 @@ struct Binding {
     mode: FamilyMode,
 }
 
-struct Dispatcher {
+pub(crate) struct Dispatcher {
     services: BTreeMap<OutId, RunningService>,
     service_order: Vec<OutId>,
     bindings: BTreeMap<NodeId, Binding>,
@@ -362,6 +363,8 @@ struct Dispatcher {
     closed: AtomicBool,
     shutdown: tokio::sync::Mutex<Option<RuntimeDrain>>,
     _device: DeviceLease,
+    /// 惰性嗅探流在建立后仍需调度器；弱引用避免自持有。
+    me: std::sync::Weak<Dispatcher>,
 }
 
 struct RuntimeDrain {
@@ -548,7 +551,9 @@ impl EgressRuntime {
             resolver.clone(),
             telemetry.clone(),
         );
-        let dispatcher = Arc::new(Dispatcher {
+        let health = ServiceContext::new(OutId::parse("health-check")?);
+        let dispatcher = Arc::new_cyclic(|me| Dispatcher {
+            me: me.clone(),
             services,
             service_order,
             bindings: routes,
@@ -556,7 +561,7 @@ impl EgressRuntime {
             resolver,
             telemetry,
             control_plane,
-            health: ServiceContext::new(OutId::parse("health-check")?),
+            health,
             closed: AtomicBool::new(false),
             shutdown: tokio::sync::Mutex::new(None),
             _device: device,
@@ -814,7 +819,7 @@ async fn shutdown_services<'a>(
 }
 
 impl Dispatcher {
-    fn enrich_original(&self, mut original: OriginalTarget) -> OriginalTarget {
+    pub(crate) fn enrich_original(&self, mut original: OriginalTarget) -> OriginalTarget {
         if let Address::Ip(ip) = original.target().address().clone() {
             if let Some(domain) = self.resolver.lookup_fake_ip(ip) {
                 if let Ok(dst) = Destination::new(&domain, original.target().port()) {
@@ -829,7 +834,7 @@ impl Dispatcher {
         original
     }
 
-    fn evaluate_route(
+    pub(crate) fn evaluate_route(
         &self,
         identity: &SessionIdentity,
         request: Option<(&OriginalTarget, Network)>,
@@ -933,6 +938,9 @@ impl Dispatcher {
             || identity.node_cancel().is_cancelled()
         {
             return Err(Error::Cancelled);
+        }
+        if !identity.source_allowed() {
+            return Err(Error::Rejected);
         }
         let binding = self
             .bindings
@@ -1054,13 +1062,12 @@ impl Dispatcher {
         }
         admitted
     }
-    fn tcp<'a>(
+    pub(crate) fn tcp<'a>(
         &'a self,
         identity: &'a SessionIdentity,
         original: OriginalTarget,
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, TcpFlow>> {
-        let original = self.enrich_original(original);
         let request = Some((&original, Network::Tcp));
         if self.routes.has_resolving_rules()
             && let Some(at) = self
@@ -1206,13 +1213,12 @@ impl Dispatcher {
             move |outcome| completion.conclude(outcome),
         ))
     }
-    fn udp<'a>(
+    pub(crate) fn udp<'a>(
         &'a self,
         identity: &'a SessionIdentity,
         original: OriginalTarget,
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, FixedUdpFlow>> {
-        let original = self.enrich_original(original);
         let request = Some((&original, Network::Udp));
         if self.routes.has_resolving_rules()
             && let Some(at) = self
@@ -1336,15 +1342,22 @@ impl Dispatcher {
             move |outcome| completion.conclude(outcome),
         ))
     }
-    fn association<'a>(
+    /// `first` 是关联的首个目标，决定整条关联的出站；DNS 劫持目标仍走节点绑定出站。
+    pub(crate) fn association<'a>(
         &'a self,
         identity: &'a SessionIdentity,
+        first: Option<OriginalTarget>,
         context: &'a ConnectContext,
     ) -> Result<FlowOpen<'a, UdpAssociation>> {
+        let first = first.filter(|original| {
+            let (decision, selected, _) =
+                self.evaluate_route(identity, Some((original, Network::Udp)), &RuleIps::NONE);
+            !decision.hijack_dns && !self.selects_engine_dns(selected.as_ref())
+        });
         let (service, mode, ledger, _) = self.admit(
             identity,
             context,
-            None,
+            first.as_ref().map(|original| (original, Network::Udp)),
             |service| {
                 service
                     .association
@@ -1411,9 +1424,13 @@ impl Dispatcher {
     }
 }
 impl SessionDispatcher for Dispatcher {
+    /// 关联按首个目标路由；规则模式下有规则时出站要到首包才确定，先接受关联。
     fn supports_udp_association(&self, identity: &SessionIdentity) -> bool {
-        self.route(identity, None, &RuleIps::NONE)
-            .is_ok_and(|(service, _, _, _)| service.association)
+        let routed = self.routes.has_rules() && self.control_plane.mode() == RunMode::Rule;
+        (routed && identity.source_allowed() && !self.closed.load(Ordering::Acquire))
+            || self
+                .route(identity, None, &RuleIps::NONE)
+                .is_ok_and(|(service, _, _, _)| service.association)
     }
     fn connect_tcp<'a>(
         &'a self,
@@ -1421,7 +1438,13 @@ impl SessionDispatcher for Dispatcher {
         target: OriginalTarget,
         context: &'a ConnectContext,
     ) -> FlowOpen<'a, TcpFlow> {
-        FlowOpen::deferred(move || self.tcp(identity, target, context))
+        FlowOpen::deferred(move || {
+            let original = self.enrich_original(target);
+            match sniff::SniffPlan::decide(self, identity, &original, Network::Tcp) {
+                Some(plan) => self.sniffing_tcp(identity, original, plan, context),
+                None => self.tcp(identity, original, context),
+            }
+        })
     }
     fn connect_udp<'a>(
         &'a self,
@@ -1429,14 +1452,116 @@ impl SessionDispatcher for Dispatcher {
         target: OriginalTarget,
         context: &'a ConnectContext,
     ) -> FlowOpen<'a, FixedUdpFlow> {
-        FlowOpen::deferred(move || self.udp(identity, target, context))
+        FlowOpen::deferred(move || {
+            let original = self.enrich_original(target);
+            match sniff::SniffPlan::decide(self, identity, &original, Network::Udp) {
+                Some(plan) => self.sniffing_udp(identity, original, plan, context),
+                None => self.udp(identity, original, context),
+            }
+        })
     }
     fn associate_udp<'a>(
         &'a self,
         identity: &'a SessionIdentity,
         context: &'a ConnectContext,
     ) -> FlowOpen<'a, UdpAssociation> {
-        FlowOpen::deferred(move || self.association(identity, context))
+        FlowOpen::deferred(move || self.lazy_association(identity, context))
+    }
+}
+
+/// 共享嗅探阶段的入口：推迟路由到首段数据嗅探之后。
+impl Dispatcher {
+    fn owned(&self) -> Result<Arc<Dispatcher>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        self.me.upgrade().ok_or(Error::Cancelled)
+    }
+    fn sniffing_tcp<'a>(
+        &'a self,
+        identity: &'a SessionIdentity,
+        original: OriginalTarget,
+        plan: sniff::SniffPlan,
+        context: &'a ConnectContext,
+    ) -> Result<FlowOpen<'a, TcpFlow>> {
+        let me = self.owned()?;
+        let owned_identity = identity.clone();
+        let later = sniff::later_context(identity, context);
+        let slot = sniff::CompletionSlot::default();
+        let opener_plan = plan.clone();
+        let open: sniff::TcpOpener = Box::new(move |result| {
+            Box::pin(async move {
+                let original = opener_plan.apply(owned_identity.sniff_policy(), original, result);
+                me.tcp(&owned_identity, original, &later)?.await
+            })
+        });
+        let stream = sniff::SniffingStream::new(&plan, open, slot.clone());
+        Ok(FlowOpen::tcp(
+            Box::pin(async move {
+                Ok(OpenedTcp {
+                    stream: Box::new(stream),
+                    info: TcpConnectInfo::unknown(),
+                })
+            }),
+            move |outcome| sniff::finish_slot(&slot, outcome),
+        ))
+    }
+    fn sniffing_udp<'a>(
+        &'a self,
+        identity: &'a SessionIdentity,
+        original: OriginalTarget,
+        plan: sniff::SniffPlan,
+        context: &'a ConnectContext,
+    ) -> Result<FlowOpen<'a, FixedUdpFlow>> {
+        let slot = sniff::CompletionSlot::default();
+        let (sender, receiver) = sniff::LazyFixedSender::new(
+            self.owned()?,
+            identity.clone(),
+            sniff::later_context(identity, context),
+            original,
+            plan,
+            slot.clone(),
+        );
+        Ok(FlowOpen::fixed_udp(
+            Box::pin(async move {
+                Ok(kerlico_core::DatagramChannel {
+                    sender: Box::new(sender),
+                    receiver: Box::new(receiver),
+                })
+            }),
+            move |outcome| sniff::finish_slot(&slot, outcome),
+        ))
+    }
+    fn lazy_association<'a>(
+        &'a self,
+        identity: &'a SessionIdentity,
+        context: &'a ConnectContext,
+    ) -> Result<FlowOpen<'a, UdpAssociation>> {
+        if self.closed.load(Ordering::Acquire)
+            || !identity.is_accepting()
+            || identity.cancel().is_cancelled()
+        {
+            return Err(Error::Cancelled);
+        }
+        if !identity.source_allowed() {
+            return Err(Error::Rejected);
+        }
+        let slot = sniff::CompletionSlot::default();
+        let (sender, receiver) = sniff::LazyAssociationSender::new(
+            self.owned()?,
+            identity.clone(),
+            sniff::later_context(identity, context),
+            slot.clone(),
+        );
+        Ok(FlowOpen::association(
+            Box::pin(async move {
+                Ok(kerlico_core::DatagramAssociation {
+                    sender: Box::new(sender),
+                    receiver: Box::new(receiver),
+                })
+            }),
+            move |outcome| sniff::finish_slot(&slot, outcome),
+        ))
     }
 }
 
@@ -1755,7 +1880,9 @@ pub mod testing {
         let issuer = input.issuer();
         issuer.activate(NEXT_RUN.fetch_add(1, Ordering::AcqRel))?;
         let telemetry = Telemetry::new(4096);
-        let dispatcher = Arc::new(Dispatcher {
+        let health = ServiceContext::new(OutId::parse("health-check")?);
+        let dispatcher = Arc::new_cyclic(|me| Dispatcher {
+            me: me.clone(),
             services: BTreeMap::from([(id.clone(), service)]),
             service_order: vec![id.clone()],
             bindings: BTreeMap::from([(issuer.node().clone(), Binding { outbound: id, mode })]),
@@ -1773,7 +1900,7 @@ pub mod testing {
                 resolver.clone(),
                 telemetry.clone(),
             ),
-            health: ServiceContext::new(OutId::parse("health-check")?),
+            health,
             closed: AtomicBool::new(false),
             shutdown: tokio::sync::Mutex::new(None),
             _device: native_device(),
