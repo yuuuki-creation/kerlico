@@ -21,6 +21,7 @@ use tokio::time::{Instant, timeout_at};
 mod group;
 mod history;
 mod meter;
+mod probe;
 pub mod process;
 mod telemetry;
 pub use group::{
@@ -29,6 +30,9 @@ pub use group::{
 pub use history::{
     BandwidthSample, HistoryQuery, HistoryReader, HistoryScope, HistoryWriter, OnlineSource,
     StoredFlow, StoredUsage,
+};
+pub use probe::{
+    DEFAULT_TEST_URL, ExpectedStatus, ProbeError, ProbeResult, ProbeSpec, ProbeTarget, Prober,
 };
 pub use telemetry::{
     DatagramTargetRecord, EventRecord, FlowEnd, FlowId, FlowKind, FlowRecord, FlowStage, Telemetry,
@@ -126,6 +130,8 @@ struct Dispatcher {
     resolver: Arc<dyn Resolver>,
     telemetry: Telemetry,
     control_plane: ControlPlane,
+    /// 后台健康检查任务的所有者，随运行时关闭取消并等待退出。
+    health: ServiceContext,
     closed: AtomicBool,
     shutdown: tokio::sync::Mutex<Option<RuntimeDrain>>,
     _device: DeviceLease,
@@ -160,6 +166,7 @@ pub struct EgressRuntime {
 impl Drop for EgressRuntime {
     fn drop(&mut self) {
         self.dispatcher.closed.store(true, Ordering::Release);
+        self.dispatcher.health.retire(Instant::now());
         for service in self.dispatcher.services.values() {
             service.host.retire(Instant::now());
         }
@@ -271,6 +278,8 @@ impl EgressRuntime {
                 )
             })
             .collect();
+        let (health_jobs, rejected_jobs) =
+            probe::health_jobs(&compiled_groups, &compiled_providers);
         let control_plane = ControlPlane::new(
             static_meta,
             compiled_groups,
@@ -289,10 +298,16 @@ impl EgressRuntime {
             resolver,
             telemetry: Telemetry::new(max_flows),
             control_plane,
+            health: ServiceContext::new(OutId::parse("health-check")?),
             closed: AtomicBool::new(false),
             shutdown: tokio::sync::Mutex::new(None),
             _device: device,
         });
+        for reason in rejected_jobs {
+            dispatcher
+                .control_plane
+                .push_log("warning", format!("健康检查未启用：{reason}"));
+        }
         let mut ingresses = BTreeMap::new();
         for binding in bindings {
             let result = Self::bind(&dispatcher, binding, run);
@@ -312,6 +327,15 @@ impl EgressRuntime {
                     .await;
                     return Err(startup(primary, cleanup));
                 }
+            }
+        }
+        for job in health_jobs {
+            let task =
+                probe::run_health_job(Arc::downgrade(&dispatcher), job, dispatcher.health.cancel());
+            if let Err(error) = dispatcher.health.spawn(task) {
+                dispatcher
+                    .control_plane
+                    .push_log("warning", format!("健康检查任务启动失败：{error}"));
             }
         }
         Ok(Self {
@@ -360,6 +384,9 @@ impl EgressRuntime {
     pub fn control_plane(&self) -> ControlPlane {
         self.dispatcher.control_plane.clone()
     }
+    pub fn prober(&self) -> Prober {
+        Prober(Arc::downgrade(&self.dispatcher))
+    }
     /// 返回独立回收收据，供消费 Engine 或丢弃运行实例后继续确认真实任务释放。
     pub fn service_retirements(&self) -> Vec<(OutId, ServiceRetirement)> {
         self.dispatcher
@@ -388,6 +415,7 @@ impl EgressRuntime {
                 .collect(),
         });
         self.dispatcher.closed.store(true, Ordering::Release);
+        self.dispatcher.health.retire(deadline);
         for (index, id) in self.dispatcher.service_order.iter().rev().enumerate() {
             let service = self.dispatcher.services.get(id).expect("命名服务已装配");
             if deadline < progress.deadline && Instant::now() >= deadline {
@@ -425,7 +453,9 @@ impl EgressRuntime {
             };
             progress.services[index].tasks = report;
         }
-        progress.report()
+        let mut report = progress.report();
+        report.merge(&self.dispatcher.health.shutdown(progress.deadline).await);
+        report
     }
 }
 fn startup(primary: Error, cleanup: ShutdownReport) -> Error {
@@ -716,30 +746,9 @@ impl Dispatcher {
                                     resolve_strategy,
                                 )
                                 .await?;
-                                let mut last = Error::InvalidAddress;
-                                for (index, target) in candidates.iter().enumerate() {
-                                    let remaining = scoped.remaining();
-                                    if remaining.is_zero() {
-                                        return Err(Error::Timeout);
-                                    }
-                                    let budget = if index + 1 < candidates.len() {
-                                        remaining.min(Duration::from_secs(1))
-                                    } else {
-                                        remaining
-                                    };
-                                    let attempt = scoped.with_timeout(budget);
-                                    match attempt
-                                        .run(service.backend.connect_tcp(target, &attempt))
-                                        .await
-                                    {
-                                        Ok(stream) => return Ok((stream, Some(target.clone()))),
-                                        Err(error @ (Error::Io(_) | Error::Timeout)) => {
-                                            last = error
-                                        }
-                                        Err(error) => return Err(error),
-                                    }
-                                }
-                                Err(last)
+                                connect_candidates(service.backend.as_ref(), &candidates, &scoped)
+                                    .await
+                                    .map(|(stream, target)| (stream, Some(target)))
                             })
                             .await
                     }
@@ -1075,6 +1084,32 @@ impl Drop for PendingLookup<'_> {
         }
     }
 }
+/// 依次尝试已解析的候选地址；非末位候选最多占用 1 秒，仅 I/O 与超时错误换下一个。
+async fn connect_candidates(
+    backend: &dyn Outbound,
+    candidates: &[Destination],
+    scoped: &ConnectContext,
+) -> Result<(OpenedTcp, Destination)> {
+    let mut last = Error::InvalidAddress;
+    for (index, target) in candidates.iter().enumerate() {
+        let remaining = scoped.remaining();
+        if remaining.is_zero() {
+            return Err(Error::Timeout);
+        }
+        let budget = if index + 1 < candidates.len() {
+            remaining.min(Duration::from_secs(1))
+        } else {
+            remaining
+        };
+        let attempt = scoped.with_timeout(budget);
+        match attempt.run(backend.connect_tcp(target, &attempt)).await {
+            Ok(stream) => return Ok((stream, target.clone())),
+            Err(error @ (Error::Io(_) | Error::Timeout)) => last = error,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last)
+}
 async fn recorded_candidates(
     resolver: &dyn Resolver,
     telemetry: &Telemetry,
@@ -1273,6 +1308,7 @@ pub mod testing {
             resolver,
             telemetry: telemetry.clone(),
             control_plane: ControlPlane::default(),
+            health: ServiceContext::new(OutId::parse("health-check")?),
             closed: AtomicBool::new(false),
             shutdown: tokio::sync::Mutex::new(None),
             _device: native_device(),

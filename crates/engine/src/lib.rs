@@ -431,6 +431,9 @@ impl Engine {
     pub fn control_plane(&self) -> kerlico_egress::ControlPlane {
         self.egress.control_plane()
     }
+    pub fn prober(&self) -> kerlico_egress::Prober {
+        self.egress.prober()
+    }
     /// 历史存储独立于命名出站；超时后仅收据完成才证明原生写者真实释放。
     pub fn history_retirement(&self) -> Option<ServiceRetirement> {
         self.history_owner.as_ref().map(HistoryOwner::retirement)

@@ -35,9 +35,9 @@
 | `/rules`、`/routing/rules` | `GET` / `POST` / `DELETE` | 查询当前路由规则摘要，动态追加或删除路由规则 |
 | `/routing/test` | `POST` | 对给定域名、IP、端口与协议模拟路由匹配并返回选中出站 |
 | `/connections`、`/connections/<id>` | `GET` / `DELETE` | 列出活跃连接与累计上下行字节，关闭全部或指定连接 |
-| `/proxies`、`/proxies/<name>`、`/proxies/<name>/delay` | `GET` / `PUT` | 查询全部出站与策略组状态、切换 `Select` 策略组选中项、测量或记录出站延迟历史 |
-| `/group`、`/group/<name>`、`/group/<name>/delay` | `GET` | 查询策略组列表、单组详情或执行组内节点并发测速 |
-| `/providers/proxies`、`/providers/proxies/<name>`、`/providers/proxies/<name>/healthcheck` | `GET` / `PUT` | 查询代理提供者列表与节点、触发订阅刷新或整组健康检查 |
+| `/proxies`、`/proxies/<name>`、`/proxies/<name>/delay?url=&timeout=&expected=` | `GET` / `PUT` | 查询全部出站与策略组状态、切换 `Select` 策略组选中项、经该出站实测延迟（见下文“延迟探测”） |
+| `/group`、`/group/<name>`、`/group/<name>/delay?url=&timeout=&expected=` | `GET` | 查询策略组列表、单组详情，或并发实测组内全部候选，返回成功项 `{"<name>": <ms>}`；全部失败时 504 |
+| `/providers/proxies`、`/providers/proxies/<name>`、`/providers/proxies/<name>/healthcheck`、`/providers/proxies/<name>/<proxy>/healthcheck` | `GET` / `PUT` | 查询代理提供者列表与节点、触发订阅刷新，按提供者的 `health-check` 设置实测整组（204）或单个节点（返回 `delay`） |
 | `/providers/rules`、`/providers/rules/<name>` | `GET` / `PUT` | 查询规则集提供者状态并触发刷新计数更新 |
 | `/observatory/status` | `GET` | 返回全部出站与策略组节点的观测存活状态与最新 RTT |
 | `/routing/balancers`、`/routing/balancers/<tag>` | `GET` / `PUT` | 查询路由均衡器状态或动态设置覆盖目标出站 |
@@ -45,6 +45,26 @@
 | `/ssm/users`（含单用户子路径）、`/ssm/stats` | `GET` / `POST` / `PUT` / `DELETE` | Shadowsocks Server Management (SSM) v1 用户管理与流量统计接口 |
 
 错误响应为 `{"error": "<稳定错误码>"}`，状态码 400、401、404 或 405。
+
+## 延迟探测
+
+语义对齐 Mihomo `URLTest`：经被测出站建立到测试 URL 的 TCP 连接（`https` 再做 TLS，校验内置公共根证书），发送 `HEAD <path> HTTP/1.1`，读到状态行即停止计时。延迟从拨号前算起，含连接、TLS 与首个响应行，最小 1 ms。`Remote` 出站把测试 URL 的主机名原样交给远端解析；`Local` 出站由调度器解析器解析后按候选地址依次尝试。被测名称是策略组时，先按组当前选择解析到具体出站再探测，结果记在组名下。
+
+查询参数：
+
+| 参数 | 含义 | 缺省 |
+| --- | --- | --- |
+| `url` | 百分号编码的 `http`/`https` 测试地址 | 策略组的 `url`；普通出站为 `https://cp.cloudflare.com/generate_204` |
+| `timeout` | 毫秒，须大于 0 | 策略组的 `timeout`；普通出站为 5000 |
+| `expected` | Mihomo `expected-status` 语法：`204`、`200/302`、`200-299,302`；空或 `*` 接受任意状态 | 策略组的 `expected-status`；普通出站接受任意状态 |
+
+响应：成功 200 `{"delay": <ms>}`；超时 504 `{"message": "Timeout"}`；连接失败、响应不合法或状态码不满足 `expected` 时 503；名称不存在 404；参数不合法 400。`/group/<name>/delay` 会先清除非 `select` 组的手动固定选择。
+
+每次探测都写入该名称的延迟历史（`/proxies` 的 `history`，最多 20 条）。成功时 `alive` 为 `true`；失败时 `alive` 立即为 `false`，历史追加一条 `delay: 0`。`url-test`、`fallback` 与 `load-balance` 选择时跳过 `alive` 为 `false` 的候选，`url-test` 和 `least-ping` 只比较非零延迟。
+
+## 后台健康检查
+
+运行时启动后为每个 `url-test`、`fallback`、`load-balance` 组，以及 `health-check.enable` 为真的代理提供者各建一个任务：启动时立即检查一轮，之后每 `interval` 秒并发探测全部成员（同时最多 10 个），超时与 `expected-status` 取组或提供者配置。`lazy` 为真（默认）时，若该组在上一周期内没有被路由使用，跳过本轮；提供者以包含其成员的任一策略组的使用时间为准。Xray `balancer` 不建任务。`url` 不合法的组不建任务，并在 `/logs` 记一条 `warning`。运行时关闭时任务随之取消并计入关闭报告。
 
 接口只读内存账本，不查询 SQLite，随进程退出停止。历史数据用 `kerlico history` 查询，见[统计历史](history.md)。
 

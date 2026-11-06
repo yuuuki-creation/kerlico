@@ -185,13 +185,17 @@ impl TcpConnector {
     /// [`StreamConnector`] 实现会使用传入的 [`ConnectContext::run`]。
     pub async fn connect(&self, server: &Destination) -> Result<BoxStream> {
         let tcp = Self::connect_raw_with_dialer(server, &self.dialer).await?;
+        self.handshake(tcp).await
+    }
+    /// 在已建立的字节流上完成客户端 TLS 握手；明文连接器原样返回。
+    pub async fn handshake(&self, stream: BoxStream) -> Result<BoxStream> {
         match &self.tls {
             Some((connector, name)) => {
-                let mut tls = connector.connect(name.clone(), tcp).await?;
+                let mut tls = connector.connect(name.clone(), stream).await?;
                 tls.get_mut().1.set_buffer_limit(Some(68 * 1024));
                 Ok(Box::new(ClientTls(tls)))
             }
-            None => Ok(tcp),
+            None => Ok(stream),
         }
     }
 }

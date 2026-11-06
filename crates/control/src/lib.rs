@@ -7,8 +7,11 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use kerlico_config::ControlSpec;
-use kerlico_core::{CancellationToken, Error, Result};
-use kerlico_egress::{ControlPlane, StoredFlow, Telemetry};
+use kerlico_core::{CancellationToken, Error, OutId, Result};
+use kerlico_egress::{
+    ControlPlane, DEFAULT_TEST_URL, ProbeError, ProbeResult, ProbeSpec, Prober, StoredFlow,
+    Telemetry,
+};
 use kerlico_engine::{Engine, FailedNodes, Stats};
 use serde_json::{Value, json};
 use std::{
@@ -60,6 +63,7 @@ struct Source {
     spec: ControlSpec,
     telemetry: Telemetry,
     control_plane: ControlPlane,
+    prober: Prober,
     stats: Arc<Stats>,
     nodes: BTreeMap<String, Arc<Stats>>,
     failed: FailedNodes,
@@ -73,6 +77,7 @@ impl Source {
             spec: spec.clone(),
             telemetry: engine.telemetry(),
             control_plane: engine.control_plane(),
+            prober: engine.prober(),
             stats: engine.stats(),
             nodes: engine.node_stats(),
             failed: engine.failed_nodes(),
@@ -269,6 +274,126 @@ fn query_str<'a>(query: &'a str, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value)
 }
 
+/// 百分号解码查询参数值；面板把测试 URL 整体编码后放进 `url=`。
+fn percent_decode(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(index + 1..index + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// 查询参数覆盖配置默认值：`url`、`timeout`（毫秒）、`expected`（Mihomo `expected-status` 语法）。
+fn probe_spec(query: &str, defaults: (String, u64, String)) -> Option<ProbeSpec> {
+    let (default_url, default_timeout, default_expected) = defaults;
+    let decoded = |name| query_str(query, name).map(percent_decode);
+    let url = decoded("url").unwrap_or(Some(default_url))?;
+    let expected = decoded("expected").unwrap_or(Some(default_expected))?;
+    let timeout = match query_str(query, "timeout") {
+        Some(raw) => raw.parse::<u64>().ok().filter(|ms| *ms > 0)?,
+        None => default_timeout,
+    };
+    ProbeSpec::new(&url, Duration::from_millis(timeout), &expected).ok()
+}
+
+fn proxy_test_defaults(source: &Source, id: &OutId) -> (String, u64, String) {
+    source
+        .control_plane
+        .group_test_defaults(id)
+        .unwrap_or_else(|| (DEFAULT_TEST_URL.to_owned(), 5000, String::new()))
+}
+
+fn bad_request() -> ApiReply {
+    ApiReply::Json(StatusCode::BAD_REQUEST, json!({"message": "Body invalid"}))
+}
+
+/// 与 Mihomo 一致：超时 504，其他失败 503，未知名称 404。
+fn delay_reply(result: ProbeResult) -> Option<ApiReply> {
+    match result {
+        Ok(delay) => Some(ApiReply::Json(StatusCode::OK, json!({ "delay": delay }))),
+        Err(ProbeError::UnknownOutbound) => None,
+        Err(ProbeError::Timeout) => Some(ApiReply::Json(
+            StatusCode::GATEWAY_TIMEOUT,
+            json!({"message": "Timeout"}),
+        )),
+        Err(_) => Some(ApiReply::Json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"message": "An error occurred in the delay test"}),
+        )),
+    }
+}
+
+async fn proxy_delay(source: &Source, name: &str, query: &str) -> Option<ApiReply> {
+    let id = OutId::parse(name).ok()?;
+    let Some(spec) = probe_spec(query, proxy_test_defaults(source, &id)) else {
+        return Some(bad_request());
+    };
+    delay_reply(source.prober.probe(&id, &spec).await)
+}
+
+async fn group_delay(source: &Source, name: &str, query: &str) -> Result<Option<ApiReply>> {
+    let Some(id) = OutId::parse(name).ok() else {
+        return Ok(None);
+    };
+    let Some(candidates) = source.control_plane.group_candidates(&id) else {
+        return Ok(None);
+    };
+    let Some(spec) = probe_spec(query, proxy_test_defaults(source, &id)) else {
+        return Ok(Some(bad_request()));
+    };
+    source.control_plane.clear_group_fixed(name)?;
+    let delays: serde_json::Map<String, Value> = source
+        .prober
+        .probe_all(&candidates, Arc::new(spec))
+        .await
+        .into_iter()
+        .filter_map(|(id, result)| Some((id.to_string(), json!(result.ok()?))))
+        .collect();
+    if delays.is_empty() {
+        return Ok(Some(ApiReply::Json(
+            StatusCode::GATEWAY_TIMEOUT,
+            json!({"message": "get delay: all proxies timeout"}),
+        )));
+    }
+    Ok(Some(ApiReply::Json(StatusCode::OK, Value::Object(delays))))
+}
+
+async fn provider_healthcheck(source: &Source, provider: &str) -> Option<ApiReply> {
+    let (members, url, timeout_ms, expected) =
+        source.control_plane.provider_health_check(provider)?;
+    let Ok(spec) = ProbeSpec::new(&url, Duration::from_millis(timeout_ms), &expected) else {
+        return Some(bad_request());
+    };
+    source.prober.probe_all(&members, Arc::new(spec)).await;
+    Some(ApiReply::Empty(StatusCode::NO_CONTENT))
+}
+
+async fn provider_member_healthcheck(
+    source: &Source,
+    provider: &str,
+    proxy: &str,
+    query: &str,
+) -> Option<ApiReply> {
+    source
+        .control_plane
+        .proxy_provider_member_json(provider, proxy)?;
+    let (_, url, timeout_ms, expected) = source.control_plane.provider_health_check(provider)?;
+    let id = OutId::parse(proxy).ok()?;
+    let Some(spec) = probe_spec(query, (url, timeout_ms, expected)) else {
+        return Some(bad_request());
+    };
+    delay_reply(source.prober.probe(&id, &spec).await)
+}
+
 enum ApiReply {
     Json(StatusCode, Value),
     Empty(StatusCode),
@@ -318,7 +443,7 @@ fn serve_ui_asset(spec: &ControlSpec, sub_path: &str) -> ApiReply {
     ApiReply::Static(StatusCode::OK, "text/html; charset=utf-8", default_html)
 }
 
-fn route(
+async fn route(
     source: &Source,
     method: &Method,
     path: &str,
@@ -514,13 +639,7 @@ fn route(
         ))),
         (&Method::GET, _, p) if p.starts_with("/proxies/") && p.ends_with("/delay") => {
             let name = &p["/proxies/".len()..p.len() - "/delay".len()];
-            match source.control_plane.probe_proxy_delay(name, 12) {
-                Some(delay) => Ok(Some(ApiReply::Json(
-                    StatusCode::OK,
-                    json!({ "delay": delay }),
-                ))),
-                None => Ok(None),
-            }
+            Ok(proxy_delay(source, name, query).await)
         }
         (&Method::GET, _, p) if p.starts_with("/proxies/") => {
             let name = &p["/proxies/".len()..];
@@ -549,10 +668,7 @@ fn route(
         ))),
         (&Method::GET, _, p) if p.starts_with("/group/") && p.ends_with("/delay") => {
             let name = &p["/group/".len()..p.len() - "/delay".len()];
-            Ok(source
-                .control_plane
-                .probe_group_delays(name, 12)
-                .map(|v| ApiReply::Json(StatusCode::OK, v)))
+            group_delay(source, name, query).await
         }
         (&Method::GET, _, p) if p.starts_with("/group/") => {
             let name = &p["/group/".len()..];
@@ -569,26 +685,9 @@ fn route(
             let rest = &p["/providers/proxies/".len()..];
             if let Some(prov_name) = rest.strip_suffix("/healthcheck") {
                 if let Some((prov, proxy)) = prov_name.split_once('/') {
-                    if source
-                        .control_plane
-                        .proxy_provider_member_json(prov, proxy)
-                        .is_some()
-                    {
-                        let delay = source
-                            .control_plane
-                            .probe_proxy_delay(proxy, 15)
-                            .unwrap_or(15);
-                        return Ok(Some(ApiReply::Json(
-                            StatusCode::OK,
-                            json!({ "delay": delay }),
-                        )));
-                    }
-                    return Ok(None);
+                    return Ok(provider_member_healthcheck(source, prov, proxy, query).await);
                 }
-                if source.control_plane.healthcheck_proxy_provider(prov_name) {
-                    return Ok(Some(ApiReply::Empty(StatusCode::NO_CONTENT)));
-                }
-                return Ok(None);
+                return Ok(provider_healthcheck(source, prov_name).await);
             }
             if let Some((prov, proxy)) = rest.split_once('/') {
                 return Ok(source
@@ -946,7 +1045,7 @@ async fn respond(shared: &Shared, request: Request<Incoming>) -> Response<Full<B
         (&Method::PUT, "/configs") | (&Method::POST, "/restart") => {
             Ok(Some(request_reload(shared, body_val.as_ref()).await))
         }
-        _ => route(source, &method, uri.path(), query, body_val.as_ref()),
+        _ => route(source, &method, uri.path(), query, body_val.as_ref()).await,
     };
     match reply {
         Ok(Some(ApiReply::Json(status, body))) => reply_json(status, body),
@@ -971,6 +1070,32 @@ mod tests {
         assert!(!authorized(Some("abc"), Some(b"abc")));
         assert!(authorized_with_query(Some("abc"), None, "token=abc"));
         assert!(!authorized_with_query(Some("abc"), None, "token=abd"));
+    }
+
+    #[test]
+    fn delay_query_overrides_defaults_and_decodes_the_url() {
+        assert_eq!(
+            percent_decode("https%3A%2F%2Fprobe.test%2Fgenerate_204").as_deref(),
+            Some("https://probe.test/generate_204")
+        );
+        assert_eq!(percent_decode("%zz"), None);
+        let defaults = || ("http://default.test/".to_owned(), 5000, "204".to_owned());
+        let spec = probe_spec(
+            "url=http%3A%2F%2Fprobe.test%3A8080%2Fx&timeout=1500&expected=200%2F302",
+            defaults(),
+        )
+        .unwrap();
+        assert_eq!(
+            spec.target.destination(),
+            &kerlico_core::Destination::new("probe.test", 8080).unwrap()
+        );
+        assert_eq!(spec.timeout, Duration::from_millis(1500));
+        assert!(spec.expected.matches(302) && !spec.expected.matches(204));
+        let fallback = probe_spec("", defaults()).unwrap();
+        assert!(fallback.expected.matches(204) && !fallback.expected.matches(200));
+        assert!(probe_spec("timeout=abc", defaults()).is_none());
+        assert!(probe_spec("timeout=0", defaults()).is_none());
+        assert!(probe_spec("expected=x", defaults()).is_none());
     }
 
     #[test]

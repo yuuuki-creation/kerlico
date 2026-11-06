@@ -357,6 +357,14 @@ impl ConnectContext {
         self.deadline
     }
 
+    /// 运行时自身发起的请求（如延迟探测）没有入站来源，资源作用域只绑定命名服务。
+    pub fn for_service(timeout: Duration, host: &ServiceContext) -> Self {
+        let mut next = Self::new(timeout);
+        next.resource = host.unsourced_resource_key();
+        next.service = host.status();
+        next
+    }
+
     /// 仅由运行装配边界设置可信资源作用域，不接收协议凭据。
     pub fn scoped(
         &self,

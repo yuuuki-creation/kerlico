@@ -485,3 +485,77 @@ async fn m4_clash_xray_ssm_endpoints_and_websocket_token_auth() {
     stop.cancel();
     serving.await.unwrap();
 }
+
+async fn delayed_204(delay: Duration) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 512];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => request.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                tokio::time::sleep(delay).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            });
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn delay_endpoints_measure_through_the_outbound() {
+    let port = delayed_204(Duration::from_millis(80)).await;
+    let mut config = forward_to(9);
+    config["proxy_groups"] = json!([{"name": "auto", "type": "url-test", "proxies": ["exit"],
+        "url": format!("http://127.0.0.1:{port}/generate_204"), "interval": 600}]);
+    let running = start(config).await;
+    let url = format!("http%3A%2F%2F127.0.0.1%3A{port}%2Fgenerate_204");
+
+    let (status, body) = get(
+        running.control,
+        &format!("/proxies/exit/delay?url={url}&timeout=2000&expected=204"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let delay = body["delay"].as_u64().unwrap();
+    assert!(delay >= 80, "实测 {delay} ms");
+
+    let (status, _) = get(
+        running.control,
+        &format!("/proxies/exit/delay?url={url}&timeout=2000&expected=200"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 503, "状态码不符应视为探测失败");
+    let (_, proxies) = get(running.control, "/proxies", None).await;
+    assert_eq!(proxies["proxies"]["exit"]["alive"], false);
+
+    let (status, group) = get(running.control, "/group/auto/delay?timeout=2000", None).await;
+    assert_eq!(status, 200, "{group}");
+    assert!(group["exit"].as_u64().unwrap() >= 80, "{group}");
+
+    let (status, _) = get(
+        running.control,
+        &format!("/proxies/missing/delay?url={url}&timeout=2000"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(
+        get(running.control, "/proxies/exit/delay?timeout=x", None)
+            .await
+            .0,
+        400
+    );
+    running.stop().await.unwrap();
+}

@@ -670,6 +670,13 @@ impl ServiceContext {
             remote_epoch: 1,
         }
     }
+    pub(crate) fn unsourced_resource_key(&self) -> ResourceKey {
+        ResourceKey {
+            instance: self.0.instance,
+            source: None,
+            remote_epoch: 1,
+        }
+    }
     pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> Result<()> {
         self.spawn_tracked(task).map(|_| ())
     }

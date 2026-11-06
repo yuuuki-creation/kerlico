@@ -46,6 +46,13 @@ struct GroupRuntimeEntry {
     selected: Option<OutId>,
     fixed: Option<OutId>,
     rr_counter: AtomicUsize,
+    last_touch_ms: AtomicU64,
+}
+
+/// 健康检查任务的归属，决定 `lazy` 以哪些策略组的最近使用时间为准。
+pub(crate) enum HealthOwner {
+    Group(OutId),
+    Provider,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -173,6 +180,7 @@ impl ControlPlane {
                     selected: initial,
                     fixed: restored,
                     rr_counter: AtomicUsize::new(0),
+                    last_touch_ms: AtomicU64::new(0),
                 },
             );
         }
@@ -215,12 +223,30 @@ impl ControlPlane {
     }
 
     /// 将可能指向策略组或负载均衡器的 `OutId` 解析为最终具体 `OutId`，同时返回所属顶层策略组。
+    ///
+    /// 经过的策略组记为最近使用，`lazy` 健康检查据此决定是否跳过本轮。
     pub fn resolve_outbound(
         &self,
         initial: &OutId,
         original: Option<&OriginalTarget>,
         source_addr: Option<std::net::SocketAddr>,
     ) -> Result<(OutId, Option<OutId>)> {
+        self.resolve(initial, original, source_addr, true)
+    }
+
+    /// 探测与路由测试使用，不计入最近使用。
+    pub(crate) fn resolve_untouched(&self, initial: &OutId) -> Result<OutId> {
+        self.resolve(initial, None, None, false).map(|(id, _)| id)
+    }
+
+    fn resolve(
+        &self,
+        initial: &OutId,
+        original: Option<&OriginalTarget>,
+        source_addr: Option<std::net::SocketAddr>,
+        touch: bool,
+    ) -> Result<(OutId, Option<OutId>)> {
+        let now = if touch { now_ms() } else { 0 };
         let groups = self.0.groups.read().unwrap_or_else(|e| e.into_inner());
         let proxies = self.0.proxies.read().unwrap_or_else(|e| e.into_inner());
         let mut current = initial.clone();
@@ -231,6 +257,9 @@ impl ControlPlane {
             };
             if top_group.is_none() {
                 top_group = Some(current.clone());
+            }
+            if touch {
+                entry.last_touch_ms.store(now, Ordering::Relaxed);
             }
             let next = Self::pick_group_member(entry, &proxies, original, source_addr)?;
             current = next;
@@ -291,10 +320,7 @@ impl ControlPlane {
                 };
                 let mut best: Option<(&OutId, u32)> = None;
                 for cand in &pool {
-                    let delay = proxies
-                        .get(*cand)
-                        .and_then(|p| p.history.back().map(|s| s.delay))
-                        .unwrap_or(u32::MAX);
+                    let delay = proxies.get(*cand).and_then(last_delay).unwrap_or(u32::MAX);
                     match best {
                         None => best = Some((*cand, delay)),
                         Some((_, best_delay)) if delay < best_delay => {
@@ -306,9 +332,7 @@ impl ControlPlane {
                 if let Some((best_id, best_delay)) = best {
                     if let Some(curr) = &entry.selected
                         && pool.contains(&curr)
-                        && let Some(curr_delay) = proxies
-                            .get(curr)
-                            .and_then(|p| p.history.back().map(|s| s.delay))
+                        && let Some(curr_delay) = proxies.get(curr).and_then(last_delay)
                         && curr_delay <= best_delay.saturating_add(entry.spec.tolerance_ms)
                     {
                         return Ok(curr.clone());
@@ -340,10 +364,7 @@ impl ControlPlane {
                         let best = pool
                             .iter()
                             .min_by_key(|cand| {
-                                proxies
-                                    .get(**cand)
-                                    .and_then(|p| p.history.back().map(|s| s.delay))
-                                    .unwrap_or(1000)
+                                proxies.get(**cand).and_then(last_delay).unwrap_or(1000)
                             })
                             .copied()
                             .unwrap_or(pool[0]);
@@ -417,11 +438,16 @@ impl ControlPlane {
                     });
                 }
                 None => {
+                    info.alive = false;
                     info.fail_count = info.fail_count.saturating_add(1);
                     info.last_error = error_reason;
-                    if info.fail_count >= 3 {
-                        info.alive = false;
+                    if info.history.len() >= MAX_DELAY_HISTORY {
+                        info.history.pop_front();
                     }
+                    info.history.push_back(DelaySample {
+                        time: iso,
+                        delay: 0,
+                    });
                 }
             }
         }
@@ -687,39 +713,60 @@ impl ControlPlane {
         self.proxy_by_name_json(name)
     }
 
-    pub fn probe_proxy_delay(&self, name: &str, default_delay_ms: u32) -> Option<u32> {
-        let id = OutId::parse(name).ok()?;
-        let exists = self
-            .0
+    pub(crate) fn has_proxy(&self, id: &OutId) -> bool {
+        self.0
             .proxies
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&id);
-        if !exists {
-            return None;
-        }
-        self.record_delay(&id, Some(default_delay_ms), None);
-        Some(default_delay_ms)
+            .contains_key(id)
     }
 
-    pub fn probe_group_delays(&self, group_name: &str, default_delay_ms: u32) -> Option<Value> {
-        let gid = OutId::parse(group_name).ok()?;
-        let candidates = {
-            let mut groups = self.0.groups.write().unwrap_or_else(|e| e.into_inner());
-            let entry = groups.get_mut(&gid)?;
-            if entry.spec.kind != ProxyGroupKind::Select {
-                entry.fixed = None;
-            }
-            entry.spec.candidates.clone()
-        };
-        let mut result = serde_json::Map::new();
-        for cand in &candidates {
-            self.record_delay(cand, Some(default_delay_ms), None);
-            result.insert(cand.to_string(), json!(default_delay_ms));
+    pub fn group_candidates(&self, id: &OutId) -> Option<Vec<OutId>> {
+        let groups = self.0.groups.read().unwrap_or_else(|e| e.into_inner());
+        groups.get(id).map(|g| g.spec.candidates.clone())
+    }
+
+    /// 策略组配置的测试 URL、超时毫秒与 `expected-status`。
+    pub fn group_test_defaults(&self, id: &OutId) -> Option<(String, u64, String)> {
+        let groups = self.0.groups.read().unwrap_or_else(|e| e.into_inner());
+        groups.get(id).map(|g| {
+            (
+                g.spec.url.clone(),
+                g.spec.timeout_ms,
+                g.spec.expected_status.clone(),
+            )
+        })
+    }
+
+    /// 提供者成员及其健康检查 URL、超时毫秒与 `expected-status`。
+    pub fn provider_health_check(&self, name: &str) -> Option<(Vec<OutId>, String, u64, String)> {
+        let providers = self.0.providers.read().unwrap_or_else(|e| e.into_inner());
+        providers.get(name).map(|p| {
+            (
+                p.proxies.clone(),
+                p.health_check_url.clone(),
+                p.health_check_timeout_ms,
+                p.health_check_expected_status.clone(),
+            )
+        })
+    }
+
+    /// 归属策略组，或包含任一成员的策略组，在 `window_ms` 内被路由使用过。
+    pub(crate) fn touched_within(
+        &self,
+        owner: &HealthOwner,
+        members: &[OutId],
+        window_ms: u64,
+    ) -> bool {
+        let since = now_ms().saturating_sub(window_ms);
+        let groups = self.0.groups.read().unwrap_or_else(|e| e.into_inner());
+        let recent = |g: &GroupRuntimeEntry| g.last_touch_ms.load(Ordering::Relaxed) >= since;
+        match owner {
+            HealthOwner::Group(id) => groups.get(id).is_some_and(recent),
+            HealthOwner::Provider => groups
+                .values()
+                .any(|g| recent(g) && g.spec.candidates.iter().any(|c| members.contains(c))),
         }
-        self.record_delay(&gid, Some(default_delay_ms), None);
-        self.persist_selections();
-        Some(Value::Object(result))
     }
 
     pub fn proxy_providers_json(&self) -> Value {
@@ -752,19 +799,6 @@ impl ControlPlane {
             .get("providers")?
             .get(name)
             .cloned()
-    }
-
-    pub fn healthcheck_proxy_provider(&self, name: &str) -> bool {
-        let providers = self.0.providers.read().unwrap_or_else(|e| e.into_inner());
-        let Some(prov) = providers.get(name) else {
-            return false;
-        };
-        let pids = prov.proxies.clone();
-        drop(providers);
-        for pid in pids {
-            self.record_delay(&pid, Some(15), None);
-        }
-        true
     }
 
     pub fn proxy_provider_member_json(
@@ -863,11 +897,7 @@ impl ControlPlane {
         let dec = routes.evaluate(&ctx);
         drop(routes);
         let resolved_out = match dec.outbound {
-            Some(ref o) => self
-                .resolve_outbound(o, None, None)
-                .ok()
-                .map(|(sel, _)| sel)
-                .or_else(|| Some(o.clone())),
+            Some(ref o) => self.resolve_untouched(o).ok().or_else(|| Some(o.clone())),
             None => None,
         };
         Ok(json!({
@@ -1005,6 +1035,11 @@ impl ControlPlane {
             users.insert(user_key.to_owned(), payload);
         }
     }
+}
+
+/// 失败探测记为 0 延迟样本（Clash API 约定），选优时不当作有效延迟。
+fn last_delay(info: &ProxyRuntimeInfo) -> Option<u32> {
+    info.history.back().map(|s| s.delay).filter(|d| *d > 0)
 }
 
 fn now_ms() -> u64 {
