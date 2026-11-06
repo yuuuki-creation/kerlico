@@ -1009,7 +1009,18 @@ impl Proxy {
         }
         smux.noop_bool("statistic", false)?;
         if let Some(mut brutal) = smux.nested("brutal-opts")? {
-            brutal.noop_bool("enabled", false)?;
+            if brutal.boolean("enabled")? == Some(true) {
+                let mut out = Opts::default();
+                out.set("enabled", true);
+                for (key, to) in [("up", "up_mbps"), ("down", "down_mbps")] {
+                    let value = brutal.take(key).ok_or_else(|| brutal.missing(key))?;
+                    let mbps = bandwidth_bytes(&brutal, key, &value)?.div_ceil(125_000);
+                    out.set(to, mbps);
+                }
+                mux.set("brutal", Value::Object(out.0));
+            } else {
+                brutal.map.clear();
+            }
             brutal.finish()?;
         }
         smux.finish()?;
@@ -2413,5 +2424,16 @@ mod tests {
         let out = map("name: h\ntype: hysteria\nserver: a.example.com\nport: 443\nauth-str: x\nup: 30 Mbps\ndown: 200\n").unwrap();
         assert_eq!(out.options["up_bps"], 3_750_000);
         assert_eq!(out.options["down_bps"], 25_000_000);
+    }
+
+    #[test]
+    fn smux_brutal_opts_map_to_multiplex_brutal() {
+        let out = map("name: s\ntype: ss\nserver: a.example.com\nport: 443\ncipher: aes-128-gcm\npassword: x\nsmux:\n  enabled: true\n  protocol: yamux\n  max-connections: 2\n  brutal-opts:\n    enabled: true\n    up: 30 Mbps\n    down: 100\n").unwrap();
+        let mux = &out.options["multiplex"];
+        assert_eq!(mux["protocol"], "yamux");
+        assert_eq!(mux["max_connections"], 2);
+        assert_eq!(mux["brutal"]["up_mbps"], 30);
+        assert_eq!(mux["brutal"]["down_mbps"], 100);
+        assert!(map("name: s\ntype: ss\nserver: a.example.com\nport: 443\ncipher: aes-128-gcm\npassword: x\nsmux:\n  enabled: true\n  brutal-opts:\n    enabled: true\n    up: 30\n").is_err());
     }
 }

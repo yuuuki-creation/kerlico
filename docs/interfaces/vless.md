@@ -23,7 +23,7 @@
 | `security` | 默认 TLS；`tls`、`reality`、`none`，字段见下表 |
 | `packet_encoding` | `udp`（默认）、`xudp`、`packetaddr`；Vision 自动使用 XUDP；跨载体迁移需要 XUDP，见[XUDP 跨载体迁移](#xudp-跨载体迁移) |
 | `mux` | 可选 `{enabled,tcp,udp,concurrency,max_connections}`；默认值为 `true,true,true,8,4`，不提供对象则不建池 |
-| `multiplex` | 可选 `sing-mux` 配置 `{enabled,protocol,max_connections,min_streams,max_streams,padding,only_tcp}`，支持 `h2mux`、`smux`、`yamux` |
+| `multiplex` | 可选 `sing-mux` 配置 `{enabled,protocol,max_connections,min_streams,max_streams,padding,only_tcp,brutal}`，支持 `h2mux`、`smux`、`yamux`，与 sing-box / Mihomo 互通，见 [sing-mux](sing-mux.md) |
 | `fragment` / `finalmask` | 可选 TCP 分片（`packets`、`length`、`delay`、`max_split`）与 QUIC/UDP 掩码参数（`brutal_down`、`brutal_up`、`udp_hop`） |
 
 | 载体对象 | 字段与限制 |

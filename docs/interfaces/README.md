@@ -17,6 +17,7 @@
 | [控制接口 (control.md)](control.md) | 只读 HTTP 端点 |
 | [设备所有者 (device-runtime.md)](device-runtime.md) | 同进程共享 WARP、原生载体与业务路径、私有状态和生命周期 |
 | [语言与诊断 (localization.md)](localization.md) | 显式语种、双语 CLI、稳定诊断码及目录覆盖边界 |
+| [sing-mux (sing-mux.md)](sing-mux.md) | smux / yamux / h2mux 复用、填充、UDP 流与 Brutal 交换，与 sing-box / Mihomo 互通 |
 | [IP 隧道 (ip-tunnel.md)](ip-tunnel.md) · [HTTP 载体 (http-carrier.md)](http-carrier.md) | WireGuard 共用 IP 数据面与受管 HTTP DATA/QUIC 载体 |
 
 ## 协议模块接口（30 个）

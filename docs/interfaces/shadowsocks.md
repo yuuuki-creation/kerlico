@@ -6,7 +6,7 @@
 
 ## 配置
 
-出站 `options`（可选启用 `udp_over_tcp` / `udp_over_tcp_version` UoT v1/v2 与 `multiplex` 通用 `sing-mux` 多路复用）：
+出站 `options`（可选启用 `udp_over_tcp` / `udp_over_tcp_version` UoT v1/v2 与 `multiplex` 通用 `sing-mux` 多路复用，见 [sing-mux](sing-mux.md)）：
 
 ```json
 {"server":"127.0.0.1","port":8388,"method":"aes-128-gcm","password":"synthetic-shadowsocks-secret","udp_over_tcp":true,"udp_over_tcp_version":2}

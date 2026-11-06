@@ -4,7 +4,7 @@
 
 ## 配置
 
-- **出站选项**：`server: {host, port}`、`password`、`transport`、`security` 与可选 `multiplex`（`sing-mux` 连接池，`h2mux` / `smux` / `yamux`）。
+- **出站选项**：`server: {host, port}`、`password`、`transport`、`security` 与可选 `multiplex`（`sing-mux` 连接池，`h2mux` / `smux` / `yamux`，见 [sing-mux](sing-mux.md)）。
 - **节点配置**：`options` 为 `transport`、必填 `security`、可选 `multiplex`、`mux_option_padding`、`fallbacks` 与 `fallback_for_alpn`，协议密码位于 `members[].native_credential`（格式 `{"password": "协议密码"}`）。密码非空、最长 4096 字节，节点最多 256 个且不能重复。
 
 `transport` 默认为 `"tcp"`，也接受 `"raw"`；对象形式如下：
