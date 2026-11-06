@@ -508,9 +508,9 @@ impl InboundProtocol for TunNode {
             let device = self.create()?;
             let access = ingress.local(&context)?;
             let redirect = match &self.routing {
-                Some(routing) if routing.plan.redirect.is_some() => {
-                    Some(RedirectListeners::bind(routing.plan.bypass_mark)?)
-                }
+                Some(routing) if routing.plan.redirect.is_some() => Some(RedirectListeners::bind(
+                    routing.plan.bypass_marks.first().copied(),
+                )?),
                 _ => None,
             };
             let mut versions = SetVersions::new();
@@ -724,7 +724,7 @@ impl NodeFactory for TunNodeFactory {
                     .map(MarkInput::parse_u32)
                     .transpose()?
                     .unwrap_or(automation::DEFAULT_INPUT_MARK);
-                if Some(input_mark) == input.routing_mark()
+                if input.bypass_marks().contains(&input_mark)
                     || options.auto_redirect_iproute2_fallback_rule_index == 0
                 {
                     return Err(invalid());
@@ -743,7 +743,7 @@ impl NodeFactory for TunNodeFactory {
                     table: options.iproute2_table_index,
                     rule_index: options.iproute2_rule_index,
                     strict: options.strict_route,
-                    bypass_mark: input.routing_mark(),
+                    bypass_marks: input.bypass_marks().iter().copied().collect(),
                     selection: Selection {
                         include_uid: uids(&options.include_uid, &options.include_uid_range)?,
                         exclude_uid: uids(&options.exclude_uid, &options.exclude_uid_range)?,

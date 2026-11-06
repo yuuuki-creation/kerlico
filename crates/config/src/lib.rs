@@ -420,6 +420,7 @@ pub struct NodeBuildContext {
     issuer: CredentialIssuer,
     local: bool,
     routing_mark: Option<u32>,
+    bypass_marks: Arc<Vec<u32>>,
     routes: RouteTable,
 }
 impl NodeBuildContext {
@@ -429,6 +430,10 @@ impl NodeBuildContext {
     /// 全局出站拨号选项的路由标记，即 kerlico 自身出站套接字带的 fwmark。
     pub fn routing_mark(&self) -> Option<u32> {
         self.routing_mark
+    }
+    /// kerlico 自身套接字可能带的全部路由标记：全局标记与各出站自带的 `routing-mark`，升序去重。
+    pub fn bypass_marks(&self) -> &[u32] {
+        &self.bypass_marks
     }
     /// 路由表中按标签共享的规则集槽；资源刷新换入新内容后持有者读到新版本。
     pub fn rule_set(&self, tag: &str) -> Option<RuleSetSlot> {
@@ -481,6 +486,7 @@ impl NodeBuildContext {
             .expect("固定测试代次"),
             local: false,
             routing_mark: None,
+            bypass_marks: Arc::default(),
             routes: RouteTable::default(),
         }
     }
@@ -1883,6 +1889,7 @@ impl Registry {
             }
         }
         let mut static_outbound_kinds = Vec::with_capacity(concrete_outbounds.len());
+        let mut bypass_marks: BTreeSet<u32> = global_dialer.routing_mark.into_iter().collect();
         for mut spec in concrete_outbounds {
             let id = OutId::parse(&spec.tag)?;
             if profiles.contains_key(&id) {
@@ -1894,6 +1901,7 @@ impl Registry {
                 .ok_or_else(|| Error::Config("出站类型未注册或未编译".into()))?;
             let dialer = extract_dialer_options(&mut spec.options, &global_dialer)?;
             dialer.validate_platform()?;
+            bypass_marks.extend(dialer.routing_mark);
             if let Some(upstream) = &dialer.detour {
                 if !factory.supports_detour() {
                     return Err(Error::Config(format!(
@@ -1916,6 +1924,7 @@ impl Registry {
                 plan,
             });
         }
+        let bypass_marks: Arc<Vec<u32>> = Arc::new(bypass_marks.into_iter().collect());
         let mut all_group_specs = inline_groups;
         all_group_specs.extend(config.proxy_groups.iter().cloned());
         if let Some(route_block) = &config.route {
@@ -2236,6 +2245,7 @@ impl Registry {
                 issuer: issuer.clone(),
                 local,
                 routing_mark: global_dialer.routing_mark,
+                bypass_marks: bypass_marks.clone(),
                 routes: routes.clone(),
             };
             let protocol = factory.build(&input)?;
@@ -2617,6 +2627,38 @@ mod tests {
             }
             Ok(Arc::new(DummyNode))
         }
+    }
+
+    #[test]
+    fn nodes_see_every_routing_mark_kerlico_sockets_carry() {
+        struct MarkProbe(Arc<std::sync::Mutex<Vec<u32>>>);
+        impl NodeFactory for MarkProbe {
+            fn kind(&self) -> &'static str {
+                "tun"
+            }
+            fn allows_local_inbound(&self) -> bool {
+                true
+            }
+            fn build(&self, input: &NodeBuildContext) -> Result<Arc<dyn InboundProtocol>> {
+                *self.0.lock().unwrap() = input.bypass_marks().to_vec();
+                DummyLocalNodeFactory("tun").build(input)
+            }
+        }
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut reg = Registry::default();
+        reg.register(DummyDirectFactory).unwrap();
+        reg.register_node(MarkProbe(seen.clone())).unwrap();
+        let cfg = parse(
+            br#"{"version":2,"routing_mark":16,
+            "outbounds":[{"tag":"plain","type":"direct"},
+                {"tag":"marked","type":"direct","options":{"routing_mark":153}},
+                {"tag":"same","type":"direct","options":{"routing-mark":153}}],
+            "inbounds":[],
+            "local_inbounds":[{"tag":"tun-in","type":"tun","listen":"127.0.0.1:0","outbound":"plain","options":{}}]}"#,
+        )
+        .unwrap();
+        reg.prepare(cfg).unwrap();
+        assert_eq!(*seen.lock().unwrap(), [16, 153]);
     }
 
     #[test]

@@ -79,7 +79,7 @@ Mihomo 顶层 `tun:` 段（`enable: true`）按同名键读取，编译期合入
 
 开启 `auto_route` 时，kerlico 自身的出站与 DNS 上游套接字不能再进 TUN。两层机制：
 
-1. 未配置全局 `routing-mark`（`dialer.routing_mark`、`route.default_mark`）时，全局拨号选项取 `auto_redirect_output_mark`，默认 `0x2024`。全部出站经 `DialerOptions` 套接字工厂建立，都带这个标记，命中 P 处的 `fwmark` 规则。配置了 `routing-mark` 时规则用该值。单个出站自带不同的 `routing-mark` 时不受这条规则保护。
+1. 未配置全局 `routing-mark`（`dialer.routing_mark`、`route.default_mark`）时，全局拨号选项取 `auto_redirect_output_mark`，默认 `0x2024`。全部出站经 `DialerOptions` 套接字工厂建立，都带这个标记，命中 P 处的 `fwmark` 规则。配置了 `routing-mark` 时规则用该值。单个出站自带不同的 `routing-mark` 时，P 处为每个不同的标记各装一条 `fwmark` 跳过规则，`auto_redirect` 的 nftables 输出链也逐个放行，这些出站同样不进 TUN。Mihomo 与 sing-tun 对出站自带标记不做处理，靠绑定物理网卡防回环；kerlico 两者都做。`auto_redirect_input_mark` 与任一标记相同时拒绝加载。规则按配置加载时的出站计算，订阅成员变化触发重载后随之更新。
 2. `auto_detect_interface` 默认开启：出站套接字绑定默认路由所在网卡（跳过 TUN），表 T 的 `dev <TUN>` 路由与绑定网卡不符，查表落空。
 
 ### 清理

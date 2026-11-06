@@ -201,7 +201,7 @@ tun:
   dns-hijack: [any:53, tcp://any:53]
 ```
 
-Linux 上 `auto-route` 安装路由表 2022 与优先级 9000 起的策略规则，IPv4、IPv6 各一套；`strict-route` 让 TUN 没有地址的地址族不可达；`auto-redirect` 用 nftables 把 TCP 交给内核栈。未配置 `routing-mark` 时 kerlico 的全部出站与 DNS 上游套接字带标记 `0x2024`，策略规则据此放行，并默认绑定物理出口网卡，不会回环进 TUN。`route-address-set` 与 `route-exclude-address-set` 引用规则集，刷新后路由表随之更新。`dns-hijack` 只劫持经本 TUN 进入的 DNS 查询。启动前和退出时都清理同一优先级段与表号的残留规则，`kill -9` 后重启不会叠加。`stack` 的三种取值都由 kerlico 的用户态栈承载。详见 [TUN 入站](interfaces/tun.md)。
+Linux 上 `auto-route` 安装路由表 2022 与优先级 9000 起的策略规则，IPv4、IPv6 各一套；`strict-route` 让 TUN 没有地址的地址族不可达；`auto-redirect` 用 nftables 把 TCP 交给内核栈。未配置 `routing-mark` 时 kerlico 的全部出站与 DNS 上游套接字带标记 `0x2024`，策略规则据此放行，出站自带的 `routing-mark` 也各有一条放行规则；套接字默认绑定物理出口网卡，不会回环进 TUN。`route-address-set` 与 `route-exclude-address-set` 引用规则集，刷新后路由表随之更新。`dns-hijack` 只劫持经本 TUN 进入的 DNS 查询。启动前和退出时都清理同一优先级段与表号的残留规则，`kill -9` 后重启不会叠加。`stack` 的三种取值都由 kerlico 的用户态栈承载。详见 [TUN 入站](interfaces/tun.md)。
 
 ## DNS 与 Fake-IP
 

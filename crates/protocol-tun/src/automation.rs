@@ -222,8 +222,8 @@ pub struct RoutePlan {
     pub table: u32,
     pub rule_index: u32,
     pub strict: bool,
-    /// kerlico 自身出站套接字的标记；命中即跳过 TUN 规则。
-    pub bypass_mark: Option<u32>,
+    /// kerlico 自身套接字可能带的全部标记（全局标记与各出站自带的标记）；命中即跳过 TUN 规则。
+    pub bypass_marks: BTreeSet<u32>,
     pub selection: Selection,
     pub redirect: Option<Redirect>,
 }
@@ -321,8 +321,8 @@ impl RoutePlan {
                 })
             };
             push(self.nop(), Selector::All, Action::Nop);
-            if let Some(mark) = self.bypass_mark {
-                push(p, Selector::Fwmark(mark), skip);
+            for mark in &self.bypass_marks {
+                push(p, Selector::Fwmark(*mark), skip);
             }
             for range in &self.selection.exclude_uid {
                 push(p, Selector::Uid(*range), skip);
@@ -410,10 +410,11 @@ impl RoutePlan {
         let table = self.nft_table();
         let tun = &self.interface;
         let mark = redirect.input_mark;
-        let bypass = self
-            .bypass_mark
+        let bypass: String = self
+            .bypass_marks
+            .iter()
             .map(|m| format!("    meta mark {m:#x} return\n"))
-            .unwrap_or_default();
+            .collect();
         Some(format!(
             "add table inet {table}\n\
              delete table inet {table}\n\
@@ -703,7 +704,7 @@ mod tests {
             table: DEFAULT_TABLE_INDEX,
             rule_index: DEFAULT_RULE_INDEX,
             strict,
-            bypass_mark: Some(DEFAULT_OUTPUT_MARK),
+            bypass_marks: BTreeSet::from([DEFAULT_OUTPUT_MARK]),
             selection: Selection::default(),
             redirect: None,
         }
@@ -743,6 +744,22 @@ mod tests {
             .map(|r| plan.route_line("replace", r))
             .collect();
         assert_eq!(routes, ["route replace 0.0.0.0/0 dev kerlico0 table 2022"]);
+    }
+
+    #[test]
+    fn every_outbound_mark_skips_the_tun_rules() {
+        let mut plan = plan(true, &[Family::V4]);
+        plan.bypass_marks.extend([0x99, 0x200]);
+        assert_eq!(
+            lines(&plan, &AddressSet::default(), Family::V4),
+            [
+                "rule add pref 9010 nop",
+                "rule add pref 9000 fwmark 0x99 goto 9010",
+                "rule add pref 9000 fwmark 0x200 goto 9010",
+                "rule add pref 9000 fwmark 0x2024 goto 9010",
+                "rule add pref 9002 lookup 2022",
+            ]
+        );
     }
 
     #[test]
@@ -824,8 +841,13 @@ mod tests {
         assert!(plan.owns(32768, Some(2022)));
         assert!(!plan.owns(32768, None));
         assert!(plan.owns(9010, None) && !plan.owns(9011, None));
+        plan.bypass_marks.insert(0x99);
         let script = plan.nft_script(7890).unwrap();
         assert!(script.contains("meta mark 0x2024 return"));
+        assert!(
+            script.contains("meta mark 0x99 return"),
+            "出站自带的标记同样放行"
+        );
         assert!(script.contains(
             "oifname \"kerlico0\" meta l4proto tcp ct mark set 0x2023 redirect to :7890"
         ));
