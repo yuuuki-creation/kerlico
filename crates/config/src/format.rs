@@ -629,7 +629,26 @@ fn normalize_yaml_root(root: &mut Value) -> Result<()> {
     {
         let mut outbounds = Vec::with_capacity(proxies.len());
         for proxy in proxies {
-            let (tag, kind, options) = crate::mihomo::member_outbound(proxy)?;
+            let name = proxy
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let (tag, kind, options) = match crate::mihomo::member_outbound(proxy) {
+                Ok(mapped) => mapped,
+                Err(error) if !proxy_referenced(obj, &name) => {
+                    match kerlico_core::Language::default() {
+                        kerlico_core::Language::ZhCn => {
+                            eprintln!("警告：跳过未被代理组或规则引用的代理 {name}：{error}")
+                        }
+                        kerlico_core::Language::En => eprintln!(
+                            "warning: skipped proxy {name}, which no group or rule references: {error}"
+                        ),
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let mut spec = Map::new();
             spec.insert("tag".into(), Value::String(tag));
             spec.insert("type".into(), Value::String(kind));
@@ -648,6 +667,27 @@ fn normalize_yaml_root(root: &mut Value) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// 代理名是否出现在某个 `proxy-groups[].proxies` 或某条规则的目标中。映射失败的代理被引用时
+/// 配置加载失败，未被引用时跳过。
+fn proxy_referenced(root: &Map<String, Value>, name: &str) -> bool {
+    let in_group = root
+        .get("proxy-groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group.get("proxies").and_then(Value::as_array))
+        .flatten()
+        .any(|member| member.as_str() == Some(name));
+    let in_rule = root
+        .get("rules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|rule| rule.split(',').any(|part| part.trim() == name));
+    in_group || in_rule
 }
 
 fn looks_like_toml(input: &str) -> bool {

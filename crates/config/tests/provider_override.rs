@@ -49,7 +49,10 @@ fn hand_written(member: Value, extra: Value) -> kerlico_core::Result<OutboundSpe
 fn compile_plain(member: Value) -> kerlico_core::Result<OutboundSpec> {
     let spec: ProxyProviderSpec =
         serde_json::from_value(json!({"type": "inline", "payload": [member]})).unwrap();
-    let (_, mut specs) = spec.compile("sub")?;
+    let (provider, mut specs) = spec.compile("sub")?;
+    if let Some(failure) = provider.failed_members.first() {
+        return Err(kerlico_core::Error::Config(failure.clone()));
+    }
     Ok(specs.remove(0))
 }
 
@@ -138,24 +141,40 @@ fn hysteria2_up_down_are_mapped() {
 }
 
 #[test]
-fn unsupported_override_matches_hand_written_error() {
-    for (member, over) in [
-        (members().remove(2), json!({"skip-cert-verify": true})),
-        (members().remove(1), json!({"skip-cert-verify": true})),
-        (members().remove(0), json!({"up": "30 Mbps"})),
-        (members().remove(2), json!({"ip-version": "ipv6"})),
-    ] {
-        let key = over.as_object().unwrap().keys().next().unwrap().clone();
-        let expected = hand_written(member.clone(), over.clone())
-            .err()
-            .expect("应报错")
-            .to_string();
-        let got = compile(vec![member], over)
-            .err()
-            .expect("应报错")
-            .to_string();
-        assert_eq!(got, expected, "override {key}");
-    }
+fn override_keys_the_type_lacks_are_ignored_like_mihomo() {
+    let over = json!({"up": "30 Mbps", "udp": false, "udp-over-tcp": true});
+    let specs = compile(members(), over.clone()).unwrap();
+    assert_eq!(specs.len(), members().len());
+    let vmess = hand_written(members().remove(1), over).unwrap();
+    assert_eq!(
+        vmess.options,
+        compile_plain(members().remove(1)).unwrap().options
+    );
+}
+
+#[test]
+fn unimplemented_security_override_skips_members_and_lists_them() {
+    let spec: ProxyProviderSpec = serde_json::from_value(json!({
+        "type": "inline",
+        "payload": members(),
+        "override": {"ip-version": "ipv6"},
+    }))
+    .unwrap();
+    let (provider, specs) = spec.compile("sub").unwrap();
+    assert!(specs.is_empty());
+    assert_eq!(provider.failed_members.len(), members().len());
+    let expected = hand_written(members().remove(2), json!({"ip-version": "ipv6"}))
+        .err()
+        .expect("手写同样字段应报错")
+        .to_string();
+    assert!(
+        provider
+            .failed_members
+            .iter()
+            .any(|failure| failure.starts_with("trojan-us") && expected.contains(failure.as_str())),
+        "{expected} / {:?}",
+        provider.failed_members
+    );
 }
 
 #[test]

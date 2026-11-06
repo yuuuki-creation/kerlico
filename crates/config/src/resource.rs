@@ -1,6 +1,6 @@
 //! 落盘资源（proxy-provider、规则集、Geo 数据库）的缓存位置、下载规格与内容校验。
 
-use crate::{CompiledRuleSet, RuleSetSource, parse_subscription_content};
+use crate::{CompiledRuleSet, RuleSetSource};
 use kerlico_core::{Error, OutId, Result};
 pub use kerlico_routing::GeoFile;
 use kerlico_routing::{GeoPart, GeoSlot};
@@ -85,7 +85,7 @@ impl ResourceSpec {
             ResourceKind::ProxyProvider(name) => {
                 let text = std::str::from_utf8(bytes)
                     .map_err(|_| Error::Config(format!("proxy-provider {name} 内容不是 UTF-8")))?;
-                let members = parse_subscription_content(text)?.len();
+                let members = crate::group::mappable_member_count(text)?;
                 if members == 0 {
                     return Err(Error::Config(format!(
                         "proxy-provider {name} 内容没有可用节点"
@@ -123,5 +123,28 @@ pub(crate) fn read_cached(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(Error::Io(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn downloaded_subscription_is_accepted_when_some_members_fail() {
+        let spec = ResourceSpec {
+            kind: ResourceKind::ProxyProvider("sub".into()),
+            path: PathBuf::from("unused"),
+            download: None,
+        };
+        let bad = "  - {name: bad, type: trojan, server: t.example.com, port: 443, password: pw, ech-opts: {enable: true}}\n";
+        let content = format!(
+            "proxies:\n  - {{name: ok, type: ss, server: 203.0.113.10, port: 8388, cipher: aes-256-gcm, password: pw}}\n{bad}"
+        );
+        assert!(matches!(
+            spec.accept(content.as_bytes()).unwrap(),
+            Accepted::Members(1)
+        ));
+        assert!(spec.accept(format!("proxies:\n{bad}").as_bytes()).is_err());
     }
 }

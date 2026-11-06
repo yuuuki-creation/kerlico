@@ -1,10 +1,14 @@
 //! Mihomo 代理条目到 kerlico 出站选项的映射。
 //!
-//! 每个 Mihomo `type` 对应 [`TYPES`] 中的一个映射函数。映射函数从条目中逐个取走认识的字段并写入
-//! kerlico 选项；取完后仍有剩余字段即报错，错误信息带代理名与字段路径。只有 [`Proxy::finish`]
-//! 内列出的公共字段允许以无效果取值出现。
+//! 每个 Mihomo `type` 对应 [`TYPES`] 中的一行：映射函数与 Mihomo 选项结构体定义的字段。映射函数
+//! 取走 kerlico 实现的字段；剩余字段按 Mihomo 的结构解码器宽松处理（见 [`Proxy::finish`]）：
+//!
+//! - Mihomo 未给该类型定义的字段：静默忽略，与 Mihomo 一致（订阅 `override` 会把字段写进每个成员）。
+//! - Mihomo 定义、kerlico 未实现、且改变安全或路由语义的字段（[`SECURITY_FIELDS`]）取生效值：
+//!   该代理映射失败，错误带代理名与字段路径。
+//! - 其余未实现字段：提示后继续。
 
-use kerlico_core::{Error, Result};
+use kerlico_core::{Error, Language, Result};
 use serde_json::{Map, Value, json};
 
 /// 一个 Mihomo 代理条目映射后的 kerlico 出站。
@@ -17,35 +21,661 @@ pub struct MihomoOutbound {
 
 type Mapper = fn(&mut Proxy) -> Result<(&'static str, Opts)>;
 
-/// Mihomo `type` 到映射函数的表。不在表中的类型报错。
-const TYPES: &[(&str, Mapper)] = &[
-    ("ss", shadowsocks),
-    ("ssr", shadowsocksr),
-    ("snell", snell),
-    ("vmess", vmess),
-    ("vless", vless),
-    ("trojan", trojan),
-    ("anytls", anytls),
-    ("http", http),
-    ("socks5", socks5),
-    ("hysteria", hysteria),
-    ("hysteria2", hysteria2),
-    ("tuic", tuic),
-    ("shadowquic", shadowquic),
-    ("wireguard", wireguard),
-    ("ssh", ssh),
-    ("mieru", mieru),
-    ("sudoku", sudoku),
-    ("trusttunnel", trusttunnel),
-    ("gost-relay", gost_relay),
-    ("tailscale", tailscale),
-    ("openvpn", openvpn),
-    ("easytier", easytier),
-    ("zerotier", zerotier),
-    ("direct", direct),
-    ("reject", reject),
-    ("dns", dns),
+/// 一种 Mihomo 代理类型：映射函数与 Mihomo 选项结构体的字段（`proxy` 标签，不含 [`BASIC_FIELDS`]）。
+struct ProxyType {
+    name: &'static str,
+    mapper: Mapper,
+    fields: &'static [&'static str],
+}
+
+/// Mihomo `BasicOption` 与 `ParseProxy` 对所有类型读取的字段。
+const BASIC_FIELDS: &[&str] = &[
+    "name",
+    "type",
+    "tfo",
+    "mptcp",
+    "interface-name",
+    "routing-mark",
+    "ip-version",
+    "dialer-proxy",
+    "smux",
 ];
+
+/// 未实现时会改变安全或路由语义的字段：取生效值时该代理映射失败，而不是静默降级。
+const SECURITY_FIELDS: &[&str] = &[
+    "tls",
+    "skip-cert-verify",
+    "name-cert-verify",
+    "fingerprint",
+    "certificate",
+    "private-key",
+    "client-fingerprint",
+    "ech-opts",
+    "reality-opts",
+    "shadow-tls-opts",
+    "restls-opts",
+    "jls-opts",
+    "tlsmirror-opts",
+    "realm-opts",
+    "disable-sni",
+    "remote-dns-resolve",
+];
+
+/// 字段表取自 Mihomo `adapter/outbound/*.go` 的选项结构体（Mihomo v1.19 系列）。不在表中的类型报错。
+const TYPES: &[ProxyType] = &[
+    ProxyType {
+        name: "ss",
+        mapper: shadowsocks,
+        fields: &[
+            "server",
+            "port",
+            "password",
+            "cipher",
+            "udp",
+            "plugin",
+            "plugin-opts",
+            "udp-over-tcp",
+            "udp-over-tcp-version",
+            "client-fingerprint",
+        ],
+    },
+    ProxyType {
+        name: "ssr",
+        mapper: shadowsocksr,
+        fields: &[
+            "server",
+            "port",
+            "password",
+            "cipher",
+            "obfs",
+            "obfs-param",
+            "protocol",
+            "protocol-param",
+            "udp",
+        ],
+    },
+    ProxyType {
+        name: "snell",
+        mapper: snell,
+        fields: &[
+            "server",
+            "port",
+            "psk",
+            "udp",
+            "version",
+            "reuse",
+            "obfs-opts",
+            "client-fingerprint",
+        ],
+    },
+    ProxyType {
+        name: "vmess",
+        mapper: vmess,
+        fields: &[
+            "server",
+            "port",
+            "uuid",
+            "alterId",
+            "cipher",
+            "udp",
+            "network",
+            "tls",
+            "alpn",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+            "servername",
+            "ech-opts",
+            "shadow-tls-opts",
+            "restls-opts",
+            "jls-opts",
+            "reality-opts",
+            "tlsmirror-opts",
+            "mekya-opts",
+            "mkcp-opts",
+            "http-opts",
+            "h2-opts",
+            "grpc-opts",
+            "ws-opts",
+            "packet-addr",
+            "xudp",
+            "packet-encoding",
+            "global-padding",
+            "authenticated-length",
+            "client-fingerprint",
+        ],
+    },
+    ProxyType {
+        name: "vless",
+        mapper: vless,
+        fields: &[
+            "server",
+            "port",
+            "uuid",
+            "flow",
+            "tls",
+            "alpn",
+            "udp",
+            "packet-addr",
+            "xudp",
+            "packet-encoding",
+            "encryption",
+            "network",
+            "ech-opts",
+            "shadow-tls-opts",
+            "restls-opts",
+            "jls-opts",
+            "reality-opts",
+            "http-opts",
+            "h2-opts",
+            "grpc-opts",
+            "ws-opts",
+            "xhttp-opts",
+            "ws-headers",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+            "servername",
+            "client-fingerprint",
+        ],
+    },
+    ProxyType {
+        name: "trojan",
+        mapper: trojan,
+        fields: &[
+            "server",
+            "port",
+            "password",
+            "alpn",
+            "sni",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+            "udp",
+            "network",
+            "ech-opts",
+            "shadow-tls-opts",
+            "restls-opts",
+            "jls-opts",
+            "reality-opts",
+            "grpc-opts",
+            "ws-opts",
+            "ss-opts",
+            "client-fingerprint",
+        ],
+    },
+    ProxyType {
+        name: "anytls",
+        mapper: anytls,
+        fields: &[
+            "server",
+            "port",
+            "password",
+            "alpn",
+            "sni",
+            "ech-opts",
+            "shadow-tls-opts",
+            "restls-opts",
+            "jls-opts",
+            "client-fingerprint",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+            "udp",
+            "client-metadata",
+            "idle-session-check-interval",
+            "idle-session-timeout",
+            "min-idle-session",
+            "disable-reuse",
+        ],
+    },
+    ProxyType {
+        name: "http",
+        mapper: http,
+        fields: &[
+            "server",
+            "port",
+            "username",
+            "password",
+            "tls",
+            "sni",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+            "headers",
+        ],
+    },
+    ProxyType {
+        name: "socks5",
+        mapper: socks5,
+        fields: &[
+            "server",
+            "port",
+            "username",
+            "password",
+            "tls",
+            "udp",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+        ],
+    },
+    ProxyType {
+        name: "hysteria",
+        mapper: hysteria,
+        fields: &[
+            "server",
+            "port",
+            "ports",
+            "protocol",
+            "obfs-protocol",
+            "up",
+            "up-speed",
+            "down",
+            "down-speed",
+            "auth",
+            "auth-str",
+            "obfs",
+            "sni",
+            "ech-opts",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+            "alpn",
+            "recv-window-conn",
+            "recv-window",
+            "disable-mtu-discovery",
+            "fast-open",
+            "hop-interval",
+        ],
+    },
+    ProxyType {
+        name: "hysteria2",
+        mapper: hysteria2,
+        fields: &[
+            "server",
+            "port",
+            "ports",
+            "hop-interval",
+            "up",
+            "down",
+            "password",
+            "obfs",
+            "obfs-password",
+            "obfs-min-packet-size",
+            "obfs-max-packet-size",
+            "sni",
+            "ech-opts",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+            "alpn",
+            "cwnd",
+            "bbr-profile",
+            "udp-mtu",
+            "handshake-timeout",
+            "realm-opts",
+            "initial-stream-receive-window",
+            "max-stream-receive-window",
+            "initial-connection-receive-window",
+            "max-connection-receive-window",
+        ],
+    },
+    ProxyType {
+        name: "tuic",
+        mapper: tuic,
+        fields: &[
+            "server",
+            "port",
+            "token",
+            "uuid",
+            "password",
+            "ip",
+            "heartbeat-interval",
+            "alpn",
+            "reduce-rtt",
+            "request-timeout",
+            "udp-relay-mode",
+            "congestion-controller",
+            "disable-sni",
+            "max-udp-relay-packet-size",
+            "fast-open",
+            "max-open-streams",
+            "cwnd",
+            "bbr-profile",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+            "recv-window-conn",
+            "recv-window",
+            "disable-mtu-discovery",
+            "max-datagram-frame-size",
+            "sni",
+            "ech-opts",
+            "udp-over-stream",
+            "udp-over-stream-version",
+        ],
+    },
+    ProxyType {
+        name: "shadowquic",
+        mapper: shadowquic,
+        fields: &[
+            "server",
+            "port",
+            "username",
+            "password",
+            "sni",
+            "alpn",
+            "quic-versions",
+            "udp-over-stream",
+            "zero-rtt",
+            "keep-alive-interval",
+            "congestion-controller",
+            "up",
+            "down",
+            "cwnd",
+            "bbr-profile",
+            "recv-window-conn",
+            "recv-window",
+            "disable-mtu-discovery",
+            "max-datagram-frame-size",
+            "max-open-streams",
+        ],
+    },
+    ProxyType {
+        name: "wireguard",
+        mapper: wireguard,
+        fields: &[
+            "server",
+            "port",
+            "public-key",
+            "pre-shared-key",
+            "reserved",
+            "allowed-ips",
+            "ip",
+            "ipv6",
+            "private-key",
+            "workers",
+            "mtu",
+            "udp",
+            "persistent-keepalive",
+            "ip-stack",
+            "amnezia-wg-option",
+            "peers",
+            "remote-dns-resolve",
+            "dns",
+            "refresh-server-ip-interval",
+        ],
+    },
+    ProxyType {
+        name: "ssh",
+        mapper: ssh,
+        fields: &[
+            "server",
+            "port",
+            "username",
+            "password",
+            "private-key",
+            "private-key-passphrase",
+            "host-key",
+            "host-key-algorithms",
+        ],
+    },
+    ProxyType {
+        name: "mieru",
+        mapper: mieru,
+        fields: &[
+            "server",
+            "port",
+            "port-range",
+            "transport",
+            "udp",
+            "username",
+            "password",
+            "multiplexing",
+            "handshake-mode",
+            "traffic-pattern",
+        ],
+    },
+    ProxyType {
+        name: "sudoku",
+        mapper: sudoku,
+        fields: &[
+            "server",
+            "port",
+            "key",
+            "aead-method",
+            "padding-min",
+            "padding-max",
+            "table-type",
+            "enable-pure-downlink",
+            "http-mask",
+            "http-mask-mode",
+            "http-mask-tls",
+            "http-mask-host",
+            "path-root",
+            "multiplex",
+            "http-mask-multiplex",
+            "httpmask",
+            "custom-table",
+            "custom-tables",
+        ],
+    },
+    ProxyType {
+        name: "trusttunnel",
+        mapper: trusttunnel,
+        fields: &[
+            "server",
+            "port",
+            "username",
+            "password",
+            "alpn",
+            "sni",
+            "ech-opts",
+            "client-fingerprint",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+            "udp",
+            "health-check",
+            "quic",
+            "congestion-controller",
+            "cwnd",
+            "bbr-profile",
+            "max-connections",
+            "min-streams",
+            "max-streams",
+        ],
+    },
+    ProxyType {
+        name: "gost-relay",
+        mapper: gost_relay,
+        fields: &[
+            "server",
+            "port",
+            "forward",
+            "udp",
+            "tls",
+            "mux",
+            "sni",
+            "username",
+            "password",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+            "client-fingerprint",
+        ],
+    },
+    ProxyType {
+        name: "tailscale",
+        mapper: tailscale,
+        fields: &[
+            "hostname",
+            "auth-key",
+            "control-url",
+            "state-dir",
+            "ephemeral",
+            "udp",
+            "accept-routes",
+            "exit-node",
+            "exit-node-allow-lan-access",
+        ],
+    },
+    ProxyType {
+        name: "openvpn",
+        mapper: openvpn,
+        fields: &[
+            "server",
+            "port",
+            "proto",
+            "dev",
+            "cipher",
+            "data-ciphers",
+            "data-ciphers-fallback",
+            "auth",
+            "comp-lzo",
+            "ca",
+            "cert",
+            "key",
+            "tls-auth",
+            "key-direction",
+            "tls-crypt",
+            "tls-crypt-v2",
+            "username",
+            "password",
+            "peer-info",
+            "ping",
+            "ping-restart",
+            "tran-window",
+            "handshake-timeout",
+            "mtu",
+            "udp",
+            "ip-stack",
+            "remote-dns-resolve",
+            "dns",
+        ],
+    },
+    ProxyType {
+        name: "easytier",
+        mapper: easytier,
+        fields: &[
+            "network-name",
+            "network-secret",
+            "hostname",
+            "ipv4",
+            "dhcp",
+            "peers",
+            "listeners",
+            "no-listener",
+            "mapped-listeners",
+            "exit-nodes",
+            "proxy-networks",
+            "instance-name",
+            "state-dir",
+            "udp",
+            "accept-dns",
+            "enable-exit-node",
+            "enable-encryption",
+            "encryption-algorithm",
+            "private-mode",
+            "latency-first",
+            "disable-p2p",
+            "enable-kcp-proxy",
+            "disable-kcp-input",
+            "enable-quic-proxy",
+            "disable-quic-input",
+            "mtu",
+            "tld-dns-zone",
+            "secure-mode",
+            "local-private-key",
+            "local-public-key",
+        ],
+    },
+    ProxyType {
+        name: "zerotier",
+        mapper: zerotier,
+        fields: &[
+            "network",
+            "state-dir",
+            "identity-secret",
+            "planet",
+            "mtu",
+            "ip-stack",
+            "physical-mtu",
+            "udp",
+            "remote-dns-resolve",
+            "dns",
+            "low-bandwidth",
+            "encrypted-hello",
+            "primary-port",
+            "secondary-port",
+            "tcp-fallback-mode",
+            "tcp-fallback-relay",
+            "orbit",
+            "remote-trace-target",
+            "remote-trace-level",
+        ],
+    },
+    ProxyType {
+        name: "direct",
+        mapper: direct,
+        fields: &[],
+    },
+    ProxyType {
+        name: "reject",
+        mapper: reject,
+        fields: &[],
+    },
+    ProxyType {
+        name: "dns",
+        mapper: dns,
+        fields: &[],
+    },
+];
+
+/// Mihomo 结构解码器的键匹配：先精确匹配，再忽略大小写并把 `_` 视为 `-`。
+fn canonical_key(key: &str) -> String {
+    key.to_ascii_lowercase().replace('_', "-")
+}
+
+/// 未实现字段的取值是否会生效：`false`、空值、`enable(d): false` 的映射都不生效。
+fn takes_effect(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(false) => false,
+        Value::String(s) => !s.is_empty() && !s.eq_ignore_ascii_case("false"),
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => {
+            !map.is_empty()
+                && ["enable", "enabled"]
+                    .iter()
+                    .all(|key| map.get(*key).is_none_or(takes_effect))
+        }
+        Value::Bool(true) => true,
+    }
+}
 
 /// `proxies` 或订阅成员：带 `tag` 或 `options` 的条目是 kerlico 原生出站（`tag`、`type`、可选
 /// `options`），原样保留；其余按 Mihomo 代理映射。
@@ -92,17 +722,35 @@ pub fn translate_proxy(raw: Value) -> Result<MihomoOutbound> {
         Some(Value::String(s)) => s.trim().to_ascii_lowercase(),
         _ => return Err(Error::Config(format!("Mihomo 代理 {name} 缺少字段 type"))),
     };
-    let Some((_, mapper)) = TYPES.iter().find(|(t, _)| *t == kind) else {
+    let Some(spec) = TYPES.iter().find(|t| t.name == kind) else {
         return Err(Error::Config(format!(
             "Mihomo 代理 {name} 的类型 {kind} 不受支持"
         )));
     };
+    let known = |key: &str| BASIC_FIELDS.contains(&key) || spec.fields.contains(&key);
+    for key in map.keys().cloned().collect::<Vec<_>>() {
+        if known(&key) {
+            continue;
+        }
+        let canonical = canonical_key(&key);
+        if let Some(field) = BASIC_FIELDS
+            .iter()
+            .chain(spec.fields)
+            .find(|f| canonical_key(f) == canonical)
+            && !map.contains_key(*field)
+            && let Some(value) = map.remove(&key)
+        {
+            map.insert((*field).to_owned(), value);
+        }
+    }
     let mut proxy = Proxy {
         name: name.clone(),
         prefix: String::new(),
         map,
+        unimplemented: Vec::new(),
     };
-    let (kind, mut opts) = mapper(&mut proxy)?;
+    let (kind, mut opts) = (spec.mapper)(&mut proxy)?;
+    proxy.map.retain(|key, _| known(key));
     proxy.common(&mut opts)?;
     proxy.finish()?;
     Ok(MihomoOutbound {
@@ -112,11 +760,13 @@ pub fn translate_proxy(raw: Value) -> Result<MihomoOutbound> {
     })
 }
 
-/// 待消费的 Mihomo 字段集合；嵌套映射以 `prefix` 记录字段路径。
+/// 待消费的 Mihomo 字段集合；嵌套映射以 `prefix` 记录字段路径。`unimplemented` 收集取了生效值、
+/// kerlico 却未实现的字段，由 [`Proxy::finish`] 统一判定。
 pub(crate) struct Proxy {
     name: String,
     prefix: String,
     map: Map<String, Value>,
+    unimplemented: Vec<String>,
 }
 
 impl Proxy {
@@ -216,16 +866,41 @@ impl Proxy {
                 name: self.name.clone(),
                 prefix: format!("{}{key}.", self.prefix),
                 map,
+                unimplemented: Vec::new(),
             })),
             Some(_) => Err(self.bad_type(key)),
         }
     }
-    /// 字段只能取 `allowed` 中的无效果值；其他取值报错。
-    fn noop_bool(&mut self, key: &str, allowed: bool) -> Result<()> {
-        match self.boolean(key)? {
-            Some(v) if v != allowed => Err(self.bad_value(key, v)),
-            _ => Ok(()),
+    /// `skip-cert-verify: true` 写到出站的跳过证书校验选项 `path`。
+    fn insecure(&mut self, opts: &mut Opts, path: &str) -> Result<()> {
+        if self.boolean("skip-cert-verify")? == Some(true) {
+            opts.set(path, true);
         }
+        Ok(())
+    }
+    /// 未启用 TLS 时 Mihomo 不读取 TLS 字段，订阅里残留的取值不生效。
+    fn drop_tls_fields(&mut self) {
+        for key in [
+            "sni",
+            "servername",
+            "alpn",
+            "skip-cert-verify",
+            "name-cert-verify",
+            "fingerprint",
+            "certificate",
+            "private-key",
+            "client-fingerprint",
+            "ech-opts",
+        ] {
+            self.map.remove(key);
+        }
+    }
+    /// kerlico 只实现取值 `allowed`；其他取值记为未实现字段。
+    fn noop_bool(&mut self, key: &str, allowed: bool) -> Result<()> {
+        if self.boolean(key)?.is_some_and(|v| v != allowed) {
+            self.unimplemented.push(key.to_owned());
+        }
+        Ok(())
     }
     fn server_target(&mut self) -> Result<Value> {
         let host = self.required_string("server")?;
@@ -309,7 +984,6 @@ impl Proxy {
         {
             return Err(self.bad_value("ip-version", v));
         }
-        self.noop_bool("skip-cert-verify", false)?;
         // `udp: true` 在 kerlico 中由协议能力决定是否承载 UDP，取值 true 无效果。
         self.noop_bool("udp", true)?;
         if let Some(mut smux) = self.nested("smux")? {
@@ -319,11 +993,43 @@ impl Proxy {
         }
         Ok(())
     }
+    /// 判定剩余与未实现字段：[`SECURITY_FIELDS`] 取生效值时映射失败，其余生效值提示后忽略。
     fn finish(self) -> Result<()> {
-        match self.map.keys().next() {
-            Some(key) => Err(self.unsupported(key)),
-            None => Ok(()),
+        let effective = self
+            .map
+            .iter()
+            .filter(|(_, value)| takes_effect(value))
+            .map(|(key, _)| key.as_str());
+        let mut ignored = Vec::new();
+        for key in self
+            .unimplemented
+            .iter()
+            .map(String::as_str)
+            .chain(effective)
+        {
+            if SECURITY_FIELDS.contains(&key) {
+                return Err(Error::Config(format!(
+                    "Mihomo 代理 {} 的字段 {} 改变安全或路由语义，kerlico 尚未实现",
+                    self.name,
+                    self.path(key)
+                )));
+            }
+            ignored.push(self.path(key));
         }
+        if !ignored.is_empty() {
+            let fields = ignored.join(", ");
+            match Language::default() {
+                Language::ZhCn => eprintln!(
+                    "警告：Mihomo 代理 {} 的字段 {fields} 尚未实现，已忽略",
+                    self.name
+                ),
+                Language::En => eprintln!(
+                    "warning: Mihomo proxy {} fields {fields} are not implemented and were ignored",
+                    self.name
+                ),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -370,8 +1076,10 @@ fn shadowsocks(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     let cipher = p.required_string("cipher")?.to_ascii_lowercase();
     let password = p.required_string("password")?;
     let plugin = p.string("plugin")?;
-    // Mihomo 的 ss 只在 plugin-opts 内读 skip-cert-verify，顶层取值无效果（订阅 override 会写入）。
-    p.boolean("skip-cert-verify")?;
+    if plugin.as_deref() != Some("shadow-tls") {
+        // Mihomo 的 ss 只把 client-fingerprint 用于 shadow-tls 插件。
+        p.map.remove("client-fingerprint");
+    }
     let mut opts = Opts::default();
     let ss2022 = cipher.starts_with("2022-");
     opts.set("server", server.clone());
@@ -407,7 +1115,7 @@ fn shadowsocks(p: &mut Proxy) -> Result<(&'static str, Opts)> {
         if let Some(alpn) = po.strings("alpn")? {
             st.set("tls.alpn", alpn);
         }
-        po.noop_bool("skip-cert-verify", false)?;
+        po.insecure(&mut st, "tls.insecure")?;
         po.finish()?;
         p.noop_bool("udp-over-tcp", false)?;
         st.set(
@@ -474,7 +1182,7 @@ fn shadowsocks(p: &mut Proxy) -> Result<(&'static str, Opts)> {
             if let Some(headers) = po.take("headers") {
                 out.set("headers", headers);
             }
-            po.noop_bool("skip-cert-verify", false)?;
+            po.insecure(&mut out, "skip_cert_verify")?;
             po.finish()?;
             opts.set("plugin", name);
             opts.set("plugin_opts", Value::Object(out.0));
@@ -512,6 +1220,8 @@ fn snell(p: &mut Proxy) -> Result<(&'static str, Opts)> {
         return Err(p.bad_value("version", version));
     }
     opts.set("version", version);
+    // Mihomo 的 snell 只把 client-fingerprint 用于 TLS 混淆；kerlico 只支持 HTTP 混淆。
+    p.map.remove("client-fingerprint");
     if let Some(v) = p.boolean("reuse")? {
         opts.set("reuse", v);
     }
@@ -530,18 +1240,29 @@ fn snell(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     Ok(("snell", opts))
 }
 
+/// 各 `network` 的选项字段；Mihomo 只读取所选 `network` 对应的一个。
+const TRANSPORT_OPTS: &[&str] = &[
+    "ws-opts",
+    "grpc-opts",
+    "h2-opts",
+    "http-opts",
+    "xhttp-opts",
+    "mkcp-opts",
+    "mekya-opts",
+];
+
 /// `network` 与 `*-opts` 映射到 kerlico `transport`。`headers_list` 为 true 时额外请求头写成
 /// `[[k, v]]` 列表（VLESS、Trojan），为 false 时只接受 `Host`（VMess）。
 fn v2ray_transport(p: &mut Proxy, opts: &mut Opts, headers_list: bool) -> Result<()> {
     let network = p.string("network")?.unwrap_or_else(|| "tcp".into());
-    match network.as_str() {
-        "tcp" => {
-            for key in ["ws-opts", "grpc-opts", "h2-opts", "http-opts"] {
-                if p.has(key) {
-                    return Err(p.unsupported(key));
-                }
-            }
+    let selected = format!("{network}-opts");
+    for key in TRANSPORT_OPTS {
+        if *key != selected {
+            p.map.remove(*key);
         }
+    }
+    match network.as_str() {
+        "tcp" => {}
         "ws" => {
             let mut t = Opts::default();
             t.set("type", "ws");
@@ -649,8 +1370,9 @@ fn vmess(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     if p.boolean("tls")? == Some(true) {
         opts.set("tls.type", "tls");
         opts.set("tls.server_name", sni.unwrap_or(host));
-    } else if sni.is_some() {
-        return Err(p.unsupported("servername"));
+        p.insecure(&mut opts, "tls.insecure")?;
+    } else {
+        p.drop_tls_fields();
     }
     v2ray_transport(p, &mut opts, false)?;
     p.smux(&mut opts)?;
@@ -704,6 +1426,8 @@ fn vless(p: &mut Proxy) -> Result<(&'static str, Opts)> {
         if let Some(fp) = fingerprint {
             opts.set("security.fingerprint", fp);
         }
+        // REALITY 不走证书链校验，Mihomo 不读取 skip-cert-verify。
+        p.map.remove("skip-cert-verify");
     } else if tls {
         opts.set("security.type", "tls");
         if let Some(name) = sni {
@@ -715,16 +1439,9 @@ fn vless(p: &mut Proxy) -> Result<(&'static str, Opts)> {
         if let Some(alpn) = p.strings("alpn")? {
             opts.set("security.alpn", alpn);
         }
-        if p.boolean("skip-cert-verify")? == Some(true) {
-            opts.set("security.allow_insecure", true);
-        }
+        p.insecure(&mut opts, "security.allow_insecure")?;
     } else {
-        if sni.is_some() {
-            return Err(p.unsupported("servername"));
-        }
-        if fingerprint.is_some() {
-            return Err(p.unsupported("client-fingerprint"));
-        }
+        p.drop_tls_fields();
         opts.set("security.type", "none");
     }
     v2ray_transport(p, &mut opts, true)?;
@@ -741,6 +1458,7 @@ fn trojan(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     opts.set("password", p.required_string("password")?);
     opts.set("security.type", "tls");
     opts.set("security.server_name", p.sni()?.unwrap_or(host));
+    p.insecure(&mut opts, "security.insecure")?;
     if let Some(mut ss) = p.nested("ss-opts")? {
         ss.noop_bool("enabled", false)?;
         ss.map.clear();
@@ -759,6 +1477,7 @@ fn anytls(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     opts.set("server", target);
     opts.set("password", p.required_string("password")?);
     opts.set("tls.server_name", p.sni()?.unwrap_or(host));
+    p.insecure(&mut opts, "tls.insecure")?;
     if let Some(secs) = p.integer("idle-session-timeout")? {
         opts.set("idle_session_timeout_ms", secs.saturating_mul(1000));
     }
@@ -790,8 +1509,9 @@ fn http(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     let sni = p.sni()?;
     if p.boolean("tls")? == Some(true) {
         opts.set("tls.server_name", sni.unwrap_or(host));
-    } else if sni.is_some() {
-        return Err(p.unsupported("sni"));
+        p.insecure(&mut opts, "tls.insecure")?;
+    } else {
+        p.drop_tls_fields();
     }
     if let Some(headers) = p.take("headers") {
         opts.set("headers", headers);
@@ -805,7 +1525,11 @@ fn socks5(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     opts.set("server", p.server_target()?);
     opts.set("version", "5");
     auth_pair(p, &mut opts)?;
-    p.noop_bool("tls", false)?;
+    if p.boolean("tls")? == Some(true) {
+        p.unimplemented.push("tls".into());
+    } else {
+        p.drop_tls_fields();
+    }
     p.udp(&mut opts, None)?;
     Ok(("socks", opts))
 }
@@ -843,6 +1567,7 @@ fn quic_tls(p: &mut Proxy, opts: &mut Opts, host: &str, alpn: bool) -> Result<()
     if let Some(ca) = p.string("ca-str")? {
         opts.set("tls.ca_pem", ca);
     }
+    p.insecure(opts, "tls.insecure")?;
     if alpn && let Some(list) = p.strings("alpn")? {
         opts.set("tls.alpn", list);
     }
@@ -926,7 +1651,6 @@ fn hysteria(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     }
     quic_tls(p, &mut opts, &host, true)?;
     p.noop_bool("disable-mtu-discovery", false)?;
-    p.noop_bool("disable_mtu_discovery", false)?;
     p.noop_bool("fast-open", false)?;
     p.udp(&mut opts, Some("udp"))?;
     Ok(("hysteria1", opts))
@@ -955,9 +1679,6 @@ fn hysteria2(p: &mut Proxy) -> Result<(&'static str, Opts)> {
         Some(other) => return Err(p.bad_value("obfs", other)),
     }
     quic_tls(p, &mut opts, &host, false)?;
-    if p.boolean("skip-cert-verify")? == Some(true) {
-        opts.set("tls.insecure", true);
-    }
     if let Some(alpn) = p.strings("alpn")?
         && alpn != ["h3"]
     {
@@ -1054,11 +1775,13 @@ fn wireguard(p: &mut Proxy) -> Result<(&'static str, Opts)> {
             name: p.name.clone(),
             prefix: "peers[0].".into(),
             map,
+            unimplemented: Vec::new(),
         },
         None => Proxy {
             name: p.name.clone(),
             prefix: String::new(),
             map: std::mem::take(&mut p.map),
+            unimplemented: Vec::new(),
         },
     };
     let host = peer.required_string("server")?;
@@ -1258,6 +1981,7 @@ fn trusttunnel(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     opts.set("auth.username", p.required_string("username")?);
     opts.set("auth.password", p.required_string("password")?);
     opts.set("tls.server_name", p.sni()?.unwrap_or(host));
+    p.insecure(&mut opts, "tls.insecure")?;
     if p.boolean("quic")? == Some(true) {
         opts.set("transport", "h3");
     }
@@ -1290,10 +2014,9 @@ fn gost_relay(p: &mut Proxy) -> Result<(&'static str, Opts)> {
     let sni = p.sni()?;
     if p.boolean("tls")? == Some(true) {
         opts.set("tls.server_name", sni.unwrap_or(host));
+        p.insecure(&mut opts, "tls.insecure")?;
     } else {
-        if sni.is_some() {
-            return Err(p.unsupported("sni"));
-        }
+        p.drop_tls_fields();
         opts.set("allow_insecure", true);
     }
     p.udp(&mut opts, None)?;
@@ -1468,41 +2191,99 @@ mod tests {
     }
 
     #[test]
-    fn unknown_field_names_proxy_and_field_path() {
-        let err = map(
-            "name: hk\ntype: vmess\nserver: a.example.com\nport: 443\nuuid: 11111111-1111-1111-1111-111111111111\nnetwork: ws\nws-opts:\n  path: /ws\n  bogus: 1\n",
+    fn fields_mihomo_does_not_define_for_the_type_are_ignored() {
+        let out = map(
+            "name: hk\ntype: vmess\nserver: a.example.com\nport: 443\nuuid: 11111111-1111-1111-1111-111111111111\nnetwork: ws\nws-opts:\n  path: /ws\n  bogus: 1\ngrpc-opts:\n  grpc-service-name: unused\nup: 100\nobfs-password: x\n",
         )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("hk") && err.contains("ws-opts.bogus"), "{err}");
-        let err = map(
-            "name: x\ntype: ss\nserver: a\nport: 1\ncipher: aes-128-gcm\npassword: p\nfoo: 1\n",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("x") && err.contains("foo"), "{err}");
+        .unwrap();
+        assert_eq!(out.options["transport"]["path"], "/ws");
+        assert!(out.options["transport"].get("service_name").is_none());
+        map("name: x\ntype: ss\nserver: a\nport: 1\ncipher: aes-128-gcm\npassword: p\nfoo: 1\nskip-cert-verify: true\n")
+            .unwrap();
+        map("name: h\ntype: hysteria2\nserver: a.example.com\nport: 443\npassword: p\nudp: false\nuuid: u\n")
+            .unwrap();
     }
 
     #[test]
-    fn non_noop_common_values_are_rejected() {
+    fn mihomo_key_matching_ignores_case_and_underscores() {
+        let out = map("name: t\ntype: trojan\nserver: a.example.com\nport: 443\npassword: p\nSkip_Cert_Verify: true\n").unwrap();
+        assert_eq!(out.options["security"]["insecure"], true);
+    }
+
+    #[test]
+    fn unimplemented_security_fields_fail_and_others_warn() {
         let base = "name: s\ntype: trojan\nserver: a.example.com\nport: 443\npassword: p\n";
         for extra in [
-            "skip-cert-verify: true\n",
-            "udp: false\n",
             "ip-version: ipv6\n",
             "client-fingerprint: chrome\n",
+            "fingerprint: ab12\n",
+            "ech-opts:\n  enable: true\n",
+            "reality-opts:\n  public-key: k\n",
         ] {
             let err = map(&format!("{base}{extra}")).unwrap_err().to_string();
             let field = extra.split(':').next().unwrap();
-            assert!(err.contains(field), "{extra}: {err}");
+            assert!(err.contains("s") && err.contains(field), "{extra}: {err}");
         }
         for extra in [
             "skip-cert-verify: false\n",
             "udp: true\n",
+            "udp: false\n",
             "ip-version: dual\n",
+            "client-fingerprint: \"\"\n",
+            "ech-opts:\n  enable: false\n",
+            "alpn: [h2]\n",
+            "smux:\n  enabled: false\n",
         ] {
             map(&format!("{base}{extra}")).expect(extra);
         }
+        let err = map("name: q\ntype: socks5\nserver: a\nport: 1\ntls: true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tls"), "{err}");
+    }
+
+    #[test]
+    fn skip_cert_verify_maps_to_each_tls_carrier() {
+        for (yaml, path) in [
+            (
+                "type: vmess\nuuid: 11111111-1111-1111-1111-111111111111\ntls: true\n",
+                "/tls/insecure",
+            ),
+            ("type: trojan\npassword: p\n", "/security/insecure"),
+            (
+                "type: vless\nuuid: 11111111-1111-1111-1111-111111111111\ntls: true\n",
+                "/security/allow_insecure",
+            ),
+            ("type: anytls\npassword: p\n", "/tls/insecure"),
+            ("type: http\ntls: true\n", "/tls/insecure"),
+            ("type: hysteria2\npassword: p\n", "/tls/insecure"),
+            (
+                "type: hysteria\nauth-str: a\nup: 10\ndown: 10\n",
+                "/tls/insecure",
+            ),
+            ("type: tuic\nuuid: u\npassword: p\n", "/tls/insecure"),
+            (
+                "type: trusttunnel\nusername: u\npassword: p\n",
+                "/tls/insecure",
+            ),
+            ("type: gost-relay\ntls: true\n", "/tls/insecure"),
+            (
+                "type: ss\ncipher: aes-128-gcm\npassword: p\nplugin: v2ray-plugin\nplugin-opts:\n  mode: websocket\n  tls: true\n  skip-cert-verify: true\n",
+                "/plugin_opts/skip_cert_verify",
+            ),
+            (
+                "type: ss\ncipher: aes-128-gcm\npassword: p\nplugin: shadow-tls\nplugin-opts:\n  host: a.example.com\n  password: x\n  skip-cert-verify: true\n",
+                "/tls/insecure",
+            ),
+        ] {
+            let out = map(&format!(
+                "name: n\nserver: a.example.com\nport: 443\nskip-cert-verify: true\n{yaml}"
+            ))
+            .unwrap_or_else(|e| panic!("{yaml}: {e}"));
+            assert_eq!(out.options.pointer(path), Some(&json!(true)), "{yaml}");
+        }
+        let plain = map("name: n\ntype: vmess\nserver: a\nport: 1\nuuid: 11111111-1111-1111-1111-111111111111\nskip-cert-verify: true\nservername: x\n").unwrap();
+        assert!(plain.options.get("tls").is_none());
     }
 
     #[test]

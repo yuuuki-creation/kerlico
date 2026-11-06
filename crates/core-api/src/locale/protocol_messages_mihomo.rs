@@ -16,6 +16,10 @@ pub(super) const DIAGNOSTICS: &[(&str, &str)] = &[
     (" 缺少字段 ", " is missing field "),
     (" 的类型 ", " type "),
     (" 不受支持", " is not supported"),
+    (
+        " 改变安全或路由语义，kerlico 尚未实现",
+        " changes security or routing semantics and is not implemented in kerlico",
+    ),
     ("出站条目缺少 tag", "An outbound entry is missing tag"),
     ("出站条目 ", "Outbound entry "),
     (" 缺少 type", " is missing type"),

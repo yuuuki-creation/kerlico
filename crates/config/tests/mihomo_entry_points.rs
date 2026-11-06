@@ -75,15 +75,48 @@ fn unknown_share_link_parameter_fails_naming_it() {
 }
 
 #[test]
-fn unknown_provider_member_field_fails_naming_proxy_and_field() {
+fn unimplemented_provider_member_fields_warn_or_skip_the_member() {
     let yaml = format!("{TROJAN_YAML}    alpn: [h2]\n");
+    assert_eq!(provider(Value::String(yaml)), top_level(TROJAN_YAML));
     let spec = ProxyProviderSpec {
         kind: "inline".into(),
-        payload: vec![Value::String(yaml)],
+        payload: vec![Value::String(format!(
+            "{TROJAN_YAML}    ech-opts:\n      enable: true\n"
+        ))],
         ..Default::default()
     };
-    let err = spec.compile("sub").err().expect("rejected").to_string();
-    assert!(err.contains("same") && err.contains("alpn"), "{err}");
+    let (provider, specs) = spec.compile("sub").expect("provider compiles");
+    assert!(specs.is_empty());
+    let [failure] = provider.failed_members.as_slice() else {
+        panic!("{:?}", provider.failed_members);
+    };
+    assert!(
+        failure.contains("same") && failure.contains("ech-opts"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn failing_top_level_proxy_fails_the_config_only_when_referenced() {
+    let proxies = "proxies:\n  - name: ok\n    type: ss\n    server: 203.0.113.10\n    port: 8388\n    cipher: aes-256-gcm\n    password: pw\n  - name: bad\n    type: trojan\n    server: t.example.com\n    port: 443\n    password: pw\n    ech-opts:\n      enable: true\n";
+    let value = parse_config_value(proxies.as_bytes()).expect("未引用的失败代理被跳过");
+    let tags: Vec<_> = value["outbounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|out| out["tag"].as_str().unwrap())
+        .collect();
+    assert_eq!(tags, ["ok"]);
+    for referenced in [
+        "proxy-groups:\n  - name: sel\n    type: select\n    proxies: [ok, bad]\n",
+        "rules:\n  - MATCH,bad\n",
+    ] {
+        let Err(err) = parse_config_value(format!("{proxies}{referenced}").as_bytes()) else {
+            panic!("被引用的失败代理使配置加载失败");
+        };
+        let err = err.to_string();
+        assert!(err.contains("bad") && err.contains("ech-opts"), "{err}");
+    }
 }
 
 #[test]

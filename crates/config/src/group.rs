@@ -263,6 +263,8 @@ pub struct CompiledProxyProvider {
     pub health_check_lazy: bool,
     pub health_check_expected_status: String,
     pub proxies: Vec<OutId>,
+    /// 映射失败而被跳过的成员，每项为 `成员名：错误`。
+    pub failed_members: Vec<String>,
 }
 
 impl ProxyProviderSpec {
@@ -352,10 +354,28 @@ impl ProxyProviderSpec {
                 ov.apply(member)?;
             }
         }
-        let filtered = members
-            .into_iter()
-            .map(value_to_outbound_spec)
-            .collect::<Result<Vec<_>>>()?;
+        let mut filtered = Vec::with_capacity(members.len());
+        let mut failed_members = Vec::new();
+        for member in members {
+            let member_name = member_name(&member).to_owned();
+            match value_to_outbound_spec(member) {
+                Ok(spec) => filtered.push(spec),
+                Err(error) => failed_members.push(format!("{member_name}：{error}")),
+            }
+        }
+        if !failed_members.is_empty() {
+            let list = failed_members.join("；");
+            match kerlico_core::Language::default() {
+                kerlico_core::Language::ZhCn => eprintln!(
+                    "警告：proxy-provider {name} 跳过 {} 个无法映射的成员：{list}",
+                    failed_members.len()
+                ),
+                kerlico_core::Language::En => eprintln!(
+                    "warning: proxy-provider {name} skipped {} members that could not be mapped: {list}",
+                    failed_members.len()
+                ),
+            }
+        }
         let mut proxy_ids = Vec::with_capacity(filtered.len());
         for spec in &filtered {
             proxy_ids.push(OutId::parse(&spec.tag)?);
@@ -406,6 +426,7 @@ impl ProxyProviderSpec {
                 health_check_lazy: hc_lazy,
                 health_check_expected_status: hc_expected,
                 proxies: proxy_ids,
+                failed_members,
             },
             filtered,
         ))
@@ -513,6 +534,14 @@ fn filter_members(
         out.push(member);
     }
     Ok(out)
+}
+
+/// 订阅内容中能映射为出站的成员数；单个成员映射失败不影响其余成员（与 provider 编译一致）。
+pub(crate) fn mappable_member_count(content: &str) -> Result<usize> {
+    Ok(parse_subscription_members(content)?
+        .into_iter()
+        .filter(|member| value_to_outbound_spec(member.clone()).is_ok())
+        .count())
 }
 
 pub fn parse_subscription_content(content: &str) -> Result<Vec<OutboundSpec>> {

@@ -53,12 +53,17 @@ cargo build --locked --release -p kerlico
 
 顶层 `proxies`、`proxy-providers` 成员（Mihomo YAML）与分享链接走同一张字段映射表（`crates/config/src/mihomo.rs`），同一节点三种写法得到相同的 kerlico `options`。带 `tag` 或 `options` 键的条目（如 JSON 订阅 `[{"tag":"n1","type":"direct"}]`）视为 kerlico 原生出站，原样保留；原生条目只允许 `tag`（带 `options` 时也可写 `name`）、`type`、`options`，其他字段报错。
 
-- 映射表未列出的字段一律报错，错误信息给出代理名和字段路径（如 `ws-opts.bogus`），不会静默丢弃或原样透传。
-- 公共字段：`interface-name`、`routing-mark`、`dialer-proxy`、`tfo`、`mptcp` 交给拨号层，作用于该节点的全部 TCP 与 UDP 载体套接字；`dialer-proxy` 对 UDP/QUIC 协议经上游出站的 UDP 通道承载，不支持的组合（见[核心接口](interfaces/core.md#出站套接字工厂)）加载时报错。以下取值无效果、允许出现：`udp: true`、`skip-cert-verify: false`、`ip-version: dual`、`smux.enabled: false`；其他取值报错。kerlico 按协议能力承载 UDP，未写 `udp` 的节点也会承载 UDP；`udp: false` 只在 SSR、Hysteria、TrustTunnel、Sudoku 上映射为关闭 UDP，其他类型报错。HTTP、SSH 的 `udp` 任意取值都忽略（Mihomo 同样不为它们承载 UDP）。
-- `skip-cert-verify: true` 在 VLESS 与 Hysteria2 上支持（Hysteria2 映射为 `tls.insecure`），Shadowsocks 顶层取值无效果（Mihomo 只在 `plugin-opts` 内读取），其他类型报错；`client-fingerprint` 只在 VLESS 上支持；`fingerprint`（证书指纹）均不支持。`alpn` 只在 VLESS、Hysteria、TUIC、ShadowQUIC 上支持；Hysteria2 只接受 `[h3]`。
+- 字段宽松规则与 Mihomo 的结构解码器一致。字段名先精确匹配，再忽略大小写并把 `_` 视为 `-`（`disable_mtu_discovery` 等同 `disable-mtu-discovery`）。映射表按 Mihomo `adapter/outbound/*.go` 选项结构体记录每个类型定义的字段：
+  - Mihomo 没有为该类型定义的字段静默忽略，例如 vmess 上的 `up`、hysteria2 上的 `udp`。订阅 `override` 会把字段写进每个成员，这类字段不影响加载。
+  - Mihomo 定义、kerlico 未实现且改变安全或路由语义的字段取生效值时，该代理映射失败，错误给出代理名和字段路径。这些字段是 `tls`（如 socks5 `tls: true`）、`fingerprint`、`name-cert-verify`、`certificate`、`private-key`、`client-fingerprint`（VLESS 以外的 TLS 类型）、`ech-opts`、`reality-opts`（VLESS 以外）、`shadow-tls-opts`、`restls-opts`、`jls-opts`、`tlsmirror-opts`、`realm-opts`、`disable-sni: true`、`remote-dns-resolve: true`，以及 `ip-version` 取 `dual` 以外的值。`false`、空串、`enable: false` 的取值不生效，照常加载。
+  - 其余未实现字段在 stderr 提示代理名与字段路径后忽略，例如 trojan `alpn`、tuic `reduce-rtt: true`、`udp: false`（kerlico 仍按协议能力承载 UDP）、`ws-opts` 内未知键。
+  - 未启用 TLS 时 Mihomo 不读取 `sni`、`servername`、`alpn`、`client-fingerprint`、`skip-cert-verify` 等 TLS 字段，kerlico 同样忽略；只读取所选 `network` 对应的一个 `*-opts`。
+- 订阅成员逐个映射：失败的成员被跳过，其余成员照常加载；stderr 提示与 `CompiledProxyProvider.failed_members` 列出每个失败成员及原因。顶层 `proxies` 同样逐个映射，失败的代理若被 `proxy-groups[].proxies` 或某条规则引用，配置加载失败并报出该错误，未被引用时提示后跳过。
+- 公共字段：`interface-name`、`routing-mark`、`dialer-proxy`、`tfo`、`mptcp` 交给拨号层，作用于该节点的全部 TCP 与 UDP 载体套接字；`dialer-proxy` 对 UDP/QUIC 协议经上游出站的 UDP 通道承载，不支持的组合（见[核心接口](interfaces/core.md#出站套接字工厂)）加载时报错。kerlico 按协议能力承载 UDP，`udp: false` 只在 SSR、Hysteria、TrustTunnel、Sudoku 上映射为关闭 UDP。
+- `skip-cert-verify: true` 映射到各 TLS 载体的跳过证书校验选项并在 stderr 提示一次：vmess `tls.insecure`、trojan `security.insecure`、vless `security.allow_insecure`、anytls/http/hysteria/hysteria2/tuic/trusttunnel/gost-relay `tls.insecure`、ss `plugin-opts`（v2ray-plugin/gost-plugin 为 `plugin_opts.skip_cert_verify`，shadow-tls 为 `tls.insecure`）。REALITY 节点不读取该字段。sing-box 的 `tls.insecure` 写法相同。`client-fingerprint` 只在 VLESS 上支持；`alpn` 只在 VLESS、Hysteria、TUIC、ShadowQUIC 上映射，Hysteria2 只接受 `[h3]`。
 - 不支持的类型：`masque`（Mihomo 的 WARP 式密钥认证与 kerlico MASQUE 客户端不同）、`rematch`。
 
-| Mihomo `type` | kerlico 类型 | 支持的字段 | 报错的常见字段 |
+| Mihomo `type` | kerlico 类型 | 支持的字段 | 未实现的常见字段（按上述规则失败或提示） |
 | --- | --- | --- | --- |
 | `ss` | `shadowsocks`；`2022-*` 加密为 `ss2022`；`plugin: shadow-tls` 为 `shadowtls` | `cipher`、`password`（2022 写作 `iPSK:uPSK`）、`udp-over-tcp`、`udp-over-tcp-version`、`smux`、`plugin: obfs`（`mode`、`host`）、`plugin: v2ray-plugin`/`gost-plugin`（`mode: websocket`、`tls`、`host`、`path`、`mux`、`headers`、`v2ray-http-upgrade`）、`shadow-tls`（`host`、`password`、`version`、`alpn`） | `plugin: restls`/`kcptun`/`jls`、`client-fingerprint`、`plugin-opts.fingerprint`；非 AEAD 旧式加密自动带 `allow_insecure` |
 | `ssr` | `shadowsocksr` | `cipher`、`password`、`protocol`、`obfs`、`protocol-param`、`obfs-param`、`udp` | 无 |
@@ -87,7 +92,7 @@ cargo build --locked --release -p kerlico
 
 分享链接支持 `ss://`（含 SIP002 `plugin=obfs-local`/`v2ray-plugin`）、`ssr://`、`vmess://`（v2rayN Base64 JSON 与 URL 形式）、`vless://`、`trojan://`、`hysteria2://`/`hy2://`、`hysteria://`、`tuic://`、`socks://`/`socks5://`、`http://`/`https://`、`anytls://`、`wireguard://`/`wg://`。链接参数先转成上表的 Mihomo 字段，未识别的参数报错并给出参数名。
 
-`proxy-providers.<name>.override` 与 Mihomo 同序生效：先按原名做 `filter`/`exclude-filter`/`exclude-type`，再把 `tfo`、`mptcp`、`udp`、`udp-over-tcp`、`up`、`down`、`dialer-proxy`、`skip-cert-verify`、`name-cert-verify`、`interface-name`、`routing-mark`、`ip-version` 覆盖写入每个成员的 Mihomo 代理映射，随后走与手写代理相同的字段映射，因此类型不支持的取值与手写时报同样的错误（例如 trojan 的 `skip-cert-verify: true`）。改名顺序为 `proxy-name`（`pattern` 正则替换为 `target`，`$1` 引用捕获组，按列表依次执行）、`additional-prefix`、`additional-suffix`。`pattern` 使用 Rust `regex` 语法，不支持环视与反向引用。kerlico 原生成员（带 `tag`/`options`）只接受改名项，设置字段覆盖会报错；`override-expr` 不支持。
+`proxy-providers.<name>.override` 与 Mihomo 同序生效：先按原名做 `filter`/`exclude-filter`/`exclude-type`，再把 `tfo`、`mptcp`、`udp`、`udp-over-tcp`、`up`、`down`、`dialer-proxy`、`skip-cert-verify`、`name-cert-verify`、`interface-name`、`routing-mark`、`ip-version` 覆盖写入每个成员的 Mihomo 代理映射，随后走与手写代理相同的字段映射。该类型没有的覆盖字段与 Mihomo 一样被忽略（例如 vmess 成员上的 `up`），语义无法实现的取值只让对应成员失败（例如 `ip-version: ipv6`）。改名顺序为 `proxy-name`（`pattern` 正则替换为 `target`，`$1` 引用捕获组，按列表依次执行）、`additional-prefix`、`additional-suffix`。`pattern` 使用 Rust `regex` 语法，不支持环视与反向引用。kerlico 原生成员（带 `tag`/`options`）只接受改名项，设置字段覆盖会报错；`override-expr` 不支持。
 
 ## 作为客户端
 

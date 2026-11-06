@@ -86,18 +86,17 @@ fn every_mihomo_type_compiles_through_the_real_registry_with_expected_options() 
 }
 
 #[test]
-fn unknown_mihomo_field_fails_config_loading_naming_proxy_and_field() {
+fn unimplemented_mihomo_fields_warn_or_fail_the_referenced_proxy() {
     let dir = Directory::new();
     let body = "    type: vmess\n    server: v.example.com\n    port: 443\n    uuid: 11111111-2222-3333-4444-555555555555\n    network: ws\n    ws-opts:\n      path: /ws\n      bogus-key: 1\n";
-    let path = dir.write("bad.yaml", &single("vmess-bad", body));
+    let path = dir.write("bad.yaml", &single("vmess-warn", body));
     let out = kerlico(&["check"], &path);
     let stderr = text(&out.stderr);
-    assert!(!out.status.success());
+    assert!(out.status.success(), "{stderr}");
     assert!(
-        stderr.contains("vmess-bad") && stderr.contains("ws-opts.bogus-key"),
+        stderr.contains("vmess-warn") && stderr.contains("ws-opts.bogus-key"),
         "{stderr}"
     );
-    assert!(!stderr.contains("[untranslated detail]"), "{stderr}");
 
     let body = "    type: trojan\n    server: t.example.com\n    port: 443\n    password: pw\n    client-fingerprint: chrome\n";
     let path = dir.write("fp.yaml", &single("trojan-fp", body));
@@ -108,6 +107,31 @@ fn unknown_mihomo_field_fails_config_loading_naming_proxy_and_field() {
         stderr.contains("trojan-fp") && stderr.contains("client-fingerprint"),
         "{stderr}"
     );
+    assert!(!stderr.contains("[untranslated detail]"), "{stderr}");
+}
+
+#[test]
+fn real_world_subscription_with_override_compiles_through_the_real_registry() {
+    let dir = Directory::new();
+    let members = dir.write(
+        "sub.yaml",
+        "proxies:\n  - {name: ss-hk, type: ss, server: 203.0.113.10, port: 8388, cipher: aes-256-gcm, password: pw, udp: true, client-fingerprint: chrome}\n  - {name: vmess-jp, type: vmess, server: vm.example.com, port: 443, uuid: 11111111-2222-3333-4444-555555555555, alterId: 0, cipher: auto, tls: true, servername: vm.example.com, network: ws, ws-opts: {path: /ray, headers: {Host: vm.example.com}}}\n  - {name: vless-us, type: vless, server: vl.example.com, port: 443, uuid: 11111111-2222-3333-4444-555555555555, flow: xtls-rprx-vision, tls: true, servername: www.example.com, client-fingerprint: chrome, reality-opts: {public-key: q4Rh2Xb8Q0Gx7sVfS0bE8Zx6c1mI2wN5yL3kJ9pTqWc, short-id: 0123abcd}}\n  - {name: trojan-sg, type: trojan, server: t.example.com, port: 443, password: pw, sni: t.example.com, alpn: [h2, http/1.1]}\n  - {name: hy2-tw, type: hysteria2, server: h2.example.com, port: 443, ports: 20000-30000, password: pw, sni: h2.example.com, obfs: salamander, obfs-password: salamander-pw}\n  - {name: tuic-kr, type: tuic, server: tu.example.com, port: 443, uuid: 11111111-2222-3333-4444-555555555555, password: pw, alpn: [h3], congestion-controller: bbr, udp-relay-mode: native, reduce-rtt: true}\n  - {name: ech-de, type: trojan, server: e.example.com, port: 443, password: pw, ech-opts: {enable: true, config: AEn+DQBF}}\n",
+    );
+    let config = format!(
+        "proxy-providers:\n  sub:\n    type: file\n    path: {}\n    override:\n      udp: true\n      skip-cert-verify: true\n      up: 100 Mbps\n      down: 500 Mbps\nproxy-groups:\n  - name: auto\n    type: select\n    use: [sub]\nrules:\n  - MATCH,auto\n",
+        serde_json::to_string(members.to_str().unwrap()).unwrap()
+    );
+    let path = dir.write("providers.yaml", &config);
+    let out = kerlico(&["check"], &path);
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("ech-de") && stderr.contains("ech-opts"),
+        "{stderr}"
+    );
+    for warned in ["trojan-sg", "tuic-kr"] {
+        assert!(stderr.contains(warned), "{warned}: {stderr}");
+    }
 }
 
 #[test]
