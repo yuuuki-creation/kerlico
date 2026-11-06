@@ -54,6 +54,7 @@ CASES = [
     {"name": "udp-tls-crypt-aes256-certificate", "proto": "udp", "wrap": "crypt", "cipher": "AES-256-GCM", "auth": "certificate", "ipv6": True, "server": ["keepalive 2 10"], "restart": True},
     {"name": "tcp-tls-auth-aes128-certificate-and-password", "proto": "tcp", "wrap": "auth", "cipher": "AES-128-GCM", "auth": "both"},
     {"name": "udp-plain-chacha-password-only", "proto": "udp", "wrap": None, "cipher": "CHACHA20-POLY1305", "auth": "password"},
+    {"name": "udp-tls-crypt-v2-certificate", "proto": "udp", "wrap": "crypt-v2", "cipher": "AES-256-GCM", "auth": "certificate"},
     {"name": "legacy-2.4-prf-key-derivation", "image": "legacy", "proto": "udp", "wrap": "crypt", "cipher": "AES-256-GCM", "auth": "certificate"},
     {"name": "server-initiated-rekey", "proto": "udp", "wrap": "crypt", "cipher": "AES-256-GCM", "auth": "certificate", "server": ["keepalive 2 10", "reneg-sec 8", "tran-window 4"], "rekey": True},
     {"name": "client-initiated-rekey", "proto": "tcp", "wrap": "crypt", "cipher": "AES-256-GCM", "auth": "certificate", "server": ["keepalive 2 10", "reneg-sec 0", "tran-window 4"],"client": {"reneg_secs": 8}, "rekey": True},
@@ -113,6 +114,8 @@ def server_config(case, label):
         lines.append("server-ipv6 fd42:8::/64")
     if case["wrap"] == "crypt":
         lines.append("tls-crypt /keys/static.key")
+    elif case["wrap"] == "crypt-v2":
+        lines.append("tls-crypt-v2 /keys/v2-server.key")
     elif case["wrap"] == "auth":
         lines.append("tls-auth /keys/static.key 0")
     if case["auth"] in ["password", "both"]:
@@ -137,6 +140,8 @@ def client_options(case, root, address):
     key = (root / "static.key").read_text()
     if case["wrap"] == "crypt":
         options["tls_crypt_key"] = key
+    elif case["wrap"] == "crypt-v2":
+        options["tls_crypt_v2"] = (root / "v2-client.key").read_text()
     elif case["wrap"] == "auth":
         options["tls_auth"] = {"key": key, "direction": 1}
     options["verify_x509_name"] = "server"
@@ -308,6 +313,10 @@ def main():
     root.mkdir(parents=True, exist_ok=True)
     create_pki(root)
     images = {label: build_image(root, label) for label in IMAGES}
+    # 客户端 tls-crypt-v2 密钥由官方 openvpn 生成，检验 kerlico 按上游格式读取 WKc。
+    run(["docker", "run", "--rm", "--mount", f"type=bind,src={root},dst=/keys", images["current"], "sh", "-c",
+         "cd /keys && openvpn --genkey tls-crypt-v2-server v2-server.key && openvpn --tls-crypt-v2 v2-server.key --genkey tls-crypt-v2-client v2-client.key && chmod 644 v2-*.key"],
+        root / "pki.log")
     versions = {label: subprocess.check_output(["docker", "run", "--rm", tag, "sh", "-c", "openvpn --version | head -1 || true"], timeout=60).decode().strip() for label, tag in images.items()}
     results = {}
     for case in CASES:
