@@ -27,7 +27,7 @@
 | `certificate` | 根级附加信任证书配置（`certificate_path`），默认空 |
 | `certificate_providers` | 命名证书提供者数组（支持 `acme` 及 Cloudflare DNS-01 质询配置），默认空 |
 | `route` / `rule_providers` | 扩展路由对象（含 `rules`、`rule_set`、`balancers`、`final`、`auto_detect_interface`、`default_interface`、`default_mark`）与外部/内联规则集提供者映射 |
-| `sniffer` / `fakedns` / `tun` / `cache_file` / `profile` / `experimental` | 全局首包协议嗅探、顶层 FakeDNS 池、顶层 TUN 入口、选中节点（`store-selected`）与 Fake-IP 缓存持久化配置 |
+| `sniffer` / `fakedns` / `tun` / `cache_file` / `profile` / `experimental` | 全局首包协议嗅探、顶层 FakeDNS 池、顶层 TUN 入口、选中节点（`store-selected`）与 Fake-IP 缓存持久化配置；两者共用 `cache_file.path`（默认 `cache.db`），JSON 文件中 `selected` 与 `fakeip` 各占一个顶层分区，互不覆盖 |
 | `geodata_mode` / `geodata_loader` / `geosite_matcher` / `geo_auto_update` / `geo_update_interval` / `geox_url` / `etag_support` | GeoIP / GeoSite 数据库加载模式、自动更新与 HTTP ETag 缓存配置 |
 | `interface_name` / `routing_mark` / `disable_keep_alive` / `keep_alive_idle` / `keep_alive_interval` | 全局默认出站绑定网卡与套接字选项，可被单条出站 `dialer` / `sockopt` 覆盖 |
 

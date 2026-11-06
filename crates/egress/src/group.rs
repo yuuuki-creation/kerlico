@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -61,12 +61,6 @@ pub struct StructuredLogEntry {
     #[serde(rename = "type")]
     pub level: String,
     pub payload: String,
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct PersistedSelections {
-    #[serde(default)]
-    selected: BTreeMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -144,17 +138,17 @@ impl ControlPlane {
             );
         }
 
-        let persisted = store_selected_path
+        let persisted: BTreeMap<String, String> = store_selected_path
             .as_deref()
-            .and_then(|p| std::fs::read(p).ok())
-            .and_then(|b| serde_json::from_slice::<PersistedSelections>(&b).ok())
+            .and_then(|p| {
+                kerlico_dns::cache_file::load(Path::new(p), kerlico_dns::cache_file::SELECTED)
+            })
             .unwrap_or_default();
 
         let mut groups = BTreeMap::new();
         for g in compiled_groups {
             let id = g.id.clone();
             let restored = persisted
-                .selected
                 .get(id.as_str())
                 .and_then(|s| OutId::parse(s).ok())
                 .filter(|cand| g.candidates.contains(cand));
@@ -503,15 +497,7 @@ impl ControlPlane {
                 map.insert(id.to_string(), sel.to_string());
             }
         }
-        let store = PersistedSelections { selected: map };
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(bytes) = serde_json::to_vec(&store) {
-            let _ = std::fs::write(path, bytes);
-        }
+        let _ = kerlico_dns::cache_file::store(path, kerlico_dns::cache_file::SELECTED, &map);
     }
 
     pub fn register_active_connection(&self, conn: ActiveConnection) {

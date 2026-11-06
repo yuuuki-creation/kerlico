@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -217,8 +217,8 @@ impl FakeIpPool {
             v6_lru: VecDeque::new(),
         };
         if let Some(path) = &persistence_path
-            && let Ok(bytes) = std::fs::read(path)
-            && let Ok(persisted) = serde_json::from_slice::<PersistedFakeIpStore>(&bytes)
+            && let Some(persisted) =
+                crate::cache_file::load::<PersistedFakeIpStore>(path, crate::cache_file::FAKEIP)
         {
             if let Some(r4) = v4_range {
                 for (dom, ip) in persisted.v4 {
@@ -403,18 +403,8 @@ impl FakeIpPool {
                 .map(|(k, v)| (k.clone(), *v))
                 .collect(),
         };
-        let _ = write_json_atomic(path, &store);
+        let _ = crate::cache_file::store(path, crate::cache_file::FAKEIP, &store);
     }
-}
-
-fn write_json_atomic(path: &Path, store: &PersistedFakeIpStore) -> std::io::Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    let data = serde_json::to_vec(store).map_err(std::io::Error::other)?;
-    std::fs::write(path, data)
 }
 
 fn touch_lru(queue: &mut VecDeque<String>, key: &str) {

@@ -1,5 +1,6 @@
 //! 为 `Local` 路径与内部 DNS 处理解析网站域名：支持静态 `hosts`、UDP/TCP/DoT/DoH、Fake-IP 双栈地址池、DNS 规则动作与反向映射。
 
+pub mod cache_file;
 pub mod fakeip;
 pub use fakeip::{CacheFileSpec, FakeDnsInput, FakeDnsPoolSpec, FakeIpPool, ReverseMappingCache};
 
