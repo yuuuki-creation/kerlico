@@ -37,11 +37,10 @@ impl ShadowsocksOutbound {
         let dialer = kerlico_core::current_compile_dialer();
         let connector = match (connector, prepared.plugin) {
             (Some(c), _) => Some(c),
-            (None, Some((name, opts))) => Some(crate::plugin::PluginConnector::new(
-                name,
-                opts,
-                dialer.clone(),
-            )? as Arc<dyn StreamConnector>),
+            (None, Some(plugin)) => {
+                Some(crate::plugin::PluginConnector::new(plugin, dialer.clone())
+                    as Arc<dyn StreamConnector>)
+            }
             (None, None) => None,
         };
         let has_udp = connector.is_none()

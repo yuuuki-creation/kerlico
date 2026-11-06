@@ -18,7 +18,14 @@
 {"method":"aes-128-gcm","multiplex":{"enabled":true,"padding":false}}
 ```
 
-每个 IPv4/IPv6 节点独立配置，凭据隔离同时覆盖明文密码与实际派生 key，拒绝跨节点复用。非 `none` 密码不能为空，UTF-8 长度上限 4096 字节；出站可选配置 `plugin`（`obfs`、`v2ray-plugin`、`gost-plugin`、`kcptun`、`restls`、`jls`）与 `plugin-opts` / `plugin-opts-*` 插件参数，其余未知字段直接拒绝。
+每个 IPv4/IPv6 节点独立配置，凭据隔离同时覆盖明文密码与实际派生 key，拒绝跨节点复用。非 `none` 密码不能为空，UTF-8 长度上限 4096 字节；出站可选配置 `plugin` 与 `plugin-opts` / `plugin-opts-*` 插件参数，其余未知字段直接拒绝。
+
+内建插件（客户端）：
+
+- `obfs` / `obfs-local` / `simple-obfs`：仅 `mode: http`，参数 `host`、`path`（别名 `obfs-host`、`obfs-uri`）。首包附加 HTTP 请求头，剥离首个 HTTP 响应头。
+- `v2ray-plugin` / `gost-plugin`：仅 `mode: websocket`，参数 `host`、`path`、`tls`、`headers`、`v2ray-http-upgrade`。默认 RFC 6455 WebSocket，负载按二进制帧收发；`v2ray-http-upgrade` 改用 HTTP Upgrade 原始流并要求 101 响应；`tls` 在同一条 TCP 连接上以 `host`（缺省为服务器地址）做 SNI 并校验证书。
+
+其他插件名（`kcptun`、`restls`、`jls`、`shadow-tls` 等）、`obfs` 的 `tls` 模式，以及 `mux`、`skip-cert-verify`、`fingerprint`、`ech`、`v2ray-http-upgrade-fast-open` 或任何未列出的参数，在配置编译期报错，不会退回明文 TCP。
 
 ## 支持方法范围
 

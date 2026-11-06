@@ -127,7 +127,7 @@ pub(crate) struct PreparedClient {
     pub target: Destination,
     pub uot_version: Option<u8>,
     pub multiplex: Option<kerlico_net::sing_mux::SingMuxOutboundConfig>,
-    pub plugin: Option<(String, crate::plugin::PluginOpts)>,
+    pub plugin: Option<crate::plugin::Plugin>,
 }
 pub(crate) fn client(options: ClientOptions) -> Result<PreparedClient> {
     for k in options.extra_plugin_opts.keys() {
@@ -135,21 +135,20 @@ pub(crate) fn client(options: ClientOptions) -> Result<PreparedClient> {
             return Err(Error::Config("Shadowsocks 出站字段不合法".into()));
         }
     }
-    let plugin = if let Some(plugin_name) = options.plugin {
+    let has_opts = options.plugin_opts.is_some() || !options.extra_plugin_opts.is_empty();
+    let plugin = match options.plugin {
+        Some(name) => Some(name),
+        None if has_opts => Some("obfs".to_owned()),
+        None => None,
+    }
+    .map(|name| {
         let opts = crate::plugin::PluginOpts::from_value_and_flattened(
             options.plugin_opts.as_ref(),
             &options.extra_plugin_opts,
         )?;
-        Some((plugin_name, opts))
-    } else if options.plugin_opts.is_some() || !options.extra_plugin_opts.is_empty() {
-        let opts = crate::plugin::PluginOpts::from_value_and_flattened(
-            options.plugin_opts.as_ref(),
-            &options.extra_plugin_opts,
-        )?;
-        Some(("obfs".to_owned(), opts))
-    } else {
-        None
-    };
+        crate::plugin::Plugin::parse(&name, opts)
+    })
+    .transpose()?;
     let target = Destination::new(&options.server, options.port)?;
     let config = server(
         ServerAddr::DomainName(target.host(), target.port()),

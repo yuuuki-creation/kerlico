@@ -4701,16 +4701,21 @@ dependencies = [
 name = "kerlico-shadowsocks"
 version = "1.12.0"
 dependencies = [
+ "base64 0.23.1",
  "bytes",
+ "futures-util",
+ "http",
  "kerlico-config",
  "kerlico-core",
  "kerlico-egress",
  "kerlico-net",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "shadowsocks",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

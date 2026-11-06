@@ -15,6 +15,11 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 bytes.workspace = true
+base64.workspace = true
+rand.workspace = true
+http.workspace = true
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
 shadowsocks = { version = "=1.25.0", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "aead-cipher-extra", "stream-cipher", "security-replay-attack-detect"] }
 
 [lints]
