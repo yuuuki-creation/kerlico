@@ -38,8 +38,8 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `bbr-profile` | BBR 预设，默认 standard |  |  | 有 | 部分 | 通过 | 取值：`aggressive`、`conservative`、`standard` |
 | `brutal-disable-loss-compensation` | QUIC 调整字段，文档未写 |  |  | 实验 | 未实现 | 未测 |  |
-| `brutal-down` | 下载速率，默认 0 |  |  | 有 | 已实现 | 通过 | 约束：不能低于 65535 bps |
-| `brutal-up` | 上传速率 |  |  | 有 | 已实现 | 通过 | 取值：`1 tbps`、`100 mbps`、`1000000`、`100kb`、`1g`、`20 mb`<br>约束：不能低于 65535 bps<br>约束：客户端 0 用 BBR<br>约束：服务端值限制客户端，0 不限 |
+| `brutal-down` | 下载速率，默认 0 |  |  | 有 | 部分 | 未测 | 约束：不能低于 65535 bps |
+| `brutal-up` | 上传速率 |  |  | 有 | 部分 | 未测 | 取值：`1 tbps`、`100 mbps`、`1000000`、`100kb`、`1g`、`20 mb`<br>约束：不能低于 65535 bps<br>约束：客户端 0 用 BBR<br>约束：服务端值限制客户端，0 不限 |
 | `congestion` | 拥塞控制 |  |  | 有 | 部分 | 通过 | 取值：`bbr`、`brutal`、`force-brutal`、`reno`<br>约束：Hysteria 默认 brutal；XHTTP H3 与 MASQUE 默认 bbr<br>约束：MASQUE 的 brutal 按 bbr 运行<br>约束：XHTTP H3 不能用 brutal，可用 force-brutal<br>约束：force-brutal 需 brutalUp |
 | `debug` | 启用拥塞日志 |  |  | 有 | 未实现 | 未测 |  |
 | `disable-chrome-parrot` | QUIC 调整字段，文档未写 |  |  | 实验 | 未实现 | 未测 |  |
@@ -53,7 +53,7 @@
 | `max-idle-timeout` | 最长空闲秒，默认 30，范围 4-120 |  |  | 有 | 部分 | 通过 |  |
 | `max-incoming-streams` | 服务端参数，不得小于 8 |  |  | 有 | 部分 | 通过 |  |
 | `max-stream-receive-window` | QUIC 窗口参数 |  |  | 有 | 未实现 | 未测 | 约束：建议流窗口与连接窗口 2:5<br>约束：至少 16384（source:infra/conf/transport_finalmask.go） |
-| `udp-hop` | UDP 端口跳跃 |  |  | 有 | 已实现 | 通过 | 取值：`interval`、`ports`<br>约束：interval 至少 5，默认 30 |
+| `udp-hop` | UDP 端口跳跃 |  |  | 有 | 部分 | 未测 | 取值：`interval`、`ports`<br>约束：interval 至少 5，默认 30 |
 
 ## finalmask-tcp-filter
 
@@ -183,10 +183,10 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `interval` | 跳变间隔秒 |  |  | 有 | 已实现 | 通过 |  |
-| `mode` | 逗号分隔 |  |  | 有 | 已实现 | 通过 | 取值：`intervallocal`、`intervallocal,intervalremote`、`intervalremote`、`perconnremote`<br>约束：intervallocal 仅 wireguard、hysteria、xhttp h3<br>约束：intervalremote、perconnremote 需 iptables 或 nftables |
-| `remote-ips` | 远端 IP，支持 CIDR |  |  | 有 | 已实现 | 通过 | 约束：仅 mode 含 intervalremote 或 perconnremote<br>约束：未填继承上层 |
-| `remote-ports` | 远端端口 |  |  | 有 | 已实现 | 通过 | 约束：仅 mode 含 intervalremote 或 perconnremote<br>约束：未填继承上层 |
+| `interval` | 跳变间隔秒 |  |  | 有 | 部分 | 未测 |  |
+| `mode` | 逗号分隔 |  |  | 有 | 未实现 | 未测 | 取值：`intervallocal`、`intervallocal,intervalremote`、`intervalremote`、`perconnremote`<br>约束：intervallocal 仅 wireguard、hysteria、xhttp h3<br>约束：intervalremote、perconnremote 需 iptables 或 nftables |
+| `remote-ips` | 远端 IP，支持 CIDR |  |  | 有 | 未实现 | 未测 | 约束：仅 mode 含 intervalremote 或 perconnremote<br>约束：未填继承上层 |
+| `remote-ports` | 远端端口 |  |  | 有 | 部分 | 未测 | 约束：仅 mode 含 intervalremote 或 perconnremote<br>约束：未填继承上层 |
 
 ## finalmask-udp-xdns
 
@@ -292,18 +292,18 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `hysteria` | Hysteria2 QUIC 传输，搭配 hysteria 协议时兼容官方实现 |  |  | 有 | 已实现 | 通过 | 取值：`hysteria` |
-| `combo` | Hysteria 传输组合 |  |  | 有 | 部分 | 通过 | security：`tls`<br>masquerade：`404`、`file`、`proxy`、`string`<br>congestion：`bbr`、`brutal`、`force-brutal`、`reno`<br>obfs：`gecko`、`none`、`salamander`<br>port_hop：`finalmask udphop`、`off`、`quicParams.udpHop`<br>protocol：`http`、`hysteria`、`shadowsocks`、`socks`、`trojan`、`vless`、`vmess`<br>约束：hysteria 协议配其他传输不能代理 UDP<br>约束：udphop intervallocal 支持 hysteria<br>约束：必须 tls<br>约束：默认拥塞 brutal |
+| `combo` | Hysteria 传输组合 |  |  | 有 | 部分 | 未测 | security：`tls`<br>masquerade：`404`、`file`、`proxy`、`string`<br>congestion：`bbr`、`brutal`、`force-brutal`、`reno`<br>obfs：`gecko`、`none`、`salamander`<br>port_hop：`finalmask udphop`、`off`、`quicParams.udpHop`<br>protocol：`http`、`hysteria`、`shadowsocks`、`socks`、`trojan`、`vless`、`vmess`<br>约束：hysteria 协议配其他传输不能代理 UDP<br>约束：udphop intervallocal 支持 hysteria<br>约束：必须 tls<br>约束：默认拥塞 brutal |
 | `auth` | 认证密码，两端一致 |  |  | 有 | 已实现 | 通过 | 约束：搭配 hysteria inbound 时被 users 覆盖 |
-| `content` | string 类型内容 |  |  | 有 | 已实现 | 通过 |  |
+| `content` | string 类型内容 |  |  | 有 | 部分 | 未测 |  |
 | `dir` | file 类型目录 |  |  | 有 | 未实现 | 未测 |  |
-| `headers` | string 类型响应头 |  |  | 有 | 已实现 | 通过 |  |
-| `insecure` | proxy 类型跳过证书校验 |  |  | 有 | 已实现 | 通过 |  |
-| `masquerade` | HTTP/3 页面伪装 |  |  | 有 | 部分 | 通过 |  |
-| `rewrite-host` | proxy 类型改写 Host |  |  | 有 | 已实现 | 通过 |  |
-| `status-code` | string 类型状态码 |  |  | 有 | 已实现 | 通过 |  |
-| `type` | 伪装类型，不填默认 404 |  |  | 有 | 部分 | 通过 | 取值：`file`、`proxy`、`string` |
+| `headers` | string 类型响应头 |  |  | 有 | 部分 | 未测 |  |
+| `insecure` | proxy 类型跳过证书校验 |  |  | 有 | 未实现 | 未测 |  |
+| `masquerade` | HTTP/3 页面伪装 |  |  | 有 | 部分 | 未测 |  |
+| `rewrite-host` | proxy 类型改写 Host |  |  | 有 | 未实现 | 未测 |  |
+| `status-code` | string 类型状态码 |  |  | 有 | 部分 | 未测 |  |
+| `type` | 伪装类型，不填默认 404 |  |  | 有 | 部分 | 未测 | 取值：`file`、`proxy`、`string` |
 | `udp-idle-timeout` | QUIC native UDP 空闲秒，默认 60 |  |  | 有 | 部分 | 通过 | 约束：源码范围 2-600（source:infra/conf/transport_method.go） |
-| `url` | proxy 类型目标 |  |  | 有 | 已实现 | 通过 |  |
+| `url` | proxy 类型目标 |  |  | 有 | 未实现 | 未测 |  |
 | `version` | 版本 |  |  | 有 | 已实现 | 通过 | 取值：`2`<br>约束：必须为 2 |
 | `x-forwarded` | proxy 类型 X-Forwarded 头，文档未写 |  |  | 有 | 未实现 | 未测 |  |
 
@@ -425,7 +425,7 @@
 | `method` | 传输方式，默认 raw |  |  | 有 | 部分 | 通过 | 取值：`grpc`、`httpupgrade`、`hysteria`、`masque`、`mkcp`、`raw`、`websocket`、`xhttp`<br>约束：源码别名：network 同 method；tcp 同 raw；splithttp 同 xhttp；kcp 同 mkcp；ws 同 websocket（source:infra/conf/transport_internet.go） |
 | `network` | method 的旧名 |  |  | 有 | 不适用 | 未测 |  |
 | `raw-settings` | raw 传输配置 |  |  | 有 | 部分 | 通过 | 约束：仅当 method 为 raw 时有效 |
-| `sockopt` | 底层网络行为配置 |  |  | 有 | 部分 | 通过 |  |
+| `sockopt` | 底层网络行为配置 |  |  | 有 | 部分 | 未测 |  |
 | `splithttp-settings` | xhttpSettings 的旧名 |  |  | 有 | 不适用 | 未测 |  |
 | `tcp-settings` | rawSettings 的旧名 |  |  | 有 | 不适用 | 未测 |  |
 | `ws-settings` | websocket 传输配置 |  |  | 有 | 已实现 | 通过 | 约束：仅当 method 为 websocket 时有效 |
@@ -468,7 +468,7 @@
 | `headers-host` | headers 内写 host |  |  | 废弃 | 不适用 | 未测 | 约束：改用独立 host 字段 |
 | `heartbeat-period` | Ping 保活间隔秒，默认不发 |  |  | 有 | 部分 | 通过 |  |
 | `host` | Host，默认空 |  |  | 有 | 已实现 | 通过 | 约束：客户端优先级 host > headers > address<br>约束：服务端值为空不校验 |
-| `max-early-data` | Early Data 首包长度阈值 | 有 | 有 |  | 部分 | 通过 | 取值：`整数`<br>约束：默认启用。 |
+| `max-early-data` | Early Data 首包长度阈值 | 有 | 有 |  | 部分 | 未测 | 取值：`整数`<br>约束：默认启用。 |
 | `path` | 请求路径 | 有 | 有 | 有 | 已实现 | 通过 | 取值：`/`、`/mypath?ed=2560`、`路径`<br>约束：ed 启用 Early Data，经 Sec-WebSocket-Protocol，推荐 2560，最大 8192 |
 | `type` | 类型字段 |  | 有 |  | 已实现 | 通过 |  |
 | `v2ray-http-upgrade` | 使用 http upgrade | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
@@ -489,7 +489,7 @@
 | `s3` | XDRIVE 字段，文档未写 |  |  | 实验 | 已实现 | 通过 | 取值：`bucket`、`endpoint`、`pathStyle`、`region` |
 | `secrets` | XDRIVE 字段，文档未写 |  |  | 实验 | 已实现 | 通过 | 约束：google-drive 需 3 个 secrets |
 | `segment-bytes` | XDRIVE 字段，文档未写 |  |  | 实验 | 已实现 | 通过 |  |
-| `service` | XDRIVE 字段，文档未写 |  |  | 实验 | 已实现 | 通过 | 取值：`google-drive`、`local`、`s3`、`template` |
+| `service` | XDRIVE 字段，文档未写 |  |  | 实验 | 部分 | 未测 | 取值：`google-drive`、`local`、`s3`、`template` |
 | `session-ttl-seconds` | XDRIVE 字段，文档未写 |  |  | 实验 | 已实现 | 通过 |  |
 | `template` | XDRIVE 字段，文档未写 |  |  | 实验 | 已实现 | 通过 |  |
 | `xmux` | XDRIVE 字段，文档未写 |  |  | 实验 | 未实现 | 未测 |  |
@@ -539,34 +539,34 @@
 | `reuse-settings-h-max-reusable-secs` | 连接持续该时间后不分配新请求 | 有 |  |  | 部分 | 通过 | 取值：`1800-3000` |
 | `reuse-settings-max-concurrency` | 每底层连接最多并发代理请求 | 有 |  |  | 部分 | 通过 | 取值：`16-32`<br>约束：与 max-connections 二选一 |
 | `reuse-settings-max-connections` | 最多同时连接数 | 有 |  |  | 部分 | 通过 | 取值：`0`<br>约束：与 max-concurrency 二选一 |
-| `sc-max-buffered-posts` | packet-up，仅服务端，单请求缓存 POST 数，默认 30，超限断连 |  |  | 有 | 部分 | 通过 |  |
-| `sc-max-each-post-bytes` | 每 POST 最大字节，默认 1000000 | 有 |  | 有 | 部分 | 通过 | 取值：`整数`<br>约束：服务端拒绝大于该值的 POST |
+| `sc-max-buffered-posts` | packet-up，仅服务端，单请求缓存 POST 数，默认 30，超限断连 |  |  | 有 | 部分 | 未测 |  |
+| `sc-max-each-post-bytes` | 每 POST 最大字节，默认 1000000 | 有 |  | 有 | 部分 | 未测 | 取值：`整数`<br>约束：服务端拒绝大于该值的 POST |
 | `sc-min-posts-interval-ms` | POST 最小间隔，默认 30 毫秒 | 有 |  | 有 | 已实现 | 通过 | 取值：`整数` |
-| `sc-stream-up-server-secs` | stream-up，仅服务端，保活间隔，默认 20-80 |  |  | 有 | 已实现 | 通过 | 取值：`-1`、`20-80`<br>约束：-1 关闭保活 |
+| `sc-stream-up-server-secs` | stream-up，仅服务端，保活间隔，默认 20-80 |  |  | 有 | 部分 | 未测 | 取值：`-1`、`20-80`<br>约束：-1 关闭保活 |
 | `seq-key` | 序列号键名 | 有 |  | 有 | 已实现 | 通过 | 取值：`字符串`<br>约束：placement 为 path 时不适用 |
 | `seq-placement` | 序列号位置 | 有 |  | 有 | 已实现 | 通过 | 取值：`cookie`、`header`、`path`、`query`<br>约束：session-placement 为 path 时也必须为 path |
 | `server-max-header-bytes` | 服务端最大请求头字节 |  |  | 有 | 未实现 | 未测 | 约束：不能为负 |
 | `session-idkey` | 会话 ID 键名，cookie/query 默认 x_session，header 默认 X-Session |  |  | 有 | 已实现 | 通过 |  |
-| `session-idlength` | 会话 ID 长度 Int32Range |  |  | 有 | 已实现 | 通过 | 约束：sessionIDTable 非空时 from 必须大于 0 |
+| `session-idlength` | 会话 ID 长度 Int32Range |  |  | 有 | 未实现 | 未测 | 约束：sessionIDTable 非空时 from 必须大于 0 |
 | `session-idplacement` | 会话 ID 位置，默认 path |  |  | 有 | 已实现 | 通过 | 取值：`cookie`、`header`、`path`、`query` |
-| `session-idtable` | 会话 ID 字符表 |  |  | 有 | 已实现 | 通过 | 取值：`ALPHABET`、`Alphabet`、`BASE36`、`Base62`、`HEX`、`alphabet`、`base36`、`hex`、`自定义 ASCII`<br>约束：必须 ASCII<br>约束：组合空间须不小于 2^31 |
+| `session-idtable` | 会话 ID 字符表 |  |  | 有 | 未实现 | 未测 | 取值：`ALPHABET`、`Alphabet`、`BASE36`、`Base62`、`HEX`、`alphabet`、`base36`、`hex`、`自定义 ASCII`<br>约束：必须 ASCII<br>约束：组合空间须不小于 2^31 |
 | `session-key` | 会话 ID 键名 | 有 |  |  | 已实现 | 通过 | 取值：`字符串`<br>约束：placement 为 path 时不适用 |
-| `session-length` | 会话 ID 长度范围 | 有 |  |  | 已实现 | 通过 | 取值：`16-32`<br>约束：仅 session-table 不为空或为 uuid 时生效<br>约束：起始值不可为 0，总 id 空间须大于 21 亿 |
+| `session-length` | 会话 ID 长度范围 | 有 |  |  | 未实现 | 未测 | 取值：`16-32`<br>约束：仅 session-table 不为空或为 uuid 时生效<br>约束：起始值不可为 0，总 id 空间须大于 21 亿 |
 | `session-placement` | 会话 ID 位置 | 有 |  |  | 已实现 | 通过 | 取值：`cookie`、`header`、`path`、`query` |
-| `session-table` | 会话 ID 字符表 | 有 |  |  | 已实现 | 通过 | 取值：``、`ALPHABET`、`Alphabet`、`BASE36`、`Base62`、`HEX`、`alphabet`、`base36`、`hex`、`number`、`uuid` |
+| `session-table` | 会话 ID 字符表 | 有 |  |  | 未实现 | 未测 | 取值：``、`ALPHABET`、`Alphabet`、`BASE36`、`Base62`、`HEX`、`alphabet`、`base36`、`hex`、`number`、`uuid` |
 | `source-xff` | 服务端接受 X-Forwarded-For 取真实 IP，受 sockopt.trustedXForwardedFor 约束 |  |  | 有 | 未实现 | 未测 |  |
 | `splithttp` | SplitHTTP 是 XHTTP 的旧名 |  |  | 有 | 不适用 | 未测 |  |
-| `uplink-chunk-size` | 上行块最大字节 | 有 |  | 有 | 已实现 | 通过 | 取值：`整数`<br>约束：仅 uplink-data-placement 不为 body<br>约束：最小 64；cookie 默认 3072，header 默认 4096 |
+| `uplink-chunk-size` | 上行块最大字节 | 有 |  | 有 | 部分 | 未测 | 取值：`整数`<br>约束：仅 uplink-data-placement 不为 body<br>约束：最小 64；cookie 默认 3072，header 默认 4096 |
 | `uplink-data-key` | 数据片段键基础名 | 有 |  | 有 | 已实现 | 通过 | 取值：`字符串` |
 | `uplink-data-placement` | 上行数据片段位置 | 有 |  | 有 | 已实现 | 通过 | 取值：`auto`、`body`、`cookie`、`header`<br>约束：cookie、header 仅 packet-up<br>约束：cookie、header 只能用于 packet-up |
 | `uplink-http-method` | 上行方法 | 有 |  |  | 已实现 | 通过 | 取值：`DELETE`、`PATCH`、`POST`、`PUT` |
 | `uplink-httpmethod` | 上行 HTTP 方法，默认 POST |  |  | 有 | 已实现 | 通过 | 取值：`GET`、`POST`、`任意方法`<br>约束：GET 只能用于 packet-up |
-| `x-padding-bytes` | 填充长度范围，默认 100-1000 | 有 |  | 有 | 部分 | 通过 | 取值：`100-1000`<br>约束：不能禁用，0 或负值报错 |
-| `x-padding-header` | 填充标头 | 有 |  | 有 | 已实现 | 通过 | 取值：`Referer`<br>约束：仅 placement 为 header、queryInHeader |
-| `x-padding-key` | 填充键名 | 有 |  | 有 | 已实现 | 通过 | 取值：`x_padding` |
-| `x-padding-method` | 填充生成方式 | 有 |  | 有 | 已实现 | 通过 | 取值：`repeat-x`、`tokenish` |
-| `x-padding-obfs-mode` | 填充混淆，默认 false | 有 |  | 有 | 已实现 | 通过 | 取值：`false`、`true` |
-| `x-padding-placement` | 填充位置 | 有 |  | 有 | 已实现 | 通过 | 取值：`cookie`、`header`、`query`、`queryInHeader`<br>约束：仅 x-padding-obfs-mode 为 true |
+| `x-padding-bytes` | 填充长度范围，默认 100-1000 | 有 |  | 有 | 部分 | 未测 | 取值：`100-1000`<br>约束：不能禁用，0 或负值报错 |
+| `x-padding-header` | 填充标头 | 有 |  | 有 | 部分 | 未测 | 取值：`Referer`<br>约束：仅 placement 为 header、queryInHeader |
+| `x-padding-key` | 填充键名 | 有 |  | 有 | 部分 | 未测 | 取值：`x_padding` |
+| `x-padding-method` | 填充生成方式 | 有 |  | 有 | 部分 | 未测 | 取值：`repeat-x`、`tokenish` |
+| `x-padding-obfs-mode` | 填充混淆，默认 false | 有 |  | 有 | 部分 | 未测 | 取值：`false`、`true` |
+| `x-padding-placement` | 填充位置 | 有 |  | 有 | 部分 | 未测 | 取值：`cookie`、`header`、`query`、`queryInHeader`<br>约束：仅 x-padding-obfs-mode 为 true |
 
 ## xmux
 

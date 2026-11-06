@@ -144,9 +144,9 @@
 | `convert-ruleset-behavior-format-source-target` | 转换规则集到 mrs | 有 |  |  | 未实现 | 未测 |  |
 | `generate-ech-keypair` | 生成 ECH 配置对 | 有 |  |  | 已实现 | 通过 |  |
 | `generate-reality-keypair` | 生成 REALITY 密钥对 | 有 |  |  | 已实现 | 通过 |  |
-| `generate-sudoku-keypair` | 生成 Sudoku 密钥对 | 有 |  |  | 已实现 | 通过 |  |
+| `generate-sudoku-keypair` | 生成 Sudoku 密钥对 | 有 |  |  | 已实现 | 未测 |  |
 | `generate-uuid` | 生成 UUID | 有 |  |  | 已实现 | 通过 |  |
-| `generate-vless-mlkem768` | 生成 vless encryption ML-KEM-768 | 有 |  |  | 已实现 | 通过 |  |
+| `generate-vless-mlkem768` | 生成 vless encryption ML-KEM-768 | 有 |  |  | 未实现 | 未测 |  |
 | `generate-vless-x25519` | 生成 vless encryption X25519 | 有 |  |  | 已实现 | 通过 |  |
 | `generate-wg-keypair` | 生成 WireGuard 密钥对 | 有 |  |  | 已实现 | 通过 |  |
 
@@ -170,20 +170,20 @@
 | `ext-ctl-tls` | 命令行标志 -ext-ctl-tls：覆盖 HTTPS API 地址 | 有 |  |  | 未实现 | 未测 | 取值：`-ext-ctl-tls` |
 | `ext-ctl-unix` | 命令行标志 -ext-ctl-unix：覆盖 Unix socket | 有 |  |  | 未实现 | 未测 | 取值：`-ext-ctl-unix` |
 | `ext-ui` | 命令行标志 -ext-ui：覆盖面板目录 | 有 |  |  | 未实现 | 未测 | 取值：`-ext-ui` |
-| `f` | 命令行标志 -f：配置文件；- 从标准输入读 | 有 |  |  | 部分 | 通过 | 取值：`-f` |
+| `f` | 命令行标志 -f：配置文件；- 从标准输入读 | 有 |  |  | 部分 | 未测 | 取值：`-f` |
 | `m` | 命令行标志 -m：geodata 模式 | 有 |  |  | 未实现 | 未测 | 取值：`-m` |
 | `post-down` | 命令行标志 -post-down：退出前脚本 | 有 |  |  | 未实现 | 未测 | 取值：`-post-down` |
 | `post-up` | 命令行标志 -post-up：启动后脚本 | 有 |  |  | 未实现 | 未测 | 取值：`-post-up` |
 | `secret` | 命令行标志 -secret：覆盖 secret | 有 |  |  | 未实现 | 未测 | 取值：`-secret` |
 | `t` | 命令行标志 -t：测试配置后退出 | 有 |  |  | 已实现 | 通过 | 取值：`-t` |
-| `v` | 命令行标志 -v：显示版本 | 有 |  |  | 已实现 | 通过 | 取值：`-v` |
+| `v` | 命令行标志 -v：显示版本 | 有 |  |  | 已实现 | 未测 | 取值：`-v` |
 
 ## format
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `format` | 格式化配置 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box format` |
-| `format-write` | format 的 --write：写回源文件 |  | 有 |  | 已实现 | 通过 | 取值：`--write`、`-w` |
+| `format` | 格式化配置 |  | 有 |  | 已实现 | 未测 | 取值：`sing-box format` |
+| `format-write` | format 的 --write：写回源文件 |  | 有 |  | 已实现 | 未测 | 取值：`--write`、`-w` |
 
 ## generate
 
@@ -196,8 +196,8 @@
 | `generate-rand-hex` | generate rand 的 --hex：十六进制输出 |  | 有 |  | 已实现 | 通过 | 取值：`--hex` |
 | `generate-reality-keypair` | 生成 REALITY 密钥对 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box generate reality-keypair` |
 | `generate-tailcat-keypair` | 生成 Tailcat 密钥对 |  | 有 |  | 未实现 | 未测 | 取值：`sing-box generate tailcat-keypair` |
-| `generate-tls-keypair` | 生成 TLS 自签密钥对 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box generate tls-keypair` |
-| `generate-tls-keypair-months` | generate tls-keypair 的 --months：有效月数 |  | 有 |  | 已实现 | 通过 | 取值：`--months`、`-m` |
+| `generate-tls-keypair` | 生成 TLS 自签密钥对 |  | 有 |  | 部分 | 未测 | 取值：`sing-box generate tls-keypair` |
+| `generate-tls-keypair-months` | generate tls-keypair 的 --months：有效月数 |  | 有 |  | 未实现 | 未测 | 取值：`--months`、`-m` |
 | `generate-uuid` | 生成 UUID |  | 有 |  | 已实现 | 通过 | 取值：`sing-box generate uuid` |
 | `generate-vapid-keypair` | 生成 VAPID 密钥对 |  | 有 |  | 未实现 | 未测 | 取值：`sing-box generate vapid-keypair` |
 | `generate-wg-keypair` | 生成 WireGuard 密钥对 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box generate wg-keypair` |
@@ -206,29 +206,29 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `geoip` | GeoIP 工具 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geoip` |
-| `geoip-export` | 导出国家为规则集 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geoip export` |
-| `geoip-export-output` | geoip export 的 --output：输出路径 |  | 有 |  | 已实现 | 通过 | 取值：`--output`、`-o` |
-| `geoip-file` | geoip 的 --file：geoip 文件，默认 geoip.db |  | 有 |  | 已实现 | 通过 | 取值：`--file`、`-f` |
-| `geoip-list` | 列出国家代码 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geoip list` |
-| `geoip-lookup` | 查询 IP 是否在 GeoIP 库中 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geoip lookup` |
+| `geoip` | GeoIP 工具 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geoip` |
+| `geoip-export` | 导出国家为规则集 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geoip export` |
+| `geoip-export-output` | geoip export 的 --output：输出路径 |  | 有 |  | 已实现 | 未测 | 取值：`--output`、`-o` |
+| `geoip-file` | geoip 的 --file：geoip 文件，默认 geoip.db |  | 有 |  | 部分 | 未测 | 取值：`--file`、`-f` |
+| `geoip-list` | 列出国家代码 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geoip list` |
+| `geoip-lookup` | 查询 IP 是否在 GeoIP 库中 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geoip lookup` |
 
 ## geosite
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `geosite` | Geosite 工具 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geosite` |
-| `geosite-export` | 导出分类为规则集 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geosite export` |
-| `geosite-export-output` | geosite export 的 --output：输出路径 |  | 有 |  | 已实现 | 通过 | 取值：`--output`、`-o` |
-| `geosite-file` | geosite 的 --file：geosite 文件，默认 geosite.db |  | 有 |  | 已实现 | 通过 | 取值：`--file`、`-f` |
-| `geosite-list` | 列出分类 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geosite list` |
-| `geosite-lookup` | 查询域名是否在 Geosite 中 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geosite lookup` |
+| `geosite` | Geosite 工具 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geosite` |
+| `geosite-export` | 导出分类为规则集 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geosite export` |
+| `geosite-export-output` | geosite export 的 --output：输出路径 |  | 有 |  | 已实现 | 未测 | 取值：`--output`、`-o` |
+| `geosite-file` | geosite 的 --file：geosite 文件，默认 geosite.db |  | 有 |  | 部分 | 未测 | 取值：`--file`、`-f` |
+| `geosite-list` | 列出分类 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geosite list` |
+| `geosite-lookup` | 查询域名是否在 Geosite 中 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geosite lookup` |
 
 ## global
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `config` | 全局选项：配置文件路径，可重复，stdin 读标准输入 |  | 有 |  | 部分 | 通过 | 取值：`--config`、`-c` |
+| `config` | 全局选项：配置文件路径，可重复，stdin 读标准输入 |  | 有 |  | 部分 | 未测 | 取值：`--config`、`-c` |
 | `config-directory` | 全局选项：配置目录路径，可重复 |  | 有 |  | 未实现 | 未测 | 取值：`--config-directory`、`-C` |
 | `directory` | 全局选项：工作目录 |  | 有 |  | 未实现 | 未测 | 取值：`--directory`、`-D` |
 | `disable-color` | 全局选项：关闭彩色输出 |  | 有 |  | 未实现 | 未测 | 取值：`--disable-color` |
@@ -237,7 +237,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `merge` | 合并配置 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box merge` |
+| `merge` | 合并配置 |  | 有 |  | 已实现 | 未测 | 取值：`sing-box merge` |
 
 ## netns-holder
 
@@ -249,32 +249,32 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `rule-set` | 规则集工具 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box rule-set` |
-| `rule-set-compile` | 把规则集 JSON 编译为二进制 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box rule-set compile` |
-| `rule-set-compile-output` | rule-set compile 的 --output：输出文件 |  | 有 |  | 已实现 | 通过 | 取值：`--output`、`-o` |
-| `rule-set-convert` | 把 AdGuard DNS 过滤器转为规则集 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box rule-set convert` |
-| `rule-set-convert-output` | rule-set convert 的 --output：输出文件 |  | 有 |  | 已实现 | 通过 | 取值：`--output`、`-o` |
-| `rule-set-convert-type` | rule-set convert 的 --type：源类型，可用 adguard |  | 有 |  | 已实现 | 通过 | 取值：`--type`、`-t` |
-| `rule-set-decompile` | 把二进制规则集反编译为 JSON |  | 有 |  | 已实现 | 通过 | 取值：`sing-box rule-set decompile` |
-| `rule-set-decompile-output` | rule-set decompile 的 --output：输出文件 |  | 有 |  | 已实现 | 通过 | 取值：`--output`、`-o` |
-| `rule-set-format` | 格式化规则集 JSON |  | 有 |  | 已实现 | 通过 | 取值：`sing-box rule-set format` |
-| `rule-set-format-write` | rule-set format 的 --write：写回源文件 |  | 有 |  | 已实现 | 通过 | 取值：`--write`、`-w` |
-| `rule-set-match` | 检查 IP 或域名是否匹配规则集 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box rule-set match` |
-| `rule-set-match-format` | rule-set match 的 --format：规则集格式，默认 source |  | 有 |  | 已实现 | 通过 | 取值：`--format`、`-f` |
-| `rule-set-merge` | 合并规则集源文件 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box rule-set merge` |
-| `rule-set-merge-config` | rule-set merge 的 --config：输入文件路径 |  | 有 |  | 已实现 | 通过 | 取值：`--config`、`-c` |
-| `rule-set-merge-config-directory` | rule-set merge 的 --config-directory：输入目录路径 |  | 有 |  | 已实现 | 通过 | 取值：`--config-directory`、`-C` |
-| `rule-set-upgrade` | 升级规则集 JSON |  | 有 |  | 已实现 | 通过 | 取值：`sing-box rule-set upgrade` |
-| `rule-set-upgrade-write` | rule-set upgrade 的 --write：写回源文件 |  | 有 |  | 已实现 | 通过 | 取值：`--write`、`-w` |
+| `rule-set` | 规则集工具 |  | 有 |  | 部分 | 未测 | 取值：`sing-box rule-set` |
+| `rule-set-compile` | 把规则集 JSON 编译为二进制 |  | 有 |  | 未实现 | 未测 | 取值：`sing-box rule-set compile` |
+| `rule-set-compile-output` | rule-set compile 的 --output：输出文件 |  | 有 |  | 未实现 | 未测 | 取值：`--output`、`-o` |
+| `rule-set-convert` | 把 AdGuard DNS 过滤器转为规则集 |  | 有 |  | 已实现 | 未测 | 取值：`sing-box rule-set convert` |
+| `rule-set-convert-output` | rule-set convert 的 --output：输出文件 |  | 有 |  | 部分 | 未测 | 取值：`--output`、`-o` |
+| `rule-set-convert-type` | rule-set convert 的 --type：源类型，可用 adguard |  | 有 |  | 已实现 | 未测 | 取值：`--type`、`-t` |
+| `rule-set-decompile` | 把二进制规则集反编译为 JSON |  | 有 |  | 未实现 | 未测 | 取值：`sing-box rule-set decompile` |
+| `rule-set-decompile-output` | rule-set decompile 的 --output：输出文件 |  | 有 |  | 未实现 | 未测 | 取值：`--output`、`-o` |
+| `rule-set-format` | 格式化规则集 JSON |  | 有 |  | 已实现 | 未测 | 取值：`sing-box rule-set format` |
+| `rule-set-format-write` | rule-set format 的 --write：写回源文件 |  | 有 |  | 已实现 | 未测 | 取值：`--write`、`-w` |
+| `rule-set-match` | 检查 IP 或域名是否匹配规则集 |  | 有 |  | 已实现 | 未测 | 取值：`sing-box rule-set match` |
+| `rule-set-match-format` | rule-set match 的 --format：规则集格式，默认 source |  | 有 |  | 已实现 | 未测 | 取值：`--format`、`-f` |
+| `rule-set-merge` | 合并规则集源文件 |  | 有 |  | 已实现 | 未测 | 取值：`sing-box rule-set merge` |
+| `rule-set-merge-config` | rule-set merge 的 --config：输入文件路径 |  | 有 |  | 已实现 | 未测 | 取值：`--config`、`-c` |
+| `rule-set-merge-config-directory` | rule-set merge 的 --config-directory：输入目录路径 |  | 有 |  | 已实现 | 未测 | 取值：`--config-directory`、`-C` |
+| `rule-set-upgrade` | 升级规则集 JSON |  | 有 |  | 部分 | 未测 | 取值：`sing-box rule-set upgrade` |
+| `rule-set-upgrade-write` | rule-set upgrade 的 --write：写回源文件 |  | 有 |  | 部分 | 未测 | 取值：`--write`、`-w` |
 
 ## run
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `confdir` | 多配置目录 |  |  | 有 | 已实现 | 通过 |  |
-| `config` | 配置源，可重复，别名 -c |  |  | 有 | 部分 | 通过 | 取值：`http+unix://`、`http://`、`https://`、`stdin:`、`本地路径`<br>约束：http+unix 为弃用前缀，改用 socket 路径（source:main/confloader/external/external.go）<br>约束：stdin 需关闭输入流<br>约束：未指定时查工作目录和资源路径的 config.json<br>约束：远程地址前缀须小写 |
-| `dump` | 输出合并后配置 |  |  | 有 | 已实现 | 通过 |  |
-| `format` | 配置格式，默认 auto |  |  | 有 | 已实现 | 通过 | 取值：`auto`、`json`、`protobuf`、`toml`、`yaml` |
+| `confdir` | 多配置目录 |  |  | 有 | 已实现 | 未测 |  |
+| `config` | 配置源，可重复，别名 -c |  |  | 有 | 部分 | 未测 | 取值：`http+unix://`、`http://`、`https://`、`stdin:`、`本地路径`<br>约束：http+unix 为弃用前缀，改用 socket 路径（source:main/confloader/external/external.go）<br>约束：stdin 需关闭输入流<br>约束：未指定时查工作目录和资源路径的 config.json<br>约束：远程地址前缀须小写 |
+| `dump` | 输出合并后配置 |  |  | 有 | 已实现 | 未测 |  |
+| `format` | 配置格式，默认 auto |  |  | 有 | 已实现 | 未测 | 取值：`auto`、`json`、`protobuf`、`toml`、`yaml` |
 | `http-unix` | -config 的 http+unix 前缀 |  |  | 废弃 | 不适用 | 未测 | 约束：改用 socket 路径，如 /path/socket.sock:/api |
 | `run` | 运行服务 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box run` |
 | `test` | 只测试配置 |  |  | 有 | 已实现 | 通过 |  |
@@ -290,7 +290,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `cert` | 生成 TLS 证书 |  |  | 有 | 已实现 | 通过 | 取值：`--ca`、`--domain`、`--expire`、`--file`、`--json`、`--name`、`--org` |
+| `cert` | 生成 TLS 证书 |  |  | 有 | 部分 | 未测 | 取值：`--ca`、`--domain`、`--expire`、`--file`、`--json`、`--name`、`--org` |
 | `cert-chain-hash` | tls hash 旧名 |  |  | 已移除 | 不适用 | 未测 | 约束：源码未注册，用 tls hash |
 | `ech` | 生成 ECH 密钥和配置 |  |  | 有 | 未实现 | 未测 | 取值：`--pem`、`--serverName`、`-i`<br>约束：command.md 未列；docs/config/transports/tls.md 有说明 |
 | `hash` | 计算证书 SHA256 |  |  | 有 | 已实现 | 通过 | 取值：`--cert`<br>约束：command.md 仍写旧名 certChainHash |
@@ -300,47 +300,47 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `tools` | 实验性工具 |  | 实验 |  | 已实现 | 通过 | 取值：`sing-box tools` |
-| `tools-connect` | 连接到地址 |  | 实验 |  | 已实现 | 通过 | 取值：`sing-box tools connect` |
-| `tools-connect-network` | tools connect 的 --network：网络类型，默认 tcp |  | 实验 |  | 已实现 | 通过 | 取值：`--network`、`-n` |
-| `tools-fetch` | 获取 URL |  | 实验 |  | 已实现 | 通过 | 取值：`sing-box tools fetch` |
-| `tools-networkquality` | 网络质量测试 |  | 实验 |  | 已实现 | 通过 | 取值：`sing-box tools networkquality` |
-| `tools-networkquality-config-url` | tools networkquality 的 --config-url：测试配置 URL |  | 实验 |  | 已实现 | 通过 | 取值：`--config-url` |
-| `tools-networkquality-http3` | tools networkquality 的 --http3：用 HTTP/3 测量 |  | 实验 |  | 已实现 | 通过 | 取值：`--http3` |
-| `tools-networkquality-max-runtime` | tools networkquality 的 --max-runtime：最大运行秒数 |  | 实验 |  | 已实现 | 通过 | 取值：`--max-runtime` |
-| `tools-networkquality-serial` | tools networkquality 的 --serial：顺序执行上下行 |  | 实验 |  | 已实现 | 通过 | 取值：`--serial` |
-| `tools-outbound` | tools 的 --outbound：使用指定出站标签 |  | 实验 |  | 已实现 | 通过 | 取值：`--outbound`、`-o` |
-| `tools-stun` | STUN 测试 |  | 实验 |  | 已实现 | 通过 | 取值：`sing-box tools stun` |
-| `tools-stun-server` | tools stun 的 --server：STUN 服务器地址 |  | 实验 |  | 已实现 | 通过 | 取值：`--server`、`-s` |
-| `tools-synctime` | 用 NTP 同步时间 |  | 实验 |  | 已实现 | 通过 | 取值：`sing-box tools synctime` |
-| `tools-synctime-format` | tools synctime 的 --format：输出格式 |  | 实验 |  | 已实现 | 通过 | 取值：`--format`、`-f` |
-| `tools-synctime-server` | tools synctime 的 --server：NTP 服务器，默认 time.apple.com |  | 实验 |  | 已实现 | 通过 | 取值：`--server`、`-s` |
-| `tools-synctime-write` | tools synctime 的 --write：写入系统时间 |  | 实验 |  | 已实现 | 通过 | 取值：`--write`、`-w` |
+| `tools` | 实验性工具 |  | 实验 |  | 未实现 | 未测 | 取值：`sing-box tools` |
+| `tools-connect` | 连接到地址 |  | 实验 |  | 未实现 | 未测 | 取值：`sing-box tools connect` |
+| `tools-connect-network` | tools connect 的 --network：网络类型，默认 tcp |  | 实验 |  | 未实现 | 未测 | 取值：`--network`、`-n` |
+| `tools-fetch` | 获取 URL |  | 实验 |  | 未实现 | 未测 | 取值：`sing-box tools fetch` |
+| `tools-networkquality` | 网络质量测试 |  | 实验 |  | 未实现 | 未测 | 取值：`sing-box tools networkquality` |
+| `tools-networkquality-config-url` | tools networkquality 的 --config-url：测试配置 URL |  | 实验 |  | 未实现 | 未测 | 取值：`--config-url` |
+| `tools-networkquality-http3` | tools networkquality 的 --http3：用 HTTP/3 测量 |  | 实验 |  | 未实现 | 未测 | 取值：`--http3` |
+| `tools-networkquality-max-runtime` | tools networkquality 的 --max-runtime：最大运行秒数 |  | 实验 |  | 未实现 | 未测 | 取值：`--max-runtime` |
+| `tools-networkquality-serial` | tools networkquality 的 --serial：顺序执行上下行 |  | 实验 |  | 未实现 | 未测 | 取值：`--serial` |
+| `tools-outbound` | tools 的 --outbound：使用指定出站标签 |  | 实验 |  | 未实现 | 未测 | 取值：`--outbound`、`-o` |
+| `tools-stun` | STUN 测试 |  | 实验 |  | 未实现 | 未测 | 取值：`sing-box tools stun` |
+| `tools-stun-server` | tools stun 的 --server：STUN 服务器地址 |  | 实验 |  | 未实现 | 未测 | 取值：`--server`、`-s` |
+| `tools-synctime` | 用 NTP 同步时间 |  | 实验 |  | 未实现 | 未测 | 取值：`sing-box tools synctime` |
+| `tools-synctime-format` | tools synctime 的 --format：输出格式 |  | 实验 |  | 未实现 | 未测 | 取值：`--format`、`-f` |
+| `tools-synctime-server` | tools synctime 的 --server：NTP 服务器，默认 time.apple.com |  | 实验 |  | 未实现 | 未测 | 取值：`--server`、`-s` |
+| `tools-synctime-write` | tools synctime 的 --write：写入系统时间 |  | 实验 |  | 未实现 | 未测 | 取值：`--write`、`-w` |
 
 ## version
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `version` | 打印版本 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box version` |
+| `version` | 打印版本 |  | 有 |  | 已实现 | 未测 | 取值：`sing-box version` |
 | `version-name` | version 的 --name：只打印版本名 |  | 有 |  | 未实现 | 未测 | 取值：`--name`、`-n` |
 
 ## xray
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | CLI 组合 |  |  | 有 | 部分 | 通过 | command：`api`、`base64`、`convert`、`help`、`mldsa65`、`mlkem768`、`run`、`tls`、`uuid`、`version`、`vlessenc`、`wg`、`x25519`<br>config_source：`confdir`、`file`、`http(s)`、`multi-file`、`stdin:`、`unix socket`<br>format：`auto`、`json`、`protobuf`、`toml`、`yaml`<br>约束：Protobuf 只取第一个配置源 |
+| `combo` | CLI 组合 |  |  | 有 | 部分 | 未测 | command：`api`、`base64`、`convert`、`help`、`mldsa65`、`mlkem768`、`run`、`tls`、`uuid`、`version`、`vlessenc`、`wg`、`x25519`<br>config_source：`confdir`、`file`、`http(s)`、`multi-file`、`stdin:`、`unix socket`<br>format：`auto`、`json`、`protobuf`、`toml`、`yaml`<br>约束：Protobuf 只取第一个配置源 |
 | `api` | 调用 gRPC API |  |  | 有 | 未实现 | 未测 |  |
 | `base64` | Base64 编解码 |  |  | 有 | 未实现 | 未测 | 约束：文档未写 |
 | `convert` | 配置转换 |  |  | 有 | 未实现 | 未测 |  |
 | `ed25519` | Ed25519 密钥命令，当前未注册 |  |  | 已移除 | 不适用 | 未测 | 取值：`-i` |
 | `help` | 显示可用命令 |  |  | 有 | 已实现 | 通过 | 取值：`xray help <command>` |
 | `lua` | Lua 脚本签名命令，当前未注册 |  |  | 已移除 | 不适用 | 未测 | 取值：`lua sign [-key seed] [-o file] <input>` |
-| `mldsa65` | 生成 ML-DSA-65 密钥对 |  |  | 有 | 已实现 | 通过 | 取值：`-i` |
-| `mlkem768` | 生成 ML-KEM-768 密钥对 |  |  | 有 | 已实现 | 通过 | 取值：`-i` |
+| `mldsa65` | 生成 ML-DSA-65 密钥对 |  |  | 有 | 未实现 | 未测 | 取值：`-i` |
+| `mlkem768` | 生成 ML-KEM-768 密钥对 |  |  | 有 | 未实现 | 未测 | 取值：`-i` |
 | `run` | 运行配置，默认命令 |  |  | 有 | 部分 | 通过 | 取值：`xray run [-c config.json] [-confdir dir]` |
 | `tls` | TLS 工具 |  |  | 有 | 已实现 | 通过 |  |
 | `uuid` | 生成 UUID |  |  | 有 | 已实现 | 通过 | 取值：`-i` |
-| `version` | 输出版本 |  |  | 有 | 已实现 | 通过 |  |
-| `vlessenc` | 生成 VLESS Encryption 配置对 |  |  | 有 | 已实现 | 通过 |  |
+| `version` | 输出版本 |  |  | 有 | 已实现 | 未测 |  |
+| `vlessenc` | 生成 VLESS Encryption 配置对 |  |  | 有 | 未实现 | 未测 |  |
 | `wg` | 生成 WireGuard 密钥对 |  |  | 有 | 已实现 | 通过 | 取值：`-i` |
 | `x25519` | 生成 X25519 密钥对 |  |  | 有 | 已实现 | 通过 | 取值：`--std-encoding`、`-i` |

@@ -1,681 +1,271 @@
-{"key": "api/api/combo", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/api/listen", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/api/services", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/auth/bearer", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/auth/websocket-token", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/cache-fakeip/post-cache-fakeip-flush", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/combo", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/clash/delete-connections", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/delete-connections-id", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/external-controller", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/clash/get", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/clash/get-group", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-group-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-group-name-delay", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-logs", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-providers-proxies", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-providers-proxies-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-providers-proxies-name-healthcheck", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-providers-rules", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-providers-rules-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-proxies", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-proxies-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-proxies-name-delay", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-rules", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/get-version", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/post-cache-fakeip-flush", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/protocol", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/clash/put-configs", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/put-providers-proxies-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/put-providers-rules-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/put-proxies-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/clash/secret", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/configs-geo/post-configs-geo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/configs/put-configs", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/connections-id/delete-connections-id", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/connections/delete-connections", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/connections/get-connections", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/controller/combo", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/controller/external-controller", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/controller/secret", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/group-name-delay/get-group-name-delay", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/group-name/get-group-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/group/get-group", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/handler-service/alter-inbound", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/handler-service/get-inbound-users", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/handler-service/get-inbound-users-count", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/handler-service/overview", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/logs/get-logs", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/metrics/debug-vars", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/metrics/listen", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/observatory-service/get-outbound-status", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/providers-proxies-name-healthcheck/get-providers-proxies-name-healthcheck", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/providers-proxies-name-proxy-healthcheck/get-providers-proxies-name-proxy-healthcheck", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/providers-proxies-name-proxy/get-providers-proxies-name-proxy", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/providers-proxies-name/get-providers-proxies-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/providers-proxies-name/put-providers-proxies-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/providers-proxies/get-providers-proxies", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/providers-rules-name/put-providers-rules-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/providers-rules/get-providers-rules", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/proxies-name-delay/get-proxies-name-delay", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/proxies-name/delete-proxies-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/proxies-name/get-proxies-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/proxies-name/put-proxies-name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/proxies/get-proxies", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/root/get", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/routing-service/get-balancer-info", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/routing-service/list-rule", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/routing-service/override-balancer-target", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/routing-service/test-route", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/rules/get-rules", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/singbox/secret", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/stats-service/get-all-online-users", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/stats-service/get-stats", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/stats-service/get-stats-online", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/stats-service/get-stats-online-ip-list", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/stats-service/get-sys-stats", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/stats-service/get-users-stats", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/stats-service/overview", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/stats-service/query-stats", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/traffic/get-traffic", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/upgrade-geo/post-upgrade-geo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "api/v2ray/get-stats", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/v2ray/get-sys-stats", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/v2ray/query-stats", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "api/version/get-version", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cache/file/enabled", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cache/file/path", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cache/file/store-fakeip", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cache/profile/store-fake-ip", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cache/profile/store-selected", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/dns01-cloudflare/api-token", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/dns01/provider", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-acme/alternative-http-port", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-acme/alternative-tls-port", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-acme/data-directory", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-acme/disable-http-challenge", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-acme/disable-tls-alpn-challenge", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-acme/dns01-challenge", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-acme/domain", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-acme/email", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-acme/key-type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-acme/protocol", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-acme/provider", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-common/tag", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/provider-common/type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/store/certificate", "test": "pass", "evidence": "crates/net/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cert/store/certificate-path", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/store/store", "test": "pass", "evidence": "crates/net/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cert/system/disable-system-ca", "test": "pass", "evidence": "crates/net/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cert/tls/acme-external", "test": "pass", "evidence": "crates/protocol-trojan/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "cert/tls/certificate", "test": "pass", "evidence": "crates/protocol-trojan/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "cert/tls/certificate-file", "test": "pass", "evidence": "crates/protocol-trojan/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "cert/tls/client-auth-cert", "test": "pass", "evidence": "crates/protocol-trusttunnel/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "cert/tls/client-auth-type", "test": "pass", "evidence": "crates/protocol-trusttunnel/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "cert/tls/custom-certifactes", "test": "pass", "evidence": "crates/net/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cert/tls/hot-reload", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cert/tls/key", "test": "pass", "evidence": "crates/protocol-trojan/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "cert/tls/key-file", "test": "pass", "evidence": "crates/protocol-trojan/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "cert/tls/one-time-loading", "test": "pass", "evidence": "crates/protocol-trojan/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "cert/tls/private-key", "test": "pass", "evidence": "crates/protocol-trojan/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "cli/api/stats", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/api/statsquery", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/check/check", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/command/generate-ech-keypair", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/command/generate-reality-keypair", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/command/generate-sudoku-keypair", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/command/generate-uuid", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/command/generate-vless-mlkem768", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/command/generate-vless-x25519", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/command/generate-wg-keypair", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/flag/f", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/flag/t", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/flag/v", "test": "pass", "evidence": "apps/kerlico/src/cli.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/generate/generate", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/generate/generate-ech-keypair", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/generate/generate-rand", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/generate/generate-rand-base64", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/generate/generate-rand-hex", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/generate/generate-reality-keypair", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/generate/generate-tls-keypair", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/generate/generate-tls-keypair-months", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/generate/generate-uuid", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/generate/generate-wg-keypair", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/global/config", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/run/config", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/run/run", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/run/test", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/tls/cert", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/tls/hash", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/version/version", "test": "pass", "evidence": "apps/kerlico/src/cli.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/xray/combo", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/xray/help", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/xray/mldsa65", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/xray/mlkem768", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/xray/run", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/xray/tls", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/xray/uuid", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/xray/version", "test": "pass", "evidence": "apps/kerlico/src/cli.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "cli/xray/vlessenc", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/xray/wg", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "cli/xray/x25519", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/env/xray-json-strict", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/format/anchors", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/format/extended-json", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/format/json", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/format/jsonc", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/format/yaml", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/reload/sighup", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/root/certificate", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/root/certificate-providers", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/root/dns", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/root/endpoints", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/root/inbounds", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/root/log", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/root/outbounds", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/root/route", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/syntax/domain-set", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/syntax/port-range", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/syntax/wildcard-dot", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/syntax/wildcard-plus", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/syntax/wildcard-star", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/top/api", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/top/dns", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/top/fakedns", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "config/top/inbounds", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/top/log", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/top/metrics", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/top/outbounds", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/top/policy", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/top/routing", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "config/top/stats", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/action/action", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/action/method", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/action/no-drop", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/action/reject", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/action/route", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/action/server", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/config/final", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/config/reverse-mapping", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/config/rules", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/config/servers", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/config/strategy", "test": "pass", "evidence": "crates/egress/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/config/timeout", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/dns/hosts", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/dns/query-strategy", "test": "pass", "evidence": "crates/egress/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/dns/servers", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/dns/use-system-hosts", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/fakedns/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/fakedns/fakedns", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/fakedns/ip-pool", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/fakedns/pool-size", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/flow/pipeline", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/flow/query-types", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/global/direct-nameserver", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/global/enable", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/global/enhanced-mode", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/global/fake-ip-filter", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/global/fake-ip-range", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/global/fake-ip-range6", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/global/fake-ip-ttl", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/global/ipv6", "test": "pass", "evidence": "crates/egress/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/global/listen", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/global/nameserver", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/global/nameserver-policy", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/global/proxy-server-nameserver", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/global/proxy-server-nameserver-policy", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/global/use-hosts", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/global/use-system-hosts", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/hijack/ip-to-domain", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/hosts/mapping", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/hosts/predefined-format", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/param/proxy-or-interface", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/query-options/combo", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/resolve/flow", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/rule/action", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/rule/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/rule/domain", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/rule/domain-keyword", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/rule/domain-regex", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/rule/domain-suffix", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/rule/invert", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/rule/query-type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/rule/rule-set", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server-common/tag", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server-common/type", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-fakeip/inet4-range", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server-fakeip/inet6-range", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server-fakeip/protocol", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server-hosts/predefined", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-hosts/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-https/headers", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server-https/path", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server-https/protocol", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server-https/server", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server-https/server-port", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server-https/tls", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server-local/protocol", "test": "pass", "evidence": "crates/egress/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-tcp/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-tcp/server", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-tcp/server-port", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-tls/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-tls/server", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-tls/server-port", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-tls/tls", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-udp/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-udp/server", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server-udp/server-port", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server/address", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server/combo", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/server/domains", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/server/port", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/upstream/combo", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/upstream/doh", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/upstream/dot", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/upstream/fakedns", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/upstream/https", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/upstream/https-local", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "dns/upstream/localhost", "test": "pass", "evidence": "crates/egress/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/upstream/system", "test": "pass", "evidence": "crates/egress/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/upstream/tcp", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/upstream/tcp-local", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "dns/upstream/udp", "test": "pass", "evidence": "crates/dns/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "experimental/config/cache-file", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "experimental/config/clash-api", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "group/balancer/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/balancer/fallback-tag", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/balancer/selector", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/balancer/strategy", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/balancer/tag", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/default-selected", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/disable-udp", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/empty-fallback", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/exclude-filter", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/exclude-type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/expected-status", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/filter", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/include-all", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/include-all-providers", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/include-all-proxies", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/interval", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/lazy", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/max-failed-times", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/proxies", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/timeout", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/url", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/common/use", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/fallback/protocol", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/load-balance/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/load-balance/hash-key", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/load-balance/protocol", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/load-balance/strategy", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/select/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/select/default", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/select/interrupt-exist-connections", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/select/outbounds", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/select/protocol", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/types/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/url-test/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/url-test/idle-timeout", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/url-test/interrupt-exist-connections", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/url-test/interval", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/url-test/outbounds", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/url-test/protocol", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/url-test/tolerance", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "group/url-test/url", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "log/api/structured", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "log/config/level", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "log/config/output", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "log/global/log-level", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "log/log/access", "test": "pass", "evidence": "crates/engine/src/history.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "log/log/dns-log", "test": "pass", "evidence": "crates/engine/src/history.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "log/log/error", "test": "pass", "evidence": "crates/engine/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "log/log/loglevel", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "log/log/mask-address", "test": "pass", "evidence": "crates/engine/src/history.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "other/endpoint-common/tag", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "other/endpoint-common/type", "test": "pass", "evidence": "apps/kerlico/src/main.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "other/global/etag-support", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "other/global/ipv6", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "other/service/systemd", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/content/format", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/exclude-filter", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/exclude-type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/filter", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/header", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/health-check-enable", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/health-check-expected-status", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/health-check-interval", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/health-check-lazy", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/health-check-timeout", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/health-check-url", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/interval", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/path", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/payload", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/proxy", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/size-limit", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "provider/proxy/url", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/action/direct", "test": "pass", "evidence": "crates/net/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/action/hijack-dns", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/action/outbound", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/action/override-address", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/action/override-port", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/action/proxy-or-group", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/action/reject", "test": "pass", "evidence": "crates/net/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/action/resolve", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/action/route", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/action/route-options", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/action/sniff", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/action/sniffer", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/action/strategy", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/action/timeout", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/config/auto-detect-interface", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/config/default-interface", "test": "pass", "evidence": "crates/net/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/config/default-mark", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/config/final", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/config/rule-set", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/config/rules", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/routing/balancers", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/routing/domain-strategy", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/routing/rules", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/action", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/and", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/auth-user", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/balancer-tag", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/combo", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/domain", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/domain-full", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/domain-keyword", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/domain-regex", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/domain-regexp", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/domain-suffix", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/domain-wildcard", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/dst-port", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/geoip", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/geoip-private", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/geosite", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/in-name", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/in-port", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/in-user", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/inbound", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/inbound-tag", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/invert", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/ip", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/ip-cidr", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/ip-cidr6", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/ip-is-private", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/ip-version", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/local-ip", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/local-port", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/logical-mode", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/logical-rules", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/logical-type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/match", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/network", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/no-resolve", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/not", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/or", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/order", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/outbound-tag", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/port", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "route/rule/port-range", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/protocol", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/rule-set", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/source-ip", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/source-ip-cidr", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/src-ip-cidr", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "route/rule/user", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "ruleset/config/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/config/format", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/config/path", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/config/rules", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/config/tag", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/config/type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/config/update-interval", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/config/url", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/content/classical", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/content/domain", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/content/ipcidr", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/geo/geo-auto-update", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/geo/geo-update-interval", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/geo/geox-url-geoip", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/geo/geox-url-geosite", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/geo/geox-url-mmdb", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/geoip/geoip", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/geosite/geosite", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/domain", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/domain-keyword", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/domain-regex", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/domain-suffix", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/invert", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/ip-cidr", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/network", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/port", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/port-range", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/source-ip-cidr", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/source-port", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/headless/source-port-range", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/rule-provider/behavior", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/rule-provider/combo", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/rule-provider/format", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/rule-provider/interval", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/rule-provider/name", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/rule-provider/path", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/rule-provider/payload", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/rule-provider/proxy", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/rule-provider/size-limit", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/rule-provider/type", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/rule-provider/url", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "ruleset/source/rules", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "stats/access-log/connection-record", "test": "pass", "evidence": "crates/egress/src/history.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/clash-api/connections", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/clash-api/traffic", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/connections/record", "test": "pass", "evidence": "crates/egress/src/history.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/connections/totals", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/counter/inbound-tag-traffic-downlink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/counter/inbound-tag-traffic-uplink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/counter/outbound-tag-traffic-downlink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/counter/outbound-tag-traffic-uplink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/counter/user-email-traffic-downlink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/counter/user-email-traffic-uplink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/policy/stats-inbound-downlink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/policy/stats-inbound-uplink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/policy/stats-outbound-downlink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/policy/stats-outbound-uplink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/policy/stats-user-downlink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/policy/stats-user-online", "test": "pass", "evidence": "crates/control/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/policy/stats-user-uplink", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/proxies/delay-history", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "stats/stats/enable", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "stats/traffic/realtime-rate", "test": "pass", "evidence": "crates/egress/src/telemetry.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "user/anytls/credentials", "test": "pass", "evidence": "crates/protocol-anytls/src/inbound.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/auth/combo", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "user/global/authentication", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "user/http/credentials", "test": "pass", "evidence": "crates/protocol-http/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/hysteria/credentials", "test": "pass", "evidence": "crates/protocol-hysteria1/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/hysteria2/credentials", "test": "pass", "evidence": "crates/protocol-hysteria2/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/identity/level-email", "test": "pass", "evidence": "crates/config/src/users.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "user/inbound/in-user-match", "test": "pass", "evidence": "crates/routing/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "user/inbound/users-override", "test": "pass", "evidence": "crates/config/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "user/mixed/credentials", "test": "pass", "evidence": "crates/protocol-http/src/inbound.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/naive/credentials", "test": "pass", "evidence": "crates/protocol-naive/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/policy/conn-idle", "test": "pass", "evidence": "crates/core-api/src/relay.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "user/policy/downlink-only", "test": "pass", "evidence": "crates/core-api/src/relay.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "user/policy/handshake", "test": "pass", "evidence": "crates/engine/src/lib.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "user/policy/uplink-only", "test": "pass", "evidence": "crates/core-api/src/relay.rs 单元与集成测试（tools/worker_gate.sh）", "date": "2026-11-04"}
-{"key": "user/shadowsocks/credentials", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/inbound.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/shadowtls/credentials", "test": "pass", "evidence": "crates/protocol-shadowtls/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/snell/credentials", "test": "pass", "evidence": "crates/protocol-snell/src/inbound.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/socks/credentials", "test": "pass", "evidence": "crates/protocol-socks/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/ssm/dynamic-users", "test": "pass", "evidence": "tools/worker_gate.sh 门禁测试", "date": "2026-11-04"}
-{"key": "user/trojan/credentials", "test": "pass", "evidence": "crates/protocol-trojan/src/inbound.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/tuic/credentials", "test": "pass", "evidence": "crates/protocol-tuic/src/config.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/vless/credentials", "test": "pass", "evidence": "crates/protocol-vless/src/inbound.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "user/vmess/credentials", "test": "pass", "evidence": "crates/protocol-vmess/src/inbound.rs 单元与集成测试（tools/worker_gate.sh）；docs/testing/cross-host-2026-11-03.md 与 docs/testing/peer-interop-2026-11-03.md", "date": "2026-11-04"}
-{"key": "api/cache-dns/post-cache-dns-flush", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/access-control-allow-origin", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/access-control-allow-private-network", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/default-mode", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/external-ui", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/external-ui-download-detour", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/external-ui-download-url", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/get-configs", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/get-dns-query", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/get-memory", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/get-profile-tracing", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/get-ui", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/patch-configs", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/patch-script", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/post-cache-dns-flush", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/post-script", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/clash/post-upgrade-ui", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/configs/get-configs", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/configs/patch-configs", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/controller/external-controller-cors-allow-origins", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/controller/external-controller-cors-allow-private-network", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/controller/external-controller-pipe", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/controller/external-controller-routing-mark", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/controller/external-controller-tls", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/controller/external-controller-unix", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/controller/external-doh-server", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/dns-query/get-dns-query", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/memory/get-memory", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/restart/post-restart", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/singbox/access-control-allow-origin", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/singbox/access-control-allow-private-network", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/singbox/combo", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/singbox/dashboard", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/singbox/dashboard-download-url", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/singbox/dashboard-enabled", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/singbox/dashboard-http-client", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/singbox/dashboard-path", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/singbox/dashboard-update-interval", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/singbox/protocol", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/singbox/tls", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/ui/get", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/upgrade-ui/post-upgrade-ui", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/webui/dashboards", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/webui/external-ui", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/webui/external-ui-name", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "api/webui/external-ui-url", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/format/format", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/format/format-write", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geoip/geoip", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geoip/geoip-export", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geoip/geoip-export-output", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geoip/geoip-file", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geoip/geoip-list", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geoip/geoip-lookup", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geosite/geosite", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geosite/geosite-export", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geosite/geosite-export-output", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geosite/geosite-file", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geosite/geosite-list", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/geosite/geosite-lookup", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/merge/merge", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-compile", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-compile-output", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-convert", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-convert-output", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-convert-type", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-decompile", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-decompile-output", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-format", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-format-write", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-match", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-match-format", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-merge", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-merge-config", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-merge-config-directory", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-upgrade", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/rule-set/rule-set-upgrade-write", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/run/confdir", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/run/dump", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/run/format", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-connect", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-connect-network", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-fetch", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-networkquality", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-networkquality-config-url", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-networkquality-http3", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-networkquality-max-runtime", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-networkquality-serial", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-outbound", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-stun", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-stun-server", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-synctime", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-synctime-format", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-synctime-server", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "cli/tools/tools-synctime-write", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/box-api", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-age-secret-key", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-config-file", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-config-string", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-home-dir", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-override-external-controller", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-override-external-controller-pipe", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-override-external-controller-routing-mark", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-override-external-controller-tls", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-override-external-controller-unix", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-override-external-ui-dir", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-override-secret", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-post-down", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/clash-post-up", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/disable-embed-ca", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/disable-loopback-detector", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/disable-system-hosts", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/object", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/safe-paths", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/skip-safe-path-check", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/xray-browser-dialer", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/xray-cone-disabled", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/xray-location-asset", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/xray-location-cert", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/xray-location-confdir", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/xray-location-config", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/xray-tun-fd", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/env/xray-xudp-basekey", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/format/array-shorthand", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/format/duration", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/format/merge", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/format/protobuf", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/format/toml", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/format/unknown-keys", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/merge/confdir", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/merge/dump", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/merge/inbounds-by-tag", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/merge/object-override", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/merge/outbounds-by-tag", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/merge/outbounds-tail", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/root/experimental", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/root/http-clients", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/root/network-namespaces", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/root/ntp", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/root/schema", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/root/services", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/schema/generate", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/top/burst-observatory", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/top/env", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/top/geodata", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/top/observatory", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/top/version", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/version/max", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "config/version/min", "test": "pass", "evidence": "crates/control/tests/http.rs; crates/config/src/format.rs; apps/kerlico/src/main.rs", "date": "2026-04-20"}
-{"key": "ntp/config/enabled", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
-{"key": "ntp/config/interval", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
-{"key": "ntp/config/server", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
-{"key": "ntp/config/server-port", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
-{"key": "ntp/config/write-to-system", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
-{"key": "ntp/ntp/dialer-proxy", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
-{"key": "ntp/ntp/enable", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
-{"key": "ntp/ntp/interval", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
-{"key": "ntp/ntp/port", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
-{"key": "ntp/ntp/server", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
-{"key": "ntp/ntp/write-to-system", "test": "pass", "evidence": "crates/net/src/ntp.rs; crates/protocol-shadowsocks/src/plugin.rs; crates/protocol-vless/src/inbound.rs", "date": "2026-04-20"}
+{"key": "api/api/combo", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/api/services", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/auth/bearer", "test": "pass", "evidence": "crates/control/src/lib.rs::tests::bearer_secret_must_match_exactly", "date": "2026-11-06"}
+{"key": "api/cache-fakeip/post-cache-fakeip-flush", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (+ crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth status only)", "date": "2026-11-06"}
+{"key": "api/clash/external-controller", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/clash/get", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/clash/get-group", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/clash/get-group-name", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/clash/get-version", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/clash/post-cache-fakeip-flush", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (+ crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth status only)", "date": "2026-11-06"}
+{"key": "api/clash/protocol", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/clash/put-proxies-name", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/clash/secret", "test": "pass", "evidence": "crates/control/src/lib.rs::tests::bearer_secret_must_match_exactly", "date": "2026-11-06"}
+{"key": "api/controller/external-controller", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/controller/secret", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/group-name/get-group-name", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/group/get-group", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/metrics/debug-vars", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/metrics/listen", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/proxies-name/put-proxies-name", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/root/get", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/routing-service/get-balancer-info", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/routing-service/override-balancer-target", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/routing-service/test-route", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/singbox/secret", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/stats-service/get-all-online-users", "test": "pass", "evidence": "crates/control/tests/http.rs::online_masks_and_merges_sources_like_flows", "date": "2026-11-06"}
+{"key": "api/stats-service/get-stats", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "api/stats-service/get-stats-online", "test": "pass", "evidence": "crates/control/tests/http.rs::online_masks_and_merges_sources_like_flows", "date": "2026-11-06"}
+{"key": "api/stats-service/get-stats-online-ip-list", "test": "pass", "evidence": "crates/control/tests/http.rs::online_masks_and_merges_sources_like_flows", "date": "2026-11-06"}
+{"key": "api/stats-service/get-sys-stats", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/stats-service/get-users-stats", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "api/stats-service/overview", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "api/stats-service/query-stats", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "api/traffic/get-traffic", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "api/v2ray/get-stats", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "api/v2ray/get-sys-stats", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/v2ray/query-stats", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "api/version/get-version", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "cache/file/enabled", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (pool-level; config->path wiring untested)", "date": "2026-11-06"}
+{"key": "cache/file/path", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (pool-level; config->path wiring untested)", "date": "2026-11-06"}
+{"key": "cache/file/store-fakeip", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (pool-level; config->path wiring untested)", "date": "2026-11-06"}
+{"key": "cache/profile/store-fake-ip", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (pool-level; config->path wiring untested)", "date": "2026-11-06"}
+{"key": "cert/tls/acme-external", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::all_five_tls_paths_both_node_families_and_both_business_families; tools/interop_vless_server.py", "date": "2026-11-06"}
+{"key": "cert/tls/certificate", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::all_five_tls_paths_both_node_families_and_both_business_families; tools/interop_vless_server.py", "date": "2026-11-06"}
+{"key": "cert/tls/certificate-file", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::all_five_tls_paths_both_node_families_and_both_business_families; tools/interop_vless_server.py", "date": "2026-11-06"}
+{"key": "cert/tls/client-auth-cert", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::multiuser_basic_remains_required_with_optional_mtls", "date": "2026-11-06"}
+{"key": "cert/tls/client-auth-type", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::multiuser_basic_remains_required_with_optional_mtls", "date": "2026-11-06"}
+{"key": "cert/tls/key", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::all_five_tls_paths_both_node_families_and_both_business_families; tools/interop_vless_server.py", "date": "2026-11-06"}
+{"key": "cert/tls/key-file", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::all_five_tls_paths_both_node_families_and_both_business_families; tools/interop_vless_server.py", "date": "2026-11-06"}
+{"key": "cert/tls/private-key", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::all_five_tls_paths_both_node_families_and_both_business_families; tools/interop_vless_server.py", "date": "2026-11-06"}
+{"key": "cli/api/stats", "test": "pass", "evidence": "apps/kerlico/tests/history.rs::real_cli_restart_persists_exact_totals_and_queries_before_pagination", "date": "2026-11-06"}
+{"key": "cli/api/statsquery", "test": "pass", "evidence": "apps/kerlico/tests/history.rs::real_cli_restart_persists_exact_totals_and_queries_before_pagination", "date": "2026-11-06"}
+{"key": "cli/check/check", "test": "pass", "evidence": "apps/kerlico/tests/history.rs::real_cli_restart_persists_exact_totals_and_queries_before_pagination", "date": "2026-11-06"}
+{"key": "cli/command/generate-ech-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/command/generate-reality-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
+{"key": "cli/command/generate-uuid", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/command/generate-vless-x25519", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
+{"key": "cli/command/generate-wg-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
+{"key": "cli/flag/t", "test": "pass", "evidence": "apps/kerlico/tests/history.rs::real_cli_restart_persists_exact_totals_and_queries_before_pagination", "date": "2026-11-06"}
+{"key": "cli/generate/generate", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/generate/generate-ech-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/generate/generate-rand", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/generate/generate-rand-base64", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/generate/generate-rand-hex", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/generate/generate-reality-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
+{"key": "cli/generate/generate-uuid", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/generate/generate-wg-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
+{"key": "cli/run/run", "test": "pass", "evidence": "apps/kerlico/tests/history.rs::real_cli_restart_persists_exact_totals_and_queries_before_pagination", "date": "2026-11-06"}
+{"key": "cli/run/test", "test": "pass", "evidence": "apps/kerlico/tests/history.rs::real_cli_restart_persists_exact_totals_and_queries_before_pagination", "date": "2026-11-06"}
+{"key": "cli/tls/hash", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/xray/help", "test": "pass", "evidence": "apps/kerlico/tests/localization.rs::real_help_and_parser_errors_use_selected_language_with_stable_arguments", "date": "2026-11-06"}
+{"key": "cli/xray/run", "test": "pass", "evidence": "apps/kerlico/tests/history.rs::real_cli_restart_persists_exact_totals_and_queries_before_pagination", "date": "2026-11-06"}
+{"key": "cli/xray/tls", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/xray/uuid", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/xray/wg", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
+{"key": "cli/xray/x25519", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
+{"key": "config/format/anchors", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_yaml_with_anchors_and_merge_keys", "date": "2026-11-06"}
+{"key": "config/format/extended-json", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_jsonc_with_comments_and_trailing_commas", "date": "2026-11-06"}
+{"key": "config/format/json", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "config/format/jsonc", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_jsonc_with_comments_and_trailing_commas", "date": "2026-11-06"}
+{"key": "config/root/dns", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "config/root/inbounds", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "config/root/outbounds", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "config/root/route", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "config/top/api", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "config/top/dns", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "config/top/fakedns", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "config/top/inbounds", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "config/top/log", "test": "pass", "evidence": "crates/engine/tests/history.rs::access_logging_can_be_disabled_without_disabling_usage", "date": "2026-11-06"}
+{"key": "config/top/metrics", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "config/top/outbounds", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "config/top/policy", "test": "pass", "evidence": "crates/engine/tests/framework.rs::tcp_forward_idle_records_timeout_with_real_engine_telemetry", "date": "2026-11-06"}
+{"key": "config/top/routing", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "config/top/stats", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "dns/action/method", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (REFUSED and drop; 50-in-30s auto-drop untested)", "date": "2026-11-06"}
+{"key": "dns/action/no-drop", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (REFUSED and drop; 50-in-30s auto-drop untested)", "date": "2026-11-06"}
+{"key": "dns/action/reject", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (REFUSED and drop; 50-in-30s auto-drop untested)", "date": "2026-11-06"}
+{"key": "dns/config/reverse-mapping", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (record/lookup; enrich_original path untested)", "date": "2026-11-06"}
+{"key": "dns/config/servers", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
+{"key": "dns/config/strategy", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::local_modes_filter_families_and_dual_prefers_ipv4", "date": "2026-11-06"}
+{"key": "dns/dns/hosts", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
+{"key": "dns/dns/query-strategy", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::local_modes_filter_families_and_dual_prefers_ipv4", "date": "2026-11-06"}
+{"key": "dns/dns/servers", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
+{"key": "dns/dns/use-system-hosts", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::system_hosts_file_does_not_override_configured_upstreams (#[ignore], needs root + mount ns)", "date": "2026-11-06"}
+{"key": "dns/fakedns/combo", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/fakedns/fakedns", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/fakedns/ip-pool", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/fakedns/pool-size", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/flow/pipeline", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
+{"key": "dns/flow/query-types", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
+{"key": "dns/global/direct-nameserver", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
+{"key": "dns/global/enhanced-mode", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/global/fake-ip-range", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/global/fake-ip-range6", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/global/ipv6", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
+{"key": "dns/global/nameserver", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
+{"key": "dns/global/use-hosts", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
+{"key": "dns/global/use-system-hosts", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::system_hosts_file_does_not_override_configured_upstreams (#[ignore], needs root + mount ns)", "date": "2026-11-06"}
+{"key": "dns/hosts/mapping", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
+{"key": "dns/hosts/predefined-format", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
+{"key": "dns/query-options/combo", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
+{"key": "dns/resolve/flow", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
+{"key": "dns/server-common/tag", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work", "date": "2026-11-06"}
+{"key": "dns/server-common/type", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
+{"key": "dns/server-fakeip/inet4-range", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/server-fakeip/inet6-range", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/server-fakeip/protocol", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/server-hosts/predefined", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
+{"key": "dns/server-hosts/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
+{"key": "dns/server-local/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
+{"key": "dns/server-tcp/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/server-tcp/server", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/server-tcp/server-port", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/server-tls/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/server-tls/server", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/server-tls/server-port", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/server-tls/tls", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/server-udp/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/server-udp/server", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/server-udp/server-port", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/server/address", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
+{"key": "dns/server/combo", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
+{"key": "dns/server/port", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/upstream/combo", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
+{"key": "dns/upstream/dot", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/upstream/fakedns", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/upstream/localhost", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
+{"key": "dns/upstream/system", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
+{"key": "dns/upstream/tcp", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/upstream/tcp-local", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "dns/upstream/udp", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "group/balancer/tag", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/common/default-selected", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/common/name", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/common/proxies", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/common/type", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/select/combo", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/select/default", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/select/outbounds", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/select/protocol", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "log/log/access", "test": "pass", "evidence": "crates/engine/tests/history.rs::access_logging_can_be_disabled_without_disabling_usage", "date": "2026-11-06"}
+{"key": "log/log/dns-log", "test": "pass", "evidence": "crates/engine/tests/history.rs::dns_and_connect_failures_are_persisted_as_events", "date": "2026-11-06"}
+{"key": "log/log/error", "test": "pass", "evidence": "crates/engine/tests/history.rs::dns_and_connect_failures_are_persisted_as_events", "date": "2026-11-06"}
+{"key": "log/log/mask-address", "test": "pass", "evidence": "crates/control/tests/http.rs::online_masks_and_merges_sources_like_flows", "date": "2026-11-06"}
+{"key": "other/endpoint-common/tag", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "provider/content/format", "test": "pass", "evidence": "crates/config/src/group.rs::tests::parses_share_links_and_applies_provider_overrides (URI list + vmess base64 inline)", "date": "2026-11-06"}
+{"key": "provider/proxy/name", "test": "pass", "evidence": "crates/config/src/group.rs::tests::parses_share_links_and_applies_provider_overrides (inline payload only; path read is untested)", "date": "2026-11-06"}
+{"key": "provider/proxy/path", "test": "pass", "evidence": "crates/config/src/group.rs::tests::parses_share_links_and_applies_provider_overrides (inline payload only; path read is untested)", "date": "2026-11-06"}
+{"key": "provider/proxy/payload", "test": "pass", "evidence": "crates/config/src/group.rs::tests::parses_share_links_and_applies_provider_overrides (inline payload only; path read is untested)", "date": "2026-11-06"}
+{"key": "route/action/direct", "test": "pass", "evidence": "crates/net/tests/interface.rs::direct_uses_the_configured_interface", "date": "2026-11-06"}
+{"key": "route/action/outbound", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
+{"key": "route/action/override-address", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work (asserts decision fields only)", "date": "2026-11-06"}
+{"key": "route/action/override-port", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work (asserts decision fields only)", "date": "2026-11-06"}
+{"key": "route/action/proxy-or-group", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "route/action/route", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
+{"key": "route/action/route-options", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work (asserts decision fields only)", "date": "2026-11-06"}
+{"key": "route/config/final", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "route/config/rule-set", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/config/rules", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
+{"key": "route/routing/balancers", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "route/routing/domain-strategy", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::cidr_matches_literal_addresses_and_never_domains", "date": "2026-11-06"}
+{"key": "route/routing/rules", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
+{"key": "route/rule/action", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/and", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work (and only; or untested)", "date": "2026-11-06"}
+{"key": "route/rule/auth-user", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::node_and_user_conditions_use_the_trusted_source", "date": "2026-11-06"}
+{"key": "route/rule/combo", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/domain", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
+{"key": "route/rule/domain-full", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
+{"key": "route/rule/domain-keyword", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
+{"key": "route/rule/domain-suffix", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
+{"key": "route/rule/domain-wildcard", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/dst-port", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/geoip-private", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/in-name", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::node_and_user_conditions_use_the_trusted_source", "date": "2026-11-06"}
+{"key": "route/rule/in-user", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::node_and_user_conditions_use_the_trusted_source", "date": "2026-11-06"}
+{"key": "route/rule/inbound", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::node_and_user_conditions_use_the_trusted_source", "date": "2026-11-06"}
+{"key": "route/rule/inbound-tag", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::node_and_user_conditions_use_the_trusted_source", "date": "2026-11-06"}
+{"key": "route/rule/ip", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::cidr_matches_literal_addresses_and_never_domains", "date": "2026-11-06"}
+{"key": "route/rule/ip-cidr", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::cidr_matches_literal_addresses_and_never_domains", "date": "2026-11-06"}
+{"key": "route/rule/ip-cidr6", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::cidr_matches_literal_addresses_and_never_domains", "date": "2026-11-06"}
+{"key": "route/rule/ip-is-private", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/local-ip", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/local-port", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/logical-mode", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work (and only; or untested)", "date": "2026-11-06"}
+{"key": "route/rule/logical-rules", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work (and only; or untested)", "date": "2026-11-06"}
+{"key": "route/rule/logical-type", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work (and only; or untested)", "date": "2026-11-06"}
+{"key": "route/rule/match", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/network", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/no-resolve", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/or", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/order", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
+{"key": "route/rule/outbound-tag", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
+{"key": "route/rule/port", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/rule-set", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/source-ip", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/source-ip-cidr", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/src-ip-cidr", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/user", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::node_and_user_conditions_use_the_trusted_source", "date": "2026-11-06"}
+{"key": "ruleset/config/rules", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "ruleset/config/tag", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "ruleset/headless/domain-suffix", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "ruleset/headless/port-range", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "ruleset/rule-provider/name", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "ruleset/rule-provider/payload", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "ruleset/source/rules", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "stats/access-log/connection-record", "test": "pass", "evidence": "crates/engine/tests/history.rs::access_logging_can_be_disabled_without_disabling_usage", "date": "2026-11-06"}
+{"key": "stats/clash-api/connections", "test": "pass", "evidence": "crates/engine/tests/history.rs::access_logging_can_be_disabled_without_disabling_usage", "date": "2026-11-06"}
+{"key": "stats/clash-api/traffic", "test": "pass", "evidence": "crates/engine/tests/history.rs (bandwidth_in assertions ~l.332-360)", "date": "2026-11-06"}
+{"key": "stats/connections/record", "test": "pass", "evidence": "crates/engine/tests/history.rs::access_logging_can_be_disabled_without_disabling_usage", "date": "2026-11-06"}
+{"key": "stats/connections/totals", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/counter/inbound-tag-traffic-downlink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/counter/inbound-tag-traffic-uplink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/counter/outbound-tag-traffic-downlink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/counter/outbound-tag-traffic-uplink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/counter/user-email-traffic-downlink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/counter/user-email-traffic-uplink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/policy/stats-inbound-downlink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/policy/stats-inbound-uplink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/policy/stats-outbound-downlink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/policy/stats-outbound-uplink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/policy/stats-user-downlink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/policy/stats-user-online", "test": "pass", "evidence": "crates/control/tests/http.rs::online_masks_and_merges_sources_like_flows", "date": "2026-11-06"}
+{"key": "stats/policy/stats-user-uplink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/stats/enable", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/traffic/realtime-rate", "test": "pass", "evidence": "crates/engine/tests/history.rs (bandwidth_in assertions ~l.332-360)", "date": "2026-11-06"}
+{"key": "user/anytls/credentials", "test": "pass", "evidence": "crates/protocol-anytls/tests/dual.rs::configuration_rejects_invalid_and_credentials_are_scoped", "date": "2026-11-06"}
+{"key": "user/auth/combo", "test": "pass", "evidence": "crates/protocol-http/tests/member_scope.rs::basic_auth_members_keep_distinct_scopes_and_original_target", "date": "2026-11-06"}
+{"key": "user/global/authentication", "test": "pass", "evidence": "crates/config/tests/credential_isolation.rs", "date": "2026-11-06"}
+{"key": "user/http/credentials", "test": "pass", "evidence": "crates/protocol-http/tests/member_scope.rs::basic_auth_members_keep_distinct_scopes_and_original_target", "date": "2026-11-06"}
+{"key": "user/hysteria/credentials", "test": "pass", "evidence": "crates/protocol-hysteria1/tests/member_scope.rs::quic_auth_selects_member_scope", "date": "2026-11-06"}
+{"key": "user/hysteria2/credentials", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/member_scope.rs::h3_auth_selects_member_scope", "date": "2026-11-06"}
+{"key": "user/identity/level-email", "test": "pass", "evidence": "crates/config/src/users.rs::tests::account_identity_survives_serialization_and_rename", "date": "2026-11-06"}
+{"key": "user/inbound/in-user-match", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::node_and_user_conditions_use_the_trusted_source", "date": "2026-11-06"}
+{"key": "user/inbound/users-override", "test": "pass", "evidence": "crates/config/tests/credential_isolation.rs", "date": "2026-11-06"}
+{"key": "user/mixed/credentials", "test": "pass", "evidence": "crates/protocol-http/tests/member_scope.rs::authenticated_local_fixture_becomes_a_member_node", "date": "2026-11-06"}
+{"key": "user/naive/credentials", "test": "pass", "evidence": "crates/protocol-naive/tests/dual.rs::authentication_name_ca_and_reserved_address_fail_before_target_access", "date": "2026-11-06"}
+{"key": "user/policy/conn-idle", "test": "pass", "evidence": "crates/engine/tests/framework.rs::tcp_forward_idle_records_timeout_with_real_engine_telemetry", "date": "2026-11-06"}
+{"key": "user/policy/downlink-only", "test": "pass", "evidence": "crates/engine/tests/framework.rs::tcp_half_close_preserves_delayed_response", "date": "2026-11-06"}
+{"key": "user/policy/handshake", "test": "pass", "evidence": "crates/engine/tests/history.rs::lookup_abandoned_by_the_outer_deadline_records_an_aborted_event", "date": "2026-11-06"}
+{"key": "user/policy/uplink-only", "test": "pass", "evidence": "crates/engine/tests/framework.rs::tcp_half_close_preserves_delayed_response", "date": "2026-11-06"}
+{"key": "user/shadowsocks/credentials", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::wrong_aead_password_never_opens_target", "date": "2026-11-06"}
+{"key": "user/shadowtls/credentials", "test": "pass", "evidence": "crates/protocol-shadowtls/tests/network.rs::independent_ipv6_nodes_and_each_layer_credentials_gate_site_access", "date": "2026-11-06"}
+{"key": "user/snell/credentials", "test": "pass", "evidence": "crates/protocol-snell/tests/dual.rs::bad_psk_userkey_and_cancellation", "date": "2026-11-06"}
+{"key": "user/socks/credentials", "test": "pass", "evidence": "crates/protocol-socks/tests/member_scope.rs::authenticated_members_keep_distinct_scopes_and_original_target", "date": "2026-11-06"}
+{"key": "user/trojan/credentials", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::bad_password_certificate_name_and_cancellation", "date": "2026-11-06"}
+{"key": "user/tuic/credentials", "test": "pass", "evidence": "crates/protocol-tuic/tests/member_scope.rs::both_tuic_authentication_versions_select_member_scope", "date": "2026-11-06"}
+{"key": "user/vless/credentials", "test": "pass", "evidence": "crates/protocol-vless/tests/server.rs::independent_node_credentials_and_both_target_families", "date": "2026-11-06"}
+{"key": "user/vmess/credentials", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::wrong_uuid_certificate_name_and_cancellation_fail", "date": "2026-11-06"}
+{"key": "config/format/merge", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_toml_and_merges_by_tag", "date": "2026-11-06"}
+{"key": "config/merge/outbounds-by-tag", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_toml_and_merges_by_tag", "date": "2026-11-06"}
+{"key": "config/merge/outbounds-tail", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_toml_and_merges_by_tag", "date": "2026-11-06"}

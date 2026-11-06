@@ -115,7 +115,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `dynamic-users` | SSM API 动态管理 Shadowsocks 用户，入站需 managed |  | 有 |  | 已实现 | 通过 | 约束：cache_path 保存流量和用户状态 |
+| `dynamic-users` | SSM API 动态管理 Shadowsocks 用户，入站需 managed |  | 有 |  | 未实现 | 未测 | 约束：cache_path 保存流量和用户状态 |
 
 ## tailcat
 

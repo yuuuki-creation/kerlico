@@ -7,7 +7,7 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `combo` | API 接入组合 |  |  | 有 | 部分 | 通过 | mode：`inbound+routing`、`listen`<br>service：`HandlerService`、`LoggerService`、`ObservatoryService`、`ReflectionService`、`RoutingService`、`StatsService`<br>约束：inbound 方式用 tunnel 入站并路由到 api 出站 |
-| `listen` | API 监听 IP 和端口，可选 |  |  | 有 | 部分 | 通过 | 约束：省略时需加 inbounds 和 routing<br>约束：简易模式不统计 API 入站流量 |
+| `listen` | API 监听 IP 和端口，可选 |  |  | 有 | 部分 | 未测 | 约束：省略时需加 inbounds 和 routing<br>约束：简易模式不统计 API 入站流量 |
 | `services` | 开启的 API |  |  | 有 | 部分 | 通过 | 取值：`HandlerService`、`LoggerService`、`ObservatoryService`、`ReflectionService`、`RoutingService`、`StatsService`<br>约束：ObservatoryService 文档未列（source:infra/conf/api.go） |
 | `tag` | 出站标识 |  |  | 有 | 未实现 | 未测 | 约束：不能为空（source:infra/conf/api.go） |
 
@@ -16,13 +16,13 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `bearer` | 请求带 Authorization: Bearer <secret> | 有 |  |  | 已实现 | 通过 | 取值：`Authorization: Bearer`<br>约束：路径不在工作目录需 SAFE_PATHS |
-| `websocket-token` | WebSocket 可用 token 查询参数 | 有 |  |  | 已实现 | 通过 | 取值：`token=<secret>` |
+| `websocket-token` | WebSocket 可用 token 查询参数 | 有 |  |  | 部分 | 未测 | 取值：`token=<secret>` |
 
 ## cache-dns
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `post-cache-dns-flush` | 清除 dns 缓存，204 | 有 |  |  | 已实现 | 通过 | 取值：`POST` |
+| `post-cache-dns-flush` | 清除 dns 缓存，204 | 有 |  |  | 未实现 | 未测 | 取值：`POST` |
 
 ## cache-fakeip
 
@@ -35,47 +35,47 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `protocol` | Clash RESTful API 服务 |  | 有 |  | 部分 | 通过 | 取值：`clash_api`<br>约束：external_controller 为空时禁用<br>约束：需要 with_clash_api 构建标签 |
-| `combo` | Clash API 的 UI、认证和 CORS 组合 |  | 有 |  | 部分 | 通过 | ui：`external_ui`、`external_ui+download`、`none`<br>auth：`none`、`secret`<br>cors：`*`、`custom`<br>private_network：`off`、`on`<br>default_mode：`Rule`、`custom`<br>约束：default_mode 无直接效果，只供 clash_mode 规则使用<br>约束：公网网站访问私网 API 时要明确 access_control_allow_origin 并开 access_control_allow_private_network<br>约束：监听 0.0.0.0 时必须设 secret |
-| `access-control-allow-origin` | 允许的 CORS 来源，默认使用 `*`。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.10.0 起<br>约束：要从公共网站访问私有网络上的 Clash API，必须在 `access_control_allow_origin` 中明确指定它而不是使用 `*`。 |
-| `access-control-allow-private-network` | 允许从私有网络访问。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.10.0 起<br>约束：要从公共网站访问私有网络上的 Clash API，必须启用 `access_control_allow_private_network`。 |
+| `combo` | Clash API 的 UI、认证和 CORS 组合 |  | 有 |  | 部分 | 未测 | ui：`external_ui`、`external_ui+download`、`none`<br>auth：`none`、`secret`<br>cors：`*`、`custom`<br>private_network：`off`、`on`<br>default_mode：`Rule`、`custom`<br>约束：default_mode 无直接效果，只供 clash_mode 规则使用<br>约束：公网网站访问私网 API 时要明确 access_control_allow_origin 并开 access_control_allow_private_network<br>约束：监听 0.0.0.0 时必须设 secret |
+| `access-control-allow-origin` | 允许的 CORS 来源，默认使用 `*`。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.10.0 起<br>约束：要从公共网站访问私有网络上的 Clash API，必须在 `access_control_allow_origin` 中明确指定它而不是使用 `*`。 |
+| `access-control-allow-private-network` | 允许从私有网络访问。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.10.0 起<br>约束：要从公共网站访问私有网络上的 Clash API，必须启用 `access_control_allow_private_network`。 |
 | `cache-file` | 缓存文件路径，默认使用`cache.db`。 |  | 已移除 |  | 不适用 | 未测 | 约束：`cache_file` 已在 Clash API 中废弃，且已迁移到 `cache_file.enabled` 和 `cache_file.path`。<br>约束：自 sing-box 1.10.0 起<br>约束：配置后启动报错（source:experimental/clashapi/server.go） |
 | `cache-id` | 缓存 ID。 |  | 已移除 |  | 不适用 | 未测 | 约束：`cache_id` 已在 Clash API 中废弃，且已迁移到 `cache_file.cache_id`。<br>约束：自 sing-box 1.10.0 起<br>约束：配置后启动报错（source:experimental/clashapi/server.go） |
-| `default-mode` | Clash 中的默认模式，默认使用 `Rule`。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.10.0 起 |
-| `delete-connections` | Clash API：关闭全部连接 |  | 有 |  | 已实现 | 通过 | 取值：`DELETE /connections`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `delete-connections-id` | Clash API：关闭指定连接 |  | 有 |  | 已实现 | 通过 | 取值：`DELETE /connections/{id}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `default-mode` | Clash 中的默认模式，默认使用 `Rule`。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.10.0 起 |
+| `delete-connections` | Clash API：关闭全部连接 |  | 有 |  | 未实现 | 未测 | 取值：`DELETE /connections`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `delete-connections-id` | Clash API：关闭指定连接 |  | 有 |  | 未实现 | 未测 | 取值：`DELETE /connections/{id}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `external-controller` | RESTful web API 监听地址。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.10.0 起 |
-| `external-ui` | 到静态网页资源目录的相对路径或绝对路径。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.10.0 起 |
-| `external-ui-download-detour` | 用于下载静态网页资源的出站的标签。 |  | 有 |  | 已实现 | 通过 | 约束：如果为空，将使用默认出站。<br>约束：自 sing-box 1.10.0 起 |
-| `external-ui-download-url` | 静态网页资源的 ZIP 下载 URL，如果指定的 `external_ui` 目录为空，将使用。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.10.0 起<br>约束：默认使用 `https://github.com/MetaCubeX/Yacd-meta/archive/gh-pages.zip`。 |
+| `external-ui` | 到静态网页资源目录的相对路径或绝对路径。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.10.0 起 |
+| `external-ui-download-detour` | 用于下载静态网页资源的出站的标签。 |  | 有 |  | 未实现 | 未测 | 约束：如果为空，将使用默认出站。<br>约束：自 sing-box 1.10.0 起 |
+| `external-ui-download-url` | 静态网页资源的 ZIP 下载 URL，如果指定的 `external_ui` 目录为空，将使用。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.10.0 起<br>约束：默认使用 `https://github.com/MetaCubeX/Yacd-meta/archive/gh-pages.zip`。 |
 | `get` | Clash API：问候 |  | 有 |  | 部分 | 通过 | 取值：`GET /`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-configs` | Clash API：读取配置 |  | 有 |  | 已实现 | 通过 | 取值：`GET /configs`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-dns-query` | Clash API：DNS 查询，查询参数 name、type |  | 有 |  | 已实现 | 通过 | 取值：`GET /dns/query`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-configs` | Clash API：读取配置 |  | 有 |  | 未实现 | 未测 | 取值：`GET /configs`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-dns-query` | Clash API：DNS 查询，查询参数 name、type |  | 有 |  | 未实现 | 未测 | 取值：`GET /dns/query`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `get-group` | Clash API：列出策略组 |  | 有 |  | 已实现 | 通过 | 取值：`GET /group`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `get-group-name` | Clash API：读取策略组 |  | 有 |  | 已实现 | 通过 | 取值：`GET /group/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-group-name-delay` | Clash API：测策略组延迟 |  | 有 |  | 已实现 | 通过 | 取值：`GET /group/{name}/delay`<br>约束：查询参数 url、timeout<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-logs` | Clash API：日志流，level 查询参数 |  | 有 |  | 已实现 | 通过 | 取值：`GET /logs`<br>约束：支持 WebSocket<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-memory` | Clash API：内存使用 |  | 有 |  | 已实现 | 通过 | 取值：`GET /memory`<br>约束：支持 WebSocket<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-profile-tracing` | Clash API：跟踪流 |  | 有 |  | 已实现 | 通过 | 取值：`GET /profile/tracing`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-providers-proxies` | Clash API：代理提供者列表（返回空表） |  | 有 |  | 已实现 | 通过 | 取值：`GET /providers/proxies`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-providers-proxies-name` | Clash API：读取代理提供者 |  | 有 |  | 已实现 | 通过 | 取值：`GET /providers/proxies/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-providers-proxies-name-healthcheck` | Clash API：代理提供者健康检查 |  | 有 |  | 已实现 | 通过 | 取值：`GET /providers/proxies/{name}/healthcheck`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-providers-rules` | Clash API：规则提供者列表 |  | 有 |  | 已实现 | 通过 | 取值：`GET /providers/rules`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-providers-rules-name` | Clash API：读取规则提供者 |  | 有 |  | 已实现 | 通过 | 取值：`GET /providers/rules/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-proxies` | Clash API：列出代理 |  | 有 |  | 已实现 | 通过 | 取值：`GET /proxies`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-proxies-name` | Clash API：读取代理 |  | 有 |  | 已实现 | 通过 | 取值：`GET /proxies/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-proxies-name-delay` | Clash API：测延迟 |  | 有 |  | 已实现 | 通过 | 取值：`GET /proxies/{name}/delay`<br>约束：查询参数 url、timeout<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-rules` | Clash API：列出路由规则 |  | 有 |  | 已实现 | 通过 | 取值：`GET /rules`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `get-ui` | Clash API：外部 UI 静态页 |  | 有 |  | 已实现 | 通过 | 取值：`GET /ui`<br>约束：external_ui 非空时<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-group-name-delay` | Clash API：测策略组延迟 |  | 有 |  | 未实现 | 未测 | 取值：`GET /group/{name}/delay`<br>约束：查询参数 url、timeout<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-logs` | Clash API：日志流，level 查询参数 |  | 有 |  | 未实现 | 未测 | 取值：`GET /logs`<br>约束：支持 WebSocket<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-memory` | Clash API：内存使用 |  | 有 |  | 未实现 | 未测 | 取值：`GET /memory`<br>约束：支持 WebSocket<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-profile-tracing` | Clash API：跟踪流 |  | 有 |  | 未实现 | 未测 | 取值：`GET /profile/tracing`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-providers-proxies` | Clash API：代理提供者列表（返回空表） |  | 有 |  | 部分 | 未测 | 取值：`GET /providers/proxies`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-providers-proxies-name` | Clash API：读取代理提供者 |  | 有 |  | 部分 | 未测 | 取值：`GET /providers/proxies/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-providers-proxies-name-healthcheck` | Clash API：代理提供者健康检查 |  | 有 |  | 未实现 | 未测 | 取值：`GET /providers/proxies/{name}/healthcheck`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-providers-rules` | Clash API：规则提供者列表 |  | 有 |  | 部分 | 未测 | 取值：`GET /providers/rules`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-providers-rules-name` | Clash API：读取规则提供者 |  | 有 |  | 部分 | 未测 | 取值：`GET /providers/rules/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-proxies` | Clash API：列出代理 |  | 有 |  | 部分 | 未测 | 取值：`GET /proxies`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-proxies-name` | Clash API：读取代理 |  | 有 |  | 部分 | 未测 | 取值：`GET /proxies/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-proxies-name-delay` | Clash API：测延迟 |  | 有 |  | 未实现 | 未测 | 取值：`GET /proxies/{name}/delay`<br>约束：查询参数 url、timeout<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-rules` | Clash API：列出路由规则 |  | 有 |  | 未实现 | 未测 | 取值：`GET /rules`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `get-ui` | Clash API：外部 UI 静态页 |  | 有 |  | 部分 | 未测 | 取值：`GET /ui`<br>约束：external_ui 非空时<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `get-version` | Clash API：版本 |  | 有 |  | 已实现 | 通过 | 取值：`GET /version`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `patch-configs` | Clash API：修改配置（mode 等） |  | 有 |  | 已实现 | 通过 | 取值：`PATCH /configs`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `patch-script` | Clash API：修改脚本 |  | 有 |  | 已实现 | 通过 | 取值：`PATCH /script`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `post-cache-dns-flush` | Clash API：清空 DNS 缓存 |  | 有 |  | 已实现 | 通过 | 取值：`POST /cache/dns/flush`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `patch-configs` | Clash API：修改配置（mode 等） |  | 有 |  | 未实现 | 未测 | 取值：`PATCH /configs`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `patch-script` | Clash API：修改脚本 |  | 有 |  | 未实现 | 未测 | 取值：`PATCH /script`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `post-cache-dns-flush` | Clash API：清空 DNS 缓存 |  | 有 |  | 未实现 | 未测 | 取值：`POST /cache/dns/flush`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `post-cache-fakeip-flush` | Clash API：清空 FakeIP 缓存 |  | 有 |  | 已实现 | 通过 | 取值：`POST /cache/fakeip/flush`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `post-script` | Clash API：测试脚本 |  | 有 |  | 已实现 | 通过 | 取值：`POST /script`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `post-upgrade-ui` | Clash API：更新外部 UI |  | 有 |  | 已实现 | 通过 | 取值：`POST /upgrade/ui`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `put-configs` | Clash API：更新配置 |  | 有 |  | 已实现 | 通过 | 取值：`PUT /configs`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `put-providers-proxies-name` | Clash API：更新代理提供者 |  | 有 |  | 已实现 | 通过 | 取值：`PUT /providers/proxies/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
-| `put-providers-rules-name` | Clash API：更新规则提供者 |  | 有 |  | 已实现 | 通过 | 取值：`PUT /providers/rules/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `post-script` | Clash API：测试脚本 |  | 有 |  | 未实现 | 未测 | 取值：`POST /script`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `post-upgrade-ui` | Clash API：更新外部 UI |  | 有 |  | 未实现 | 未测 | 取值：`POST /upgrade/ui`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `put-configs` | Clash API：更新配置 |  | 有 |  | 未实现 | 未测 | 取值：`PUT /configs`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `put-providers-proxies-name` | Clash API：更新代理提供者 |  | 有 |  | 未实现 | 未测 | 取值：`PUT /providers/proxies/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
+| `put-providers-rules-name` | Clash API：更新规则提供者 |  | 有 |  | 未实现 | 未测 | 取值：`PUT /providers/rules/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `put-proxies-name` | Clash API：切换 selector |  | 有 |  | 已实现 | 通过 | 取值：`PUT /proxies/{name}`<br>约束：认证：Authorization: Bearer secret；WebSocket 可用 token 查询参数（source:experimental/clashapi/server.go） |
 | `secret` | RESTful API 的密钥（可选）通过指定 HTTP 标头 `Authorization: Bearer ${secret}` 进行身份验证如果 RESTful API 正在监听 0.0.0.0，请始终设置一个密钥。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.10.0 起 |
 | `store-fakeip` | 将 fakeip 存储在缓存文件中。 |  | 已移除 |  | 不适用 | 未测 | 约束：`store_selected` 已在 Clash API 中废弃，且已迁移到 `cache_file.store_fakeip`。<br>约束：自 sing-box 1.10.0 起<br>约束：配置后启动报错（source:experimental/clashapi/server.go） |
@@ -86,42 +86,42 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-configs` | 获取基本配置 | 有 |  |  | 已实现 | 通过 | 取值：`GET` |
-| `patch-configs` | 更新基本配置，204 | 有 |  |  | 已实现 | 通过 | 取值：`PATCH`<br>约束：body 如 {"mixed-port": 7890} |
-| `put-configs` | 重新加载基本配置，204 | 有 |  |  | 已实现 | 通过 | 取值：`PUT`<br>约束：body {path,payload}<br>约束：force=true |
+| `get-configs` | 获取基本配置 | 有 |  |  | 未实现 | 未测 | 取值：`GET` |
+| `patch-configs` | 更新基本配置，204 | 有 |  |  | 未实现 | 未测 | 取值：`PATCH`<br>约束：body 如 {"mixed-port": 7890} |
+| `put-configs` | 重新加载基本配置，204 | 有 |  |  | 未实现 | 未测 | 取值：`PUT`<br>约束：body {path,payload}<br>约束：force=true |
 
 ## configs-geo
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `post-configs-geo` | 更新 GEO 数据库，204 | 有 |  |  | 已实现 | 通过 | 取值：`POST`<br>约束：body {path,payload} |
+| `post-configs-geo` | 更新 GEO 数据库，204 | 有 |  |  | 未实现 | 未测 | 取值：`POST`<br>约束：body {path,payload} |
 
 ## connections
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `delete-connections` | 关闭所有连接，204 | 有 |  |  | 已实现 | 通过 | 取值：`DELETE` |
-| `get-connections` | 连接信息 | 有 |  |  | 部分 | 通过 | 取值：`GET`、`WS`<br>约束：interval=毫秒，默认 1000 |
+| `delete-connections` | 关闭所有连接，204 | 有 |  |  | 未实现 | 未测 | 取值：`DELETE` |
+| `get-connections` | 连接信息 | 有 |  |  | 部分 | 未测 | 取值：`GET`、`WS`<br>约束：interval=毫秒，默认 1000 |
 
 ## connections-id
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `delete-connections-id` | 关闭特定连接，204 | 有 |  |  | 已实现 | 通过 | 取值：`DELETE` |
+| `delete-connections-id` | 关闭特定连接，204 | 有 |  |  | 未实现 | 未测 | 取值：`DELETE` |
 
 ## controller
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | 控制接口维度 | 有 |  |  | 部分 | 通过 | listener：`external-controller`、`external-controller-pipe`、`external-controller-tls`、`external-controller-unix`<br>auth：`none`、`secret`<br>cors：`allow-origins`、`allow-private-network`、`off`<br>ui：`external-ui`、`external-ui-url`、`off`<br>doh：`external-doh-server`、`off`<br>约束：tls 需顶层 tls 证书<br>约束：unix、pipe、doh 不验证 secret |
+| `combo` | 控制接口维度 | 有 |  |  | 部分 | 未测 | listener：`external-controller`、`external-controller-pipe`、`external-controller-tls`、`external-controller-unix`<br>auth：`none`、`secret`<br>cors：`allow-origins`、`allow-private-network`、`off`<br>ui：`external-ui`、`external-ui-url`、`off`<br>doh：`external-doh-server`、`off`<br>约束：tls 需顶层 tls 证书<br>约束：unix、pipe、doh 不验证 secret |
 | `external-controller` | RESTful API 监听地址 | 有 |  |  | 已实现 | 通过 | 取值：`host:port` |
-| `external-controller-cors-allow-origins` | API CORS 允许来源 | 有 |  |  | 已实现 | 通过 | 取值：`来源列表` |
-| `external-controller-cors-allow-private-network` | API CORS 允许私有网络 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
-| `external-controller-pipe` | Windows namedpipe API 监听地址 | 有 |  |  | 已实现 | 通过 | 取值：`管道路径`<br>约束：namedpipe 访问不验证 secret |
-| `external-controller-routing-mark` | 为 external-controller 与 external-controller-tls 监听 socket 设置 routing-mark | 有 |  |  | 已实现 | 通过 | 取值：`整数`<br>约束：仅 Linux |
-| `external-controller-tls` | HTTPS API 监听地址 | 有 |  |  | 已实现 | 通过 | 取值：`host:port`<br>约束：文档：使用 TLS 也必须填写 external-controller<br>约束：需配置顶层 tls 证书 |
-| `external-controller-unix` | Unix socket API 监听地址 | 有 |  |  | 已实现 | 通过 | 取值：`路径`<br>约束：Unix socket 访问不验证 secret |
-| `external-doh-server` | 在 RESTful API 端口上开启 DoH 服务器 | 有 |  |  | 已实现 | 通过 | 取值：`URL 路径`<br>约束：该 URL 不验证 secret |
+| `external-controller-cors-allow-origins` | API CORS 允许来源 | 有 |  |  | 已实现 | 未测 | 取值：`来源列表` |
+| `external-controller-cors-allow-private-network` | API CORS 允许私有网络 | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true` |
+| `external-controller-pipe` | Windows namedpipe API 监听地址 | 有 |  |  | 未实现 | 未测 | 取值：`管道路径`<br>约束：namedpipe 访问不验证 secret |
+| `external-controller-routing-mark` | 为 external-controller 与 external-controller-tls 监听 socket 设置 routing-mark | 有 |  |  | 未实现 | 未测 | 取值：`整数`<br>约束：仅 Linux |
+| `external-controller-tls` | HTTPS API 监听地址 | 有 |  |  | 未实现 | 未测 | 取值：`host:port`<br>约束：文档：使用 TLS 也必须填写 external-controller<br>约束：需配置顶层 tls 证书 |
+| `external-controller-unix` | Unix socket API 监听地址 | 有 |  |  | 未实现 | 未测 | 取值：`路径`<br>约束：Unix socket 访问不验证 secret |
+| `external-doh-server` | 在 RESTful API 端口上开启 DoH 服务器 | 有 |  |  | 未实现 | 未测 | 取值：`URL 路径`<br>约束：该 URL 不验证 secret |
 | `secret` | API 访问密钥 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
 
 ## debug-gc
@@ -140,7 +140,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-dns-query` | DNS 查询，返回 Status、Question、TC、RD、RA、AD、CD、Answer、Authority、Additional | 有 |  |  | 已实现 | 通过 | 取值：`GET`<br>约束：name<br>约束：type |
+| `get-dns-query` | DNS 查询，返回 Status、Question、TC、RD、RA、AD、CD、Answer、Authority、Additional | 有 |  |  | 未实现 | 未测 | 取值：`GET`<br>约束：name<br>约束：type |
 
 ## doh
 
@@ -164,7 +164,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-group-name-delay` | 测试组内节点并清除自动组 fixed | 有 |  |  | 已实现 | 通过 | 取值：`GET`<br>约束：expected<br>约束：timeout<br>约束：url |
+| `get-group-name-delay` | 测试组内节点并清除自动组 fixed | 有 |  |  | 未实现 | 未测 | 取值：`GET`<br>约束：expected<br>约束：timeout<br>约束：url |
 
 ## handler-service
 
@@ -172,13 +172,13 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `add-inbound` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
 | `add-outbound` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
-| `alter-inbound` | gRPC 方法 |  |  | 有 | 已实现 | 通过 |  |
+| `alter-inbound` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
 | `alter-outbound` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
-| `get-inbound-users` | gRPC 方法 |  |  | 有 | 已实现 | 通过 |  |
-| `get-inbound-users-count` | gRPC 方法 |  |  | 有 | 已实现 | 通过 |  |
+| `get-inbound-users` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
+| `get-inbound-users-count` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
 | `list-inbounds` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
 | `list-outbounds` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
-| `overview` | 增删列入站出站；入站增删用户 |  |  | 有 | 已实现 | 通过 | 取值：`列入站`、`列出站`、`删除入站`、`删除出站`、`删除用户`、`添加入站`、`添加出站`、`添加用户`<br>约束：用户操作仅 VMess、VLESS、Trojan、Shadowsocks |
+| `overview` | 增删列入站出站；入站增删用户 |  |  | 有 | 未实现 | 未测 | 取值：`列入站`、`列出站`、`删除入站`、`删除出站`、`删除用户`、`添加入站`、`添加出站`、`添加用户`<br>约束：用户操作仅 VMess、VLESS、Trojan、Shadowsocks |
 | `remove-inbound` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
 | `remove-outbound` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
 
@@ -193,7 +193,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-logs` | 实时日志 | 有 |  |  | 已实现 | 通过 | 取值：`GET`、`WS`<br>约束：format=structured<br>约束：level=info\|warning\|error\|debug |
+| `get-logs` | 实时日志 | 有 |  |  | 未实现 | 未测 | 取值：`GET`、`WS`<br>约束：format=structured<br>约束：level=info\|warning\|error\|debug |
 
 ## lua-dns
 
@@ -267,7 +267,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-memory` | 实时内存，每秒推送 inuse、oslimit | 有 |  |  | 已实现 | 通过 | 取值：`GET`、`WS` |
+| `get-memory` | 实时内存，每秒推送 inuse、oslimit | 有 |  |  | 未实现 | 未测 | 取值：`GET`、`WS` |
 
 ## metrics
 
@@ -282,70 +282,70 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-outbound-status` | gRPC 方法 |  |  | 有 | 已实现 | 通过 |  |
+| `get-outbound-status` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
 
 ## providers-proxies
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-providers-proxies` | 所有代理集合 | 有 |  |  | 已实现 | 通过 | 取值：`GET` |
+| `get-providers-proxies` | 所有代理集合 | 有 |  |  | 部分 | 未测 | 取值：`GET` |
 
 ## providers-proxies-name
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-providers-proxies-name` | 特定集合 | 有 |  |  | 已实现 | 通过 | 取值：`GET` |
-| `put-providers-proxies-name` | 更新集合，204 | 有 |  |  | 已实现 | 通过 | 取值：`PUT` |
+| `get-providers-proxies-name` | 特定集合 | 有 |  |  | 部分 | 未测 | 取值：`GET` |
+| `put-providers-proxies-name` | 更新集合，204 | 有 |  |  | 未实现 | 未测 | 取值：`PUT` |
 
 ## providers-proxies-name-healthcheck
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-providers-proxies-name-healthcheck` | 触发集合健康检查，204 | 有 |  |  | 已实现 | 通过 | 取值：`GET` |
+| `get-providers-proxies-name-healthcheck` | 触发集合健康检查，204 | 有 |  |  | 未实现 | 未测 | 取值：`GET` |
 
 ## providers-proxies-name-proxy
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-providers-proxies-name-proxy` | 集合内指定代理 | 有 |  |  | 已实现 | 通过 | 取值：`GET` |
+| `get-providers-proxies-name-proxy` | 集合内指定代理 | 有 |  |  | 部分 | 未测 | 取值：`GET` |
 
 ## providers-proxies-name-proxy-healthcheck
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-providers-proxies-name-proxy-healthcheck` | 测试集合内指定代理 | 有 |  |  | 已实现 | 通过 | 取值：`GET`<br>约束：timeout<br>约束：url |
+| `get-providers-proxies-name-proxy-healthcheck` | 测试集合内指定代理 | 有 |  |  | 未实现 | 未测 | 取值：`GET`<br>约束：timeout<br>约束：url |
 
 ## providers-rules
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-providers-rules` | 所有规则集合 | 有 |  |  | 已实现 | 通过 | 取值：`GET` |
+| `get-providers-rules` | 所有规则集合 | 有 |  |  | 部分 | 未测 | 取值：`GET` |
 
 ## providers-rules-name
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `put-providers-rules-name` | 更新规则集合，204 | 有 |  |  | 已实现 | 通过 | 取值：`PUT` |
+| `put-providers-rules-name` | 更新规则集合，204 | 有 |  |  | 未实现 | 未测 | 取值：`PUT` |
 
 ## proxies
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-proxies` | 代理信息，含 name、type、udp、uot、xudp、tfo、mptcp、smux、alive、history、extra、interface、routing-mark、provider-name、dialer-proxy；组另含 now、all、testUrl、hidden、icon、emptyFallback、expectedStatus、fixed | 有 |  |  | 已实现 | 通过 | 取值：`GET` |
+| `get-proxies` | 代理信息，含 name、type、udp、uot、xudp、tfo、mptcp、smux、alive、history、extra、interface、routing-mark、provider-name、dialer-proxy；组另含 now、all、testUrl、hidden、icon、emptyFallback、expectedStatus、fixed | 有 |  |  | 部分 | 未测 | 取值：`GET` |
 
 ## proxies-name
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `delete-proxies-name` | 清除 fixed 选择（Selector 除外），204 | 有 |  |  | 已实现 | 通过 | 取值：`DELETE` |
-| `get-proxies-name` | 具体代理 | 有 |  |  | 已实现 | 通过 | 取值：`GET` |
+| `delete-proxies-name` | 清除 fixed 选择（Selector 除外），204 | 有 |  |  | 已实现 | 未测 | 取值：`DELETE` |
+| `get-proxies-name` | 具体代理 | 有 |  |  | 部分 | 未测 | 取值：`GET` |
 | `put-proxies-name` | 选择代理，204 | 有 |  |  | 已实现 | 通过 | 取值：`PUT`<br>约束：body {"name":"日本"} |
 
 ## proxies-name-delay
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-proxies-name-delay` | 测试代理延迟 | 有 |  |  | 已实现 | 通过 | 取值：`GET`<br>约束：expected<br>约束：timeout<br>约束：url |
+| `get-proxies-name-delay` | 测试代理延迟 | 有 |  |  | 未实现 | 未测 | 取值：`GET`<br>约束：expected<br>约束：timeout<br>约束：url |
 
 ## reflection-service
 
@@ -357,7 +357,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `post-restart` | 重启内核，204 | 有 |  |  | 已实现 | 通过 | 取值：`POST`<br>约束：body {path,payload} |
+| `post-restart` | 重启内核，204 | 有 |  |  | 未实现 | 未测 | 取值：`POST`<br>约束：body {path,payload} |
 
 ## root
 
@@ -371,7 +371,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `add-rule` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
 | `get-balancer-info` | gRPC 方法 |  |  | 有 | 已实现 | 通过 |  |
-| `list-rule` | gRPC 方法 |  |  | 有 | 已实现 | 通过 |  |
+| `list-rule` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
 | `override-balancer-target` | gRPC 方法 |  |  | 有 | 已实现 | 通过 |  |
 | `overview` | 增删改规则、查询均衡器、封来源 IP |  |  | 有 | 未实现 | 未测 | 取值：`adrules`、`bi`、`bo`、`rmrules`、`sib` |
 | `remove-rule` | gRPC 方法 |  |  | 有 | 未实现 | 未测 |  |
@@ -382,7 +382,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get-rules` | 规则列表，index、type、payload、proxy、size、extra | 有 |  |  | 已实现 | 通过 | 取值：`GET` |
+| `get-rules` | 规则列表，index、type、payload、proxy、size、extra | 有 |  |  | 未实现 | 未测 | 取值：`GET` |
 
 ## rules-disable
 
@@ -394,18 +394,18 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `protocol` | sing-box gRPC API 服务，兼容 gRPC-Web |  | 有 |  | 已实现 | 通过 | 取值：`api`<br>约束：自 sing-box 1.14.0 起 |
-| `combo` | sing-box API 服务的面板、认证和安全层组合 |  | 有 |  | 已实现 | 通过 | dashboard：`bool`、`object`、`off`、`path`<br>auth：`none`、`secret`<br>security：`none`、`tls`<br>protocol：`grpc`、`grpc-web`<br>约束：dashboard 下载后在 /dashboard/ 提供，其他浏览器请求被重定向<br>约束：secret 为空时不认证<br>约束：update_interval 默认 1d |
-| `access-control-allow-origin` | 允许的 CORS 来源,默认使用 `*`。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
-| `access-control-allow-private-network` | 允许从私有网络访问。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
-| `dashboard` | 下载并通过 API 监听器在 `/dashboard/` 提供的 Web 仪表板；其他浏览器请求将被重定向到该路径。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
-| `dashboard-download-url` | 仪表板压缩包（zip）的下载 URL。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `https://github.com/SagerNet/sing-box-dashboard/archive/refs/heads/gh-pages.zip`。 |
-| `dashboard-enabled` | 启用仪表板。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
-| `dashboard-http-client` | 用于下载仪表板的 HTTP 客户端。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
-| `dashboard-path` | 存放仪表板文件的目录。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用工作目录下的 `dashboard`。 |
-| `dashboard-update-interval` | 仪表板的更新间隔。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1d`。 |
+| `protocol` | sing-box gRPC API 服务，兼容 gRPC-Web |  | 有 |  | 未实现 | 未测 | 取值：`api`<br>约束：自 sing-box 1.14.0 起 |
+| `combo` | sing-box API 服务的面板、认证和安全层组合 |  | 有 |  | 未实现 | 未测 | dashboard：`bool`、`object`、`off`、`path`<br>auth：`none`、`secret`<br>security：`none`、`tls`<br>protocol：`grpc`、`grpc-web`<br>约束：dashboard 下载后在 /dashboard/ 提供，其他浏览器请求被重定向<br>约束：secret 为空时不认证<br>约束：update_interval 默认 1d |
+| `access-control-allow-origin` | 允许的 CORS 来源,默认使用 `*`。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
+| `access-control-allow-private-network` | 允许从私有网络访问。 |  | 有 |  | 已实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
+| `dashboard` | 下载并通过 API 监听器在 `/dashboard/` 提供的 Web 仪表板；其他浏览器请求将被重定向到该路径。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
+| `dashboard-download-url` | 仪表板压缩包（zip）的下载 URL。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `https://github.com/SagerNet/sing-box-dashboard/archive/refs/heads/gh-pages.zip`。 |
+| `dashboard-enabled` | 启用仪表板。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
+| `dashboard-http-client` | 用于下载仪表板的 HTTP 客户端。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
+| `dashboard-path` | 存放仪表板文件的目录。 |  | 有 |  | 部分 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用工作目录下的 `dashboard`。 |
+| `dashboard-update-interval` | 仪表板的更新间隔。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1d`。 |
 | `secret` | API 密钥。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：默认无需认证。 |
-| `tls` | TLS 配置,参阅 TLS。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起 |
+| `tls` | TLS 配置,参阅 TLS。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
 
 ## singbox-grpc
 
@@ -511,7 +511,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `get` | GET /ui 面板静态资源 | 有 |  |  | 已实现 | 通过 | 取值：`GET` |
+| `get` | GET /ui 面板静态资源 | 有 |  |  | 部分 | 未测 | 取值：`GET` |
 
 ## upgrade
 
@@ -523,13 +523,13 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `post-upgrade-geo` | 更新 GEO 数据库，204 | 有 |  |  | 已实现 | 通过 | 取值：`POST` |
+| `post-upgrade-geo` | 更新 GEO 数据库，204 | 有 |  |  | 未实现 | 未测 | 取值：`POST` |
 
 ## upgrade-ui
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `post-upgrade-ui` | 更新面板，须设置 external-ui | 有 |  |  | 已实现 | 通过 | 取值：`POST` |
+| `post-upgrade-ui` | 更新面板，须设置 external-ui | 有 |  |  | 未实现 | 未测 | 取值：`POST` |
 
 ## v2ray
 
@@ -549,7 +549,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `dashboards` | 文档列出的外部面板 Yacd、Metacubexd、zashboard | 有 |  |  | 已实现 | 通过 | 取值：`Metacubexd`、`Yacd`、`zashboard` |
-| `external-ui` | 静态面板目录，经 API 地址 /ui 提供 | 有 |  |  | 已实现 | 通过 | 取值：`工作目录相对路径`、`绝对路径`<br>约束：不在工作目录时需用 SAFE_PATHS 加入安全路径 |
-| `external-ui-name` | 面板子目录名，合并为 external-ui/<name> | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
-| `external-ui-url` | 面板下载地址 | 有 |  |  | 已实现 | 通过 | 取值：`URL`<br>约束：source:docs/config.yaml 注明支持 zip 与 tgz |
+| `dashboards` | 文档列出的外部面板 Yacd、Metacubexd、zashboard | 有 |  |  | 部分 | 未测 | 取值：`Metacubexd`、`Yacd`、`zashboard` |
+| `external-ui` | 静态面板目录，经 API 地址 /ui 提供 | 有 |  |  | 已实现 | 未测 | 取值：`工作目录相对路径`、`绝对路径`<br>约束：不在工作目录时需用 SAFE_PATHS 加入安全路径 |
+| `external-ui-name` | 面板子目录名，合并为 external-ui/<name> | 有 |  |  | 已实现 | 未测 | 取值：`字符串` |
+| `external-ui-url` | 面板下载地址 | 有 |  |  | 未实现 | 未测 | 取值：`URL`<br>约束：source:docs/config.yaml 注明支持 zip 与 tgz |

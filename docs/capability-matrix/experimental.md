@@ -6,8 +6,8 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `cache-file` | 缓存文件配置对象 |  | 有 |  | 已实现 | 通过 |  |
-| `clash-api` | Clash API 配置对象 |  | 有 |  | 部分 | 通过 |  |
+| `cache-file` | 缓存文件配置对象 |  | 有 |  | 部分 | 未测 |  |
+| `clash-api` | Clash API 配置对象 |  | 有 |  | 部分 | 未测 |  |
 | `debug` | experimental.debug 调试配置对象，文档未列 |  | 有 |  | 不适用 | 未测 |  |
 | `v2ray-api` | V2Ray API 配置对象 |  | 有 |  | 未实现 | 未测 |  |
 

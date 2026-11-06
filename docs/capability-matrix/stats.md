@@ -49,7 +49,7 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `delay-history` | /proxies 的 history 与 extra 延迟记录 | 有 |  |  | 已实现 | 通过 | 取值：`JSON` |
+| `delay-history` | /proxies 的 history 与 extra 延迟记录 | 有 |  |  | 未实现 | 未测 | 取值：`JSON` |
 
 ## rules
 

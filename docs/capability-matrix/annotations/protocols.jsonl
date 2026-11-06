@@ -56,7 +56,7 @@
 {"key": "inbound/common/routing-mark", "kerlico": "no", "where": "", "note": "监听 socket 的 routing-mark。建议：暂不实现，kerlico 的监听 socket 不设 SO_MARK，需要系统路由配合时再加"}
 {"key": "inbound/common/rule", "kerlico": "no", "where": "", "note": "入站使用的子规则，为空或未找到时用 rules。建议：暂不实现，`routes` 是一张全局表，按 `node` 字段匹配入站已能实现大部分分流"}
 {"key": "inbound/common/settings", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "节点 `options`，每种协议私有且拒绝未知字段"}
-{"key": "inbound/common/sniffing", "kerlico": "yes", "where": "", "note": "入站流量探测配置。建议：实现，kerlico 没有任何协议嗅探，TUN 和透明代理拿不到域名时路由规则不命中"}
+{"key": "inbound/common/sniffing", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：在 IngressBinding 打开 TCP/UDP 流的统一边界调用 sniff_and_prepare_*，覆盖 socks/http/mixed/tun 与协议服务端；实现或删除 parse_pure_ip；补端到端测试（IP 目标 + TLS SNI -> 路由命中/目标被覆盖）"}
 {"key": "inbound/common/stream-settings", "kerlico": "partial", "where": "crates/protocol-vless/src/inbound.rs", "note": "`transport` 和 `security` 只在 VLESS、Trojan、VMess 的 `options` 内，不是通用字段；传输只有 tcp、ws、httpupgrade、grpc，VLESS 另有 xhttp、xdrive"}
 {"key": "inbound/common/tag", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "节点 `tag`"}
 {"key": "inbound/common/type", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "节点 `type`。缺 mixed、redirect、tproxy、cloudflared、hysteria2-realm、masque、openvpn、tailcat；direct、tunnel 用 `inbounds`"}
@@ -75,17 +75,17 @@
 {"key": "inbound/fallback/type", "kerlico": "yes", "where": "crates/net/src/fallback.rs", "note": "`FallbackRule.dest` TCP 回落连接建立与双向拷贝"}
 {"key": "inbound/fallback/xver", "kerlico": "no", "where": "", "note": "发送 PROXY protocol 版本，默认 0。建议：暂不实现，kerlico 没有 PROXY protocol，随回落的后续需求再定"}
 {"key": "inbound/global/allow-lan", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "`nodes` 可监听任意地址但要求认证；`local_inbounds` 只能监听回环；没有单独开关"}
-{"key": "inbound/global/bind-address", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "节点 `listen` 的 IP 部分"}
+{"key": "inbound/global/bind-address", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：把 \"*\" 展开为 [::] 双栈监听（或 0.0.0.0 与 [::] 各一个节点）"}
 {"key": "inbound/global/inbound-mptcp", "kerlico": "no", "where": "", "note": "入站 MPTCP。建议：暂不实现，kerlico 的监听没有 socket 调优字段，也没有 MPTCP 需求证据"}
 {"key": "inbound/global/inbound-tfo", "kerlico": "no", "where": "", "note": "入站 TCP Fast Open。建议：暂不实现，kerlico 的监听没有 socket 调优字段，TFO 随监听选项一起做"}
-{"key": "inbound/global/lan-allowed-ips", "kerlico": "yes", "where": "crates/engine/src/lib.rs", "note": "`lan_allowed_ips` / `lan-allowed-ips` 入站来源 CIDR 白名单过滤（`IpFilter`）"}
-{"key": "inbound/global/lan-disallowed-ips", "kerlico": "yes", "where": "crates/engine/src/lib.rs", "note": "`lan_disallowed_ips` / `lan-disallowed-ips` 入站来源 CIDR 黑名单优先拒绝"}
+{"key": "inbound/global/lan-allowed-ips", "kerlico": "partial", "where": "crates/engine/src/lib.rs", "note": "M11 审计（夸大）：把 IpFilter 放入 InboundContext 或包装节点 UDP socket 的 recv_from，在 handle_udp/QUIC 新连接处按来源 IP 丢弃；加 engine 测试：被拒来源的 TCP 与 UDP 都不建流"}
+{"key": "inbound/global/lan-disallowed-ips", "kerlico": "partial", "where": "crates/engine/src/lib.rs", "note": "M11 审计（夸大）：把 IpFilter 放入 InboundContext 或包装节点 UDP socket 的 recv_from，在 handle_udp/QUIC 新连接处按来源 IP 丢弃；加 engine 测试：被拒来源的 TCP 与 UDP 都不建流"}
 {"key": "inbound/global/listeners", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`nodes` 和 `local_inbounds` 数组"}
 {"key": "inbound/global/mixed-port", "kerlico": "yes", "where": "crates/config/src/plan.rs", "note": "顶层 `mixed_port` / `mixed-port` 自动展开为 `mixed` 入站节点"}
 {"key": "inbound/global/port", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`local_inbounds` 里写一条 type `http` 的节点"}
 {"key": "inbound/global/redir-port", "kerlico": "yes", "where": "crates/config/src/plan.rs", "note": "顶层 `redir_port` / `redir-port` 自动展开为 `redirect` 入站节点"}
 {"key": "inbound/global/socks-port", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`local_inbounds` 里写一条 type `socks` 的节点"}
-{"key": "inbound/global/tproxy-port", "kerlico": "yes", "where": "crates/config/src/plan.rs", "note": "顶层 `tproxy_port` / `tproxy-port` 自动展开为 `tproxy` 入站节点"}
+{"key": "inbound/global/tproxy-port", "kerlico": "partial", "where": "crates/config/src/plan.rs", "note": "M11 审计（夸大）：tproxy UDP 用 IP_RECVORIGDSTADDR/IPV6_RECVORIGDSTADDR 取原始目标，按会话持续回包并以透明套接字绑定原目标地址回送；IPv6 设 IPV6_TRANSPARENT"}
 {"key": "inbound/http/accounts", "kerlico": "yes", "where": "crates/protocol-http/src/inbound.rs", "note": "成员 `native_credential` 的 `username`、`password`"}
 {"key": "inbound/http/allow-transparent", "kerlico": "no", "where": "", "note": "true 时转发所有 HTTP 请求而非仅代理请求。建议：暂不实现，kerlico 只接受 CONNECT 和 absolute-form 请求，透明转发要先有透明代理入口"}
 {"key": "inbound/http/certificate", "kerlico": "yes", "where": "crates/protocol-http/src/config.rs", "note": "`tls.cert_pem`，只支持内联 PEM"}
@@ -148,29 +148,29 @@
 {"key": "inbound/hysteria2/certificate", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "`certificate_pem` 或 `certificate_file`"}
 {"key": "inbound/hysteria2/client-auth-cert", "kerlico": "no", "where": "", "note": "mTLS 客户端证书。建议：暂不实现，随 client-auth-type 一起放到安全层统一做"}
 {"key": "inbound/hysteria2/client-auth-type", "kerlico": "no", "where": "", "note": "mTLS 类型。建议：暂不实现，节点已有协议原生认证，mTLS 放到安全层统一做"}
-{"key": "inbound/hysteria2/combo", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "obfs 只有 none、salamander；拥塞只有 `bbr`、`reno`；缺 gecko、masquerade、brutal、realm、ECH、mTLS、mux"}
+{"key": "inbound/hysteria2/combo", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "M11 审计（夸大）：combo 依赖的 down 被丢弃、up 语义反、proxy 伪装为假实现，见对应行"}
 {"key": "inbound/hysteria2/cwnd", "kerlico": "no", "where": "", "note": "初始拥塞窗口。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
-{"key": "inbound/hysteria2/down", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`down` 带宽字符串解析并限制服务端下行发送速率"}
-{"key": "inbound/hysteria2/down-mbps", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`down_mbps` / `down-mbps` 服务端下行带宽配置（Mbps）"}
+{"key": "inbound/hysteria2/down", "kerlico": "no", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（空壳）：down.to_bps() 结果被丢弃；需存 down_bps 并作为 Hysteria-CC-RX 返回（上游语义：CC-RX=服务端接收速率）"}
+{"key": "inbound/hysteria2/down-mbps", "kerlico": "no", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（空壳）：同 down：仅校验后丢弃，无任何限速或协商效果"}
 {"key": "inbound/hysteria2/ech-key", "kerlico": "no", "where": "", "note": "ECH 密钥，填写即开启；可由 mihomo generate ech-keypair 生成。建议：暂不实现，ECH 要先在安全层统一选方案，按协议单加没有意义"}
-{"key": "inbound/hysteria2/ignore-client-bandwidth", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "没有开关；kerlico 固定返回 auto 并用 `limits.congestion`，等于这项恒开"}
+{"key": "inbound/hysteria2/ignore-client-bandwidth", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "M11 审计（夸大）：\"恒开\"仅在 up 未设时成立；设了 up 就发数值 CC-RX，客户端改走 brutal。需显式开关，开时固定 auto"}
 {"key": "inbound/hysteria2/initial-connection-receive-window", "kerlico": "no", "where": "", "note": "quic-go 初始连接接收窗口。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
 {"key": "inbound/hysteria2/initial-stream-receive-window", "kerlico": "no", "where": "", "note": "quic-go 初始流接收窗口。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
-{"key": "inbound/hysteria2/masquerade", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade` 支持 URL 简写或 `{type: \"string\"|\"file\"|\"proxy\", ...}` 完整伪装配置"}
+{"key": "inbound/hysteria2/masquerade", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（夸大）：string/file 可用；proxy（含 http(s):// 简写）不反代，只回 200+Location 空体，需实现 HTTP 反向代理"}
 {"key": "inbound/hysteria2/masquerade-content", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.content` / `masquerade_content` 静态字符串响应体"}
 {"key": "inbound/hysteria2/masquerade-directory", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.directory` / `masquerade_directory` 静态文件目录服务（拦截 `..` 路径穿越）"}
 {"key": "inbound/hysteria2/masquerade-headers", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.headers` / `masquerade_headers` 伪装响应附加标头"}
-{"key": "inbound/hysteria2/masquerade-rewrite-host", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.rewrite_host` / `masquerade_rewrite_host` 反向代理重写 `Host` 标头"}
-{"key": "inbound/hysteria2/masquerade-status-code", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.status_code` / `masquerade_status_code` 自定义伪装 HTTP 状态码"}
-{"key": "inbound/hysteria2/masquerade-type", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.type` / `masquerade_type` 支持 `string`、`file`、`proxy`"}
-{"key": "inbound/hysteria2/masquerade-url", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`masquerade.url` / `masquerade_url` 反向代理上游 URL"}
+{"key": "inbound/hysteria2/masquerade-rewrite-host", "kerlico": "no", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（空壳）：把 Host 写进响应头而非上游请求头；需随反代实现改写请求 Host"}
+{"key": "inbound/hysteria2/masquerade-status-code", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（夸大）：仅 string 类型生效；补测试"}
+{"key": "inbound/hysteria2/masquerade-type", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（夸大）：type=proxy 为假实现（200+Location），string/file 为真"}
+{"key": "inbound/hysteria2/masquerade-url", "kerlico": "no", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（空壳）：URL 只写进 Location 响应头，不发起上游请求；需实现反向代理（insecure 字段现被忽略）"}
 {"key": "inbound/hysteria2/max-connection-receive-window", "kerlico": "no", "where": "", "note": "quic-go 最大连接接收窗口。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
 {"key": "inbound/hysteria2/max-idle-time", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "`limits.idle_timeout_ms`"}
 {"key": "inbound/hysteria2/max-stream-receive-window", "kerlico": "no", "where": "", "note": "quic-go 最大流接收窗口。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
 {"key": "inbound/hysteria2/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/hysteria2/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/hysteria2/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/hysteria2/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/hysteria2/mux-option-padding", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：入站 padding 只读一次 u16 长度并跳过、回 18 字节；上游 sing-mux paddingConn 为前 16 次读写各带 [dataLen u16][padLen u16] 头（推断，未对照上游源码运行）；按上游帧格式实现并加 sing-box 互通用例"}
 {"key": "inbound/hysteria2/obfs", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "只有 salamander，由 `salamander_password` 启用；gecko 没有"}
 {"key": "inbound/hysteria2/obfs-max-packet-size", "kerlico": "no", "where": "", "note": "gecko 混淆最大线上包长。建议：暂不实现，gecko 混淆的参数，kerlico 没有 gecko"}
 {"key": "inbound/hysteria2/obfs-min-packet-size", "kerlico": "no", "where": "", "note": "gecko 混淆最小线上包长。建议：暂不实现，gecko 混淆的参数，kerlico 没有 gecko"}
@@ -205,8 +205,8 @@
 {"key": "inbound/hysteria2/realm-token", "kerlico": "no", "where": "", "note": "Hysteria Realm Realm 的 Bearer 令牌，需与 realm 上配置的 `users[].token` 之一匹配。建议：暂不实现，NAT 穿透会合是 Hysteria2 的附加服务，kerlico 还没有 Realm 客户端或服务端"}
 {"key": "inbound/hysteria2/tls", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "只有证书和私钥；缺 ALPN、ECH 等通用字段"}
 {"key": "inbound/hysteria2/udp-mtu", "kerlico": "no", "where": "", "note": "UDP 中继使用的 MTU。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
-{"key": "inbound/hysteria2/up", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`up` 带宽字符串解析并在认证响应返回 `Hysteria-CC-RX`"}
-{"key": "inbound/hysteria2/up-mbps", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "`up_mbps` / `up-mbps` 服务端上行带宽配置（Mbps）"}
+{"key": "inbound/hysteria2/up", "kerlico": "no", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（空壳）：CC-RX 应发 down（服务端接收速率）；up 应作为服务端发送上限（按客户端 rx 取 min 后 brutal/pacing）；单位区分 b/B 大小写（现 to_ascii_lowercase 把 MBps 当 Mbps）"}
+{"key": "inbound/hysteria2/up-mbps", "kerlico": "no", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（空壳）：CC-RX 应发 down（服务端接收速率）；up 应作为服务端发送上限（按客户端 rx 取 min 后 brutal/pacing）；单位区分 b/B 大小写（现 to_ascii_lowercase 把 MBps 当 Mbps）"}
 {"key": "inbound/hysteria2/users", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "节点 `members`，成员 `native_credential` 的 `auth`"}
 {"key": "inbound/hysteria2/users-name", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "成员 `user_id`，关联管理账户"}
 {"key": "inbound/hysteria2/users-password", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "成员 `native_credential` 的 `auth`"}
@@ -223,9 +223,9 @@
 {"key": "inbound/listen/proxy-protocol-accept-no-header", "kerlico": "na", "where": "", "note": "sing-box 已移除的旧字段"}
 {"key": "inbound/listen/reuse-addr", "kerlico": "partial", "where": "crates/engine/src/lib.rs", "note": "监听固定 `set_reuse_address`，没有开关"}
 {"key": "inbound/listen/routing-mark", "kerlico": "no", "where": "", "note": "设置 netfilter 路由标记。建议：暂不实现，kerlico 的监听 socket 没有调优字段，等性能或部署需求出现再统一加"}
-{"key": "inbound/listen/sniff", "kerlico": "yes", "where": "", "note": "启用协议探测。建议：实现，见入站通用 sniffing"}
-{"key": "inbound/listen/sniff-override-destination", "kerlico": "yes", "where": "", "note": "用探测出的域名覆盖连接目标地址。建议：实现，随嗅探一起做"}
-{"key": "inbound/listen/sniff-timeout", "kerlico": "yes", "where": "", "note": "探测超时时间。建议：实现，随嗅探一起做"}
+{"key": "inbound/listen/sniff", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：在 IngressBinding 打开 TCP/UDP 流的统一边界调用 sniff_and_prepare_*，覆盖 socks/http/mixed/tun 与协议服务端；实现或删除 parse_pure_ip；补端到端测试（IP 目标 + TLS SNI -> 路由命中/目标被覆盖）"}
+{"key": "inbound/listen/sniff-override-destination", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：在 IngressBinding 打开 TCP/UDP 流的统一边界调用 sniff_and_prepare_*，覆盖 socks/http/mixed/tun 与协议服务端；实现或删除 parse_pure_ip；补端到端测试（IP 目标 + TLS SNI -> 路由命中/目标被覆盖）"}
+{"key": "inbound/listen/sniff-timeout", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：在 IngressBinding 打开 TCP/UDP 流的统一边界调用 sniff_and_prepare_*，覆盖 socks/http/mixed/tun 与协议服务端；实现或删除 parse_pure_ip；补端到端测试（IP 目标 + TLS SNI -> 路由命中/目标被覆盖）"}
 {"key": "inbound/listen/tcp-fast-open", "kerlico": "no", "where": "", "note": "启用 TCP Fast Open。建议：暂不实现，kerlico 的监听 socket 没有调优字段，等性能或部署需求出现再统一加"}
 {"key": "inbound/listen/tcp-keep-alive", "kerlico": "no", "where": "", "note": "TCP keep alive 初始周期。建议：暂不实现，kerlico 的监听 socket 没有调优字段，等性能或部署需求出现再统一加"}
 {"key": "inbound/listen/tcp-keep-alive-interval", "kerlico": "no", "where": "", "note": "TCP keep alive 间隔。建议：暂不实现，kerlico 的监听 socket 没有调优字段，等性能或部署需求出现再统一加"}
@@ -233,20 +233,20 @@
 {"key": "inbound/listen/udp-disable-domain-unmapping", "kerlico": "no", "where": "", "note": "如果启用，对于地址为域的 UDP 代理请求，将在响应中发送原始包地址而不是映射的域。建议：暂不实现，kerlico 的 UDP 关联由各协议决定回写地址，没有统一开关"}
 {"key": "inbound/listen/udp-fragment", "kerlico": "no", "where": "", "note": "启用 UDP 分段。建议：暂不实现，kerlico 的监听 socket 没有调优字段，等性能或部署需求出现再统一加"}
 {"key": "inbound/listen/udp-timeout", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "全局 `limits.idle_timeout_ms`；不能按节点设置"}
-{"key": "inbound/masque/address", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`address` 配置客户端隧道 IPv4/IPv6 地址并通过 `ADDRESS_ASSIGN` 胶囊下发"}
+{"key": "inbound/masque/address", "kerlico": "partial", "where": "crates/protocol-masque/src/server.rs", "note": "M11 审计（夸大）：实现地址池：按前缀为每条隧道分配独立地址、耗尽返回 503、隧道间互转，并补服务端测试；现为单一固定主机地址（前缀被丢弃），且只在收到 ADDRESS_REQUEST 后回应"}
 {"key": "inbound/masque/advertise-routes", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`advertise_routes` / `advertise-routes` 通过 `ROUTE_ADVERTISEMENT` 胶囊下发路由范围"}
-{"key": "inbound/masque/combo", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`MasqueNodeFactory` 基于 HTTP/3 Extended CONNECT（`:protocol = connect-ip`）与 H3 Datagram 承载 RFC 9484 IP 隧道"}
+{"key": "inbound/masque/combo", "kerlico": "partial", "where": "crates/protocol-masque/src/server.rs", "note": "M11 审计（夸大）：缺 Xray 组合中的 alpn h2（TCP 上 HTTP/2 CONNECT-IP）；supports_tcp=false 且 ALPN 固定 h3；补服务端互通用例（现仅测 kerlico 客户端对 Xray 服务端）"}
 {"key": "inbound/masque/email", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`users[].email` / `username` 用户标识绑定与多用户归属统计"}
-{"key": "inbound/masque/level", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`users[].level` 用户等级兼容字段"}
+{"key": "inbound/masque/level", "kerlico": "no", "where": "crates/protocol-masque/src/server.rs", "note": "M11 审计（空壳）：level 带 #[allow(dead_code)]，解析后丢弃；Xray 用它选流量统计策略，需接入统计等级或改标 no"}
 {"key": "inbound/masque/masque", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`type = \"masque\"` 入站节点（`MasqueNode`）"}
-{"key": "inbound/masque/mtu", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`mtu`（1280..=9000）配置服务端用户态 IP 栈 MTU"}
+{"key": "inbound/masque/mtu", "kerlico": "partial", "where": "crates/protocol-masque/src/server.rs", "note": "M11 审计（夸大）：校验下限实为 576（RFC 9484 要求 >=1280）；mtu 超过 QUIC datagram 容量（initial_mtu 1350）时 send_datagram TooLarge 被静默丢包，需按 max_datagram_size 校验或钳位 MSS"}
 {"key": "inbound/masque/name", "kerlico": "no", "where": "", "note": "系统接口的自定义接口名称。建议：暂不实现，kerlico 的 IP 隧道协议固定走用户态栈，不创建系统网卡"}
 {"key": "inbound/masque/pass", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`users[].pass` / `password` Basic 认证口令（常量时间 SHA-256 校验）"}
 {"key": "inbound/masque/path", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`path` 校验 CONNECT-IP 请求 URI 路径"}
 {"key": "inbound/masque/protocol", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "入站 `type = \"masque\"`（`MasqueNodeFactory`）"}
 {"key": "inbound/masque/system", "kerlico": "no", "where": "", "note": "使用系统接口。建议：暂不实现，kerlico 的 IP 隧道协议固定走用户态栈，不创建系统网卡"}
 {"key": "inbound/masque/tls", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`tls` 配置服务端证书与私钥（支持内联 PEM 或文件路径，ALPN `h3`）"}
-{"key": "inbound/masque/users", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`users` 内联用户列表或顶层 `users` 引用"}
+{"key": "inbound/masque/users", "kerlico": "partial", "where": "crates/protocol-masque/src/server.rs", "note": "M11 审计（夸大）：节点 options 不接受内联 users（deny_unknown_fields 拒绝），只能经 members.native_credential；改说明或加内联支持"}
 {"key": "inbound/masque/users-password", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`users[].password` Basic 认证密码"}
 {"key": "inbound/masque/users-username", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "`users[].username` Basic 认证用户名"}
 {"key": "inbound/masque/version", "kerlico": "yes", "where": "crates/protocol-masque/src/server.rs", "note": "RFC 9484 `connect-ip` 胶囊与上下文 0 数据报协议版本"}
@@ -255,11 +255,11 @@
 {"key": "inbound/mieru/traffic-pattern", "kerlico": "partial", "where": "crates/protocol-mieru/src/config.rs", "note": "`traffic` 的 `low_entropy_mode`、`mask_rotation`、`max_padding`；不是 base64 串，不能直接粘贴 Mihomo 的取值"}
 {"key": "inbound/mieru/transport", "kerlico": "partial", "where": "crates/protocol-mieru/src/config.rs", "note": "`transport`：`tcp`；`udp` 只允许回环不安全兼容模式"}
 {"key": "inbound/mieru/user-hint-is-mandatory", "kerlico": "yes", "where": "crates/protocol-mieru/src/config.rs", "note": "`user_hint_required`"}
-{"key": "inbound/mieru/users", "kerlico": "yes", "where": "crates/protocol-mieru/src/config.rs", "note": "`users` 或成员 `native_credential`"}
+{"key": "inbound/mieru/users", "kerlico": "partial", "where": "crates/protocol-mieru/src/config.rs", "note": "M11 审计（夸大）：公网节点写 options.users/username 会被拒，只能用 members；仅 local_inbounds 接受内联 users，说明需写明"}
 {"key": "inbound/mixed/certificate", "kerlico": "no", "where": "", "note": "TLS 证书，PEM 或路径。建议：暂不实现，mixed 本身没做，TLS 放到第二步"}
 {"key": "inbound/mixed/client-auth-cert", "kerlico": "no", "where": "", "note": "mTLS 客户端证书。建议：暂不实现，随 client-auth-type 一起放到安全层统一做"}
 {"key": "inbound/mixed/client-auth-type", "kerlico": "no", "where": "", "note": "mTLS 类型。建议：暂不实现，节点已有协议原生认证，mTLS 放到安全层统一做"}
-{"key": "inbound/mixed/combo", "kerlico": "yes", "where": "crates/protocol-http/src/inbound.rs", "note": "`MixedNodeFactory` 在单端口首字节嗅探分流 SOCKS5（`0x05`）与 HTTP CONNECT/绝对 URI 请求，并支持 SOCKS5 UDP Associate"}
+{"key": "inbound/mixed/combo", "kerlico": "partial", "where": "crates/protocol-http/src/inbound.rs", "note": "M11 审计（夸大）：分流本身成立但无任何 MixedNode 测试；Mihomo 组合含 mTLS/ECH/reality、sing-box 含 set_system_proxy，均缺，应标 partial 并补首字节分流测试"}
 {"key": "inbound/mixed/domain-resolver", "kerlico": "no", "where": "", "note": "按入站指定解析目标域名的 DNS。建议：暂不实现，kerlico 的目标域名由 `Dispatcher` 和全局 `dns` 处理"}
 {"key": "inbound/mixed/ech-key", "kerlico": "no", "where": "", "note": "ECH 密钥，填写即开启；可由 mihomo generate ech-keypair 生成。建议：暂不实现，ECH 要先在安全层统一选方案，按协议单加没有意义"}
 {"key": "inbound/mixed/mixed", "kerlico": "yes", "where": "crates/protocol-http/src/inbound.rs", "note": "`type = \"mixed\"` 入站节点（`MixedInbound`）"}
@@ -269,7 +269,7 @@
 {"key": "inbound/mixed/set-system-proxy", "kerlico": "no", "where": "", "note": "启动时自动设置系统代理，停止时自动清理。建议：暂不实现，kerlico 不修改系统设置"}
 {"key": "inbound/mixed/tls", "kerlico": "no", "where": "", "note": "mixed 入站启用 TLS。建议：暂不实现，mixed 本身没做，TLS 放到第二步"}
 {"key": "inbound/mixed/udp", "kerlico": "yes", "where": "crates/protocol-socks/src/inbound.rs", "note": "`MixedInbound` 复刻 SOCKS5 `listen_udp` 与 `UDP ASSOCIATE` 处理 UDP 转发"}
-{"key": "inbound/mixed/users", "kerlico": "yes", "where": "crates/protocol-http/src/inbound.rs", "note": "`users` 内联 `{username, password}` 列表或绑定节点级管理用户凭据，同时作用于 SOCKS5 与 HTTP Basic 认证"}
+{"key": "inbound/mixed/users", "kerlico": "partial", "where": "crates/protocol-http/src/inbound.rs", "note": "M11 审计（夸大）：options 不接受内联 users，只能经 members；改说明或加内联支持，并补 mixed 认证测试（SOCKS5 与 HTTP 两侧）"}
 {"key": "inbound/mixed/users-password", "kerlico": "yes", "where": "crates/protocol-http/src/inbound.rs", "note": "`users[].password` 认证密码"}
 {"key": "inbound/mixed/users-username", "kerlico": "yes", "where": "crates/protocol-http/src/inbound.rs", "note": "`users[].username` 认证用户名"}
 {"key": "inbound/naive/combo", "kerlico": "partial", "where": "crates/protocol-naive/src/config.rs", "note": "`transports` 决定 TCP（h1、h2）和 UDP（h3）；只有 tls；H3 拥塞只有 `cubic`、`reno`，缺 bbr 和 security=none"}
@@ -280,86 +280,86 @@
 {"key": "inbound/naive/users", "kerlico": "yes", "where": "crates/protocol-naive/src/server.rs", "note": "节点 `members`"}
 {"key": "inbound/naive/users-password", "kerlico": "yes", "where": "crates/protocol-naive/src/config.rs", "note": "成员 `native_credential` 的 `password`"}
 {"key": "inbound/naive/users-username", "kerlico": "yes", "where": "crates/protocol-naive/src/config.rs", "note": "成员 `native_credential` 的 `username`"}
-{"key": "inbound/openvpn/address", "kerlico": "yes", "where": "", "note": "OpenVPN 服务器地址前缀列表。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/auth", "kerlico": "yes", "where": "", "note": "OpenVPN 数据信道认证摘要。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/cipher", "kerlico": "yes", "where": "", "note": "`static_key` 模式使用的数据信道加密方式。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/combo", "kerlico": "yes", "where": "", "note": "OpenVPN 服务端端点的模式、传输、客户端校验和推送组合。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/data-ciphers", "kerlico": "yes", "where": "", "note": "允许的 OpenVPN 数据信道加密方式。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/data-ciphers-fallback", "kerlico": "yes", "where": "", "note": "用于不支持加密方式协商的遗留客户端的 OpenVPN 数据信道加密方式。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/duplicate-cn", "kerlico": "yes", "where": "", "note": "允许具有相同认证证书 common name 或用户名的多个客户端同时在线。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/handshake-window", "kerlico": "yes", "where": "", "note": "初始 TLS 握手和每次 TLS 重协商允许使用的最长时间。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/key-direction", "kerlico": "yes", "where": "", "note": "静态密钥方向，`server` 或 `client` 之一。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/max-clients", "kerlico": "yes", "where": "", "note": "已建立与握手中的 TLS 客户端会话的最大数量。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/mode", "kerlico": "yes", "where": "", "note": "OpenVPN 会话模式，`tls` 或 `static_key` 之一。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/mss-fix", "kerlico": "yes", "where": "", "note": "用于限制 TCP MSS 的最大封装数据包大小。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/mss-fix-disabled", "kerlico": "yes", "where": "", "note": "禁用 MSS 限制，包括默认限制。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/mss-fix-mode", "kerlico": "yes", "where": "", "note": "显式 `mss_fix` 的计算模式，`mtu` 或 `fixed` 之一。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
+{"key": "inbound/openvpn/address", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Allocate client IPs from address pool and use it for StackOptions/PUSH_REPLY ifconfig"}
+{"key": "inbound/openvpn/auth", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）"}
+{"key": "inbound/openvpn/cipher", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add static_key data-channel cipher (BF-CBC/AES-CBC + HMAC)"}
+{"key": "inbound/openvpn/combo", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）"}
+{"key": "inbound/openvpn/data-ciphers", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Negotiate cipher from peer_info IV_CIPHERS intersect list"}
+{"key": "inbound/openvpn/data-ciphers-fallback", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add field and legacy fallback cipher"}
+{"key": "inbound/openvpn/duplicate-cn", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Track active sessions by CN/username and reject duplicates unless enabled"}
+{"key": "inbound/openvpn/handshake-window", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Enforce handshake deadline in tick and drop session"}
+{"key": "inbound/openvpn/key-direction", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Accept key_direction alias and apply to static-key data keys"}
+{"key": "inbound/openvpn/max-clients", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Reject new sessions over max_clients (default 1024) and evict closed ones"}
+{"key": "inbound/openvpn/mode", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Implement real static_key mode (no TLS, data keys from static key)"}
+{"key": "inbound/openvpn/mss-fix", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Clamp SYN MSS option in tunnel ingress/egress"}
+{"key": "inbound/openvpn/mss-fix-disabled", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add field together with MSS clamp"}
+{"key": "inbound/openvpn/mss-fix-mode", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add mtu/fixed mode with MSS clamp"}
 {"key": "inbound/openvpn/mtu", "kerlico": "yes", "where": "", "note": "OpenVPN 接口 MTU。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/name", "kerlico": "yes", "where": "", "note": "系统接口的自定义接口名称。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
+{"key": "inbound/openvpn/name", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Implement system TUN with name or drop claim"}
 {"key": "inbound/openvpn/network", "kerlico": "yes", "where": "", "note": "OpenVPN 传输网络，`udp` 或 `tcp` 之一。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/peer-address", "kerlico": "yes", "where": "", "note": "IPv4 隧道对端地址。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/peer-address-ipv6", "kerlico": "yes", "where": "", "note": "IPv6 隧道对端地址。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/ping-interval", "kerlico": "yes", "where": "", "note": "服务器未向客户端发送任何 packet 时，发送 data channel ping 的间隔。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/ping-restart", "kerlico": "yes", "where": "", "note": "服务器未收到任何 packet 后关闭客户端会话的时间。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/protocol", "kerlico": "yes", "where": "", "note": "OpenVPN 服务端端点。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push", "kerlico": "yes", "where": "", "note": "推送给客户端的选项。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-block-outside-dns", "kerlico": "yes", "where": "", "note": "向客户端推送 `block-outside-dns`，在 Windows 客户端上阻止 VPN 之外的 DNS 查询。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-dhcp-options", "kerlico": "yes", "where": "", "note": "推送的额外传统 `dhcp-option` 值，不包含 `dhcp-option` 前缀。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-dns", "kerlico": "yes", "where": "", "note": "推送给客户端的 DNS 服务器地址。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-dns-servers", "kerlico": "yes", "where": "", "note": "推送的现代 OpenVPN DNS 服务器组。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-dns-servers-addresses", "kerlico": "yes", "where": "", "note": "OpenVPN 推送的现代 DNS 服务器组字段：DNS 服务器地址，IP 或 IP:port，IPv6 端口写 [IPv6]:port。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-dns-servers-dnssec", "kerlico": "yes", "where": "", "note": "OpenVPN 推送的现代 DNS 服务器组字段：DNSSEC 模式。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-dns-servers-priority", "kerlico": "yes", "where": "", "note": "OpenVPN 推送的现代 DNS 服务器组字段：优先级，数字最小的一组生效。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-dns-servers-resolve-domains", "kerlico": "yes", "where": "", "note": "OpenVPN 推送的现代 DNS 服务器组字段：由这组服务器解析的域名。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-dns-servers-sni", "kerlico": "yes", "where": "", "note": "OpenVPN 推送的现代 DNS 服务器组字段：TLS SNI。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-dns-servers-transport", "kerlico": "yes", "where": "", "note": "OpenVPN 推送的现代 DNS 服务器组字段：传输方式。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-ping-interval", "kerlico": "yes", "where": "", "note": "推送给客户端的 OpenVPN `ping` 间隔。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-ping-restart", "kerlico": "yes", "where": "", "note": "推送给客户端的 OpenVPN `ping-restart` 超时。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-redirect-gateway", "kerlico": "yes", "where": "", "note": "向客户端推送 `redirect-gateway`，根据 `push.redirect_gateway_flags` 通过 VPN 路由客户端流量。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-redirect-gateway-flags", "kerlico": "yes", "where": "", "note": "向客户端推送的 OpenVPN `redirect-gateway` flag。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-routes", "kerlico": "yes", "where": "", "note": "推送给客户端的路由。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/push-search-domains", "kerlico": "yes", "where": "", "note": "推送的现代 OpenVPN 搜索域。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/remote", "kerlico": "yes", "where": "", "note": "UDP `static_key` 服务器的固定远端地址。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/remote-port", "kerlico": "yes", "where": "", "note": "UDP `static_key` 服务器的固定远端端口。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/renegotiate-bytes", "kerlico": "yes", "where": "", "note": "传输指定字节数后重新协商数据通道密钥。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/renegotiate-disabled", "kerlico": "yes", "where": "", "note": "禁用基于时间的 TLS 重协商，包括默认间隔。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/renegotiate-interval", "kerlico": "yes", "where": "", "note": "OpenVPN TLS 重协商间隔。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/renegotiate-packets", "kerlico": "yes", "where": "", "note": "传输指定数据包数后重新协商数据通道密钥。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/replay-window", "kerlico": "yes", "where": "", "note": "UDP 数据通道重放窗口大小。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/replay-window-time", "kerlico": "yes", "where": "", "note": "UDP 重放窗口时长。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/static-key", "kerlico": "yes", "where": "", "note": "OpenVPN 静态密钥内容。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/static-key-path", "kerlico": "yes", "where": "", "note": "OpenVPN 静态密钥路径。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/system", "kerlico": "yes", "where": "", "note": "使用系统接口。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls", "kerlico": "yes", "where": "", "note": "在 TLS 模式下必填。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
+{"key": "inbound/openvpn/peer-address", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add field for static_key p2p ifconfig"}
+{"key": "inbound/openvpn/peer-address-ipv6", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add field and IPv6 ifconfig-ipv6"}
+{"key": "inbound/openvpn/ping-interval", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Send PING on idle in tick"}
+{"key": "inbound/openvpn/ping-restart", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Track last-receive and drop session after ping_restart"}
+{"key": "inbound/openvpn/protocol", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）"}
+{"key": "inbound/openvpn/push", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
+{"key": "inbound/openvpn/push-block-outside-dns", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
+{"key": "inbound/openvpn/push-dhcp-options", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
+{"key": "inbound/openvpn/push-dns", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
+{"key": "inbound/openvpn/push-dns-servers", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
+{"key": "inbound/openvpn/push-dns-servers-addresses", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
+{"key": "inbound/openvpn/push-dns-servers-dnssec", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
+{"key": "inbound/openvpn/push-dns-servers-priority", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
+{"key": "inbound/openvpn/push-dns-servers-resolve-domains", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
+{"key": "inbound/openvpn/push-dns-servers-sni", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
+{"key": "inbound/openvpn/push-dns-servers-transport", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add dns_servers and emit `dns server N ...` push lines"}
+{"key": "inbound/openvpn/push-ping-interval", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
+{"key": "inbound/openvpn/push-ping-restart", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
+{"key": "inbound/openvpn/push-redirect-gateway", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
+{"key": "inbound/openvpn/push-redirect-gateway-flags", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add flags and emit redirect-gateway <flags>"}
+{"key": "inbound/openvpn/push-routes", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build PUSH_REPLY from PushOptions (per-user override) and accept sing-box field names"}
+{"key": "inbound/openvpn/push-search-domains", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：add field and emit dns search-domains push line"}
+{"key": "inbound/openvpn/remote", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add UDP static_key fixed remote"}
+{"key": "inbound/openvpn/remote-port", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add UDP static_key fixed remote port"}
+{"key": "inbound/openvpn/renegotiate-bytes", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Trigger SoftReset rekey after byte count"}
+{"key": "inbound/openvpn/renegotiate-disabled", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Add with rekey implementation"}
+{"key": "inbound/openvpn/renegotiate-interval", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Implement timed rekey with new key_id"}
+{"key": "inbound/openvpn/renegotiate-packets", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Trigger rekey after packet count"}
+{"key": "inbound/openvpn/replay-window", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Size ReplayWindow from config"}
+{"key": "inbound/openvpn/replay-window-time", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Add time window to ReplayWindow"}
+{"key": "inbound/openvpn/static-key", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Derive data keys from static key in static_key mode"}
+{"key": "inbound/openvpn/static-key-path", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Same unit as static-key"}
+{"key": "inbound/openvpn/system", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：Implement system TUN or drop claim"}
+{"key": "inbound/openvpn/tls", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：reject tls mode without certificate+key instead of generating self-signed"}
 {"key": "inbound/openvpn/tls-certificate", "kerlico": "yes", "where": "", "note": "TLS 服务器证书内容。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
 {"key": "inbound/openvpn/tls-certificate-path", "kerlico": "yes", "where": "", "note": "TLS 服务器证书路径。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-certificate-profile", "kerlico": "yes", "where": "", "note": "TLS 证书 profile，可选值为 `insecure`、`legacy`、`preferred` 或 `suiteb`。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-cipher", "kerlico": "yes", "where": "", "note": "TLS 1.2 及更低版本允许的 OpenSSL cipher suite 名称，以冒号分隔。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-client-certificate", "kerlico": "yes", "where": "", "note": "TLS CA 证书内容，用于验证客户端证书。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-client-certificate-path", "kerlico": "yes", "where": "", "note": "TLS CA 证书路径，用于验证客户端证书。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-client-name", "kerlico": "yes", "where": "", "note": "TLS 期望的客户端证书名称。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-client-name-type", "kerlico": "yes", "where": "", "note": "tls.client_name 匹配的证书字段。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-control-wrap", "kerlico": "yes", "where": "", "note": "TLS OpenVPN 控制信道包装。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-control-wrap-direction", "kerlico": "yes", "where": "", "note": "OpenVPN `tls-auth` 密钥方向，`server` 或 `client` 之一。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-control-wrap-force-cookie", "kerlico": "yes", "where": "", "note": "要求 UDP 上的 `tls-crypt-v2` 客户端支持无状态 session cookie。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
+{"key": "inbound/openvpn/tls-certificate-profile", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：map profile to rustls provider/sig-scheme restrictions"}
+{"key": "inbound/openvpn/tls-cipher", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：filter provider cipher_suites from config"}
+{"key": "inbound/openvpn/tls-client-certificate", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build WebPkiClientVerifier from CA"}
+{"key": "inbound/openvpn/tls-client-certificate-path", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：build WebPkiClientVerifier from CA"}
+{"key": "inbound/openvpn/tls-client-name", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：check client leaf name in custom verifier"}
+{"key": "inbound/openvpn/tls-client-name-type", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：check client leaf name in custom verifier"}
+{"key": "inbound/openvpn/tls-control-wrap", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：accept `type` as the selector"}
+{"key": "inbound/openvpn/tls-control-wrap-direction", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：map server->0 client->1"}
+{"key": "inbound/openvpn/tls-control-wrap-force-cookie", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：implement stateless cookie for HARD_RESET_CLIENT_V3"}
 {"key": "inbound/openvpn/tls-control-wrap-key", "kerlico": "yes", "where": "", "note": "TLS 控制信道包装密钥内容。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
 {"key": "inbound/openvpn/tls-control-wrap-key-path", "kerlico": "yes", "where": "", "note": "TLS 控制信道包装密钥路径。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-control-wrap-type", "kerlico": "yes", "where": "", "note": "控制信道包装类型，`tls_auth`、`tls_crypt` 或 `tls_crypt_v2` 之一。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-crl-path", "kerlico": "yes", "where": "", "note": "TLS 用于拒绝已吊销客户端证书的证书吊销列表路径。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-groups", "kerlico": "yes", "where": "", "note": "按偏好顺序排列的 TLS key exchange group，以冒号分隔。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
+{"key": "inbound/openvpn/tls-control-wrap-type", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：implement tls-crypt-v2 server key unwrap of client WKc"}
+{"key": "inbound/openvpn/tls-crl-path", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：load CRL into WebPkiClientVerifier with_crls"}
+{"key": "inbound/openvpn/tls-groups", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：filter provider kx_groups from config"}
 {"key": "inbound/openvpn/tls-key", "kerlico": "yes", "where": "", "note": "TLS 服务器私钥内容。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
 {"key": "inbound/openvpn/tls-key-path", "kerlico": "yes", "where": "", "note": "TLS 服务器私钥路径。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-ns-certificate-type", "kerlico": "yes", "where": "", "note": "TLS 已弃用的 Netscape 证书类型检查，`server` 或 `client` 之一。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-peer-fingerprint", "kerlico": "yes", "where": "", "note": "TLS 允许的客户端叶证书 SHA-256 指纹。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-remote-certificate-eku", "kerlico": "yes", "where": "", "note": "TLS 客户端证书所需的 Extended Key Usage。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-remote-certificate-ku", "kerlico": "yes", "where": "", "note": "TLS OpenVPN `remote-cert-ku` 格式的客户端证书 Key Usage mask。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-remote-certificate-tls", "kerlico": "yes", "where": "", "note": "TLS 客户端证书用途检查，`server`、`client` 或 `none` 之一。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-verify-client-certificate", "kerlico": "yes", "where": "", "note": "TLS OpenVPN 客户端证书策略，`require`、`optional` 或 `none` 之一。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-version-max", "kerlico": "yes", "where": "", "note": "最高 TLS 版本。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/tls-version-min", "kerlico": "yes", "where": "", "note": "最低 TLS 版本。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/topology", "kerlico": "yes", "where": "", "note": "推送给客户端的 OpenVPN topology，`subnet`、`p2p` 或 `net30` 之一。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
+{"key": "inbound/openvpn/tls-ns-certificate-type", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：custom verifier check nsCertType"}
+{"key": "inbound/openvpn/tls-peer-fingerprint", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：custom verifier compare leaf SHA-256"}
+{"key": "inbound/openvpn/tls-remote-certificate-eku", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：custom verifier check EKU"}
+{"key": "inbound/openvpn/tls-remote-certificate-ku", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：custom verifier check KU mask"}
+{"key": "inbound/openvpn/tls-remote-certificate-tls", "kerlico": "no", "where": "", "note": "M11 审计（缺失）：custom verifier check clientAuth EKU"}
+{"key": "inbound/openvpn/tls-verify-client-certificate", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：require/optional/none -> verifier allow_unauthenticated"}
+{"key": "inbound/openvpn/tls-version-max", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：pass versions to builder_with_protocol_versions"}
+{"key": "inbound/openvpn/tls-version-min", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：pass versions to builder_with_protocol_versions"}
+{"key": "inbound/openvpn/topology", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Use configured topology in PUSH_REPLY and ifconfig format"}
 {"key": "inbound/openvpn/users", "kerlico": "yes", "where": "", "note": "OpenVPN 用户名/密码用户列表。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
-{"key": "inbound/openvpn/users-password", "kerlico": "yes", "where": "", "note": "用户密码。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
+{"key": "inbound/openvpn/users-password", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Same unit as users"}
 {"key": "inbound/openvpn/users-username", "kerlico": "yes", "where": "", "note": "用户名。建议：暂不实现，kerlico 只有 OpenVPN 客户端出站，服务端只有 sing-box 提供；先补出站缺口"}
 {"key": "inbound/redirect/combo", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "`RedirectNodeFactory` 通过 `SO_ORIGINAL_DST` / `IP6T_SO_ORIGINAL_DST`（或 `InboundContext::original_dst`）提取原始目标并建立 TCP 代理流"}
 {"key": "inbound/redirect/protocol", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "入站 `type = \"redirect\"`（`RedirectNodeFactory`）"}
@@ -380,7 +380,7 @@
 {"key": "inbound/shadowquic/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/shadowquic/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/shadowquic/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/shadowquic/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/shadowquic/mux-option-padding", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：sing-mux 自写帧层与上游不兼容：padding 用一次性前缀且服务端回 18 字节，而非 paddingConn 前 16 包分帧(:954)；yamux 丢弃 type=1 window-update(:316)，hashicorp 正是用它带 SYN 开流，且从不发 window update；h2mux 的 SYN 为空 HEADERS 无 HPACK，无 :status 响应、SETTINGS ACK、WINDOW_UPDATE(:204,:969)；改用真实 yamux/h2 实现与 paddingConn 并加 sing-box 互通用例"}
 {"key": "inbound/shadowquic/protocol", "kerlico": "yes", "where": "crates/protocol-shadowquic/src/lib.rs", "note": "节点 type `shadowquic`"}
 {"key": "inbound/shadowquic/quic-versions", "kerlico": "yes", "where": "crates/protocol-shadowquic/src/config.rs", "note": "`quic_versions`"}
 {"key": "inbound/shadowquic/recv-window", "kerlico": "no", "where": "", "note": "连接级接收窗口，0 内部默认。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
@@ -435,11 +435,11 @@
 {"key": "inbound/shadowsocks/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
 {"key": "inbound/shadowsocks/managed", "kerlico": "no", "where": "", "note": "交给 SSM API 管理用户。建议：暂不实现，managed 是 sing-box 给 SSM API 用的开关，kerlico 用配置 `members` 管理用户"}
 {"key": "inbound/shadowsocks/method", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`method`，同 cipher；2022 系列走 type `ss2022`"}
-{"key": "inbound/shadowsocks/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "inbound/shadowsocks/multiplex", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：sing-mux 自写帧层与上游不兼容：padding 用一次性前缀且服务端回 18 字节，而非 paddingConn 前 16 包分帧(:954)；yamux 丢弃 type=1 window-update(:316)，hashicorp 正是用它带 SYN 开流，且从不发 window update；h2mux 的 SYN 为空 HEADERS 无 HPACK，无 :status 响应、SETTINGS ACK、WINDOW_UPDATE(:204,:969)；改用真实 yamux/h2 实现与 paddingConn 并加 sing-box 互通用例"}
 {"key": "inbound/shadowsocks/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/shadowsocks/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/shadowsocks/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/shadowsocks/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/shadowsocks/mux-option-padding", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：sing-mux 自写帧层与上游不兼容：padding 用一次性前缀且服务端回 18 字节，而非 paddingConn 前 16 包分帧(:954)；yamux 丢弃 type=1 window-update(:316)，hashicorp 正是用它带 SYN 开流，且从不发 window update；h2mux 的 SYN 为空 HEADERS 无 HPACK，无 :status 响应、SETTINGS ACK、WINDOW_UPDATE(:204,:969)；改用真实 yamux/h2 实现与 paddingConn 并加 sing-box 互通用例"}
 {"key": "inbound/shadowsocks/network", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/inbound.rs", "note": "节点同时开 TCP 和 UDP，不能只开其一"}
 {"key": "inbound/shadowsocks/password", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "AEAD 用成员 `native_credential` 的 `password`；旧式和 none 用 `options.password` 且要 `allow_insecure`"}
 {"key": "inbound/shadowsocks/protocol", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/inbound.rs", "note": "节点 type `shadowsocks`，2022 系列为 `ss2022`"}
@@ -487,12 +487,12 @@
 {"key": "inbound/shortcut/tuic-server-alpn", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "节点 type `tuic` 的 `tls.alpn`"}
 {"key": "inbound/shortcut/tuic-server-authentication-timeout", "kerlico": "no", "where": "", "note": "认证超时，毫秒。建议：暂不实现，kerlico 的 TUIC 节点没有这项配置"}
 {"key": "inbound/shortcut/tuic-server-certificate", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "节点 type `tuic` 的 `certificate_pem` 或 `certificate_file`"}
-{"key": "inbound/shortcut/tuic-server-congestion-controller", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "节点 type `tuic` 的 `congestion_control`"}
+{"key": "inbound/shortcut/tuic-server-congestion-controller", "kerlico": "partial", "where": "crates/protocol-tuic/src/config.rs", "note": "M11 审计（夸大）：只认 newreno，Mihomo 取值 new_reno 被拒；加 new_reno 别名"}
 {"key": "inbound/shortcut/tuic-server-cwnd", "kerlico": "no", "where": "", "note": "TUIC 快捷入站初始拥塞窗口。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
 {"key": "inbound/shortcut/tuic-server-enable", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "在 `nodes` 写一条 type `tuic`；kerlico 没有顶层快捷段"}
 {"key": "inbound/shortcut/tuic-server-listen", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "节点 `listen`"}
 {"key": "inbound/shortcut/tuic-server-max-idle-time", "kerlico": "no", "where": "", "note": "最大空闲时间，毫秒。建议：暂不实现，kerlico 的 TUIC 节点没有这项配置，随 QUIC 调参项一起考虑"}
-{"key": "inbound/shortcut/tuic-server-max-udp-relay-packet-size", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "全局 `limits.max_datagram_size`，不能按节点设置"}
+{"key": "inbound/shortcut/tuic-server-max-udp-relay-packet-size", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：全局上限只作丢弃阈值，且超限直接 Err(ResourceLimit) 终止关联而非丢单包；Mihomo 语义是中继分片包长，需节点级字段并按其分片"}
 {"key": "inbound/shortcut/tuic-server-private-key", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "节点 type `tuic` 的 `private_key_pem` 或 `private_key_file`"}
 {"key": "inbound/shortcut/tuic-server-token", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "节点 type `tuic`、`version` 4，成员 `token`"}
 {"key": "inbound/shortcut/tuic-server-users", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "节点 type `tuic`、`version` 5，成员 `uuid`、`password`"}
@@ -570,7 +570,7 @@
 {"key": "inbound/sudoku/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/sudoku/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/sudoku/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/sudoku/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/sudoku/mux-option-padding", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Run sing-mux inbound+outbound against a real sing-box peer (incl. padding framing); add tools/interop_sing_mux.py"}
 {"key": "inbound/sudoku/padding-max", "kerlico": "yes", "where": "crates/protocol-sudoku/src/config.rs", "note": "`protocol.padding_max`"}
 {"key": "inbound/sudoku/padding-min", "kerlico": "yes", "where": "crates/protocol-sudoku/src/config.rs", "note": "`protocol.padding_min`"}
 {"key": "inbound/sudoku/path-root", "kerlico": "yes", "where": "crates/protocol-sudoku/src/config.rs", "note": "`http_mask.path_root`"}
@@ -593,9 +593,9 @@
 {"key": "inbound/tailcat/users", "kerlico": "no", "where": "", "note": "Tailcat 用户。建议：暂不实现，Tailcat 只有 sing-box 提供，kerlico 已有 Tailscale 出站，用途不同且没有互通对端需求"}
 {"key": "inbound/tailcat/users-name", "kerlico": "no", "where": "", "note": "用户名称，用于日志和 auth_user 匹配。建议：暂不实现，Tailcat 只有 sing-box 提供，kerlico 已有 Tailscale 出站，用途不同且没有互通对端需求"}
 {"key": "inbound/tailcat/users-public-key", "kerlico": "no", "where": "", "note": "用户客户端公钥。建议：暂不实现，Tailcat 只有 sing-box 提供，kerlico 已有 Tailscale 出站，用途不同且没有互通对端需求"}
-{"key": "inbound/tproxy/combo", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "`TproxyNodeFactory` 启用 `IP_TRANSPARENT` / `IPV6_TRANSPARENT` 与 `IP_RECVORIGDSTADDR` 透明接管 TCP 与 UDP 流量"}
+{"key": "inbound/tproxy/combo", "kerlico": "partial", "where": "crates/net/src/transparent.rs", "note": "M11 审计（夸大）：Set IPV6_TRANSPARENT, enable RECVORIGDSTADDR, add netns test with TPROXY rules"}
 {"key": "inbound/tproxy/protocol", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "入站 `type = \"tproxy\"`（`TproxyNodeFactory`）"}
-{"key": "inbound/tproxy/udp", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "`TproxyInbound` 支持 UDP 透明代理并按原始目标地址建立 `DatagramSession`"}
+{"key": "inbound/tproxy/udp", "kerlico": "no", "where": "crates/net/src/transparent.rs", "note": "M11 审计（空壳）：recvmsg with IP_RECVORIGDSTADDR cmsg, per-source reply sockets bound transparent to the original dst"}
 {"key": "inbound/trojan/allow-insecure", "kerlico": "partial", "where": "crates/protocol-trojan/src/config.rs", "note": "`security` 写 `{type:none}`，但只允许回环节点；不能在公网前置 nginx"}
 {"key": "inbound/trojan/certificate", "kerlico": "yes", "where": "crates/protocol-trojan/src/config.rs", "note": "`certificate_pem` 或 `certificate_file`"}
 {"key": "inbound/trojan/client-auth-cert", "kerlico": "no", "where": "", "note": "mTLS 客户端证书。建议：暂不实现，随 client-auth-type 一起放到安全层统一做"}
@@ -603,7 +603,7 @@
 {"key": "inbound/trojan/clients", "kerlico": "yes", "where": "crates/protocol-trojan/src/inbound.rs", "note": "节点 `members`；clients 是 users 的别名"}
 {"key": "inbound/trojan/combo", "kerlico": "partial", "where": "crates/protocol-trojan/src/config.rs", "note": "传输 tcp、ws、httpupgrade、grpc，安全 tls、none（回环）；缺 xhttp、mkcp、hysteria、quic、reality、ech、ss-option、mux、fallback"}
 {"key": "inbound/trojan/ech-key", "kerlico": "no", "where": "", "note": "ECH 密钥，填写即开启；可由 mihomo generate ech-keypair 生成。建议：暂不实现，ECH 要先在安全层统一选方案，按协议单加没有意义"}
-{"key": "inbound/trojan/email", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "Xray 用户邮箱是用户标识，对应成员 `user_id`"}
+{"key": "inbound/trojan/email", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Add optional member label carried to stats, or retire these matrix keys as native-only"}
 {"key": "inbound/trojan/fallback", "kerlico": "yes", "where": "crates/protocol-trojan/src/inbound.rs", "note": "Trojan 入站支持 `fallbacks` 与 `fallback_server` 回落转发"}
 {"key": "inbound/trojan/fallback-for-alpn", "kerlico": "yes", "where": "crates/protocol-trojan/src/config.rs", "note": "`fallback_for_alpn` / `fallback-for-alpn` 按 ALPN 映射回落目标"}
 {"key": "inbound/trojan/fallback-for-alpn-server", "kerlico": "yes", "where": "crates/protocol-trojan/src/config.rs", "note": "`fallback_for_alpn.<alpn>.server` 回落目标地址"}
@@ -622,11 +622,11 @@
 {"key": "inbound/trojan/jls-config-users-password", "kerlico": "no", "where": "", "note": "JLS 密码。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
 {"key": "inbound/trojan/jls-config-users-username", "kerlico": "no", "where": "", "note": "JLS 用户名。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
 {"key": "inbound/trojan/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
-{"key": "inbound/trojan/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "inbound/trojan/multiplex", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Run sing-mux inbound+outbound against a real sing-box peer (incl. padding framing); add tools/interop_sing_mux.py"}
 {"key": "inbound/trojan/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/trojan/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/trojan/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/trojan/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/trojan/mux-option-padding", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Run sing-mux inbound+outbound against a real sing-box peer (incl. padding framing); add tools/interop_sing_mux.py"}
 {"key": "inbound/trojan/password", "kerlico": "yes", "where": "crates/protocol-trojan/src/inbound.rs", "note": "成员 `native_credential` 的 `password`"}
 {"key": "inbound/trojan/private-key", "kerlico": "yes", "where": "crates/protocol-trojan/src/config.rs", "note": "`private_key_pem` 或 `private_key_file`"}
 {"key": "inbound/trojan/protocol", "kerlico": "yes", "where": "crates/protocol-trojan/src/inbound.rs", "note": "节点 type `trojan`"}
@@ -666,9 +666,9 @@
 {"key": "inbound/trojan/transport", "kerlico": "partial", "where": "crates/protocol-trojan/src/config.rs", "note": "`transport`：tcp、ws、httpupgrade、grpc；缺 http、quic"}
 {"key": "inbound/trojan/trojan", "kerlico": "yes", "where": "crates/protocol-trojan/src/inbound.rs", "note": "节点 type `trojan`"}
 {"key": "inbound/trojan/users", "kerlico": "yes", "where": "crates/protocol-trojan/src/inbound.rs", "note": "节点 `members`"}
-{"key": "inbound/trojan/users-name", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "成员 `user_id`，关联管理账户"}
+{"key": "inbound/trojan/users-name", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Add optional member label carried to stats, or retire these matrix keys as native-only"}
 {"key": "inbound/trojan/users-password", "kerlico": "yes", "where": "crates/protocol-trojan/src/inbound.rs", "note": "成员 `native_credential` 的 `password`"}
-{"key": "inbound/trojan/users-username", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "Mihomo 的用户名对应成员 `user_id`"}
+{"key": "inbound/trojan/users-username", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Add optional member label carried to stats, or retire these matrix keys as native-only"}
 {"key": "inbound/trojan/ws-path", "kerlico": "yes", "where": "crates/protocol-trojan/src/config.rs", "note": "`transport` 的 ws `path`"}
 {"key": "inbound/trusttunnel/bbr-profile", "kerlico": "no", "where": "", "note": "BBR 档位。建议：暂不实现，kerlico 没有 BBR 档位配置，没有吞吐证据前不加"}
 {"key": "inbound/trusttunnel/certificate", "kerlico": "yes", "where": "crates/protocol-trusttunnel/src/config.rs", "note": "`tls.certificate_pem` 或 `certificate_file`"}
@@ -701,29 +701,29 @@
 {"key": "inbound/tuic/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/tuic/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/tuic/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/tuic/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/tuic/mux-option-padding", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Run sing-mux inbound+outbound against a real sing-box peer (incl. padding framing); add tools/interop_sing_mux.py"}
 {"key": "inbound/tuic/private-key", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "`private_key_pem` 或 `private_key_file`"}
 {"key": "inbound/tuic/protocol", "kerlico": "yes", "where": "crates/protocol-tuic/src/server.rs", "note": "节点 type `tuic`"}
 {"key": "inbound/tuic/tls", "kerlico": "partial", "where": "crates/protocol-tuic/src/config.rs", "note": "`tls` 有证书、私钥、`alpn`；缺 ECH 等通用字段"}
 {"key": "inbound/tuic/token", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "`version` 4 时成员 `token`"}
 {"key": "inbound/tuic/users", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "`version` 5 时成员 `uuid`、`password`"}
-{"key": "inbound/tuic/users-name", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "成员 `user_id`，关联管理账户"}
+{"key": "inbound/tuic/users-name", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Add optional member label carried to stats, or retire these matrix keys as native-only"}
 {"key": "inbound/tuic/users-password", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "成员 `native_credential` 的 `password`"}
 {"key": "inbound/tuic/users-uuid", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "成员 `native_credential` 的 `uuid`"}
 {"key": "inbound/tuic/v4", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "`version` 4"}
 {"key": "inbound/tuic/v5", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "`version` 5"}
 {"key": "inbound/tuic/zero-rtt-handshake", "kerlico": "no", "where": "", "note": "在客户端启用 0-RTT QUIC 连接握手这对性能影响不大，因为协议是完全复用的强烈建议禁用此功能，因为它容易受到重放攻击。建议：暂不实现，kerlico 的 TUIC 没有 0-RTT 路径，重放风险也不值得"}
-{"key": "inbound/tun/auto-detect-interface", "kerlico": "yes", "where": "", "note": "自动选择出口接口。建议：实现，kerlico 的 TUN 不改路由，要靠用户手工配；这是开箱可用的前提"}
-{"key": "inbound/tun/auto-redirect", "kerlico": "yes", "where": "", "note": "用 nftables 自动做透明重定向。建议：实现，kerlico 的 TUN 不改路由，要靠用户手工配；这是开箱可用的前提"}
-{"key": "inbound/tun/auto-redirect-input-mark", "kerlico": "yes", "where": "", "note": "auto-redirect 使用的入站标记。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/auto-redirect-iproute2-fallback-rule-index", "kerlico": "yes", "where": "", "note": "auto-redirect 回退规则的序号。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/auto-redirect-output-mark", "kerlico": "yes", "where": "", "note": "auto-redirect 使用的出站标记。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/auto-route", "kerlico": "yes", "where": "", "note": "自动全局路由。建议：实现，kerlico 的 TUN 不改路由，要靠用户手工配；这是开箱可用的前提"}
-{"key": "inbound/tun/combo", "kerlico": "partial", "where": "crates/protocol-tun/src/lib.rs", "note": "只有用户态栈、`name`、`addresses`、`mtu`；auto-route、strict-route、dns-hijack 都没有"}
+{"key": "inbound/tun/auto-detect-interface", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Apply plan.outbound_interface/output_mark to Local egress sockets (net/src/lib.rs bind_device/set_mark) for the TUN-owning engine"}
+{"key": "inbound/tun/auto-redirect", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Implement nftables redirect plan (marks + fallback rule) and teardown; netns test"}
+{"key": "inbound/tun/auto-redirect-input-mark", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Implement nftables redirect plan (marks + fallback rule) and teardown; netns test"}
+{"key": "inbound/tun/auto-redirect-iproute2-fallback-rule-index", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Implement nftables redirect plan (marks + fallback rule) and teardown; netns test"}
+{"key": "inbound/tun/auto-redirect-output-mark", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Implement nftables redirect plan (marks + fallback rule) and teardown; netns test"}
+{"key": "inbound/tun/auto-route", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Add v6 route, loop rule deletes (-4/-6), check exit codes, exclude own egress via mark/bind; netns test"}
+{"key": "inbound/tun/combo", "kerlico": "partial", "where": "crates/protocol-tun/src/lib.rs", "note": "M11 审计（夸大）：see TUN route automation unit"}
 {"key": "inbound/tun/congestion-controller", "kerlico": "no", "where": "", "note": "TCP 拥塞控制。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
 {"key": "inbound/tun/device", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`name`"}
 {"key": "inbound/tun/disable-icmp-forwarding", "kerlico": "no", "where": "", "note": "关闭 ICMP 转发。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
-{"key": "inbound/tun/dns-hijack", "kerlico": "yes", "where": "", "note": "DNS 劫持列表。建议：实现，kerlico 的 TUN 只有 IP 目标，域名规则不命中；劫持 DNS 是解决办法之一"}
+{"key": "inbound/tun/dns-hijack", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Scope the hijack rule to the tun node and honour dns_hijack entries; netns DNS test"}
 {"key": "inbound/tun/dns-mode", "kerlico": "no", "where": "", "note": "系统 DNS 配置方式。建议：暂不实现，先做 dns-hijack，Fake-IP 在 dns 类别单独定"}
 {"key": "inbound/tun/endpoint-independent-nat", "kerlico": "no", "where": "", "note": "独立于端点的 NAT。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
 {"key": "inbound/tun/exclude-dst-port", "kerlico": "no", "where": "", "note": "排除目标端口。建议：暂不实现，kerlico 的 TUN 现在只做 Linux 接口收发，按应用、用户过滤要先有路由接管"}
@@ -749,7 +749,7 @@
 {"key": "inbound/tun/inet4-route-address", "kerlico": "yes", "where": "", "note": "IPv4 自定义路由。建议：实现，随 auto-route 一起做"}
 {"key": "inbound/tun/inet4-route-exclude-address", "kerlico": "yes", "where": "", "note": "IPv4 路由排除地址。建议：实现，随 auto-route 一起做"}
 {"key": "inbound/tun/inet6-address", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`addresses` 写 IPv6 前缀"}
-{"key": "inbound/tun/inet6-route-address", "kerlico": "yes", "where": "", "note": "IPv6 自定义路由。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/inet6-route-address", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Add ip -6 route replace default dev ... table T; netns test"}
 {"key": "inbound/tun/inet6-route-exclude-address", "kerlico": "yes", "where": "", "note": "IPv6 路由排除地址。建议：实现，随 auto-route 一起做"}
 {"key": "inbound/tun/iproute2-rule-index", "kerlico": "yes", "where": "", "note": "iproute2 规则起始序号。建议：实现，随 auto-route 一起做"}
 {"key": "inbound/tun/iproute2-table-index", "kerlico": "yes", "where": "", "note": "iproute2 路由表序号。建议：实现，随 auto-route 一起做"}
@@ -758,13 +758,13 @@
 {"key": "inbound/tun/processors-per-channel", "kerlico": "no", "where": "", "note": "每通道处理器数。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
 {"key": "inbound/tun/protocol", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "节点 type `tun`，放在 `local_inbounds`"}
 {"key": "inbound/tun/recvmsgx", "kerlico": "no", "where": "", "note": "macOS 批量收包。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
-{"key": "inbound/tun/route-address", "kerlico": "yes", "where": "", "note": "自定义路由地址。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/route-address-set", "kerlico": "yes", "where": "", "note": "用规则集生成路由地址。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/route-address", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Add ip -6 route replace default dev ... table T; netns test"}
+{"key": "inbound/tun/route-address-set", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Resolve rule_set CIDRs from routing crate into include/exclude CIDRs, or reject the keys"}
 {"key": "inbound/tun/route-exclude-address", "kerlico": "yes", "where": "", "note": "排除路由地址。建议：实现，随 auto-route 一起做"}
-{"key": "inbound/tun/route-exclude-address-set", "kerlico": "yes", "where": "", "note": "用规则集生成排除地址。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/route-exclude-address-set", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Resolve rule_set CIDRs from routing crate into include/exclude CIDRs, or reject the keys"}
 {"key": "inbound/tun/sendmsgx", "kerlico": "no", "where": "", "note": "macOS 批量发包。建议：暂不实现，kerlico 用固定用户态栈，没有这项调优"}
-{"key": "inbound/tun/stack", "kerlico": "partial", "where": "crates/protocol-tun/src/lib.rs", "note": "固定 smoltcp 用户态栈（`ServerTunnel`）；没有 system、gvisor、mixed 可选"}
-{"key": "inbound/tun/strict-route", "kerlico": "yes", "where": "", "note": "严格路由，防止流量绕过 TUN。建议：实现，随 auto-route 一起做"}
+{"key": "inbound/tun/stack", "kerlico": "partial", "where": "crates/protocol-tun/src/lib.rs", "note": "M11 审计（夸大）：Accept and map stack (smoltcp only) instead of rejecting"}
+{"key": "inbound/tun/strict-route", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Emit strict-route ip rules (unreachable for non-TUN default) and teardown"}
 {"key": "inbound/tun/tun", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "节点 type `tun`，只支持 Linux"}
 {"key": "inbound/tun/udp-timeout", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "全局 `limits.idle_timeout_ms`"}
 {"key": "inbound/tunnel/address", "kerlico": "na", "where": "", "note": "Xray 旧字段名，能力见 rewrite-address"}
@@ -777,7 +777,7 @@
 {"key": "inbound/tunnel/port-map", "kerlico": "no", "where": "", "note": "本地端口到远端地址/端口映射，未命中按 rewrite 处理。建议：暂不实现，kerlico 写多条 `inbounds` 可达到同样效果"}
 {"key": "inbound/tunnel/protocol", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`inbounds` 的 `tcp-forward`、`udp-forward`"}
 {"key": "inbound/tunnel/rewrite-address", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`target.host`，必填"}
-{"key": "inbound/tunnel/rewrite-port", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "`target.port`，必填；不支持 0 表示沿用监听端口"}
+{"key": "inbound/tunnel/rewrite-port", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Implement port 0 = listen port or fix matrix note"}
 {"key": "inbound/tunnel/target", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`target`，host 和 port 分开写"}
 {"key": "inbound/tunnel/tunnel", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "只有端口转发，由 `inbounds` 提供；没有透明代理能力"}
 {"key": "inbound/tunnel/user-level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
@@ -786,13 +786,13 @@
 {"key": "inbound/tunnels/proxy", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`inbounds` 的 `outbound`，必填"}
 {"key": "inbound/tunnels/single-line", "kerlico": "na", "where": "", "note": "Mihomo 的单行配置写法，kerlico 用同样字段的对象写法"}
 {"key": "inbound/tunnels/target", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "`inbounds` 的 `target`"}
-{"key": "inbound/vless-reverse/combo", "kerlico": "yes", "where": "", "note": "VLESS 极简反向代理组合。建议：暂不实现，Xray 专属的反向隧道，kerlico 还没有反向代理控制面；需要内网穿透时单独设计"}
+{"key": "inbound/vless-reverse/combo", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Implement Xray reverse bridge/portal over Mux.Cool (tag routing, bridge dial-back); interop vs Xray"}
 {"key": "inbound/vless/allow-insecure", "kerlico": "partial", "where": "crates/protocol-vless/src/inbound.rs", "note": "`security` 写 `{type:none}`，无 Encryption 时只允许回环；不能在公网前置 nginx"}
 {"key": "inbound/vless/certificate", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "`certificate_pem` 或 `certificate_file`"}
 {"key": "inbound/vless/client-auth-cert", "kerlico": "no", "where": "", "note": "mTLS 客户端证书。建议：暂不实现，随 client-auth-type 一起放到安全层统一做"}
 {"key": "inbound/vless/client-auth-type", "kerlico": "no", "where": "", "note": "mTLS 类型。建议：暂不实现，节点已有协议原生认证，mTLS 放到安全层统一做"}
 {"key": "inbound/vless/clients", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "节点 `members`；clients 是 users 的别名"}
-{"key": "inbound/vless/combo", "kerlico": "partial", "where": "crates/protocol-vless/src/inbound.rs", "note": "传输 tcp、ws、httpupgrade、grpc、xhttp 四种 mode、xdrive，安全 tls、reality、none，`decryption`，vision，Mux.Cool；缺 mkcp、hysteria、quic、ech、sing-mux、fallback、reverse"}
+{"key": "inbound/vless/combo", "kerlico": "partial", "where": "crates/protocol-vless/src/inbound.rs", "note": "M11 审计（夸大）：see VLESS TLS fakes + reverse units"}
 {"key": "inbound/vless/decryption", "kerlico": "partial", "where": "crates/protocol-vless/src/server_encryption.rs", "note": "`decryption`；票据时长和非空 padding 超出范围时拒绝"}
 {"key": "inbound/vless/decryption-appearance", "kerlico": "yes", "where": "crates/protocol-vless/src/server_encryption.rs", "note": "`decryption` 第 2 段，由 `Decryption::parse` 解析"}
 {"key": "inbound/vless/decryption-auth", "kerlico": "yes", "where": "crates/protocol-vless/src/server_encryption.rs", "note": "`decryption` 最后的密钥段，X25519 与 ML-KEM-768 可混合，最多 8 个"}
@@ -800,7 +800,7 @@
 {"key": "inbound/vless/decryption-padding", "kerlico": "no", "where": "", "note": "padding/delay 块，格式 probability-min-max。建议：暂不实现，kerlico 节点拒绝非空 padding；等 `Decryption::parse` 放开时一起做互通"}
 {"key": "inbound/vless/decryption-ticket", "kerlico": "partial", "where": "crates/protocol-vless/src/server_encryption.rs", "note": "`decryption` 第 3 段，票据使用期超出当前范围时拒绝"}
 {"key": "inbound/vless/ech-key", "kerlico": "no", "where": "", "note": "ECH 密钥，填写即开启；可由 mihomo generate ech-keypair 生成。建议：暂不实现，ECH 要先在安全层统一选方案，按协议单加没有意义"}
-{"key": "inbound/vless/email", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "Xray 用户邮箱是用户标识，对应成员 `user_id`"}
+{"key": "inbound/vless/email", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Add optional member label carried to stats, or retire these matrix keys as native-only"}
 {"key": "inbound/vless/fallbacks", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "VLESS 入站支持 `fallbacks` 数组，首包握手失败时经 `RecordingStream` 与 `try_fallback` 重放至回落服务器"}
 {"key": "inbound/vless/flow", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "成员 `native_credential` 的 `flow`，空或 xtls-rprx-vision"}
 {"key": "inbound/vless/grpc-service-name", "kerlico": "yes", "where": "crates/protocol-vless/src/server_http.rs", "note": "`transport` 的 grpc `service_name`"}
@@ -814,11 +814,11 @@
 {"key": "inbound/vless/jls-config-users-password", "kerlico": "no", "where": "", "note": "JLS 密码。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
 {"key": "inbound/vless/jls-config-users-username", "kerlico": "no", "where": "", "note": "JLS 用户名。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
 {"key": "inbound/vless/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
-{"key": "inbound/vless/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "inbound/vless/multiplex", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Run sing-mux inbound+outbound against a real sing-box peer (incl. padding framing); add tools/interop_sing_mux.py"}
 {"key": "inbound/vless/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/vless/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/vless/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/vless/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/vless/mux-option-padding", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Run sing-mux inbound+outbound against a real sing-box peer (incl. padding framing); add tools/interop_sing_mux.py"}
 {"key": "inbound/vless/private-key", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "`private_key_pem` 或 `private_key_file`"}
 {"key": "inbound/vless/protocol", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "节点 type `vless`"}
 {"key": "inbound/vless/reality-config-dest", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "`security` reality 的 `cover`"}
@@ -840,7 +840,7 @@
 {"key": "inbound/vless/res-tls-proxy", "kerlico": "no", "where": "", "note": "Restls 回落目标使用的代理。建议：暂不实现，kerlico 没有 Restls，同类需求由 shadowtls 覆盖"}
 {"key": "inbound/vless/res-tls-rate-limit", "kerlico": "no", "where": "", "note": "Restls fallback 双向转发限速，bit/s，0 不限。建议：暂不实现，kerlico 没有 Restls，同类需求由 shadowtls 覆盖"}
 {"key": "inbound/vless/res-tls-restls-script", "kerlico": "no", "where": "", "note": "Restls 剧本。建议：暂不实现，kerlico 没有 Restls，同类需求由 shadowtls 覆盖"}
-{"key": "inbound/vless/reverse", "kerlico": "yes", "where": "", "note": "极简反向代理：存在时该用户连接用于建立反向隧道，同时禁用正向代理。建议：暂不实现，Xray 专属的反向隧道，kerlico 还没有反向代理控制面"}
+{"key": "inbound/vless/reverse", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Implement Xray reverse bridge/portal over Mux.Cool (tag routing, bridge dial-back); interop vs Xray"}
 {"key": "inbound/vless/shadow-tls-enable", "kerlico": "no", "where": "", "note": "启用 ShadowTLS。建议：暂不实现，kerlico 的 shadowtls `inner` 只允许 shadowsocks 和 ss2022，需要时再放宽白名单"}
 {"key": "inbound/vless/shadow-tls-handshake-dest", "kerlico": "no", "where": "", "note": "ShadowTLS 握手目标。建议：暂不实现，kerlico 的 shadowtls `inner` 只允许 shadowsocks 和 ss2022，需要时再放宽白名单"}
 {"key": "inbound/vless/shadow-tls-handshake-for-server-name", "kerlico": "no", "where": "", "note": "ShadowTLS 按 SNI 选握手目标。建议：暂不实现，kerlico 的 shadowtls `inner` 只允许 shadowsocks 和 ss2022，需要时再放宽白名单"}
@@ -853,12 +853,12 @@
 {"key": "inbound/vless/shadow-tls-wildcard-sni", "kerlico": "no", "where": "", "note": "ShadowTLS 通配 SNI。建议：暂不实现，kerlico 的 shadowtls `inner` 只允许 shadowsocks 和 ss2022，需要时再放宽白名单"}
 {"key": "inbound/vless/tag", "kerlico": "no", "where": "", "note": "反向代理的出站 tag。建议：暂不实现，随 reverse 一起"}
 {"key": "inbound/vless/testseed", "kerlico": "no", "where": "", "note": "Vision padding 种子。建议：暂不实现，文档未写的测试字段，没有稳定语义"}
-{"key": "inbound/vless/tls", "kerlico": "partial", "where": "crates/protocol-vless/src/inbound.rs", "note": "`security` 的 tls，只有证书和私钥；缺 ALPN、ECH、版本"}
+{"key": "inbound/vless/tls", "kerlico": "partial", "where": "crates/protocol-vless/src/inbound.rs", "note": "M11 审计（夸大）：Implement real ACME (HTTP-01) and ECH server keys, or reject the options"}
 {"key": "inbound/vless/transport", "kerlico": "partial", "where": "crates/protocol-vless/src/server_http.rs", "note": "`transport`：tcp、ws、httpupgrade、grpc、xhttp、xdrive；sing-box 的 http、quic 没有"}
 {"key": "inbound/vless/users", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "节点 `members`，1 到 256 个"}
 {"key": "inbound/vless/users-flow", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "成员 `native_credential` 的 `flow`"}
-{"key": "inbound/vless/users-name", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "成员 `user_id`，关联管理账户"}
-{"key": "inbound/vless/users-username", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "Mihomo 的用户名对应成员 `user_id`"}
+{"key": "inbound/vless/users-name", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Add optional member label carried to stats, or retire these matrix keys as native-only"}
+{"key": "inbound/vless/users-username", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Add optional member label carried to stats, or retire these matrix keys as native-only"}
 {"key": "inbound/vless/users-uuid", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "成员 `native_credential` 的 `uuid`"}
 {"key": "inbound/vless/vless", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound.rs", "note": "节点 type `vless`"}
 {"key": "inbound/vless/wire-format", "kerlico": "yes", "where": "crates/protocol-vless/src/inbound_wire.rs", "note": "按线格式解码请求，`flow` 经附加信息传递"}
@@ -894,7 +894,7 @@
 {"key": "inbound/vmess/default", "kerlico": "no", "where": "", "note": "users 默认配置，仅配合 detour 有效。建议：暂不实现，Xray 的 detour 默认用户，kerlico 没有 detour"}
 {"key": "inbound/vmess/dynamic-port-command", "kerlico": "no", "where": "", "note": "VMess 动态端口指令。建议：暂不实现，动态端口只在 alterId 旧协议中使用"}
 {"key": "inbound/vmess/ech-key", "kerlico": "no", "where": "", "note": "ECH 密钥，填写即开启；可由 mihomo generate ech-keypair 生成。建议：暂不实现，ECH 要先在安全层统一选方案，按协议单加没有意义"}
-{"key": "inbound/vmess/email", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "Xray 用户邮箱是用户标识，对应成员 `user_id`"}
+{"key": "inbound/vmess/email", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Add optional member label carried to stats, or retire these matrix keys as native-only"}
 {"key": "inbound/vmess/grpc-service-name", "kerlico": "yes", "where": "crates/protocol-vmess/src/carrier.rs", "note": "`transport` 的 grpc `service_name`"}
 {"key": "inbound/vmess/id", "kerlico": "partial", "where": "crates/protocol-vmess/src/inbound.rs", "note": "`uuid` 只接受标准 UUID（`parse_str`）；短字符串映射没有"}
 {"key": "inbound/vmess/jls-config-alpn", "kerlico": "no", "where": "", "note": "JLS ALPN。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
@@ -935,11 +935,11 @@
 {"key": "inbound/vmess/mkcp-config-tti", "kerlico": "no", "where": "", "note": "mKCP 传输时间间隔，毫秒。建议：暂不实现，kerlico 没有 mKCP 载体，VLESS 接口文档也列为未实现"}
 {"key": "inbound/vmess/mkcp-config-uplink-capacity", "kerlico": "no", "where": "", "note": "mKCP 上行容量，MB/s。建议：暂不实现，kerlico 没有 mKCP 载体，VLESS 接口文档也列为未实现"}
 {"key": "inbound/vmess/mkcp-config-write-buffer", "kerlico": "no", "where": "", "note": "mKCP 写缓冲，字节。建议：暂不实现，kerlico 没有 mKCP 载体，VLESS 接口文档也列为未实现"}
-{"key": "inbound/vmess/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "inbound/vmess/multiplex", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Run sing-mux inbound+outbound against a real sing-box peer (incl. padding framing); add tools/interop_sing_mux.py"}
 {"key": "inbound/vmess/mux-option-brutal-down", "kerlico": "no", "where": "", "note": "sing-mux Brutal 下行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/vmess/mux-option-brutal-enabled", "kerlico": "no", "where": "", "note": "sing-mux 入站 TCP Brutal。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
 {"key": "inbound/vmess/mux-option-brutal-up", "kerlico": "no", "where": "", "note": "sing-mux Brutal 上行，默认 Mbps。建议：暂不实现，kerlico 没有 sing-mux，也没有 Brutal 拥塞控制"}
-{"key": "inbound/vmess/mux-option-padding", "kerlico": "yes", "where": "", "note": "入站 sing-mux 填充。建议：实现，随 sing-mux 一起做；sing-box、Mihomo 的 SS、Trojan、VMess 节点靠它互通多路复用"}
+{"key": "inbound/vmess/mux-option-padding", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：Run sing-mux inbound+outbound against a real sing-box peer (incl. padding framing); add tools/interop_sing_mux.py"}
 {"key": "inbound/vmess/private-key", "kerlico": "yes", "where": "crates/protocol-vmess/src/carrier.rs", "note": "`private_key_pem` 或 `private_key_file`"}
 {"key": "inbound/vmess/protocol", "kerlico": "yes", "where": "crates/protocol-vmess/src/inbound.rs", "note": "节点 type `vmess`"}
 {"key": "inbound/vmess/reality-config-dest", "kerlico": "no", "where": "", "note": "REALITY 回落目标。建议：暂不实现，REALITY 目前只接在 VLESS 上，先把 VLESS 的缺口补齐"}
@@ -986,17 +986,17 @@
 {"key": "inbound/vmess/users", "kerlico": "yes", "where": "crates/protocol-vmess/src/inbound.rs", "note": "节点 `members`"}
 {"key": "inbound/vmess/users-alter-id", "kerlico": "no", "where": "", "note": "VMess 用户 alterId，0 关闭旧协议，大于 0 开启。建议：暂不实现，alterId 旧协议基于 MD5 认证，kerlico 明确不做；新部署都用 AEAD"}
 {"key": "inbound/vmess/users-alterid", "kerlico": "no", "where": "", "note": "alterId 旧协议开关。建议：暂不实现，alterId 旧协议基于 MD5 认证，kerlico 明确不做；新部署都用 AEAD"}
-{"key": "inbound/vmess/users-name", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "成员 `user_id`，关联管理账户"}
-{"key": "inbound/vmess/users-username", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "Mihomo 的用户名对应成员 `user_id`"}
+{"key": "inbound/vmess/users-name", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Add optional member label carried to stats, or retire these matrix keys as native-only"}
+{"key": "inbound/vmess/users-username", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Add optional member label carried to stats, or retire these matrix keys as native-only"}
 {"key": "inbound/vmess/users-uuid", "kerlico": "yes", "where": "crates/protocol-vmess/src/inbound.rs", "note": "成员 `native_credential` 的 `uuid`"}
 {"key": "inbound/vmess/vmess", "kerlico": "yes", "where": "crates/protocol-vmess/src/inbound.rs", "note": "节点 type `vmess`"}
 {"key": "inbound/vmess/wire-format", "kerlico": "partial", "where": "crates/protocol-vmess/src/crypto.rs", "note": "AEAD 头部，`aes-128-gcm` 和 `chacha20-poly1305`；CFB、不加密和 MD5 认证没有"}
 {"key": "inbound/vmess/ws-path", "kerlico": "yes", "where": "crates/protocol-vmess/src/carrier.rs", "note": "`transport` 的 ws `path`"}
 {"key": "inbound/wireguard/allowed-ips", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "成员 `native_credential` 的 `allowed_ips`"}
 {"key": "inbound/wireguard/combo", "kerlico": "yes", "where": "crates/protocol-wireguard/src/server.rs", "note": "kerlico 节点也不走 streamSettings；隧道内 TCP、UDP 都有，物理监听是 UDP"}
-{"key": "inbound/wireguard/email", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "Xray 用户邮箱是用户标识，对应成员 `user_id`"}
+{"key": "inbound/wireguard/email", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "M11 审计（夸大）：Add optional member label carried to stats, or retire these matrix keys as native-only"}
 {"key": "inbound/wireguard/keep-alive", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "成员 `native_credential` 的 `persistent_keepalive`"}
-{"key": "inbound/wireguard/level", "kerlico": "yes", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
+{"key": "inbound/wireguard/level", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：Drop the keys from the claim or map to per-user limits"}
 {"key": "inbound/wireguard/mtu", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`tunnel.mtu`，范围 1280 到 9000"}
 {"key": "inbound/wireguard/peers", "kerlico": "yes", "where": "crates/protocol-wireguard/src/server.rs", "note": "节点 `members`，每个成员是一个 peer"}
 {"key": "inbound/wireguard/pre-shared-key", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "成员 `native_credential` 的 `preshared_key`"}
@@ -1031,7 +1031,7 @@
 {"key": "outbound/common/name", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "出站 `tag`"}
 {"key": "outbound/common/port", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "各协议 `options` 内的服务器端口"}
 {"key": "outbound/common/protocol", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "出站 `type`。Xray 列出的 dns、loopback 没有"}
-{"key": "outbound/common/proxy-settings", "kerlico": "yes", "where": "", "note": "出站 proxySettings。建议：实现，链式代理是常见部署需求，kerlico 目前只有 shadowtls 这一种内外层组合"}
+{"key": "outbound/common/proxy-settings", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：route every outbound dial through connect_raw_with_dialer or reject detour at compile where unsupported; add an e2e chained-proxy test"}
 {"key": "outbound/common/send-through", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "直连只能绑 `interface`；WireGuard、OpenVPN、ZeroTier 有 `bind` 绑外层地址。没有逐流绑定源 IP"}
 {"key": "outbound/common/server", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "各协议 `options` 内的服务器地址"}
 {"key": "outbound/common/settings", "kerlico": "yes", "where": "crates/config/src/lib.rs", "note": "出站 `options`，每种协议私有且拒绝未知字段"}
@@ -1064,16 +1064,16 @@
 {"key": "outbound/direct/user-level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
 {"key": "outbound/dns/address", "kerlico": "na", "where": "", "note": "Xray 旧字段名，能力见 rewrite-address"}
 {"key": "outbound/dns/block-types", "kerlico": "na", "where": "", "note": "Xray 旧字段名，能力见 rules 的 q-type"}
-{"key": "outbound/dns/combo", "kerlico": "yes", "where": "crates/net/src/lib.rs", "note": "内置 `dns` 出站（`DnsFactory`），复用 `DnsResolver::exchange_wire_query` 应答 TCP/UDP DNS 线格式查询"}
+{"key": "outbound/dns/combo", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "M11 审计（夸大）：inject engine DnsResolver into DnsOutbound, forward non-A/AAAA upstream, add e2e dns-outbound test"}
 {"key": "outbound/dns/direct", "kerlico": "no", "where": "", "note": "放行到目标 DNS 服务器，按 rewrite 转发。建议：暂不实现，先做基本 dns 出站，查询规则等有需求再加"}
-{"key": "outbound/dns/dns", "kerlico": "yes", "where": "crates/net/src/lib.rs", "note": "`type = \"dns\"` 出站实例，将明文 DNS 查询转发至引擎 `DnsResolver`"}
+{"key": "outbound/dns/dns", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "M11 审计（夸大）：inject engine DnsResolver via ServiceContext; add test"}
 {"key": "outbound/dns/domain", "kerlico": "no", "where": "", "note": "匹配域名列表，写法同路由 domain。建议：暂不实现，先做基本 dns 出站，查询规则等有需求再加"}
 {"key": "outbound/dns/drop", "kerlico": "no", "where": "", "note": "丢弃请求，不返回响应。建议：暂不实现，先做基本 dns 出站，查询规则等有需求再加"}
-{"key": "outbound/dns/hijack", "kerlico": "yes", "where": "crates/net/src/lib.rs", "note": "配合路由将 53 端口或 DNS 流/报文交由 `dns` 出站处理"}
+{"key": "outbound/dns/hijack", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "M11 审计（夸大）：implement exchange_dns_packet for SystemResolver; add hijack-dns e2e test"}
 {"key": "outbound/dns/network", "kerlico": "na", "where": "", "note": "Xray 旧字段名，能力见 rewrite-network"}
 {"key": "outbound/dns/non-ipquery", "kerlico": "na", "where": "", "note": "Xray 旧字段名，能力见 rules"}
 {"key": "outbound/dns/port", "kerlico": "na", "where": "", "note": "Xray 旧字段名，能力见 rewrite-port"}
-{"key": "outbound/dns/protocol", "kerlico": "yes", "where": "crates/net/src/lib.rs", "note": "出站 `type = \"dns\"`（`DnsFactory`）"}
+{"key": "outbound/dns/protocol", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "M11 审计（夸大）：same as outbound/dns/dns"}
 {"key": "outbound/dns/q-type", "kerlico": "no", "where": "", "note": "匹配 DNS 查询类型。建议：暂不实现，先做基本 dns 出站，查询规则等有需求再加"}
 {"key": "outbound/dns/r-code", "kerlico": "no", "where": "", "note": "return 使用的 RCODE，默认 0。建议：暂不实现，先做基本 dns 出站，查询规则等有需求再加"}
 {"key": "outbound/dns/return", "kerlico": "no", "where": "", "note": "返回指定 RCODE 的响应。建议：暂不实现，先做基本 dns 出站，查询规则等有需求再加"}
@@ -1110,7 +1110,7 @@
 {"key": "outbound/easytier/private-mode", "kerlico": "no", "where": "", "note": "隐私模式，默认 false。建议：暂不实现，kerlico 的 EasyTier 只做客户端，流量经配置的对端转发"}
 {"key": "outbound/easytier/protocol", "kerlico": "yes", "where": "crates/protocol-easytier/src/client.rs", "note": "出站 type `easytier`"}
 {"key": "outbound/easytier/proxy-networks", "kerlico": "no", "where": "", "note": "经网络代理访问的子网。建议：暂不实现，kerlico 的 EasyTier 只做客户端，流量经配置的对端转发"}
-{"key": "outbound/easytier/secure-mode", "kerlico": "yes", "where": "crates/protocol-easytier/src/config.rs", "note": "`secure_mode` / `secure-mode` 强制要求启用非 `none` 加密算法"}
+{"key": "outbound/easytier/secure-mode", "kerlico": "no", "where": "crates/protocol-easytier/src/config.rs", "note": "M11 审计（空壳）：secure_mode only rejects encryption=none; upstream secure-mode is Noise E2E (local/peer X25519 keys) and node_config never enables it; implement via upstream secure-mode config or mark missing"}
 {"key": "outbound/easytier/state-dir", "kerlico": "no", "where": "", "note": "状态目录，默认 easytier/<代理名称>。建议：暂不实现，kerlico 的 EasyTier 不落状态文件"}
 {"key": "outbound/easytier/tld-dns-zone", "kerlico": "no", "where": "", "note": "MagicDNS TLD，默认 et.net。建议：暂不实现，kerlico 不用 Magic DNS"}
 {"key": "outbound/gost-relay/client-fingerprint", "kerlico": "no", "where": "", "note": "uTLS 指纹。建议：暂不实现，只有 VLESS 有 `fingerprint`，其他协议要先抽出共用 TLS 整形层"}
@@ -1120,7 +1120,7 @@
 {"key": "outbound/gost-relay/password", "kerlico": "yes", "where": "crates/protocol-gost-relay/src/config.rs", "note": "`password`"}
 {"key": "outbound/gost-relay/protocol", "kerlico": "yes", "where": "crates/protocol-gost-relay/src/outbound.rs", "note": "出站 type `gost-relay`"}
 {"key": "outbound/gost-relay/sni", "kerlico": "yes", "where": "crates/protocol-gost-relay/src/config.rs", "note": "`tls.server_name`"}
-{"key": "outbound/gost-relay/tls", "kerlico": "yes", "where": "crates/protocol-gost-relay/src/config.rs", "note": "`tls`，还有 `allow_insecure`"}
+{"key": "outbound/gost-relay/tls", "kerlico": "partial", "where": "crates/protocol-gost-relay/src/config.rs", "note": "M11 审计（夸大）：note lists allow_insecure as a TLS option but it is a plaintext-to-non-loopback permit and is rejected when tls is set; reword note"}
 {"key": "outbound/gost-relay/udp", "kerlico": "partial", "where": "crates/protocol-gost-relay/src/outbound.rs", "note": "固定目标 UDP 恒开，没有开关；不提供多目标关联"}
 {"key": "outbound/gost-relay/username", "kerlico": "yes", "where": "crates/protocol-gost-relay/src/config.rs", "note": "`username`"}
 {"key": "outbound/http/address", "kerlico": "yes", "where": "crates/protocol-http/src/outbound.rs", "note": "`server.host`"}
@@ -1173,7 +1173,7 @@
 {"key": "outbound/hysteria/version", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "kerlico 用 type 区分：`hysteria2`、`hysteria1`；Xray 只有版本 2"}
 {"key": "outbound/hysteria2/bbr-profile", "kerlico": "no", "where": "", "note": "BBR 档位，默认 standard。建议：暂不实现，kerlico 没有 BBR 档位配置，没有吞吐证据前不加"}
 {"key": "outbound/hysteria2/brutal-debug", "kerlico": "no", "where": "", "note": "启用 Hysteria Brutal CC 的调试信息日志记录。建议：暂不实现，Brutal 需要固定速率拥塞控制，先做 Hysteria2 带宽协商时一起决定"}
-{"key": "outbound/hysteria2/combo", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "`salamander_password` 或无混淆，`server` 单端口，`limits.congestion` 的 bbr、reno，`ca_pem` 校验；缺 gecko、端口跳跃、brutal、realm、跳过校验、指纹、ech"}
+{"key": "outbound/hysteria2/combo", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "M11 审计（夸大）：note omits that up/brutal is silently ignored and lists hop as missing though it exists; correct note"}
 {"key": "outbound/hysteria2/cwnd", "kerlico": "no", "where": "", "note": "初始拥塞窗口。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
 {"key": "outbound/hysteria2/disable-chrome-parrot", "kerlico": "no", "where": "", "note": "禁用 Chrome QUIC 指纹模仿。建议：暂不实现，kerlico 没有模仿 Chrome QUIC 指纹，这个开关没有对象"}
 {"key": "outbound/hysteria2/down", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "`down` 带宽字符串（如 `100 Mbps`）解析并映射为 `Hysteria-CC-RX` 协商速率"}
@@ -1222,8 +1222,8 @@
 {"key": "outbound/hysteria2/server-ports", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "`server_ports` / `server-ports` 端口或端口段列表"}
 {"key": "outbound/hysteria2/tls", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "`tls` 只有 `server_name`、`ca_pem`；缺跳过校验、ALPN、指纹、ECH"}
 {"key": "outbound/hysteria2/udp-mtu", "kerlico": "no", "where": "", "note": "UDP 中继使用的 MTU。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
-{"key": "outbound/hysteria2/up", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "`up` 带宽字符串（如 `50 Mbps`）解析并限制上行速率"}
-{"key": "outbound/hysteria2/up-mbps", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "`up_mbps` / `up-mbps` 上行带宽（Mbps）"}
+{"key": "outbound/hysteria2/up", "kerlico": "no", "where": "crates/protocol-hysteria2/src/config.rs", "note": "M11 审计（空壳）：up is only validated (to_bps()? then dropped); server hysteria-cc-rx parsed into _rate and discarded (outbound.rs:327); implement Brutal tx at min(up, server rx) or downgrade to missing"}
+{"key": "outbound/hysteria2/up-mbps", "kerlico": "no", "where": "crates/protocol-hysteria2/src/config.rs", "note": "M11 审计（空壳）：alias of up; same drop; implement Brutal or downgrade"}
 {"key": "outbound/list/protocols", "kerlico": "na", "where": "", "note": "只描述文档结构的协议列表页"}
 {"key": "outbound/loopback/combo", "kerlico": "no", "where": "", "note": "Loopback 用途。建议：暂不实现，kerlico 的 `routes` 是单次匹配，没有重新进路由的二次分流需求"}
 {"key": "outbound/loopback/inbound-tag", "kerlico": "no", "where": "", "note": "重新进入路由时的入站标识。建议：暂不实现，kerlico 的 `routes` 是单次匹配，没有重新进路由的二次分流需求"}
@@ -1274,7 +1274,7 @@
 {"key": "outbound/mieru/transport", "kerlico": "partial", "where": "crates/protocol-mieru/src/config.rs", "note": "`transport`：`tcp`；`udp` 只允许回环不安全兼容模式"}
 {"key": "outbound/mieru/username", "kerlico": "yes", "where": "crates/protocol-mieru/src/config.rs", "note": "`username`"}
 {"key": "outbound/naive/combo", "kerlico": "partial", "where": "crates/protocol-naive/src/config.rs", "note": "`transport` 的 h2、h3（kerlico 另有 h1），`congestion_control` 的 cubic、reno，`udp_over_tcp` v1、v2；缺 bbr、bbr2、ECH"}
-{"key": "outbound/naive/extra-headers", "kerlico": "yes", "where": "crates/protocol-naive/src/http.rs", "note": "`extra_headers` / `extra-headers`（支持 Map 或多行字符串）注入 HTTP/1.1、H2、H3 CONNECT 请求"}
+{"key": "outbound/naive/extra-headers", "kerlico": "partial", "where": "crates/protocol-naive/src/http.rs", "note": "M11 审计（夸大）：field is BTreeMap<String,String> with no custom deserializer, so the multi-line string form fails; add a string deserializer or drop that claim, and add a wire test asserting the header on H1/H2/H3 CONNECT"}
 {"key": "outbound/naive/insecure-concurrency", "kerlico": "partial", "where": "crates/protocol-naive/src/config.rs", "note": "`max_sessions` 控制载体数；不是同名的并发隧道语义"}
 {"key": "outbound/naive/password", "kerlico": "yes", "where": "crates/protocol-naive/src/config.rs", "note": "`password`"}
 {"key": "outbound/naive/protocol", "kerlico": "yes", "where": "crates/protocol-naive/src/lib.rs", "note": "出站 type `naive`"}
@@ -1290,14 +1290,14 @@
 {"key": "outbound/openconnect/allow-insecure-crypto", "kerlico": "no", "where": "", "note": "启用旧版 VPN 服务器所需的弱 TLS 和 DTLS 密码套件及 TLS 1.0 兼容性。建议：暂不实现，kerlico 的证书校验不可关闭"}
 {"key": "outbound/openconnect/auth-group", "kerlico": "no", "where": "", "note": "认证组，用于在所选 flavor 支持时预选匹配的组、realm、domain 或 gateway 选项。建议：暂不实现，kerlico 只做用户名密码表单认证，交互式和令牌认证放到有需求时"}
 {"key": "outbound/openconnect/base-mtu", "kerlico": "partial", "where": "crates/protocol-openconnect/src/config.rs", "note": "`mtu` 同时写入 X-CSTP-Base-MTU 和 X-CSTP-MTU；不能分开设"}
-{"key": "outbound/openconnect/combo", "kerlico": "partial", "where": "crates/protocol-openconnect/src/config.rs", "note": "anyconnect 加用户名密码，TLS 数据通道，`ca_pem`；缺其他 flavor、token、cookie、DTLS、压缩、host check、客户端证书、系统网卡"}
+{"key": "outbound/openconnect/combo", "kerlico": "partial", "where": "crates/protocol-openconnect/src/config.rs", "note": "M11 审计（夸大）：note says client cert missing although mTLS is wired; dtls_local_port and key_password are accepted but inert"}
 {"key": "outbound/openconnect/compression-disabled", "kerlico": "partial", "where": "crates/protocol-openconnect/src/session.rs", "note": "固定不协商压缩（`Accept-Encoding: identity`），没有开关"}
 {"key": "outbound/openconnect/compression-mode", "kerlico": "no", "where": "", "note": "AnyConnect 压缩模式，可选值为。建议：暂不实现，kerlico 不做压缩，压缩还有明文泄露风险"}
 {"key": "outbound/openconnect/cookie", "kerlico": "no", "where": "", "note": "用于跳过凭据提示并直接连接的现有认证会话。建议：暂不实现，kerlico 只做用户名密码表单认证，交互式和令牌认证放到有需求时"}
 {"key": "outbound/openconnect/csd", "kerlico": "no", "where": "", "note": "AnyConnect CSD/host scan 合规性选项。建议：暂不实现，合规检查需要外部 wrapper 和主机信息，kerlico 不做"}
 {"key": "outbound/openconnect/csd-wrapper-path", "kerlico": "no", "where": "", "note": "外部 AnyConnect CSD wrapper 可执行文件的路径。建议：暂不实现，合规检查需要外部 wrapper 和主机信息，kerlico 不做"}
 {"key": "outbound/openconnect/dpd-interval", "kerlico": "no", "where": "", "note": "覆盖 Dead Peer Detection 间隔。建议：暂不实现，kerlico 按服务端返回的周期做保活，暂无覆盖需求"}
-{"key": "outbound/openconnect/dtls-local-port", "kerlico": "yes", "where": "crates/protocol-openconnect/src/config.rs", "note": "`dtls_local_port` / `dtls-local-port` 本地端口配置与非零校验"}
+{"key": "outbound/openconnect/dtls-local-port", "kerlico": "no", "where": "crates/protocol-openconnect/src/config.rs", "note": "M11 审计（空壳）：only validated !=0 then dropped; Config has no field and no DTLS channel exists; reject the key or mark missing"}
 {"key": "outbound/openconnect/external-auth-disabled", "kerlico": "no", "where": "", "note": "禁用 AnyConnect、GlobalProtect 和 Fortinet 的 SSO、SAML 等外部浏览器认证。建议：暂不实现，kerlico 只做用户名密码表单认证，交互式和令牌认证放到有需求时"}
 {"key": "outbound/openconnect/flavor", "kerlico": "partial", "where": "crates/protocol-openconnect/src/config.rs", "note": "只有 AnyConnect，没有配置项"}
 {"key": "outbound/openconnect/form-entries", "kerlico": "no", "where": "", "note": "认证表单字段覆盖。建议：暂不实现，kerlico 只做用户名密码表单认证，交互式和令牌认证放到有需求时"}
@@ -1338,7 +1338,7 @@
 {"key": "outbound/openconnect/tls-client-certificate", "kerlico": "yes", "where": "crates/protocol-openconnect/src/config.rs", "note": "`tls.client_certificate` / `tls-client-certificate` 内联 PEM 客户端证书 mTLS 认证"}
 {"key": "outbound/openconnect/tls-client-certificate-path", "kerlico": "yes", "where": "crates/protocol-openconnect/src/config.rs", "note": "`tls.client_certificate_path` / `tls-client-certificate-path` 文件路径加载客户端证书"}
 {"key": "outbound/openconnect/tls-client-key", "kerlico": "yes", "where": "crates/protocol-openconnect/src/config.rs", "note": "`tls.client_key` / `tls-client-key` 内联 PEM 客户端私钥"}
-{"key": "outbound/openconnect/tls-client-key-password", "kerlico": "yes", "where": "crates/protocol-openconnect/src/config.rs", "note": "`tls.client_key_password` / `tls-client-key-password` 私钥口令配置与加密私钥拦截"}
+{"key": "outbound/openconnect/tls-client-key-password", "kerlico": "no", "where": "crates/protocol-openconnect/src/config.rs", "note": "M11 审计（空壳）：key_password checked non-empty then discarded; tls_mtls takes no password and rustls_pemfile skips ENCRYPTED keys so it fails as generic invalid PEM; decrypt PKCS#8 with the password or reject the key"}
 {"key": "outbound/openconnect/tls-client-key-path", "kerlico": "yes", "where": "crates/protocol-openconnect/src/config.rs", "note": "`tls.client_key_path` / `tls-client-key-path` 文件路径加载客户端私钥"}
 {"key": "outbound/openconnect/tls-insecure", "kerlico": "no", "where": "", "note": "TLS 禁用 VPN 服务器证书和主机名验证。建议：暂不实现，kerlico 的证书校验不可关闭"}
 {"key": "outbound/openconnect/tls-mca-certificate", "kerlico": "no", "where": "", "note": "TLS PEM 格式的 AnyConnect 多证书认证（MCA）证书链内容。建议：暂不实现，kerlico 只做用户名密码表单认证，交互式和令牌认证放到有需求时"}
@@ -1395,7 +1395,7 @@
 {"key": "outbound/openvpn/key", "kerlico": "yes", "where": "crates/protocol-openvpn/src/config.rs", "note": "`key_pem`；私钥不能加密"}
 {"key": "outbound/openvpn/key-direction", "kerlico": "yes", "where": "crates/protocol-openvpn/src/config.rs", "note": "`tls_auth.direction`，取 0、1，省略表示双向"}
 {"key": "outbound/openvpn/mode", "kerlico": "partial", "where": "crates/protocol-openvpn/src/config.rs", "note": "只有 tls；static_key 没有"}
-{"key": "outbound/openvpn/mss-fix", "kerlico": "yes", "where": "crates/protocol-openvpn/src/client.rs", "note": "`mss_fix` / `mss-fix` 在隧道收发路径双向钳制 IPv4/IPv6 TCP SYN MSS 并增量重算校验和"}
+{"key": "outbound/openvpn/mss-fix", "kerlico": "partial", "where": "crates/protocol-openvpn/src/client.rs", "note": "M11 审计（夸大）：value is raw MSS not OpenVPN mssfix packet size (no overhead derivation, no default 1492/mtu mode); IPv6 ext headers skipped; add clamp unit test"}
 {"key": "outbound/openvpn/mss-fix-disabled", "kerlico": "no", "where": "", "note": "禁用 MSS 限制，包括默认限制。建议：暂不实现，随 mss-fix 一起"}
 {"key": "outbound/openvpn/mss-fix-mode", "kerlico": "no", "where": "", "note": "显式 `mss_fix` 的 OpenVPN MSS 计算模式，`mtu` 或 `fixed` 之一。建议：暂不实现，随 mss-fix 一起"}
 {"key": "outbound/openvpn/mtu", "kerlico": "yes", "where": "crates/protocol-openvpn/src/config.rs", "note": "`mtu`，默认 1400，不读取推送的 tun-mtu"}
@@ -1458,7 +1458,7 @@
 {"key": "outbound/openvpn/tls-control-wrap-type", "kerlico": "partial", "where": "crates/protocol-openvpn/src/config.rs", "note": "tls_auth、tls_crypt；tls_crypt_v2 没有"}
 {"key": "outbound/openvpn/tls-crl-path", "kerlico": "no", "where": "", "note": "TLS 用于拒绝已吊销服务器证书的 PEM 或 DER CRL 文件路径。建议：暂不实现，证书校验细项由 rustls 默认行为决定，等真实对端需要再加"}
 {"key": "outbound/openvpn/tls-crypt", "kerlico": "yes", "where": "crates/protocol-openvpn/src/config.rs", "note": "`tls_crypt_key`"}
-{"key": "outbound/openvpn/tls-crypt-v2", "kerlico": "yes", "where": "crates/protocol-openvpn/src/wrap.rs", "note": "`tls_crypt_v2` / `tls-crypt-v2` 解析 PEM 客户端密钥与 WKc，并在握手首包附带 WKc 发送 `P_CONTROL_HARD_RESET_CLIENT_V3`"}
+{"key": "outbound/openvpn/tls-crypt-v2", "kerlico": "partial", "where": "crates/protocol-openvpn/src/wrap.rs", "note": "M11 审计（夸大）：WKc length read from first 2 bytes; upstream stores net_len in last 2 bytes, so genuine `--genkey tls-crypt-v2-client` keys are rejected (from upstream tls_crypt.c memory, verify); kerlico server treats v2 as plain tls-crypt (server.rs:905); add interop case vs openvpn --tls-crypt-v2"}
 {"key": "outbound/openvpn/tls-groups", "kerlico": "no", "where": "", "note": "按偏好顺序排列的 TLS key exchange group，以冒号分隔。建议：暂不实现，证书校验细项由 rustls 默认行为决定，等真实对端需要再加"}
 {"key": "outbound/openvpn/tls-ns-certificate-type", "kerlico": "no", "where": "", "note": "TLS 已弃用的 Netscape 证书类型检查，`server` 或 `client` 之一。建议：暂不实现，Netscape 证书类型检查已弃用"}
 {"key": "outbound/openvpn/tls-peer-fingerprint", "kerlico": "no", "where": "", "note": "TLS 允许的服务器 leaf certificate 的 SHA-256 fingerprint。建议：暂不实现，kerlico 的证书校验不可跳过，指纹固定放到安全层统一做"}
@@ -1500,71 +1500,71 @@
 {"key": "outbound/shadowsocks/address", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`server`"}
 {"key": "outbound/shadowsocks/cipher", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`AEAD_METHODS`、`LEGACY_METHODS`，2022 系列走 type `ss2022`；缺 aes-192-gcm、aegis、lea、deoxys 等"}
 {"key": "outbound/shadowsocks/client-fingerprint", "kerlico": "no", "where": "", "note": "shadow-tls、restls、jls 插件 uTLS 指纹。建议：暂不实现，只有 VLESS 有 `fingerprint`，其他协议要先抽出共用 TLS 整形层"}
-{"key": "outbound/shadowsocks/combo", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "kerlico 的方法表，shadow-tls 外层，TCP+UDP；缺 obfs、v2ray-plugin、gost-plugin、kcptun、restls、jls 插件，UoT，sing-mux 和 streamSettings 传输"}
+{"key": "outbound/shadowsocks/combo", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
 {"key": "outbound/shadowsocks/email", "kerlico": "no", "where": "", "note": "出站用户的邮箱标识。建议：暂不实现，kerlico 的出站凭据不带用户标识，统计按命名出站投影"}
 {"key": "outbound/shadowsocks/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
 {"key": "outbound/shadowsocks/method", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`method`，同 cipher"}
-{"key": "outbound/shadowsocks/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
-{"key": "outbound/shadowsocks/network", "kerlico": "partial", "where": "crates/protocol-shadowsocks/src/outbound.rs", "note": "kerlico 按协议能力同时提供 TCP 和 UDP，没有只开其一的开关"}
+{"key": "outbound/shadowsocks/multiplex", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U2 sing-mux：yamux 补窗口更新/ping、h2mux 改真 HTTP/2(HEADERS+HPACK+WINDOW_UPDATE)，加对 sing-box 的互通用例"}
+{"key": "outbound/shadowsocks/network", "kerlico": "no", "where": "crates/protocol-shadowsocks/src/outbound.rs", "note": "M11 审计（缺失）：U7 出站 network(tcp/udp)/udp 开关：在各协议 Options 增加字段并裁剪 Capabilities"}
 {"key": "outbound/shadowsocks/password", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`password`"}
-{"key": "outbound/shadowsocks/plugin", "kerlico": "partial", "where": "crates/protocol-shadowtls/src/config.rs", "note": "只有 shadow-tls，用外层 `shadowtls` 出站加 `inner` 实现；其他插件没有"}
-{"key": "outbound/shadowsocks/plugin-opts", "kerlico": "partial", "where": "crates/protocol-shadowtls/src/config.rs", "note": "只有 shadow-tls，字段在外层 `shadowtls` 出站；通用 SIP003 参数串没有"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-fingerprint", "kerlico": "yes", "where": "", "note": "gost-plugin 证书指纹。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-headers", "kerlico": "yes", "where": "", "note": "gost-plugin 请求头。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-host", "kerlico": "yes", "where": "", "note": "gost-plugin 主机。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mode", "kerlico": "yes", "where": "", "note": "gost-plugin 模式。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mux", "kerlico": "yes", "where": "", "note": "gost-plugin 多路复用。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-name-cert-verify", "kerlico": "yes", "where": "", "note": "gost-plugin 校验名。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-path", "kerlico": "yes", "where": "", "note": "gost-plugin 路径。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-skip-cert-verify", "kerlico": "yes", "where": "", "note": "gost-plugin 跳过验证。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-tls", "kerlico": "yes", "where": "", "note": "gost-plugin wss。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-jls-alpn", "kerlico": "yes", "where": "", "note": "JLS 插件ALPN。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
-{"key": "outbound/shadowsocks/plugin-opts-jls-host", "kerlico": "yes", "where": "", "note": "JLS 域名。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
-{"key": "outbound/shadowsocks/plugin-opts-jls-password", "kerlico": "yes", "where": "", "note": "JLS 密码。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
-{"key": "outbound/shadowsocks/plugin-opts-jls-username", "kerlico": "yes", "where": "", "note": "JLS 用户名。建议：暂不实现，kerlico 的 JLS 只用于 ShadowQUIC，把它叠到任意协议上是 Mihomo 专属组合"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-acknodelay", "kerlico": "yes", "where": "", "note": "kcptun 插件收包立即刷新 ack。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-autoexpire", "kerlico": "yes", "where": "", "note": "kcptun 插件单 UDP 连接自动过期秒数，0 禁用。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-conn", "kerlico": "yes", "where": "", "note": "kcptun 插件到服务端的 UDP 连接数。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-crypt", "kerlico": "yes", "where": "", "note": "kcptun 插件加密方式。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-datashard", "kerlico": "yes", "where": "", "note": "kcptun 插件Reed-Solomon 数据分片。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-dscp", "kerlico": "yes", "where": "", "note": "kcptun 插件DSCP（6 位）。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-framesize", "kerlico": "yes", "where": "", "note": "kcptun 插件smux 最大帧。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-interval", "kerlico": "yes", "where": "", "note": "kcptun 插件interval 参数。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-keepalive", "kerlico": "yes", "where": "", "note": "kcptun 插件心跳间隔秒。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-key", "kerlico": "yes", "where": "", "note": "kcptun 插件预共享密钥。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-mode", "kerlico": "yes", "where": "", "note": "kcptun 插件模式档位。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-mtu", "kerlico": "yes", "where": "", "note": "kcptun 插件UDP 包 MTU。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-nocomp", "kerlico": "yes", "where": "", "note": "kcptun 插件禁用压缩。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-nodelay", "kerlico": "yes", "where": "", "note": "kcptun 插件nodelay 参数。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-parityshard", "kerlico": "yes", "where": "", "note": "kcptun 插件Reed-Solomon 校验分片。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-ratelimit", "kerlico": "yes", "where": "", "note": "kcptun 插件单 KCP 连接出站限速，字节/秒，0 禁用。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-rcvwnd", "kerlico": "yes", "where": "", "note": "kcptun 插件接收窗口（包数）。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-resend", "kerlico": "yes", "where": "", "note": "kcptun 插件resend 参数。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-scavengettl", "kerlico": "yes", "where": "", "note": "kcptun 插件过期连接存活秒数。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxbuf", "kerlico": "yes", "where": "", "note": "kcptun 插件smux 解复用总缓冲字节。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxver", "kerlico": "yes", "where": "", "note": "kcptun 插件smux 版本。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-sndwnd", "kerlico": "yes", "where": "", "note": "kcptun 插件发送窗口（包数）。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-sockbuf", "kerlico": "yes", "where": "", "note": "kcptun 插件每 socket 缓冲字节。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-kcptun-streambuf", "kerlico": "yes", "where": "", "note": "kcptun 插件每流接收缓冲，smux v2+。建议：暂不实现，kcptun 只有 Mihomo 内置，kerlico 没有 KCP 载体"}
-{"key": "outbound/shadowsocks/plugin-opts-obfs-host", "kerlico": "yes", "where": "", "note": "simple-obfs 插件obfs 域名。建议：暂不实现，simple-obfs 已被 ShadowTLS 这类方案取代，kerlico 没有插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-obfs-mode", "kerlico": "yes", "where": "", "note": "simple-obfs 插件obfs 模式。建议：暂不实现，simple-obfs 已被 ShadowTLS 这类方案取代，kerlico 没有插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-restls-host", "kerlico": "yes", "where": "", "note": "Restls 插件应为 TLS 1.3 服务器。建议：暂不实现，kerlico 没有 Restls，同类需求由 shadowtls 覆盖"}
-{"key": "outbound/shadowsocks/plugin-opts-restls-password", "kerlico": "yes", "where": "", "note": "Restls 密码。建议：暂不实现，kerlico 没有 Restls，同类需求由 shadowtls 覆盖"}
-{"key": "outbound/shadowsocks/plugin-opts-restls-restls-script", "kerlico": "yes", "where": "", "note": "Restls 插件握手后行为脚本。建议：暂不实现，kerlico 没有 Restls，同类需求由 shadowtls 覆盖"}
-{"key": "outbound/shadowsocks/plugin-opts-restls-version-hint", "kerlico": "yes", "where": "", "note": "Restls 插件版本提示。建议：暂不实现，kerlico 没有 Restls，同类需求由 shadowtls 覆盖"}
-{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-host", "kerlico": "yes", "where": "crates/protocol-shadowtls/src/config.rs", "note": "外层 `shadowtls` 的 `tls.server_name`"}
-{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-password", "kerlico": "yes", "where": "crates/protocol-shadowtls/src/config.rs", "note": "外层 `shadowtls` 的 `password`"}
-{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-version", "kerlico": "yes", "where": "crates/protocol-shadowtls/src/config.rs", "note": "外层 `shadowtls` 的 `version`"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-fingerprint", "kerlico": "yes", "where": "", "note": "v2ray-plugin 证书指纹。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-headers", "kerlico": "yes", "where": "", "note": "v2ray-plugin 请求头。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-host", "kerlico": "yes", "where": "", "note": "v2ray-plugin 主机。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mode", "kerlico": "yes", "where": "", "note": "v2ray-plugin 模式。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mux", "kerlico": "yes", "where": "", "note": "v2ray-plugin 多路复用。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-name-cert-verify", "kerlico": "yes", "where": "", "note": "v2ray-plugin 校验名。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-path", "kerlico": "yes", "where": "", "note": "v2ray-plugin 路径。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-skip-cert-verify", "kerlico": "yes", "where": "", "note": "v2ray-plugin 跳过验证。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-tls", "kerlico": "yes", "where": "", "note": "v2ray-plugin wss。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-v2ray-http-upgrade", "kerlico": "yes", "where": "", "note": "v2ray-plugin http upgrade。建议：暂不实现，kerlico 没有 SIP003 插件机制"}
+{"key": "outbound/shadowsocks/plugin", "kerlico": "no", "where": "crates/protocol-shadowtls/src/config.rs", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts", "kerlico": "no", "where": "crates/protocol-shadowtls/src/config.rs", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-fingerprint", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-headers", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-host", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mode", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mux", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-name-cert-verify", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-path", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-skip-cert-verify", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-tls", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-alpn", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-host", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-password", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-jls-username", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-acknodelay", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-autoexpire", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-conn", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-crypt", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-datashard", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-dscp", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-framesize", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-interval", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-keepalive", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-key", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-mode", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-mtu", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-nocomp", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-nodelay", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-parityshard", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-ratelimit", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-rcvwnd", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-resend", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-scavengettl", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxbuf", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-smuxver", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-sndwnd", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-sockbuf", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-kcptun-streambuf", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-obfs-host", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-obfs-mode", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-host", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-password", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-restls-script", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-restls-version-hint", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-host", "kerlico": "partial", "where": "crates/protocol-shadowtls/src/config.rs", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-password", "kerlico": "partial", "where": "crates/protocol-shadowtls/src/config.rs", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-version", "kerlico": "partial", "where": "crates/protocol-shadowtls/src/config.rs", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-fingerprint", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-headers", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-host", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mode", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mux", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-name-cert-verify", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-path", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-skip-cert-verify", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-tls", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-v2ray-http-upgrade", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U1 SS SIP003 插件：实现真 WebSocket(v2ray/gost)、simple-obfs tls、kcptun、restls、jls、shadow-tls 插件映射；未实现的插件名与未知 plugin-opts 必须报错而非回落明文 TCP"}
 {"key": "outbound/shadowsocks/port", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`port`"}
 {"key": "outbound/shadowsocks/protocol", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/outbound.rs", "note": "出站 type `shadowsocks`，2022 系列为 `ss2022`"}
 {"key": "outbound/shadowsocks/server", "kerlico": "yes", "where": "crates/protocol-shadowsocks/src/config.rs", "note": "`server`"}
@@ -1591,7 +1591,7 @@
 {"key": "outbound/snell/client-fingerprint", "kerlico": "no", "where": "", "note": "obfs 插件使用的 uTLS 指纹。建议：暂不实现，只有 VLESS 有 `fingerprint`，其他协议要先抽出共用 TLS 整形层"}
 {"key": "outbound/snell/combo", "kerlico": "partial", "where": "crates/protocol-snell/src/config.rs", "note": "出站只有 v4、v6，`obfs_mode` none、http，`reuse`，`mode`（仅 v6），`userkey`；缺 v1、v2、v3、v5、tls、jls、restls、shadow-tls"}
 {"key": "outbound/snell/mode", "kerlico": "yes", "where": "crates/protocol-snell/src/outbound.rs", "note": "`mode`：`default`、`unshaped`、`unsafe-raw`，只对 v6 有效"}
-{"key": "outbound/snell/network", "kerlico": "partial", "where": "crates/protocol-snell/src/outbound.rs", "note": "kerlico 按协议能力同时提供 TCP 和 UDP，没有只开其一的开关"}
+{"key": "outbound/snell/network", "kerlico": "no", "where": "crates/protocol-snell/src/outbound.rs", "note": "M11 审计（缺失）：U7 出站 network(tcp/udp)/udp 开关：在各协议 Options 增加字段并裁剪 Capabilities"}
 {"key": "outbound/snell/obfs-host", "kerlico": "yes", "where": "crates/protocol-snell/src/outbound.rs", "note": "`obfs_host`"}
 {"key": "outbound/snell/obfs-mode", "kerlico": "yes", "where": "crates/protocol-snell/src/outbound.rs", "note": "`obfs_mode`"}
 {"key": "outbound/snell/obfs-opts-alpn", "kerlico": "no", "where": "", "note": "ALPN，仅 shadow-tls。建议：暂不实现，kerlico 的 Snell 只有 http 混淆；tls 和外层包装由独立协议负责"}
@@ -1607,7 +1607,7 @@
 {"key": "outbound/snell/reuse", "kerlico": "yes", "where": "crates/protocol-snell/src/outbound.rs", "note": "`reuse`"}
 {"key": "outbound/snell/server", "kerlico": "yes", "where": "crates/protocol-snell/src/outbound.rs", "note": "`server.host`"}
 {"key": "outbound/snell/server-port", "kerlico": "yes", "where": "crates/protocol-snell/src/outbound.rs", "note": "`server.port`"}
-{"key": "outbound/snell/udp", "kerlico": "partial", "where": "crates/protocol-snell/src/outbound.rs", "note": "UDP 恒开，没有开关"}
+{"key": "outbound/snell/udp", "kerlico": "no", "where": "crates/protocol-snell/src/outbound.rs", "note": "M11 审计（缺失）：U7 出站 network(tcp/udp)/udp 开关：在各协议 Options 增加字段并裁剪 Capabilities"}
 {"key": "outbound/snell/userkey", "kerlico": "yes", "where": "crates/protocol-snell/src/outbound.rs", "note": "`userkey`"}
 {"key": "outbound/snell/version", "kerlico": "partial", "where": "crates/protocol-snell/src/config.rs", "note": "出站只接受 4、6；1、2、3、5 明确拒绝"}
 {"key": "outbound/socks/address", "kerlico": "yes", "where": "crates/protocol-socks/src/config.rs", "note": "`server.host`"}
@@ -1615,7 +1615,7 @@
 {"key": "outbound/socks/email", "kerlico": "no", "where": "", "note": "出站用户的邮箱标识。建议：暂不实现，kerlico 的出站凭据不带用户标识，统计按命名出站投影"}
 {"key": "outbound/socks/fingerprint", "kerlico": "no", "where": "", "note": "TLS 证书指纹固定。建议：暂不实现，kerlico 的证书校验不可跳过，指纹固定放到安全层统一做"}
 {"key": "outbound/socks/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
-{"key": "outbound/socks/network", "kerlico": "partial", "where": "crates/protocol-socks/src/outbound.rs", "note": "SOCKS5 同时提供 TCP 和 UDP，4、4a 只有 TCP；没有开关"}
+{"key": "outbound/socks/network", "kerlico": "no", "where": "crates/protocol-socks/src/outbound.rs", "note": "M11 审计（缺失）：U7 出站 network(tcp/udp)/udp 开关：在各协议 Options 增加字段并裁剪 Capabilities"}
 {"key": "outbound/socks/pass", "kerlico": "yes", "where": "crates/protocol-socks/src/config.rs", "note": "`auth.password`"}
 {"key": "outbound/socks/password", "kerlico": "yes", "where": "crates/protocol-socks/src/config.rs", "note": "`auth.password`"}
 {"key": "outbound/socks/port", "kerlico": "yes", "where": "crates/protocol-socks/src/config.rs", "note": "`server.port`"}
@@ -1625,7 +1625,7 @@
 {"key": "outbound/socks/servers", "kerlico": "na", "where": "", "note": "Xray 旧多服务器写法，kerlico 一个命名出站对应一个服务器，也不接受此写法"}
 {"key": "outbound/socks/socks", "kerlico": "yes", "where": "crates/protocol-socks/src/outbound.rs", "note": "出站 type `socks`"}
 {"key": "outbound/socks/tls", "kerlico": "no", "where": "", "note": "SOCKS over TLS。建议：暂不实现，SOCKS over TLS 不是常见部署"}
-{"key": "outbound/socks/udp", "kerlico": "partial", "where": "crates/protocol-socks/src/outbound.rs", "note": "SOCKS5 UDP 恒开，没有开关"}
+{"key": "outbound/socks/udp", "kerlico": "no", "where": "crates/protocol-socks/src/outbound.rs", "note": "M11 审计（缺失）：U7 出站 network(tcp/udp)/udp 开关：在各协议 Options 增加字段并裁剪 Capabilities"}
 {"key": "outbound/socks/udp-over-tcp", "kerlico": "no", "where": "", "note": "UDP over TCP 配置。建议：暂不实现，sing-box 的 UoT 扩展，kerlico 只在 Naive 上有"}
 {"key": "outbound/socks/user", "kerlico": "yes", "where": "crates/protocol-socks/src/config.rs", "note": "`auth.username`"}
 {"key": "outbound/socks/username", "kerlico": "yes", "where": "crates/protocol-socks/src/config.rs", "note": "`auth.username`"}
@@ -1717,7 +1717,7 @@
 {"key": "outbound/trojan/email", "kerlico": "no", "where": "", "note": "出站用户的邮箱标识。建议：暂不实现，kerlico 的出站凭据不带用户标识，统计按命名出站投影"}
 {"key": "outbound/trojan/flow", "kerlico": "no", "where": "", "note": "Trojan 流控。建议：暂不实现，Trojan flow 是 Xray 已废弃的方向，kerlico 只在 VLESS 上做 Vision"}
 {"key": "outbound/trojan/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
-{"key": "outbound/trojan/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "outbound/trojan/multiplex", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U2 sing-mux：yamux 补窗口更新/ping、h2mux 改真 HTTP/2(HEADERS+HPACK+WINDOW_UPDATE)，加对 sing-box 的互通用例"}
 {"key": "outbound/trojan/network", "kerlico": "partial", "where": "crates/protocol-trojan/src/config.rs", "note": "Mihomo 这项指传输层，对应 `transport`：tcp、ws、grpc 都有；sing-box 这项指 tcp、udp，kerlico 恒开"}
 {"key": "outbound/trojan/password", "kerlico": "yes", "where": "crates/protocol-trojan/src/outbound.rs", "note": "`password`"}
 {"key": "outbound/trojan/port", "kerlico": "yes", "where": "crates/protocol-trojan/src/outbound.rs", "note": "`server.port`"}
@@ -1758,7 +1758,7 @@
 {"key": "outbound/tuic/max-datagram-frame-size", "kerlico": "no", "where": "", "note": "最大 QUIC datagram 帧长。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
 {"key": "outbound/tuic/max-open-streams", "kerlico": "no", "where": "", "note": "最大打开流。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
 {"key": "outbound/tuic/max-udp-relay-packet-size", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "全局 `limits.max_datagram_size`，不能按出站设置"}
-{"key": "outbound/tuic/network", "kerlico": "partial", "where": "crates/protocol-tuic/src/client.rs", "note": "kerlico 按协议能力同时提供 TCP 和 UDP，没有只开其一的开关"}
+{"key": "outbound/tuic/network", "kerlico": "no", "where": "crates/protocol-tuic/src/client.rs", "note": "M11 审计（缺失）：U7 出站 network(tcp/udp)/udp 开关：在各协议 Options 增加字段并裁剪 Capabilities"}
 {"key": "outbound/tuic/password", "kerlico": "yes", "where": "crates/protocol-tuic/src/config.rs", "note": "`password`"}
 {"key": "outbound/tuic/protocol", "kerlico": "yes", "where": "crates/protocol-tuic/src/lib.rs", "note": "出站 type `tuic`"}
 {"key": "outbound/tuic/recv-window", "kerlico": "no", "where": "", "note": "QUIC 连接接收窗口。建议：暂不实现，属于调参项，不影响互通，等吞吐测试指出需要再加"}
@@ -1785,13 +1785,13 @@
 {"key": "outbound/vless/flow", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs", "note": "`flow`：空、xtls-rprx-vision、xtls-rprx-vision-udp443"}
 {"key": "outbound/vless/id", "kerlico": "partial", "where": "crates/protocol-vless/src/lib.rs", "note": "`uuid` 只接受标准 UUID（`parse_str`）；短字符串映射 UUIDv5 没有"}
 {"key": "outbound/vless/level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议：暂不实现，kerlico 没有等级策略，资源由节点 `max_sessions` 和全局 `limits` 控制"}
-{"key": "outbound/vless/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "outbound/vless/multiplex", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U2 sing-mux：yamux 补窗口更新/ping、h2mux 改真 HTTP/2(HEADERS+HPACK+WINDOW_UPDATE)，加对 sing-box 的互通用例"}
 {"key": "outbound/vless/network", "kerlico": "partial", "where": "crates/protocol-vless/src/profile.rs", "note": "`transport`：tcp、ws、grpc、xhttp；h2、http 没有"}
 {"key": "outbound/vless/packet-addr", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs", "note": "`packet_encoding` 设 `packetaddr`"}
 {"key": "outbound/vless/packet-encoding", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs", "note": "`packet_encoding`：`udp`、`xudp`、`packetaddr`"}
 {"key": "outbound/vless/port", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs", "note": "`server.port`"}
 {"key": "outbound/vless/protocol", "kerlico": "yes", "where": "crates/protocol-vless/src/outbound.rs", "note": "出站 type `vless`"}
-{"key": "outbound/vless/reverse", "kerlico": "yes", "where": "", "note": "极简反向代理：出站自动向服务端注册隧道，保留公网源 IP。建议：暂不实现，Xray 专属的反向隧道，kerlico 还没有反向代理控制面"}
+{"key": "outbound/vless/reverse", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：U3 VLESS reverse：出站侧补注册隧道(连 reverse.internal.v2fly.arpa 并服务反向流)，加对 Xray 的互通用例"}
 {"key": "outbound/vless/seed", "kerlico": "no", "where": "", "note": "Vision Seed。建议：暂不实现，文档未写的测试字段，没有稳定语义"}
 {"key": "outbound/vless/server", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs", "note": "`server.host`"}
 {"key": "outbound/vless/server-port", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs", "note": "`server.port`"}
@@ -1821,7 +1821,7 @@
 {"key": "outbound/vmess/max-simultaneous-write-connection", "kerlico": "no", "where": "", "note": "Mekya 同会话同时等待写回的请求数。建议：暂不实现，Mekya 是 v2ray 兼容传输，kerlico 没有这个载体"}
 {"key": "outbound/vmess/max-write-duration-ms", "kerlico": "no", "where": "", "note": "Mekya 单响应写回最大时长。建议：暂不实现，Mekya 是 v2ray 兼容传输，kerlico 没有这个载体"}
 {"key": "outbound/vmess/max-write-size", "kerlico": "no", "where": "", "note": "Mekya 单响应写回最大负载。建议：暂不实现，Mekya 是 v2ray 兼容传输，kerlico 没有这个载体"}
-{"key": "outbound/vmess/multiplex", "kerlico": "yes", "where": "", "note": "参阅 多路复用。建议：实现，kerlico 只有 VLESS Mux.Cool，缺 sing-box 与 Mihomo 通用的 smux、yamux、h2mux"}
+{"key": "outbound/vmess/multiplex", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：U2 sing-mux：yamux 补窗口更新/ping、h2mux 改真 HTTP/2(HEADERS+HPACK+WINDOW_UPDATE)，加对 sing-box 的互通用例"}
 {"key": "outbound/vmess/network", "kerlico": "partial", "where": "crates/protocol-vmess/src/carrier.rs", "note": "`transport`：tcp、ws、grpc；h2、http、mkcp、mekya 没有"}
 {"key": "outbound/vmess/packet-addr", "kerlico": "no", "where": "", "note": "把 UDP 用 packetaddr 编码。建议：暂不实现，kerlico 的 VMess 没有 Mux 和 XUDP；只在 VLESS 上做了"}
 {"key": "outbound/vmess/packet-encoding", "kerlico": "no", "where": "", "note": "UDP 包编码，空为原始。建议：暂不实现，kerlico 的 VMess 没有 Mux 和 XUDP；只在 VLESS 上做了"}
@@ -1883,18 +1883,18 @@
 {"key": "outbound/wireguard/local-address", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`tunnel.addresses`"}
 {"key": "outbound/wireguard/mtu", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`tunnel.mtu`，1280 到 9000"}
 {"key": "outbound/wireguard/name", "kerlico": "no", "where": "", "note": "为系统接口自定义设备名称。建议：暂不实现，kerlico 的 IP 隧道协议固定走用户态栈，不创建系统网卡"}
-{"key": "outbound/wireguard/network", "kerlico": "partial", "where": "crates/protocol-wireguard/src/client.rs", "note": "kerlico 按协议能力同时提供 TCP 和 UDP，没有只开其一的开关"}
+{"key": "outbound/wireguard/network", "kerlico": "no", "where": "crates/protocol-wireguard/src/client.rs", "note": "M11 审计（缺失）：U7 出站 network(tcp/udp)/udp 开关：在各协议 Options 增加字段并裁剪 Capabilities"}
 {"key": "outbound/wireguard/no-kernel-tun", "kerlico": "partial", "where": "crates/protocol-wireguard/src/client.rs", "note": "固定用户态，等于这项恒开，没有开关"}
 {"key": "outbound/wireguard/on-demand", "kerlico": "no", "where": "", "note": "允许该 endpoint 在需要时断开连接。建议：暂不实现，kerlico 的隧道出站常驻运行，没有按需断开的生命周期"}
 {"key": "outbound/wireguard/peer-public-key", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`peer.public_key`"}
-{"key": "outbound/wireguard/peers", "kerlico": "partial", "where": "crates/protocol-wireguard/src/config.rs", "note": "`peer` 只有一个；多 peer 出站没有"}
+{"key": "outbound/wireguard/peers", "kerlico": "no", "where": "crates/protocol-wireguard/src/config.rs", "note": "M11 审计（缺失）：多 peer 出站(需路由选 peer)：L"}
 {"key": "outbound/wireguard/peers-address", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`endpoint.host`，只有一个 peer"}
 {"key": "outbound/wireguard/peers-allowed-ips", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`peer.allowed_ips`"}
 {"key": "outbound/wireguard/peers-persistent-keepalive-interval", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`peer.persistent_keepalive`"}
 {"key": "outbound/wireguard/peers-port", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`endpoint.port`"}
 {"key": "outbound/wireguard/peers-pre-shared-key", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`peer.preshared_key`"}
 {"key": "outbound/wireguard/peers-public-key", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`peer.public_key`"}
-{"key": "outbound/wireguard/peers-reserved", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`peers_reserved` / `peers-reserved` 3 字节保留字段（支持数组或 Base64）"}
+{"key": "outbound/wireguard/peers-reserved", "kerlico": "no", "where": "crates/protocol-wireguard/src/config.rs", "note": "M11 审计（缺失）：U4 WireGuard：peers_reserved 键 + reserved 的断言用例(握手/数据包头 1..4 字节)"}
 {"key": "outbound/wireguard/peers-server", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`endpoint.host`"}
 {"key": "outbound/wireguard/peers-server-port", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`endpoint.port`"}
 {"key": "outbound/wireguard/persistent-keepalive", "kerlico": "yes", "where": "crates/protocol-wireguard/src/config.rs", "note": "`peer.persistent_keepalive`"}
@@ -1934,6 +1934,6 @@
 {"key": "outbound/zerotier/remote-trace-target", "kerlico": "no", "where": "", "note": "接收诊断的节点 ID。建议：暂不实现，kerlico 的 ZeroTier 出站只做隧道连接，这项是可选调优"}
 {"key": "outbound/zerotier/secondary-port", "kerlico": "no", "where": "", "note": "第二 UDP 端口，0 自动，-1 禁用。建议：暂不实现，kerlico 的 ZeroTier 出站只做隧道连接，这项是可选调优"}
 {"key": "outbound/zerotier/state-dir", "kerlico": "partial", "where": "crates/protocol-zerotier/src/config.rs", "note": "`identity_file` 只保存身份；没有状态目录"}
-{"key": "outbound/zerotier/tcp-fallback-mode", "kerlico": "yes", "where": "crates/protocol-zerotier/src/config.rs", "note": "`tcp_fallback_mode` / `tcp-fallback-mode`（`auto` / `never` / `always`）控制 TCP 隧道回退策略"}
-{"key": "outbound/zerotier/tcp-fallback-relay", "kerlico": "yes", "where": "crates/protocol-zerotier/src/outbound.rs", "note": "`tcp_fallback_relay` / `tcp-fallback-relay` 指定 TLS 帧中继地址并在 UDP 不可达时回退"}
-{"key": "outbound/zerotier/udp", "kerlico": "partial", "where": "crates/protocol-zerotier/src/outbound.rs", "note": "UDP 恒开，没有开关"}
+{"key": "outbound/zerotier/tcp-fallback-mode", "kerlico": "no", "where": "crates/protocol-zerotier/src/config.rs", "note": "M11 审计（空壳）：U5 ZeroTier tcp-fallback：实现真 TCP/TLS 帧中继，mode 取值对齐 auto/disable/force"}
+{"key": "outbound/zerotier/tcp-fallback-relay", "kerlico": "no", "where": "crates/protocol-zerotier/src/outbound.rs", "note": "M11 审计（空壳）：U5 ZeroTier tcp-fallback：实现真 TCP/TLS 帧中继，mode 取值对齐 auto/disable/force"}
+{"key": "outbound/zerotier/udp", "kerlico": "no", "where": "crates/protocol-zerotier/src/outbound.rs", "note": "M11 审计（缺失）：U7 出站 network(tcp/udp)/udp 开关：在各协议 Options 增加字段并裁剪 Capabilities"}
