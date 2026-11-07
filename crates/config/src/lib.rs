@@ -2286,7 +2286,7 @@ impl Registry {
             let mut isolated = BTreeSet::new();
             let mut auth_keys = BTreeSet::new();
             for entry in manifest.entries() {
-                OutId::parse(&entry.protocol)?;
+                NodeId::parse(&entry.protocol)?;
                 if let CredentialPurpose::Authentication { slot } = entry.purpose {
                     if slot >= issuer.len()
                         || !auth_keys.insert((entry.protocol.clone(), entry.fingerprint))

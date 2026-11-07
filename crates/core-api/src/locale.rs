@@ -214,6 +214,10 @@ const DIAGNOSTICS: &[(&str, &str)] = &[
         "Local proxy inbounds must listen on loopback and be explicitly allowed by the module",
     ),
     (
+        "出站名必须是 1 至 256 字节且不含控制字符",
+        "Outbound names must be 1 to 256 bytes without control characters",
+    ),
+    (
         "标识必须是 1 至 64 个字母、数字、横线或下划线",
         "Identifiers must contain 1 to 64 ASCII letters, digits, hyphens, or underscores",
     ),

@@ -56,22 +56,35 @@ impl fmt::Display for RunId {
 pub struct NodeId(String);
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct OutId(String);
+impl NodeId {
+    pub fn parse(value: &str) -> Result<Self> {
+        if value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        {
+            return Err(Error::Config(
+                "标识必须是 1 至 64 个字母、数字、横线或下划线".into(),
+            ));
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+impl OutId {
+    /// 出站与策略组名沿用 Mihomo：订阅里的中文、emoji、空格与括号原样保留。
+    pub fn parse(value: &str) -> Result<Self> {
+        if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            return Err(Error::Config(
+                "出站名必须是 1 至 256 字节且不含控制字符".into(),
+            ));
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
 macro_rules! label_id {
     ($ty:ident) => {
         impl $ty {
-            pub fn parse(value: &str) -> Result<Self> {
-                if value.is_empty()
-                    || value.len() > 64
-                    || !value
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-                {
-                    return Err(Error::Config(
-                        "标识必须是 1 至 64 个字母、数字、横线或下划线".into(),
-                    ));
-                }
-                Ok(Self(value.to_owned()))
-            }
             pub fn as_str(&self) -> &str {
                 &self.0
             }

@@ -2172,7 +2172,7 @@ mod tests {
             json!({"outbound":"a","ip_cidr":["10.0.0.0/"]}),
             json!({"outbound":"a","ip_cidr":["::ffff:10.0.0.0/104"]}),
             json!({"outbound":"a","domain_keyword":["例子"]}),
-            json!({"outbound":"bad tag","port":[1]}),
+            json!({"outbound":"bad\ntag","port":[1]}),
         ] {
             let spec: RuleSpec = serde_json::from_value(rule).unwrap();
             assert!(RouteTable::compile(&[spec]).is_err());

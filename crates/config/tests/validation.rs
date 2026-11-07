@@ -269,3 +269,19 @@ fn control_listener_must_not_collide_with_a_tcp_listener() {
         "UDP 入口不占 TCP 端口"
     );
 }
+
+#[test]
+fn outbound_names_keep_mihomo_unicode_spaces_and_brackets() {
+    let name = "🇭🇰 香港 [01] x.y";
+    let config = json!({
+        "version": 2,
+        "outbounds": [{"tag": "exit", "type": "eof"}, {"tag": name, "type": "eof"}],
+        "inbounds": [forward("entry", "127.0.0.1:7000", "tcp-forward")],
+        "routes": [{"outbound": name, "node": ["entry"]}],
+    });
+    prepare(config.clone()).unwrap();
+    let mut bad = config;
+    bad["outbounds"][1]["tag"] = json!("a\nb");
+    bad["routes"][0]["outbound"] = json!("a\nb");
+    assert!(prepare(bad).is_err(), "控制字符不能进入出站名");
+}

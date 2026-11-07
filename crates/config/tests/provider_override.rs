@@ -286,3 +286,11 @@ fn share_link_members_get_overrides_too() {
     assert_eq!(specs[0].tag, "US-Hy2-V1");
     assert_eq!(specs[0].options["up"], "10 Mbps");
 }
+
+#[test]
+fn additional_prefix_and_member_names_stay_verbatim() {
+    let mut member = members().remove(0);
+    member["name"] = json!("🇭🇰 香港 01");
+    let specs = compile(vec![member], json!({"additional-prefix": "[sub] "})).unwrap();
+    assert_eq!(specs[0].tag, "[sub] 🇭🇰 香港 01");
+}

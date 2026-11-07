@@ -88,27 +88,27 @@ fn real_world_subscription_loads_supported_members_and_lists_the_rest() {
     assert_eq!(
         kinds,
         [
-            ("sub-HK-01", "shadowsocks"),
-            ("sub-JP-02", "vmess"),
-            ("sub-US-03", "vless"),
-            ("sub-SG-04", "trojan"),
-            ("sub-TW-05", "hysteria2"),
-            ("sub-KR-06", "tuic"),
+            ("[sub] HK 01", "shadowsocks"),
+            ("[sub] JP 02", "vmess"),
+            ("[sub] US 03", "vless"),
+            ("[sub] SG 04", "trojan"),
+            ("[sub] TW 05", "hysteria2"),
+            ("[sub] KR 06", "tuic"),
         ]
     );
     let options = |tag: &str| -> &Value { &specs.iter().find(|s| s.tag == tag).unwrap().options };
-    assert_eq!(options("sub-JP-02")["tls"]["insecure"], true);
-    assert_eq!(options("sub-SG-04")["security"]["insecure"], true);
-    assert_eq!(options("sub-TW-05")["tls"]["insecure"], true);
-    assert_eq!(options("sub-TW-05")["up"], "100 Mbps");
-    assert_eq!(options("sub-KR-06")["tls"]["insecure"], true);
-    assert_eq!(options("sub-US-03")["security"]["type"], "reality");
+    assert_eq!(options("[sub] JP 02")["tls"]["insecure"], true);
+    assert_eq!(options("[sub] SG 04")["security"]["insecure"], true);
+    assert_eq!(options("[sub] TW 05")["tls"]["insecure"], true);
+    assert_eq!(options("[sub] TW 05")["up"], "100 Mbps");
+    assert_eq!(options("[sub] KR 06")["tls"]["insecure"], true);
+    assert_eq!(options("[sub] US 03")["security"]["type"], "reality");
     assert!(
-        options("sub-US-03")["security"]
+        options("[sub] US 03")["security"]
             .get("allow_insecure")
             .is_none()
     );
-    assert!(options("sub-HK-01").get("up").is_none());
+    assert!(options("[sub] HK 01").get("up").is_none());
     let [failure] = provider.failed_members.as_slice() else {
         panic!("{:?}", provider.failed_members);
     };

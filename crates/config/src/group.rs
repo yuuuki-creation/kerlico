@@ -625,7 +625,7 @@ fn extract_members_from_value(val: Value) -> Vec<Value> {
 fn value_to_outbound_spec(val: Value) -> Result<OutboundSpec> {
     let (tag, kind, options) = crate::mihomo::member_outbound(val)?;
     Ok(OutboundSpec {
-        tag: sanitize_tag(&tag),
+        tag,
         kind,
         options,
     })
@@ -640,25 +640,6 @@ pub(crate) fn normalize_outbound_kind(kind: &str) -> String {
         "wg" => "wireguard".into(),
         "socks5" => "socks".into(),
         other => other.into(),
-    }
-}
-
-fn sanitize_tag(raw: &str) -> String {
-    let mut s = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-            s.push(ch);
-        } else if ch.is_whitespace() || ch == '.' || ch == ':' {
-            s.push('-');
-        }
-    }
-    let trimmed = s.trim_matches('-');
-    if trimmed.is_empty() {
-        "proxy-node".into()
-    } else if trimmed.len() > 64 {
-        trimmed[..64].to_owned()
-    } else {
-        trimmed.to_owned()
     }
 }
 
@@ -1121,7 +1102,7 @@ mod tests {
         };
         let (compiled, specs) = prov.compile("my-sub").unwrap();
         assert_eq!(compiled.proxies.len(), 4);
-        assert_eq!(specs[0].tag, "Sub-HK-Node-V1");
+        assert_eq!(specs[0].tag, "Sub-HK Node-V1");
         assert_eq!(specs[0].kind, "vmess");
         assert_eq!(specs[0].options["dialer-proxy"], "upstream-detour");
         assert_eq!(specs[1].tag, "Sub-JP-Reality-V1");
