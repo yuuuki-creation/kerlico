@@ -981,6 +981,14 @@ impl Rule {
                 .is_some_and(|(_, children)| children.iter().any(|c| c.has_ip_conditions(sets)))
     }
 
+    fn wants_process(&self, sets: &HashMap<String, RuleSetSlot>) -> bool {
+        self.has_process_rules()
+            || self.rule_set.iter().any(|tag| {
+                sets.get(tag)
+                    .is_some_and(|slot| slot.load().has_process_rules())
+            })
+    }
+
     fn has_process_rules(&self) -> bool {
         if !self.process_name.is_empty()
             || !self.process_path.is_empty()
@@ -1275,6 +1283,8 @@ pub struct RouteDecision {
     pub resolve_strategy: Option<ResolveStrategy>,
     /// `Resolution::Pending` 求值停在此顶层规则，需要先解析目标域名。
     pub resolve_at: Option<usize>,
+    /// [`RouteTable::needs_process`] 求值停在进程规则。
+    pub process_needed: bool,
     pub sniff: Option<(Vec<String>, Duration)>,
     /// 产生终结动作的规则；命中最终出站时为 `Match`。
     pub rule: Option<RuleLabel>,
@@ -1305,6 +1315,7 @@ struct Scope {
     top: usize,
     mode: Resolution,
     record: bool,
+    stop_at_process: bool,
 }
 
 /// 按配置顺序匹配，非终结动作（`sniff`、`resolve`、`route-options`）累积后继续，首条终结动作生效。
@@ -1557,6 +1568,21 @@ impl RouteTable {
         self.evaluate_inner(ctx, mode, false)
     }
 
+    /// 同 Mihomo 只在规则走到进程条件时才查进程：在 `mode` 下求值是否会在终结动作前遇到
+    /// 进程规则（含引用进程规则的规则集）。为假时进程信息不影响结果，调用方可省去查找。
+    pub fn needs_process(&self, ctx: &RouteContext<'_>, mode: Resolution) -> bool {
+        let mut decision = RouteDecision::default();
+        let scope = Scope {
+            depth: 0,
+            top: 0,
+            mode,
+            record: false,
+            stop_at_process: true,
+        };
+        self.evaluate_slice(&self.rules, ctx, &self.geo.load(), &mut decision, scope);
+        decision.process_needed
+    }
+
     fn evaluate_inner(
         &self,
         ctx: &RouteContext<'_>,
@@ -1570,6 +1596,7 @@ impl RouteTable {
             top: 0,
             mode,
             record,
+            stop_at_process: false,
         };
         let matched_terminal = self.evaluate_slice(&self.rules, ctx, &geo, &mut decision, scope);
         if decision.resolve_at.is_some() {
@@ -1600,6 +1627,7 @@ impl RouteTable {
             top,
             mode,
             record,
+            stop_at_process,
         } = scope;
         if depth > 8 {
             return false;
@@ -1612,6 +1640,10 @@ impl RouteTable {
             let top = if depth == 0 { index } else { top };
             if pending && rule.wants_ip(&self.sets) {
                 decision.resolve_at = Some(top);
+                return true;
+            }
+            if stop_at_process && rule.wants_process(&self.sets) {
+                decision.process_needed = true;
                 return true;
             }
             let visible = match mode {
@@ -1663,6 +1695,7 @@ impl RouteTable {
                         top,
                         mode,
                         record,
+                        stop_at_process,
                     };
                     let hit = self
                         .sub_rules
@@ -2415,6 +2448,39 @@ tag","port":[1]}),
                 .as_deref(),
             Some("sub-out")
         );
+    }
+
+    #[test]
+    fn process_is_needed_only_when_evaluation_reaches_a_process_rule() {
+        let specs: Vec<RuleSpec> = [
+            "DST-PORT,53,dns-out",
+            "PROCESS-NAME,curl,direct-curl",
+            "MATCH,final-out",
+        ]
+        .into_iter()
+        .filter_map(|line| parse_clash_rule_line(line).unwrap().0)
+        .collect();
+        let table = RouteTable::compile(&specs).unwrap();
+        let source = local("n");
+        let needs = |port| {
+            let target = Destination::new("example.com", port).unwrap();
+            table.needs_process(
+                &RouteContext {
+                    target: &target,
+                    resolved_ips: &[],
+                    network: Network::Udp,
+                    source: &source,
+                    source_addr: None,
+                    protocol: None,
+                    sniffed_domain: None,
+                    process_name: None,
+                    process_path: None,
+                },
+                Resolution::Never,
+            )
+        };
+        assert!(!needs(53));
+        assert!(needs(443));
     }
 
     #[test]

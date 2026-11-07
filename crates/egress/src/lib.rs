@@ -837,12 +837,7 @@ impl Dispatcher {
         let Some((original, network)) = request else {
             return (kerlico_routing::RouteDecision::default(), binding_out, None);
         };
-        let proc_info = if self.routes.has_process_rules() {
-            process::resolve_local_process(identity.observed_source(), network)
-        } else {
-            None
-        };
-        let ctx = kerlico_routing::RouteContext {
+        let mut ctx = kerlico_routing::RouteContext {
             target: original.target(),
             resolved_ips: &ips.ips,
             network,
@@ -850,11 +845,18 @@ impl Dispatcher {
             source_addr: identity.observed_source(),
             protocol: original.sniffed_protocol(),
             sniffed_domain: original.sniffed_domain(),
-            process_name: proc_info.as_ref().map(|(n, _)| n.as_str()),
-            process_path: proc_info
-                .as_ref()
-                .and_then(|(_, p)| (!p.is_empty()).then_some(p.as_str())),
+            process_name: None,
+            process_path: None,
         };
+        // 反查进程要扫描 /proc，只在求值会走到进程规则时才做（DNS 劫持等先命中的流不查）。
+        let proc_info = (self.routes.has_process_rules()
+            && self.routes.needs_process(&ctx, ips.mode))
+        .then(|| process::resolve_local_process(identity.observed_source(), network))
+        .flatten();
+        ctx.process_name = proc_info.as_ref().map(|(n, _)| n.as_str());
+        ctx.process_path = proc_info
+            .as_ref()
+            .and_then(|(_, p)| (!p.is_empty()).then_some(p.as_str()));
         let mode = self.control_plane.mode();
         let decision = if record && mode == RunMode::Rule {
             self.routes.evaluate_recorded(&ctx, ips.mode)
@@ -2030,6 +2032,7 @@ mod tests {
             override_port: Some(8443),
             resolve_strategy: None,
             resolve_at: None,
+            process_needed: false,
             sniff: None,
             reject: false,
             hijack_dns: false,
