@@ -74,7 +74,7 @@
 | `routing-mark` | 监听 socket 的 routing-mark | 有 |  |  | 未实现 | 未测 | 取值：`整数`<br>约束：仅 Linux |
 | `rule` | 入站使用的子规则，为空或未找到时用 rules | 有 |  |  | 未实现 | 未测 | 取值：`sub-rule 名` |
 | `settings` | 协议专属配置对象 |  |  | 有 | 已实现 | 通过 |  |
-| `sniffing` | 入站流量探测配置 |  |  | 有 | 部分 | 未测 |  |
+| `sniffing` | 入站流量探测配置 |  |  | 有 | 已实现 | 通过 |  |
 | `stream-settings` | 入站传输配置 |  |  | 有 | 部分 | 通过 |  |
 | `tag` | 入站的标签。 |  | 有 | 有 | 已实现 | 通过 | 约束：非空时必须在所有 tag 中唯一 |
 | `type` | 入站类型 | 有 | 有 |  | 部分 | 通过 | 取值：`anytls`、`cloudflared`、`direct`、`http`、`hysteria`、`hysteria2`、`hysteria2-realm`、`mieru`、`mixed`、`naive`、`redir`、`redirect`、`shadowquic`、`shadowsocks`、`shadowtls`、`snell`、`socks`、`sudoku`、`tailcat`、`tproxy`、`trojan`、`trusttunnel`、`tuic`、`tun`…… |
@@ -108,17 +108,17 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `allow-lan` | 允许其他设备经代理端口访问 | 有 |  |  | 部分 | 通过 | 取值：`false`、`true` |
-| `bind-address` | 绑定地址，仅允许经此地址访问 | 有 |  |  | 部分 | 未测 | 取值：`*`、`IPv4 地址`、`[IPv6 地址]`<br>约束：仅 allow-lan 为 true 时有意义 |
+| `bind-address` | 绑定地址，仅允许经此地址访问 | 有 |  |  | 已实现 | 通过 | 取值：`*`、`IPv4 地址`、`[IPv6 地址]`<br>约束：仅 allow-lan 为 true 时有意义 |
 | `inbound-mptcp` | 入站 MPTCP（文档未写） | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `inbound-tfo` | 入站 TCP Fast Open（文档未写） | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `lan-allowed-ips` | 允许连接的地址段白名单，默认 0.0.0.0/0 与 ::/0 | 有 |  |  | 部分 | 未测 | 取值：`CIDR 列表`<br>约束：仅作用于 allow-lan 为 true |
-| `lan-disallowed-ips` | 禁止连接的地址段黑名单，默认空 | 有 |  |  | 部分 | 未测 | 取值：`CIDR 列表`<br>约束：黑名单优先级高于白名单 |
+| `lan-allowed-ips` | 允许连接的地址段白名单，默认 0.0.0.0/0 与 ::/0 | 有 |  |  | 已实现 | 通过 | 取值：`CIDR 列表`<br>约束：仅作用于 allow-lan 为 true |
+| `lan-disallowed-ips` | 禁止连接的地址段黑名单，默认空 | 有 |  |  | 已实现 | 通过 | 取值：`CIDR 列表`<br>约束：黑名单优先级高于白名单 |
 | `listeners` | 多入站列表，可同时建多个类型、地址、端口的入站并单独设 rule、proxy | 有 |  |  | 已实现 | 通过 | 取值：`数组`<br>约束：listen: 0.0.0.0 监听所有接口，未启用 TLS 的 HTTP、SOCKS、Mixed 不应直接暴露公网<br>约束：listener 中的 tun 面向高级场景 |
 | `mixed-port` | 混合端口，同时支持 HTTP(S) 与 SOCKS5 | 有 |  |  | 已实现 | 通过 | 取值：`端口` |
 | `port` | http(s) 代理端口 | 有 |  |  | 已实现 | 通过 | 取值：`端口` |
 | `redir-port` | redirect 透明代理端口 | 有 |  |  | 已实现 | 通过 | 取值：`端口`<br>约束：仅 Linux(Android)、macOS<br>约束：仅代理 TCP |
 | `socks-port` | socks4/4a/5 代理端口 | 有 |  |  | 已实现 | 通过 | 取值：`端口` |
-| `tproxy-port` | tproxy 透明代理端口 | 有 |  |  | 部分 | 未测 | 取值：`端口`<br>约束：仅 Linux(Android)<br>约束：代理 TCP 与 UDP |
+| `tproxy-port` | tproxy 透明代理端口 | 有 |  |  | 已实现 | 通过 | 取值：`端口`<br>约束：仅 Linux(Android)<br>约束：代理 TCP 与 UDP |
 
 ## http
 
@@ -178,7 +178,7 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `protocol` | Hysteria2 入站 | 有 | 有 |  | 已实现 | 通过 | 取值：`hysteria2`<br>约束：不可作 detour 注入目标 |
-| `combo` | Hysteria2 入站组合 | 有 | 有 |  | 部分 | 未测 | obfs：`none`、`salamander`<br>masquerade：`file`、`http`、`https`、`none`<br>ignore-client-bandwidth：`false`、`true`<br>bbr-profile：`aggressive`、`conservative`、`standard`<br>realm：`off`、`on`<br>ech：`off`、`on`<br>client-auth-type：``、`request`、`require-and-verify`、`require-any`、`verify-if-given`<br>mux：`brutal`、`off`、`padding`<br>约束：listener 文档 obfs 只列 salamander；gecko 仅出站页写明，source:listener/inbound/hysteria2.go 另有 obfs-min-packet-size、obfs-max-packet-size<br>约束：obfs 启用后与标准 QUIC 不兼容<br>obfs：`gecko`、`none`、`salamander`<br>congestion：`bbr(ignore_client_bandwidth)`、`brutal(up/down)`<br>bbr_profile：`aggressive`、`conservative`、`standard`<br>masquerade：`file://`、`http(s)://`、`none`、`type:file`、`type:proxy`、`type:string`<br>realm_ip_version：`4`、`6`、`both`<br>port_mapping：`off`、`on`<br>brutal_debug：`off`、`on`<br>约束：listen 地址必须与 realm.ip_version 兼容<br>约束：masquerade 字符串与 masquerade.type 对象冲突<br>约束：obfs.min_packet_size、max_packet_size 仅 gecko<br>约束：realm.port_mapping 需要 IPv4，与 ip_version 6 冲突<br>约束：sing-box 不提供 userpass 别名，对接官方程序时用 <用户名>:<密码> 作为密码<br>约束：tls 必填<br>约束：up_mbps、down_mbps 与 ignore_client_bandwidth 冲突 |
+| `combo` | Hysteria2 入站组合 | 有 | 有 |  | 已实现 | 通过 | obfs：`none`、`salamander`<br>masquerade：`file`、`http`、`https`、`none`<br>ignore-client-bandwidth：`false`、`true`<br>bbr-profile：`aggressive`、`conservative`、`standard`<br>realm：`off`、`on`<br>ech：`off`、`on`<br>client-auth-type：``、`request`、`require-and-verify`、`require-any`、`verify-if-given`<br>mux：`brutal`、`off`、`padding`<br>约束：listener 文档 obfs 只列 salamander；gecko 仅出站页写明，source:listener/inbound/hysteria2.go 另有 obfs-min-packet-size、obfs-max-packet-size<br>约束：obfs 启用后与标准 QUIC 不兼容<br>obfs：`gecko`、`none`、`salamander`<br>congestion：`bbr(ignore_client_bandwidth)`、`brutal(up/down)`<br>bbr_profile：`aggressive`、`conservative`、`standard`<br>masquerade：`file://`、`http(s)://`、`none`、`type:file`、`type:proxy`、`type:string`<br>realm_ip_version：`4`、`6`、`both`<br>port_mapping：`off`、`on`<br>brutal_debug：`off`、`on`<br>约束：listen 地址必须与 realm.ip_version 兼容<br>约束：masquerade 字符串与 masquerade.type 对象冲突<br>约束：obfs.min_packet_size、max_packet_size 仅 gecko<br>约束：realm.port_mapping 需要 IPv4，与 ip_version 6 冲突<br>约束：sing-box 不提供 userpass 别名，对接官方程序时用 <用户名>:<密码> 作为密码<br>约束：tls 必填<br>约束：up_mbps、down_mbps 与 ignore_client_bandwidth 冲突 |
 | `alpn` | ALPN，默认 h3；客户端需写入其中之一否则认证失败 | 有 |  |  | 未实现 | 未测 | 取值：`列表` |
 | `bbr-profile` | BBR 档位，默认 standard | 有 | 有 |  | 未实现 | 未测 | 取值：`aggressive`、`conservative`、`standard`<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `standard`。 |
 | `brutal-debug` | 启用 Hysteria Brutal CC 的调试信息日志记录。 |  | 有 |  | 未实现 | 未测 |  |
@@ -186,27 +186,27 @@
 | `client-auth-cert` | mTLS 客户端证书 | 有 |  |  | 未实现 | 未测 | 取值：`PEM`、`路径` |
 | `client-auth-type` | mTLS 类型 | 有 |  |  | 未实现 | 未测 | 取值：``、`request`、`require-and-verify`、`require-any`、`verify-if-given`<br>约束：verify-if-given、require-and-verify 时 client-auth-cert 必填 |
 | `cwnd` | hysteria2 入站字段 cwnd（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `down` | 速率，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `down-mbps` | 支持的速率，默认不限制。 |  | 有 |  | 未实现 | 未测 | 约束：与 `ignore_client_bandwidth` 冲突。 |
+| `down` | 速率，默认 Mbps | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `down-mbps` | 支持的速率，默认不限制。 |  | 有 |  | 已实现 | 通过 | 约束：与 `ignore_client_bandwidth` 冲突。 |
 | `ech-key` | ECH 密钥，填写即开启；可由 mihomo generate ech-keypair 生成 | 有 |  |  | 未实现 | 未测 | 取值：`PEM` |
-| `ignore-client-bandwidth` | 忽略客户端带宽，永远用传统拥塞控制 BBR | 有 | 有 |  | 部分 | 未测 | 取值：`false`、`true` |
+| `ignore-client-bandwidth` | 忽略客户端带宽，永远用传统拥塞控制 BBR | 有 | 有 |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `initial-connection-receive-window` | hysteria2 入站字段 initial-connection-receive-window（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `initial-stream-receive-window` | hysteria2 入站字段 initial-stream-receive-window（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `masquerade` | 伪装 HTTP/3，为空始终返回 404 | 有 | 有 |  | 部分 | 未测 | 取值：`file:///path`、`file:///var/www`、`http://127.0.0.1:8080`、`http://host`、`https://`、`https://host`<br>约束：仅支持 file、http/https<br>约束：与 `masquerade.type` 冲突。 |
+| `masquerade` | 伪装 HTTP/3，为空始终返回 404 | 有 | 有 |  | 已实现 | 通过 | 取值：`file:///path`、`file:///var/www`、`http://127.0.0.1:8080`、`http://host`、`https://`、`https://host`<br>约束：仅支持 file、http/https<br>约束：与 `masquerade.type` 冲突。 |
 | `masquerade-content` | 固定响应内容。 |  | 有 |  | 已实现 | 通过 |  |
 | `masquerade-directory` | 文件服务器根目录。 |  | 有 |  | 已实现 | 通过 |  |
 | `masquerade-headers` | 固定响应头。 |  | 有 |  | 已实现 | 通过 |  |
-| `masquerade-rewrite-host` | 重写请求头中的 Host 字段到目标 URL。 |  | 有 |  | 未实现 | 未测 |  |
-| `masquerade-status-code` | 固定响应状态码。 |  | 有 |  | 部分 | 未测 |  |
-| `masquerade-type` | HTTP3 服务器认证失败时的行为 （对象配置）。 |  | 有 |  | 部分 | 未测 | 取值：`file`、`proxy`、`string`<br>约束：与 `masquerade` 冲突。 |
-| `masquerade-url` | 反向代理目标 URL。 |  | 有 |  | 未实现 | 未测 |  |
+| `masquerade-rewrite-host` | 重写请求头中的 Host 字段到目标 URL。 |  | 有 |  | 已实现 | 通过 |  |
+| `masquerade-status-code` | 固定响应状态码。 |  | 有 |  | 已实现 | 通过 |  |
+| `masquerade-type` | HTTP3 服务器认证失败时的行为 （对象配置）。 |  | 有 |  | 已实现 | 通过 | 取值：`file`、`proxy`、`string`<br>约束：与 `masquerade` 冲突。 |
+| `masquerade-url` | 反向代理目标 URL。 |  | 有 |  | 已实现 | 通过 |  |
 | `max-connection-receive-window` | hysteria2 入站字段 max-connection-receive-window（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `max-idle-time` | hysteria2 入站字段 max-idle-time（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `max-stream-receive-window` | hysteria2 入站字段 max-stream-receive-window（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `obfs` | QUIC 混淆，为空禁用 | 有 | 有 |  | 部分 | 通过 | 取值：`salamander`<br>约束：启用混淆与标准 QUIC 不兼容，失去 HTTP/3 伪装 |
 | `obfs-max-packet-size` | hysteria2 入站字段 obfs-max-packet-size（文档页未写，配置结构存在） | 有 | 有 |  | 未实现 | 未测 | 约束：仅限 Gecko。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `1200`。 |
 | `obfs-min-packet-size` | hysteria2 入站字段 obfs-min-packet-size（文档页未写，配置结构存在） | 有 | 有 |  | 未实现 | 未测 | 约束：仅限 Gecko。<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `512`。 |
@@ -240,8 +240,8 @@
 | `realm-token` | Realm 的 Bearer 令牌，需与 realm 上配置的 `users[].token` 之一匹配。 |  | 有 |  | 未实现 | 未测 |  |
 | `tls` | TLS 配置, 参阅 TLS。 |  | 有 |  | 部分 | 通过 | 约束：必填 |
 | `udp-mtu` | hysteria2 入站字段 udp-mtu（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `up` | 速率，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `up-mbps` | 支持的速率，默认不限制。 |  | 有 |  | 未实现 | 未测 | 约束：与 `ignore_client_bandwidth` 冲突。 |
+| `up` | 速率，默认 Mbps | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
+| `up-mbps` | 支持的速率，默认不限制。 |  | 有 |  | 已实现 | 通过 | 约束：与 `ignore_client_bandwidth` 冲突。 |
 | `users` | 用户映射；用户名不参与认证，仅用于 IN-USER | 有 | 有 |  | 已实现 | 通过 | 取值：`username: password` |
 | `users-name` | 用户名称，用于日志和 auth_user 匹配 |  | 有 |  | 已实现 | 通过 |  |
 | `users-password` | 认证密码。 |  | 有 |  | 已实现 | 通过 |  |
@@ -286,9 +286,9 @@
 | `proxy-protocol-accept-no-header` | Proxy Protocol 接受无头连接，已移除 |  | 已移除 |  | 不适用 | 未测 | 约束：1.6.0 移除 |
 | `reuse-addr` | 重用监听地址。 |  | 有 |  | 部分 | 通过 | 约束：自 sing-box 1.12.0 起 |
 | `routing-mark` | 设置 netfilter 路由标记。 |  | 有 |  | 未实现 | 未测 | 约束：仅支持 Linux。<br>约束：自 sing-box 1.12.0 起 |
-| `sniff` | 启用协议探测。 |  | 已移除 |  | 部分 | 未测 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除，参阅 迁移指南. |
-| `sniff-override-destination` | 用探测出的域名覆盖连接目标地址。 |  | 已移除 |  | 部分 | 未测 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除。<br>约束：如果域名无效（如 Tor），将不生效。 |
-| `sniff-timeout` | 探测超时时间。 |  | 已移除 |  | 部分 | 未测 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除，参阅 迁移指南.<br>约束：默认使用 300ms。 |
+| `sniff` | 启用协议探测。 |  | 已移除 |  | 已实现 | 通过 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除，参阅 迁移指南. |
+| `sniff-override-destination` | 用探测出的域名覆盖连接目标地址。 |  | 已移除 |  | 已实现 | 通过 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除。<br>约束：如果域名无效（如 Tor），将不生效。 |
+| `sniff-timeout` | 探测超时时间。 |  | 已移除 |  | 已实现 | 通过 | 约束：入站字段已废弃且将在 sing-box 1.12.0 中被移除，参阅 迁移指南.<br>约束：默认使用 300ms。 |
 | `tcp-fast-open` | 启用 TCP Fast Open。 |  | 有 |  | 未实现 | 未测 |  |
 | `tcp-keep-alive` | TCP keep alive 初始周期。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.13.0 起<br>约束：默认使用 `5m`。<br>约束：默认值从 `10m` 更改为 `5m`。 |
 | `tcp-keep-alive-interval` | TCP keep alive 间隔。 |  | 有 |  | 未实现 | 未测 | 约束：默认使用 `75s`。 |
@@ -479,7 +479,7 @@
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `quic-versions` | 支持的 QUIC 版本 | 有 |  |  | 已实现 | 通过 | 取值：`v1`、`v2` |
 | `recv-window` | 连接级接收窗口，0 内部默认 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `recv-window-conn` | 流级接收窗口，0 内部默认 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
@@ -540,11 +540,11 @@
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
 | `managed` | 默认为 `false`。 |  | 有 |  | 未实现 | 未测 | 约束：当该入站需要由 SSM API 管理用户时必须启用此字段。 |
 | `method` | 加密方法 |  | 有 | 有 | 部分 | 通过 | 取值：`2022-blake3-aes-128-gcm`、`2022-blake3-aes-256-gcm`、`2022-blake3-chacha20-poly1305`、`aes-128-gcm`、`aes-192-gcm`、`aes-256-gcm`、`chacha20-ietf-poly1305`、`chacha20-poly1305`、`none`、`xchacha20-ietf-poly1305`、`xchacha20-poly1305`<br>约束：必填<br>约束：上层 method 非 SS2022 时可设置且仅支持非 SS2022，上层 password 被忽略<br>约束：上层为 SS2022 时不支持单用户 method |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 部分 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `network` | 监听的网络协议，`tcp` `udp` 之一。 |  | 有 | 有 | 部分 | 通过 | 取值：`tcp`、`tcp,udp`、`udp`<br>约束：默认所有。<br>约束：tcp 不代表拒绝 UDP 代理请求，UDP 仍可经 XUDP 走 TCP |
 | `password` | 密码 | 有 | 有 | 有 | 已实现 | 通过 | 取值：`2022 methods`、`base64`、`none`、`other methods`、`任意字符串`<br>约束：2022 用 openssl rand --base64 <长度><br>约束：none 无密码<br>约束：必填<br>约束：SS2022 客户端密码写 ServerPassword:UserPassword<br>约束：SS2022 用预共享密钥：128-gcm 16 字节，256-gcm 与 chacha20 32 字节<br>约束：其他方法任意字符串 |
 | `res-tls-dest` | 回落目标 | 有 |  |  | 未实现 | 未测 | 取值：`host:port` |
@@ -704,7 +704,7 @@
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `padding-max` | 最大填充率 | 有 |  |  | 已实现 | 通过 | 取值：`0-100`<br>约束：必须 >= padding-min |
 | `padding-min` | 最小填充率 | 有 |  |  | 已实现 | 通过 | 取值：`0-100` |
 | `path-root` | httpmask.path-root 的兼容写法 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
@@ -737,8 +737,8 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `protocol` | TProxy 透明代理入站 | 有 |  |  | 已实现 | 通过 | 约束：仅 Linux(Android) |
-| `combo` | TProxy 入站组合 | 有 |  |  | 部分 | 未测 | network：`tcp`、`udp`<br>约束：DSCP 规则仅限 tproxy udp 入站 |
-| `udp` | 是否监听 UDP | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `combo` | TProxy 入站组合 | 有 |  |  | 已实现 | 通过 | network：`tcp`、`udp`<br>约束：DSCP 规则仅限 tproxy udp 入站 |
+| `udp` | 是否监听 UDP | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 
 ## trojan
 
@@ -772,11 +772,11 @@
 | `jls-config-users-password` | JLS 密码 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `jls-config-users-username` | JLS 用户名 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 部分 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `password` | 密码，必填 |  |  | 有 | 已实现 | 通过 |  |
 | `private-key` | TLS 私钥，PEM 或路径 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`、`路径`<br>约束：与 certificate 同时填写 |
 | `reality-config-dest` | REALITY 回落目标 | 有 |  |  | 未实现 | 未测 | 取值：`host:port`<br>约束：不可与 certificate、private-key 同时填写 |
@@ -862,7 +862,7 @@
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `private-key` | TLS 私钥，PEM 或路径 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`、`路径`<br>约束：与 certificate 同时填写 |
 | `tls` | TLS 配置, 参阅 TLS。 |  | 有 |  | 部分 | 通过 | 约束：必填 |
 | `token` | TUIC v4 token 列表 | 有 |  |  | 已实现 | 通过 | 取值：`列表` |
@@ -878,17 +878,17 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `protocol` | listeners 中的 TUN，面向高级用户 | 有 |  |  | 已实现 | 通过 | 约束：普通用户用顶层 tun |
 | `tun` | 创建 TUN 接口接入流量 |  |  | 有 | 已实现 | 通过 | 取值：`tun`<br>约束：Android/iOS 需外部 APP 通过 XRAY_TUN_FD 传 FD<br>约束：Windows、Linux、macOS、FreeBSD 独立运行 |
-| `combo` | listener TUN 组合，取值同顶层 tun | 有 |  |  | 部分 | 未测 | stack：`gvisor`、`mips`、`mixed`、`system`<br>dns-mode：``、`disabled`、`hijack`、`native`<br>auto-route：`false`、`true`<br>strict-route：`false`、`true` |
-| `auto-detect-interface` | 自动选择出口接口 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
-| `auto-redirect` | tun 入站字段 auto-redirect（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `auto-redirect-input-mark` | tun 入站字段 auto-redirect-input-mark（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `auto-redirect-iproute2-fallback-rule-index` | tun 入站字段 auto-redirect-iproute2-fallback-rule-index（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `auto-redirect-output-mark` | tun 入站字段 auto-redirect-output-mark（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `auto-route` | 自动全局路由 | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `combo` | listener TUN 组合，取值同顶层 tun | 有 |  |  | 已实现 | 通过 | stack：`gvisor`、`mips`、`mixed`、`system`<br>dns-mode：``、`disabled`、`hijack`、`native`<br>auto-route：`false`、`true`<br>strict-route：`false`、`true` |
+| `auto-detect-interface` | 自动选择出口接口 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
+| `auto-redirect` | tun 入站字段 auto-redirect（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `auto-redirect-input-mark` | tun 入站字段 auto-redirect-input-mark（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `auto-redirect-iproute2-fallback-rule-index` | tun 入站字段 auto-redirect-iproute2-fallback-rule-index（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `auto-redirect-output-mark` | tun 入站字段 auto-redirect-output-mark（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `auto-route` | 自动全局路由 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `congestion-controller` | TCP 拥塞控制 | 有 |  |  | 未实现 | 未测 | 取值：`bbr`、`bbr3`、`cubic`、`reno`<br>约束：仅 mips 协议栈 |
 | `device` | tun 入站字段 device（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `disable-icmp-forwarding` | tun 入站字段 disable-icmp-forwarding（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `dns-hijack` | DNS 劫持列表 | 有 |  |  | 部分 | 未测 | 取值：`0.0.0.0:53` |
+| `dns-hijack` | DNS 劫持列表 | 有 |  |  | 已实现 | 通过 | 取值：`0.0.0.0:53` |
 | `dns-mode` | 系统 DNS 配置方式 | 有 |  |  | 未实现 | 未测 | 取值：`disabled`、`hijack`、`native` |
 | `endpoint-independent-nat` | 独立于端点的 NAT | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `exclude-dst-port` | tun 入站字段 exclude-dst-port（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
@@ -914,7 +914,7 @@
 | `inet4-route-address` | IPv4 自定义路由 | 有 |  |  | 已实现 | 未测 | 取值：`CIDR 列表` |
 | `inet4-route-exclude-address` | tun 入站字段 inet4-route-exclude-address（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 未测 |  |
 | `inet6-address` | TUN IPv6 地址 | 有 |  |  | 已实现 | 通过 | 取值：`CIDR 列表` |
-| `inet6-route-address` | IPv6 自定义路由 | 有 |  |  | 部分 | 未测 | 取值：`CIDR 列表` |
+| `inet6-route-address` | IPv6 自定义路由 | 有 |  |  | 已实现 | 通过 | 取值：`CIDR 列表` |
 | `inet6-route-exclude-address` | tun 入站字段 inet6-route-exclude-address（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 未测 |  |
 | `iproute2-rule-index` | tun 入站字段 iproute2-rule-index（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 未测 |  |
 | `iproute2-table-index` | tun 入站字段 iproute2-table-index（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 未测 |  |
@@ -922,13 +922,13 @@
 | `mtu` | MTU | 有 |  |  | 已实现 | 通过 | 取值：`整数` |
 | `processors-per-channel` | tun 入站字段 processors-per-channel（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `recvmsgx` | tun 入站字段 recvmsgx（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `route-address` | tun 入站字段 route-address（文档页未写，配置结构存在） | 有 |  |  | 部分 | 未测 |  |
-| `route-address-set` | tun 入站字段 route-address-set（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
+| `route-address` | tun 入站字段 route-address（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
+| `route-address-set` | tun 入站字段 route-address-set（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `route-exclude-address` | tun 入站字段 route-exclude-address（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 未测 |  |
-| `route-exclude-address-set` | tun 入站字段 route-exclude-address-set（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
+| `route-exclude-address-set` | tun 入站字段 route-exclude-address-set（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `sendmsgx` | tun 入站字段 sendmsgx（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `stack` | 协议栈 | 有 |  |  | 部分 | 未测 | 取值：`gvisor`、`mips`、`mixed`、`system` |
-| `strict-route` | 严格路由 | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
+| `stack` | 协议栈 | 有 |  |  | 已实现 | 通过 | 取值：`gvisor`、`mips`、`mixed`、`system` |
+| `strict-route` | 严格路由 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `udp-timeout` | tun 入站字段 udp-timeout（文档页未写，配置结构存在） | 有 |  |  | 部分 | 未测 |  |
 
 ## tunnel
@@ -993,11 +993,11 @@
 | `jls-config-users-password` | JLS 密码 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `jls-config-users-username` | JLS 用户名 | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 部分 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `private-key` | TLS 私钥，PEM 或路径 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`、`路径`<br>约束：与 certificate 同时填写 |
 | `reality-config-dest` | REALITY 回落目标 | 有 |  |  | 已实现 | 通过 | 取值：`host:port`<br>约束：不可与 certificate、private-key 同时填写 |
 | `reality-config-limit-fallback-download-after-bytes` | 回落下载传输该字节后开始限速 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
@@ -1125,11 +1125,11 @@
 | `mkcp-config-tti` | 传输时间间隔，毫秒 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mkcp-config-uplink-capacity` | 上行容量，MB/s | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mkcp-config-write-buffer` | 写缓冲，字节 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 部分 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `mux-option-brutal-down` | Brutal 下行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
 | `mux-option-brutal-enabled` | 入站 TCP Brutal | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `mux-option-brutal-up` | Brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`整数` |
-| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 部分 | 未测 | 取值：`false`、`true` |
+| `mux-option-padding` | 入站 sing-mux 填充 | 有 |  |  | 已实现 | 通过 | 取值：`false`、`true` |
 | `private-key` | TLS 私钥，PEM 或路径 | 有 |  |  | 已实现 | 通过 | 取值：`PEM`、`路径`<br>约束：与 certificate 同时填写 |
 | `reality-config-dest` | REALITY 回落目标 | 有 |  |  | 未实现 | 未测 | 取值：`host:port`<br>约束：不可与 certificate、private-key 同时填写 |
 | `reality-config-limit-fallback-download-after-bytes` | 回落下载传输该字节后开始限速 | 有 |  |  | 未实现 | 未测 | 取值：`整数` |

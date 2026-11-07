@@ -17,9 +17,9 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | 规则集的类型、格式、版本和下载方式组合 |  | 有 |  | 部分 | 未测 | type：`inline`、`local`、`remote`<br>format：`binary`、`source`<br>source_version：`1`、`2`、`3`、`4`、`5`<br>tag：`multiple({tag})`、`single`<br>remote_client：`default_http_client`、`download_detour(deprecated)`、`http_client`<br>约束：path 或 url 后缀为 json、srs 时 format 可省略<br>约束：update_interval 默认 1d<br>约束：多 tag 与 inline 冲突，且 path、url、initial_path 必须含 {tag}<br>约束：本地文件修改后自动重载（1.10.0 起）<br>约束：远程规则集在 cache_file 开启时被缓存 |
+| `combo` | 规则集的类型、格式、版本和下载方式组合 |  | 有 |  | 已实现 | 通过 | type：`inline`、`local`、`remote`<br>format：`binary`、`source`<br>source_version：`1`、`2`、`3`、`4`、`5`<br>tag：`multiple({tag})`、`single`<br>remote_client：`default_http_client`、`download_detour(deprecated)`、`http_client`<br>约束：path 或 url 后缀为 json、srs 时 format 可省略<br>约束：update_interval 默认 1d<br>约束：多 tag 与 inline 冲突，且 path、url、initial_path 必须含 {tag}<br>约束：本地文件修改后自动重载（1.10.0 起）<br>约束：远程规则集在 cache_file 开启时被缓存 |
 | `download-detour` | 用于下载规则集的出站的标签。 |  | 废弃 |  | 不适用 | 未测 | 约束：`download_detour` 已在 sing-box 1.14.0 废弃且将在 sing-box 1.16.0 中被移除，请使用 `http_client` 代替。<br>约束：自 sing-box 1.8.0 起 |
-| `format` | 规则集格式， `source` 或 `binary`。 |  | 有 |  | 未实现 | 未测 | 取值：`binary`、`source`<br>约束：必填<br>约束：自 sing-box 1.8.0 起 |
+| `format` | 规则集格式， `source` 或 `binary`。 |  | 有 |  | 已实现 | 通过 | 取值：`binary`、`source`<br>约束：必填<br>约束：自 sing-box 1.8.0 起 |
 | `http-client` | 用于下载规则集的 HTTP 客户端。 |  | 有 |  | 未实现 | 未测 | 约束：当 `http_clients` 与 `default_http_client` 均未配置时，将使用通过默认出站连接的隐式 HTTP 客户端。<br>约束：留空时使用默认 HTTP 客户端：即由 `default_http_client`指定的客户端，或当 `default_http_client` 为空时使用顶级 `http_clients` 的第一项。<br>约束：自 sing-box 1.14.0 起<br>约束：该隐式默认已在 sing-box 1.14.0 废弃，并将在 sing-box 1.16.0 移除；请改为定义 `http_clients`。 |
 | `initial-path` | 规则集初始内容的文件路径。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
 | `path` | 规则集的文件路径。 |  | 有 |  | 已实现 | 未测 | 约束：必填<br>约束：自 sing-box 1.8.0 起 |
@@ -72,13 +72,13 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `geoip` | geoip.dat 预定义 IP 列表 |  |  | 有 | 部分 | 未测 | 取值：`geoip-full.dat`、`geoip-lite.dat` |
+| `geoip` | geoip.dat 预定义 IP 列表 |  |  | 有 | 已实现 | 通过 | 取值：`geoip-full.dat`、`geoip-lite.dat` |
 
 ## geosite
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `geosite` | geosite.dat 预定义域名列表 |  |  | 有 | 部分 | 未测 | 取值：`geosite-expand.dat`、`geosite.dat` |
+| `geosite` | geosite.dat 预定义域名列表 |  |  | 有 | 已实现 | 通过 | 取值：`geosite-expand.dat`、`geosite.dat` |
 
 ## headless
 
@@ -117,9 +117,9 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `combo` | 规则集维度 | 有 |  |  | 部分 | 未测 | type：`file`、`http`、`inline`<br>behavior：`classical`、`domain`、`ipcidr`<br>format：`mrs`、`text`、`yaml`<br>约束：http 必须 url<br>约束：inline 用 payload<br>约束：mrs 不支持 classical |
+| `combo` | 规则集维度 | 有 |  |  | 已实现 | 通过 | type：`file`、`http`、`inline`<br>behavior：`classical`、`domain`、`ipcidr`<br>format：`mrs`、`text`、`yaml`<br>约束：http 必须 url<br>约束：inline 用 payload<br>约束：mrs 不支持 classical |
 | `behavior` | 行为 | 有 |  |  | 已实现 | 未测 | 取值：`classical`、`domain`、`ipcidr` |
-| `format` | 格式，默认 yaml | 有 |  |  | 未实现 | 未测 | 取值：`mrs`、`text`、`yaml`<br>约束：mrs 的 behavior 仅 domain、ipcidr |
+| `format` | 格式，默认 yaml | 有 |  |  | 已实现 | 通过 | 取值：`mrs`、`text`、`yaml`<br>约束：mrs 的 behavior 仅 domain、ipcidr |
 | `header` | 自定义请求头 | 有 |  |  | 未实现 | 未测 | 取值：`映射` |
 | `interval` | 更新间隔秒 | 有 |  |  | 已实现 | 未测 | 取值：`整数` |
 | `name` | 必须，不能重复 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |

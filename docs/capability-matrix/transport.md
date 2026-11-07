@@ -38,8 +38,8 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `bbr-profile` | BBR 预设，默认 standard |  |  | 有 | 部分 | 通过 | 取值：`aggressive`、`conservative`、`standard` |
 | `brutal-disable-loss-compensation` | QUIC 调整字段，文档未写 |  |  | 实验 | 未实现 | 未测 |  |
-| `brutal-down` | 下载速率，默认 0 |  |  | 有 | 部分 | 未测 | 约束：不能低于 65535 bps |
-| `brutal-up` | 上传速率 |  |  | 有 | 部分 | 未测 | 取值：`1 tbps`、`100 mbps`、`1000000`、`100kb`、`1g`、`20 mb`<br>约束：不能低于 65535 bps<br>约束：客户端 0 用 BBR<br>约束：服务端值限制客户端，0 不限 |
+| `brutal-down` | 下载速率，默认 0 |  |  | 有 | 已实现 | 通过 | 约束：不能低于 65535 bps |
+| `brutal-up` | 上传速率 |  |  | 有 | 已实现 | 通过 | 取值：`1 tbps`、`100 mbps`、`1000000`、`100kb`、`1g`、`20 mb`<br>约束：不能低于 65535 bps<br>约束：客户端 0 用 BBR<br>约束：服务端值限制客户端，0 不限 |
 | `congestion` | 拥塞控制 |  |  | 有 | 部分 | 通过 | 取值：`bbr`、`brutal`、`force-brutal`、`reno`<br>约束：Hysteria 默认 brutal；XHTTP H3 与 MASQUE 默认 bbr<br>约束：MASQUE 的 brutal 按 bbr 运行<br>约束：XHTTP H3 不能用 brutal，可用 force-brutal<br>约束：force-brutal 需 brutalUp |
 | `debug` | 启用拥塞日志 |  |  | 有 | 未实现 | 未测 |  |
 | `disable-chrome-parrot` | QUIC 调整字段，文档未写 |  |  | 实验 | 未实现 | 未测 |  |
@@ -294,16 +294,16 @@
 | `hysteria` | Hysteria2 QUIC 传输，搭配 hysteria 协议时兼容官方实现 |  |  | 有 | 已实现 | 通过 | 取值：`hysteria` |
 | `combo` | Hysteria 传输组合 |  |  | 有 | 部分 | 未测 | security：`tls`<br>masquerade：`404`、`file`、`proxy`、`string`<br>congestion：`bbr`、`brutal`、`force-brutal`、`reno`<br>obfs：`gecko`、`none`、`salamander`<br>port_hop：`finalmask udphop`、`off`、`quicParams.udpHop`<br>protocol：`http`、`hysteria`、`shadowsocks`、`socks`、`trojan`、`vless`、`vmess`<br>约束：hysteria 协议配其他传输不能代理 UDP<br>约束：udphop intervallocal 支持 hysteria<br>约束：必须 tls<br>约束：默认拥塞 brutal |
 | `auth` | 认证密码，两端一致 |  |  | 有 | 已实现 | 通过 | 约束：搭配 hysteria inbound 时被 users 覆盖 |
-| `content` | string 类型内容 |  |  | 有 | 部分 | 未测 |  |
+| `content` | string 类型内容 |  |  | 有 | 已实现 | 通过 |  |
 | `dir` | file 类型目录 |  |  | 有 | 未实现 | 未测 |  |
-| `headers` | string 类型响应头 |  |  | 有 | 部分 | 未测 |  |
-| `insecure` | proxy 类型跳过证书校验 |  |  | 有 | 未实现 | 未测 |  |
-| `masquerade` | HTTP/3 页面伪装 |  |  | 有 | 部分 | 未测 |  |
-| `rewrite-host` | proxy 类型改写 Host |  |  | 有 | 未实现 | 未测 |  |
-| `status-code` | string 类型状态码 |  |  | 有 | 部分 | 未测 |  |
-| `type` | 伪装类型，不填默认 404 |  |  | 有 | 部分 | 未测 | 取值：`file`、`proxy`、`string` |
+| `headers` | string 类型响应头 |  |  | 有 | 已实现 | 通过 |  |
+| `insecure` | proxy 类型跳过证书校验 |  |  | 有 | 已实现 | 通过 |  |
+| `masquerade` | HTTP/3 页面伪装 |  |  | 有 | 已实现 | 通过 |  |
+| `rewrite-host` | proxy 类型改写 Host |  |  | 有 | 已实现 | 通过 |  |
+| `status-code` | string 类型状态码 |  |  | 有 | 已实现 | 通过 |  |
+| `type` | 伪装类型，不填默认 404 |  |  | 有 | 已实现 | 通过 | 取值：`file`、`proxy`、`string` |
 | `udp-idle-timeout` | QUIC native UDP 空闲秒，默认 60 |  |  | 有 | 部分 | 通过 | 约束：源码范围 2-600（source:infra/conf/transport_method.go） |
-| `url` | proxy 类型目标 |  |  | 有 | 未实现 | 未测 |  |
+| `url` | proxy 类型目标 |  |  | 有 | 已实现 | 通过 |  |
 | `version` | 版本 |  |  | 有 | 已实现 | 通过 | 取值：`2`<br>约束：必须为 2 |
 | `x-forwarded` | proxy 类型 X-Forwarded 头，文档未写 |  |  | 有 | 未实现 | 未测 |  |
 

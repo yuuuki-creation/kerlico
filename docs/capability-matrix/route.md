@@ -28,15 +28,15 @@
 | `reject` | 拒绝 | 有 | 有 |  | 已实现 | 未测 | 取值：`reject`<br>约束：终结动作 |
 | `reject-drop` | 拒绝并静默丢弃 | 有 |  |  | 未实现 | 未测 |  |
 | `rematch` | rematch 出站写入名称或切子规则后重新匹配 | 有 |  |  | 未实现 | 未测 |  |
-| `resolve` | `resolve` 将请求的目标从域名解析为 IP 地址。 |  | 有 |  | 部分 | 未测 | 取值：`resolve`<br>约束：非终结动作 |
+| `resolve` | `resolve` 将请求的目标从域名解析为 IP 地址。 |  | 有 |  | 已实现 | 通过 | 取值：`resolve`<br>约束：非终结动作 |
 | `rewrite-ttl` | 重写 DNS 回应中的 TTL。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.12.0 起 |
 | `route` | `route` 继承了将连接路由到指定出站的经典规则动作。 |  | 有 |  | 已实现 | 通过 | 取值：`route`<br>约束：可带 route-options 全部字段<br>约束：终结动作 |
 | `route-options` | `route-options` 为路由设置选项。 |  | 有 |  | 已实现 | 通过 | 取值：`route-options`<br>约束：当内容只有一项时，可以忽略 JSON 数组 [] 标签<br>约束：非终结动作 |
 | `server` | 指定要使用的 DNS 服务器的标签，而不是通过 DNS 路由进行选择。 |  | 有 |  | 未实现 | 未测 |  |
-| `sniff` | `sniff` 对连接执行协议嗅探。 |  | 有 |  | 部分 | 未测 | 取值：`sniff`<br>约束：非终结动作 |
-| `sniffer` | 启用的探测器。 |  | 有 |  | 未实现 | 未测 | 取值：`bittorrent`、`dns`、`dtls`、`http`、`ntp`、`quic`、`rdp`、`ssh`、`stun`、`tls`<br>约束：默认启用所有探测器。 |
+| `sniff` | `sniff` 对连接执行协议嗅探。 |  | 有 |  | 已实现 | 通过 | 取值：`sniff`<br>约束：非终结动作 |
+| `sniffer` | 启用的探测器。 |  | 有 |  | 已实现 | 通过 | 取值：`bittorrent`、`dns`、`dtls`、`http`、`ntp`、`quic`、`rdp`、`ssh`、`stun`、`tls`<br>约束：默认启用所有探测器。 |
 | `strategy` | DNS 解析策略，可用值有：`prefer_ipv4`、`prefer_ipv6`、`ipv4_only`、`ipv6_only`。 |  | 有 |  | 已实现 | 未测 | 取值：`ipv4_only`、`ipv6_only`、`prefer_ipv4`、`prefer_ipv6`<br>约束：默认使用 `dns.strategy`。 |
-| `timeout` | 探测超时时间。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 300ms。 |
+| `timeout` | 探测超时时间。 |  | 有 |  | 已实现 | 通过 | 约束：自 sing-box 1.14.0 起<br>约束：默认使用 300ms。 |
 | `tls-fragment` | 通过分段 TLS 握手数据包来绕过防火墙检测。 |  | 有 |  | 未实现 | 未测 | 约束：在 Linux、Apple 平台和需要管理员权限的 Windows 系统上，可自动检测等待时间。<br>约束：由于性能不佳，请首先尝试 `tls_record_fragment`，且仅应用于已知被阻止的服务器名称。<br>约束：自 sing-box 1.12.0 起 |
 | `tls-fragment-fallback-delay` | 当 TLS 分片功能无法自动判定等待时间时使用的回退值。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.12.0 起<br>约束：默认使用 `500ms`。 |
 | `tls-record-fragment` | 通过分段 TLS 握手数据包到多个 TLS 记录来绕过防火墙检测。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.12.0 起 |
@@ -50,12 +50,12 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `auto-detect-interface` | 默认将出站连接绑定到默认网卡，以防止在 tun 下出现路由环路。 |  | 有 |  | 未实现 | 未测 | 约束：仅支持 Linux、Windows 和 macOS。 |
+| `auto-detect-interface` | 默认将出站连接绑定到默认网卡，以防止在 tun 下出现路由环路。 |  | 有 |  | 已实现 | 通过 | 约束：仅支持 Linux、Windows 和 macOS。 |
 | `default-domain-resolver` | 详情参阅 拨号字段。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.12.0 起 |
 | `default-fallback-delay` | 详情参阅 拨号字段。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.11.0 起 |
 | `default-fallback-network-type` | 详情参阅 拨号字段。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.11.0 起 |
 | `default-http-client` | 远程规则集使用的默认 HTTP 客户端 的标签。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.14.0 起 |
-| `default-interface` | 默认将出站连接绑定到指定网卡，以防止在 tun 下出现路由环路。 |  | 有 |  | 未实现 | 未测 | 约束：仅支持 Linux、Windows 和 macOS。 |
+| `default-interface` | 默认将出站连接绑定到指定网卡，以防止在 tun 下出现路由环路。 |  | 有 |  | 已实现 | 通过 | 约束：仅支持 Linux、Windows 和 macOS。 |
 | `default-mark` | 默认为出站连接设置路由标记。 |  | 有 |  | 已实现 | 未测 | 约束：仅支持 Linux。 |
 | `default-network-strategy` | 默认网络策略，语义同拨号字段 network_strategy |  | 有 |  | 未实现 | 未测 | 约束：Conflicts with `default_interface`.<br>约束：Takes no effect if `outbound.bind_interface`, `outbound.inet4_bind_address` or `outbound.inet6_bind_address` is set.<br>约束：自 sing-box 1.11.0 起 |
 | `default-network-type` | 详情参阅 拨号字段。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.11.0 起 |
@@ -150,9 +150,9 @@
 | `domains` | domain 的别名 |  |  | 有 | 不适用 | 未测 |  |
 | `dscp` | DSCP 标记 | 有 |  |  | 未实现 | 未测 | 取值：`DSCP,4,DIRECT`<br>约束：仅限 tproxy udp 入站 |
 | `dst-port` | 目标端口范围 | 有 |  |  | 部分 | 通过 | 取值：`DST-PORT,80,DIRECT` |
-| `geoip` | 匹配 IP 所属国家代码 | 有 | 已移除 | 有 | 部分 | 未测 | 取值：`GEOIP,CN,DIRECT`、`geoip:cn`<br>约束：GeoIP 已废弃且可能在不久的将来移除，参阅 迁移指南。<br>约束：必须小写 geoip:<br>约束：默认精简版只含 cn、ir、ru |
+| `geoip` | 匹配 IP 所属国家代码 | 有 | 已移除 | 有 | 已实现 | 通过 | 取值：`GEOIP,CN,DIRECT`、`geoip:cn`<br>约束：GeoIP 已废弃且可能在不久的将来移除，参阅 迁移指南。<br>约束：必须小写 geoip:<br>约束：默认精简版只含 cn、ir、ru |
 | `geoip-private` | 私有地址 |  |  | 有 | 已实现 | 通过 | 取值：`geoip:private` |
-| `geosite` | 匹配 Geosite 内域名 | 有 | 已移除 | 有 | 部分 | 未测 | 取值：`GEOSITE,youtube,PROXY`、`geosite:cn`、`geosite:google`<br>约束：Geosite 已废弃且可能在不久的将来移除，参阅 迁移指南。<br>约束：必须小写 geosite: |
+| `geosite` | 匹配 Geosite 内域名 | 有 | 已移除 | 有 | 已实现 | 通过 | 取值：`GEOSITE,youtube,PROXY`、`geosite:cn`、`geosite:google`<br>约束：Geosite 已废弃且可能在不久的将来移除，参阅 迁移指南。<br>约束：必须小写 geosite: |
 | `geosite-attr` | 按属性筛选 geosite |  |  | 有 | 未实现 | 未测 | 取值：`geosite:google@cn` |
 | `in-name` | 入站名称 | 有 |  |  | 已实现 | 通过 | 取值：`IN-NAME,ss,PROXY` |
 | `in-port` | 入站端口，可用范围 | 有 |  |  | 未实现 | 未测 | 取值：`IN-PORT,7890,PROXY` |
@@ -201,7 +201,7 @@
 | `process-path` | 完整进程路径 | 有 | 有 |  | 未实现 | 未测 | 取值：`PROCESS-PATH,/usr/bin/wget,PROXY`<br>约束：仅支持 Linux、Windows 和 macOS. |
 | `process-path-regex` | 进程路径正则 | 有 | 有 |  | 未实现 | 未测 | 取值：`PROCESS-PATH-REGEX,.*bin/wget,PROXY`<br>约束：仅支持 Linux、Windows 和 macOS.<br>约束：自 sing-box 1.10.0 起 |
 | `process-path-wildcard` | 进程路径通配，仅 * 和 ? | 有 |  |  | 未实现 | 未测 | 取值：`PROCESS-PATH-WILDCARD,/usr/*/wget,PROXY` |
-| `protocol` | 探测到的协议, 参阅 协议探测。 |  | 有 | 有 | 部分 | 未测 | 取值：`bittorrent`、`dns`、`dtls`、`http`、`ntp`、`quic`、`rdp`、`ssh`、`stun`、`tls`<br>约束：bittorrent 只有基础嗅探<br>约束：http 仅 1.0 和 1.1<br>约束：tls 1.0~1.3<br>约束：必须开启入站 sniffing |
+| `protocol` | 探测到的协议, 参阅 协议探测。 |  | 有 | 有 | 已实现 | 通过 | 取值：`bittorrent`、`dns`、`dtls`、`http`、`ntp`、`quic`、`rdp`、`ssh`、`stun`、`tls`<br>约束：bittorrent 只有基础嗅探<br>约束：http 仅 1.0 和 1.1<br>约束：tls 1.0~1.3<br>约束：必须开启入站 sniffing |
 | `rematch-name` | 匹配 rematch 出站写入的名称 | 有 |  |  | 未实现 | 未测 | 取值：`REMATCH-NAME,rematch1,PROXY` |
 | `rule-set` | 引用规则集合 | 有 | 有 |  | 已实现 | 通过 | 取值：`RULE-SET,providername,proxy`<br>约束：需配置 rule-providers<br>约束：自 sing-box 1.8.0 起 |
 | `rule-set-ip-cidr-match-source` | 使规则集中的 `ip_cidr` 规则匹配源 IP。 |  | 有 |  | 未实现 | 未测 | 约束：自 sing-box 1.10.0 起 |

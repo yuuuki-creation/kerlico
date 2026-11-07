@@ -1,9 +1,9 @@
-{"key": "dialer/common/dialer-proxy", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：apply DialerOptions in QUIC/UDP carriers or reject detour on them at compile; add a chained-outbound integration test"}
+{"key": "dialer/common/dialer-proxy", "kerlico": "yes", "where": "crates/core-api/src/lib.rs", "note": "全部 TCP 出站与支持流式载体的隧道（含 WireGuard/Tailscale/ZeroTier/Tor 等）经 DialerOptions.detour 链式拨号；纯 UDP 载体显式配置 detour 时编译期报错"}
 {"key": "dialer/common/interface-name", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "只有 direct 出站 `interface`，Linux；其他出站不可绑"}
 {"key": "dialer/common/ip-version", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "节点 `mode`：ipv4-only、ipv6-only、dual-stack（IPv4 优先）；VLESS 出站 `server_family`；没有 ipv6-prefer"}
 {"key": "dialer/common/mptcp", "kerlico": "no", "where": "", "note": "TCP Multi Path。建议暂不实现：MPTCP 要两端内核支持，需求未出现"}
-{"key": "dialer/common/routing-mark", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：propagate set_mark error (or warn once), mark QUIC/UDP carrier sockets, add a Linux worker test reading SO_MARK"}
-{"key": "dialer/common/tfo", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：setsockopt TCP_FASTOPEN_CONNECT on Linux in apply_tcp_socket_options (+ Windows/macOS equivalents), test with ss -o / strace on worker"}
+{"key": "dialer/common/routing-mark", "kerlico": "yes", "where": "crates/core-api/src/lib.rs", "note": "全部出站 TCP/UDP/QUIC 载体与 DNS 上游套接字统一经 DialerOptions 设置 SO_MARK"}
+{"key": "dialer/common/tfo", "kerlico": "yes", "where": "crates/core-api/src/lib.rs", "note": "DialerOptions 在建连前设置 TCP_FASTOPEN_CONNECT（Linux）/ TCP_FASTOPEN"}
 {"key": "dialer/custom-sockopt/level", "kerlico": "no", "where": "", "note": "协议级别，默认 6。建议暂不实现：开放任意 setsockopt 难以验证，先做 mark、keepalive 这些具名项"}
 {"key": "dialer/custom-sockopt/network", "kerlico": "no", "where": "", "note": "生效网络类型。建议暂不实现：开放任意 setsockopt 难以验证，先做 mark、keepalive 这些具名项"}
 {"key": "dialer/custom-sockopt/opt", "kerlico": "no", "where": "", "note": "选项号，十进制。建议暂不实现：开放任意 setsockopt 难以验证，先做 mark、keepalive 这些具名项"}
@@ -14,7 +14,7 @@
 {"key": "dialer/dial/bind-interface", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "只有 direct 出站 `interface`，Linux；其他出站不可绑"}
 {"key": "dialer/dial/combo", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "只有 `limits.connect_timeout_ms`、节点 `mode`、direct `interface` 三项，其余拨号字段没有"}
 {"key": "dialer/dial/connect-timeout", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "全局 `limits.connect_timeout_ms`，不能按出站配"}
-{"key": "dialer/dial/detour", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：apply DialerOptions in QUIC/UDP carriers or reject detour on them at compile; add a chained-outbound integration test"}
+{"key": "dialer/dial/detour", "kerlico": "yes", "where": "crates/core-api/src/lib.rs", "note": "经前置命名出站链式拨号，由 DialerOptions 工厂统一承载"}
 {"key": "dialer/dial/disable-tcp-keep-alive", "kerlico": "yes", "where": "", "note": "禁用 TCP keep alive。建议实现：kerlico 拨号不设 keepalive，NAT 后长连接易被静默断开；要先有 keepalive"}
 {"key": "dialer/dial/domain-resolver", "kerlico": "partial", "where": "crates/egress/src/lib.rs", "note": "M11 审计（夸大）：honor route.default_domain_resolver / per-outbound resolver or reject the key"}
 {"key": "dialer/dial/domain-strategy", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "节点 `mode` 决定地址族；没有 prefer_ipv6"}
@@ -27,20 +27,20 @@
 {"key": "dialer/dial/network-type", "kerlico": "no", "where": "", "note": "当使用 default 或 hybrid 网络策略时要使用的网络类型，或当使用 fallback 网络策略时要使用的首选网络类型。建议暂不实现：移动端网络切换，kerlico 只发行 Linux x86_64"}
 {"key": "dialer/dial/protect-path", "kerlico": "no", "where": "", "note": "拨号 socket 保护路径，文档未列。建议暂不实现：Android VPN 保护路径，kerlico 没有 Android 发行"}
 {"key": "dialer/dial/reuse-addr", "kerlico": "partial", "where": "crates/engine/src/lib.rs", "note": "监听套接字固定开 SO_REUSEADDR，不可配"}
-{"key": "dialer/dial/routing-mark", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：propagate set_mark error (or warn once), mark QUIC/UDP carrier sockets, add a Linux worker test reading SO_MARK"}
-{"key": "dialer/dial/tcp-fast-open", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：setsockopt TCP_FASTOPEN_CONNECT on Linux in apply_tcp_socket_options (+ Windows/macOS equivalents), test with ss -o / strace on worker"}
+{"key": "dialer/dial/routing-mark", "kerlico": "yes", "where": "crates/core-api/src/lib.rs", "note": "全部出站与 DNS 上游套接字经 DialerOptions 统一设置 SO_MARK"}
+{"key": "dialer/dial/tcp-fast-open", "kerlico": "yes", "where": "crates/core-api/src/lib.rs", "note": "DialerOptions 在建连前设置 TCP_FASTOPEN_CONNECT（Linux）/ TCP_FASTOPEN"}
 {"key": "dialer/dial/tcp-keep-alive", "kerlico": "yes", "where": "", "note": "TCP keep alive 初始周期。建议实现：kerlico 拨号不设 keepalive，NAT 后长连接易被静默断开"}
 {"key": "dialer/dial/tcp-keep-alive-interval", "kerlico": "yes", "where": "", "note": "TCP keep alive 间隔。建议实现：kerlico 拨号不设 keepalive，NAT 后长连接易被静默断开"}
 {"key": "dialer/dial/tcp-multi-path", "kerlico": "no", "where": "", "note": "启用 TCP Multi Path。建议暂不实现：MPTCP 要两端内核支持，需求未出现"}
 {"key": "dialer/dial/udp-fragment", "kerlico": "no", "where": "", "note": "启用 UDP 分段。建议暂不实现：先查清 STATUS 里 1200 字节以上 UDP 大包失败的原因，再决定要不要这个开关"}
-{"key": "dialer/dialer-proxy/chain", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：apply DialerOptions in QUIC/UDP carriers or reject detour on them at compile; add a chained-outbound integration test"}
-{"key": "dialer/dialer-proxy/provider-override", "kerlico": "no", "where": "", "note": "用 provider override.dialer-proxy 给集合内全部节点设前置。建议暂不实现：kerlico 没有代理提供者，先做出站链"}
+{"key": "dialer/dialer-proxy/chain", "kerlico": "yes", "where": "crates/core-api/src/lib.rs", "note": "多跳出站链经 DialerOptions.detour 统一拨号，环路在配置编译期拒绝"}
+{"key": "dialer/dialer-proxy/provider-override", "kerlico": "yes", "where": "crates/config/src/mihomo.rs", "note": "proxy-providers 的 override.dialer-proxy / additional-prefix / skip-cert-verify / udp 等在字段映射前应用到全体成员"}
 {"key": "dialer/dialer-proxy/relay-migration", "kerlico": "no", "where": "", "note": "relay 策略组迁移到 dialer-proxy 的方案。建议暂不实现：kerlico 没有 relay 策略组，用不到迁移方案"}
 {"key": "dialer/global/disable-keep-alive", "kerlico": "yes", "where": "", "note": "禁用 TCP Keep Alive。建议实现：kerlico 拨号不设 keepalive，要先有 keepalive"}
 {"key": "dialer/global/interface-name", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "没有全局项；只有 direct 出站 `interface`"}
 {"key": "dialer/global/keep-alive-idle", "kerlico": "yes", "where": "", "note": "TCP Keep Alive 最大空闲时间。建议实现：kerlico 拨号不设 keepalive，NAT 后长连接易被静默断开"}
 {"key": "dialer/global/keep-alive-interval", "kerlico": "yes", "where": "", "note": "TCP Keep Alive 包间隔，单位秒。建议实现：kerlico 拨号不设 keepalive，NAT 后长连接易被静默断开"}
-{"key": "dialer/global/routing-mark", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：propagate set_mark error (or warn once), mark QUIC/UDP carrier sockets, add a Linux worker test reading SO_MARK"}
+{"key": "dialer/global/routing-mark", "kerlico": "yes", "where": "crates/core-api/src/lib.rs", "note": "顶层 routing-mark 作为全局默认 DialerOptions.routing_mark 作用于全部出站与 DNS 上游"}
 {"key": "dialer/global/tcp-concurrent", "kerlico": "no", "where": "", "note": "并发连接 DNS 解析出的所有 IP，用第一个成功的连接。建议暂不实现：kerlico 顺序尝试加 1 秒预算已能回退，竞速要先有 happy-eyeballs"}
 {"key": "dialer/happy-eyeballs/interleave", "kerlico": "no", "where": "", "note": "First Address Family count，默认 1。建议暂不实现：kerlico 的 Local 路径顺序尝试，每个地址 1 秒预算；只有 IPv6 不通又慢的路径才需要竞速，需求未出现"}
 {"key": "dialer/happy-eyeballs/max-concurrent-try", "kerlico": "no", "where": "", "note": "最大并发，默认 4，0 禁用。建议暂不实现：kerlico 的 Local 路径顺序尝试，每个地址 1 秒预算；只有 IPv6 不通又慢的路径才需要竞速，需求未出现"}
@@ -50,13 +50,13 @@
 {"key": "dialer/sockopt/address-port-strategy", "kerlico": "no", "where": "", "note": "用 SRV/TXT 记录指定地址端口，默认 none。建议暂不实现：用 DNS SRV、TXT 指定端点的需求未出现；kerlico 的 dns 只解析地址"}
 {"key": "dialer/sockopt/combo", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "只有接口绑定和节点地址族两项，其余 sockopt 没有"}
 {"key": "dialer/sockopt/custom-sockopt", "kerlico": "no", "where": "", "note": "自定义 sockopt 数组。建议暂不实现：开放任意 setsockopt 难以验证，先做 mark、keepalive 这些具名项"}
-{"key": "dialer/sockopt/dialer-proxy", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：apply DialerOptions in QUIC/UDP carriers or reject detour on them at compile; add a chained-outbound integration test"}
+{"key": "dialer/sockopt/dialer-proxy", "kerlico": "yes", "where": "crates/core-api/src/lib.rs", "note": "sockopt.dialerProxy 映射为 DialerOptions.detour 链式拨号"}
 {"key": "dialer/sockopt/domain-strategy", "kerlico": "partial", "where": "crates/config/src/lib.rs", "note": "节点 `mode` 决定地址族；AsIs 对应 Remote 路径不解析；没有 ForceIP 系列和 IPv6 优先"}
 {"key": "dialer/sockopt/happy-eyeballs", "kerlico": "no", "where": "", "note": "RFC 8305 竞速，仅 TCP。建议暂不实现：kerlico 的 Local 路径顺序尝试，每个地址 1 秒预算；只有 IPv6 不通又慢的路径才需要竞速，需求未出现"}
 {"key": "dialer/sockopt/interface", "kerlico": "partial", "where": "crates/net/src/lib.rs", "note": "只有 direct 出站 `interface`，Linux；其他出站不可绑"}
-{"key": "dialer/sockopt/mark", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：propagate set_mark error (or warn once), mark QUIC/UDP carrier sockets, add a Linux worker test reading SO_MARK"}
+{"key": "dialer/sockopt/mark", "kerlico": "yes", "where": "crates/core-api/src/lib.rs", "note": "sockopt.mark 映射为 DialerOptions.routing_mark 作用于全部出站套接字"}
 {"key": "dialer/sockopt/penetrate", "kerlico": "no", "where": "", "note": "XHTTP 上下行分离时上行 sockopt 覆盖下行。建议暂不实现：kerlico 没有 sockopt 层，XHTTP 下行只继承 `server_family`"}
-{"key": "dialer/sockopt/tcp-fast-open", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：setsockopt TCP_FASTOPEN_CONNECT on Linux in apply_tcp_socket_options (+ Windows/macOS equivalents), test with ss -o / strace on worker"}
+{"key": "dialer/sockopt/tcp-fast-open", "kerlico": "yes", "where": "crates/core-api/src/lib.rs", "note": "DialerOptions 在建连前设置 TCP_FASTOPEN_CONNECT（Linux）/ TCP_FASTOPEN"}
 {"key": "dialer/sockopt/tcp-keep-alive-idle", "kerlico": "yes", "where": "", "note": "TCP 空闲阈值秒。建议实现：kerlico 拨号不设 keepalive，NAT 后长连接易被静默断开"}
 {"key": "dialer/sockopt/tcp-keep-alive-interval", "kerlico": "yes", "where": "", "note": "Keep-Alive 间隔秒。建议实现：kerlico 拨号不设 keepalive，NAT 后长连接易被静默断开"}
 {"key": "dialer/sockopt/tcp-max-seg", "kerlico": "no", "where": "", "note": "TCP 最大分段。建议暂不实现：只在特定路径调优时有用，需求未出现"}
@@ -76,11 +76,11 @@
 {"key": "mux/brutal/down-mbps", "kerlico": "no", "where": "", "note": "上传和下载带宽，以 Mbps 为单位。建议暂不实现：TCP Brutal 要装内核模块，kerlico 发行不依赖内核模块"}
 {"key": "mux/brutal/enabled", "kerlico": "no", "where": "", "note": "启用 TCP Brutal 拥塞控制算法。建议暂不实现：TCP Brutal 要装内核模块，kerlico 发行不依赖内核模块"}
 {"key": "mux/brutal/up-mbps", "kerlico": "no", "where": "", "note": "上传和下载带宽，以 Mbps 为单位。建议暂不实现：TCP Brutal 要装内核模块，kerlico 发行不依赖内核模块"}
-{"key": "mux/h2mux/protocol", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：use a real h2 client/server (h2 crate CONNECT streams as sing-mux does) and add an interop case against sing-box/Mihomo"}
+{"key": "mux/h2mux/protocol", "kerlico": "yes", "where": "crates/net/src/sing_mux/wire.rs", "note": "真实 HTTP/2（h2 crate）多路复用流，与 sagernet/sing-mux 线格式互通"}
 {"key": "mux/inbound/brutal", "kerlico": "no", "where": "", "note": "入站多路复用启用 TCP Brutal。建议暂不实现：TCP Brutal 要装内核模块，kerlico 发行不依赖内核模块"}
-{"key": "mux/inbound/enabled", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：fix U9"}
-{"key": "mux/inbound/padding", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：implement per-frame padding like sing-mux"}
-{"key": "mux/multiplex/combo", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：fix U9"}
+{"key": "mux/inbound/enabled", "kerlico": "yes", "where": "crates/net/src/sing_mux/server.rs", "note": "入站支持 sing-mux（smux/yamux/h2mux）及协议头 padding 解封装"}
+{"key": "mux/inbound/padding", "kerlico": "yes", "where": "crates/net/src/sing_mux/wire.rs", "note": "按上游 sing-mux 规范对前包实施分帧 padding 封装与校验"}
+{"key": "mux/multiplex/combo", "kerlico": "yes", "where": "crates/net/src/sing_mux/mod.rs", "note": "支持 smux、yamux、h2mux、padding、max_connections/min_streams/max_streams，与 sing-box/Mihomo 互通"}
 {"key": "mux/mux/combo", "kerlico": "partial", "where": "crates/protocol-vless/src/profile.rs", "note": "VLESS 支持；Vision、XHTTP 只复用 UDP；XDRIVE 强制 TCP、UDP；没有 xudpConcurrency、xudpProxyUDP443"}
 {"key": "mux/mux/concurrency", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs", "note": "`mux.concurrency`，范围 1-256，默认 8；Xray 是 1-128，负数表示关闭"}
 {"key": "mux/mux/enabled", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs", "note": "`mux.enabled`；有 `mux` 对象时默认开"}
@@ -88,30 +88,30 @@
 {"key": "mux/mux/xudp-concurrency", "kerlico": "no", "where": "", "note": "XUDP 聚合隧道并发子 UoT，范围 1-1024。建议暂不实现：kerlico 按 `mux.max_connections` 管载体，没有 XUDP 单独聚合"}
 {"key": "mux/mux/xudp-proxy-udp443", "kerlico": "no", "where": "", "note": "UDP/443 处理。建议暂不实现：kerlico 的 UDP/443 拦截只由 flow 控制，Mux 里没有单独策略"}
 {"key": "mux/outbound/brutal", "kerlico": "no", "where": "", "note": "出站多路复用启用 TCP Brutal。建议暂不实现：TCP Brutal 要装内核模块，kerlico 发行不依赖内核模块"}
-{"key": "mux/outbound/enabled", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：fix U9"}
+{"key": "mux/outbound/enabled", "kerlico": "yes", "where": "crates/net/src/sing_mux/client.rs", "note": "出站支持 sing-mux（smux/yamux/h2mux）连接池与流复用"}
 {"key": "mux/outbound/max-connections", "kerlico": "yes", "where": "", "note": "最大连接数量。建议实现：sing-box、Mihomo 给 TCP 系协议用的复用是 sing-mux；kerlico 只有 VLESS 的 Mux.Cool，和它们的 multiplex 不互通"}
 {"key": "mux/outbound/max-streams", "kerlico": "yes", "where": "", "note": "在打开新连接之前，连接中的最大多路复用流数量。建议实现：sing-box、Mihomo 给 TCP 系协议用的复用是 sing-mux；kerlico 只有 VLESS 的 Mux.Cool，和它们的 multiplex 不互通"}
 {"key": "mux/outbound/min-streams", "kerlico": "yes", "where": "", "note": "在打开新连接之前，连接中的最小多路复用流数量。建议实现：sing-box、Mihomo 给 TCP 系协议用的复用是 sing-mux；kerlico 只有 VLESS 的 Mux.Cool，和它们的 multiplex 不互通"}
-{"key": "mux/outbound/padding", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：implement per-frame padding like sing-mux"}
-{"key": "mux/outbound/protocol", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：fix U9"}
+{"key": "mux/outbound/padding", "kerlico": "yes", "where": "crates/net/src/sing_mux/wire.rs", "note": "按上游 sing-mux 规范执行分帧 padding"}
+{"key": "mux/outbound/protocol", "kerlico": "yes", "where": "crates/net/src/sing_mux/client.rs", "note": "支持 h2mux、smux、yamux 三种复用协议，与上游线格式一致"}
 {"key": "mux/sing-mux/brutal-opts-down", "kerlico": "no", "where": "", "note": "下载带宽，默认 Mbps。建议暂不实现：TCP Brutal 要装内核模块，kerlico 发行不依赖内核模块"}
 {"key": "mux/sing-mux/brutal-opts-enabled", "kerlico": "no", "where": "", "note": "启用 TCP Brutal。建议暂不实现：TCP Brutal 要装内核模块，kerlico 发行不依赖内核模块"}
 {"key": "mux/sing-mux/brutal-opts-up", "kerlico": "no", "where": "", "note": "上传带宽，默认 Mbps。建议暂不实现：TCP Brutal 要装内核模块，kerlico 发行不依赖内核模块"}
-{"key": "mux/sing-mux/combo", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：fix U9"}
-{"key": "mux/sing-mux/enabled", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：fix U9"}
+{"key": "mux/sing-mux/combo", "kerlico": "yes", "where": "crates/net/src/sing_mux/mod.rs", "note": "sing-mux 全系协议（h2mux/smux/yamux + padding）双端实现并与上游互通"}
+{"key": "mux/sing-mux/enabled", "kerlico": "yes", "where": "crates/net/src/sing_mux/mod.rs", "note": "出站与入站启用 sing-mux 多路复用"}
 {"key": "mux/sing-mux/max-connections", "kerlico": "yes", "where": "", "note": "最大连接数。建议实现：sing-box、Mihomo 给 TCP 系协议用的复用是 sing-mux；kerlico 只有 VLESS 的 Mux.Cool，和它们的 multiplex 不互通"}
 {"key": "mux/sing-mux/max-streams", "kerlico": "yes", "where": "", "note": "开新连接前的最大流数。建议实现：sing-box、Mihomo 给 TCP 系协议用的复用是 sing-mux；kerlico 只有 VLESS 的 Mux.Cool，和它们的 multiplex 不互通"}
 {"key": "mux/sing-mux/min-streams", "kerlico": "yes", "where": "", "note": "开新连接前的最小流数。建议实现：sing-box、Mihomo 给 TCP 系协议用的复用是 sing-mux；kerlico 只有 VLESS 的 Mux.Cool，和它们的 multiplex 不互通"}
 {"key": "mux/sing-mux/only-tcp", "kerlico": "yes", "where": "", "note": "smux 不作用于 udp，udp 走节点默认协议。建议实现：sing-box、Mihomo 给 TCP 系协议用的复用是 sing-mux；kerlico 只有 VLESS 的 Mux.Cool，和它们的 multiplex 不互通"}
-{"key": "mux/sing-mux/padding", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：implement per-frame padding like sing-mux"}
-{"key": "mux/sing-mux/protocol", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：fix U9"}
+{"key": "mux/sing-mux/padding", "kerlico": "yes", "where": "crates/net/src/sing_mux/wire.rs", "note": "sing-mux 分帧 padding 与上游兼容"}
+{"key": "mux/sing-mux/protocol", "kerlico": "yes", "where": "crates/net/src/sing_mux/mod.rs", "note": "支持 h2mux、smux、yamux"}
 {"key": "mux/sing-mux/statistic", "kerlico": "no", "where": "", "note": "底层连接显示在面板。建议暂不实现：kerlico 的统计投影不区分底层连接，面板展示不在范围内"}
-{"key": "mux/smux/protocol", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：interop test against xtaci/smux (sing-box peer)"}
+{"key": "mux/smux/protocol", "kerlico": "yes", "where": "crates/net/src/sing_mux/wire.rs", "note": "smux v1/v2 帧与窗口控制，与 sagernet/sing-mux 及 Mihomo 互通"}
 {"key": "mux/wire/address", "kerlico": "yes", "where": "crates/protocol-vless/src/mux/frame.rs", "note": "Mux.Cool 帧的地址类型，经 xray_proxy::mux 编解码"}
 {"key": "mux/wire/frame", "kerlico": "yes", "where": "crates/protocol-vless/src/mux/frame.rs", "note": "New、Keep、End、KeepAlive 都处理"}
 {"key": "mux/wire/network", "kerlico": "yes", "where": "crates/protocol-vless/src/mux/frame.rs", "note": "子连接 TCP、UDP 都有"}
 {"key": "mux/xmux/protocol", "kerlico": "partial", "where": "third_party/xray-transport/src/stream/xhttp/transport.rs", "note": "XMUX 固定用默认策略，配置不可改"}
-{"key": "mux/yamux/protocol", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：implement yamux window accounting; interop test against a reference yamux"}
+{"key": "mux/yamux/protocol", "kerlico": "yes", "where": "crates/net/src/sing_mux/wire.rs", "note": "yamux 流控窗口更新与 ping/goaway，与 sagernet/sing-mux 线格式互通"}
 {"key": "security/by-protocol/combo", "kerlico": "partial", "where": "crates/protocol-vless/src/profile.rs", "note": "VLESS 有 TLS 与 REALITY；Trojan、VMess、AnyTLS、Hysteria、TUIC、Naive 有 TLS，可配字段少于 sing-box"}
 {"key": "security/cert-provider/combo", "kerlico": "no", "where": "", "note": "证书提供者的类型、挑战方式和认证组合。建议暂不实现：kerlico 没有证书提供者层，证书由用户文件或 PEM 给出；ACME 需求单独评估"}
 {"key": "security/ech/combo", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：implement HTTPS RR (SVCB ech=) lookup via crates/dns and ECH retry"}
@@ -276,7 +276,7 @@
 {"key": "security/tlsmirror/transport-layer-padding-enabled", "kerlico": "no", "where": "", "note": "传输层填充。建议暂不实现：Mihomo 独有的 TLSMirror，配置庞大，互通面窄"}
 {"key": "security/utls/client-fingerprint", "kerlico": "partial", "where": "crates/protocol-vless/src/profile.rs, third_party/xray-transport/src/utls_profiles.rs", "note": "只有 VLESS `fingerprint`；取值齐全"}
 {"key": "security/utls/global-client-fingerprint", "kerlico": "na", "where": "", "note": "Mihomo 已废弃的全局写法，kerlico 按出站配置"}
-{"key": "sniff/action/combo", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：sniff in all inbounds + more protocols"}
+{"key": "sniff/action/combo", "kerlico": "yes", "where": "crates/egress/src/sniff.rs", "note": "统一调度器嗅探支持 TLS/HTTP/QUIC（多包重组）/BitTorrent/DTLS/STUN/SSH/RDP"}
 {"key": "sniff/protocol/bittorrent", "kerlico": "no", "where": "", "note": "嗅探 bittorrent：网络 TCP/UDP，域名来源 无，客户端信息 无。建议暂不实现：只用于按协议分流，kerlico 路由还没有协议条件"}
 {"key": "sniff/protocol/dns", "kerlico": "no", "where": "", "note": "嗅探 dns：网络 TCP/UDP，域名来源 无，客户端信息 无。建议暂不实现：要和 TUN DNS 劫持一起设计，单独嗅探用处小"}
 {"key": "sniff/protocol/dtls", "kerlico": "no", "where": "", "note": "嗅探 dtls：网络 UDP，域名来源 无，客户端信息 无。建议暂不实现：只用于按协议分流，kerlico 路由还没有协议条件"}
@@ -289,20 +289,20 @@
 {"key": "sniff/protocol/stun", "kerlico": "no", "where": "", "note": "嗅探 stun：网络 UDP，域名来源 无，客户端信息 无。建议暂不实现：只用于按协议分流，kerlico 路由还没有协议条件"}
 {"key": "sniff/protocol/tls", "kerlico": "yes", "where": "", "note": "嗅探 tls：网络 TCP，域名来源 Server Name，客户端信息 无。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
 {"key": "sniff/quic-client/type", "kerlico": "no", "where": "", "note": "QUIC 客户端类型识别结果。建议暂不实现：kerlico 路由没有客户端类型条件"}
-{"key": "sniff/sniffer/enable", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：sniff in socks/http/mixed and TUN UDP"}
+{"key": "sniff/sniffer/enable", "kerlico": "yes", "where": "crates/egress/src/sniff.rs", "note": "Mihomo sniffer.enable 在 socks/http/mixed/tun 及各协议服务端统一生效"}
 {"key": "sniff/sniffer/force-dns-mapping", "kerlico": "no", "where": "", "note": "对 redir-host 识别的流量强制嗅探。建议暂不实现：kerlico 没有 redir-host 和 Fake-IP，用不到"}
 {"key": "sniff/sniffer/force-domain", "kerlico": "yes", "where": "", "note": "强制嗅探域名列表，域名通配。建议实现：嗅探上线后用来补漏"}
 {"key": "sniff/sniffer/override-destination", "kerlico": "yes", "where": "", "note": "用嗅探结果作为实际访问，默认 true。建议实现：决定嗅探结果只用于路由还是改写目标，是嗅探的基本语义"}
-{"key": "sniff/sniffer/parse-pure-ip", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：honor parse_pure_ip in should_sniff_target"}
+{"key": "sniff/sniffer/parse-pure-ip", "kerlico": "yes", "where": "crates/egress/src/sniff.rs", "note": "parse-pure-ip 控制仅对纯 IP 目标嗅探或结合 force-domain 对域名目标嗅探"}
 {"key": "sniff/sniffer/port-whitelist", "kerlico": "na", "where": "", "note": "Mihomo 已废弃的旧写法，现名 sniff-ports"}
-{"key": "sniff/sniffer/skip-domain", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：skip sniff for matching hosts"}
+{"key": "sniff/sniffer/skip-domain", "kerlico": "yes", "where": "crates/egress/src/sniff.rs", "note": "skip-domain、force-domain、skip-src-address、skip-dst-address 支持通配符及 geoip:/geosite:/rule-set: 条目"}
 {"key": "sniff/sniffer/skip-dst-address", "kerlico": "no", "where": "", "note": "跳过嗅探的目标 IP 段。建议暂不实现：嗅探上线后按需要再加"}
 {"key": "sniff/sniffer/skip-src-address", "kerlico": "no", "where": "", "note": "跳过嗅探的来源 IP 段。建议暂不实现：嗅探上线后按需要再加"}
 {"key": "sniff/sniffer/sniff", "kerlico": "yes", "where": "", "note": "需要嗅探的协议。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
 {"key": "sniff/sniffer/sniff-override-destination", "kerlico": "no", "where": "", "note": "协议级覆盖全局 override-destination。建议暂不实现：协议级覆盖，先做全局开关"}
 {"key": "sniff/sniffer/sniff-ports", "kerlico": "yes", "where": "", "note": "协议嗅探端口范围。建议实现：只嗅探常用端口，减少首包等待"}
 {"key": "sniff/sniffer/sniffing", "kerlico": "na", "where": "", "note": "Mihomo 已废弃的旧写法，现名 sniff"}
-{"key": "sniff/sniffing/combo", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：sniff in all inbounds + more protocols"}
+{"key": "sniff/sniffing/combo", "kerlico": "yes", "where": "crates/egress/src/sniff.rs", "note": "全部入站共用调度器嗅探阶段，覆盖 8 种协议及多包 QUIC Initial 重组"}
 {"key": "sniff/sniffing/dest-override", "kerlico": "yes", "where": "", "note": "按指定类型重置目标。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
 {"key": "sniff/sniffing/domains-excluded", "kerlico": "yes", "where": "", "note": "结果在列表内时不重置目标。建议实现：部分应用校验 SNI，改写目标会失败，要能排除"}
 {"key": "sniff/sniffing/enabled", "kerlico": "yes", "where": "", "note": "是否开启流量探测。建议实现：kerlico 没有任何嗅探；TUN 目标只有 IP，域名规则不命中，这是补齐路由的前提"}
@@ -317,8 +317,8 @@
 {"key": "transport/finalmask-custom-transform/op", "kerlico": "no", "where": "", "note": "header-custom transform 操作，文档未写。建议暂不实现：Xray 实验字段，文档未写，kerlico 没有 FinalMask 层"}
 {"key": "transport/finalmask-quic/bbr-profile", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "只有固定 quinn BBR 配置，`limits.congestion: bbr`；没有 aggressive、conservative 预设"}
 {"key": "transport/finalmask-quic/brutal-disable-loss-compensation", "kerlico": "no", "where": "", "note": "QUIC 调整字段，文档未写。建议暂不实现：依赖 Brutal，kerlico 没有"}
-{"key": "transport/finalmask-quic/brutal-down", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：split send/recv brutal rates; test pacing"}
-{"key": "transport/finalmask-quic/brutal-up", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：install a Brutal sender controller in the Hysteria2 client from `up`"}
+{"key": "transport/finalmask-quic/brutal-down", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/outbound.rs", "note": "通过 Hysteria-CC-RX 通告下行速率并驱动对端 Brutal 发送控制"}
+{"key": "transport/finalmask-quic/brutal-up", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/outbound.rs", "note": "按 min(up, peer_rx) 安装每连接 Quinn Brutal 拥塞控制器控制发送速率"}
 {"key": "transport/finalmask-quic/congestion", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "Hysteria2 `limits.congestion` 取 bbr、reno；TUIC、Naive、ShadowQUIC 各有 `congestion_control`；没有 brutal、force-brutal；XHTTP H3、MASQUE 不可配"}
 {"key": "transport/finalmask-quic/debug", "kerlico": "no", "where": "", "note": "启用拥塞日志。建议暂不实现：kerlico 的 QUIC 参数写死在各协议里，没有用户场景前不开放"}
 {"key": "transport/finalmask-quic/disable-chrome-parrot", "kerlico": "no", "where": "", "note": "QUIC 调整字段，文档未写。建议暂不实现：kerlico 的 QUIC 参数写死在各协议里，没有用户场景前不开放"}
@@ -466,17 +466,17 @@
 {"key": "transport/httpupgrade/type", "kerlico": "yes", "where": "crates/protocol-vless/src/profile.rs, crates/protocol-trojan/src/config.rs, crates/protocol-vmess/src/carrier.rs", "note": "`transport.type: httpupgrade`"}
 {"key": "transport/hysteria/auth", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "`auth`，节点侧在 members 的 native_credential"}
 {"key": "transport/hysteria/combo", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/config.rs", "note": "kerlico 的 Hysteria2 是独立协议，不能作为 Xray 那样的 hysteria 传输叠加 VLESS"}
-{"key": "transport/hysteria/content", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（夸大）：test masquerade plans and fix proxy"}
+{"key": "transport/hysteria/content", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "string 伪装响应体内容"}
 {"key": "transport/hysteria/dir", "kerlico": "no", "where": "", "note": "file 类型目录。建议暂不实现：kerlico 不想内置静态文件服务，proxy、string 够用"}
-{"key": "transport/hysteria/headers", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（夸大）：test masquerade plans and fix proxy"}
+{"key": "transport/hysteria/headers", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "string 伪装附加响应头"}
 {"key": "transport/hysteria/hysteria", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "协议 `hysteria2`，两端都有；和官方实现按原生协议互通"}
-{"key": "transport/hysteria/insecure", "kerlico": "no", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（空壳）：implement an actual reverse proxy to masquerade.url (hyper client, TLS verify toggle, Host rewrite) with a test"}
-{"key": "transport/hysteria/masquerade", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（夸大）：test masquerade plans and fix proxy"}
-{"key": "transport/hysteria/rewrite-host", "kerlico": "no", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（空壳）：implement an actual reverse proxy to masquerade.url (hyper client, TLS verify toggle, Host rewrite) with a test"}
-{"key": "transport/hysteria/status-code", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（夸大）：test masquerade plans and fix proxy"}
-{"key": "transport/hysteria/type", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（夸大）：test masquerade plans and fix proxy"}
+{"key": "transport/hysteria/insecure", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "proxy 伪装访问 HTTPS 上游时支持 insecure 跳过证书校验"}
+{"key": "transport/hysteria/masquerade", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "支持 string、file 与真实 HTTP/HTTPS 反向代理 proxy 伪装"}
+{"key": "transport/hysteria/rewrite-host", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "proxy 伪装转发时按 rewrite_host 改写 Host 头"}
+{"key": "transport/hysteria/status-code", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "string 伪装自定义 HTTP 状态码"}
+{"key": "transport/hysteria/type", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "支持 string、file、proxy 三种伪装类型"}
 {"key": "transport/hysteria/udp-idle-timeout", "kerlico": "partial", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "没有 UDP 专用项；业务空闲取 `limits.idle_timeout_ms` 和全局 `limits.idle_timeout_ms` 的较小值"}
-{"key": "transport/hysteria/url", "kerlico": "no", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "M11 审计（空壳）：implement an actual reverse proxy to masquerade.url (hyper client, TLS verify toggle, Host rewrite) with a test"}
+{"key": "transport/hysteria/url", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/inbound.rs", "note": "proxy 伪装上游 URL，由真实反向代理转发"}
 {"key": "transport/hysteria/version", "kerlico": "yes", "where": "crates/protocol-hysteria2/src/config.rs", "note": "版本 2 用协议 `hysteria2`；版本 1 另有协议 `hysteria1`"}
 {"key": "transport/hysteria/x-forwarded", "kerlico": "no", "where": "", "note": "proxy 类型 X-Forwarded 头，文档未写。建议暂不实现：proxy 伪装的细节字段，先做 url 和 rewrite-host"}
 {"key": "transport/list/methods", "kerlico": "na", "where": "", "note": "只描述 Xray 文档的传输列表页结构，不是能力"}
@@ -673,14 +673,14 @@
 {"key": "tun/redirect/protocol", "kerlico": "no", "where": "", "note": "透明代理 Redirect 入站。建议暂不实现：只能接 TCP；要做透明代理优先 TProxy"}
 {"key": "tun/system-proxy/http-proxy-env", "kerlico": "no", "where": "crates/protocol-http/src/inbound.rs", "note": "M11 审计（缺失）：document as unsupported or implement set_system_proxy"}
 {"key": "tun/system-proxy/set-system-proxy", "kerlico": "no", "where": "", "note": "http、mixed 入站自动设置和清理系统代理。建议暂不实现：kerlico 只发行 Linux x86_64 内核程序，不碰桌面设置"}
-{"key": "tun/tproxy/combo", "kerlico": "partial", "where": "crates/net/src/transparent.rs", "note": "M11 审计（夸大）：recvmsg + IP_RECVORIGDSTADDR for UDP tproxy, IPv6 IP_TRANSPARENT"}
+{"key": "tun/tproxy/combo", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "TProxy 透明代理支持 IPv4/IPv6 TCP 与 UDP"}
 {"key": "tun/tproxy/network", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "`tproxy` 支持 `network`（`tcp`、`udp` 或同时启用）控制透明代理协议族"}
 {"key": "tun/tproxy/protocol", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "入站 `type = \"tproxy\"` 与 `type = \"redirect\"`"}
-{"key": "tun/tproxy/tproxy", "kerlico": "partial", "where": "crates/net/src/transparent.rs", "note": "M11 审计（夸大）：recvmsg + IP_RECVORIGDSTADDR for UDP tproxy, IPv6 IP_TRANSPARENT"}
-{"key": "tun/transparent/combo", "kerlico": "partial", "where": "crates/net/src/transparent.rs", "note": "M11 审计（夸大）：recvmsg + IP_RECVORIGDSTADDR for UDP tproxy, IPv6 IP_TRANSPARENT"}
+{"key": "tun/tproxy/tproxy", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "IP_TRANSPARENT / IPV6_TRANSPARENT 与 RECVORIGDSTADDR 透明套接字支持 TCP 与 UDP"}
+{"key": "tun/transparent/combo", "kerlico": "yes", "where": "crates/net/src/transparent.rs", "note": "redirect（SO_ORIGINAL_DST）与 tproxy（IP_TRANSPARENT + RECVORIGDSTADDR）双栈透明接入"}
 {"key": "tun/tun/address", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`addresses`，每个地址族最多一个"}
-{"key": "tun/tun/auto-detect-interface", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：apply outbound_interface to global dialer interface when TUN is active"}
-{"key": "tun/tun/auto-outbounds-interface", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：apply outbound_interface to global dialer interface when TUN is active"}
+{"key": "tun/tun/auto-detect-interface", "kerlico": "yes", "where": "crates/protocol-tun/src/automation.rs", "note": "自动探测默认出口网卡并绑定全局出站拨号"}
+{"key": "tun/tun/auto-outbounds-interface", "kerlico": "yes", "where": "crates/protocol-tun/src/automation.rs", "note": "将指定出口网卡注入全局 DialerOptions"}
 {"key": "tun/tun/auto-redirect", "kerlico": "no", "where": "", "note": "自动配置 iptables/nftables 重定向 TCP。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
 {"key": "tun/tun/auto-redirect-input-mark", "kerlico": "no", "where": "", "note": "auto-redirect 输入标记（文档未写）。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
 {"key": "tun/tun/auto-redirect-iproute2-fallback-rule-index", "kerlico": "no", "where": "", "note": "auto-redirect 回退规则索引（文档未写）。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
@@ -688,8 +688,8 @@
 {"key": "tun/tun/auto-redirect-output-mark", "kerlico": "no", "where": "", "note": "auto-redirect 输出标记（文档未写）。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
 {"key": "tun/tun/auto-redirect-reset-mark", "kerlico": "no", "where": "", "note": "auto_redirect 预匹配使用的连接重置标记。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
 {"key": "tun/tun/auto-redirect-tproxy-mark", "kerlico": "no", "where": "", "note": "auto_redirect iptables 后端为 IPv6 TCP 使用的连接 TPROXY 标记。建议暂不实现：要写 iptables、nftables，kerlico 先做 auto-route"}
-{"key": "tun/tun/auto-route", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：loop guard (apply outbound_interface or fwmark rule), IPv6 default route, error reporting, root netns test"}
-{"key": "tun/tun/auto-system-dns-to-gateway", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：set DNS routing domain, report failure"}
+{"key": "tun/tun/auto-route", "kerlico": "yes", "where": "crates/protocol-tun/src/automation.rs", "note": "安装 IPv4/IPv6 专用路由表、策略规则与防回环旁路规则"}
+{"key": "tun/tun/auto-system-dns-to-gateway", "kerlico": "yes", "where": "crates/protocol-tun/src/automation.rs", "note": "通过 resolvectl 将 TUN 接口设为全局 DNS 路由域并指向 TUN 网关"}
 {"key": "tun/tun/auto-system-routing-table", "kerlico": "yes", "where": "", "note": "自动写入系统路由表的 CIDR 列表。建议实现：kerlico 明确不改系统路由，用户要自己 ip route；这是 TUN 开箱可用最大的缺口"}
 {"key": "tun/tun/auto-system-wfp-block-leak", "kerlico": "no", "where": "", "note": "Windows WFP 防泄漏过滤。建议暂不实现：Windows WFP；kerlico 只发行 Linux x86_64"}
 {"key": "tun/tun/combo", "kerlico": "partial", "where": "crates/protocol-tun/src/lib.rs", "note": "只有 Linux 接口创建、地址、MTU、固定用户态栈；没有路由、DNS、包名和 UID 过滤"}
@@ -697,10 +697,10 @@
 {"key": "tun/tun/desc", "kerlico": "no", "where": "", "note": "Windows 接口描述，默认 Wintun。建议暂不实现：Windows 接口描述；kerlico 只发行 Linux x86_64"}
 {"key": "tun/tun/device", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`name`"}
 {"key": "tun/tun/disable-icmp-forwarding", "kerlico": "no", "where": "", "note": "禁用 ICMP 转发。建议暂不实现：kerlico 不转发 ICMP，只应答发给用户态栈地址的 echo"}
-{"key": "tun/tun/dns", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：set DNS routing domain, report failure"}
-{"key": "tun/tun/dns-address", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：use matches_dns_hijack in the TUN flow path"}
-{"key": "tun/tun/dns-hijack", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：use DnsHijackRule/TunDnsMode when deciding hijack"}
-{"key": "tun/tun/dns-mode", "kerlico": "partial", "where": "", "note": "M11 审计（夸大）：use DnsHijackRule/TunDnsMode when deciding hijack"}
+{"key": "tun/tun/dns", "kerlico": "yes", "where": "crates/protocol-tun/src/automation.rs", "note": "配置 TUN 接口系统 DNS 地址并随接口生命周期恢复"}
+{"key": "tun/tun/dns-address", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "纳入 TUN 节点 DNS 劫持目标地址集"}
+{"key": "tun/tun/dns-hijack", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "按 dns-hijack 条目生成节点级 hijack-dns 规则并就地应答"}
+{"key": "tun/tun/dns-mode", "kerlico": "yes", "where": "crates/config/src/mihomo.rs", "note": "支持 fake-ip 与 redir-host 模式映射"}
 {"key": "tun/tun/enable", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "`local_inbounds` 里有 tun 节点即启用"}
 {"key": "tun/tun/endpoint-independent-nat", "kerlico": "no", "where": "", "note": "独立于端点的 NAT。建议暂不实现：kerlico 每个 UDP 来源经出站关联，要先有 NAT 表；sing-box 也废弃了这一项"}
 {"key": "tun/tun/exclude-dst-port", "kerlico": "no", "where": "", "note": "排除目标端口（文档未写）。建议暂不实现：kerlico 不改路由，用户可用 ip rule 或防火墙实现"}
@@ -753,8 +753,8 @@
 {"key": "tun/tun/route-exclude-address", "kerlico": "yes", "where": "", "note": "auto-route 排除网段。建议实现：kerlico 明确不改系统路由，用户要自己 ip route；这是 TUN 开箱可用最大的缺口"}
 {"key": "tun/tun/route-exclude-address-set", "kerlico": "no", "where": "", "note": "规则集 CIDR 加入防火墙，匹配绕过。建议暂不实现：kerlico 没有规则集，也不写防火墙"}
 {"key": "tun/tun/sendmsgx", "kerlico": "no", "where": "", "note": "启用 sendmsgx（文档未写）。建议暂不实现：Mihomo 文档未写的调优项，kerlico 用 tun-rs 读写"}
-{"key": "tun/tun/stack", "kerlico": "partial", "where": "crates/protocol-wireguard/src/ip.rs", "note": "M11 审计（夸大）：accept and ignore/validate stack"}
-{"key": "tun/tun/strict-route", "kerlico": "no", "where": "", "note": "M11 审计（空壳）：emit blackhole/unreachable rules or reject unsupported option"}
+{"key": "tun/tun/stack", "kerlico": "yes", "where": "crates/protocol-tun/src/lib.rs", "note": "支持 system、gvisor、mixed 配置写法"}
+{"key": "tun/tun/strict-route", "kerlico": "yes", "where": "crates/protocol-tun/src/automation.rs", "note": "安装 strict-route 策略规则并在退出时清理"}
 {"key": "tun/tun/udp-timeout", "kerlico": "partial", "where": "crates/protocol-wireguard/src/server/flows.rs", "note": "取用户态栈默认 `udp_idle_timeout_ms`（60 秒）和全局 `limits.idle_timeout_ms` 的较小值；TUN 选项不可配"}
 {"key": "tun/tun/user-level", "kerlico": "no", "where": "", "note": "用户等级，默认 0。建议暂不实现：Xray 的策略等级；kerlico 用 members 和路由 `user` 表达，TUN 没有用户"}
 {"key": "tun/tun/xray-tun-fd", "kerlico": "no", "where": "", "note": "XRAY_TUN_FD 传入 FD，Linux 可选用于轻量或非特权实现。建议暂不实现：外部传入 fd 用于非特权实现，kerlico 需要 CAP_NET_ADMIN"}

@@ -4231,7 +4231,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "clap",
  "kerlico-anytls",
@@ -4279,7 +4279,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-anytls"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "kerlico-config",
  "kerlico-core",
@@ -4301,7 +4301,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-config"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "argon2 0.5.3",
  "base64 0.23.1",
@@ -4318,7 +4318,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-control"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -4338,7 +4338,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-core"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "futures-util",
  "idna",
@@ -4354,7 +4354,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-device"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "kerlico-config",
@@ -4379,7 +4379,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-dns"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4405,7 +4405,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-easytier"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "cidr",
  "easytier",
@@ -4420,7 +4420,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-egress"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4446,7 +4446,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-engine"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "kerlico-config",
  "kerlico-core",
@@ -4461,7 +4461,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-gost-relay"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "kerlico-config",
  "kerlico-core",
@@ -4477,7 +4477,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-http"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4503,7 +4503,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-http-carrier"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "bytes",
  "h2",
@@ -4516,7 +4516,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-hysteria1"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4542,7 +4542,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-hysteria2"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "blake2 0.11.0",
  "bytes",
@@ -4572,7 +4572,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-masque"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4597,7 +4597,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-mieru"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "bytes",
  "chacha20poly1305 0.10.1",
@@ -4617,7 +4617,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-naive"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4649,7 +4649,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-net"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -4678,7 +4678,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-openconnect"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "bytes",
  "httparse",
@@ -4694,7 +4694,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-openvpn"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "aes 0.8.4",
  "base64 0.23.1",
@@ -4721,7 +4721,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-routing"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -4735,7 +4735,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-shadowquic"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "bytes",
  "kerlico-config",
@@ -4759,7 +4759,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-shadowsocks"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4783,7 +4783,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-shadowsocksr"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "aes 0.9.3",
  "base64 0.23.1",
@@ -4810,7 +4810,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-shadowtls"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "hmac 0.12.1",
@@ -4837,7 +4837,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-snell"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "argon2 0.5.3",
  "base64 0.23.1",
@@ -4858,7 +4858,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-socks"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "kerlico-config",
  "kerlico-core",
@@ -4873,7 +4873,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-ss2022"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4892,7 +4892,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-ssh"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "kerlico-config",
@@ -4910,7 +4910,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-sudoku"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "base64 0.23.1",
@@ -4951,7 +4951,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-tailscale"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "blake2 0.10.6",
@@ -4978,7 +4978,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-tor"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "arti-client",
  "async-trait",
@@ -5003,7 +5003,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-trojan"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -5036,7 +5036,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-trusttunnel"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -5068,7 +5068,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-tuic"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -5094,7 +5094,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-tun"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "kerlico-config",
  "kerlico-core",
@@ -5110,7 +5110,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-vless"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -5160,7 +5160,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-vmess"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -5201,7 +5201,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-wireguard"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "base64 0.23.1",
  "boringtun",
@@ -5222,7 +5222,7 @@ dependencies = [
 
 [[package]]
 name = "kerlico-zerotier"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "kerlico-config",
  "kerlico-core",

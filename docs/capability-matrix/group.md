@@ -33,10 +33,10 @@
 | `default-selected` | 默认选择节点；为空或不存在选第一个 | 有 |  |  | 已实现 | 通过 | 取值：`节点名` |
 | `disable-udp` | 禁用该组 UDP | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true` |
 | `empty-fallback` | 组为空时回退，默认 COMPATIBLE | 有 |  |  | 部分 | 未测 | 取值：`proxy 名`<br>约束：不支持填代理组 |
-| `exclude-filter` | 排除节点，` 分隔多个正则 | 有 |  |  | 部分 | 未测 | 取值：`正则` |
+| `exclude-filter` | 排除节点，` 分隔多个正则 | 有 |  |  | 已实现 | 通过 | 取值：`正则` |
 | `exclude-type` | 按类型排除，\| 分隔，无视大小写，不支持正则 | 有 |  |  | 已实现 | 未测 | 取值：`Shadowsocks\|Http`<br>约束：仅排除引入的出站代理 |
 | `expected-status` | 健康检查期望状态码，默认 * | 有 |  |  | 已实现 | 通过 | 取值：`*`、`200/302`、`200/302/400-503`、`204`、`400-503` |
-| `filter` | 筛选节点，` 分隔多个正则 | 有 |  |  | 部分 | 未测 | 取值：`正则`<br>约束：仅作用于引入集合与 include-all-proxies |
+| `filter` | 筛选节点，` 分隔多个正则 | 有 |  |  | 已实现 | 通过 | 取值：`正则`<br>约束：仅作用于引入集合与 include-all-proxies |
 | `hidden` | API 返回 hidden | 有 |  |  | 未实现 | 未测 | 取值：`false`、`true` |
 | `icon` | API 返回 icon | 有 |  |  | 未实现 | 未测 | 取值：`字符串` |
 | `include-all` | 引入所有出站及集合，按名称排序 | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true`<br>约束：不含策略组 |

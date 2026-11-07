@@ -540,7 +540,12 @@ fn accept_tcp(peer: &mut RuntimePeer, bytes: Vec<u8>) -> Result<()> {
         return Err(Error::ResourceLimit);
     }
     let lease = peer.context.stream_budget.try_acquire()?;
-    let stream = TcpStream::accept(peer.stack.clone(), tuple, bytes, peer.context.cancel.clone())?;
+    let stream = TcpStream::accept(
+        peer.stack.clone(),
+        tuple,
+        bytes,
+        peer.context.cancel.clone(),
+    )?;
     peer.stack.poll()?;
     let access = if peer.context.peer_addr.is_none() {
         peer.access.with_observed_source(tuple.source)

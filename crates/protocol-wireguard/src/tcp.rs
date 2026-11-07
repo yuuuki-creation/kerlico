@@ -33,7 +33,11 @@ impl TcpStream {
         // 入站 SYN 与监听 socket 同在一次加锁内入队：另一任务的轮询若先看到没收到 SYN 的
         // 监听 socket，会把它当作握手失败取消，客户端收到 RST。
         let syn = syn
-            .map(|syn| stack.budget.packet(rewrite_tcp(&syn, remote, local)?, false))
+            .map(|syn| {
+                stack
+                    .budget
+                    .packet(rewrite_tcp(&syn, remote, local)?, false)
+            })
             .transpose()?;
         let mut state = stack.lock()?;
         if state.tcp.len() + state.udp.len() >= stack.limits.max_flows {

@@ -20,9 +20,9 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `combo` | 代理集合维度 | 有 |  |  | 部分 | 未测 | type：`file`、`http`、`inline`<br>content：`age-armor`、`base64`、`uri`、`yaml`<br>health-check：`lazy`、`off`、`on`<br>override：`fields`、`none`、`override-expr`<br>filter：`exclude-filter`、`exclude-type`、`filter`、`none` |
 | `age-secret-key` | 解密 age armor 配置 | 有 |  |  | 未实现 | 未测 | 取值：`AGE-SECRET-KEY`<br>约束：仅 x25519 与 mlkem768-x25519<br>约束：内容仅 age armor 格式<br>约束：核心不主动发送公钥，可在 header 设 X-Age-Public-Key |
-| `exclude-filter` | 排除节点，` 分隔多个正则 | 有 |  |  | 部分 | 未测 | 取值：`正则` |
+| `exclude-filter` | 排除节点，` 分隔多个正则 | 有 |  |  | 已实现 | 通过 | 取值：`正则` |
 | `exclude-type` | 按配置 type 排除，\| 分隔 | 有 |  |  | 已实现 | 未测 | 取值：`ss\|http` |
-| `filter` | 筛选节点，` 分隔多个正则 | 有 |  |  | 部分 | 未测 | 取值：`正则` |
+| `filter` | 筛选节点，` 分隔多个正则 | 有 |  |  | 已实现 | 通过 | 取值：`正则` |
 | `header` | 请求头 | 有 |  |  | 已实现 | 未测 | 取值：`映射` |
 | `health-check-enable` | 启用健康检查 | 有 |  |  | 已实现 | 未测 | 取值：`false`、`true` |
 | `health-check-expected-status` | 期望状态码 | 有 |  |  | 已实现 | 未测 | 取值：`同 group.common.expected-status` |

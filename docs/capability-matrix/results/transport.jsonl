@@ -1,25 +1,50 @@
+{"key": "dialer/common/dialer-proxy", "test": "pass", "evidence": "crates/protocol-wireguard/src/tests/runtime.rs::detour_carries_the_wireguard_carrier_through_the_upstream_outbound", "date": "2026-11-07"}
 {"key": "dialer/common/interface-name", "test": "pass", "evidence": "crates/net/tests/interface.rs::direct_uses_the_configured_interface (direct only; dialer path untested)", "date": "2026-11-06"}
 {"key": "dialer/common/ip-version", "test": "pass", "evidence": "crates/egress/tests/address_policy.rs", "date": "2026-11-06"}
+{"key": "dialer/common/routing-mark", "test": "pass", "evidence": "apps/kerlico/tests/dialer_marks.rs::every_outbound_socket_carries_the_compile_time_mark", "date": "2026-11-07"}
+{"key": "dialer/common/tfo", "test": "pass", "evidence": "crates/core-api/tests/socket_factory_lint.rs::outbound_sockets_go_through_dialer_options", "date": "2026-11-07"}
 {"key": "dialer/dial/bind-interface", "test": "pass", "evidence": "crates/net/tests/interface.rs::direct_uses_the_configured_interface (direct only; dialer path untested)", "date": "2026-11-06"}
 {"key": "dialer/dial/connect-timeout", "test": "pass", "evidence": "crates/core-api/src/lib.rs::cancellation_and_budget", "date": "2026-11-06"}
+{"key": "dialer/dial/detour", "test": "pass", "evidence": "crates/protocol-wireguard/src/tests/runtime.rs::detour_carries_the_wireguard_carrier_through_the_upstream_outbound", "date": "2026-11-07"}
 {"key": "dialer/dial/domain-strategy", "test": "pass", "evidence": "crates/egress/tests/address_policy.rs", "date": "2026-11-06"}
+{"key": "dialer/dial/routing-mark", "test": "pass", "evidence": "apps/kerlico/tests/dialer_marks.rs::every_outbound_socket_carries_the_compile_time_mark", "date": "2026-11-07"}
+{"key": "dialer/dial/tcp-fast-open", "test": "pass", "evidence": "crates/core-api/tests/socket_factory_lint.rs::outbound_sockets_go_through_dialer_options", "date": "2026-11-07"}
+{"key": "dialer/dialer-proxy/chain", "test": "pass", "evidence": "crates/protocol-wireguard/src/tests/runtime.rs::detour_carries_the_wireguard_carrier_through_the_upstream_outbound", "date": "2026-11-07"}
+{"key": "dialer/dialer-proxy/provider-override", "test": "pass", "evidence": "crates/config/tests/provider_override.rs::dialing_fields_reach_every_type", "date": "2026-11-07"}
 {"key": "dialer/global/interface-name", "test": "pass", "evidence": "crates/net/tests/interface.rs::direct_uses_the_configured_interface (direct only; dialer path untested)", "date": "2026-11-06"}
+{"key": "dialer/global/routing-mark", "test": "pass", "evidence": "apps/kerlico/tests/dialer_marks.rs::every_outbound_socket_carries_the_compile_time_mark", "date": "2026-11-07"}
 {"key": "dialer/sockopt/accept-proxy-protocol", "test": "pass", "evidence": "crates/net/src/fallback.rs::proxy_protocol_v1_and_v2_roundtrip_and_preserve_payload (codec only; engine accept path untested)", "date": "2026-11-06"}
+{"key": "dialer/sockopt/dialer-proxy", "test": "pass", "evidence": "crates/protocol-wireguard/src/tests/runtime.rs::detour_carries_the_wireguard_carrier_through_the_upstream_outbound", "date": "2026-11-07"}
 {"key": "dialer/sockopt/domain-strategy", "test": "pass", "evidence": "crates/egress/tests/address_policy.rs", "date": "2026-11-06"}
 {"key": "dialer/sockopt/interface", "test": "pass", "evidence": "crates/net/tests/interface.rs::direct_uses_the_configured_interface (direct only; dialer path untested)", "date": "2026-11-06"}
+{"key": "dialer/sockopt/mark", "test": "pass", "evidence": "apps/kerlico/tests/dialer_marks.rs::every_outbound_socket_carries_the_compile_time_mark", "date": "2026-11-07"}
+{"key": "dialer/sockopt/tcp-fast-open", "test": "pass", "evidence": "crates/core-api/tests/socket_factory_lint.rs::outbound_sockets_go_through_dialer_options", "date": "2026-11-07"}
 {"key": "flow/vision/combo", "test": "pass", "evidence": "crates/protocol-vless/src/vision_io.rs::direct_boundary_preserves_raw_records_and_fragmented_response_addons; tools/interop_vless_matrix.py (Xray vision cases)", "date": "2026-11-06"}
 {"key": "flow/vision/vision", "test": "pass", "evidence": "crates/protocol-vless/src/vision_io.rs::direct_boundary_preserves_raw_records_and_fragmented_response_addons; tools/interop_vless_matrix.py (Xray vision cases)", "date": "2026-11-06"}
 {"key": "flow/vision/xtls-rprx-vision", "test": "pass", "evidence": "crates/protocol-vless/src/vision_io.rs::direct_boundary_preserves_raw_records_and_fragmented_response_addons; tools/interop_vless_matrix.py (Xray vision cases)", "date": "2026-11-06"}
 {"key": "flow/vless/addons", "test": "pass", "evidence": "crates/protocol-vless/src/vision_io.rs::direct_boundary_preserves_raw_records_and_fragmented_response_addons; tools/interop_vless_matrix.py (Xray vision cases)", "date": "2026-11-06"}
 {"key": "flow/vless/xtls-rprx-vision", "test": "pass", "evidence": "crates/protocol-vless/src/vision_io.rs::direct_boundary_preserves_raw_records_and_fragmented_response_addons; tools/interop_vless_matrix.py (Xray vision cases)", "date": "2026-11-06"}
+{"key": "mux/h2mux/protocol", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "mux/inbound/enabled", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "mux/inbound/padding", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "mux/multiplex/combo", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "mux/mux/combo", "test": "pass", "evidence": "crates/protocol-vless/src/mux/client.rs::concurrent_first_streams_share_the_connection_being_created; tools/interop_vless_matrix.py --mux (Xray peer)", "date": "2026-11-06"}
 {"key": "mux/mux/concurrency", "test": "pass", "evidence": "crates/protocol-vless/src/mux/client.rs::concurrent_first_streams_share_the_connection_being_created; tools/interop_vless_matrix.py --mux (Xray peer)", "date": "2026-11-06"}
 {"key": "mux/mux/enabled", "test": "pass", "evidence": "crates/protocol-vless/src/mux/client.rs::concurrent_first_streams_share_the_connection_being_created; tools/interop_vless_matrix.py --mux (Xray peer)", "date": "2026-11-06"}
 {"key": "mux/mux/mux", "test": "pass", "evidence": "crates/protocol-vless/src/mux/client.rs::concurrent_first_streams_share_the_connection_being_created; tools/interop_vless_matrix.py --mux (Xray peer)", "date": "2026-11-06"}
+{"key": "mux/outbound/enabled", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::pool_reuses_sessions_like_sing_mux_select_session", "date": "2026-11-07"}
+{"key": "mux/outbound/padding", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "mux/outbound/protocol", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "mux/sing-mux/combo", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "mux/sing-mux/enabled", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "mux/sing-mux/padding", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "mux/sing-mux/protocol", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "mux/smux/protocol", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "mux/wire/address", "test": "pass", "evidence": "crates/protocol-vless/src/mux/frame.rs::independent_mux_vector_and_all_truncations", "date": "2026-11-06"}
 {"key": "mux/wire/frame", "test": "pass", "evidence": "crates/protocol-vless/src/mux/frame.rs::independent_mux_vector_and_all_truncations", "date": "2026-11-06"}
 {"key": "mux/wire/network", "test": "pass", "evidence": "crates/protocol-vless/src/mux/frame.rs::independent_mux_vector_and_all_truncations", "date": "2026-11-06"}
 {"key": "mux/xmux/protocol", "test": "pass", "evidence": "third_party/xray-transport/tests/stream_xhttp_transport_tests.rs::default_xmux_fans_out_three_clients_then_reuses_a_released_slot (transport level; config mapping untested)", "date": "2026-11-06"}
+{"key": "mux/yamux/protocol", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "security/by-protocol/combo", "test": "pass", "evidence": "tools/interop_vless_matrix.py", "date": "2026-11-06"}
 {"key": "security/mtls/certificate", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::multiuser_basic_remains_required_with_optional_mtls", "date": "2026-11-06"}
 {"key": "security/mtls/private-key", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::multiuser_basic_remains_required_with_optional_mtls", "date": "2026-11-06"}
@@ -86,11 +111,18 @@
 {"key": "security/tls/utls-fingerprint", "test": "pass", "evidence": "third_party/xray-transport/tests/utls_tls_shaping_tests.rs::chrome_fingerprint_shapes_the_client_hello", "date": "2026-11-06"}
 {"key": "security/tls/verify-peer-cert-by-name", "test": "pass", "evidence": "third_party/xray-transport/tests/transport_tests.rs::tls_leaf_der_pin_short_circuits_name_and_chain_verification / tls_ca_pin_ors_verification_names_independently_from_sni_for_dns_and_ip_sans (transport level; kerlico config mapping only compiled in profile.rs::vless_outbound_compiles_extended_m2_transport_tls_and_mux_options)", "date": "2026-11-06"}
 {"key": "security/utls/client-fingerprint", "test": "pass", "evidence": "third_party/xray-transport/tests/utls_tls_shaping_tests.rs::chrome_fingerprint_shapes_the_client_hello", "date": "2026-11-06"}
+{"key": "sniff/action/combo", "test": "pass", "evidence": "crates/net/tests/sniff.rs::quic_chrome_hello_split_over_three_initials", "date": "2026-11-07"}
 {"key": "sniff/protocol/http", "test": "pass", "evidence": "crates/net/src/sniff.rs::tests::sniffs_tls_client_hello_and_http_host (byte parser only)", "date": "2026-11-06"}
 {"key": "sniff/protocol/quic", "test": "pass", "evidence": "crates/net/src/sniff.rs::tests::sniffs_quic_v1_initial_sni (byte parser only)", "date": "2026-11-06"}
 {"key": "sniff/protocol/tls", "test": "pass", "evidence": "crates/net/src/sniff.rs::tests::sniffs_tls_client_hello_and_http_host (byte parser only)", "date": "2026-11-06"}
+{"key": "sniff/sniffer/enable", "test": "pass", "evidence": "crates/protocol-socks/tests/sniff.rs::skip_and_force_lists_follow_mihomo", "date": "2026-11-07"}
+{"key": "sniff/sniffer/parse-pure-ip", "test": "pass", "evidence": "crates/protocol-socks/tests/sniff.rs::skip_and_force_lists_follow_mihomo", "date": "2026-11-07"}
+{"key": "sniff/sniffer/skip-domain", "test": "pass", "evidence": "crates/protocol-socks/tests/sniff.rs::skip_and_force_lists_follow_mihomo", "date": "2026-11-07"}
+{"key": "sniff/sniffing/combo", "test": "pass", "evidence": "crates/protocol-vless/tests/sniff.rs::vless_server_routes_raw_ip_tls_by_sniffed_sni", "date": "2026-11-07"}
 {"key": "transport/common/type", "test": "pass", "evidence": "tools/interop_vless_matrix.py", "date": "2026-11-06"}
 {"key": "transport/finalmask-quic/bbr-profile", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::udp_disabled_tcp_concurrency_and_cancel (streams); idle none", "date": "2026-11-06"}
+{"key": "transport/finalmask-quic/brutal-down", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::auth_reply_advertises_the_node_receive_rate_or_auto", "date": "2026-11-07"}
+{"key": "transport/finalmask-quic/brutal-up", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::client_up_paces_the_upload_with_brutal", "date": "2026-11-07"}
 {"key": "transport/finalmask-quic/congestion", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::udp_disabled_tcp_concurrency_and_cancel (streams); idle none", "date": "2026-11-06"}
 {"key": "transport/finalmask-quic/max-idle-timeout", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::udp_disabled_tcp_concurrency_and_cancel (streams); idle none", "date": "2026-11-06"}
 {"key": "transport/finalmask-quic/max-incoming-streams", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::udp_disabled_tcp_concurrency_and_cancel (streams); idle none", "date": "2026-11-06"}
@@ -131,8 +163,16 @@
 {"key": "transport/httpupgrade/protocol", "test": "pass", "evidence": "third_party/xray-transport/tests/stream_httpupgrade_tests.rs; third_party/xray-transport/tests/stream_websocket_tests.rs; tools/interop_vless_matrix.py", "date": "2026-11-06"}
 {"key": "transport/httpupgrade/type", "test": "pass", "evidence": "third_party/xray-transport/tests/stream_httpupgrade_tests.rs; third_party/xray-transport/tests/stream_websocket_tests.rs; tools/interop_vless_matrix.py", "date": "2026-11-06"}
 {"key": "transport/hysteria/auth", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix; tools/interop_hysteria2.py", "date": "2026-11-06"}
+{"key": "transport/hysteria/content", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_string_and_default_still_answer_locally", "date": "2026-11-07"}
+{"key": "transport/hysteria/headers", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_string_and_default_still_answer_locally", "date": "2026-11-07"}
 {"key": "transport/hysteria/hysteria", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix; tools/interop_hysteria2.py", "date": "2026-11-06"}
+{"key": "transport/hysteria/insecure", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_proxy_forwards_to_the_upstream", "date": "2026-11-07"}
+{"key": "transport/hysteria/masquerade", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_proxy_forwards_to_the_upstream", "date": "2026-11-07"}
+{"key": "transport/hysteria/rewrite-host", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_proxy_forwards_to_the_upstream", "date": "2026-11-07"}
+{"key": "transport/hysteria/status-code", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_string_and_default_still_answer_locally", "date": "2026-11-07"}
+{"key": "transport/hysteria/type", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_proxy_forwards_to_the_upstream", "date": "2026-11-07"}
 {"key": "transport/hysteria/udp-idle-timeout", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::udp_disabled_tcp_concurrency_and_cancel (streams); idle none", "date": "2026-11-06"}
+{"key": "transport/hysteria/url", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_proxy_forwards_to_the_upstream", "date": "2026-11-07"}
 {"key": "transport/hysteria/version", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix; tools/interop_hysteria2.py", "date": "2026-11-06"}
 {"key": "transport/masque/host", "test": "pass", "evidence": "tools/interop_masque.py; crates/protocol-masque/src/capsule.rs tests", "date": "2026-11-06"}
 {"key": "transport/masque/http3-fixed-params", "test": "pass", "evidence": "tools/interop_masque.py; crates/protocol-masque/src/capsule.rs tests", "date": "2026-11-06"}
@@ -228,13 +268,24 @@
 {"key": "transport/xmux/h-max-reusable-secs", "test": "pass", "evidence": "third_party/xray-transport/tests/stream_xhttp_transport_tests.rs::default_xmux_fans_out_three_clients_then_reuses_a_released_slot, c_max_reuse_times_retires_a_client_after_exactly_two_selections, h_max_request_times_rotates_packet_uploader_after_downlink_budget (transport level)", "date": "2026-11-06"}
 {"key": "transport/xmux/max-concurrency", "test": "pass", "evidence": "third_party/xray-transport/tests/stream_xhttp_transport_tests.rs::default_xmux_fans_out_three_clients_then_reuses_a_released_slot, c_max_reuse_times_retires_a_client_after_exactly_two_selections, h_max_request_times_rotates_packet_uploader_after_downlink_budget (transport level)", "date": "2026-11-06"}
 {"key": "transport/xmux/max-connections", "test": "pass", "evidence": "third_party/xray-transport/tests/stream_xhttp_transport_tests.rs::default_xmux_fans_out_three_clients_then_reuses_a_released_slot, c_max_reuse_times_retires_a_client_after_exactly_two_selections, h_max_request_times_rotates_packet_uploader_after_downlink_budget (transport level)", "date": "2026-11-06"}
+{"key": "tun/tproxy/combo", "test": "pass", "evidence": "crates/net/src/transparent.rs::tests::ipv6_and_udp_transparent_helpers", "date": "2026-11-07"}
 {"key": "tun/tproxy/network", "test": "pass", "evidence": "crates/net/src/transparent.rs::tests::redirect_and_tproxy_factories_validate_options (option validation only)", "date": "2026-11-06"}
 {"key": "tun/tproxy/protocol", "test": "pass", "evidence": "crates/net/src/transparent.rs::tests::redirect_and_tproxy_factories_validate_options (option validation only)", "date": "2026-11-06"}
+{"key": "tun/tproxy/tproxy", "test": "pass", "evidence": "crates/net/src/transparent.rs::tests::ipv6_and_udp_transparent_helpers", "date": "2026-11-07"}
+{"key": "tun/transparent/combo", "test": "pass", "evidence": "crates/net/src/transparent.rs::tests::ipv6_and_udp_transparent_helpers", "date": "2026-11-07"}
 {"key": "tun/tun/address", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs::tests::gateway_is_the_next_address; crates/protocol-tun/tests/config.rs::check_rejects_addresses_that_only_fail_at_run; crates/protocol-tun/tests/netns.rs (3 tests, #[ignore], root+netns)", "date": "2026-11-06"}
+{"key": "tun/tun/auto-detect-interface", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
+{"key": "tun/tun/auto-outbounds-interface", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::route_plan_renders_ipv4_ipv6_strict_and_bypass_rules", "date": "2026-11-07"}
+{"key": "tun/tun/auto-route", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
+{"key": "tun/tun/auto-system-dns-to-gateway", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::system_dns_commands_include_domain_and_dns", "date": "2026-11-07"}
 {"key": "tun/tun/auto-system-routing-table", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::parses_linux_default_interface_and_builds_tun_route_plan (command strings only)", "date": "2026-11-06"}
 {"key": "tun/tun/combo", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs::tests::gateway_is_the_next_address; crates/protocol-tun/tests/config.rs::check_rejects_addresses_that_only_fail_at_run; crates/protocol-tun/tests/netns.rs (3 tests, #[ignore], root+netns)", "date": "2026-11-06"}
 {"key": "tun/tun/congestion-controller", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs::tests::gateway_is_the_next_address; crates/protocol-tun/tests/config.rs::check_rejects_addresses_that_only_fail_at_run; crates/protocol-tun/tests/netns.rs (3 tests, #[ignore], root+netns)", "date": "2026-11-06"}
 {"key": "tun/tun/device", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs::tests::gateway_is_the_next_address; crates/protocol-tun/tests/config.rs::check_rejects_addresses_that_only_fail_at_run; crates/protocol-tun/tests/netns.rs (3 tests, #[ignore], root+netns)", "date": "2026-11-06"}
+{"key": "tun/tun/dns", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::system_dns_commands_include_domain_and_dns", "date": "2026-11-07"}
+{"key": "tun/tun/dns-address", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
+{"key": "tun/tun/dns-hijack", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
+{"key": "tun/tun/dns-mode", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
 {"key": "tun/tun/enable", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs::tests::gateway_is_the_next_address; crates/protocol-tun/tests/config.rs::check_rejects_addresses_that_only_fail_at_run; crates/protocol-tun/tests/netns.rs (3 tests, #[ignore], root+netns)", "date": "2026-11-06"}
 {"key": "tun/tun/gateway", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs::tests::gateway_is_the_next_address; crates/protocol-tun/tests/config.rs::check_rejects_addresses_that_only_fail_at_run; crates/protocol-tun/tests/netns.rs (3 tests, #[ignore], root+netns)", "date": "2026-11-06"}
 {"key": "tun/tun/inet4-address", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs::tests::gateway_is_the_next_address; crates/protocol-tun/tests/config.rs::check_rejects_addresses_that_only_fail_at_run; crates/protocol-tun/tests/netns.rs (3 tests, #[ignore], root+netns)", "date": "2026-11-06"}
@@ -247,6 +298,8 @@
 {"key": "tun/tun/protocol", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs::tests::gateway_is_the_next_address; crates/protocol-tun/tests/config.rs::check_rejects_addresses_that_only_fail_at_run; crates/protocol-tun/tests/netns.rs (3 tests, #[ignore], root+netns)", "date": "2026-11-06"}
 {"key": "tun/tun/route-address", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::parses_linux_default_interface_and_builds_tun_route_plan (command strings only)", "date": "2026-11-06"}
 {"key": "tun/tun/route-exclude-address", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::parses_linux_default_interface_and_builds_tun_route_plan (command strings only)", "date": "2026-11-06"}
+{"key": "tun/tun/stack", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
+{"key": "tun/tun/strict-route", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
 {"key": "tun/tun/udp-timeout", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs::tests::gateway_is_the_next_address; crates/protocol-tun/tests/config.rs::check_rejects_addresses_that_only_fail_at_run; crates/protocol-tun/tests/netns.rs (3 tests, #[ignore], root+netns)", "date": "2026-11-06"}
 {"key": "udp/handling/combo", "test": "pass", "evidence": "tools/interop_vless_matrix.py", "date": "2026-11-06"}
 {"key": "udp/hysteria/native", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::real_hysteria2_idle_association_records_timeout_after_zero_packet", "date": "2026-11-06"}

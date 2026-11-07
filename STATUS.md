@@ -4,7 +4,7 @@
 
 ## 版本
 
-最新发布：[v1.13.0](docs/releases/1.13.0.md)（[GitHub Release v1.13.0](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.13.0)），带 Linux `x86_64` 二进制。`M11` 审计发现 `M2`–`M10` 交付中有一批标为已实现的功能是空壳或夸大（2,080 项中 642 项），本版本修复了影响最大的一批并把能力总表改为审计后的真实状态；未修复的单元见 [M11 审计](docs/testing/m11-audit/README.md)。
+最新发布：[v1.14.0](docs/releases/1.14.0.md)（[GitHub Release v1.14.0](https://github.com/yuuuki-creation/kerlico/releases/tag/v1.14.0)），带 Linux `x86_64` 二进制。`M12`–`M13` 完成统一 DNS 管线与 IP 规则解析、运行时真实 Geo 数据与 `.srs`/`.mrs` 二进制规则集、Linux TUN 自动路由与防回环、全协议 `DialerOptions` 拨号工厂、`sing-mux` 线格式互通、uTLS ClientHello 指纹与完整套件通告、Hysteria2 Brutal 与伪装反向代理、控制面 WebSocket 推送与 `PATCH /configs`，并通过 Mihomo v1.19.33 同配置 14 场景与 600 秒混合流量长稳（34,632 请求 0 失败）对照验收（见 [Mihomo 替换验收](docs/testing/mihomo-replacement-acceptance-2026-11-07.md)）。
 
 构建基线：Rust `1.99.1`，Linux `x86_64`。
 
@@ -31,13 +31,14 @@
 | `M10`（`v1.11.0`） | Hysteria2 / TUIC 动态 UDP 端口跳跃与 `SUB-RULE`：TUIC `HoppingSocket`（`ports`/`mport`/`hop_interval`/`hop_interval_max`）、Hysteria2 毫秒级跳跃间隔与 `mport`、`RouteTable` 命名子规则表递归求值 | 已完成 |
 | `v1.12.0` | 17 协议 70 组合性能对标与数据面全栈加速：公网 1Gbps 跨机 30s 与内网环回 256MiB 双场景 70/70 达标（`>= 78%` Mihomo），8 流总吞吐分别达 Mihomo 的 109.1% 与 103.2%，双端峰值内存占 Mihomo 中位数约 55.1% | 已发布 |
 | `M11`（`v1.13.0`） | 真实化：审计 2,080 项已实现标注；修复 OpenVPN 服务端默认账号与证书校验、路由条件全匹配、SIP003 静默降级；测速与健康检查、热重载、远程资源下载、连接表、OpenVPN 服务端、Mihomo 字段映射、密钥生成与 `cache.db` 改为真实实现；能力总表按审计回写 | 已发布 |
-| `M12` 起 | M11 审计剩余单元：DNS 管线、`.srs`/`.mrs` 与 Geo 运行时加载、ACME、服务端 ECH、sing-mux 线格式、拨号选项覆盖、TUN 自动化、TProxy UDP、VLESS Reverse、Hysteria2 带宽与 masquerade 等 | 待做 |
+| `M12`–`M13`（`v1.14.0`） | Mihomo 替换就绪与真实化收口：统一 DNS 管线与 IP 规则解析、运行时真实 Geo 与 `.srs`/`.mrs` 规则集、Linux TUN 自动路由与防回环、全协议 `DialerOptions` 套接字工厂、`sing-mux` 线格式互通、uTLS ClientHello 指纹与完整套件通告、Hysteria2 Brutal 与伪装反代、全局入站嗅探与 TProxy UDP、控制面 WebSocket 与 `PATCH /configs`；Mihomo v1.19.33 同配置 14 场景与 600 秒长稳（34,632 请求 0 失败）对照验收通过 | 已发布 |
+| `M14` 起 | 剩余服务端与外围子项：内置 ACME 协议签发、服务端 ECH 解密、VLESS Reverse 注册隧道、内置 NTP 后台校准循环等 | 待做 |
 
 验证规则见 [0012](docs/decisions/0012-simplified-delivery-and-verification.md)。跨进程设备 daemon/IPC 不在计划内，出现多进程部署需求时再排。
 
 ## 三核心主要功能对齐拓扑
 
-[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 1,147 项、部分实现 670 项、未实现 2,214 项、不适用 329 项；实测通过 1,336 项，只计指向具名测试或互通用例的项。`M11` 前的通过标注多数没有指向具体测试，已按 [M11 审计](docs/testing/m11-audit/README.md) 改写。下图是 `M0`–`M7` 的原规划拓扑，其中部分节点经审计为空壳，以能力总表为准。
+[能力总表](docs/capability-matrix/README.md) 汇总 Mihomo、sing-box、Xray 文档共 4,360 项：当前已实现 1,353 项、部分实现 530 项、未实现 2,148 项、不适用 329 项；实测通过 1,540 项，只计指向具名测试或互通用例的项。下图是 `M0`–`M7` 的架构模块拓扑，逐项状态以能力总表为准。
 
 ```mermaid
 flowchart TD
@@ -128,11 +129,11 @@ flowchart TD
 | 能力 | 现状 |
 | --- | --- |
 | 协议模块 | 30 个进入默认构建。双端 22 个（含 MASQUE、OpenVPN）；仅入站：TUN、Mixed、Redirect、TProxy；仅出站：SSH、Gost Relay、Tor、OpenConnect、Tailscale、EasyTier、ZeroTier、DNS |
-| 节点与出站 | 独立节点；单一 `EgressRuntime`/`Dispatcher`；`Local`/`Remote` 分支；`FamilyMode`；`select`/`url-test`/`fallback`/`load-balance` 策略组按后台实测延迟选择；http 订阅经出站下载；`detour` 与 `routing_mark` 只在 ss、trojan、vless、vmess 的 TCP 路径生效 |
-| 路由 | `routes` / `route` 按域名、正则、`rule-set`/`rule-providers`（远程规则集经出站下载并运行中刷新）、CIDR、来源 IP/端口、网络、协议、节点、用户与逻辑规则选择出站或策略组，或执行 `sniff`/`resolve`/`hijack-dns`/`reject`；GeoIP/GeoSite 运行时只用内置小表；`.srs`/`.mrs` 为私有格式；`resolve` 后 IP 规则不匹配域名目标；`in_type`/`in_port`/`dscp`/`uid` 编译期拒绝 |
-| DNS | 本地出网解析用 `hosts` 与第一个 UDP/TCP/TLS 上游；DoH、DNS 规则表与 Fake-IP 双栈池只作用于劫持的 DNS 报文；无 DoQ、乐观缓存、ECS；`dns.listen` 不监听 |
-| TUN | Linux 系统接口与 `auto-route`（仅 IPv4 默认路由）；`strict-route`、`auto-redirect` 与出口防回环未生效；Fake-IP/反向映射/首包嗅探还原域名 |
-| 控制 | HTTP 控制面：`/v1/*` 统计；Clash/Mihomo 兼容的策略切换、实测延迟、`/connections` 实时连接与断开、`/rules`、`/memory`、`/dns/query`、`PUT /configs` 与 `/restart` 热重载、订阅与规则提供者更新；无 WebSocket 推送；`PATCH /configs` 未实现 |
+| 节点与出站 | 独立节点；单一 `EgressRuntime`/`Dispatcher`；`Local`/`Remote` 分支；`FamilyMode`；`select`/`url-test`/`fallback`/`load-balance` 策略组按后台实测延迟选择；http 订阅经出站下载，`override` 先于字段映射应用；全部出站与 DNS 上游统一经 `DialerOptions` 套接字工厂（覆盖 `detour`/`dialer-proxy`、`routing_mark`、`interface_name`、TFO、MPTCP、uTLS `client-fingerprint` 与 `skip-cert-verify`）；`sing-mux`（`smux`/`yamux`/`h2mux` + padding）与上游线格式互通（含 SS2022） |
+| 路由与嗅探 | `routes` / `route` 按域名、正则、`rule-set`/`rule-providers`（真实二进制 `.srs` v1–v4 与 `.mrs` v1，远程经出站下载并运行中刷新）、真实 Geo（`geoip.dat`、`geosite.dat`、`country.mmdb`、`ASN.mmdb`）、CIDR、来源 IP/端口、网络、协议、进程（惰性反查）、节点、用户与逻辑规则选择出站或策略组，或执行 `sniff`/`resolve`/`hijack-dns`/`reject`；未标 `no-resolve` 的 IP/GeoIP/ASN 规则自动解析域名目标；全部入站共用调度器嗅探阶段（TLS/HTTP/多包 QUIC/BT/DTLS/STUN/SSH/RDP），支持 `geoip:`/`geosite:`/`rule-set:` 跳过名单 |
+| DNS | 本地出网、劫持 DNS、`dns.listen`（UDP/TCP）与 `/dns/query` 共用统一管线：按 `hosts` → Fake-IP 双栈池（含 `fake-ip-filter`） → `nameserver-policy` → `nameserver` / `fallback`（含 `fallback-filter`）求值，支持 UDP、TCP、DoT、DoH、DoQ、乐观缓存、ECS 与 `default-nameserver` / `proxy-server-nameserver` |
+| TUN 与透明代理 | Linux 系统接口与按 `sing-tun` 布局实现的 `auto-route`（IPv4/IPv6 专用路由表与策略规则）、`strict-route`、`auto-redirect`（nftables）、`auto-detect-interface` 与逐出站 `routing-mark` 防回环放行；TUN 读取独立任务与 256 KiB 每向 TCP 缓冲；TProxy 支持 IPv4/IPv6 TCP 与 UDP（`IP_RECVORIGDSTADDR`/`IPV6_RECVORIGDSTADDR`） |
+| 控制 | HTTP 与 WebSocket 控制面：`/v1/*` 统计；Clash/Mihomo 兼容的策略切换、实测延迟、`/connections`、`/traffic`、`/logs`、`/memory` WebSocket 与 HTTP 流、`/rules`（含逐规则 `hitCount`/`hitAt`/`missCount`/`missAt`）、`/dns/query`、`/cache/dns/flush`、`PUT/PATCH /configs` 与 `/restart` 热重载、`rule`/`global`/`direct` 模式切换；metacubexd 面板验收通过 |
 | 用户与统计 | 管理账户与原生凭据分离；唯一计量边界；SQLite 用量、带宽、访问记录、DNS 与错误事件；`history` 查询 |
 | WARP | `device` 配置启用；数据面用已保存身份在双栈机器上验证过，CLI 在真实单栈机器上的自动补齐未实测 |
 | 双语 | CLI 帮助、错误和诊断完成；使用指南中英齐全；接口文档为中文 |
@@ -140,11 +141,11 @@ flowchart TD
 
 ## 最新门禁
 
-`v1.13.0`（`perf-01`，提交 `177504c`）：fmt、严格 Clippy、全量单元与回环集成测试、第三方测试、release 与许可通知全部通过；发行二进制在 `perf-02` 构建。同一提交在 `perf-02` 首次门禁中 `kerlico-sudoku --test mux` 的 `real_mux_uses_one_carrier_for_concurrent_distinct_targets_and_fin` 在高负载下因引擎关闭清理超时失败一次，空闲机器上连续 5 次通过。门禁只含回环与单元测试。
+`v1.14.0`（`perf-02`，提交 `0537733`）：fmt、严格 Clippy、全量单元与回环集成测试、`zerotier-node` 与 `xray-transport` uTLS 塑造测试、release 与许可通知全部通过；发行二进制在 `perf-02` 构建。Mihomo v1.19.33 同配置 14 场景与 600 秒长稳（34,632 请求 0 失败）在 `perf-01` 验证通过（见 [Mihomo 替换验收](docs/testing/mihomo-replacement-acceptance-2026-11-07.md)）。
 
 ## 实机测试
 
-30 个协议都在 `perf-01`、`perf-02`、`perf-03` 上跨机跑过，也都对过第三方真实对端，记录见 [跨机矩阵](docs/testing/cross-host-2026-11-03.md)、[第三方互通](docs/testing/peer-interop-2026-11-03.md) 与 [17 协议 70 组合性能对标报告](docs/testing/benchmarks/mihomo-vs-kerlico-2026-11-04/REPORT.md)。公网 1Gbps 跨机 30s 固定时长（`perf-01 <-> perf-03`）与内网环回 256MiB（`perf-01`）17 协议 70 组合 100% 达标（`>= 78%` Mihomo 吞吐）。`v1.3.2` 二进制的双端矩阵（TCP 小包与 1 MiB、UDP）：通过 1597，失败 45，不适用 128；44 项失败是 1200 字节及以上的 UDP 大包，1 项是 WireGuard IPv6 的 TCP 1 MiB，都在 MTU 1300 的 Mesh 路径上。
+30 个协议都在 `perf-01`、`perf-02`、`perf-03` 上跨机跑过，也都对过第三方真实对端，记录见 [跨机矩阵](docs/testing/cross-host-2026-11-03.md)、[第三方互通](docs/testing/peer-interop-2026-11-03.md)、[17 协议 70 组合性能对标报告](docs/testing/benchmarks/mihomo-vs-kerlico-2026-11-04/REPORT.md) 与 [Mihomo 替换验收报告](docs/testing/mihomo-replacement-acceptance-2026-11-07.md)。公网 1Gbps 跨机 30s 固定时长（`perf-01 <-> perf-03`）与内网环回 256MiB（`perf-01`）17 协议 70 组合 100% 达标（`>= 78%` Mihomo 吞吐）。`v1.3.2` 二进制的双端矩阵（TCP 小包与 1 MiB、UDP）：通过 1597，失败 45，不适用 128；44 项失败是 1200 字节及以上的 UDP 大包，1 项是 WireGuard IPv6 的 TCP 1 MiB，都在 MTU 1300 的 Mesh 路径上。
 
 官网 https://www.kerlico.com ，文档站 https://wiki.kerlico.com 。源码和部署参数在 `site/`。
 

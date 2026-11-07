@@ -49,7 +49,7 @@
 | `name` | 必须，代理名称，不可重复 | 有 |  |  | 已实现 | 通过 | 取值：`字符串` |
 | `port` | 必须，端口 | 有 |  |  | 已实现 | 通过 | 取值：`端口` |
 | `protocol` | 出站协议名 |  |  | 有 | 部分 | 未测 | 取值：`blackhole`、`dns`、`freedom`、`http`、`hysteria`、`loopback`、`masque`、`shadowsocks`、`socks`、`trojan`、`vless`、`vmess`、`wireguard`<br>约束：源码另接受别名 block、direct |
-| `proxy-settings` | 出站 proxySettings |  |  | 已移除 | 部分 | 未测 | 约束：配置时报错，改用 sockopt.dialerProxy |
+| `proxy-settings` | 出站 proxySettings |  |  | 已移除 | 已实现 | 通过 | 约束：配置时报错，改用 sockopt.dialerProxy |
 | `send-through` | 发送数据的本地 IP，默认 0.0.0.0 |  |  | 有 | 部分 | 未测 | 取值：`IP`、`IPv6 CIDR`、`origin`、`srcip`<br>约束：CIDR 时随机选 IP，需系统允许 bind；ndp 网络不建议小于 /120<br>约束：origin 用本机被连接的 IP；对 UDP 无效<br>约束：srcip 用入站源 IP |
 | `server` | 必须，服务器域名或 IP | 有 |  |  | 已实现 | 通过 | 取值：`IP`、`域名` |
 | `settings` | 协议专属配置对象 |  |  | 有 | 已实现 | 通过 |  |
@@ -90,15 +90,15 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `dns` | DNS 出站，接收路由送入的明文 DNS 查询 |  |  | 有 | 部分 | 未测 | 取值：`dns`<br>约束：只支持 UDP 和 TCP 明文 DNS；DoH、DoT、DoQ 不适用 |
-| `protocol` | DNS 出站，请求在内部 DNS 模块处理 | 有 | 已移除 |  | 部分 | 未测 | 取值：`dns`<br>约束：1.11.0 废弃，1.13.0 移除；配置后启动报错（source:option/outbound.go）<br>约束：用 hijack-dns 规则动作替代 |
-| `combo` | dns 出站维度 | 有 |  | 有 | 部分 | 未测 | network：`tcp`、`udp`<br>约束：udp 默认开启<br>action：`direct`、`drop`、`hijack`、`return`<br>match：`domain`、`none`、`qType`<br>network：`tcp`、`udp`、`保持来源`<br>source：`tproxy`、`tun`、`tunnel`<br>约束：hijack 仅 A/AAAA<br>约束：rCode 仅 return 生效<br>约束：规则各条件为与关系 |
+| `dns` | DNS 出站，接收路由送入的明文 DNS 查询 |  |  | 有 | 已实现 | 通过 | 取值：`dns`<br>约束：只支持 UDP 和 TCP 明文 DNS；DoH、DoT、DoQ 不适用 |
+| `protocol` | DNS 出站，请求在内部 DNS 模块处理 | 有 | 已移除 |  | 已实现 | 通过 | 取值：`dns`<br>约束：1.11.0 废弃，1.13.0 移除；配置后启动报错（source:option/outbound.go）<br>约束：用 hijack-dns 规则动作替代 |
+| `combo` | dns 出站维度 | 有 |  | 有 | 已实现 | 通过 | network：`tcp`、`udp`<br>约束：udp 默认开启<br>action：`direct`、`drop`、`hijack`、`return`<br>match：`domain`、`none`、`qType`<br>network：`tcp`、`udp`、`保持来源`<br>source：`tproxy`、`tun`、`tunnel`<br>约束：hijack 仅 A/AAAA<br>约束：rCode 仅 return 生效<br>约束：规则各条件为与关系 |
 | `address` | rewriteAddress 旧名 |  |  | 有 | 不适用 | 未测 |  |
 | `block-types` | 旧字段 |  |  | 废弃 | 不适用 | 未测 | 约束：不能与 rules 混用，改用 rules |
 | `direct` | 放行到目标 DNS 服务器，按 rewrite 转发 |  |  | 有 | 未实现 | 未测 |  |
 | `domain` | 匹配域名列表，写法同路由 domain |  |  | 有 | 未实现 | 未测 |  |
 | `drop` | 丢弃请求，不返回响应 |  |  | 有 | 未实现 | 未测 |  |
-| `hijack` | 导入内置 DNS 处理 |  |  | 有 | 部分 | 未测 | 约束：目前仅 A 和 AAAA |
+| `hijack` | 导入内置 DNS 处理 |  |  | 有 | 已实现 | 通过 | 约束：目前仅 A 和 AAAA |
 | `network` | rewriteNetwork 旧名 |  |  | 有 | 不适用 | 未测 |  |
 | `non-ipquery` | 旧字段 |  |  | 废弃 | 不适用 | 未测 | 取值：`drop`、`reject`、`skip`<br>约束：不能与 rules 混用，改用 rules |
 | `port` | rewritePort 旧名 |  |  | 有 | 不适用 | 未测 |  |
@@ -225,7 +225,7 @@
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `protocol` | Hysteria2 出站 | 有 | 有 |  | 已实现 | 通过 | 取值：`hysteria2` |
-| `combo` | Hysteria2 出站维度 | 有 | 有 |  | 部分 | 未测 | obfs：`gecko`、`none`、`salamander`<br>port：`port`、`ports`<br>hop-interval：`固定`、`范围`<br>bbr-profile：`aggressive`、`conservative`、`standard`<br>bandwidth：`bbr`、`brutal up/down`<br>realm：`off`、`on`<br>verify：`default`、`fingerprint`、`name-cert-verify`、`skip-cert-verify`<br>ech：`off`、`on`<br>约束：obfs-min-packet-size、obfs-max-packet-size 仅 gecko<br>约束：ports 配置后忽略 port<br>connect：`realm`、`server_port`、`server_ports`<br>congestion：`bbr`、`brutal(up/down)`<br>bbr_profile：`aggressive`、`conservative`、`standard`<br>hop_interval_max：`off`、`on`<br>disable_chrome_parrot：`off`、`on`<br>network：`tcp`、`tcp+udp`、`udp`<br>realm_ip_version：`4`、`6`、`both`<br>port_mapping：`off`、`on`<br>约束：Chrome 伪装时服务端不能用 Ed25519 证书，且固定 idle_timeout 30 秒、覆盖 max_concurrent_streams 和 initial_packet_size<br>约束：network 留空时 TCP、UDP 都启用<br>约束：obfs.min_packet_size、max_packet_size 仅 gecko<br>约束：realm.port_mapping 与 ip_version 6 冲突<br>约束：server_ports 与 server_port 冲突<br>约束：server、server_port、server_ports 与 realm 冲突<br>约束：tls 必填<br>约束：up、down 留空时用 BBR |
+| `combo` | Hysteria2 出站维度 | 有 | 有 |  | 已实现 | 通过 | obfs：`gecko`、`none`、`salamander`<br>port：`port`、`ports`<br>hop-interval：`固定`、`范围`<br>bbr-profile：`aggressive`、`conservative`、`standard`<br>bandwidth：`bbr`、`brutal up/down`<br>realm：`off`、`on`<br>verify：`default`、`fingerprint`、`name-cert-verify`、`skip-cert-verify`<br>ech：`off`、`on`<br>约束：obfs-min-packet-size、obfs-max-packet-size 仅 gecko<br>约束：ports 配置后忽略 port<br>connect：`realm`、`server_port`、`server_ports`<br>congestion：`bbr`、`brutal(up/down)`<br>bbr_profile：`aggressive`、`conservative`、`standard`<br>hop_interval_max：`off`、`on`<br>disable_chrome_parrot：`off`、`on`<br>network：`tcp`、`tcp+udp`、`udp`<br>realm_ip_version：`4`、`6`、`both`<br>port_mapping：`off`、`on`<br>约束：Chrome 伪装时服务端不能用 Ed25519 证书，且固定 idle_timeout 30 秒、覆盖 max_concurrent_streams 和 initial_packet_size<br>约束：network 留空时 TCP、UDP 都启用<br>约束：obfs.min_packet_size、max_packet_size 仅 gecko<br>约束：realm.port_mapping 与 ip_version 6 冲突<br>约束：server_ports 与 server_port 冲突<br>约束：server、server_port、server_ports 与 realm 冲突<br>约束：tls 必填<br>约束：up、down 留空时用 BBR |
 | `bbr-profile` | BBR 档位，默认 standard | 有 | 有 |  | 未实现 | 未测 | 取值：`aggressive`、`conservative`、`standard`<br>约束：自 sing-box 1.14.0 起<br>约束：默认使用 `standard`。 |
 | `brutal-debug` | 启用 Hysteria Brutal CC 的调试信息日志记录。 |  | 有 |  | 未实现 | 未测 |  |
 | `cwnd` | hysteria2 出站字段 cwnd（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
@@ -275,8 +275,8 @@
 | `server-ports` | 服务器端口范围列表。 |  | 有 |  | 已实现 | 未测 | 约束：与 `server_port` 和 `realm` 冲突。<br>约束：自 sing-box 1.11.0 起 |
 | `tls` | TLS 配置, 参阅 TLS。 |  | 有 |  | 部分 | 通过 | 约束：必填 |
 | `udp-mtu` | hysteria2 出站字段 udp-mtu（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `up` | brutal 上行，默认 Mbps | 有 |  |  | 未实现 | 未测 | 取值：`30 Mbps` |
-| `up-mbps` | 最大带宽。 |  | 有 |  | 未实现 | 未测 |  |
+| `up` | brutal 上行，默认 Mbps | 有 |  |  | 已实现 | 通过 | 取值：`30 Mbps` |
+| `up-mbps` | 最大带宽。 |  | 有 |  | 已实现 | 通过 |  |
 
 ## list
 
@@ -609,7 +609,7 @@
 | `email` | 邮箱，可选 |  |  | 有 | 未实现 | 未测 |  |
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
 | `method` | 加密方法： |  | 有 | 有 | 部分 | 通过 | 取值：`2022-blake3-aes-128-gcm`、`2022-blake3-aes-256-gcm`、`2022-blake3-chacha20-poly1305`、`aes-128-cfb`、`aes-128-ctr`、`aes-128-gcm`、`aes-192-cfb`、`aes-192-ctr`、`aes-192-gcm`、`aes-256-cfb`、`aes-256-ctr`、`aes-256-gcm`、`chacha20-ietf`、`chacha20-ietf-poly1305`、`chacha20-poly1305`、`none`、`rc4-md5`、`xchacha20`、`xchacha20-ietf-poly1305`、`xchacha20-poly1305`<br>约束：后 9 种为旧版流加密方法<br>约束：必填 |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 部分 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `network` | 启用的网络协议`tcp` 或 `udp`。 |  | 有 |  | 未实现 | 未测 | 取值：`tcp`、`udp`<br>约束：默认所有。 |
 | `password` | 密码 | 有 | 有 | 有 | 已实现 | 通过 | 取值：`字符串`<br>约束：必填<br>约束：SS2022 预共享密钥：128-gcm 16 字节，其他 32 字节 |
 | `plugin` | 插件 | 有 | 有 |  | 部分 | 通过 | 取值：`gost-plugin`、`jls`、`kcptun`、`obfs`、`obfs-local`、`restls`、`shadow-tls`、`v2ray-plugin`<br>约束：仅支持 `obfs-local` 和 `v2ray-plugin`。 |
@@ -872,7 +872,7 @@
 | `email` | 邮箱，可选 |  |  | 有 | 未实现 | 未测 |  |
 | `flow` | Trojan flow |  |  | 已移除 | 未实现 | 未测 | 约束：配置时报错 |
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 部分 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `network` | 传输层，其他值为 tcp | 有 | 有 |  | 部分 | 通过 | 取值：`grpc`、`tcp`、`udp`、`ws`<br>约束：默认所有。 |
 | `password` | 必须，密码 | 有 | 有 | 有 | 已实现 | 通过 | 取值：`字符串`<br>约束：必填 |
 | `port` | 服务端端口 |  |  | 有 | 已实现 | 通过 |  |
@@ -955,7 +955,7 @@
 | `flow` | VLESS 子协议 | 有 | 有 | 有 | 已实现 | 通过 | 取值：``、`xtls-rprx-vision`、`xtls-rprx-vision-udp443`<br>约束：XTLS 仅在 TCP+TLS/REALITY 或 VLESS Encryption 下可用<br>约束：xtls-rprx-vision 拦截 UDP 443，-udp443 不拦截 |
 | `id` | 用户 ID：UUID 或小于 30 字节字符串 |  |  | 有 | 部分 | 通过 |  |
 | `level` | 用户等级，默认 0 |  |  | 有 | 未实现 | 未测 |  |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 部分 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `network` | 传输层，其他值为 tcp | 有 | 有 |  | 部分 | 通过 | 取值：`grpc`、`h2`、`http`、`tcp`、`udp`、`ws`、`xhttp`<br>约束：默认所有。 |
 | `packet-addr` | vless 出站字段 packet-addr（文档页未写，配置结构存在） | 有 |  |  | 已实现 | 通过 |  |
 | `packet-encoding` | UDP 包编码，空为原始 | 有 | 有 |  | 已实现 | 通过 | 取值：``、`(none)`、`packetaddr`、`xudp` |
@@ -996,7 +996,7 @@
 | `max-simultaneous-write-connection` | vmess 出站字段 max-simultaneous-write-connection（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `max-write-duration-ms` | vmess 出站字段 max-write-duration-ms（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `max-write-size` | vmess 出站字段 max-write-size（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
-| `multiplex` | 参阅 多路复用。 |  | 有 |  | 部分 | 未测 |  |
+| `multiplex` | 参阅 多路复用。 |  | 有 |  | 已实现 | 通过 |  |
 | `network` | 传输层，其他值为 tcp | 有 | 有 |  | 部分 | 通过 | 取值：`grpc`、`h2`、`http`、`mekya`、`mkcp`、`tcp`、`udp`、`ws`<br>约束：默认所有。 |
 | `packet-addr` | vmess 出站字段 packet-addr（文档页未写，配置结构存在） | 有 |  |  | 未实现 | 未测 |  |
 | `packet-encoding` | UDP 包编码，空为原始 | 有 | 有 |  | 未实现 | 未测 | 取值：``、`(none)`、`packetaddr`、`xudp` |

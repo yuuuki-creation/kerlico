@@ -1,27 +1,63 @@
 {"key": "api/api/combo", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
 {"key": "api/api/services", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
 {"key": "api/auth/bearer", "test": "pass", "evidence": "crates/control/src/lib.rs::tests::bearer_secret_must_match_exactly", "date": "2026-11-06"}
+{"key": "api/auth/websocket-token", "test": "pass", "evidence": "crates/control/tests/http.rs::websocket_requires_the_token_when_a_secret_is_set", "date": "2026-11-07"}
+{"key": "api/cache-dns/post-cache-dns-flush", "test": "pass", "evidence": "crates/control/tests/http.rs::websocket_feeds_push_traffic_logs_memory_and_connection_snapshots", "date": "2026-11-07"}
 {"key": "api/cache-fakeip/post-cache-fakeip-flush", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (+ crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth status only)", "date": "2026-11-06"}
+{"key": "api/clash/default-mode", "test": "pass", "evidence": "crates/control/tests/http.rs::mode_patch_routes_through_global_and_direct", "date": "2026-11-07"}
+{"key": "api/clash/delete-connections-id", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "date": "2026-11-07"}
 {"key": "api/clash/external-controller", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
 {"key": "api/clash/get", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/clash/get-configs", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::patch_configs_moves_the_mixed_port_and_applies_mode_and_log_level", "date": "2026-11-07"}
+{"key": "api/clash/get-dns-query", "test": "pass", "evidence": "crates/control/tests/http.rs::dns_query_answers_from_the_runtime_resolver_hosts", "date": "2026-11-07"}
 {"key": "api/clash/get-group", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
 {"key": "api/clash/get-group-name", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/clash/get-group-name-delay", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
+{"key": "api/clash/get-logs", "test": "pass", "evidence": "crates/control/tests/http.rs::websocket_feeds_push_traffic_logs_memory_and_connection_snapshots", "date": "2026-11-07"}
+{"key": "api/clash/get-memory", "test": "pass", "evidence": "crates/control/tests/http.rs::websocket_feeds_push_traffic_logs_memory_and_connection_snapshots", "date": "2026-11-07"}
+{"key": "api/clash/get-providers-proxies-name", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "date": "2026-11-07"}
+{"key": "api/clash/get-proxies", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
+{"key": "api/clash/get-proxies-name", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
+{"key": "api/clash/get-proxies-name-delay", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
+{"key": "api/clash/get-rules", "test": "pass", "evidence": "crates/control/tests/http.rs::rules_count_hits_and_misses_per_flow", "date": "2026-11-07"}
+{"key": "api/clash/get-ui", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
 {"key": "api/clash/get-version", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/clash/patch-configs", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::patch_configs_moves_the_mixed_port_and_applies_mode_and_log_level", "date": "2026-11-07"}
+{"key": "api/clash/post-cache-dns-flush", "test": "pass", "evidence": "crates/control/tests/http.rs::websocket_feeds_push_traffic_logs_memory_and_connection_snapshots", "date": "2026-11-07"}
 {"key": "api/clash/post-cache-fakeip-flush", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (+ crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth status only)", "date": "2026-11-06"}
 {"key": "api/clash/protocol", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/clash/put-configs", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::put_configs_reloads_payload_and_path_and_rolls_back_a_failed_start", "date": "2026-11-07"}
+{"key": "api/clash/put-providers-proxies-name", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "date": "2026-11-07"}
 {"key": "api/clash/put-proxies-name", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
 {"key": "api/clash/secret", "test": "pass", "evidence": "crates/control/src/lib.rs::tests::bearer_secret_must_match_exactly", "date": "2026-11-06"}
+{"key": "api/configs/get-configs", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::patch_configs_moves_the_mixed_port_and_applies_mode_and_log_level", "date": "2026-11-07"}
+{"key": "api/configs/patch-configs", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::patch_configs_moves_the_mixed_port_and_applies_mode_and_log_level", "date": "2026-11-07"}
+{"key": "api/configs/put-configs", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::put_configs_reloads_payload_and_path_and_rolls_back_a_failed_start", "date": "2026-11-07"}
+{"key": "api/connections-id/delete-connections-id", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "date": "2026-11-07"}
+{"key": "api/connections/get-connections", "test": "pass", "evidence": "crates/control/tests/http.rs::websocket_feeds_push_traffic_logs_memory_and_connection_snapshots", "date": "2026-11-07"}
 {"key": "api/controller/external-controller", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
 {"key": "api/controller/secret", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/dns-query/get-dns-query", "test": "pass", "evidence": "crates/control/tests/http.rs::dns_query_answers_from_the_runtime_resolver_hosts", "date": "2026-11-07"}
+{"key": "api/group-name-delay/get-group-name-delay", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
 {"key": "api/group-name/get-group-name", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
 {"key": "api/group/get-group", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/logs/get-logs", "test": "pass", "evidence": "crates/control/tests/http.rs::websocket_feeds_push_traffic_logs_memory_and_connection_snapshots", "date": "2026-11-07"}
+{"key": "api/memory/get-memory", "test": "pass", "evidence": "crates/control/tests/http.rs::websocket_feeds_push_traffic_logs_memory_and_connection_snapshots", "date": "2026-11-07"}
 {"key": "api/metrics/debug-vars", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
 {"key": "api/metrics/listen", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
+{"key": "api/providers-proxies-name/get-providers-proxies-name", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "date": "2026-11-07"}
+{"key": "api/providers-proxies-name/put-providers-proxies-name", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "date": "2026-11-07"}
+{"key": "api/proxies-name-delay/get-proxies-name-delay", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
+{"key": "api/proxies-name/get-proxies-name", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
 {"key": "api/proxies-name/put-proxies-name", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/proxies/get-proxies", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
+{"key": "api/restart/post-restart", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::put_configs_reloads_payload_and_path_and_rolls_back_a_failed_start", "date": "2026-11-07"}
 {"key": "api/root/get", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
 {"key": "api/routing-service/get-balancer-info", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/routing-service/list-rule", "test": "pass", "evidence": "crates/control/tests/http.rs::rules_reflect_the_compiled_route_table", "date": "2026-11-07"}
 {"key": "api/routing-service/override-balancer-target", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
 {"key": "api/routing-service/test-route", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/rules/get-rules", "test": "pass", "evidence": "crates/control/tests/http.rs::rules_count_hits_and_misses_per_flow", "date": "2026-11-07"}
 {"key": "api/singbox/secret", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
 {"key": "api/stats-service/get-all-online-users", "test": "pass", "evidence": "crates/control/tests/http.rs::online_masks_and_merges_sources_like_flows", "date": "2026-11-06"}
 {"key": "api/stats-service/get-stats", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
@@ -32,14 +68,17 @@
 {"key": "api/stats-service/overview", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
 {"key": "api/stats-service/query-stats", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
 {"key": "api/traffic/get-traffic", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "api/ui/get", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
 {"key": "api/v2ray/get-stats", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
 {"key": "api/v2ray/get-sys-stats", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
 {"key": "api/v2ray/query-stats", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
 {"key": "api/version/get-version", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "api/webui/dashboards", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
 {"key": "cache/file/enabled", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (pool-level; config->path wiring untested)", "date": "2026-11-06"}
 {"key": "cache/file/path", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (pool-level; config->path wiring untested)", "date": "2026-11-06"}
 {"key": "cache/file/store-fakeip", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (pool-level; config->path wiring untested)", "date": "2026-11-06"}
 {"key": "cache/profile/store-fake-ip", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists (pool-level; config->path wiring untested)", "date": "2026-11-06"}
+{"key": "cache/profile/store-selected", "test": "pass", "evidence": "crates/egress/tests/cache_file.rs::store_selected_and_fakeip_share_default_cache_file", "date": "2026-11-07"}
 {"key": "cert/tls/acme-external", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::all_five_tls_paths_both_node_families_and_both_business_families; tools/interop_vless_server.py", "date": "2026-11-06"}
 {"key": "cert/tls/certificate", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::all_five_tls_paths_both_node_families_and_both_business_families; tools/interop_vless_server.py", "date": "2026-11-06"}
 {"key": "cert/tls/certificate-file", "test": "pass", "evidence": "crates/protocol-trusttunnel/tests/network.rs::all_five_tls_paths_both_node_families_and_both_business_families; tools/interop_vless_server.py", "date": "2026-11-06"}
@@ -54,6 +93,7 @@
 {"key": "cli/command/generate-ech-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
 {"key": "cli/command/generate-reality-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
 {"key": "cli/command/generate-uuid", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/command/generate-vless-mlkem768", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::mlkem768_matches_xray_seed_vector", "date": "2026-11-07"}
 {"key": "cli/command/generate-vless-x25519", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
 {"key": "cli/command/generate-wg-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
 {"key": "cli/flag/t", "test": "pass", "evidence": "apps/kerlico/tests/history.rs::real_cli_restart_persists_exact_totals_and_queries_before_pagination", "date": "2026-11-06"}
@@ -63,23 +103,50 @@
 {"key": "cli/generate/generate-rand-base64", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
 {"key": "cli/generate/generate-rand-hex", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
 {"key": "cli/generate/generate-reality-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
+{"key": "cli/generate/generate-tls-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::tls_keypair_validity_follows_months", "date": "2026-11-07"}
+{"key": "cli/generate/generate-tls-keypair-months", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::tls_keypair_validity_follows_months", "date": "2026-11-07"}
 {"key": "cli/generate/generate-uuid", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
 {"key": "cli/generate/generate-wg-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
+{"key": "cli/geoip/geoip", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_country_mmdb_and_geoip_dat_lookups", "date": "2026-11-07"}
+{"key": "cli/geoip/geoip-export", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_country_mmdb_and_geoip_dat_lookups", "date": "2026-11-07"}
+{"key": "cli/geoip/geoip-file", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_country_mmdb_and_geoip_dat_lookups", "date": "2026-11-07"}
+{"key": "cli/geoip/geoip-list", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_country_mmdb_and_geoip_dat_lookups", "date": "2026-11-07"}
+{"key": "cli/geoip/geoip-lookup", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_country_mmdb_and_geoip_dat_lookups", "date": "2026-11-07"}
+{"key": "cli/geosite/geosite", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_geosite_cn_loads_compact_and_matches_fast", "date": "2026-11-07"}
+{"key": "cli/geosite/geosite-export", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_geosite_cn_loads_compact_and_matches_fast", "date": "2026-11-07"}
+{"key": "cli/geosite/geosite-file", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_geosite_cn_loads_compact_and_matches_fast", "date": "2026-11-07"}
+{"key": "cli/geosite/geosite-list", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_geosite_cn_loads_compact_and_matches_fast", "date": "2026-11-07"}
+{"key": "cli/geosite/geosite-lookup", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_geosite_cn_loads_compact_and_matches_fast", "date": "2026-11-07"}
+{"key": "cli/rule-set/rule-set", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_mrs_and_srs_rule_sets_decode", "date": "2026-11-07"}
+{"key": "cli/rule-set/rule-set-compile", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_mrs_and_srs_rule_sets_decode", "date": "2026-11-07"}
+{"key": "cli/rule-set/rule-set-compile-output", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_mrs_and_srs_rule_sets_decode", "date": "2026-11-07"}
+{"key": "cli/rule-set/rule-set-convert-output", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_mrs_and_srs_rule_sets_decode", "date": "2026-11-07"}
+{"key": "cli/rule-set/rule-set-decompile", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_mrs_and_srs_rule_sets_decode", "date": "2026-11-07"}
+{"key": "cli/rule-set/rule-set-decompile-output", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_mrs_and_srs_rule_sets_decode", "date": "2026-11-07"}
 {"key": "cli/run/run", "test": "pass", "evidence": "apps/kerlico/tests/history.rs::real_cli_restart_persists_exact_totals_and_queries_before_pagination", "date": "2026-11-06"}
 {"key": "cli/run/test", "test": "pass", "evidence": "apps/kerlico/tests/history.rs::real_cli_restart_persists_exact_totals_and_queries_before_pagination", "date": "2026-11-06"}
+{"key": "cli/tls/cert", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::tls_keypair_validity_follows_months", "date": "2026-11-07"}
 {"key": "cli/tls/hash", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
 {"key": "cli/xray/help", "test": "pass", "evidence": "apps/kerlico/tests/localization.rs::real_help_and_parser_errors_use_selected_language_with_stable_arguments", "date": "2026-11-06"}
+{"key": "cli/xray/mldsa65", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::mldsa65_seed_signs_and_printed_verify_key_verifies", "date": "2026-11-07"}
+{"key": "cli/xray/mlkem768", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::mlkem768_matches_xray_seed_vector", "date": "2026-11-07"}
 {"key": "cli/xray/run", "test": "pass", "evidence": "apps/kerlico/tests/history.rs::real_cli_restart_persists_exact_totals_and_queries_before_pagination", "date": "2026-11-06"}
 {"key": "cli/xray/tls", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
 {"key": "cli/xray/uuid", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::generators_produce_valid_uuid_ech_tls_and_kem_outputs", "date": "2026-11-06"}
+{"key": "cli/xray/vlessenc", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::vlessenc_pairs_real_server_and_client_keys", "date": "2026-11-07"}
 {"key": "cli/xray/wg", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
 {"key": "cli/xray/x25519", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::x25519_matches_rfc7748_section_6_1_vector", "date": "2026-11-06"}
 {"key": "config/format/anchors", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_yaml_with_anchors_and_merge_keys", "date": "2026-11-06"}
 {"key": "config/format/extended-json", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_jsonc_with_comments_and_trailing_commas", "date": "2026-11-06"}
 {"key": "config/format/json", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
 {"key": "config/format/jsonc", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_jsonc_with_comments_and_trailing_commas", "date": "2026-11-06"}
+{"key": "config/format/merge", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_toml_and_merges_by_tag", "date": "2026-11-06"}
+{"key": "config/merge/outbounds-by-tag", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_toml_and_merges_by_tag", "date": "2026-11-06"}
+{"key": "config/merge/outbounds-tail", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_toml_and_merges_by_tag", "date": "2026-11-06"}
+{"key": "config/reload/sighup", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::sighup_reload_moves_the_listener_and_keeps_serving_on_invalid_config", "date": "2026-11-07"}
 {"key": "config/root/dns", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
 {"key": "config/root/inbounds", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "config/root/log", "test": "pass", "evidence": "crates/control/tests/http.rs::websocket_feeds_push_traffic_logs_memory_and_connection_snapshots", "date": "2026-11-07"}
 {"key": "config/root/outbounds", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
 {"key": "config/root/route", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
 {"key": "config/top/api", "test": "pass", "evidence": "crates/control/tests/http.rs::control_requires_the_secret_and_reports_runtime_state", "date": "2026-11-06"}
@@ -92,10 +159,15 @@
 {"key": "config/top/policy", "test": "pass", "evidence": "crates/engine/tests/framework.rs::tcp_forward_idle_records_timeout_with_real_engine_telemetry", "date": "2026-11-06"}
 {"key": "config/top/routing", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
 {"key": "config/top/stats", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "dns/action/action", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
 {"key": "dns/action/method", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (REFUSED and drop; 50-in-30s auto-drop untested)", "date": "2026-11-06"}
 {"key": "dns/action/no-drop", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (REFUSED and drop; 50-in-30s auto-drop untested)", "date": "2026-11-06"}
 {"key": "dns/action/reject", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (REFUSED and drop; 50-in-30s auto-drop untested)", "date": "2026-11-06"}
+{"key": "dns/action/route", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
+{"key": "dns/action/server", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
+{"key": "dns/config/final", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
 {"key": "dns/config/reverse-mapping", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (record/lookup; enrich_original path untested)", "date": "2026-11-06"}
+{"key": "dns/config/rules", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::rules_rule_sets_and_geosite_use_injected_sets", "date": "2026-11-07"}
 {"key": "dns/config/servers", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
 {"key": "dns/config/strategy", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::local_modes_filter_families_and_dual_prefers_ipv4", "date": "2026-11-06"}
 {"key": "dns/dns/hosts", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
@@ -109,17 +181,39 @@
 {"key": "dns/flow/pipeline", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
 {"key": "dns/flow/query-types", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
 {"key": "dns/global/direct-nameserver", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
+{"key": "dns/global/enable", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::rcode_upstream_and_dns_enable_flag", "date": "2026-11-07"}
 {"key": "dns/global/enhanced-mode", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/global/fake-ip-filter", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::fake_ip_filter_modes_and_pass_through_types", "date": "2026-11-07"}
+{"key": "dns/global/fake-ip-filter-mode", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::fake_ip_filter_modes_and_pass_through_types", "date": "2026-11-07"}
 {"key": "dns/global/fake-ip-range", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
 {"key": "dns/global/fake-ip-range6", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/global/fallback", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::fallback_filter_follows_mihomo", "date": "2026-11-07"}
+{"key": "dns/global/fallback-filter-domain", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::fallback_filter_follows_mihomo", "date": "2026-11-07"}
+{"key": "dns/global/fallback-filter-geoip", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::fallback_filter_follows_mihomo", "date": "2026-11-07"}
+{"key": "dns/global/fallback-filter-geoip-code", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::fallback_filter_follows_mihomo", "date": "2026-11-07"}
+{"key": "dns/global/fallback-filter-ipcidr", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::fallback_filter_follows_mihomo", "date": "2026-11-07"}
 {"key": "dns/global/ipv6", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
-{"key": "dns/global/nameserver", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
+{"key": "dns/global/listen", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::listener_serves_udp_and_tcp_through_the_pipeline", "date": "2026-11-07"}
+{"key": "dns/global/nameserver", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::doh_only_and_doq_only_configs_resolve", "date": "2026-11-07"}
+{"key": "dns/global/nameserver-policy", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
+{"key": "dns/global/proxy-server-nameserver", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::hostname_upstreams_use_default_nameserver_and_proxy_server_group", "date": "2026-11-07"}
+{"key": "dns/global/proxy-server-nameserver-policy", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::hostname_upstreams_use_default_nameserver_and_proxy_server_group", "date": "2026-11-07"}
 {"key": "dns/global/use-hosts", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
 {"key": "dns/global/use-system-hosts", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::system_hosts_file_does_not_override_configured_upstreams (#[ignore], needs root + mount ns)", "date": "2026-11-06"}
 {"key": "dns/hosts/mapping", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
 {"key": "dns/hosts/predefined-format", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
+{"key": "dns/param/proxy-or-interface", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::detour_and_respect_rules_dial_through_the_dialer", "date": "2026-11-07"}
 {"key": "dns/query-options/combo", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
 {"key": "dns/resolve/flow", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
+{"key": "dns/rule/action", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
+{"key": "dns/rule/combo", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::rules_rule_sets_and_geosite_use_injected_sets", "date": "2026-11-07"}
+{"key": "dns/rule/domain", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
+{"key": "dns/rule/domain-keyword", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
+{"key": "dns/rule/domain-regex", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
+{"key": "dns/rule/domain-suffix", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
+{"key": "dns/rule/invert", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
+{"key": "dns/rule/query-type", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
+{"key": "dns/rule/rule-set", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::rules_rule_sets_and_geosite_use_injected_sets", "date": "2026-11-07"}
 {"key": "dns/server-common/tag", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work", "date": "2026-11-06"}
 {"key": "dns/server-common/type", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
 {"key": "dns/server-fakeip/inet4-range", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
@@ -127,6 +221,12 @@
 {"key": "dns/server-fakeip/protocol", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
 {"key": "dns/server-hosts/predefined", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
 {"key": "dns/server-hosts/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::exchange_packet_answers_wire_query_from_hosts", "date": "2026-11-06"}
+{"key": "dns/server-https/headers", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::doh_only_and_doq_only_configs_resolve", "date": "2026-11-07"}
+{"key": "dns/server-https/path", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::doh_only_and_doq_only_configs_resolve", "date": "2026-11-07"}
+{"key": "dns/server-https/protocol", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::doh_only_and_doq_only_configs_resolve", "date": "2026-11-07"}
+{"key": "dns/server-https/server", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::doh_only_and_doq_only_configs_resolve", "date": "2026-11-07"}
+{"key": "dns/server-https/server-port", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::doh_only_and_doq_only_configs_resolve", "date": "2026-11-07"}
+{"key": "dns/server-https/tls", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::doh_only_and_doq_only_configs_resolve", "date": "2026-11-07"}
 {"key": "dns/server-local/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
 {"key": "dns/server-tcp/protocol", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
 {"key": "dns/server-tcp/server", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
@@ -140,40 +240,69 @@
 {"key": "dns/server-udp/server-port", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
 {"key": "dns/server/address", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
 {"key": "dns/server/combo", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
+{"key": "dns/server/domains", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::local_resolution_uses_policy_hosts_and_main", "date": "2026-11-07"}
 {"key": "dns/server/port", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
 {"key": "dns/upstream/combo", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream; crates/dns/src/lib.rs::tests::rejects_malformed_specs (tcp/tls only parsed, never dialed in a test)", "date": "2026-11-06"}
+{"key": "dns/upstream/doh", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::doh_only_and_doq_only_configs_resolve", "date": "2026-11-07"}
 {"key": "dns/upstream/dot", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
 {"key": "dns/upstream/fakedns", "test": "pass", "evidence": "crates/dns/src/fakeip.rs::tests::fakeip_pool_allocates_dual_stack_evicts_lru_and_persists; crates/dns/src/lib.rs::tests::dns_rules_fakeip_doh_and_reverse_mapping_work (allocation + lookup_fake_ip)", "date": "2026-11-06"}
+{"key": "dns/upstream/https", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::detour_and_respect_rules_dial_through_the_dialer", "date": "2026-11-07"}
+{"key": "dns/upstream/https-local", "test": "pass", "evidence": "crates/dns/src/pipeline_tests.rs::doh_only_and_doq_only_configs_resolve", "date": "2026-11-07"}
 {"key": "dns/upstream/localhost", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
 {"key": "dns/upstream/system", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::hosts_win_and_unknown_hosts_fail_without_upstream; crates/dns/src/lib.rs::tests::queries_the_configured_upstream", "date": "2026-11-06"}
 {"key": "dns/upstream/tcp", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
 {"key": "dns/upstream/tcp-local", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
 {"key": "dns/upstream/udp", "test": "pass", "evidence": "crates/dns/src/lib.rs::tests::queries_the_configured_upstream (udp only); tcp/tls: crates/dns/src/lib.rs::tests::bracketed_ipv6_without_port_uses_the_default_port (parse only)", "date": "2026-11-06"}
+{"key": "experimental/config/cache-file", "test": "pass", "evidence": "crates/egress/tests/cache_file.rs::store_selected_and_fakeip_share_default_cache_file", "date": "2026-11-07"}
 {"key": "group/balancer/tag", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
 {"key": "group/common/default-selected", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/common/exclude-filter", "test": "pass", "evidence": "crates/config/tests/provider_override.rs::filters_are_full_regexes_like_mihomo", "date": "2026-11-07"}
+{"key": "group/common/expected-status", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::direct_probe_measures_and_rejects_unexpected_status", "date": "2026-11-07"}
+{"key": "group/common/filter", "test": "pass", "evidence": "crates/config/tests/provider_override.rs::filters_are_full_regexes_like_mihomo", "date": "2026-11-07"}
 {"key": "group/common/name", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
 {"key": "group/common/proxies", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
 {"key": "group/common/type", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/common/url", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "date": "2026-11-07"}
+{"key": "group/fallback/protocol", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::fallback_skips_a_candidate_whose_probe_fails", "date": "2026-11-07"}
 {"key": "group/select/combo", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
 {"key": "group/select/default", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/select/interrupt-exist-connections", "test": "pass", "evidence": "crates/control/tests/http.rs::switching_an_interrupting_select_group_closes_flows_of_the_old_member", "date": "2026-11-07"}
 {"key": "group/select/outbounds", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
 {"key": "group/select/protocol", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "group/url-test/protocol", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "date": "2026-11-07"}
+{"key": "group/url-test/url", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "date": "2026-11-07"}
+{"key": "log/config/level", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::patch_configs_moves_the_mixed_port_and_applies_mode_and_log_level", "date": "2026-11-07"}
+{"key": "log/config/output", "test": "pass", "evidence": "crates/core-api/src/log.rs::tests::file_output_and_level_filtering", "date": "2026-11-07"}
+{"key": "log/global/log-level", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::patch_configs_moves_the_mixed_port_and_applies_mode_and_log_level", "date": "2026-11-07"}
 {"key": "log/log/access", "test": "pass", "evidence": "crates/engine/tests/history.rs::access_logging_can_be_disabled_without_disabling_usage", "date": "2026-11-06"}
 {"key": "log/log/dns-log", "test": "pass", "evidence": "crates/engine/tests/history.rs::dns_and_connect_failures_are_persisted_as_events", "date": "2026-11-06"}
 {"key": "log/log/error", "test": "pass", "evidence": "crates/engine/tests/history.rs::dns_and_connect_failures_are_persisted_as_events", "date": "2026-11-06"}
+{"key": "log/log/loglevel", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::patch_configs_moves_the_mixed_port_and_applies_mode_and_log_level", "date": "2026-11-07"}
 {"key": "log/log/mask-address", "test": "pass", "evidence": "crates/control/tests/http.rs::online_masks_and_merges_sources_like_flows", "date": "2026-11-06"}
 {"key": "other/endpoint-common/tag", "test": "pass", "evidence": "crates/config/src/lib.rs::tests::m3_config_route_fakedns_sniffer_cache_tun_roundtrip", "date": "2026-11-06"}
+{"key": "other/global/etag-support", "test": "pass", "evidence": "crates/egress/tests/resource_fetcher.rs::http_fetcher_honors_etag_304_and_falls_back_to_cache_on_failure", "date": "2026-11-07"}
+{"key": "other/service/systemd", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::sighup_reload_moves_the_listener_and_keeps_serving_on_invalid_config", "date": "2026-11-07"}
 {"key": "provider/content/format", "test": "pass", "evidence": "crates/config/src/group.rs::tests::parses_share_links_and_applies_provider_overrides (URI list + vmess base64 inline)", "date": "2026-11-06"}
+{"key": "provider/proxy/exclude-filter", "test": "pass", "evidence": "crates/config/tests/provider_override.rs::filters_are_full_regexes_like_mihomo", "date": "2026-11-07"}
+{"key": "provider/proxy/filter", "test": "pass", "evidence": "crates/config/tests/provider_override.rs::filters_are_full_regexes_like_mihomo", "date": "2026-11-07"}
 {"key": "provider/proxy/name", "test": "pass", "evidence": "crates/config/src/group.rs::tests::parses_share_links_and_applies_provider_overrides (inline payload only; path read is untested)", "date": "2026-11-06"}
 {"key": "provider/proxy/path", "test": "pass", "evidence": "crates/config/src/group.rs::tests::parses_share_links_and_applies_provider_overrides (inline payload only; path read is untested)", "date": "2026-11-06"}
 {"key": "provider/proxy/payload", "test": "pass", "evidence": "crates/config/src/group.rs::tests::parses_share_links_and_applies_provider_overrides (inline payload only; path read is untested)", "date": "2026-11-06"}
+{"key": "provider/proxy/type", "test": "pass", "evidence": "crates/egress/tests/resources.rs::http_provider_download_writes_the_cache_and_signals_new_members", "date": "2026-11-07"}
+{"key": "provider/proxy/url", "test": "pass", "evidence": "crates/egress/tests/resources.rs::http_provider_download_writes_the_cache_and_signals_new_members", "date": "2026-11-07"}
 {"key": "route/action/direct", "test": "pass", "evidence": "crates/net/tests/interface.rs::direct_uses_the_configured_interface", "date": "2026-11-06"}
 {"key": "route/action/outbound", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
 {"key": "route/action/override-address", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work (asserts decision fields only)", "date": "2026-11-06"}
 {"key": "route/action/override-port", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work (asserts decision fields only)", "date": "2026-11-06"}
 {"key": "route/action/proxy-or-group", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
+{"key": "route/action/resolve", "test": "pass", "evidence": "crates/egress/tests/dns_pipeline.rs::mihomo_ip_rules_resolve_domains_and_dns_listen_answers", "date": "2026-11-07"}
 {"key": "route/action/route", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
 {"key": "route/action/route-options", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work (asserts decision fields only)", "date": "2026-11-06"}
+{"key": "route/action/sniff", "test": "pass", "evidence": "crates/protocol-socks/tests/sniff.rs::sing_box_style_route_sniff_action_detects_ssh_for_protocol_rules", "date": "2026-11-07"}
+{"key": "route/action/sniffer", "test": "pass", "evidence": "crates/protocol-socks/tests/sniff.rs::sing_box_style_route_sniff_action_detects_ssh_for_protocol_rules", "date": "2026-11-07"}
+{"key": "route/action/timeout", "test": "pass", "evidence": "crates/protocol-socks/tests/sniff.rs::socks_routes_raw_ip_tls_http_and_ssh_by_sniffed_result", "date": "2026-11-07"}
+{"key": "route/config/auto-detect-interface", "test": "pass", "evidence": "apps/kerlico/tests/dialer_marks.rs::every_outbound_socket_carries_the_compile_time_mark", "date": "2026-11-07"}
+{"key": "route/config/default-interface", "test": "pass", "evidence": "apps/kerlico/tests/dialer_marks.rs::every_outbound_socket_carries_the_compile_time_mark", "date": "2026-11-07"}
 {"key": "route/config/final", "test": "pass", "evidence": "crates/control/tests/http.rs::m4_clash_xray_ssm_endpoints_and_websocket_token_auth", "date": "2026-11-06"}
 {"key": "route/config/rule-set", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
 {"key": "route/config/rules", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
@@ -190,7 +319,9 @@
 {"key": "route/rule/domain-suffix", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
 {"key": "route/rule/domain-wildcard", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
 {"key": "route/rule/dst-port", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/geoip", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_country_mmdb_and_geoip_dat_lookups", "date": "2026-11-07"}
 {"key": "route/rule/geoip-private", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/geosite", "test": "pass", "evidence": "crates/egress/tests/geo_reload.rs::referenced_geosite_downloads_at_startup_and_reloads_without_restart", "date": "2026-11-07"}
 {"key": "route/rule/in-name", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::node_and_user_conditions_use_the_trusted_source", "date": "2026-11-06"}
 {"key": "route/rule/in-user", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::node_and_user_conditions_use_the_trusted_source", "date": "2026-11-06"}
 {"key": "route/rule/inbound", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::node_and_user_conditions_use_the_trusted_source", "date": "2026-11-06"}
@@ -211,15 +342,25 @@
 {"key": "route/rule/order", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
 {"key": "route/rule/outbound-tag", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::domain_conditions_match_exact_suffix_and_keyword; crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins", "date": "2026-11-06"}
 {"key": "route/rule/port", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::fields_combine_with_and_and_first_match_wins; crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "route/rule/protocol", "test": "pass", "evidence": "crates/net/tests/sniff.rs::protocol_names_and_networks", "date": "2026-11-07"}
 {"key": "route/rule/rule-set", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
 {"key": "route/rule/source-ip", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
 {"key": "route/rule/source-ip-cidr", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
 {"key": "route/rule/src-ip-cidr", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
 {"key": "route/rule/user", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::node_and_user_conditions_use_the_trusted_source", "date": "2026-11-06"}
+{"key": "ruleset/config/combo", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_mrs_and_srs_rule_sets_decode", "date": "2026-11-07"}
+{"key": "ruleset/config/format", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_mrs_and_srs_rule_sets_decode", "date": "2026-11-07"}
 {"key": "ruleset/config/rules", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
 {"key": "ruleset/config/tag", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "ruleset/config/type", "test": "pass", "evidence": "crates/egress/tests/resources.rs::remote_rule_set_loads_at_startup_and_refresh_swaps_routing", "date": "2026-11-07"}
+{"key": "ruleset/config/update-interval", "test": "pass", "evidence": "crates/egress/tests/resources.rs::failed_download_keeps_the_stale_cache", "date": "2026-11-07"}
+{"key": "ruleset/config/url", "test": "pass", "evidence": "crates/egress/tests/resources.rs::remote_rule_set_loads_at_startup_and_refresh_swaps_routing", "date": "2026-11-07"}
+{"key": "ruleset/geoip/geoip", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_country_mmdb_and_geoip_dat_lookups", "date": "2026-11-07"}
+{"key": "ruleset/geosite/geosite", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_geosite_cn_loads_compact_and_matches_fast", "date": "2026-11-07"}
 {"key": "ruleset/headless/domain-suffix", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
 {"key": "ruleset/headless/port-range", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
+{"key": "ruleset/rule-provider/combo", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_mrs_and_srs_rule_sets_decode", "date": "2026-11-07"}
+{"key": "ruleset/rule-provider/format", "test": "pass", "evidence": "crates/routing/tests/real_geodata.rs::real_mrs_and_srs_rule_sets_decode", "date": "2026-11-07"}
 {"key": "ruleset/rule-provider/name", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
 {"key": "ruleset/rule-provider/payload", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
 {"key": "ruleset/source/rules", "test": "pass", "evidence": "crates/routing/src/lib.rs::tests::extended_m3_rules_actions_logical_ruleset_and_geodata_work", "date": "2026-11-06"}
@@ -241,6 +382,7 @@
 {"key": "stats/policy/stats-user-downlink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
 {"key": "stats/policy/stats-user-online", "test": "pass", "evidence": "crates/control/tests/http.rs::online_masks_and_merges_sources_like_flows", "date": "2026-11-06"}
 {"key": "stats/policy/stats-user-uplink", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
+{"key": "stats/proxies/delay-history", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "date": "2026-11-07"}
 {"key": "stats/stats/enable", "test": "pass", "evidence": "crates/egress/tests/shared_runtime.rs::verified_identity_cannot_cross_issuers_and_one_flow_has_one_usage", "date": "2026-11-06"}
 {"key": "stats/traffic/realtime-rate", "test": "pass", "evidence": "crates/engine/tests/history.rs (bandwidth_in assertions ~l.332-360)", "date": "2026-11-06"}
 {"key": "user/anytls/credentials", "test": "pass", "evidence": "crates/protocol-anytls/tests/dual.rs::configuration_rejects_invalid_and_credentials_are_scoped", "date": "2026-11-06"}
@@ -266,53 +408,3 @@
 {"key": "user/tuic/credentials", "test": "pass", "evidence": "crates/protocol-tuic/tests/member_scope.rs::both_tuic_authentication_versions_select_member_scope", "date": "2026-11-06"}
 {"key": "user/vless/credentials", "test": "pass", "evidence": "crates/protocol-vless/tests/server.rs::independent_node_credentials_and_both_target_families", "date": "2026-11-06"}
 {"key": "user/vmess/credentials", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::wrong_uuid_certificate_name_and_cancellation_fail", "date": "2026-11-06"}
-{"key": "config/format/merge", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_toml_and_merges_by_tag", "date": "2026-11-06"}
-{"key": "config/merge/outbounds-by-tag", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_toml_and_merges_by_tag", "date": "2026-11-06"}
-{"key": "config/merge/outbounds-tail", "test": "pass", "evidence": "crates/config/src/format.rs::tests::parses_toml_and_merges_by_tag", "date": "2026-11-06"}
-{"key": "api/clash/delete-connections-id", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "date": "2026-11-07"}
-{"key": "api/clash/get-dns-query", "test": "pass", "evidence": "crates/control/tests/http.rs::dns_query_answers_from_the_runtime_resolver_hosts", "date": "2026-11-07"}
-{"key": "api/clash/get-group-name-delay", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
-{"key": "api/clash/get-memory", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "date": "2026-11-07"}
-{"key": "api/clash/get-providers-proxies-name", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "date": "2026-11-07"}
-{"key": "api/clash/get-proxies", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
-{"key": "api/clash/get-proxies-name", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
-{"key": "api/clash/get-proxies-name-delay", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
-{"key": "api/clash/get-rules", "test": "pass", "evidence": "crates/control/tests/http.rs::rules_reflect_the_compiled_route_table", "date": "2026-11-07"}
-{"key": "api/clash/put-configs", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::put_configs_reloads_payload_and_path_and_rolls_back_a_failed_start", "date": "2026-11-07"}
-{"key": "api/clash/put-providers-proxies-name", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "date": "2026-11-07"}
-{"key": "api/configs/put-configs", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::put_configs_reloads_payload_and_path_and_rolls_back_a_failed_start", "date": "2026-11-07"}
-{"key": "api/connections-id/delete-connections-id", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "date": "2026-11-07"}
-{"key": "api/connections/get-connections", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "date": "2026-11-07"}
-{"key": "api/dns-query/get-dns-query", "test": "pass", "evidence": "crates/control/tests/http.rs::dns_query_answers_from_the_runtime_resolver_hosts", "date": "2026-11-07"}
-{"key": "api/group-name-delay/get-group-name-delay", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
-{"key": "api/memory/get-memory", "test": "pass", "evidence": "crates/control/tests/http.rs::connections_lists_a_live_direct_flow_and_delete_closes_it", "date": "2026-11-07"}
-{"key": "api/providers-proxies-name/get-providers-proxies-name", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "date": "2026-11-07"}
-{"key": "api/providers-proxies-name/put-providers-proxies-name", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::provider_update_endpoint_downloads_and_rebuilds_with_new_members", "date": "2026-11-07"}
-{"key": "api/proxies-name-delay/get-proxies-name-delay", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
-{"key": "api/proxies-name/get-proxies-name", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
-{"key": "api/proxies/get-proxies", "test": "pass", "evidence": "crates/control/tests/http.rs::delay_endpoints_measure_through_the_outbound", "date": "2026-11-07"}
-{"key": "api/restart/post-restart", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::put_configs_reloads_payload_and_path_and_rolls_back_a_failed_start", "date": "2026-11-07"}
-{"key": "api/routing-service/list-rule", "test": "pass", "evidence": "crates/control/tests/http.rs::rules_reflect_the_compiled_route_table", "date": "2026-11-07"}
-{"key": "api/rules/get-rules", "test": "pass", "evidence": "crates/control/tests/http.rs::rules_reflect_the_compiled_route_table", "date": "2026-11-07"}
-{"key": "cache/profile/store-selected", "test": "pass", "evidence": "crates/egress/tests/cache_file.rs::store_selected_and_fakeip_share_default_cache_file", "date": "2026-11-07"}
-{"key": "cli/command/generate-vless-mlkem768", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::mlkem768_matches_xray_seed_vector", "date": "2026-11-07"}
-{"key": "cli/generate/generate-tls-keypair", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::tls_keypair_validity_follows_months", "date": "2026-11-07"}
-{"key": "cli/generate/generate-tls-keypair-months", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::tls_keypair_validity_follows_months", "date": "2026-11-07"}
-{"key": "cli/tls/cert", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::tls_keypair_validity_follows_months", "date": "2026-11-07"}
-{"key": "cli/xray/mldsa65", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::mldsa65_seed_signs_and_printed_verify_key_verifies", "date": "2026-11-07"}
-{"key": "cli/xray/mlkem768", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::mlkem768_matches_xray_seed_vector", "date": "2026-11-07"}
-{"key": "cli/xray/vlessenc", "test": "pass", "evidence": "crates/net/src/generate.rs::tests::vlessenc_pairs_real_server_and_client_keys", "date": "2026-11-07"}
-{"key": "config/reload/sighup", "test": "pass", "evidence": "apps/kerlico/tests/reload.rs::sighup_reload_moves_the_listener_and_keeps_serving_on_invalid_config", "date": "2026-11-07"}
-{"key": "experimental/config/cache-file", "test": "pass", "evidence": "crates/egress/tests/cache_file.rs::store_selected_and_fakeip_share_default_cache_file", "date": "2026-11-07"}
-{"key": "group/common/expected-status", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::direct_probe_measures_and_rejects_unexpected_status", "date": "2026-11-07"}
-{"key": "group/common/url", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "date": "2026-11-07"}
-{"key": "group/fallback/protocol", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::fallback_skips_a_candidate_whose_probe_fails", "date": "2026-11-07"}
-{"key": "group/select/interrupt-exist-connections", "test": "pass", "evidence": "crates/control/tests/http.rs::switching_an_interrupting_select_group_closes_flows_of_the_old_member", "date": "2026-11-07"}
-{"key": "group/url-test/protocol", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "date": "2026-11-07"}
-{"key": "group/url-test/url", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "date": "2026-11-07"}
-{"key": "provider/proxy/type", "test": "pass", "evidence": "crates/egress/tests/resources.rs::http_provider_download_writes_the_cache_and_signals_new_members", "date": "2026-11-07"}
-{"key": "provider/proxy/url", "test": "pass", "evidence": "crates/egress/tests/resources.rs::http_provider_download_writes_the_cache_and_signals_new_members", "date": "2026-11-07"}
-{"key": "ruleset/config/type", "test": "pass", "evidence": "crates/egress/tests/resources.rs::remote_rule_set_loads_at_startup_and_refresh_swaps_routing", "date": "2026-11-07"}
-{"key": "ruleset/config/update-interval", "test": "pass", "evidence": "crates/egress/tests/resources.rs::failed_download_keeps_the_stale_cache", "date": "2026-11-07"}
-{"key": "ruleset/config/url", "test": "pass", "evidence": "crates/egress/tests/resources.rs::remote_rule_set_loads_at_startup_and_refresh_swaps_routing", "date": "2026-11-07"}
-{"key": "stats/proxies/delay-history", "test": "pass", "evidence": "crates/egress/tests/health_check.rs::url_test_switches_to_the_faster_measured_candidate", "date": "2026-11-07"}

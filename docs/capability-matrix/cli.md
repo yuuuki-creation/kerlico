@@ -206,23 +206,23 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `geoip` | GeoIP 工具 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geoip` |
-| `geoip-export` | 导出国家为规则集 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geoip export` |
+| `geoip` | GeoIP 工具 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geoip` |
+| `geoip-export` | 导出国家为规则集 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geoip export` |
 | `geoip-export-output` | geoip export 的 --output：输出路径 |  | 有 |  | 已实现 | 未测 | 取值：`--output`、`-o` |
-| `geoip-file` | geoip 的 --file：geoip 文件，默认 geoip.db |  | 有 |  | 部分 | 未测 | 取值：`--file`、`-f` |
-| `geoip-list` | 列出国家代码 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geoip list` |
-| `geoip-lookup` | 查询 IP 是否在 GeoIP 库中 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geoip lookup` |
+| `geoip-file` | geoip 的 --file：geoip 文件，默认 geoip.db |  | 有 |  | 已实现 | 通过 | 取值：`--file`、`-f` |
+| `geoip-list` | 列出国家代码 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geoip list` |
+| `geoip-lookup` | 查询 IP 是否在 GeoIP 库中 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geoip lookup` |
 
 ## geosite
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `geosite` | Geosite 工具 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geosite` |
-| `geosite-export` | 导出分类为规则集 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geosite export` |
+| `geosite` | Geosite 工具 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geosite` |
+| `geosite-export` | 导出分类为规则集 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geosite export` |
 | `geosite-export-output` | geosite export 的 --output：输出路径 |  | 有 |  | 已实现 | 未测 | 取值：`--output`、`-o` |
-| `geosite-file` | geosite 的 --file：geosite 文件，默认 geosite.db |  | 有 |  | 部分 | 未测 | 取值：`--file`、`-f` |
-| `geosite-list` | 列出分类 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geosite list` |
-| `geosite-lookup` | 查询域名是否在 Geosite 中 |  | 有 |  | 部分 | 未测 | 取值：`sing-box geosite lookup` |
+| `geosite-file` | geosite 的 --file：geosite 文件，默认 geosite.db |  | 有 |  | 已实现 | 通过 | 取值：`--file`、`-f` |
+| `geosite-list` | 列出分类 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geosite list` |
+| `geosite-lookup` | 查询域名是否在 Geosite 中 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box geosite lookup` |
 
 ## global
 
@@ -249,14 +249,14 @@
 
 | 编号 | 说明 | Mihomo | sing-box | Xray | kerlico | 实测 | 取值与约束 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `rule-set` | 规则集工具 |  | 有 |  | 部分 | 未测 | 取值：`sing-box rule-set` |
-| `rule-set-compile` | 把规则集 JSON 编译为二进制 |  | 有 |  | 未实现 | 未测 | 取值：`sing-box rule-set compile` |
-| `rule-set-compile-output` | rule-set compile 的 --output：输出文件 |  | 有 |  | 未实现 | 未测 | 取值：`--output`、`-o` |
+| `rule-set` | 规则集工具 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box rule-set` |
+| `rule-set-compile` | 把规则集 JSON 编译为二进制 |  | 有 |  | 已实现 | 通过 | 取值：`sing-box rule-set compile` |
+| `rule-set-compile-output` | rule-set compile 的 --output：输出文件 |  | 有 |  | 已实现 | 通过 | 取值：`--output`、`-o` |
 | `rule-set-convert` | 把 AdGuard DNS 过滤器转为规则集 |  | 有 |  | 已实现 | 未测 | 取值：`sing-box rule-set convert` |
-| `rule-set-convert-output` | rule-set convert 的 --output：输出文件 |  | 有 |  | 部分 | 未测 | 取值：`--output`、`-o` |
+| `rule-set-convert-output` | rule-set convert 的 --output：输出文件 |  | 有 |  | 已实现 | 通过 | 取值：`--output`、`-o` |
 | `rule-set-convert-type` | rule-set convert 的 --type：源类型，可用 adguard |  | 有 |  | 已实现 | 未测 | 取值：`--type`、`-t` |
-| `rule-set-decompile` | 把二进制规则集反编译为 JSON |  | 有 |  | 未实现 | 未测 | 取值：`sing-box rule-set decompile` |
-| `rule-set-decompile-output` | rule-set decompile 的 --output：输出文件 |  | 有 |  | 未实现 | 未测 | 取值：`--output`、`-o` |
+| `rule-set-decompile` | 把二进制规则集反编译为 JSON |  | 有 |  | 已实现 | 通过 | 取值：`sing-box rule-set decompile` |
+| `rule-set-decompile-output` | rule-set decompile 的 --output：输出文件 |  | 有 |  | 已实现 | 通过 | 取值：`--output`、`-o` |
 | `rule-set-format` | 格式化规则集 JSON |  | 有 |  | 已实现 | 未测 | 取值：`sing-box rule-set format` |
 | `rule-set-format-write` | rule-set format 的 --write：写回源文件 |  | 有 |  | 已实现 | 未测 | 取值：`--write`、`-w` |
 | `rule-set-match` | 检查 IP 或域名是否匹配规则集 |  | 有 |  | 已实现 | 未测 | 取值：`sing-box rule-set match` |

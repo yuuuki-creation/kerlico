@@ -13,6 +13,7 @@
 {"key": "inbound/common/protocol", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
 {"key": "inbound/common/proxy", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
 {"key": "inbound/common/settings", "test": "pass", "evidence": "crates/protocol-tuic/tests/dual.rs::rejects_mixed_versions_unknown_options_and_duplicate_users", "date": "2026-11-06"}
+{"key": "inbound/common/sniffing", "test": "pass", "evidence": "crates/protocol-socks/tests/sniff.rs::socks_routes_raw_ip_tls_http_and_ssh_by_sniffed_result", "date": "2026-11-07"}
 {"key": "inbound/common/stream-settings", "test": "pass", "evidence": "test: none（未逐一核对传输用例）", "date": "2026-11-06"}
 {"key": "inbound/common/tag", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
 {"key": "inbound/common/type", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
@@ -30,11 +31,15 @@
 {"key": "inbound/fallback/path", "test": "pass", "evidence": "crates/net/src/fallback.rs::fallback_selection_respects_specificity_and_http_path", "date": "2026-11-06"}
 {"key": "inbound/fallback/type", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
 {"key": "inbound/global/allow-lan", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
+{"key": "inbound/global/bind-address", "test": "pass", "evidence": "crates/protocol-http/tests/bind_any.rs::bind_address_star_listens_on_both_families", "date": "2026-11-07"}
+{"key": "inbound/global/lan-allowed-ips", "test": "pass", "evidence": "crates/net/src/transparent.rs::tests::ipv6_and_udp_transparent_helpers", "date": "2026-11-07"}
+{"key": "inbound/global/lan-disallowed-ips", "test": "pass", "evidence": "crates/net/src/transparent.rs::tests::ipv6_and_udp_transparent_helpers", "date": "2026-11-07"}
 {"key": "inbound/global/listeners", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
 {"key": "inbound/global/mixed-port", "test": "pass", "evidence": "test: none（crates/config/src/format.rs::normalizes_mihomo_yaml_rules_sub_rules_and_ports 只测解析，不测展开）", "date": "2026-11-06"}
 {"key": "inbound/global/port", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
 {"key": "inbound/global/redir-port", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
 {"key": "inbound/global/socks-port", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
+{"key": "inbound/global/tproxy-port", "test": "pass", "evidence": "crates/net/src/transparent.rs::tests::ipv6_and_udp_transparent_helpers", "date": "2026-11-07"}
 {"key": "inbound/http/accounts", "test": "pass", "evidence": "crates/protocol-http/tests/protocol.rs::wrong_auth_and_conflicting_host_are_rejected", "date": "2026-11-06"}
 {"key": "inbound/http/certificate", "test": "pass", "evidence": "crates/protocol-http/tests/protocol.rs::plain_tls_connect_preserves_half_close", "date": "2026-11-06"}
 {"key": "inbound/http/combo", "test": "pass", "evidence": "crates/protocol-http/tests/protocol.rs::plain_tls_connect_preserves_half_close", "date": "2026-11-06"}
@@ -67,16 +72,28 @@
 {"key": "inbound/hysteria/users-name", "test": "pass", "evidence": "crates/protocol-hysteria1/tests/member_scope.rs::quic_auth_selects_member_scope", "date": "2026-11-06"}
 {"key": "inbound/hysteria/version", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix; tools/interop_hysteria2.py", "date": "2026-11-06"}
 {"key": "inbound/hysteria2/certificate", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix; tools/interop_hysteria2.py", "date": "2026-11-06"}
+{"key": "inbound/hysteria2/combo", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::auth_reply_advertises_the_node_receive_rate_or_auto", "date": "2026-11-07"}
+{"key": "inbound/hysteria2/down", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::auth_reply_advertises_the_node_receive_rate_or_auto", "date": "2026-11-07"}
+{"key": "inbound/hysteria2/down-mbps", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::auth_reply_advertises_the_node_receive_rate_or_auto", "date": "2026-11-07"}
+{"key": "inbound/hysteria2/ignore-client-bandwidth", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::auth_reply_advertises_the_node_receive_rate_or_auto", "date": "2026-11-07"}
+{"key": "inbound/hysteria2/masquerade", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_proxy_forwards_to_the_upstream", "date": "2026-11-07"}
 {"key": "inbound/hysteria2/masquerade-content", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
 {"key": "inbound/hysteria2/masquerade-directory", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
 {"key": "inbound/hysteria2/masquerade-headers", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
+{"key": "inbound/hysteria2/masquerade-rewrite-host", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_proxy_forwards_to_the_upstream", "date": "2026-11-07"}
+{"key": "inbound/hysteria2/masquerade-status-code", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_string_and_default_still_answer_locally", "date": "2026-11-07"}
+{"key": "inbound/hysteria2/masquerade-type", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_proxy_forwards_to_the_upstream", "date": "2026-11-07"}
+{"key": "inbound/hysteria2/masquerade-url", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::masquerade_proxy_forwards_to_the_upstream", "date": "2026-11-07"}
 {"key": "inbound/hysteria2/max-idle-time", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::real_hysteria2_idle_association_records_timeout_after_zero_packet", "date": "2026-11-06"}
+{"key": "inbound/hysteria2/mux-option-padding", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "inbound/hysteria2/obfs", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix; tools/interop_hysteria2.py", "date": "2026-11-06"}
 {"key": "inbound/hysteria2/obfs-password", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix; tools/interop_hysteria2.py", "date": "2026-11-06"}
 {"key": "inbound/hysteria2/obfs-type", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix; tools/interop_hysteria2.py", "date": "2026-11-06"}
 {"key": "inbound/hysteria2/private-key", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix; tools/interop_hysteria2.py", "date": "2026-11-06"}
 {"key": "inbound/hysteria2/protocol", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix; tools/interop_hysteria2.py", "date": "2026-11-06"}
 {"key": "inbound/hysteria2/tls", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix; tools/interop_hysteria2.py", "date": "2026-11-06"}
+{"key": "inbound/hysteria2/up", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::auth_reply_advertises_the_node_receive_rate_or_auto", "date": "2026-11-07"}
+{"key": "inbound/hysteria2/up-mbps", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::auth_reply_advertises_the_node_receive_rate_or_auto", "date": "2026-11-07"}
 {"key": "inbound/hysteria2/users", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/member_scope.rs::h3_auth_selects_member_scope", "date": "2026-11-06"}
 {"key": "inbound/hysteria2/users-name", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/member_scope.rs::h3_auth_selects_member_scope", "date": "2026-11-06"}
 {"key": "inbound/hysteria2/users-password", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::authentication_tls_and_obfuscation_fail_without_target_access", "date": "2026-11-06"}
@@ -85,6 +102,9 @@
 {"key": "inbound/listen/listen", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
 {"key": "inbound/listen/listen-port", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
 {"key": "inbound/listen/reuse-addr", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
+{"key": "inbound/listen/sniff", "test": "pass", "evidence": "crates/protocol-socks/tests/sniff.rs::socks_routes_raw_ip_tls_http_and_ssh_by_sniffed_result", "date": "2026-11-07"}
+{"key": "inbound/listen/sniff-override-destination", "test": "pass", "evidence": "crates/protocol-http/tests/sniff.rs::http_and_mixed_inbounds_route_raw_ip_by_sniffed_domain", "date": "2026-11-07"}
+{"key": "inbound/listen/sniff-timeout", "test": "pass", "evidence": "crates/protocol-socks/tests/sniff.rs::socks_routes_raw_ip_tls_http_and_ssh_by_sniffed_result", "date": "2026-11-07"}
 {"key": "inbound/listen/udp-timeout", "test": "pass", "evidence": "crates/engine/tests/framework.rs::udp_forward_idle_records_timeout_and_one_payload", "date": "2026-11-06"}
 {"key": "inbound/masque/advertise-routes", "test": "pass", "evidence": "codec only: crates/protocol-masque/src/capsule.rs::tests::route_order_and_filter; server: none", "date": "2026-11-06"}
 {"key": "inbound/masque/email", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
@@ -114,6 +134,59 @@
 {"key": "inbound/naive/users", "test": "pass", "evidence": "tools/interop_naive.py", "date": "2026-11-06"}
 {"key": "inbound/naive/users-password", "test": "pass", "evidence": "tools/interop_naive.py", "date": "2026-11-06"}
 {"key": "inbound/naive/users-username", "test": "pass", "evidence": "tools/interop_naive.py", "date": "2026-11-06"}
+{"key": "inbound/openvpn/address", "test": "pass", "evidence": "tools/interop_openvpn_server.py two-clients-get-distinct-addresses", "date": "2026-11-07"}
+{"key": "inbound/openvpn/data-ciphers", "test": "pass", "evidence": "tools/interop_openvpn_server.py udp-ncp-picks-server-order", "date": "2026-11-07"}
+{"key": "inbound/openvpn/duplicate-cn", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::second_login_with_the_same_name_kicks_the_first_unless_duplicate_cn", "date": "2026-11-07"}
+{"key": "inbound/openvpn/handshake-window", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::ping_restart_and_handshake_window_close_idle_sessions", "date": "2026-11-07"}
+{"key": "inbound/openvpn/max-clients", "test": "pass", "evidence": "tools/interop_openvpn_server.py max-clients-1-released-on-exit", "date": "2026-11-07"}
+{"key": "inbound/openvpn/mode", "test": "pass", "evidence": "tools/interop_openvpn_server.py udp-tls-crypt-certificate", "date": "2026-11-07"}
+{"key": "inbound/openvpn/network", "test": "pass", "evidence": "tools/interop_openvpn_server.py tcp-password-only", "date": "2026-11-07"}
+{"key": "inbound/openvpn/ping-interval", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::server_sends_ping_when_idle", "date": "2026-11-07"}
+{"key": "inbound/openvpn/ping-restart", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::ping_restart_and_handshake_window_close_idle_sessions", "date": "2026-11-07"}
+{"key": "inbound/openvpn/protocol", "test": "pass", "evidence": "tools/interop_openvpn_server.py udp-tls-crypt-certificate", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-block-outside-dns", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-dhcp-options", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-dns", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-dns-servers", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-dns-servers-addresses", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-dns-servers-priority", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-dns-servers-resolve-domains", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-dns-servers-sni", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-dns-servers-transport", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-ping-interval", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-ping-restart", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-redirect-gateway", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-redirect-gateway-flags", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-routes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/push-search-domains", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
+{"key": "inbound/openvpn/renegotiate-interval", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::server_initiated_renegotiation_moves_both_sides_to_a_new_key_id", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::config_rejects_what_the_server_does_not_implement", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-certificate", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs::tests::openvpn_client_and_server_sessions_complete_handshake_and_exchange_data_v2", "date": "2026-11-06"}
+{"key": "inbound/openvpn/tls-certificate-path", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
+{"key": "inbound/openvpn/tls-cipher", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-client-certificate", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-client-certificate-path", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-client-name", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-client-name-type", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-control-wrap", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_crypt_and_tls_auth_wrapped_logins_succeed", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-control-wrap-direction", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_crypt_and_tls_auth_wrapped_logins_succeed", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-control-wrap-key", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs::tests::openvpn_client_and_server_sessions_complete_handshake_and_exchange_data_v2", "date": "2026-11-06"}
+{"key": "inbound/openvpn/tls-control-wrap-key-path", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
+{"key": "inbound/openvpn/tls-control-wrap-type", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_crypt_and_tls_auth_wrapped_logins_succeed", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-crl-path", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-groups", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-key", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs::tests::openvpn_client_and_server_sessions_complete_handshake_and_exchange_data_v2", "date": "2026-11-06"}
+{"key": "inbound/openvpn/tls-key-path", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
+{"key": "inbound/openvpn/tls-peer-fingerprint", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::peer_fingerprint_pins_a_self_signed_client_certificate_without_a_ca", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-remote-certificate-tls", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-verify-client-certificate", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-version-max", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "date": "2026-11-07"}
+{"key": "inbound/openvpn/tls-version-min", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "date": "2026-11-07"}
+{"key": "inbound/openvpn/topology", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::push_reply_carries_configured_routes_dns_topology_and_per_user_address", "date": "2026-11-07"}
+{"key": "inbound/openvpn/users", "test": "pass", "evidence": "tools/interop_openvpn_server.py wrong-password-is-refused", "date": "2026-11-07"}
+{"key": "inbound/openvpn/users-password", "test": "pass", "evidence": "tools/interop_openvpn_server.py wrong-password-is-refused", "date": "2026-11-07"}
+{"key": "inbound/openvpn/users-username", "test": "pass", "evidence": "tools/interop_openvpn_server.py wrong-password-is-refused", "date": "2026-11-07"}
 {"key": "inbound/redirect/combo", "test": "pass", "evidence": "test: none（crates/net/src/transparent.rs::redirect_and_tproxy_factories_validate_options 只测选项校验）", "date": "2026-11-06"}
 {"key": "inbound/redirect/protocol", "test": "pass", "evidence": "crates/net/src/transparent.rs::redirect_and_tproxy_factories_validate_options", "date": "2026-11-06"}
 {"key": "inbound/shadowquic/alpn", "test": "pass", "evidence": "test: none (only default h3 exercised)", "date": "2026-11-06"}
@@ -122,6 +195,7 @@
 {"key": "inbound/shadowquic/jls-upstream-addr", "test": "pass", "evidence": "crates/protocol-shadowquic/tests/dual.rs::ordinary_quic_is_forwarded_to_real_cover_and_reclaimed_without_business_access", "date": "2026-11-06"}
 {"key": "inbound/shadowquic/jls-upstream-rate-limit", "test": "pass", "evidence": "test: none (limiter vendor/quinn-jls/src/jls.rs:104 unasserted)", "date": "2026-11-06"}
 {"key": "inbound/shadowquic/jls-upstream-sni", "test": "pass", "evidence": "crates/protocol-shadowquic/tests/dual.rs::wrong_credentials_and_server_name_never_open_target_access", "date": "2026-11-06"}
+{"key": "inbound/shadowquic/mux-option-padding", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "inbound/shadowquic/protocol", "test": "pass", "evidence": "crates/protocol-shadowquic/tests/dual.rs::complete_versions_modes_node_families_and_congestion_matrix; tools/interop_shadowquic.py", "date": "2026-11-06"}
 {"key": "inbound/shadowquic/quic-versions", "test": "pass", "evidence": "crates/protocol-shadowquic/tests/member_scope.rs::jls_library_selected_user_controls_member_scope", "date": "2026-11-06"}
 {"key": "inbound/shadowquic/users-password", "test": "pass", "evidence": "crates/protocol-shadowquic/tests/dual.rs::wrong_credentials_and_server_name_never_open_target_access", "date": "2026-11-06"}
@@ -131,6 +205,8 @@
 {"key": "inbound/shadowsocks/combo", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix", "date": "2026-11-06"}
 {"key": "inbound/shadowsocks/email", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::native_second_member_keeps_tcp_udp_identity_and_original_domain", "date": "2026-11-06"}
 {"key": "inbound/shadowsocks/method", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix", "date": "2026-11-06"}
+{"key": "inbound/shadowsocks/multiplex", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "inbound/shadowsocks/mux-option-padding", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "inbound/shadowsocks/network", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix", "date": "2026-11-06"}
 {"key": "inbound/shadowsocks/password", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix", "date": "2026-11-06"}
 {"key": "inbound/shadowsocks/protocol", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix; tools/interop_shadowsocks.py", "date": "2026-11-06"}
@@ -202,12 +278,15 @@
 {"key": "inbound/sudoku/httpmask-mode", "test": "pass", "evidence": "crates/protocol-sudoku/tests/protocol.rs::six_carriers_three_methods_dual_stack_tcp_and_uot", "date": "2026-11-06"}
 {"key": "inbound/sudoku/httpmask-path-root", "test": "pass", "evidence": "crates/protocol-sudoku/tests/http_controls.rs::http_paths_methods_query_and_mode_controls_do_not_reach_egress", "date": "2026-11-06"}
 {"key": "inbound/sudoku/key", "test": "pass", "evidence": "crates/protocol-sudoku/tests/protocol.rs::public_looking_and_split_key_aliases_use_the_same_real_secret", "date": "2026-11-06"}
+{"key": "inbound/sudoku/mux-option-padding", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "inbound/sudoku/padding-max", "test": "pass", "evidence": "crates/protocol-sudoku/tests/protocol.rs::table_directions_pure_packed_padding_and_rotated_layouts", "date": "2026-11-06"}
 {"key": "inbound/sudoku/padding-min", "test": "pass", "evidence": "crates/protocol-sudoku/tests/protocol.rs::table_directions_pure_packed_padding_and_rotated_layouts", "date": "2026-11-06"}
 {"key": "inbound/sudoku/path-root", "test": "pass", "evidence": "crates/protocol-sudoku/tests/http_controls.rs::http_paths_methods_query_and_mode_controls_do_not_reach_egress", "date": "2026-11-06"}
 {"key": "inbound/sudoku/protocol", "test": "pass", "evidence": "crates/protocol-sudoku/tests/protocol.rs::six_carriers_three_methods_dual_stack_tcp_and_uot", "date": "2026-11-06"}
 {"key": "inbound/sudoku/table-type", "test": "pass", "evidence": "crates/protocol-sudoku/tests/protocol.rs::table_directions_pure_packed_padding_and_rotated_layouts", "date": "2026-11-06"}
+{"key": "inbound/tproxy/combo", "test": "pass", "evidence": "crates/net/src/transparent.rs::tests::ipv6_and_udp_transparent_helpers", "date": "2026-11-07"}
 {"key": "inbound/tproxy/protocol", "test": "pass", "evidence": "crates/net/src/transparent.rs::redirect_and_tproxy_factories_validate_options (factory options only)", "date": "2026-11-06"}
+{"key": "inbound/tproxy/udp", "test": "pass", "evidence": "crates/net/src/transparent.rs::tests::ipv6_and_udp_transparent_helpers", "date": "2026-11-07"}
 {"key": "inbound/trojan/certificate", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::all_carriers_dual_role_tcp_udp", "date": "2026-11-06"}
 {"key": "inbound/trojan/clients", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::credential_separation_and_config_rejections", "date": "2026-11-06"}
 {"key": "inbound/trojan/combo", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::all_carriers_dual_role_tcp_udp", "date": "2026-11-06"}
@@ -219,6 +298,8 @@
 {"key": "inbound/trojan/fallback-server-port", "test": "pass", "evidence": "crates/net/src/fallback.rs::fallback_selection_respects_specificity_and_http_path (selection only; no e2e relay test; compile_trojan_fallbacks untested)", "date": "2026-11-06"}
 {"key": "inbound/trojan/fallbacks", "test": "pass", "evidence": "crates/net/src/fallback.rs::fallback_selection_respects_specificity_and_http_path (selection only; no e2e relay test; compile_trojan_fallbacks untested)", "date": "2026-11-06"}
 {"key": "inbound/trojan/grpc-service-name", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::all_carriers_dual_role_tcp_udp", "date": "2026-11-06"}
+{"key": "inbound/trojan/multiplex", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "inbound/trojan/mux-option-padding", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "inbound/trojan/password", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::credential_separation_and_config_rejections", "date": "2026-11-06"}
 {"key": "inbound/trojan/private-key", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::all_carriers_dual_role_tcp_udp", "date": "2026-11-06"}
 {"key": "inbound/trojan/protocol", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::credential_separation_and_config_rejections", "date": "2026-11-06"}
@@ -241,6 +322,7 @@
 {"key": "inbound/tuic/combo", "test": "pass", "evidence": "crates/protocol-tuic/tests/dual.rs::versions_modes_addresses_and_congestion_complete_matrix", "date": "2026-11-06"}
 {"key": "inbound/tuic/congestion-control", "test": "pass", "evidence": "crates/protocol-tuic/tests/dual.rs::versions_modes_addresses_and_congestion_complete_matrix", "date": "2026-11-06"}
 {"key": "inbound/tuic/congestion-controller", "test": "pass", "evidence": "crates/protocol-tuic/tests/dual.rs::versions_modes_addresses_and_congestion_complete_matrix", "date": "2026-11-06"}
+{"key": "inbound/tuic/mux-option-padding", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "inbound/tuic/private-key", "test": "pass", "evidence": "tools/interop_tuic.py (certificate_file/private_key_file vs reference tuic-server); crates/protocol-tuic/tests/dual.rs::versions_modes_addresses_and_congestion_complete_matrix", "date": "2026-11-06"}
 {"key": "inbound/tuic/protocol", "test": "pass", "evidence": "crates/protocol-tuic/tests/dual.rs::versions_modes_addresses_and_congestion_complete_matrix", "date": "2026-11-06"}
 {"key": "inbound/tuic/tls", "test": "pass", "evidence": "crates/protocol-tuic/tests/dual.rs::versions_modes_addresses_and_congestion_complete_matrix", "date": "2026-11-06"}
@@ -250,11 +332,25 @@
 {"key": "inbound/tuic/users-uuid", "test": "pass", "evidence": "crates/protocol-tuic/tests/dual.rs::versions_modes_addresses_and_congestion_complete_matrix", "date": "2026-11-06"}
 {"key": "inbound/tuic/v4", "test": "pass", "evidence": "crates/protocol-tuic/tests/dual.rs::versions_modes_addresses_and_congestion_complete_matrix", "date": "2026-11-06"}
 {"key": "inbound/tuic/v5", "test": "pass", "evidence": "crates/protocol-tuic/tests/dual.rs::versions_modes_addresses_and_congestion_complete_matrix", "date": "2026-11-06"}
+{"key": "inbound/tun/auto-detect-interface", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::route_plan_renders_ipv4_ipv6_strict_and_bypass_rules", "date": "2026-11-07"}
+{"key": "inbound/tun/auto-redirect", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::redirect_renders_nftables_and_fallback_rules", "date": "2026-11-07"}
+{"key": "inbound/tun/auto-redirect-input-mark", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::redirect_renders_nftables_and_fallback_rules", "date": "2026-11-07"}
+{"key": "inbound/tun/auto-redirect-iproute2-fallback-rule-index", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::redirect_renders_nftables_and_fallback_rules", "date": "2026-11-07"}
+{"key": "inbound/tun/auto-redirect-output-mark", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::redirect_renders_nftables_and_fallback_rules", "date": "2026-11-07"}
+{"key": "inbound/tun/auto-route", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
+{"key": "inbound/tun/combo", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
 {"key": "inbound/tun/device", "test": "pass", "evidence": "crates/protocol-tun/tests/netns.rs::kernel_packets_reach_the_dispatcher_and_return (#[ignore], needs root, not in tools/worker_gate.sh)", "date": "2026-11-06"}
+{"key": "inbound/tun/dns-hijack", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
 {"key": "inbound/tun/inet4-address", "test": "pass", "evidence": "crates/protocol-tun/tests/netns.rs::kernel_packets_reach_the_dispatcher_and_return (#[ignore], needs root, not in tools/worker_gate.sh)", "date": "2026-11-06"}
 {"key": "inbound/tun/inet6-address", "test": "pass", "evidence": "crates/protocol-tun/tests/netns.rs::kernel_packets_reach_the_dispatcher_and_return (#[ignore], needs root, not in tools/worker_gate.sh)", "date": "2026-11-06"}
+{"key": "inbound/tun/inet6-route-address", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::route_plan_renders_ipv4_ipv6_strict_and_bypass_rules", "date": "2026-11-07"}
 {"key": "inbound/tun/mtu", "test": "pass", "evidence": "crates/protocol-tun/tests/netns.rs::kernel_packets_reach_the_dispatcher_and_return (#[ignore], needs root, not in tools/worker_gate.sh)", "date": "2026-11-06"}
 {"key": "inbound/tun/protocol", "test": "pass", "evidence": "crates/protocol-tun/tests/netns.rs::kernel_packets_reach_the_dispatcher_and_return (#[ignore], needs root, not in tools/worker_gate.sh)", "date": "2026-11-06"}
+{"key": "inbound/tun/route-address", "test": "pass", "evidence": "crates/protocol-tun/src/automation.rs::tests::route_plan_renders_ipv4_ipv6_strict_and_bypass_rules", "date": "2026-11-07"}
+{"key": "inbound/tun/route-address-set", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs::tests::routing_address_set_tracks_rule_set_updates", "date": "2026-11-07"}
+{"key": "inbound/tun/route-exclude-address-set", "test": "pass", "evidence": "crates/protocol-tun/src/lib.rs::tests::routing_address_set_tracks_rule_set_updates", "date": "2026-11-07"}
+{"key": "inbound/tun/stack", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
+{"key": "inbound/tun/strict-route", "test": "pass", "evidence": "tools/acceptance_vs_mihomo.py", "date": "2026-11-07"}
 {"key": "inbound/tun/tun", "test": "pass", "evidence": "crates/protocol-tun/tests/netns.rs::kernel_packets_reach_the_dispatcher_and_return (#[ignore], needs root, not in tools/worker_gate.sh)", "date": "2026-11-06"}
 {"key": "inbound/tunnel/allowed-network", "test": "pass", "evidence": "crates/engine/tests/framework.rs::tcp_half_close_preserves_delayed_response; crates/engine/tests/framework.rs::udp_keeps_independent_senders_and_packet_boundaries", "date": "2026-11-06"}
 {"key": "inbound/tunnel/combo", "test": "pass", "evidence": "crates/engine/tests/framework.rs::tcp_half_close_preserves_delayed_response", "date": "2026-11-06"}
@@ -278,6 +374,8 @@
 {"key": "inbound/vless/flow", "test": "pass", "evidence": "tools/interop_vless_server.py --vision (vs Xray)", "date": "2026-11-06"}
 {"key": "inbound/vless/grpc-service-name", "test": "pass", "evidence": "tools/interop_vless_server.py --transport ws|httpupgrade|grpc|xhttp --mode ... (vs Xray)", "date": "2026-11-06"}
 {"key": "inbound/vless/id", "test": "pass", "evidence": "crates/protocol-vless/tests/wire.rs::rejects_invalid_version_command_address_and_flow", "date": "2026-11-06"}
+{"key": "inbound/vless/multiplex", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "inbound/vless/mux-option-padding", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "inbound/vless/private-key", "test": "pass", "evidence": "crates/protocol-vless/tests/server.rs::independent_node_credentials_and_both_target_families", "date": "2026-11-06"}
 {"key": "inbound/vless/protocol", "test": "pass", "evidence": "crates/protocol-vless/tests/server.rs::independent_node_credentials_and_both_target_families", "date": "2026-11-06"}
 {"key": "inbound/vless/reality-config-dest", "test": "pass", "evidence": "tools/interop_vless_server.py --security reality (positive path vs Xray); no negative short-id/time-skew test", "date": "2026-11-06"}
@@ -299,6 +397,8 @@
 {"key": "inbound/vmess/combo", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::dual_cipher_transport_security_matrix; tools/interop_vmess.py (vs Xray)", "date": "2026-11-06"}
 {"key": "inbound/vmess/grpc-service-name", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::dual_cipher_transport_security_matrix; tools/interop_vmess.py (vs Xray)", "date": "2026-11-06"}
 {"key": "inbound/vmess/id", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::wrong_uuid_certificate_name_and_cancellation_fail", "date": "2026-11-06"}
+{"key": "inbound/vmess/multiplex", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
+{"key": "inbound/vmess/mux-option-padding", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "inbound/vmess/private-key", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::dual_cipher_transport_security_matrix; tools/interop_vmess.py (vs Xray)", "date": "2026-11-06"}
 {"key": "inbound/vmess/protocol", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::dual_cipher_transport_security_matrix; tools/interop_vmess.py (vs Xray)", "date": "2026-11-06"}
 {"key": "inbound/vmess/tls", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::dual_cipher_transport_security_matrix; tools/interop_vmess.py (vs Xray)", "date": "2026-11-06"}
@@ -328,6 +428,7 @@
 {"key": "outbound/common/mux", "test": "pass", "evidence": "tools/interop_vless_matrix.py (--mux, line 187)", "date": "2026-11-06"}
 {"key": "outbound/common/name", "test": "pass", "evidence": "crates/engine/tests/framework.rs::rejects_unknown_fields_capabilities_and_references", "date": "2026-11-06"}
 {"key": "outbound/common/port", "test": "pass", "evidence": "crates/protocol-anytls/tests/dual.rs::sing_box_both_roles_tcp_and_uot_v2", "date": "2026-11-06"}
+{"key": "outbound/common/proxy-settings", "test": "pass", "evidence": "crates/protocol-wireguard/src/tests/runtime.rs::detour_carries_the_wireguard_carrier_through_the_upstream_outbound", "date": "2026-11-07"}
 {"key": "outbound/common/server", "test": "pass", "evidence": "crates/protocol-anytls/tests/dual.rs::sing_box_both_roles_tcp_and_uot_v2", "date": "2026-11-06"}
 {"key": "outbound/common/settings", "test": "pass", "evidence": "crates/protocol-anytls/tests/dual.rs::configuration_rejects_invalid_and_credentials_are_scoped", "date": "2026-11-06"}
 {"key": "outbound/common/stream-settings", "test": "pass", "evidence": "tools/interop_vless_matrix.py; tools/interop_trojan.py; tools/interop_vmess.py", "date": "2026-11-06"}
@@ -339,6 +440,10 @@
 {"key": "outbound/direct/freedom", "test": "pass", "evidence": "crates/egress/tests/address_policy.rs::direct_tcp_binding_matches_target_observation_for_both_families", "date": "2026-11-06"}
 {"key": "outbound/direct/protocol", "test": "pass", "evidence": "crates/egress/tests/address_policy.rs::direct_tcp_binding_matches_target_observation_for_both_families", "date": "2026-11-06"}
 {"key": "outbound/direct/target-strategy", "test": "pass", "evidence": "crates/egress/tests/address_policy.rs::domain_prefers_ipv4_and_falls_back_before_payload", "date": "2026-11-06"}
+{"key": "outbound/dns/combo", "test": "pass", "evidence": "crates/egress/tests/dns_pipeline.rs::mihomo_ip_rules_resolve_domains_and_dns_listen_answers", "date": "2026-11-07"}
+{"key": "outbound/dns/dns", "test": "pass", "evidence": "crates/egress/tests/dns_pipeline.rs::mihomo_ip_rules_resolve_domains_and_dns_listen_answers", "date": "2026-11-07"}
+{"key": "outbound/dns/hijack", "test": "pass", "evidence": "crates/egress/tests/dns_pipeline.rs::mihomo_ip_rules_resolve_domains_and_dns_listen_answers", "date": "2026-11-07"}
+{"key": "outbound/dns/protocol", "test": "pass", "evidence": "crates/egress/tests/dns_pipeline.rs::mihomo_ip_rules_resolve_domains_and_dns_listen_answers", "date": "2026-11-07"}
 {"key": "outbound/easytier/combo", "test": "pass", "evidence": "tools/interop_easytier.py (static-tcp, dhcp-udp-relay)", "date": "2026-11-06"}
 {"key": "outbound/easytier/dhcp", "test": "pass", "evidence": "crates/protocol-easytier/src/tests.rs::dhcp_selection_follows_the_network_and_avoids_conflicts; tools/interop_easytier.py dhcp-udp-relay", "date": "2026-11-06"}
 {"key": "outbound/easytier/encryption-algorithm", "test": "pass", "evidence": "tools/interop_easytier.py (default aes-gcm only)", "date": "2026-11-06"}
@@ -389,6 +494,7 @@
 {"key": "outbound/hysteria/up-mbps", "test": "pass", "evidence": "crates/protocol-hysteria1/src/congestion.rs::negotiated_rate_is_not_shared_between_connections", "date": "2026-11-06"}
 {"key": "outbound/hysteria/up-speed", "test": "pass", "evidence": "crates/protocol-hysteria1/src/congestion.rs::negotiated_rate_is_not_shared_between_connections", "date": "2026-11-06"}
 {"key": "outbound/hysteria/version", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix", "date": "2026-11-06"}
+{"key": "outbound/hysteria2/combo", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::client_up_paces_the_upload_with_brutal", "date": "2026-11-07"}
 {"key": "outbound/hysteria2/network", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::udp_disabled_tcp_concurrency_and_cancel", "date": "2026-11-06"}
 {"key": "outbound/hysteria2/obfs", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::authentication_tls_and_obfuscation_fail_without_target_access", "date": "2026-11-06"}
 {"key": "outbound/hysteria2/obfs-password", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix", "date": "2026-11-06"}
@@ -398,6 +504,8 @@
 {"key": "outbound/hysteria2/server", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix", "date": "2026-11-06"}
 {"key": "outbound/hysteria2/server-port", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::complete_native_and_salamander_dual_stack_matrix", "date": "2026-11-06"}
 {"key": "outbound/hysteria2/tls", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::authentication_tls_and_obfuscation_fail_without_target_access", "date": "2026-11-06"}
+{"key": "outbound/hysteria2/up", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::client_up_paces_the_upload_with_brutal", "date": "2026-11-07"}
+{"key": "outbound/hysteria2/up-mbps", "test": "pass", "evidence": "crates/protocol-hysteria2/tests/protocol.rs::client_up_paces_the_upload_with_brutal", "date": "2026-11-07"}
 {"key": "outbound/masque/address", "test": "pass", "evidence": "tools/interop_masque.py", "date": "2026-11-06"}
 {"key": "outbound/masque/combo", "test": "pass", "evidence": "tools/interop_masque.py (Basic auth + ca_pem only; mTLS untested)", "date": "2026-11-06"}
 {"key": "outbound/masque/masque", "test": "pass", "evidence": "tools/interop_masque.py", "date": "2026-11-06"}
@@ -469,6 +577,7 @@
 {"key": "outbound/openvpn/tls-control-wrap-key", "test": "pass", "evidence": "tools/interop_openvpn.py::udp-tls-crypt-aes256-certificate", "date": "2026-11-06"}
 {"key": "outbound/openvpn/tls-control-wrap-type", "test": "pass", "evidence": "tools/interop_openvpn.py::udp-tls-crypt-aes256-certificate", "date": "2026-11-06"}
 {"key": "outbound/openvpn/tls-crypt", "test": "pass", "evidence": "tools/interop_openvpn.py::udp-tls-crypt-aes256-certificate", "date": "2026-11-06"}
+{"key": "outbound/openvpn/tls-crypt-v2", "test": "pass", "evidence": "tools/interop_openvpn.py udp-tls-crypt-v2-certificate", "date": "2026-11-07"}
 {"key": "outbound/openvpn/tls-server-name", "test": "pass", "evidence": "tools/interop_openvpn.py::wrong-x509-name-is-rejected", "date": "2026-11-06"}
 {"key": "outbound/openvpn/topology", "test": "pass", "evidence": "crates/protocol-openvpn/src/push.rs::tests::net30_local_address_and_continuation_and_compression_are_detected", "date": "2026-11-06"}
 {"key": "outbound/openvpn/username", "test": "pass", "evidence": "tools/interop_openvpn.py::wrong-password-is-rejected", "date": "2026-11-06"}
@@ -483,7 +592,18 @@
 {"key": "outbound/shadowsocks/address", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix", "date": "2026-11-06"}
 {"key": "outbound/shadowsocks/cipher", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix", "date": "2026-11-06"}
 {"key": "outbound/shadowsocks/method", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix", "date": "2026-11-06"}
+{"key": "outbound/shadowsocks/multiplex", "test": "pass", "evidence": "crates/protocol-ss2022/tests/protocol.rs::sing_mux_carries_tcp_and_udp_over_bounded_carriers", "date": "2026-11-07"}
 {"key": "outbound/shadowsocks/password", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix", "date": "2026-11-06"}
+{"key": "outbound/shadowsocks/plugin", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
+{"key": "outbound/shadowsocks/plugin-opts", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::sip003_and_flattened_plugin_opts_parse_supported_variants", "date": "2026-11-07"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-headers", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mode", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
+{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-path", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
+{"key": "outbound/shadowsocks/plugin-opts-obfs-mode", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::obfs_http_never_reports_header_only_read_as_eof", "date": "2026-11-07"}
+{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-host", "test": "pass", "evidence": "crates/config/src/mihomo.rs::tests::ss_2022_and_shadow_tls_route_to_dedicated_kinds", "date": "2026-11-07"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-headers", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mode", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
+{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-path", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
 {"key": "outbound/shadowsocks/port", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix", "date": "2026-11-06"}
 {"key": "outbound/shadowsocks/protocol", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix", "date": "2026-11-06"}
 {"key": "outbound/shadowsocks/server", "test": "pass", "evidence": "crates/protocol-shadowsocks/tests/protocol.rs::complete_cipher_tcp_udp_matrix", "date": "2026-11-06"}
@@ -576,6 +696,7 @@
 {"key": "outbound/tor/protocol", "test": "pass", "evidence": "crates/protocol-tor/src/tests.rs::tor_factory_exposes_remote_tcp_without_eof_or_udp", "date": "2026-11-06"}
 {"key": "outbound/trojan/address", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::all_carriers_dual_role_tcp_udp", "date": "2026-11-06"}
 {"key": "outbound/trojan/combo", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::all_carriers_dual_role_tcp_udp", "date": "2026-11-06"}
+{"key": "outbound/trojan/multiplex", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "outbound/trojan/network", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::all_carriers_dual_role_tcp_udp", "date": "2026-11-06"}
 {"key": "outbound/trojan/password", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::all_carriers_dual_role_tcp_udp", "date": "2026-11-06"}
 {"key": "outbound/trojan/port", "test": "pass", "evidence": "crates/protocol-trojan/tests/dual.rs::all_carriers_dual_role_tcp_udp", "date": "2026-11-06"}
@@ -614,6 +735,7 @@
 {"key": "outbound/vless/encryption-resumption", "test": "pass", "evidence": "tools/interop_vless_matrix.py", "date": "2026-11-06"}
 {"key": "outbound/vless/flow", "test": "pass", "evidence": "tools/interop_vless_matrix.py", "date": "2026-11-06"}
 {"key": "outbound/vless/id", "test": "pass", "evidence": "crates/protocol-vless/tests/client.rs::configuration_fails_closed_and_user_ids_are_redacted", "date": "2026-11-06"}
+{"key": "outbound/vless/multiplex", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "outbound/vless/network", "test": "pass", "evidence": "tools/interop_vless_matrix.py", "date": "2026-11-06"}
 {"key": "outbound/vless/packet-addr", "test": "pass", "evidence": "tools/interop_vless_packetaddr.py", "date": "2026-11-06"}
 {"key": "outbound/vless/packet-encoding", "test": "pass", "evidence": "tools/interop_vless_packetaddr.py", "date": "2026-11-06"}
@@ -634,6 +756,7 @@
 {"key": "outbound/vmess/experiments", "test": "pass", "evidence": "tools/interop_vmess.py", "date": "2026-11-06"}
 {"key": "outbound/vmess/global-padding", "test": "pass", "evidence": "tools/interop_vmess.py", "date": "2026-11-06"}
 {"key": "outbound/vmess/id", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::wrong_uuid_certificate_name_and_cancellation_fail", "date": "2026-11-06"}
+{"key": "outbound/vmess/multiplex", "test": "pass", "evidence": "crates/net/src/sing_mux/tests.rs::client_speaks_sing_mux_to_reference_server_for_every_protocol", "date": "2026-11-07"}
 {"key": "outbound/vmess/network", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::dual_cipher_transport_security_matrix", "date": "2026-11-06"}
 {"key": "outbound/vmess/port", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::dual_cipher_transport_security_matrix", "date": "2026-11-06"}
 {"key": "outbound/vmess/protocol", "test": "pass", "evidence": "crates/protocol-vmess/tests/dual.rs::dual_cipher_transport_security_matrix", "date": "2026-11-06"}
@@ -680,67 +803,3 @@
 {"key": "outbound/zerotier/primary-port", "test": "pass", "evidence": "tools/interop_zerotier.py", "date": "2026-11-06"}
 {"key": "outbound/zerotier/protocol", "test": "pass", "evidence": "tools/interop_zerotier.py", "date": "2026-11-06"}
 {"key": "outbound/zerotier/state-dir", "test": "pass", "evidence": "crates/protocol-zerotier/src/config.rs::identity_file_is_created_once_and_reused", "date": "2026-11-06"}
-{"key": "inbound/openvpn/tls-certificate", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs::tests::openvpn_client_and_server_sessions_complete_handshake_and_exchange_data_v2", "date": "2026-11-06"}
-{"key": "inbound/openvpn/tls-certificate-path", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
-{"key": "inbound/openvpn/tls-control-wrap-key", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs::tests::openvpn_client_and_server_sessions_complete_handshake_and_exchange_data_v2", "date": "2026-11-06"}
-{"key": "inbound/openvpn/tls-control-wrap-key-path", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
-{"key": "inbound/openvpn/tls-key", "test": "pass", "evidence": "crates/protocol-openvpn/src/server.rs::tests::openvpn_client_and_server_sessions_complete_handshake_and_exchange_data_v2", "date": "2026-11-06"}
-{"key": "inbound/openvpn/tls-key-path", "test": "pass", "evidence": "test: none", "date": "2026-11-06"}
-{"key": "inbound/openvpn/address", "test": "pass", "evidence": "tools/interop_openvpn_server.py two-clients-get-distinct-addresses", "date": "2026-11-07"}
-{"key": "inbound/openvpn/data-ciphers", "test": "pass", "evidence": "tools/interop_openvpn_server.py udp-ncp-picks-server-order", "date": "2026-11-07"}
-{"key": "inbound/openvpn/duplicate-cn", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::second_login_with_the_same_name_kicks_the_first_unless_duplicate_cn", "date": "2026-11-07"}
-{"key": "inbound/openvpn/handshake-window", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::ping_restart_and_handshake_window_close_idle_sessions", "date": "2026-11-07"}
-{"key": "inbound/openvpn/max-clients", "test": "pass", "evidence": "tools/interop_openvpn_server.py max-clients-1-released-on-exit", "date": "2026-11-07"}
-{"key": "inbound/openvpn/mode", "test": "pass", "evidence": "tools/interop_openvpn_server.py udp-tls-crypt-certificate", "date": "2026-11-07"}
-{"key": "inbound/openvpn/network", "test": "pass", "evidence": "tools/interop_openvpn_server.py tcp-password-only", "date": "2026-11-07"}
-{"key": "inbound/openvpn/ping-interval", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::server_sends_ping_when_idle", "date": "2026-11-07"}
-{"key": "inbound/openvpn/ping-restart", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::ping_restart_and_handshake_window_close_idle_sessions", "date": "2026-11-07"}
-{"key": "inbound/openvpn/protocol", "test": "pass", "evidence": "tools/interop_openvpn_server.py udp-tls-crypt-certificate", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-block-outside-dns", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-dhcp-options", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-dns", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-dns-servers", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-dns-servers-addresses", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-dns-servers-priority", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-dns-servers-resolve-domains", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-dns-servers-sni", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-dns-servers-transport", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-ping-interval", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-ping-restart", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-redirect-gateway", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-redirect-gateway-flags", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-routes", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/push-search-domains", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/options.rs::tests::push_options_render_routes_dns_gateway_and_search_domains", "date": "2026-11-07"}
-{"key": "inbound/openvpn/renegotiate-interval", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::server_initiated_renegotiation_moves_both_sides_to_a_new_key_id", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::config_rejects_what_the_server_does_not_implement", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-cipher", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-client-certificate", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-client-certificate-path", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-client-name", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-client-name-type", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-control-wrap", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_crypt_and_tls_auth_wrapped_logins_succeed", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-control-wrap-direction", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_crypt_and_tls_auth_wrapped_logins_succeed", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-control-wrap-type", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_crypt_and_tls_auth_wrapped_logins_succeed", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-crl-path", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-groups", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-peer-fingerprint", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::peer_fingerprint_pins_a_self_signed_client_certificate_without_a_ca", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-remote-certificate-tls", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-verify-client-certificate", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::missing_untrusted_revoked_or_misnamed_client_certificates_are_refused", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-version-max", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "date": "2026-11-07"}
-{"key": "inbound/openvpn/tls-version-min", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::tls_version_and_suite_settings_shape_the_handshake", "date": "2026-11-07"}
-{"key": "inbound/openvpn/topology", "test": "pass", "evidence": "crates/protocol-openvpn/src/server/tests.rs::push_reply_carries_configured_routes_dns_topology_and_per_user_address", "date": "2026-11-07"}
-{"key": "inbound/openvpn/users", "test": "pass", "evidence": "tools/interop_openvpn_server.py wrong-password-is-refused", "date": "2026-11-07"}
-{"key": "inbound/openvpn/users-password", "test": "pass", "evidence": "tools/interop_openvpn_server.py wrong-password-is-refused", "date": "2026-11-07"}
-{"key": "inbound/openvpn/users-username", "test": "pass", "evidence": "tools/interop_openvpn_server.py wrong-password-is-refused", "date": "2026-11-07"}
-{"key": "outbound/openvpn/tls-crypt-v2", "test": "pass", "evidence": "tools/interop_openvpn.py udp-tls-crypt-v2-certificate", "date": "2026-11-07"}
-{"key": "outbound/shadowsocks/plugin", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
-{"key": "outbound/shadowsocks/plugin-opts", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::sip003_and_flattened_plugin_opts_parse_supported_variants", "date": "2026-11-07"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-headers", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-mode", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
-{"key": "outbound/shadowsocks/plugin-opts-gost-plugin-path", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
-{"key": "outbound/shadowsocks/plugin-opts-obfs-mode", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::obfs_http_never_reports_header_only_read_as_eof", "date": "2026-11-07"}
-{"key": "outbound/shadowsocks/plugin-opts-shadow-tls-host", "test": "pass", "evidence": "crates/config/src/mihomo.rs::tests::ss_2022_and_shadow_tls_route_to_dedicated_kinds", "date": "2026-11-07"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-headers", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-mode", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
-{"key": "outbound/shadowsocks/plugin-opts-v2ray-plugin-path", "test": "pass", "evidence": "crates/protocol-shadowsocks/src/plugin.rs::tests::websocket_mode_frames_payload_and_sends_handshake_key", "date": "2026-11-07"}
