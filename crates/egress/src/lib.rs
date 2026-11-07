@@ -1345,12 +1345,15 @@ impl Dispatcher {
                 self.evaluate_route(identity, Some((original, Network::Udp)), &RuleIps::NONE);
             !decision.hijack_dns && !self.selects_engine_dns(selected.as_ref())
         });
+        // 规则模式下关联在出站确定前就已接受（见 supports_udp_association）；首包选中只有
+        // 固定目标 UDP 的出站时按目标各开固定通道，而不是让整条关联失败。
+        let per_target = first.is_some();
         let (service, mode, ledger, _) = self.admit(
             identity,
             context,
             first.as_ref().map(|original| (original, Network::Udp)),
             |service| {
-                (service.association || service.capabilities.udp)
+                (service.association || per_target && service.capabilities.udp)
                     .then_some(())
                     .ok_or(Error::Unsupported("所选命名出站没有多目标 UDP 关联能力"))
             },
@@ -1428,7 +1431,7 @@ impl SessionDispatcher for Dispatcher {
         (routed && identity.source_allowed() && !self.closed.load(Ordering::Acquire))
             || self
                 .route(identity, None, &RuleIps::NONE)
-                .is_ok_and(|(service, _, _, _)| service.association || service.capabilities.udp)
+                .is_ok_and(|(service, _, _, _)| service.association)
     }
     fn connect_tcp<'a>(
         &'a self,

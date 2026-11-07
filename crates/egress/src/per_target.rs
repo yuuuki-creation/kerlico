@@ -159,7 +159,7 @@ mod tests {
         let b = Destination::new("192.0.2.2", 443).unwrap();
         flow.sender.send_to(b"one", &a).await.unwrap();
         flow.sender.send_to(b"two", &b).await.unwrap();
-        let mut replies = vec![
+        let mut replies = [
             flow.receiver.recv_from().await.unwrap().unwrap(),
             flow.receiver.recv_from().await.unwrap().unwrap(),
         ];
