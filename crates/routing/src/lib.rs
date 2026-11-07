@@ -428,6 +428,8 @@ impl RuleLabel {
             }
         };
         let text = |values: &[String]| values.to_vec();
+        // Mihomo 的 GEOIP 载荷总以小写国家代码展示。
+        let lower = |values: &[String]| values.iter().map(|v| v.to_ascii_lowercase()).collect();
         let shown = |values: &[u16]| values.iter().map(u16::to_string).collect::<Vec<_>>();
         push("Domain", text(&spec.domain));
         push("DomainSuffix", text(&spec.domain_suffix));
@@ -436,9 +438,9 @@ impl RuleLabel {
         push("DomainWildcard", text(&spec.domain_wildcard));
         push("GeoSite", text(&spec.geosite));
         push("IPCIDR", text(&spec.ip_cidr));
-        push("GeoIP", text(&spec.geoip));
+        push("GeoIP", lower(&spec.geoip));
         push("IPASN", spec.ip_asn.iter().map(u32::to_string).collect());
-        push("SrcGeoIP", text(&spec.source_geoip));
+        push("SrcGeoIP", lower(&spec.source_geoip));
         push(
             "SrcIPASN",
             spec.source_ip_asn.iter().map(u32::to_string).collect(),
@@ -471,7 +473,7 @@ impl RuleLabel {
         push("RuleSet", text(&spec.rule_set));
         push("InName", text(&spec.node));
         push("InUser", text(&spec.user));
-        push("Process", text(&spec.process_name));
+        push("ProcessName", text(&spec.process_name));
         push("ProcessPath", text(&spec.process_path));
         push("ProcessNameRegex", text(&spec.process_name_regex));
         push("ProcessPathRegex", text(&spec.process_path_regex));
@@ -1968,6 +1970,23 @@ mod tests {
     }
 
     #[test]
+    fn rule_labels_use_mihomo_type_names_and_payloads() {
+        for (line, kind, payload) in [
+            ("PROCESS-NAME,curl,DIRECT", "ProcessName", "curl"),
+            ("GEOIP,CN,DIRECT", "GeoIP", "cn"),
+            ("GEOIP,US,DIRECT,no-resolve", "GeoIP", "us"),
+        ] {
+            let (spec, _) = parse_clash_rule_line(line).unwrap();
+            let label = RuleLabel::of(&spec.unwrap());
+            assert_eq!(
+                (label.kind.as_str(), label.payload.as_str()),
+                (kind, payload),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
     fn unsupported_conditions_are_rejected_instead_of_matching_everything() {
         for line in [
             "IN-PORT,7890,REJECT",
@@ -2172,7 +2191,8 @@ mod tests {
             json!({"outbound":"a","ip_cidr":["10.0.0.0/"]}),
             json!({"outbound":"a","ip_cidr":["::ffff:10.0.0.0/104"]}),
             json!({"outbound":"a","domain_keyword":["例子"]}),
-            json!({"outbound":"bad\ntag","port":[1]}),
+            json!({"outbound":"bad
+tag","port":[1]}),
         ] {
             let spec: RuleSpec = serde_json::from_value(rule).unwrap();
             assert!(RouteTable::compile(&[spec]).is_err());
