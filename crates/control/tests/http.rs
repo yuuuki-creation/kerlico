@@ -561,6 +561,17 @@ async fn delay_endpoints_measure_through_the_outbound() {
     running.stop().await.unwrap();
 }
 
+#[tokio::test]
+async fn percent_encoded_names_in_the_path_reach_the_named_group() {
+    let mut config = forward_to(9);
+    config["proxy_groups"] = json!([{"name": "[g] 组", "type": "select", "proxies": ["exit"]}]);
+    let running = start(config).await;
+    let (status, body) = get(running.control, "/proxies/%5Bg%5D%20%E7%BB%84", None).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["name"], "[g] 组");
+    running.stop().await.unwrap();
+}
+
 async fn echo_server() -> (u16, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

@@ -1218,7 +1218,11 @@ async fn respond(
         {
             Ok(update_proxy_provider(shared, source, &p["/providers/proxies/".len()..]).await)
         }
-        _ => route(source, &method, uri.path(), query, body_val.as_ref()).await,
+        _ => {
+            // 面板把节点名百分号编码后放进路径，例如 `/providers/proxies/sub/%5Bsub%5D%20HK/healthcheck`。
+            let path = percent_decode(uri.path()).unwrap_or_else(|| uri.path().to_owned());
+            route(source, &method, &path, query, body_val.as_ref()).await
+        }
     };
     match reply {
         Ok(Some(ApiReply::Json(status, body))) => reply_json(status, body),
