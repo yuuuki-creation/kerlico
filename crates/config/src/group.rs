@@ -453,39 +453,16 @@ pub fn expected_status_to_string(v: &Value) -> String {
     }
 }
 
+/// Mihomo 的 `filter`：反引号分隔的多个 regexp2 表达式，任一匹配即命中；支持环视，例如
+/// `^(?!.*(剩余|到期)).*$`。
 fn matches_pattern(pat: &str, text: &str) -> Result<bool> {
-    if pat.contains('[') && !pat.contains(']') || pat.contains('(') && !pat.contains(')') {
-        return Err(Error::Config(format!("正则表达式括号不闭合：{pat}")));
-    }
-    let (case_insensitive, cleaned) = match pat.strip_prefix("(?i)") {
-        Some(rest) => (true, rest),
-        None => (false, pat),
-    };
-    let clean = cleaned.trim_start_matches('(').trim_end_matches(')');
-    let hay = if case_insensitive {
-        text.to_ascii_lowercase()
-    } else {
-        text.to_owned()
-    };
-    for branch in clean.split('|') {
-        let b = if case_insensitive {
-            branch.to_ascii_lowercase()
-        } else {
-            branch.to_owned()
-        };
-        if b.is_empty() {
-            continue;
-        }
-        let anchored_start = b.starts_with('^');
-        let anchored_end = b.ends_with('$');
-        let core = b.trim_start_matches('^').trim_end_matches('$');
-        let matched = match (anchored_start, anchored_end) {
-            (true, true) => hay == core,
-            (true, false) => hay.starts_with(core),
-            (false, true) => hay.ends_with(core),
-            (false, false) => hay.contains(core),
-        };
-        if matched {
+    for part in pat.split('`').filter(|p| !p.is_empty()) {
+        let re = fancy_regex::Regex::new(part)
+            .map_err(|e| Error::Config(format!("filter 正则不合法：{part}：{e}")))?;
+        if re
+            .is_match(text)
+            .map_err(|e| Error::Config(format!("filter 正则匹配失败：{part}：{e}")))?
+        {
             return Ok(true);
         }
     }
@@ -624,11 +601,7 @@ fn extract_members_from_value(val: Value) -> Vec<Value> {
 
 fn value_to_outbound_spec(val: Value) -> Result<OutboundSpec> {
     let (tag, kind, options) = crate::mihomo::member_outbound(val)?;
-    Ok(OutboundSpec {
-        tag,
-        kind,
-        options,
-    })
+    Ok(OutboundSpec { tag, kind, options })
 }
 
 pub(crate) fn normalize_outbound_kind(kind: &str) -> String {

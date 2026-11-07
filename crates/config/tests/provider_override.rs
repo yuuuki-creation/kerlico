@@ -234,6 +234,24 @@ fn filters_see_the_original_name() {
 }
 
 #[test]
+fn filters_are_full_regexes_like_mihomo() {
+    let tags = |filter: &str| {
+        let spec: ProxyProviderSpec = serde_json::from_value(json!({
+            "type": "inline", "payload": members(), "filter": filter,
+        }))
+        .unwrap();
+        let (_, specs) = spec.compile("sub").unwrap();
+        specs.into_iter().map(|s| s.tag).collect::<Vec<_>>()
+    };
+    assert_eq!(tags("(^|-)(ss|trojan)"), ["ss-hk", "trojan-us"]);
+    assert_eq!(
+        tags("^(?!.*(hk|jp)).*$"),
+        ["trojan-us", "hy2-sg", "vless-de"]
+    );
+    assert_eq!(tags("(?i)HK`-de$"), ["ss-hk", "vless-de"]);
+}
+
+#[test]
 fn exclude_type_uses_mihomo_type_names() {
     let spec: ProxyProviderSpec = serde_json::from_value(json!({
         "type": "inline",

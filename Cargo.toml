@@ -101,6 +101,7 @@ h3 = "=0.0.8"
 h3-quinn = "=0.0.10"
 reqwest = {version="0.12",default-features=false,features=["rustls-tls","json"]}
 regex = "1"
+fancy-regex = "0.14"
 hmac = "0.12"
 time = {version="0.3",features=["formatting","macros"]}
 quick-xml = {version="0.38",features=["serialize"]}
