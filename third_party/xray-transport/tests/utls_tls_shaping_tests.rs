@@ -22,8 +22,10 @@ mod utls_tls_shaping_tests {
     const EXT_ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
     const GROUP_SECP256R1: u16 = 0x0017;
     const CHROME_GREASE_CIPHER: u16 = 0x0a0a;
-    const CHROME_PROVIDER_SUPPORTED_CIPHERS: &[u16] = &[
-        0x0a0a, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8,
+    /// uTLS `HelloChrome_133` 的完整密码套件列表（GREASE 槽位在首位）。
+    const CHROME_ADVERTISED_CIPHERS: &[u16] = &[
+        0x0a0a, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013,
+        0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
     ];
     const CHROME_LEGACY_TLS12_CIPHERS: &[u16] = &[0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035];
 
@@ -211,20 +213,26 @@ mod utls_tls_shaping_tests {
         );
     }
 
+    /// The hello advertises the profile's whole list, legacy suites included,
+    /// because uTLS (and so Mihomo and Xray) does: dropping the suites this
+    /// provider lacks changes the JA3/JA4 the fingerprint exists to match.
     #[test]
-    fn legacy_cipher_advertisement_keeps_chrome_order_and_grease() {
+    fn legacy_cipher_advertisement_keeps_the_full_chrome_list_order_and_grease() {
         let hello = plain_tls_client_hello_bytes(&config("chrome", &[]))
             .expect("chrome ClientHello must be produced");
 
         assert_eq!(
             cipher_suites(&hello),
-            CHROME_PROVIDER_SUPPORTED_CIPHERS,
-            "filtering must preserve the profile order and its leading GREASE slot"
+            CHROME_ADVERTISED_CIPHERS,
+            "the hello must carry the profile's suites in order, GREASE slot first"
         );
     }
 
+    /// Advertising is not negotiating: every selectable profile still offers
+    /// at least one suite this provider can finish, and the suites it cannot
+    /// finish are only the ones the profile itself lists.
     #[test]
-    fn legacy_cipher_advertisement_is_supported_for_every_selectable_profile() {
+    fn legacy_cipher_advertisement_stays_negotiable_for_every_selectable_profile() {
         for fingerprint in selectable_fingerprints() {
             let hello = plain_tls_client_hello_bytes(&config(fingerprint, &[]))
                 .unwrap_or_else(|error| panic!("{fingerprint}: ClientHello: {error}"));
@@ -240,11 +248,7 @@ mod utls_tls_shaping_tests {
                 .collect::<Vec<_>>();
 
             assert!(
-                !advertised.is_empty(),
-                "{fingerprint}: a selectable profile needs a negotiable suite"
-            );
-            assert!(
-                advertised.iter().all(|suite| supported.contains(suite)),
+                advertised.iter().any(|suite| supported.contains(suite)),
                 "{fingerprint}: advertised {advertised:04x?}, provider supports {supported:04x?}"
             );
         }
@@ -1177,12 +1181,10 @@ mod utls_tls_shaping_tests {
         (addr, served)
     }
 
-    /// Minimal TLS 1.2 legacy-only peer. It reads the real wire ClientHello,
-    /// records its suites, then sends the handshake_failure a server with no
-    /// common cipher is required to produce. The suites are intentionally the
-    /// compatibility tail Chrome used to advertise despite being unusable by
-    /// our provider.
-    async fn spawn_tls12_legacy_only_server() -> (
+    /// A TLS 1.2 server that answers every ClientHello with a ServerHello
+    /// choosing `TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA`, a suite uTLS' Chrome
+    /// advertises and this provider does not implement.
+    async fn spawn_tls12_legacy_choosing_server() -> (
         SocketAddr,
         tokio::task::JoinHandle<Result<Vec<u16>, String>>,
     ) {
@@ -1208,11 +1210,21 @@ mod utls_tls_shaping_tests {
                 .map_err(|e| e.to_string())?;
             let offered = cipher_suites(&record);
 
-            // fatal handshake_failure, encoded as a TLS 1.2 alert record.
+            let mut body = vec![0x03, 0x03];
+            body.extend_from_slice(&[0x11; 32]);
+            body.extend_from_slice(&[0x00, 0xc0, 0x13, 0x00, 0x00, 0x00]);
+            let mut handshake = vec![0x02, 0x00];
+            handshake.extend_from_slice(&(body.len() as u16).to_be_bytes());
+            handshake.extend_from_slice(&body);
+            let mut server_hello = vec![0x16, 0x03, 0x03];
+            server_hello.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+            server_hello.extend_from_slice(&handshake);
             stream
-                .write_all(&[0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28])
+                .write_all(&server_hello)
                 .await
                 .map_err(|e| e.to_string())?;
+            let mut reply = [0u8; 64];
+            let _ = stream.read(&mut reply).await;
             Ok(offered)
         });
 
@@ -1363,16 +1375,19 @@ mod utls_tls_shaping_tests {
         test_result
     }
 
+    /// Chrome advertises its legacy TLS 1.2 suites as uTLS does. A server that
+    /// picks one of them must fail the handshake on the client side, because rustls
+    /// refuses a suite its provider does not implement.
     #[tokio::test]
-    async fn legacy_cipher_advertisement_has_no_chrome_tls12_legacy_server_overlap() {
+    async fn legacy_cipher_advertisement_refuses_a_server_that_picks_a_legacy_suite() {
         let task_owner = xray_transport::lifecycle::TaskOwner::new();
         let task_owner_guard = task_owner.abort_on_drop();
         let test_result = task_owner.scope(async {
-        let (addr, served) = spawn_tls12_legacy_only_server().await;
+        let (addr, served) = spawn_tls12_legacy_choosing_server().await;
 
         dial_shaped("chrome", addr)
             .await
-            .expect_err("a legacy-only server has no common cipher with this provider");
+            .expect_err("a suite the provider does not implement must end the handshake");
         let offered = served
             .await
             .expect("the server task must finish")
@@ -1383,9 +1398,9 @@ mod utls_tls_shaping_tests {
             .filter(|suite| CHROME_LEGACY_TLS12_CIPHERS.contains(suite))
             .collect::<Vec<_>>();
 
-        assert!(
-            overlap.is_empty(),
-            "Chrome advertised legacy-only suites the provider cannot finish: {overlap:04x?}"
+        assert_eq!(
+            overlap, CHROME_LEGACY_TLS12_CIPHERS,
+            "Chrome must advertise the legacy suites uTLS sends, in profile order"
         );
     
         }).await;

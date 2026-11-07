@@ -24,6 +24,7 @@ step fmt cargo fmt --all --check
 step clippy cargo clippy --workspace --all-targets --locked --keep-going --no-deps -- -D warnings
 step test cargo test --workspace --all-targets --locked --no-fail-fast
 step test-third-party cargo test --locked -p zerotier-node
+step test-xray-transport bash tools/test_xray_transport.sh --test utls_tls_shaping_tests --no-fail-fast
 step release cargo build --release --locked -p kerlico
 step notices sh -c 'python3 tools/gen_third_party_notices.py > "\$CARGO_TARGET_DIR/release/THIRD_PARTY_NOTICES.txt"'
 sha256sum "\$CARGO_TARGET_DIR/release/kerlico" "\$CARGO_TARGET_DIR/release/THIRD_PARTY_NOTICES.txt"

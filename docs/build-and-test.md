@@ -46,7 +46,7 @@
 tools/worker_gate.sh perf-02 HEAD
 ```
 
-它把提交同步到 worker 的独立工作区，依次执行 `cargo fmt --check`、严格 Clippy、全工作区测试和 release 构建，结束后打印每步退出码、失败项和二进制 SHA-256。结果写入 [STATUS.md](../STATUS.md)。
+它把提交同步到 worker 的独立工作区，依次执行 `cargo fmt --check`、严格 Clippy、全工作区测试、不在 workspace 内的 `zerotier-node` 与 `xray-transport` 测试（后者经 `tools/test_xray_transport.sh`）和 release 构建，结束后打印每步退出码、失败项和二进制 SHA-256。结果写入 [STATUS.md](../STATUS.md)。
 
 日常修改默认用 `tools/worker_run.sh perf-02 '<命令>'` 在主力机 `perf-02` 上运行未提交的工作树，`--pull` 把 fmt、lockfile 等改动拉回本机；多模块或多批次验证可同时向 `perf-02`、`perf-01`、`perf-03` 并发派发不同测试分片以提高效率。
 
