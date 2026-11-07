@@ -25,6 +25,7 @@ mod fetch;
 mod group;
 mod history;
 mod meter;
+mod per_target;
 mod probe;
 pub mod process;
 mod resource;
@@ -1349,8 +1350,7 @@ impl Dispatcher {
             context,
             first.as_ref().map(|original| (original, Network::Udp)),
             |service| {
-                service
-                    .association
+                (service.association || service.capabilities.udp)
                     .then_some(())
                     .ok_or(Error::Unsupported("所选命名出站没有多目标 UDP 关联能力"))
             },
@@ -1370,7 +1370,15 @@ impl Dispatcher {
         let completion = lease.clone();
         Ok(FlowOpen::association(
             Box::pin(async move {
-                match scoped.run(service.backend.associate_udp(&scoped)).await {
+                let opened = if service.association {
+                    scoped.run(service.backend.associate_udp(&scoped)).await
+                } else {
+                    Ok(per_target::association(
+                        service.backend.clone(),
+                        scoped.clone(),
+                    ))
+                };
+                match opened {
                     Ok(mut channel) => {
                         if service.policy == TargetPolicy::Local {
                             channel.sender = Box::new(LocalAssociationSender {
@@ -1420,7 +1428,7 @@ impl SessionDispatcher for Dispatcher {
         (routed && identity.source_allowed() && !self.closed.load(Ordering::Acquire))
             || self
                 .route(identity, None, &RuleIps::NONE)
-                .is_ok_and(|(service, _, _, _)| service.association)
+                .is_ok_and(|(service, _, _, _)| service.association || service.capabilities.udp)
     }
     fn connect_tcp<'a>(
         &'a self,
