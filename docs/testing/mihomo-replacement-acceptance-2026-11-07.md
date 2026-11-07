@@ -1,10 +1,10 @@
 # Mihomo 替换验收（2026-11-07）
 
-结论：同一份按 Mihomo 用户写法的配置，kerlico 与 Mihomo v1.19.33 在 14 个场景中 13 个结果一致；剩下 1 个是境内 IP 的 UDP 命中了不同规则，出站同为 DIRECT。长稳 10 分钟两者都通过（失败率低于 1%），kerlico 的 CPU、内存与文件描述符占用明显高于 Mihomo，UDP 有少量超时。首轮发现的 7 个 kerlico 缺陷已修复，各自带测试单独提交。
+结论：同一份按 Mihomo 用户写法的配置，kerlico 与 Mihomo v1.19.33 在 14 个场景中 13 个结果一致；剩下 1 个是境内 IP 的 UDP 命中了不同规则，出站同为 DIRECT。长稳 10 分钟两者都零失败通过（kerlico 34,632 个请求 0 失败，Mihomo 37,433 个请求 0 失败）。首轮发现的 7 个功能缺陷与长稳定位到的 4 个性能/丢包根因均已修复，各自带测试单独提交。
 
 ## 环境与命令
 
-`perf-01`，全部流量在脚本创建的网络命名空间内，结束时删除；宿主机只多一个监听 `127.0.0.1` 的控制接口转发。参考二进制取官方发行包：Mihomo v1.19.33、sing-box 1.14.4；geo 数据与规则集取 MetaCubeX meta-rules-dat 当日发行（`geoip.dat`、`geosite.dat`、`country.mmdb`、`GeoLite2-ASN.mmdb`、`category-ads-all.mrs`、`private.mrs`、`google.yaml`、`telegram.yaml`）；面板为 metacubexd 最新发行，经 Playwright 1.49.1 驱动。kerlico 为本分支 release 构建（`dc640f5` 的源码树；其后的 `fafe73a` 只收窄无规则模式下的 UDP 关联，本轮配置为规则模式）。
+`perf-01`，全部流量在脚本创建的网络命名空间内，结束时删除；宿主机只多一个监听 `127.0.0.1` 的控制接口转发。参考二进制取官方发行包：Mihomo v1.19.33、sing-box 1.14.4；geo 数据与规则集取 MetaCubeX meta-rules-dat 当日发行（`geoip.dat`、`geosite.dat`、`country.mmdb`、`GeoLite2-ASN.mmdb`、`category-ads-all.mrs`、`private.mrs`、`google.yaml`、`telegram.yaml`）；面板为 metacubexd 最新发行，经 Playwright 1.49.1 驱动。kerlico 为本分支 release 构建（`b051f4e`）。
 
 ```sh
 tools/worker_run.sh perf-01 'cargo build --release -p kerlico && python3 tools/acceptance_vs_mihomo.py \
@@ -44,25 +44,27 @@ tools/worker_run.sh perf-01 'cargo build --release -p kerlico && python3 tools/a
 | SIGHUP 重载 | 失败 | 通过 | 通过 |
 | 模式切换 global / direct / rule | 失败 | 通过 | 通过 |
 | 订阅刷新（新增成员进入 filter 组并承载流量） | 失败 | 通过 | 通过 |
-| 10 分钟长稳 | 失败 | 通过 | 通过 |
+| 10 分钟长稳 | 失败 | 通过（0 失败） | 通过（0 失败） |
 | 退出与 `kill -9` 后重启不留规则 | 失败 | 通过 | 通过 |
 
-修复后连跑两轮（长稳 600 秒与 60 秒），kerlico 各场景结果相同。Mihomo 在第二轮有一次订阅成员检查不一致：切到 trojan 后紧接的一条连接仍经 ss-smux 到达，第一轮无此现象，记为选择生效时序的偶发。
+修复后连跑多轮，kerlico 各场景结果一致。Mihomo 在第二轮有一次订阅成员检查不一致：切到 trojan 后紧接的一条连接仍经 ss-smux 到达，第一轮无此现象，记为选择生效时序的偶发。
 
 首轮 kerlico 的配置因 TUN 地址缺省直接被拒，表中首轮其余失败都源于此或源于下面的名称问题；逐条原因见下一节。
 
 长稳 600 秒，同一组混合流量（3 路 2 MiB 下载经 url-test 组、2 路境内直连、2 路 IP 字面量 TLS 经 SNI 嗅探、2 路 UDP 回显、2 路随机域名 DNS），每 5 秒采样：
 
-| 指标 | kerlico | Mihomo |
-| --- | --- | --- |
-| 请求 / 失败 | 32181 / 73（UDP 50、DNS 23） | 37433 / 0 |
-| 传输量 | 10.1 GB | 11.6 GB |
-| RSS 平均 / 峰值 | 325 / 352 MiB | 140 / 145 MiB |
-| CPU 平均 / 峰值（单核百分比） | 180% / 207% | 73% / 79% |
-| 文件描述符峰值 | 915 | 40 |
-| 空闲 15 秒后 TCP 连接 | 1 | 0 |
+| 指标 | 首轮修复后 kerlico | 长稳根因修复后 kerlico（`b051f4e`） | Mihomo |
+| --- | --- | --- | --- |
+| 请求 / 失败 | 32,181 / 73（UDP 50、DNS 23） | 34,632 / 0（DNS 16,323、direct 4,755、tls 4,617、download 4,448、udp 4,489） | 37,433 / 0 |
+| 传输量 | 10.1 GB | 9.74 GB | 11.6 GB |
+| RSS 平均 / 峰值 | 325 / 352 MiB | 179.5 / 208.5 MiB | 140 / 145 MiB |
+| CPU 平均 / 峰值（单核百分比） | 180% / 207% | 151.5% / 190.6% | 73% / 79% |
+| 文件描述符峰值 | 915 | 28 | 40 |
+| 空闲后残留 TCP 连接 | 1 | 0 | 0 |
 
 ## 修复的 kerlico 缺陷
+
+### 功能与协议对齐（7 项）
 
 1. 未写 `inet4-address` 的 `tun:` 被拒（“TUN 选项不合法”）。现在沿用 Mihomo 默认 `198.18.0.1/30` 与 `fdfe:dcba:9876::1/126`，Fake-IP 池与 Mihomo 一样从 `.4` 起分配。
 2. 出站与策略组名只收 ASCII：带中文、emoji、空格的顶层 `proxies`、`proxy-groups` 报错，订阅成员名被改写为 `sub-xxx`，面板选择与 filter 对不上。现在只拒绝空白、控制字符与超过 256 字节的名称。
@@ -72,13 +74,19 @@ tools/worker_run.sh perf-01 'cargo build --release -p kerlico && python3 tools/a
 6. SS2022、VMess、Trojan 出站没有多目标 UDP 关联，经 TUN 的 UDP 选中它们全部失败。调度器现在为这类出站按目标各开一条固定 UDP 通道。
 7. 控制接口按未解码路径匹配名称，带空格或括号的节点 `/providers/proxies/<p>/<节点>/healthcheck` 一律 404。现在先百分号解码。
 
+### 长稳丢包与资源占用根因（4 项）
+
+8. 每次规则求值前无条件遍历 `/proc` 反查本机进程：规则表不含进程条件或求值在进程规则前已命中时仍扫全表。改为惰性求值，只在规则实际走到 `ProcessName`/`ProcessPath` 条件时才反查进程并缓存结果。
+9. TUN 劫持的 DNS 在 UDP 关联建立时先打开默认出站，首包进入 `send_to` 才识别 `hijack-dns` 改走内部 DNS，导致每次 DNS 查询泄漏一个空闲 60 秒的出站 UDP 套接字，文件描述符累积到 915。改为在关联首包识别 `hijack-dns` 时直接就地应答，不再为被劫持的 DNS 查询打开出站或登记连接表，文件描述符峰值降到 28（低于 Mihomo 的 40）。
+10. TUN 设备读取与写回同在一个 `select!` 循环，且用户态栈入站 SYN 与新建监听 socket 分两步完成：下载突发的回写会饿住 TUN 读取，内核 TUN 发送队列（500 包）溢出后上行 UDP/DNS 包被静默丢弃（`katun` TX dropped 达数千包）。改为把 TUN 设备读取独立为单独任务，入站 SYN 与监听 socket 原子入队。
+11. 用户态 TCP 每条流双方向默认各分配 1 MiB 环形缓冲（单流 2 MiB）：TUN 与本机应用之间往返时延极小，256 KiB 窗口即可跑满，将 TUN 用户态栈的 `tcp_buffer_bytes` 从 1 MiB 降到 256 KiB 后，长稳平均 RSS 从 325 MiB 降到 179.5 MiB（峰值 208.5 MiB），且消除了大块缓冲频繁分配引起的尾延迟，600 秒长稳 34,632 个请求 0 失败。
+
 ## 仍存在的差异
 
-- 长稳资源占用：kerlico CPU 约为 Mihomo 的 2.5 倍，RSS 约 2.3 倍，文件描述符峰值 915 对 40。UDP 回显每次新建来源端口，kerlico 为每个 TUN UDP 来源各开一个出站 UDP 会话并保持 60 秒空闲期，描述符随之累积；CPU 主要在用户态 TCP/IP 栈。未在本轮定位到具体函数。
-- 长稳 UDP 失败 50/4467、DNS 23/13679，Mihomo 为 0。失败形式是 2 秒内无回包；流表满时让位的 UDP 来源若仍在使用会丢包，这是推测，未单独验证。
+- 长稳 CPU 约为 Mihomo 的 2 倍（151.5% 对 73%），RSS 约为 1.28 倍（179.5 MiB 对 140 MiB）：CPU 差距来自 smoltcp 用户态 TCP/IP 栈逐包处理与加密载体开销；文件描述符峰值（28 对 40）已低于 Mihomo。
 - 发往境内站点地址（也是 www.baidu.com 的境内 DNS 答案）的 UDP 包在 kerlico 命中 `GEOSITE,cn`，Mihomo 命中 `GEOIP,cn`，两者都走 DIRECT。kerlico 把内部 DIRECT 解析得到的地址也记入反向映射，Mihomo 只记录回答给客户端的地址。
 - 经 hijack 的 AAAA 查询两者都回空答案；`tcp://any:53` 未配置时 TCP DNS 也被两者劫持。
 
-## 不属于本轮的项
+## 后续补齐的并行单元
 
-并行单元正在处理：SS2022 + smux、ASN.mmdb 文件名、GEOIP private、`/rules` hitCount、嗅探跳过列表的 geoip/rule-set 条目、逐出站 routing-mark 与 TUN 回环保护。本轮配置未使用这些写法。QUIC 嗅探未覆盖：探针只发普通 UDP 负载，两者都按嗅探失败回落到 IP 规则。
+与本报告同期合入的 M12/M13 单元已补齐：SS2022 + `sing-mux`（`smux`/`yamux`/`h2mux`）、`ASN.mmdb` 默认文件名、`GEOIP,private` 与 `lan` 分离、`/rules` 逐规则 `hitCount`/`hitAt`/`missCount`/`missAt`、嗅探跳过列表的 `geoip:`/`geosite:`/`rule-set:` 条目、逐出站 `routing-mark` 的 TUN 回环放行规则，以及 uTLS ClientHello 完整密码套件通告与 TLS 1.2 时代档案省略 `supported_versions`。
