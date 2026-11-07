@@ -266,8 +266,13 @@ fn same_source_port_and_two_targets_keep_distinct_synack_and_reset_sources() {
         let mut streams = Vec::new();
         for target in targets {
             let wire = packet::FlowTuple { source, target };
-            let stream = TcpStream::accept(stack.clone(), wire, CancellationToken::new()).unwrap();
-            stack.input_tcp(syn(source, target)).unwrap();
+            let stream = TcpStream::accept(
+                stack.clone(),
+                wire,
+                syn(source, target),
+                CancellationToken::new(),
+            )
+            .unwrap();
             stack.poll().unwrap();
             assert!(stack.drain(8).unwrap().is_empty());
             streams.push(stream);
@@ -331,10 +336,10 @@ fn reset_before_target_connect_cancels_pending_operation() {
     let stream = TcpStream::accept(
         stack.clone(),
         packet::FlowTuple { source, target },
+        syn(source, target),
         CancellationToken::new(),
     )
     .unwrap();
-    stack.input_tcp(syn(source, target)).unwrap();
     stack.poll().unwrap();
     assert!(!stream.pending_cancel().is_cancelled());
     let initial = syn(source, target);

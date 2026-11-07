@@ -122,6 +122,11 @@ pub(crate) struct SharedStack {
     allowed: Vec<Network>,
     started: Instant,
 }
+impl State {
+    pub(crate) fn push_incoming(&mut self, packet: QueuedPacket) {
+        self.device.incoming.push_back(packet);
+    }
+}
 impl SharedStack {
     pub fn new(
         prepared: &Prepared,

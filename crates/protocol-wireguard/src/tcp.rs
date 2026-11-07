@@ -1,5 +1,5 @@
 use crate::{
-    packet::FlowTuple,
+    packet::{FlowTuple, rewrite_tcp},
     stack::{FlowScope, SharedStack, TcpEntry, TcpOwner, endpoint},
 };
 use kerlico_core::{ConnectContext, Error, Result};
@@ -27,8 +27,14 @@ impl TcpStream {
         local: SocketAddr,
         remote: SocketAddr,
         scope: FlowScope,
-        wire: Option<FlowTuple>,
+        inbound: Option<(FlowTuple, Vec<u8>)>,
     ) -> Result<Self> {
+        let (wire, syn) = inbound.unzip();
+        // 入站 SYN 与监听 socket 同在一次加锁内入队：另一任务的轮询若先看到没收到 SYN 的
+        // 监听 socket，会把它当作握手失败取消，客户端收到 RST。
+        let syn = syn
+            .map(|syn| stack.budget.packet(rewrite_tcp(&syn, remote, local)?, false))
+            .transpose()?;
         let mut state = stack.lock()?;
         if state.tcp.len() + state.udp.len() >= stack.limits.max_flows {
             return Err(Error::ResourceLimit);
@@ -71,6 +77,9 @@ impl TcpStream {
         if let Some(wire) = wire {
             state.inbound_tcp.insert(wire, id);
         }
+        if let Some(syn) = syn {
+            state.push_incoming(syn);
+        }
         state.tcp.insert(
             id,
             TcpEntry {
@@ -96,9 +105,11 @@ impl TcpStream {
             pending,
         })
     }
+    /// `syn` 是客户端发来的、四元组为 `wire` 的 SYN，与监听 socket 一起入队。
     pub fn accept(
         stack: Arc<SharedStack>,
         wire: FlowTuple,
+        syn: Vec<u8>,
         cancel: kerlico_core::CancellationToken,
     ) -> Result<Self> {
         let local = next_local(&stack, wire.target.ip())?;
@@ -107,7 +118,7 @@ impl TcpStream {
             local,
             wire.source,
             FlowScope::inbound(cancel),
-            Some(wire),
+            Some((wire, syn)),
         )
     }
     pub async fn connect(

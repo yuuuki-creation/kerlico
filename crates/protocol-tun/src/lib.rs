@@ -233,6 +233,28 @@ fn device_gone(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(EBADFD)
 }
 
+async fn read_device(
+    device: Arc<tun_rs::AsyncDevice>,
+    tunnel: Arc<ServerTunnel>,
+    events: Arc<dyn kerlico_core::NodeObserver>,
+    mtu: usize,
+) -> Result<()> {
+    // 留出链路层余量；过长的包由内核按 MTU 截断前已被拒绝。
+    let mut buffer = vec![0; mtu + 64];
+    loop {
+        let length = device.recv(&mut buffer).await?;
+        if is_ambient_link_packet(&buffer[..length]) {
+            continue;
+        }
+        match tunnel.receive(&buffer[..length]) {
+            Ok(()) => {}
+            Err(Error::Cancelled) => return Ok(()),
+            // 单个包不合法或超出配额不影响接口上的其他流量。
+            Err(_) => events.record(NodeEvent::Dropped),
+        }
+    }
+}
+
 /// 接口地址。用户态栈用它的下一个地址。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct InterfaceAddress {
@@ -508,7 +530,7 @@ impl InboundProtocol for TunNode {
         Box::pin(async move {
             // Engine 的 max_streams 是单条多路复用连接的上限；TUN 的流由 max_flows 和会话配额约束。
             context.max_streams = self.max_flows;
-            let device = self.create()?;
+            let device = Arc::new(self.create()?);
             let access = ingress.local(&context)?;
             let redirect = match &self.routing {
                 Some(routing) if routing.plan.redirect.is_some() => Some(RedirectListeners::bind(
@@ -534,13 +556,20 @@ impl InboundProtocol for TunNode {
             let events = context.events.clone();
             let tasks = context.tasks.clone();
             let redirect_context = context.clone();
-            let tunnel = ServerTunnel::new(self.stack()?, access.clone(), context)?;
-            // 留出链路层余量；过长的包由内核按 MTU 截断前已被拒绝。
-            let mut buffer = vec![0; usize::from(self.mtu) + 64];
+            let tunnel = Arc::new(ServerTunnel::new(self.stack()?, access.clone(), context)?);
+            // 读接口单独成任务：与写回同在一个循环时，下载突发的回写会饿住读取，
+            // 内核的 TUN 队列（500 包）溢出后上行包被静默丢弃。
+            let mut reader = tasks.spawn_tracked(read_device(
+                device.clone(),
+                tunnel.clone(),
+                events.clone(),
+                usize::from(self.mtu),
+            ))?;
             loop {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Ok(()),
+                    read = &mut reader => return read.and_then(|read| read),
                     packet = tunnel.next_packet() => match packet {
                         Ok(packet) => match device.send(&packet).await {
                             Ok(_) => {}
@@ -551,18 +580,6 @@ impl InboundProtocol for TunNode {
                         Err(Error::Cancelled) => return Ok(()),
                         Err(error) => return Err(error),
                     },
-                    read = device.recv(&mut buffer) => {
-                        let length = read?;
-                        if is_ambient_link_packet(&buffer[..length]) {
-                            continue;
-                        }
-                        match tunnel.receive(&buffer[..length]) {
-                            Ok(()) => {}
-                            Err(Error::Cancelled) => return Ok(()),
-                            // 单个包不合法或超出配额不影响接口上的其他流量。
-                            Err(_) => events.record(NodeEvent::Dropped),
-                        }
-                    }
                     accepted = async { redirect.as_ref().expect("guarded").accept().await }, if redirect.is_some() => {
                         if let Ok(stream) = accepted {
                             events.record(NodeEvent::Accepted);
