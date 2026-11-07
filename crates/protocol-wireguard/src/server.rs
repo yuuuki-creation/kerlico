@@ -153,9 +153,13 @@ pub(crate) struct RuntimePeer {
     stack: Arc<SharedStack>,
     access: PeerSession,
     context: InboundContext,
-    udp: HashMap<SocketAddr, mpsc::Sender<flows::PendingDatagram>>,
+    udp: HashMap<SocketAddr, UdpFlow>,
     last_seen: Instant,
     _lease: StreamLease,
+}
+struct UdpFlow {
+    sender: mpsc::Sender<flows::PendingDatagram>,
+    used: Instant,
 }
 impl RuntimePeer {
     pub(crate) fn from_tunnel(
@@ -179,7 +183,7 @@ impl RuntimePeer {
         fragments: &mut Reassembler,
         bytes: &[u8],
     ) -> Result<()> {
-        self.udp.retain(|_, sender| !sender.is_closed());
+        self.udp.retain(|_, flow| !flow.sender.is_closed());
         self.last_seen = Instant::now();
         accept_packet(self, allowed, fragments, bytes)
     }
@@ -188,7 +192,7 @@ impl RuntimePeer {
             + self
                 .udp
                 .values()
-                .filter(|sender| !sender.is_closed())
+                .filter(|flow| !flow.sender.is_closed())
                 .count()
     }
 }
@@ -370,7 +374,7 @@ impl WireGuardNode {
                 let Some(runtime) = &mut peer.runtime else {
                     continue;
                 };
-                runtime.udp.retain(|_, sender| !sender.is_closed());
+                runtime.udp.retain(|_, flow| !flow.sender.is_closed());
                 if runtime.context.cancel.is_cancelled() {
                     peer.runtime = None;
                     continue;
@@ -495,6 +499,28 @@ fn accept_packet(
         }
     }
 }
+fn flow_table_full(peer: &RuntimePeer) -> bool {
+    peer.stack.flow_count() + peer.udp.len()
+        >= peer.stack.limits.max_flows.min(peer.context.max_streams)
+}
+/// 流表满时腾出一个位置：先回收只剩挥手的已关闭 TCP 流，再让最久未用的 UDP 来源让位
+/// （DNS 这类一次性查询每次换来源端口，等空闲超时才释放会挡住所有新流）。
+/// 被移除的 UDP 流在通道关闭后结束并归还会话额度。
+fn make_room(peer: &mut RuntimePeer) -> bool {
+    if peer.stack.reclaim_closed_tcp() {
+        return true;
+    }
+    if let Some(oldest) = peer
+        .udp
+        .iter()
+        .min_by_key(|(_, flow)| flow.used)
+        .map(|(source, _)| *source)
+    {
+        peer.udp.remove(&oldest);
+        return true;
+    }
+    false
+}
 fn accept_tcp(peer: &mut RuntimePeer, bytes: Vec<u8>) -> Result<()> {
     let packet = IpPacket::parse(&bytes)?;
     let tuple = packet.tcp_tuple()?;
@@ -507,9 +533,7 @@ fn accept_tcp(peer: &mut RuntimePeer, bytes: Vec<u8>) -> Result<()> {
         }
         return Ok(());
     }
-    if peer.stack.flow_count() + peer.udp.len()
-        >= peer.stack.limits.max_flows.min(peer.context.max_streams)
-    {
+    if flow_table_full(peer) && !make_room(peer) {
         if let Some(reset) = tcp_reset(&bytes)? {
             peer.stack.queue_packet(reset)?;
         }
@@ -553,17 +577,18 @@ fn accept_udp(peer: &mut RuntimePeer, packet: &IpPacket<'_>) -> Result<()> {
         target: tuple.target,
         packet: peer.stack.budget.packet(payload.to_vec(), false)?,
     };
-    if let Some(sender) = peer.udp.get(&tuple.source) {
-        match sender.try_send(pending) {
-            Ok(()) => return Ok(()),
+    if let Some(flow) = peer.udp.get_mut(&tuple.source) {
+        match flow.sender.try_send(pending) {
+            Ok(()) => {
+                flow.used = Instant::now();
+                return Ok(());
+            }
             Err(mpsc::error::TrySendError::Full(_)) => return Err(Error::ResourceLimit),
             Err(mpsc::error::TrySendError::Closed(packet)) => pending = packet,
         }
         peer.udp.remove(&tuple.source);
     }
-    if peer.stack.flow_count() + peer.udp.len()
-        >= peer.stack.limits.max_flows.min(peer.context.max_streams)
-    {
+    if flow_table_full(peer) && !make_room(peer) {
         return Err(Error::ResourceLimit);
     }
     let lease = peer.context.stream_budget.try_acquire()?;
@@ -581,7 +606,13 @@ fn accept_udp(peer: &mut RuntimePeer, packet: &IpPacket<'_>) -> Result<()> {
     owner.spawn(async move {
         flows::udp(stack, tuple.source, packets, access, context, lease).await;
     })?;
-    peer.udp.insert(tuple.source, sender);
+    peer.udp.insert(
+        tuple.source,
+        UdpFlow {
+            sender,
+            used: Instant::now(),
+        },
+    );
     events.record(NodeEvent::Accepted);
     Ok(())
 }

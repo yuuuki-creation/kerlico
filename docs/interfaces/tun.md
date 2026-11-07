@@ -29,7 +29,7 @@ Mihomo 顶层 `tun:` 段（`enable: true`）按同名键读取，编译期合入
 | `name` / `device` / `interface_name` | 接口名，默认 `kerlico0`，最长 15 字符 |
 | `addresses` / `inet4_address` / `inet6_address` | 接口地址，1 至 2 个，每个地址族最多一个。IPv4 前缀不超过 `/30`，IPv6 不超过 `/126`。下一个地址留给用户态栈。都不写时与 Mihomo 相同取 `198.18.0.1/30` 与 `fdfe:dcba:9876::1/126`，Fake-IP 池从 `.4` 起分配 |
 | `mtu` | 1280 至 9000，默认 1500 |
-| `max_flows` | 同时存在的 TCP 流和 UDP 来源数上限，1 至 4096，默认 1024 |
+| `max_flows` | 同时存在的 TCP 流和 UDP 来源数上限，1 至 4096，默认 1024。表满时新 UDP 来源顶替最久未用的 UDP 来源，TCP 新连接被重置 |
 | `stack` | `system`、`gvisor`、`mixed`、`lwip` 都由 kerlico 的用户态 TCP/IP 栈承载；非 `gvisor` 时启动日志记一行。其他值报错 |
 | `udp_timeout` | UDP 来源空闲超时，秒数或 `30s`、`5m`、`1h`，默认 60 秒，同时受 `limits.idle_timeout_ms` 约束 |
 | `endpoint_independent_nat` | 接受。UDP 按来源端口建立多目标关联，映射本身与目标无关 |
@@ -55,7 +55,7 @@ Mihomo 顶层 `tun:` 段（`enable: true`）按同名键读取，编译期合入
 
 ## 并发上限
 
-隧道本身常驻占用一个会话配额，每条 TCP 流和每个 UDP 来源再各占一个。实际并发是 `max_flows`、节点 `max_sessions` 减一、全局 `limits.max_sessions` 剩余配额三者的最小值。`limits.max_sessions` 默认 128，要用满默认的 `max_flows` 须调高它。节点会话上限为 1 时没有配额留给流，`kerlico check` 直接拒绝。
+隧道本身常驻占用一个会话配额，每条 TCP 流和每个 UDP 来源再各占一个。实际并发是 `max_flows`、节点 `max_sessions` 减一、全局 `limits.max_sessions` 剩余配额三者的最小值。`limits.max_sessions` 默认 4096，大于默认的 `max_flows`。节点会话上限为 1 时没有配额留给流，`kerlico check` 直接拒绝。
 
 ## 自动路由
 

@@ -239,6 +239,36 @@ impl SharedStack {
         self.lock()
             .map_or(0, |state| state.tcp.len() + state.udp.len())
     }
+    /// 回收一条应用已关闭、己方数据与 FIN 都已被确认、只等对端挥手或 TIME_WAIT 到期的 TCP 流。
+    /// 短连接密集时这些流会占满流表，挡住新连接。
+    pub fn reclaim_closed_tcp(&self) -> bool {
+        let Ok(mut state) = self.lock() else {
+            return false;
+        };
+        let State { sockets, tcp, .. } = &mut *state;
+        let Some(id) = tcp
+            .iter()
+            .find(|(_, entry)| {
+                matches!(entry.owner, TcpOwner::Draining(_))
+                    && matches!(
+                        sockets.get::<tcp::Socket>(entry.handle).state(),
+                        tcp::State::FinWait2 | tcp::State::TimeWait | tcp::State::Closed
+                    )
+            })
+            .map(|(id, _)| *id)
+        else {
+            return false;
+        };
+        if let Some(mut entry) = state.tcp.remove(&id) {
+            entry.wake();
+            state.tuples.remove(&entry.tuple);
+            if let Some(wire) = entry.wire {
+                state.inbound_tcp.remove(&wire);
+            }
+            state.sockets.remove(entry.handle);
+        }
+        true
+    }
     pub fn queue(&self, packets: Vec<Vec<u8>>) -> Result<()> {
         let mut state = self.lock()?;
         let packets = packets

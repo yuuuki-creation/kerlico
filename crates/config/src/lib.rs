@@ -1412,7 +1412,8 @@ impl Default for Limits {
             connect_timeout_ms: 10_000,
             idle_timeout_ms: 60_000,
             drain_timeout_ms: 5_000,
-            max_sessions: 128,
+            // 客户端一台桌面的浏览器与 DNS 查询就会同时持有数百个会话；128 会让新连接被拒。
+            max_sessions: 4096,
             udp_queue_packets: 32,
             max_datagram_size: 65_535,
             max_flow_records: 65_536,

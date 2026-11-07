@@ -254,6 +254,13 @@ async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     }
 }
 async fn start_tun(name: &str, address: &str, limits: Value) -> Engine {
+    start_tun_with(
+        json!({"name":name,"addresses":[address],"mtu":1500}),
+        limits,
+    )
+    .await
+}
+async fn start_tun_with(options: Value, limits: Value) -> Engine {
     ip(&["link", "set", "lo", "up"]);
     let mut registry = Registry::default();
     registry.register(EchoFactory).unwrap();
@@ -264,7 +271,7 @@ async fn start_tun(name: &str, address: &str, limits: Value) -> Engine {
         "inbounds": [{"tag":"keep","type":"tcp-forward","listen":"127.0.0.1:0",
             "target":{"host":"192.0.2.1","port":7000},"outbound":"exit"}],
         "local_inbounds": [{"tag":"tun","type":"tun","listen":"127.0.0.1:0","outbound":"exit",
-            "options":{"name":name,"addresses":[address],"mtu":1500}}],
+            "options":options}],
         "limits": limits,
     });
     Engine::bind(
@@ -379,6 +386,38 @@ async fn flow_limit_follows_max_flows_rather_than_the_stream_cap() {
     .unwrap();
     assert_eq!(held.len(), 300, "全部流同时存活");
     drop(held);
+    stop.cancel();
+    running.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 root，并在独立网络命名空间内运行"]
+async fn new_udp_flows_evict_the_least_recently_used_when_the_table_is_full() {
+    let engine = start_tun_with(
+        json!({"name":"kl3","addresses":["198.21.0.1/24"],"mtu":1500,"max_flows":8}),
+        json!({"max_sessions":512,"drain_timeout_ms":1000}),
+    )
+    .await;
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(engine.run(stop.clone()));
+    interface_ready("kl3").await;
+    let answered = tokio::task::spawn_blocking(|| {
+        (0..40)
+            .filter(|index| {
+                let socket = UdpSocket::bind("198.21.0.1:0").unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                socket.connect("198.21.0.200:53").unwrap();
+                socket.send(format!("query-{index}").as_bytes()).unwrap();
+                let mut bytes = [0; 64];
+                socket.recv(&mut bytes).is_ok()
+            })
+            .count()
+    })
+    .await
+    .unwrap();
+    assert_eq!(answered, 40, "一次性 UDP 查询不应在空闲超时前占满流表");
     stop.cancel();
     running.await.unwrap().unwrap();
 }
