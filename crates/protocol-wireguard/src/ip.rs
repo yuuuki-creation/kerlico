@@ -287,7 +287,10 @@ impl ServerTunnel {
             .lock()
             .map_err(|_| Error::Protocol("IP节点状态已损坏"))?;
         let (peer, fragments) = &mut *state;
-        peer.receive(&self.allowed, fragments, bytes)
+        let received = peer.receive(&self.allowed, fragments, bytes);
+        // 输入可能让用户态栈产生 ACK 或数据；另一任务里的 next_packet 等这个通知去轮询。
+        self.stack.notify.notify_one();
+        received
     }
     pub async fn next_packet(&self) -> Result<Vec<u8>> {
         next_packet(&self.stack).await
