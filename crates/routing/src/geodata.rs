@@ -691,20 +691,48 @@ pub fn compile_sites(bytes: &[u8], refs: &[&GeoSiteRef]) -> Result<HashMap<Strin
         return dat_has_entries(bytes).map(|()| HashMap::new());
     }
     let wanted: BTreeSet<&str> = refs.iter().map(|r| r.list.as_str()).collect();
-    let mut lists: HashMap<String, Vec<SiteItem>> = HashMap::new();
-    for (code, msg) in dat_entries(bytes)? {
-        if wanted.contains(code.as_str()) {
-            lists.entry(code).or_default().extend(site_items(msg)?);
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut builders: Vec<(&GeoSiteRef, DomainSetBuilder)> = refs
+        .iter()
+        .map(|&r| (r, DomainSetBuilder::default()))
+        .collect();
+    let mut rest_bytes = bytes;
+    while !rest_bytes.is_empty() {
+        let (tag, wire, next) = read_pb_key(rest_bytes)?;
+        rest_bytes = next;
+        if tag == 1 && wire == 2 {
+            let (msg, next) = read_pb_bytes(rest_bytes)?;
+            rest_bytes = next;
+            let code = entry_code(msg)?;
+            if wanted.contains(code.as_str()) {
+                seen.insert(code.clone());
+                let mut m = msg;
+                while !m.is_empty() {
+                    let (t, w, n) = read_pb_key(m)?;
+                    m = n;
+                    if t == 2 && w == 2 {
+                        let (domain, n) = read_pb_bytes(m)?;
+                        m = n;
+                        if let Some(item) = parse_pb_domain(domain)? {
+                            for (r, builder) in &mut builders {
+                                if r.list == code && r.admits(&item.attrs) {
+                                    builder.insert(item.rule.clone());
+                                }
+                            }
+                        }
+                    } else {
+                        m = skip_pb_field(m, w)?;
+                    }
+                }
+            }
+        } else {
+            rest_bytes = skip_pb_field(rest_bytes, wire)?;
         }
     }
     let mut out = HashMap::with_capacity(refs.len());
-    for r in refs {
-        let items = lists
-            .get(&r.list)
-            .ok_or_else(|| Error::Config(format!("geosite.dat 中没有分类 {}", r.list)))?;
-        let mut builder = DomainSetBuilder::default();
-        for item in items.iter().filter(|item| r.admits(&item.attrs)) {
-            builder.insert(item.rule.clone());
+    for (r, builder) in builders {
+        if !seen.contains(&r.list) {
+            return Err(Error::Config(format!("geosite.dat 中没有分类 {}", r.list)));
         }
         out.insert(r.key.clone(), builder.build()?);
     }

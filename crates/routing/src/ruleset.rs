@@ -5,7 +5,7 @@
 
 use crate::{
     Network, PortRange,
-    domain_set::{DomainRule, DomainSet},
+    domain_set::DomainSet,
     ip_set::{IpSet, IpSetBuilder, parse_prefix},
     mrs::{self, Behavior, MrsPayload},
     srs, wildcard_domain_matches,
@@ -315,32 +315,32 @@ pub struct CompiledHeadlessRule {
     pub logical: Option<(LogicalMode, Vec<CompiledHeadlessRule>)>,
 }
 
-fn domain_rules(spec: &HeadlessRuleSpec) -> Result<Vec<DomainRule>> {
-    let mut rules = Vec::new();
+fn build_domain_set(spec: &HeadlessRuleSpec) -> Result<DomainSet> {
+    let mut builder = crate::domain_set::DomainSetBuilder::default();
     for d in &spec.domain {
-        rules.push(DomainRule::Full(domain_entry(d)?));
+        builder.insert_full(validate_domain_entry(d)?);
     }
     for d in &spec.domain_suffix {
-        rules.push(match d.trim().strip_prefix('.') {
-            Some(rest) => DomainRule::Subdomain(domain_entry(rest)?),
-            None => DomainRule::Suffix(domain_entry(d)?),
-        });
+        match d.trim().strip_prefix('.') {
+            Some(rest) => builder.insert_subdomain(validate_domain_entry(rest)?),
+            None => builder.insert_suffix(validate_domain_entry(d)?),
+        }
     }
     for kw in &spec.domain_keyword {
         if kw.is_empty() {
             return Err(Error::Config("无头规则 domain_keyword 不能为空".into()));
         }
-        rules.push(DomainRule::Keyword(kw.to_ascii_lowercase()));
+        builder.insert_keyword(kw);
     }
     for re in &spec.domain_regex {
         Regex::new(re).map_err(|_| Error::Config(format!("无头规则 domain_regex 不合法：{re}")))?;
-        rules.push(DomainRule::Regex(re.clone()));
+        builder.insert_regex(re.clone());
     }
-    Ok(rules)
+    builder.build()
 }
 
-fn domain_entry(value: &str) -> Result<String> {
-    let d = value.trim().trim_end_matches('.').to_ascii_lowercase();
+fn validate_domain_entry(value: &str) -> Result<&str> {
+    let d = value.trim().trim_end_matches('.');
     if d.is_empty() || d.parse::<IpAddr>().is_ok() {
         return Err(Error::Config(format!("规则集域名不合法：{value}")));
     }
@@ -407,7 +407,7 @@ impl CompiledHeadlessRule {
             domain_wildcard.push(w.trim().to_ascii_lowercase());
         }
         Ok(Self {
-            domains: DomainSet::from_rules(domain_rules(spec)?)?,
+            domains: build_domain_set(spec)?,
             domain_wildcard,
             ip_cidr: ip_set(&spec.ip_cidr, "ip_cidr")?,
             port: spec.port.clone(),
@@ -631,7 +631,28 @@ impl RuleSetFormat {
                 }
             }
             Self::Mihomo { behavior, format } => match format {
-                MihomoFormat::Mrs => vec![mrs_to_headless(mrs::read(bytes, Some(behavior))?)],
+                MihomoFormat::Mrs => {
+                    let (domains, ip_cidr) =
+                        mrs::read_compiled(bytes, Some(behavior), wildcard_regex)?;
+                    return Ok(vec![CompiledHeadlessRule {
+                        domains,
+                        domain_wildcard: Vec::new(),
+                        ip_cidr,
+                        port: Vec::new(),
+                        port_range: Vec::new(),
+                        source_ip_cidr: IpSet::default(),
+                        source_port: Vec::new(),
+                        source_port_range: Vec::new(),
+                        networks: Vec::new(),
+                        process_name: Vec::new(),
+                        process_path: Vec::new(),
+                        process_name_regex: Vec::new(),
+                        process_path_regex: Vec::new(),
+                        platform_only: false,
+                        invert: false,
+                        logical: None,
+                    }]);
+                }
                 MihomoFormat::Yaml | MihomoFormat::Text => {
                     let text = std::str::from_utf8(bytes)
                         .map_err(|_| Error::Config("rule-provider 文件不是 UTF-8 文本".into()))?;

@@ -134,6 +134,7 @@ impl Supervisor<'_> {
             },
         )
         .await?;
+        super::trim_allocator();
         for (tag, address) in engine.listeners()? {
             match self.language {
                 Language::ZhCn => println!("入口 {tag} 已监听 {address}"),
@@ -172,6 +173,7 @@ impl Supervisor<'_> {
                 &error,
             );
         }
+        super::trim_allocator();
         let error = match self.start(value, prepared).await {
             Ok(generation) => {
                 *current = Some(generation);

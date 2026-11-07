@@ -560,6 +560,22 @@ impl UsageSnapshot {
             .or_default()
             .add(record.usage);
     }
+
+    fn account_ledger(&mut self, flow: &FlowLedger) {
+        let usage = flow.usage();
+        self.engine.add(usage);
+        self.nodes
+            .entry(flow.source.node().clone())
+            .or_default()
+            .add(usage);
+        if let Some(user) = flow.source.user() {
+            self.users.entry(user).or_default().add(usage);
+        }
+        self.outbounds
+            .entry(flow.outbound.clone())
+            .or_default()
+            .add(usage);
+    }
 }
 
 struct Registry {
@@ -577,8 +593,21 @@ struct Registry {
 struct TelemetryInner {
     run: RunId,
     next: AtomicU64,
+    last_trim_ms: AtomicU64,
     capacity: usize,
     registry: Mutex<Registry>,
+}
+
+fn maybe_trim_allocator(last_trim_ms: &AtomicU64) {
+    let now = timestamp();
+    let prev = last_trim_ms.load(Ordering::Relaxed);
+    if now.saturating_sub(prev) >= 15_000
+        && last_trim_ms
+            .compare_exchange(prev, now, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    {
+        kerlico_core::trim_allocator();
+    }
 }
 
 #[derive(Clone)]
@@ -588,6 +617,7 @@ impl Telemetry {
         Self(Arc::new(TelemetryInner {
             run: RunId::generate(),
             next: AtomicU64::new(1),
+            last_trim_ms: AtomicU64::new(0),
             capacity,
             registry: Mutex::new(Registry {
                 records: BTreeMap::new(),
@@ -617,7 +647,12 @@ impl Telemetry {
             .registry
             .lock()
             .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
-        if registry.records.len() >= self.0.capacity {
+        let soft_cap = if !registry.persistent && self.0.capacity > 4096 {
+            1024
+        } else {
+            self.0.capacity
+        };
+        if registry.records.len() >= soft_cap {
             let remove = registry.order.iter().position(|id| {
                 registry
                     .records
@@ -630,14 +665,16 @@ impl Telemetry {
                 }
                 let id = registry.order.remove(index).expect("已找到记录序号");
                 if let Some(flow) = registry.records.remove(&id) {
-                    let record = flow.record();
-                    registry.archived.account(&record);
                     if registry.persistent {
+                        let record = flow.record();
+                        registry.archived.account(&record);
                         registry.pending.insert(id, record);
+                    } else {
+                        registry.archived.account_ledger(&flow);
                     }
                     registry.archived.evicted_records += 1;
                 }
-            } else {
+            } else if registry.records.len() >= self.0.capacity {
                 return Err(Error::ResourceLimit);
             }
         }
@@ -676,21 +713,28 @@ impl Telemetry {
         });
         registry.order.push_back(sequence);
         registry.records.insert(sequence, flow.clone());
+        drop(registry);
+        if sequence & 511 == 0 {
+            maybe_trim_allocator(&self.0.last_trim_ms);
+        }
         Ok(flow)
     }
     pub fn usage(&self) -> Result<UsageSnapshot> {
-        let registry = self
-            .0
-            .registry
-            .lock()
-            .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
-        let mut snapshot = registry.archived.clone();
-        snapshot.retained_records = registry.records.len();
-        for flow in registry.records.values() {
-            let record = flow.record();
-            snapshot.active_flows += usize::from(record.end.is_none());
-            snapshot.account(&record);
-        }
+        let snapshot = {
+            let registry = self
+                .0
+                .registry
+                .lock()
+                .map_err(|_| Error::Protocol("运行账本状态已损坏"))?;
+            let mut snapshot = registry.archived.clone();
+            snapshot.retained_records = registry.records.len();
+            for flow in registry.records.values() {
+                snapshot.active_flows += usize::from(flow.end.load(Ordering::Acquire) == 0);
+                snapshot.account_ledger(flow);
+            }
+            snapshot
+        };
+        maybe_trim_allocator(&self.0.last_trim_ms);
         Ok(snapshot)
     }
     /// 尚未结束的流；活动流不会被容量淘汰，因此这里是完整的在线连接表。

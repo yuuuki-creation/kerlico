@@ -180,7 +180,7 @@ impl Drop for TcpStream {
             && let Some(entry) = state.tcp.get_mut(&self.id)
         {
             entry.owner = if entry.write_closed {
-                TcpOwner::Draining(Instant::now() + Duration::from_secs(60))
+                TcpOwner::Draining(Instant::now() + Duration::from_secs(5))
             } else {
                 TcpOwner::Aborting(Instant::now() + Duration::from_secs(1))
             };

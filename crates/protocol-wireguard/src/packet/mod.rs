@@ -172,7 +172,7 @@ impl<'a> IpPacket<'a> {
         }
         self.tuple()
     }
-    fn tuple(&self) -> Result<FlowTuple> {
+    pub(crate) fn tuple(&self) -> Result<FlowTuple> {
         let bytes = self.payload.get(..4).ok_or_else(malformed)?;
         let source_port = u16::from_be_bytes([bytes[0], bytes[1]]);
         let target_port = u16::from_be_bytes([bytes[2], bytes[3]]);
@@ -297,18 +297,102 @@ pub(crate) fn udp_packet(
 }
 
 pub(crate) fn rewrite_tcp(bytes: &[u8], source: SocketAddr, target: SocketAddr) -> Result<Vec<u8>> {
+    let mut owned = bytes.to_vec();
+    rewrite_tcp_in_place(&mut owned, source, target, true)?;
+    Ok(owned)
+}
+
+pub(crate) fn rewrite_tcp_in_place(
+    bytes: &mut [u8],
+    source: SocketAddr,
+    target: SocketAddr,
+    verify_checksum: bool,
+) -> Result<()> {
     let packet = IpPacket::parse(bytes)?;
-    packet.tcp_tuple()?;
+    if verify_checksum {
+        packet.tcp_tuple()?;
+    } else if packet.protocol != 6 || packet.fragment.is_some() || packet.payload.len() < 20 {
+        return Err(malformed());
+    } else {
+        let _ = packet.tuple()?;
+    }
     if source.is_ipv4() != packet.source.is_ipv4() || target.is_ipv4() != source.is_ipv4() {
         return Err(malformed());
     }
-    let mut payload = packet.payload.to_vec();
-    payload[..2].copy_from_slice(&source.port().to_be_bytes());
-    payload[2..4].copy_from_slice(&target.port().to_be_bytes());
-    payload[16..18].fill(0);
-    let check = transport_checksum(source.ip(), target.ip(), 6, &payload);
-    payload[16..18].copy_from_slice(&check.to_be_bytes());
-    ip_packet(source.ip(), target.ip(), 6, &payload, packet.hop_limit)
+    if !unicast(source.ip()) || !unicast(target.ip()) {
+        return Err(malformed());
+    }
+    let header_len = bytes.len() - packet.payload.len();
+    let old_src_port = u16::from_be_bytes([bytes[header_len], bytes[header_len + 1]]);
+    let old_dst_port = u16::from_be_bytes([bytes[header_len + 2], bytes[header_len + 3]]);
+    let old_tcp_check = u16::from_be_bytes([bytes[header_len + 16], bytes[header_len + 17]]);
+    let mut tcp_acc = u32::from(!old_tcp_check);
+    tcp_acc = tcp_acc
+        .wrapping_add(u32::from(!old_src_port))
+        .wrapping_add(u32::from(source.port()))
+        .wrapping_add(u32::from(!old_dst_port))
+        .wrapping_add(u32::from(target.port()));
+    match (source.ip(), target.ip()) {
+        (IpAddr::V4(src4), IpAddr::V4(dst4)) => {
+            if header_len != 20 {
+                return Err(malformed());
+            }
+            let old_ip_check = u16::from_be_bytes([bytes[10], bytes[11]]);
+            let mut ip_acc = u32::from(!old_ip_check);
+            let old_addrs = [
+                u16::from_be_bytes([bytes[12], bytes[13]]),
+                u16::from_be_bytes([bytes[14], bytes[15]]),
+                u16::from_be_bytes([bytes[16], bytes[17]]),
+                u16::from_be_bytes([bytes[18], bytes[19]]),
+            ];
+            let s_oct = src4.octets();
+            let d_oct = dst4.octets();
+            let new_addrs = [
+                u16::from_be_bytes([s_oct[0], s_oct[1]]),
+                u16::from_be_bytes([s_oct[2], s_oct[3]]),
+                u16::from_be_bytes([d_oct[0], d_oct[1]]),
+                u16::from_be_bytes([d_oct[2], d_oct[3]]),
+            ];
+            for (old_w, new_w) in old_addrs.into_iter().zip(new_addrs) {
+                ip_acc = ip_acc
+                    .wrapping_add(u32::from(!old_w))
+                    .wrapping_add(u32::from(new_w));
+                tcp_acc = tcp_acc
+                    .wrapping_add(u32::from(!old_w))
+                    .wrapping_add(u32::from(new_w));
+            }
+            bytes[12..16].copy_from_slice(&s_oct);
+            bytes[16..20].copy_from_slice(&d_oct);
+            let new_ip_check = finish(ip_acc);
+            bytes[10..12].copy_from_slice(&new_ip_check.to_be_bytes());
+        }
+        (IpAddr::V6(src6), IpAddr::V6(dst6)) => {
+            if header_len < 40 {
+                return Err(malformed());
+            }
+            let s_oct = src6.octets();
+            let d_oct = dst6.octets();
+            for i in (0..16).step_by(2) {
+                let old_s = u16::from_be_bytes([bytes[8 + i], bytes[8 + i + 1]]);
+                let new_s = u16::from_be_bytes([s_oct[i], s_oct[i + 1]]);
+                let old_d = u16::from_be_bytes([bytes[24 + i], bytes[24 + i + 1]]);
+                let new_d = u16::from_be_bytes([d_oct[i], d_oct[i + 1]]);
+                tcp_acc = tcp_acc
+                    .wrapping_add(u32::from(!old_s))
+                    .wrapping_add(u32::from(new_s))
+                    .wrapping_add(u32::from(!old_d))
+                    .wrapping_add(u32::from(new_d));
+            }
+            bytes[8..24].copy_from_slice(&s_oct);
+            bytes[24..40].copy_from_slice(&d_oct);
+        }
+        _ => return Err(malformed()),
+    }
+    bytes[header_len..header_len + 2].copy_from_slice(&source.port().to_be_bytes());
+    bytes[header_len + 2..header_len + 4].copy_from_slice(&target.port().to_be_bytes());
+    let new_tcp_check = finish(tcp_acc);
+    bytes[header_len + 16..header_len + 18].copy_from_slice(&new_tcp_check.to_be_bytes());
+    Ok(())
 }
 
 pub(crate) fn tcp_reset(bytes: &[u8]) -> Result<Option<Vec<u8>>> {

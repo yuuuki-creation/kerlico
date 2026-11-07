@@ -360,8 +360,13 @@ fn registry() -> Result<Registry> {
     Ok(registry)
 }
 
+pub(crate) fn trim_allocator() {
+    kerlico_core::trim_allocator();
+}
+
 #[tokio::main]
 async fn main() {
+    kerlico_core::configure_allocator();
     let raw: Vec<_> = std::env::args_os().collect();
     let language = cli::language_from_args(&raw);
     let args = match cli::parse_args(&raw, language) {

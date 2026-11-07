@@ -1,6 +1,6 @@
 use crate::{
     config::{Addresses, Limits, Network, Prepared},
-    packet::{FlowTuple, IpPacket, rewrite_tcp},
+    packet::{FlowTuple, IpPacket, rewrite_tcp_in_place},
     queue::{PacketBudget, PacketLease, QueuedPacket},
 };
 use kerlico_core::{CancellationToken, ConnectContext, Error, Result};
@@ -221,15 +221,13 @@ impl SharedStack {
     pub fn time(&self) -> StackInstant {
         StackInstant::from_millis(self.started.elapsed().as_millis().min(i64::MAX as u128) as i64)
     }
-    pub fn input_tcp(&self, packet: Vec<u8>) -> Result<()> {
+    pub fn input_tcp(&self, mut packet: Vec<u8>) -> Result<()> {
         let mut state = self.lock()?;
         let tuple = IpPacket::parse(&packet)?.tcp_tuple()?;
-        let packet = if let Some(id) = state.inbound_tcp.get(&tuple) {
+        if let Some(id) = state.inbound_tcp.get(&tuple) {
             let entry = state.tcp.get(id).ok_or(Error::Rejected)?;
-            rewrite_tcp(&packet, entry.tuple.target, entry.tuple.source)?
-        } else {
-            packet
-        };
+            rewrite_tcp_in_place(&mut packet, entry.tuple.target, entry.tuple.source, false)?;
+        }
         state
             .device
             .incoming
@@ -347,11 +345,11 @@ impl SharedStack {
                 if packet.protocol != 6 {
                     return Err(Error::Protocol("WireGuard TCP栈产生了意外控制包"));
                 }
-                let tuple = packet.tcp_tuple()?;
+                let tuple = packet.tuple()?;
                 if let Some(entry) = tuples.get(&tuple).and_then(|id| tcp.get(id))
                     && let Some(wire) = entry.wire
                 {
-                    queued.bytes = rewrite_tcp(&queued.bytes, wire.target, wire.source)?;
+                    rewrite_tcp_in_place(&mut queued.bytes, wire.target, wire.source, false)?;
                 }
                 queued.from_stack = false;
             }
@@ -387,7 +385,12 @@ impl SharedStack {
                 let socket = state.sockets.get::<tcp::Socket>(entry.handle);
                 match entry.owner {
                     TcpOwner::Attached => None,
-                    TcpOwner::Draining(_) if socket.remote_endpoint().is_none() => Some(*id),
+                    TcpOwner::Draining(_)
+                        if socket.remote_endpoint().is_none()
+                            || socket.state() == tcp::State::TimeWait =>
+                    {
+                        Some(*id)
+                    }
                     TcpOwner::Aborting(deadline)
                         if socket.remote_endpoint().is_none() || now >= deadline =>
                     {

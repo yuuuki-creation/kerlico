@@ -45,12 +45,32 @@ pub struct DomainSet {
 impl DomainSetBuilder {
     pub fn insert(&mut self, rule: DomainRule) {
         match rule {
-            DomainRule::Full(d) => self.table.insert(&normalize(&d), FULL),
-            DomainRule::Suffix(d) => self.table.insert(&normalize(&d), SUFFIX),
-            DomainRule::Subdomain(d) => self.table.insert(&normalize(&d), SUBDOMAIN),
-            DomainRule::Keyword(k) => self.keywords.push(k.to_ascii_lowercase()),
-            DomainRule::Regex(r) => self.regexes.push(r),
+            DomainRule::Full(d) => self.insert_full(&d),
+            DomainRule::Suffix(d) => self.insert_suffix(&d),
+            DomainRule::Subdomain(d) => self.insert_subdomain(&d),
+            DomainRule::Keyword(k) => self.insert_keyword(&k),
+            DomainRule::Regex(r) => self.insert_regex(r),
         }
+    }
+
+    pub fn insert_full(&mut self, d: &str) {
+        insert_normalized(&mut self.table, d, FULL);
+    }
+
+    pub fn insert_suffix(&mut self, d: &str) {
+        insert_normalized(&mut self.table, d, SUFFIX);
+    }
+
+    pub fn insert_subdomain(&mut self, d: &str) {
+        insert_normalized(&mut self.table, d, SUBDOMAIN);
+    }
+
+    pub fn insert_keyword(&mut self, k: &str) {
+        self.keywords.push(k.to_ascii_lowercase());
+    }
+
+    pub fn insert_regex(&mut self, r: String) {
+        self.regexes.push(r);
     }
 
     pub fn build(mut self) -> Result<DomainSet> {
@@ -85,12 +105,18 @@ impl DomainSetBuilder {
     }
 }
 
-fn normalize(domain: &str) -> String {
-    domain
-        .trim()
-        .trim_end_matches('.')
-        .trim_start_matches('.')
-        .to_ascii_lowercase()
+fn insert_normalized(table: &mut KeyTable, domain: &str, flag: u8) {
+    let trimmed = domain.trim().trim_end_matches('.').trim_start_matches('.');
+    if trimmed.is_empty() || trimmed.len() > 255 {
+        return;
+    }
+    let mut buf = [0u8; 256];
+    for (dst, src) in buf[..trimmed.len()].iter_mut().zip(trimmed.bytes()) {
+        *dst = src.to_ascii_lowercase();
+    }
+    if let Ok(s) = std::str::from_utf8(&buf[..trimmed.len()]) {
+        table.insert(s, flag);
+    }
 }
 
 impl DomainSet {

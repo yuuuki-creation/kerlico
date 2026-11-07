@@ -314,7 +314,7 @@ async fn copy_streams(
         inner: b,
         active: &active,
     };
-    let copy = tokio::io::copy_bidirectional_with_sizes(&mut a, &mut b, 256 * 1024, 256 * 1024);
+    let copy = tokio::io::copy_bidirectional_with_sizes(&mut a, &mut b, 64 * 1024, 64 * 1024);
     tokio::pin!(copy);
     let timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(timer);

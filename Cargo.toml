@@ -124,7 +124,7 @@ blake3 = { git = "https://github.com/aimalygin/xray-rust", rev = "9b06d374664922
 xray-transport = { path = "third_party/xray-transport" }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 # 身份工作量证明在未优化构建中单次校验需要数秒。
 [profile.dev.package.zerotier-node]

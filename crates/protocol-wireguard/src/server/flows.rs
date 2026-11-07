@@ -101,6 +101,7 @@ pub(super) async fn udp(
             let timer = tokio::time::sleep(idle);
             tokio::pin!(timer);
             let mut translated_loopback = false;
+            let mut all_dns = true;
             loop {
                 let received = {
                     let receive = receiver.recv_from();
@@ -111,6 +112,9 @@ pub(super) async fn udp(
                             _ = &mut timer => return Err(Error::Timeout),
                             packet = packets.recv() => {
                                 let Some(packet) = packet else { return Ok(()); };
+                                if packet.target.port() != 53 {
+                                    all_dns = false;
+                                }
                                 let target_addr = if stack.addresses.contains(packet.target.ip()) {
                                     translated_loopback = true;
                                     let local_ip = if packet.target.is_ipv4() {
@@ -140,8 +144,13 @@ pub(super) async fn udp(
                     return Err(Error::Protocol("WireGuard UDP回包地址族与原来源不一致"));
                 }
                 let packet = udp_packet(remote, source, &payload)?;
+                let post_reply_idle = if all_dns {
+                    idle.min(std::time::Duration::from_secs(2))
+                } else {
+                    idle
+                };
                 match stack.queue_packet(packet) {
-                    Ok(()) => timer.as_mut().reset(Instant::now() + idle),
+                    Ok(()) => timer.as_mut().reset(Instant::now() + post_reply_idle),
                     Err(Error::ResourceLimit) => scope.context.events.record(NodeEvent::Dropped),
                     Err(error) => return Err(error),
                 }

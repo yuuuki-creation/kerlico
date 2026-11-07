@@ -312,6 +312,9 @@ async fn next_packet(stack: &SharedStack) -> Result<Vec<u8>> {
     let mut timer = tokio::time::interval(Duration::from_millis(20));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if let Some(packet) = stack.drain(1)?.pop() {
+            return Ok(packet);
+        }
         stack.poll()?;
         if let Some(packet) = stack.drain(1)?.pop() {
             return Ok(packet);

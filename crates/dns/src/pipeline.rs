@@ -666,7 +666,7 @@ impl Inner {
         let enhanced_fake = matches!(mode.as_deref(), Some("fake-ip") | Some("fakeip"));
         let mut v4 = spec.fake_ip_range.clone().or(b.fake_ranges.0.clone());
         let mut v6 = spec.fake_ip_range6.clone().or(b.fake_ranges.1.clone());
-        let mut pool_size = 65535usize;
+        let mut pool_size = 4096usize;
         let mut enabled = enhanced_fake || b.has_fake_server || v4.is_some() || v6.is_some();
         match &spec.fakedns {
             Some(FakeDnsInput::Bool(on)) => enabled |= *on,

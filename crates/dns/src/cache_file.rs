@@ -5,7 +5,7 @@
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
@@ -14,9 +14,10 @@ use std::{
 pub const FAKEIP: &str = "fakeip";
 pub const SELECTED: &str = "selected";
 
-type Documents = HashMap<PathBuf, Map<String, Value>>;
+type SectionMap = BTreeMap<String, Vec<u8>>;
+type Documents = HashMap<PathBuf, SectionMap>;
 
-fn with_document<R>(path: &Path, f: impl FnOnce(&mut Map<String, Value>) -> R) -> R {
+fn with_document<R>(path: &Path, f: impl FnOnce(&mut SectionMap) -> R) -> R {
     static DOCUMENTS: OnceLock<Mutex<Documents>> = OnceLock::new();
     let mut docs = DOCUMENTS
         .get_or_init(Default::default)
@@ -25,22 +26,40 @@ fn with_document<R>(path: &Path, f: impl FnOnce(&mut Map<String, Value>) -> R) -
     let doc = docs.entry(path.to_path_buf()).or_insert_with(|| {
         std::fs::read(path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .and_then(|bytes| serde_json::from_slice::<Map<String, Value>>(&bytes).ok())
+            .map(|map| {
+                map.into_iter()
+                    .filter_map(|(k, v)| serde_json::to_vec(&v).ok().map(|b| (k, b)))
+                    .collect()
+            })
             .unwrap_or_default()
     });
     f(doc)
 }
 
 pub fn load<T: DeserializeOwned>(path: &Path, section: &str) -> Option<T> {
-    with_document(path, |doc| doc.get(section).cloned())
-        .and_then(|value| serde_json::from_value(value).ok())
+    with_document(path, |doc| {
+        doc.get(section)
+            .and_then(|bytes| serde_json::from_slice(bytes).ok())
+    })
 }
 
 pub fn store<T: Serialize>(path: &Path, section: &str, value: &T) -> io::Result<()> {
-    let value = serde_json::to_value(value).map_err(io::Error::other)?;
+    let section_bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
     with_document(path, |doc| {
-        doc.insert(section.to_owned(), value);
-        let bytes = serde_json::to_vec(doc).map_err(io::Error::other)?;
+        doc.insert(section.to_owned(), section_bytes);
+        let cap = doc.values().map(|v| v.len() + 32).sum::<usize>() + 2;
+        let mut bytes = Vec::with_capacity(cap);
+        bytes.push(b'{');
+        for (i, (k, v)) in doc.iter().enumerate() {
+            if i > 0 {
+                bytes.push(b',');
+            }
+            serde_json::to_writer(&mut bytes, k).map_err(io::Error::other)?;
+            bytes.push(b':');
+            bytes.extend_from_slice(v);
+        }
+        bytes.push(b'}');
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -80,6 +99,7 @@ mod tests {
         let selected = BTreeMap::from([("proxy".to_owned(), "node-b".to_owned())]);
         store(&path, SELECTED, &selected).unwrap();
         pool.allocate_v4("b.example").unwrap();
+        drop(pool);
 
         let doc = sections(&path);
         assert_eq!(doc[SELECTED], serde_json::json!({"proxy": "node-b"}));

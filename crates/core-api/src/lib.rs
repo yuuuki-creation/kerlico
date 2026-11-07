@@ -41,6 +41,38 @@ pub use dialer::{
     with_compile_dialer,
 };
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[allow(unsafe_code)]
+pub fn configure_allocator() {
+    const M_TRIM_THRESHOLD: i32 = -1;
+    const M_ARENA_MAX: i32 = -8;
+    unsafe extern "C" {
+        fn mallopt(param: i32, value: i32) -> i32;
+    }
+    // 限制 glibc 线程分配池数量并下调归还阈值，避免跨 Tokio 线程释放缓冲导致多 arena 常驻膨胀。
+    unsafe {
+        let _ = mallopt(M_ARENA_MAX, 2);
+        let _ = mallopt(M_TRIM_THRESHOLD, 64 * 1024);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+pub fn configure_allocator() {}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[allow(unsafe_code)]
+pub fn trim_allocator() {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> i32;
+    }
+    unsafe {
+        let _ = malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+pub fn trim_allocator() {}
+
 /// 可在线程间移动的装箱异步操作；丢弃操作不会撤回已经发送的数据。
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 

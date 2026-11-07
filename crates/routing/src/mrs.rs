@@ -153,9 +153,10 @@ pub fn read(bytes: &[u8], expected: Option<Behavior>) -> Result<MrsPayload> {
                 labels,
             };
             let mut patterns = Vec::new();
-            for key in set.keys()? {
-                patterns.push(key_to_pattern(&unreverse(&key)?));
-            }
+            set.for_each_key(|key| {
+                patterns.push(key_to_pattern(&unreverse(key)?));
+                Ok(())
+            })?;
             Ok(MrsPayload::Domain(compact_patterns(patterns)))
         }
         _ => {
@@ -169,6 +170,104 @@ pub fn read(bytes: &[u8], expected: Option<Behavior>) -> Result<MrsPayload> {
                     .map_err(|_| malformed("IP 区间"))?;
             }
             Ok(MrsPayload::IpCidr(builder.build()))
+        }
+    }
+}
+
+/// 流式解码 `.mrs` 为 [`DomainSet`] 或 [`IpSet`]，避免构建数十万级中间 `String` 数组。
+pub(crate) fn read_compiled(
+    bytes: &[u8],
+    expected: Option<Behavior>,
+    wildcard_to_regex: impl Fn(&str) -> String,
+) -> Result<(crate::domain_set::DomainSet, IpSet)> {
+    let body = zstd::stream::decode_all(bytes).map_err(|_| malformed("zstd 解压失败"))?;
+    let mut r = Reader { buf: &body, pos: 0 };
+    if r.take(4)? != MAGIC {
+        return Err(Error::Config("不是 Mihomo 二进制规则集".into()));
+    }
+    let behavior = match r.take(1)?[0] {
+        0 => Behavior::Domain,
+        1 => Behavior::IpCidr,
+        other => return Err(malformed(&format!("未知 behavior {other}"))),
+    };
+    if let Some(expected) = expected
+        && expected != behavior
+    {
+        return Err(Error::Config(format!(
+            "mrs 文件 behavior 为 {}，配置为 {}",
+            behavior.name(),
+            expected.name()
+        )));
+    }
+    let _count = r.i64()?;
+    let extra = usize::try_from(r.i64()?).map_err(|_| malformed("保留区长度"))?;
+    r.take(extra)?;
+    if r.take(1)?[0] != 1 {
+        return Err(malformed("内容版本"));
+    }
+    match behavior {
+        Behavior::Domain => {
+            let leaves = r.u64s()?;
+            let label_bitmap = r.u64s()?;
+            let n = r.len(1)?;
+            let labels = r.take(n)?.to_vec();
+            let set = Succinct {
+                leaves,
+                label_bitmap,
+                labels,
+            };
+            let mut builder = crate::domain_set::DomainSetBuilder::default();
+            let mut wildcards = Vec::new();
+            let mut buf = [0u8; 256];
+            set.for_each_key(|rev_key| {
+                let owned;
+                let key_str: &str = if rev_key.len() <= 256 && rev_key.is_ascii() {
+                    let len = rev_key.len();
+                    for (dst, &src) in buf[..len].iter_mut().zip(rev_key.iter().rev()) {
+                        *dst = src;
+                    }
+                    std::str::from_utf8(&buf[..len])
+                        .map_err(|_| Error::Config("规则集域名不是 UTF-8".into()))?
+                } else {
+                    owned = unreverse(rev_key)?;
+                    &owned
+                };
+                if key_str.contains('*') {
+                    wildcards.push(key_to_pattern(key_str));
+                } else if let Some(rest) = key_str
+                    .strip_prefix("+.")
+                    .or_else(|| key_str.strip_prefix('.'))
+                {
+                    let d = rest.trim().trim_end_matches('.');
+                    if d.is_empty() || d.parse::<IpAddr>().is_ok() {
+                        return Err(Error::Config(format!("规则集域名不合法：{rest}")));
+                    }
+                    builder.insert_subdomain(d);
+                } else {
+                    let d = key_str.trim().trim_end_matches('.');
+                    if d.is_empty() || d.parse::<IpAddr>().is_ok() {
+                        return Err(Error::Config(format!("规则集域名不合法：{key_str}")));
+                    }
+                    builder.insert_full(d);
+                }
+                Ok(())
+            })?;
+            for w in compact_patterns(wildcards) {
+                builder.insert_regex(wildcard_to_regex(&w));
+            }
+            Ok((builder.build()?, IpSet::default()))
+        }
+        _ => {
+            let n = r.len(32)?;
+            let mut builder = IpSetBuilder::default();
+            for _ in 0..n {
+                let from = Ipv6Addr::from(<[u8; 16]>::try_from(r.take(16)?).unwrap_or_default());
+                let to = Ipv6Addr::from(<[u8; 16]>::try_from(r.take(16)?).unwrap_or_default());
+                builder
+                    .add_range(IpAddr::V6(from), IpAddr::V6(to))
+                    .map_err(|_| malformed("IP 区间"))?;
+            }
+            Ok((crate::domain_set::DomainSet::default(), builder.build()))
         }
     }
 }

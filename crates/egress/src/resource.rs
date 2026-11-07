@@ -329,6 +329,15 @@ impl Refresher {
 
 /// 启动时已加载内容的摘要与缓存时间，作为刷新比较的基线。
 fn initial_state(spec: &ResourceSpec) -> EntryState {
+    if matches!(spec.kind, ResourceKind::Geo { .. }) {
+        return EntryState {
+            status: ResourceStatus {
+                updated_at: modified(&spec.path),
+                error: None,
+            },
+            ..EntryState::default()
+        };
+    }
     let bytes = read_file(&spec.path).ok().flatten();
     EntryState {
         digest: bytes.as_deref().map(digest),

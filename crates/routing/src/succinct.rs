@@ -25,6 +25,16 @@ fn set_bit(words: &mut Vec<u64>, i: usize) {
 impl Succinct {
     /// 全部键，按深度优先、标签序输出。
     pub fn keys(&self) -> Result<Vec<Vec<u8>>> {
+        let mut keys = Vec::new();
+        self.for_each_key(|key| {
+            keys.push(key.to_vec());
+            Ok(())
+        })?;
+        Ok(keys)
+    }
+
+    /// 按深度优先、标签序遍历全部键，复用单一路径缓冲区避免中间分配。
+    pub fn for_each_key(&self, mut f: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
         let malformed = || Error::Config("规则集域名字典树结构损坏".into());
         // 每个节点的第一条出边下标与出边数。
         let mut first_edge: Vec<u32> = Vec::new();
@@ -52,10 +62,9 @@ impl Succinct {
             return Err(malformed());
         }
         let nodes = first_edge.len();
-        let mut keys = Vec::new();
-        let mut key = Vec::new();
+        let mut key = Vec::with_capacity(256);
         if bit(&self.leaves, 0) {
-            keys.push(Vec::new());
+            f(&[])?;
         }
         // (节点, 下一条待访问的边序号)
         let mut stack: Vec<(usize, u32)> = vec![(0, 0)];
@@ -74,14 +83,14 @@ impl Succinct {
             }
             key.push(self.labels[e]);
             if bit(&self.leaves, child) {
-                keys.push(key.clone());
+                f(&key)?;
             }
             stack.push((child, 0));
             if stack.len() > 1024 {
                 return Err(malformed());
             }
         }
-        Ok(keys)
+        Ok(())
     }
 
     /// 按层序构建；`keys` 先排序去重。与 sing 的 `newSuccinctSet` 及 Mihomo 的 `buildDomainSet` 输出一致。

@@ -183,7 +183,6 @@ impl RuntimePeer {
         fragments: &mut Reassembler,
         bytes: &[u8],
     ) -> Result<()> {
-        self.udp.retain(|_, flow| !flow.sender.is_closed());
         self.last_seen = Instant::now();
         accept_packet(self, allowed, fragments, bytes)
     }
@@ -507,6 +506,10 @@ fn flow_table_full(peer: &RuntimePeer) -> bool {
 /// （DNS 这类一次性查询每次换来源端口，等空闲超时才释放会挡住所有新流）。
 /// 被移除的 UDP 流在通道关闭后结束并归还会话额度。
 fn make_room(peer: &mut RuntimePeer) -> bool {
+    peer.udp.retain(|_, flow| !flow.sender.is_closed());
+    if !flow_table_full(peer) {
+        return true;
+    }
     if peer.stack.reclaim_closed_tcp() {
         return true;
     }
@@ -591,6 +594,9 @@ fn accept_udp(peer: &mut RuntimePeer, packet: &IpPacket<'_>) -> Result<()> {
             Err(mpsc::error::TrySendError::Closed(packet)) => pending = packet,
         }
         peer.udp.remove(&tuple.source);
+    }
+    if peer.udp.len() >= 64 {
+        peer.udp.retain(|_, flow| !flow.sender.is_closed());
     }
     if flow_table_full(peer) && !make_room(peer) {
         return Err(Error::ResourceLimit);

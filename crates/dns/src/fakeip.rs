@@ -3,7 +3,7 @@
 use kerlico_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::PathBuf,
     sync::Mutex,
@@ -164,7 +164,7 @@ impl V6Range {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Deserialize)]
 struct PersistedFakeIpStore {
     #[serde(default)]
     v4: BTreeMap<String, Ipv4Addr>,
@@ -172,16 +172,110 @@ struct PersistedFakeIpStore {
     v6: BTreeMap<String, Ipv6Addr>,
 }
 
+struct LruMapRef<'a, A>(&'a HashMap<String, (A, u64)>);
+
+impl<A: Serialize> Serialize for LruMapRef<'_, A> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (k, (ip, _)) in self.0 {
+            map.serialize_entry(k, ip)?;
+        }
+        map.end()
+    }
+}
+
+#[derive(Serialize)]
+struct PersistedFakeIpStoreRef<'a> {
+    v4: LruMapRef<'a, Ipv4Addr>,
+    v6: LruMapRef<'a, Ipv6Addr>,
+}
+
+struct LruTable<A> {
+    domain_to_ip: HashMap<String, (A, u64)>,
+    ip_to_domain: HashMap<A, String>,
+    order: BTreeMap<u64, String>,
+    seq: u64,
+}
+
+impl<A: Copy + Eq + std::hash::Hash> LruTable<A> {
+    fn new() -> Self {
+        Self {
+            domain_to_ip: HashMap::new(),
+            ip_to_domain: HashMap::new(),
+            order: BTreeMap::new(),
+            seq: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.domain_to_ip.len()
+    }
+
+    fn contains_ip(&self, ip: &A) -> bool {
+        self.ip_to_domain.contains_key(ip)
+    }
+
+    fn insert(&mut self, domain: String, ip: A) {
+        self.seq += 1;
+        let s = self.seq;
+        if let Some((old_ip, old_seq)) = self.domain_to_ip.insert(domain.clone(), (ip, s)) {
+            self.order.remove(&old_seq);
+            if old_ip != ip {
+                self.ip_to_domain.remove(&old_ip);
+            }
+        }
+        self.ip_to_domain.insert(ip, domain.clone());
+        self.order.insert(s, domain);
+    }
+
+    fn get_and_touch(&mut self, domain: &str) -> Option<A> {
+        let (ip, old_seq) = *self.domain_to_ip.get(domain)?;
+        self.seq += 1;
+        let s = self.seq;
+        if let Some(dom) = self.order.remove(&old_seq) {
+            if let Some(entry) = self.domain_to_ip.get_mut(domain) {
+                entry.1 = s;
+            }
+            self.order.insert(s, dom);
+        }
+        Some(ip)
+    }
+
+    fn lookup_ip_and_touch(&mut self, ip: &A) -> Option<String> {
+        let dom = self.ip_to_domain.get(ip)?.clone();
+        let _ = self.get_and_touch(&dom);
+        Some(dom)
+    }
+
+    fn pop_oldest(&mut self) -> Option<(String, A)> {
+        let (_, dom) = self.order.pop_first()?;
+        let (ip, _) = self.domain_to_ip.remove(&dom)?;
+        self.ip_to_domain.remove(&ip);
+        Some((dom, ip))
+    }
+
+    fn clear(&mut self) {
+        self.domain_to_ip.clear();
+        self.ip_to_domain.clear();
+        self.order.clear();
+    }
+}
+
 struct PoolState {
     v4_cursor: u32,
     v6_cursor: u64,
-    domain_to_v4: HashMap<String, Ipv4Addr>,
-    v4_to_domain: HashMap<Ipv4Addr, String>,
-    v4_lru: VecDeque<String>,
-    domain_to_v6: HashMap<String, Ipv6Addr>,
-    v6_to_domain: HashMap<Ipv6Addr, String>,
-    v6_lru: VecDeque<String>,
+    v4: LruTable<Ipv4Addr>,
+    v6: LruTable<Ipv6Addr>,
+    dirty_count: usize,
+    last_persisted: Option<Instant>,
 }
+
+const PERSIST_MIN_INTERVAL: Duration = Duration::from_secs(5);
+const PERSIST_EAGER_LIMIT: usize = 32;
 
 pub struct FakeIpPool {
     v4_range: Option<V4Range>,
@@ -214,12 +308,10 @@ impl FakeIpPool {
         let mut state = PoolState {
             v4_cursor: v4_range.map_or(0, |r| r.first_usable),
             v6_cursor: v6_range.map_or(0, |r| r.first_offset),
-            domain_to_v4: HashMap::new(),
-            v4_to_domain: HashMap::new(),
-            v4_lru: VecDeque::new(),
-            domain_to_v6: HashMap::new(),
-            v6_to_domain: HashMap::new(),
-            v6_lru: VecDeque::new(),
+            v4: LruTable::new(),
+            v6: LruTable::new(),
+            dirty_count: 0,
+            last_persisted: None,
         };
         if let Some(path) = &persistence_path
             && let Some(persisted) =
@@ -227,19 +319,15 @@ impl FakeIpPool {
         {
             if let Some(r4) = v4_range {
                 for (dom, ip) in persisted.v4 {
-                    if r4.contains(ip) && state.domain_to_v4.len() < pool_size {
-                        state.domain_to_v4.insert(dom.clone(), ip);
-                        state.v4_to_domain.insert(ip, dom.clone());
-                        state.v4_lru.push_back(dom);
+                    if r4.contains(ip) && state.v4.len() < pool_size {
+                        state.v4.insert(dom, ip);
                     }
                 }
             }
             if let Some(r6) = v6_range {
                 for (dom, ip) in persisted.v6 {
-                    if r6.contains(ip) && state.domain_to_v6.len() < pool_size {
-                        state.domain_to_v6.insert(dom.clone(), ip);
-                        state.v6_to_domain.insert(ip, dom.clone());
-                        state.v6_lru.push_back(dom);
+                    if r6.contains(ip) && state.v6.len() < pool_size {
+                        state.v6.insert(dom, ip);
                     }
                 }
             }
@@ -288,19 +376,14 @@ impl FakeIpPool {
             return None;
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&existing) = state.domain_to_v4.get(&key) {
-            touch_lru(&mut state.v4_lru, &key);
+        if let Some(existing) = state.v4.get_and_touch(&key) {
             return Some(existing);
         }
         let max_cap = usize::try_from(range.capacity())
             .unwrap_or(self.pool_size)
             .min(self.pool_size);
-        while state.domain_to_v4.len() >= max_cap {
-            if let Some(old_dom) = state.v4_lru.pop_front()
-                && let Some(old_ip) = state.domain_to_v4.remove(&old_dom)
-            {
-                state.v4_to_domain.remove(&old_ip);
-            } else {
+        while state.v4.len() >= max_cap {
+            if state.v4.pop_oldest().is_none() {
                 break;
             }
         }
@@ -311,11 +394,9 @@ impl FakeIpPool {
             } else {
                 state.v4_cursor + 1
             };
-            if !state.v4_to_domain.contains_key(&candidate) {
-                state.domain_to_v4.insert(key.clone(), candidate);
-                state.v4_to_domain.insert(candidate, key.clone());
-                state.v4_lru.push_back(key);
-                self.persist_locked(&state);
+            if !state.v4.contains_ip(&candidate) {
+                state.v4.insert(key, candidate);
+                self.maybe_persist_locked(&mut state);
                 return Some(candidate);
             }
         }
@@ -333,16 +414,11 @@ impl FakeIpPool {
             return None;
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&existing) = state.domain_to_v6.get(&key) {
-            touch_lru(&mut state.v6_lru, &key);
+        if let Some(existing) = state.v6.get_and_touch(&key) {
             return Some(existing);
         }
-        while state.domain_to_v6.len() >= self.pool_size {
-            if let Some(old_dom) = state.v6_lru.pop_front()
-                && let Some(old_ip) = state.domain_to_v6.remove(&old_dom)
-            {
-                state.v6_to_domain.remove(&old_ip);
-            } else {
+        while state.v6.len() >= self.pool_size {
+            if state.v6.pop_oldest().is_none() {
                 break;
             }
         }
@@ -353,11 +429,9 @@ impl FakeIpPool {
             } else {
                 state.v6_cursor + 1
             };
-            if !state.v6_to_domain.contains_key(&candidate) {
-                state.domain_to_v6.insert(key.clone(), candidate);
-                state.v6_to_domain.insert(candidate, key.clone());
-                state.v6_lru.push_back(key);
-                self.persist_locked(&state);
+            if !state.v6.contains_ip(&candidate) {
+                state.v6.insert(key, candidate);
+                self.maybe_persist_locked(&mut state);
                 return Some(candidate);
             }
         }
@@ -367,56 +441,58 @@ impl FakeIpPool {
     pub fn lookup_domain(&self, ip: IpAddr) -> Option<String> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         match ip.to_canonical() {
-            IpAddr::V4(v4) => {
-                let dom = state.v4_to_domain.get(&v4)?.clone();
-                touch_lru(&mut state.v4_lru, &dom);
-                Some(dom)
-            }
-            IpAddr::V6(v6) => {
-                let dom = state.v6_to_domain.get(&v6)?.clone();
-                touch_lru(&mut state.v6_lru, &dom);
-                Some(dom)
-            }
+            IpAddr::V4(v4) => state.v4.lookup_ip_and_touch(&v4),
+            IpAddr::V6(v6) => state.v6.lookup_ip_and_touch(&v6),
         }
     }
 
     pub fn flush(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.domain_to_v4.clear();
-        state.v4_to_domain.clear();
-        state.v4_lru.clear();
-        state.domain_to_v6.clear();
-        state.v6_to_domain.clear();
-        state.v6_lru.clear();
-        self.persist_locked(&state);
+        state.v4.clear();
+        state.v6.clear();
+        self.persist_locked(&mut state);
         Ok(())
     }
 
-    fn persist_locked(&self, state: &PoolState) {
+    fn maybe_persist_locked(&self, state: &mut PoolState) {
+        if self.persistence_path.is_none() {
+            return;
+        }
+        state.dirty_count += 1;
+        let total = state.v4.len() + state.v6.len();
+        let now = Instant::now();
+        if total <= PERSIST_EAGER_LIMIT
+            || state.dirty_count >= 512
+            || state
+                .last_persisted
+                .is_none_or(|last| now.duration_since(last) >= PERSIST_MIN_INTERVAL)
+        {
+            self.persist_locked(state);
+        }
+    }
+
+    fn persist_locked(&self, state: &mut PoolState) {
         let Some(path) = &self.persistence_path else {
             return;
         };
-        let store = PersistedFakeIpStore {
-            v4: state
-                .domain_to_v4
-                .iter()
-                .map(|(k, v)| (k.clone(), *v))
-                .collect(),
-            v6: state
-                .domain_to_v6
-                .iter()
-                .map(|(k, v)| (k.clone(), *v))
-                .collect(),
+        let store = PersistedFakeIpStoreRef {
+            v4: LruMapRef(&state.v4.domain_to_ip),
+            v6: LruMapRef(&state.v6.domain_to_ip),
         };
         let _ = crate::cache_file::store(path, crate::cache_file::FAKEIP, &store);
+        state.dirty_count = 0;
+        state.last_persisted = Some(Instant::now());
     }
 }
 
-fn touch_lru(queue: &mut VecDeque<String>, key: &str) {
-    if let Some(pos) = queue.iter().position(|item| item == key) {
-        queue.remove(pos);
+impl Drop for FakeIpPool {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock()
+            && state.dirty_count > 0
+        {
+            self.persist_locked(&mut state);
+        }
     }
-    queue.push_back(key.to_owned());
 }
 
 pub fn wildcard_match(pattern: &str, domain: &str) -> bool {
@@ -561,6 +637,7 @@ mod tests {
         );
 
         // Reload from persisted cache file
+        drop(pool);
         let reloaded = FakeIpPool::new(
             Some("198.18.0.0/29"),
             Some("fc00::/64"),

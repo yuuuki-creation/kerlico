@@ -469,8 +469,8 @@ impl TunNode {
     fn stack(&self) -> Result<StackOptions> {
         let mut limits = StackLimits {
             max_flows: self.max_flows,
-            // 本机应用与用户态栈之间往返时延极小，256 KiB 窗口足够；每条流两个方向各一份。
-            tcp_buffer_bytes: 256 * 1024,
+            // 本机应用与用户态栈之间往返时延极小，64 KiB 窗口足够且低于 glibc 128 KiB mmap 阈值。
+            tcp_buffer_bytes: 64 * 1024,
             ..StackLimits::default()
         };
         if let Some(ms) = self.udp_idle_timeout_ms {
