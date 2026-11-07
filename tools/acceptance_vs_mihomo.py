@@ -468,6 +468,7 @@ def loop(kind, fn, pause):
             record(kind, False)
             with lock:
                 stats.setdefault("errors", {}).setdefault(kind, str(e)[:120])
+                stats.setdefault("failures", []).append([round(time.time(), 2), kind, f"{type(e).__name__}: {str(e)[:160]}"])
         time.sleep(pause)
 
 def download():
@@ -488,7 +489,10 @@ def udp():
     got = 0
     for i in range(20):
         s.send(b"x" * 1200)
-        got += len(s.recv(2048))
+        try:
+            got += len(s.recv(2048))
+        except OSError as e:
+            raise OSError(f"sport {s.getsockname()[1]} packet {i}: {e}") from None
     s.close()
     return got
 
@@ -1123,6 +1127,9 @@ def run_core(core: Core, args, results: dict) -> None:
         time.sleep(1)
     if not checks["api /version"] is True:
         return
+    if args.soak_only:
+        res["soak"] = soak(core, args.soak)
+        return
 
     # S2 订阅成员逐个可用
     status, body = api("GET", "/providers/proxies/sub")
@@ -1367,10 +1374,15 @@ def soak(core: Core, seconds: int) -> dict:
             rss, cpu = proc_sample(core.pid)
             now = time.time()
             st, conns = api("GET", "/connections", timeout=5)
-            n = len((conns or {}).get("connections") or []) if st == 200 else -1
+            live = (conns or {}).get("connections") or [] if st == 200 else []
+            n = len(live) if st == 200 else -1
             fds = len(os.listdir(f"/proc/{core.pid}/fd"))
+            chains: dict = {}
+            for c in live:
+                key = f"{c.get('metadata', {}).get('network', '')} {'/'.join(reversed(c.get('chains') or []))}"
+                chains[key] = chains.get(key, 0) + 1
             samples.append({"t": round(now - t0), "rss_kib": rss, "cpu_pct": round(100 * (cpu - last_cpu) / (now - last_t), 1),
-                            "connections": n, "fds": fds})
+                            "connections": n, "fds": fds, "chains": chains})
             last_cpu, last_t = cpu, now
     out, err = p.communicate()
     try:
@@ -1548,6 +1560,7 @@ def main() -> int:
     parser.add_argument("--cores", default="kerlico,mihomo")
     parser.add_argument("--soak", type=int, default=600)
     parser.add_argument("--skip-dashboard", action="store_true")
+    parser.add_argument("--soak-only", action="store_true", help="内核就绪后只跑长稳")
     parser.add_argument("--debug-hold", action="store_true", help="拓扑与服务端就绪后暂停，删除 work/hold 后继续")
     parser.add_argument("--playwright-image", default="mcr.microsoft.com/playwright/python:v1.49.1-noble")
     parser.add_argument("--out", required=True)
