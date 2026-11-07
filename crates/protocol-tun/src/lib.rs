@@ -193,6 +193,9 @@ struct Options {
     auto_system_dns_to_gateway: bool,
 }
 
+/// 未写地址时沿用 Mihomo 的默认 TUN 地址；Fake-IP 池从 `.4` 起分配，不与它重叠。
+const DEFAULT_ADDRESSES: [&str; 2] = ["198.18.0.1/30", "fdfe:dcba:9876::1/126"];
+
 fn invalid() -> Error {
     Error::Config("TUN 选项不合法".into())
 }
@@ -644,6 +647,9 @@ impl NodeFactory for TunNodeFactory {
                 options.addresses.push(address.clone());
             }
         }
+        if options.addresses.is_empty() {
+            options.addresses = DEFAULT_ADDRESSES.iter().map(|a| (*a).to_owned()).collect();
+        }
         if options.name.is_empty()
             || options.name.len() > 15
             || !options
@@ -868,5 +874,21 @@ mod tests {
                 .is_err()
         );
         assert_eq!(Timeout::Text("5m".into()).millis().unwrap(), 300_000);
+    }
+
+    #[test]
+    fn mihomo_tun_without_addresses_uses_mihomo_defaults() {
+        let options = json!({
+            "stack": "mixed",
+            "device": "katun",
+            "auto-route": true,
+            "auto-detect-interface": true,
+            "strict-route": true,
+            "dns-hijack": ["any:53"],
+        });
+        let node = TunNodeFactory
+            .build(&NodeBuildContext::for_test(options, Vec::new()))
+            .unwrap();
+        assert!(node.supports_virtual());
     }
 }

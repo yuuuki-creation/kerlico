@@ -92,9 +92,14 @@ impl V4Range {
         };
         let network = u32::from(ip) & mask;
         let broadcast = network | !mask;
-        // 预留 network (.0)、gateway (.1) 与 broadcast
-        let first_usable = network.saturating_add(2);
+        // 与 Mihomo 一致从 .4 起分配：.0–.3 是默认 TUN 地址 198.18.0.1/30 所在网段；
+        // 网段太小时退回只预留 network (.0) 与 gateway (.1)。
         let last_usable = broadcast.saturating_sub(1);
+        let first_usable = if network.saturating_add(4) <= last_usable {
+            network + 4
+        } else {
+            network.saturating_add(2)
+        };
         if first_usable > last_usable {
             return Err(Error::Config("Fake-IP IPv4 地址池容量不足".into()));
         }
@@ -493,6 +498,20 @@ impl ReverseMappingCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_fake_ip_skips_default_tun_subnet_like_mihomo() {
+        let pool = FakeIpPool::new(Some("198.18.0.1/16"), None, 16, 1, Vec::new(), None).unwrap();
+        assert_eq!(
+            pool.allocate_v4("a.example"),
+            Some(Ipv4Addr::new(198, 18, 0, 4))
+        );
+        let tiny = FakeIpPool::new(Some("198.18.0.0/30"), None, 16, 1, Vec::new(), None).unwrap();
+        assert_eq!(
+            tiny.allocate_v4("a.example"),
+            Some(Ipv4Addr::new(198, 18, 0, 2))
+        );
+    }
 
     #[test]
     fn fakeip_pool_allocates_dual_stack_evicts_lru_and_persists() {

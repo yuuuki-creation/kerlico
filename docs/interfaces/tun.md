@@ -27,7 +27,7 @@ Mihomo 顶层 `tun:` 段（`enable: true`）按同名键读取，编译期合入
 | 字段 | 约束说明 |
 | --- | --- |
 | `name` / `device` / `interface_name` | 接口名，默认 `kerlico0`，最长 15 字符 |
-| `addresses` / `inet4_address` / `inet6_address` | 接口地址，1 至 2 个，每个地址族最多一个。IPv4 前缀不超过 `/30`，IPv6 不超过 `/126`。下一个地址留给用户态栈 |
+| `addresses` / `inet4_address` / `inet6_address` | 接口地址，1 至 2 个，每个地址族最多一个。IPv4 前缀不超过 `/30`，IPv6 不超过 `/126`。下一个地址留给用户态栈。都不写时与 Mihomo 相同取 `198.18.0.1/30` 与 `fdfe:dcba:9876::1/126`，Fake-IP 池从 `.4` 起分配 |
 | `mtu` | 1280 至 9000，默认 1500 |
 | `max_flows` | 同时存在的 TCP 流和 UDP 来源数上限，1 至 4096，默认 1024 |
 | `stack` | `system`、`gvisor`、`mixed`、`lwip` 都由 kerlico 的用户态 TCP/IP 栈承载；非 `gvisor` 时启动日志记一行。其他值报错 |
