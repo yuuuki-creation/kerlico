@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
-    sync::oneshot,
+    sync::{mpsc, oneshot},
     time::Sleep,
 };
 
@@ -477,6 +477,8 @@ pub(crate) struct LazyAssociationSender {
     pending: Option<PendingUdp>,
     open: Option<AssociationSender>,
     receiver: Option<oneshot::Sender<kerlico_core::AssociationReceiver>>,
+    /// 关联建立前被劫持的 DNS 查询在本地应答，回包经此送给接收端。
+    hijacked: mpsc::Sender<AddressedDatagram>,
     slot: CompletionSlot,
 }
 
@@ -488,6 +490,7 @@ impl LazyAssociationSender {
         slot: CompletionSlot,
     ) -> (Self, LazyAssociationReceiver) {
         let (tx, rx) = oneshot::channel();
+        let (hijacked, answers) = mpsc::channel(16);
         (
             Self {
                 dispatcher,
@@ -497,9 +500,14 @@ impl LazyAssociationSender {
                 pending: None,
                 open: None,
                 receiver: Some(tx),
+                hijacked,
                 slot,
             },
-            LazyAssociationReceiver { rx, inner: None },
+            LazyAssociationReceiver {
+                rx,
+                inner: None,
+                answers,
+            },
         )
     }
 }
@@ -513,6 +521,12 @@ impl DatagramAssociationSender for LazyAssociationSender {
         Box::pin(async move {
             if let Some(sender) = self.open.as_mut() {
                 return sender.send_to(packet, target).await;
+            }
+            // 同 Mihomo，劫持的 DNS 不建立出站：只有 DNS 的来源不占出站 socket。
+            if self.first.is_none() && self.dispatcher.hijacks_dns(&self.identity, target) {
+                let reply = self.dispatcher.resolver.exchange_dns_packet(packet).await?;
+                let _ = self.hijacked.send((target.clone(), reply)).await;
+                return Ok(());
             }
             if self.first.is_none() {
                 let original = self
@@ -563,16 +577,23 @@ impl DatagramAssociationSender for LazyAssociationSender {
 pub(crate) struct LazyAssociationReceiver {
     rx: oneshot::Receiver<kerlico_core::AssociationReceiver>,
     inner: Option<kerlico_core::AssociationReceiver>,
+    answers: mpsc::Receiver<AddressedDatagram>,
 }
 
 impl DatagramAssociationReceiver for LazyAssociationReceiver {
     fn recv_from(&mut self) -> BoxFuture<'_, Result<Option<AddressedDatagram>>> {
         Box::pin(async move {
             if self.inner.is_none() {
-                match (&mut self.rx).await {
-                    Ok(inner) => self.inner = Some(inner),
-                    Err(_) => return Ok(None),
+                tokio::select! { biased;
+                    Some(answer) = self.answers.recv() => return Ok(Some(answer)),
+                    opened = &mut self.rx => match opened {
+                        Ok(inner) => self.inner = Some(inner),
+                        Err(_) => return Ok(self.answers.try_recv().ok()),
+                    },
                 }
+            }
+            if let Ok(answer) = self.answers.try_recv() {
+                return Ok(Some(answer));
             }
             self.inner.as_mut().expect("已建立").recv_from().await
         })

@@ -1335,6 +1335,24 @@ impl Dispatcher {
             move |outcome| completion.conclude(outcome),
         ))
     }
+    /// 发往 `target` 的 UDP 是否被 `hijack-dns` 规则劫持，判定与 `DnsHijackAssociationSender` 一致。
+    pub(crate) fn hijacks_dns(&self, identity: &SessionIdentity, target: &Destination) -> bool {
+        self.routes.has_hijack_dns()
+            && self
+                .routes
+                .evaluate(&kerlico_routing::RouteContext {
+                    target,
+                    resolved_ips: &[],
+                    network: Network::Udp,
+                    source: identity.source(),
+                    source_addr: identity.observed_source(),
+                    protocol: Some("dns"),
+                    sniffed_domain: None,
+                    process_name: None,
+                    process_path: None,
+                })
+                .hijack_dns
+    }
     /// `first` 是关联的首个目标，决定整条关联的出站；DNS 劫持目标仍走节点绑定出站。
     pub(crate) fn association<'a>(
         &'a self,
