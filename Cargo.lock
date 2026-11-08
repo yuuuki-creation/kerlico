@@ -7571,7 +7571,6 @@ dependencies = [
 [[package]]
 name = "rr-crypto"
 version = "0.1.0"
-source = "git+https://github.com/jacek4yang/rust-reality?rev=316003c5ad2ce9b443f0e9c4311478b7f7b61f9c#316003c5ad2ce9b443f0e9c4311478b7f7b61f9c"
 dependencies = [
  "zeroize",
 ]
@@ -7579,7 +7578,6 @@ dependencies = [
 [[package]]
 name = "rr-linux"
 version = "0.1.0"
-source = "git+https://github.com/jacek4yang/rust-reality?rev=316003c5ad2ce9b443f0e9c4311478b7f7b61f9c#316003c5ad2ce9b443f0e9c4311478b7f7b61f9c"
 dependencies = [
  "libc",
  "rustix 1.1.6",
@@ -7588,7 +7586,6 @@ dependencies = [
 [[package]]
 name = "rr-session"
 version = "0.1.0"
-source = "git+https://github.com/jacek4yang/rust-reality?rev=316003c5ad2ce9b443f0e9c4311478b7f7b61f9c#316003c5ad2ce9b443f0e9c4311478b7f7b61f9c"
 
 [[package]]
 name = "rsa"
@@ -7805,7 +7802,6 @@ dependencies = [
 [[package]]
 name = "rust-reality"
 version = "2.2.0"
-source = "git+https://github.com/jacek4yang/rust-reality?rev=316003c5ad2ce9b443f0e9c4311478b7f7b61f9c#316003c5ad2ce9b443f0e9c4311478b7f7b61f9c"
 dependencies = [
  "aes-gcm 0.11.1",
  "aho-corasick",

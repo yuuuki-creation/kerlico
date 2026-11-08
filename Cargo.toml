@@ -2,6 +2,7 @@
 members = ["apps/kerlico", "crates/*"]
 default-members = ["apps/kerlico"]
 exclude = [
+    "third_party/rust-reality",
     "third_party/ml-kem-legacy",
     "third_party/h3",
     "third_party/shaped-rustls/rustls",
@@ -88,7 +89,7 @@ rand = "0.8"
 sha2 = "0.10"
 socket2 = { version = "0.6", features = ["all"] }
 rust-xhttp = { git = "https://github.com/jacek4yang/rust-xhttp", rev = "8de99be3ed1b9446a23763d1b6c36976177eb124" }
-rust-reality = { git = "https://github.com/jacek4yang/rust-reality", rev = "316003c5ad2ce9b443f0e9c4311478b7f7b61f9c" }
+rust-reality = { path = "third_party/rust-reality" }
 bytes = "1"
 http = "1"
 hyper = {version="1",features=["server","http1","http2"]}
