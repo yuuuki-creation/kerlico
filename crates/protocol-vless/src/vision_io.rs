@@ -26,6 +26,7 @@ struct Boundary {
     prefix_len: usize,
     header: [u8; 5],
     header_len: usize,
+    end_after_body: bool,
 }
 impl Boundary {
     fn new(user: UserId, client: bool) -> Self {
@@ -40,11 +41,19 @@ impl Boundary {
             prefix_len: 0,
             header: [0; 5],
             header_len: 0,
+            end_after_body: false,
         }
     }
     fn limit(&self, size: usize) -> usize {
         size.min(match self.stage {
-            Stage::ResponseVersion | Stage::ResponseLength | Stage::Prefix => 1,
+            Stage::ResponseVersion | Stage::ResponseLength => 1,
+            Stage::Prefix => {
+                if self.prefix_len == 0 || self.prefix[0] <= 2 {
+                    1
+                } else {
+                    16 - self.prefix_len
+                }
+            }
             Stage::ResponseBody(n) | Stage::Body(n) => n,
             Stage::Header => 5 - self.header_len,
             Stage::Released => size,
@@ -69,18 +78,27 @@ impl Boundary {
                 };
             }
             Stage::Prefix => {
-                self.prefix[self.prefix_len] = bytes[0];
-                self.prefix_len += 1;
+                let take = (16 - self.prefix_len).min(bytes.len());
+                self.prefix[self.prefix_len..self.prefix_len + take]
+                    .copy_from_slice(&bytes[..take]);
+                self.prefix_len += take;
                 if self.prefix[..self.prefix_len] == self.user[..self.prefix_len] {
                     if self.prefix_len == 16 {
                         self.stage = Stage::Header;
+                        if bytes.len() > take {
+                            self.framed(&bytes[take..]);
+                        }
                     }
                     return;
                 }
                 // 兼容省略首个 UUID 前缀的帧；已交付的探测字节仍计入真实帧边界。
                 self.stage = Stage::Header;
                 let prefix = self.prefix;
-                self.framed(&prefix[..self.prefix_len]);
+                let prefix_len = self.prefix_len;
+                self.framed(&prefix[..prefix_len]);
+                if bytes.len() > take {
+                    self.framed(&bytes[take..]);
+                }
             }
             Stage::Header | Stage::Body(_) => self.framed(bytes),
             Stage::Released => {}
@@ -96,11 +114,17 @@ impl Boundary {
                     self.header_len += count;
                     bytes = &bytes[count..];
                     if self.header_len == 5 {
+                        let command = self.header[0];
                         let size = u16::from_be_bytes([self.header[1], self.header[2]]) as usize
                             + u16::from_be_bytes([self.header[3], self.header[4]]) as usize;
                         self.header_len = 0;
+                        self.end_after_body = command == 1;
                         self.stage = if size == 0 {
-                            Stage::Header
+                            if self.end_after_body {
+                                Stage::Released
+                            } else {
+                                Stage::Header
+                            }
                         } else {
                             Stage::Body(size)
                         };
@@ -110,7 +134,11 @@ impl Boundary {
                     let count = size.min(bytes.len());
                     bytes = &bytes[count..];
                     self.stage = if count == size {
-                        Stage::Header
+                        if self.end_after_body {
+                            Stage::Released
+                        } else {
+                            Stage::Header
+                        }
                     } else {
                         Stage::Body(size - count)
                     };
@@ -149,6 +177,9 @@ impl AsyncRead for VisionCarrier {
             let count = buffer.filled().len();
             if count > 0 {
                 this.boundary.observe(buffer.filled());
+                if matches!(this.boundary.stage, Stage::Released) {
+                    this.inner.release_record_alignment();
+                }
             }
             out.advance(count);
         }

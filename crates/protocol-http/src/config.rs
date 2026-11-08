@@ -80,7 +80,7 @@ pub fn server_tls(options: ServerTls) -> Result<tokio_rustls::TlsAcceptor> {
     let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(options.key_pem))?
         .ok_or_else(|| Error::Config("HTTP TLS 私钥缺失".into()))?;
     let mut config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
-        rustls::crypto::ring::default_provider(),
+        rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .map_err(|_| Error::Config("HTTP TLS 版本不可用".into()))?

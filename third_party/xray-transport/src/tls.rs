@@ -299,10 +299,11 @@ impl TlsConnector {
         stream: BoxedTransportStream,
         prepared: PreparedTlsStream,
     ) -> Result<BoxedTransportStream, TransportError> {
-        let stream = TokioTlsConnector::from(prepared.client_config)
+        let mut stream = TokioTlsConnector::from(prepared.client_config)
             .connect(prepared.server_name, stream)
             .await
             .map_err(TransportError::Tls)?;
+        stream.get_mut().1.set_buffer_limit(Some(68 * 1024));
 
         Ok(Box::new(ClientTlsStream(stream)))
     }
@@ -321,10 +322,11 @@ impl TlsConnector {
         stream: BoxedTransportStream,
         prepared: PreparedTlsStream,
     ) -> Result<BoxedTransportStream, TransportError> {
-        let stream = TokioTlsConnector::from(prepared.client_config)
+        let mut stream = TokioTlsConnector::from(prepared.client_config)
             .connect(prepared.server_name, CapturedStream::new(stream, None))
             .await
             .map_err(TransportError::Tls)?;
+        stream.get_mut().1.set_buffer_limit(Some(68 * 1024));
 
         Ok(Box::new(PenetratingTlsStream::new(stream)))
     }
@@ -469,7 +471,33 @@ impl AsyncWrite for ClientTlsStream {
         cx: &mut Context<'_>,
         input: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().0).poll_write(cx, input)
+        let this = self.get_mut();
+        if input.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let limit = input.len().min(65536);
+        let mut total = 0;
+        while total < limit {
+            match Pin::new(&mut this.0).poll_write(cx, &input[total..limit]) {
+                Poll::Ready(Ok(0)) => break,
+                Poll::Ready(Ok(n)) => total += n,
+                Poll::Ready(Err(err)) => {
+                    return if total > 0 {
+                        Poll::Ready(Ok(total))
+                    } else {
+                        Poll::Ready(Err(err))
+                    };
+                }
+                Poll::Pending => {
+                    return if total > 0 {
+                        Poll::Ready(Ok(total))
+                    } else {
+                        Poll::Pending
+                    };
+                }
+            }
+        }
+        Poll::Ready(Ok(total))
     }
 
     fn poll_write_vectored(

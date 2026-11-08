@@ -525,7 +525,7 @@ impl Entry {
         let write_life = life.clone();
         link.scope.spawn(async move {
             let result: Result<()> = async {
-                let mut buffer = vec![0; 65536];
+                let mut buffer = vec![0; PIPE_BYTES];
                 loop {
                     let n = tokio::select! { biased; _ = write_life.tx_cancel.cancelled() => return if write_life.closed.load(Ordering::Acquire) { Ok(()) } else { Err(Error::Cancelled) }, n = outgoing.read(&mut buffer) => n? };
                     if n == 0 {
@@ -962,7 +962,7 @@ impl TcpActor {
             let frame = Frame::data(
                 entry.life.wire_id,
                 entry.next()?,
-                Bytes::copy_from_slice(chunk),
+                body.slice_ref(chunk),
                 self.link.client,
                 &traffic,
             );

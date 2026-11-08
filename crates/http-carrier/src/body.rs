@@ -130,17 +130,34 @@ impl AsyncRead for BodyIo {
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        loop {
+        let mut read_any = false;
+        while buf.remaining() > 0 {
             if !this.buffer.is_empty() {
                 let count = buf.remaining().min(this.buffer.len());
                 buf.put_slice(&this.buffer.split_to(count));
-                return Poll::Ready(Ok(()));
+                read_any = true;
+                continue;
             }
-            match ready!(this.reader.poll_data(cx))? {
-                Some(bytes) => this.buffer = bytes,
-                None => return Poll::Ready(Ok(())),
+            match this.reader.poll_data(cx) {
+                Poll::Ready(Ok(Some(bytes))) => this.buffer = bytes,
+                Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
+                Poll::Ready(Err(err)) => {
+                    return if read_any {
+                        Poll::Ready(Ok(()))
+                    } else {
+                        Poll::Ready(Err(err))
+                    };
+                }
+                Poll::Pending => {
+                    return if read_any {
+                        Poll::Ready(Ok(()))
+                    } else {
+                        Poll::Pending
+                    };
+                }
             }
         }
+        Poll::Ready(Ok(()))
     }
 }
 impl AsyncWrite for BodyIo {
@@ -158,9 +175,10 @@ impl AsyncWrite for BodyIo {
         }
         ready!(this.poll_pending(cx))?;
         if let Some(Writer::H2(send)) = &mut this.writer {
-            let want = buf.len().min(65536);
-            if send.capacity() == 0 {
-                send.reserve_capacity(want);
+            let want = buf.len().min(262144);
+            let cap = send.capacity();
+            if cap < want {
+                send.reserve_capacity(want - cap);
             }
             let capacity = match ready!(send.poll_capacity(cx)) {
                 Some(Ok(cap)) => cap,

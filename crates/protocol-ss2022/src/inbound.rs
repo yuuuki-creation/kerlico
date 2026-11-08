@@ -149,8 +149,6 @@ impl InboundProtocol for Ss2022Node {
         Box::pin(async move {
             let handshake =
                 ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
-            let candidates = Candidates::new(stream);
-            let mut tasks = JoinSet::new();
             let mut configurations = Vec::new();
             for (_, row) in self.credentials.rows() {
                 if !configurations
@@ -160,44 +158,64 @@ impl InboundProtocol for Ss2022Node {
                     configurations.push(row.config.clone());
                 }
             }
-            for config in configurations {
-                let stream = candidates.reader();
-                let crypto = Context::new_shared(ServerType::Server);
-                let owner = context.tasks.clone();
-                let task = owner.spawn_tracked(async move {
-                    let mut stream = ProxyServerStream::from_stream_with_user_manager(
-                        crypto,
-                        stream,
-                        config.method(),
-                        config.key(),
-                        config.clone_user_manager(),
-                    );
-                    let target = destination(&stream.handshake().await?)?;
-                    let key = stream.user_key().unwrap_or(config.key()).to_vec();
-                    Ok::<_, Error>((key, Box::new(stream) as BoxStream, target))
-                })?;
-                tasks.spawn(async move {
-                    task.await
-                        .unwrap_or(Err(Error::Protocol("认证任务异常退出")))
-                });
-            }
-            let selected = handshake
-                .run(async {
-                    while let Some(result) = tasks.join_next().await {
-                        if let Ok(Ok(result)) = result {
-                            return Ok(result);
+            let (key, stream, target) = if configurations.len() == 1 {
+                let config = &configurations[0];
+                let mut stream = ProxyServerStream::from_stream_with_user_manager(
+                    self.crypto.clone(),
+                    stream,
+                    config.method(),
+                    config.key(),
+                    config.clone_user_manager(),
+                );
+                let addr = handshake
+                    .run(async { stream.handshake().await.map_err(Error::from) })
+                    .await?;
+                let target = destination(&addr)?;
+                let key = stream.user_key().unwrap_or(config.key()).to_vec();
+                (key, Box::new(stream) as BoxStream, target)
+            } else {
+                let candidates = Candidates::new(stream);
+                let mut tasks = JoinSet::new();
+                for config in configurations {
+                    let stream = candidates.reader();
+                    let crypto = Context::new_shared(ServerType::Server);
+                    let owner = context.tasks.clone();
+                    let task = owner.spawn_tracked(async move {
+                        let mut stream = ProxyServerStream::from_stream_with_user_manager(
+                            crypto,
+                            stream,
+                            config.method(),
+                            config.key(),
+                            config.clone_user_manager(),
+                        );
+                        let target = destination(&stream.handshake().await?)?;
+                        let key = stream.user_key().unwrap_or(config.key()).to_vec();
+                        Ok::<_, Error>((key, Box::new(stream) as BoxStream, target))
+                    })?;
+                    tasks.spawn(async move {
+                        task.await
+                            .unwrap_or(Err(Error::Protocol("认证任务异常退出")))
+                    });
+                }
+                let selected = handshake
+                    .run(async {
+                        while let Some(result) = tasks.join_next().await {
+                            if let Ok(Ok(result)) = result {
+                                return Ok(result);
+                            }
                         }
-                    }
-                    Err(Error::Rejected)
-                })
-                .await;
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
-            let (key, stream, target) = selected?;
-            let nonce = candidates.prefix(self.config.method().salt_len())?;
-            self.crypto
-                .check_nonce_replay(self.config.method(), &nonce)?;
-            candidates.accept();
+                        Err(Error::Rejected)
+                    })
+                    .await;
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                let (key, stream, target) = selected?;
+                let nonce = candidates.prefix(self.config.method().salt_len())?;
+                self.crypto
+                    .check_nonce_replay(self.config.method(), &nonce)?;
+                candidates.accept();
+                (key, stream, target)
+            };
             let access = if self.local {
                 ingress.local(&context)?
             } else {

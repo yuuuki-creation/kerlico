@@ -19,7 +19,7 @@ impl Default for Limits {
             udp_queue_packets: 16,
             udp_queue_bytes: 4 * 1024 * 1024,
             idle_timeout_ms: 30_000,
-            congestion: "bbr".into(),
+            congestion: "cubic".into(),
         }
     }
 }
@@ -29,7 +29,7 @@ impl Limits {
             || !(1..=64).contains(&self.udp_queue_packets)
             || !(65536..=16 * 1024 * 1024).contains(&self.udp_queue_bytes)
             || !(100..=86_400_000).contains(&self.idle_timeout_ms)
-            || !matches!(self.congestion.as_str(), "bbr" | "reno")
+            || !matches!(self.congestion.as_str(), "bbr" | "reno" | "cubic")
         {
             return Err(invalid());
         }
@@ -50,11 +50,11 @@ impl Limits {
                 .try_into()
                 .map_err(|_| invalid())?,
         ));
-        value.stream_receive_window((16 * 1024 * 1024u32).into());
-        value.receive_window((64 * 1024 * 1024u32).into());
-        value.send_window(64 * 1024 * 1024);
-        value.datagram_receive_buffer_size(Some(256 * 1024));
-        value.datagram_send_buffer_size(256 * 1024);
+        value.stream_receive_window((4 * 1024 * 1024u32).into());
+        value.receive_window((16 * 1024 * 1024u32).into());
+        value.send_window(16 * 1024 * 1024);
+        value.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
+        value.datagram_send_buffer_size(2 * 1024 * 1024);
         value.advertised_datagram_frame_size(Some(1200));
         let fallback: Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> =
             if self.congestion == "bbr" {
@@ -62,9 +62,15 @@ impl Limits {
                 bbr.initial_window(1024 * 1024);
                 Arc::new(bbr)
             } else {
-                let mut reno = quinn::congestion::NewRenoConfig::default();
-                reno.initial_window(1024 * 1024);
-                Arc::new(reno)
+                if self.congestion == "reno" {
+                    let mut c = quinn::congestion::NewRenoConfig::default();
+                    c.initial_window(1024 * 1024);
+                    Arc::new(c)
+                } else {
+                    let mut cubic = quinn::congestion::CubicConfig::default();
+                    cubic.initial_window(1024 * 1024);
+                    Arc::new(cubic)
+                }
             };
         value.congestion_controller_factory(Arc::new(crate::congestion::SwitchFactory::new(
             fallback, rate,

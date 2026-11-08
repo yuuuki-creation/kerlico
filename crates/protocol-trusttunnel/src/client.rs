@@ -125,8 +125,91 @@ impl Drop for Carrier {
 struct Pool {
     carriers: Vec<Arc<Carrier>>,
     connecting: usize,
+    notify: Arc<tokio::sync::Notify>,
 }
 type MemberPool = tokio::sync::Mutex<Pool>;
+struct TlsStream<S> {
+    inner: S,
+}
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for TlsStream<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        out: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = out.filled().len();
+        match std::pin::Pin::new(&mut self.inner).poll_read(cx, out) {
+            std::task::Poll::Ready(Ok(())) => {
+                if out.filled().len() == before {
+                    return std::task::Poll::Ready(Ok(()));
+                }
+            }
+            other => return other,
+        }
+        while out.remaining() >= 16384 {
+            let mark = out.filled().len();
+            match std::pin::Pin::new(&mut self.inner).poll_read(cx, out) {
+                std::task::Poll::Ready(Ok(())) => {
+                    if out.filled().len() == mark {
+                        break;
+                    }
+                }
+                std::task::Poll::Pending => break,
+                std::task::Poll::Ready(Err(_)) => break,
+            }
+        }
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for TlsStream<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        input: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if input.is_empty() {
+            return std::task::Poll::Ready(Ok(0));
+        }
+        let limit = input.len().min(65536);
+        let mut offset = 0;
+        while offset < limit {
+            match std::pin::Pin::new(&mut self.inner).poll_write(cx, &input[offset..limit]) {
+                std::task::Poll::Ready(Ok(0)) => {
+                    if offset > 0 {
+                        return std::task::Poll::Ready(Ok(offset));
+                    }
+                    return std::task::Poll::Ready(Ok(0));
+                }
+                std::task::Poll::Ready(Ok(n)) => offset += n,
+                std::task::Poll::Pending => {
+                    if offset > 0 {
+                        return std::task::Poll::Ready(Ok(offset));
+                    }
+                    return std::task::Poll::Pending;
+                }
+                std::task::Poll::Ready(Err(err)) => {
+                    if offset > 0 {
+                        return std::task::Poll::Ready(Ok(offset));
+                    }
+                    return std::task::Poll::Ready(Err(err));
+                }
+            }
+        }
+        std::task::Poll::Ready(Ok(offset))
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
 struct Client {
     server: Destination,
     auth: String,
@@ -207,9 +290,10 @@ impl Client {
         let stream = self.dialer.connect(&self.server).await?;
         let name = rustls::pki_types::ServerName::try_from(self.name.clone())
             .map_err(|_| crate::invalid())?;
-        let stream = tokio_rustls::TlsConnector::from(self.tls.clone())
+        let mut stream = tokio_rustls::TlsConnector::from(self.tls.clone())
             .connect(name, stream)
             .await?;
+        stream.get_mut().1.set_buffer_limit(Some(68 * 1024));
         let actual = stream.get_ref().1.alpn_protocol();
         let expected = self.transport.alpn();
         if actual != Some(expected[0].as_slice())
@@ -219,7 +303,7 @@ impl Client {
         {
             return Err(protocol());
         }
-        Ok(Box::new(stream))
+        Ok(Box::new(TlsStream { inner: stream }))
     }
     async fn make(&self) -> Result<Arc<Carrier>> {
         let closed = Arc::new(AtomicBool::new(false));
@@ -229,10 +313,10 @@ impl Client {
         let (sender, driver) = if self.transport == Transport::H2 {
             let io = self.tls().await?;
             let (sender, connection) = h2::client::Builder::new()
-                .initial_window_size(16 * 1024 * 1024)
-                .initial_connection_window_size(64 * 1024 * 1024)
+                .initial_window_size(2 * 1024 * 1024)
+                .initial_connection_window_size(8 * 1024 * 1024)
                 .max_frame_size(65536)
-                .max_send_buffer_size(4 * 1024 * 1024)
+                .max_send_buffer_size(1024 * 1024)
                 .max_header_list_size(16384)
                 .handshake(io)
                 .await
@@ -330,28 +414,39 @@ impl Client {
                     Arc::new(tokio::sync::Mutex::new(Pool {
                         carriers: Vec::new(),
                         connecting: 0,
+                        notify: Arc::new(tokio::sync::Notify::new()),
                     }))
                 })
                 .clone()
         };
-        let slots = self
-            .limits
-            .max_streams
-            .div_ceil(self.limits.max_connections);
         let mut should_make = false;
-        let picked = {
+        let picked = loop {
             let mut pool = bucket.lock().await;
             pool.carriers.retain(|c| !c.closed.load(Ordering::Relaxed));
             let mut idle = None;
-            for carrier in &pool.carriers {
-                if carrier.slots.available_permits() == slots
-                    && let Ok(slot) = carrier.slots.clone().try_acquire_owned()
-                {
-                    idle = Some((carrier.clone(), slot));
-                    break;
-                }
+            if let Some(carrier) = pool
+                .carriers
+                .iter()
+                .filter(|c| c.slots.available_permits() > 0)
+                .max_by_key(|c| c.slots.available_permits())
+                .cloned()
+                && let Ok(slot) = carrier.slots.clone().try_acquire_owned()
+            {
+                idle = Some((carrier, slot));
             }
-            if let Some(pair) = idle {
+            if idle.is_none()
+                && pool.connecting > 0
+                && (pool.carriers.is_empty()
+                    || pool.carriers.len() + pool.connecting >= self.limits.max_connections)
+            {
+                let notified = pool.notify.clone().notified_owned();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                drop(pool);
+                notified.await;
+                continue;
+            }
+            break if let Some(pair) = idle {
                 Some(pair)
             } else if pool.carriers.len() + pool.connecting < self.limits.max_connections {
                 pool.connecting += 1;
@@ -371,7 +466,7 @@ impl Client {
                 None
             } else {
                 None
-            }
+            };
         };
         if let Some((carrier, slot)) = picked {
             if carrier.age() >= std::time::Duration::from_millis(self.limits.health_check_ms) {
@@ -389,6 +484,7 @@ impl Client {
             let made = self.make().await;
             let mut pool = bucket.lock().await;
             pool.connecting = pool.connecting.saturating_sub(1);
+            pool.notify.notify_waiters();
             let carrier = made?;
             let slot = carrier
                 .slots

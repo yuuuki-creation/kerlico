@@ -99,11 +99,12 @@ impl AsyncUdpSocket for HoppingSocket {
     }
 }
 
+const SALT_LEN: usize = 8;
+
 struct Salamander {
     inner: Arc<dyn AsyncUdpSocket>,
     password: Arc<String>,
     send: Mutex<Vec<u8>>,
-    receive: Mutex<Vec<u8>>,
 }
 impl std::fmt::Debug for Salamander {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -163,7 +164,6 @@ pub(crate) fn wrap_hopping(
             inner,
             password,
             send: Mutex::new(Vec::with_capacity(1500)),
-            receive: Mutex::new(vec![0; 65536]),
         }),
     })
 }
@@ -182,17 +182,30 @@ impl AsyncUdpSocket for Salamander {
                 "Salamander 数据报超出单包边界",
             ));
         }
-        let mut salt = [0; 8];
+        let mut salt = [0; SALT_LEN];
         rand::thread_rng().fill_bytes(&mut salt);
         let key = mask(&self.password, &salt);
+        let total = SALT_LEN + transmit.contents.len();
+        if total <= 2048 {
+            let mut stack = [0u8; 2048];
+            stack[..SALT_LEN].copy_from_slice(&salt);
+            for (i, byte) in transmit.contents.iter().enumerate() {
+                stack[i + SALT_LEN] = byte ^ key[i % 32];
+            }
+            return self.inner.try_send(&udp::Transmit {
+                contents: &stack[..total],
+                segment_size: None,
+                ..*transmit
+            });
+        }
         let mut buffer = self
             .send
             .lock()
             .map_err(|_| io::Error::other("Salamander 状态不可用"))?;
-        buffer.resize(transmit.contents.len() + 8, 0);
-        buffer[..8].copy_from_slice(&salt);
+        buffer.resize(total, 0);
+        buffer[..SALT_LEN].copy_from_slice(&salt);
         for (i, byte) in transmit.contents.iter().enumerate() {
-            buffer[i + 8] = byte ^ key[i % 32];
+            buffer[i + SALT_LEN] = byte ^ key[i % 32];
         }
         self.inner.try_send(&udp::Transmit {
             contents: &buffer,
@@ -209,7 +222,6 @@ impl AsyncUdpSocket for Salamander {
         if output.is_empty() || meta.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        let _ = &self.receive;
         let count = std::task::ready!(self.inner.poll_recv(cx, output, meta))?;
         for i in 0..count {
             let info = &mut meta[i];

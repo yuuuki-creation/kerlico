@@ -128,7 +128,8 @@ impl InboundProtocol for TrojanNode {
                 .run(async {
                     match &self.tls {
                         Some(tls) => {
-                            let tls_stream = tls.accept(stream).await?;
+                            let mut tls_stream = tls.accept(stream).await?;
+                            tls_stream.get_mut().1.set_buffer_limit(Some(68 * 1024));
                             let (_, conn) = tls_stream.get_ref();
                             let sni = conn.server_name().map(str::to_owned);
                             let alpn = conn

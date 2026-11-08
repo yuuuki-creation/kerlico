@@ -211,7 +211,7 @@ impl kerlico_core::DeviceNetwork for NativeDevice {
     fn connect_tcp(&self, target: std::net::SocketAddr) -> BoxFuture<'_, Result<OpenedTcp>> {
         Box::pin(async move {
             if self.dialer.has_detour() {
-                let dest = Destination::new(&target.ip().to_string(), target.port())?;
+                let dest = Destination::from_socket_addr(target)?;
                 let stream = self.dialer.connect(&dest).await?;
                 let bound = if target.is_ipv4() {
                     std::net::SocketAddr::from(([0u8; 4], 0))
@@ -283,11 +283,8 @@ impl Outbound for Direct {
             let Address::Ip(ip) = target.address() else {
                 return Err(Error::Unsupported("直连后端只接受调度器已选定的字面目标"));
             };
-            context
-                .run(
-                    self.device
-                        .connect_target_tcp(std::net::SocketAddr::new(*ip, target.port()), context),
-                )
+            self.device
+                .connect_target_tcp(std::net::SocketAddr::new(*ip, target.port()), context)
                 .await
         })
     }

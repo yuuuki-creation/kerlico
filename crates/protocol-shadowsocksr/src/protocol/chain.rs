@@ -4,6 +4,7 @@ use crate::{
     crypto::{self, Hash},
     invalid,
 };
+use bytes::Buf;
 use kerlico_core::Result;
 #[derive(Clone, Copy)]
 struct Random(u64, u64);
@@ -164,7 +165,7 @@ impl Codec {
             time,
         )?;
         self.init_rc4()?;
-        self.buffer.drain(..36);
+        self.buffer.advance(36);
         Ok(true)
     }
     pub(super) fn chain_data(&mut self, data: &[u8]) -> Result<Vec<u8>> {
@@ -231,7 +232,7 @@ impl Codec {
         if self.buffer.len() < total {
             return Ok(None);
         }
-        let frame = self.buffer[..total].to_vec();
+        let frame = &self.buffer[..total];
         let hash = crypto::mac(
             Hash::Md5,
             &self.packet_key(self.receive_id),
@@ -261,7 +262,7 @@ impl Codec {
             self.last_client = hash;
         }
         self.next_receive()?;
-        self.buffer.drain(..total);
+        self.buffer.advance(total);
         Ok(Some(data))
     }
 }

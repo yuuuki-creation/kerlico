@@ -132,7 +132,23 @@ impl AsyncWrite for ServerTls {
         cx: &mut Context<'_>,
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().0).poll_write(cx, bytes)
+        let this = self.get_mut();
+        if bytes.is_empty() {
+            return Pin::new(&mut this.0).poll_write(cx, bytes);
+        }
+        let limit = bytes.len().min(65536);
+        let mut total = 0;
+        while total < limit {
+            match Pin::new(&mut this.0).poll_write(cx, &bytes[total..limit]) {
+                Poll::Ready(Ok(0)) => break,
+                Poll::Ready(Ok(n)) => total += n,
+                Poll::Ready(Err(_)) if total > 0 => return Poll::Ready(Ok(total)),
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending if total > 0 => return Poll::Ready(Ok(total)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Poll::Ready(Ok(total))
     }
     fn poll_write_vectored(
         self: Pin<&mut Self>,

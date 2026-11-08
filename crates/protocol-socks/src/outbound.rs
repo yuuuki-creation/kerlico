@@ -212,6 +212,7 @@ impl Outbound for SocksOutbound {
                         receiver: Box::new(AssociationReceiver {
                             socket,
                             control: guard,
+                            buf: vec![0; 65535],
                         }),
                     })
                 })
@@ -259,6 +260,7 @@ struct AssociationSender {
 struct AssociationReceiver {
     socket: Arc<UdpSocket>,
     control: Arc<Control>,
+    buf: Vec<u8>,
 }
 impl DatagramAssociationSender for AssociationSender {
     fn send_to<'a>(
@@ -275,10 +277,9 @@ impl DatagramAssociationSender for AssociationSender {
 impl DatagramAssociationReceiver for AssociationReceiver {
     fn recv_from(&mut self) -> BoxFuture<'_, Result<Option<AddressedDatagram>>> {
         Box::pin(async move {
-            let mut bytes = vec![0; 65535];
             loop {
-                let count = tokio::select! { biased; _=self.control.cancel.cancelled()=>return Ok(None), result=self.socket.recv(&mut bytes)=>result? };
-                if let Ok((source, payload)) = wire::packet(&bytes[..count]) {
+                let count = tokio::select! { biased; _=self.control.cancel.cancelled()=>return Ok(None), result=self.socket.recv(&mut self.buf)=>result? };
+                if let Ok((source, payload)) = wire::packet(&self.buf[..count]) {
                     return Ok(Some((source, payload.to_vec())));
                 }
             }

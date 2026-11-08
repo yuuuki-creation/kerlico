@@ -47,7 +47,6 @@ struct Socket {
     settings: Arc<Settings>,
     sequence: AtomicU32,
     send: Mutex<Vec<u8>>,
-    receive: Mutex<Vec<u8>>,
 }
 impl std::fmt::Debug for Socket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,6 +58,32 @@ fn mask(key: &[u8], salt: &[u8]) -> [u8; 32] {
     hash.update(key);
     hash.update(salt);
     hash.finalize().into()
+}
+fn pack_into(settings: &Settings, sequence: u32, bytes: &[u8], out: &mut [u8]) -> usize {
+    let mut offset = 0;
+    if settings.carrier == Carrier::WechatVideo {
+        out[offset..offset + 2].copy_from_slice(&[0xa1, 0x08]);
+        offset += 2;
+        out[offset..offset + 4].copy_from_slice(&sequence.to_be_bytes());
+        offset += 4;
+        out[offset..offset + 7].copy_from_slice(&[0, 0x10, 0x11, 0x18, 0x30, 0x22, 0x30]);
+        offset += 7;
+    }
+    if let Some(key) = &settings.key {
+        let mut salt = [0; 16];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+        let hash = mask(key, &salt);
+        out[offset..offset + 16].copy_from_slice(&salt);
+        offset += 16;
+        for (index, &byte) in bytes.iter().enumerate() {
+            out[offset + index] = byte ^ hash[index % 32];
+        }
+        offset += bytes.len();
+    } else {
+        out[offset..offset + bytes.len()].copy_from_slice(bytes);
+        offset += bytes.len();
+    }
+    offset
 }
 fn pack(settings: &Settings, sequence: u32, bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len() + settings.overhead());
@@ -354,7 +379,6 @@ pub(crate) fn wrap(
             settings,
             sequence: AtomicU32::new(rand::rngs::OsRng.next_u32() & 0xffff),
             send: Mutex::new(Vec::with_capacity(1500)),
-            receive: Mutex::new(vec![0; 65535]),
         }),
         close,
     ))
@@ -373,6 +397,22 @@ impl AsyncUdpSocket for Socket {
                 io::ErrorKind::InvalidInput,
                 "Hysteria v1 包装超出单包边界",
             ));
+        }
+        let total = transmit.contents.len() + self.settings.overhead();
+        if total <= 2048 {
+            let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+            let mut stack_buf = [0u8; 2048];
+            let len = pack_into(
+                &self.settings,
+                seq,
+                transmit.contents,
+                &mut stack_buf[..total],
+            );
+            return self.inner.try_send(&udp::Transmit {
+                contents: &stack_buf[..len],
+                segment_size: None,
+                ..*transmit
+            });
         }
         let bytes = pack(
             &self.settings,
@@ -399,7 +439,7 @@ impl AsyncUdpSocket for Socket {
         if output.is_empty() || meta.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        let _ = &self.receive;
+
         let count = std::task::ready!(self.inner.poll_recv(cx, output, meta))?;
         let overhead = self.settings.overhead();
         for i in 0..count {

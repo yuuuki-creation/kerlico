@@ -3,6 +3,7 @@ use crate::{
     crypto::{self, Hash},
     invalid,
 };
+use bytes::Buf;
 use kerlico_core::Result;
 impl Codec {
     pub(super) fn v4_auth(&self, metadata: &[u8], data: &[u8]) -> Result<Vec<u8>> {
@@ -42,7 +43,7 @@ impl Codec {
         if self.buffer.len() < length {
             return Ok(false);
         }
-        let frame = self.buffer[..length].to_vec();
+        let frame = &self.buffer[..length];
         let expected = crypto::mac(
             Hash::Sha1,
             &self.base_mac_key(&self.recv_iv),
@@ -51,7 +52,7 @@ impl Codec {
         if !crypto::equal(&expected[..10], &frame[length - 10..]) {
             return Err(invalid());
         }
-        let offset = padding_end(&frame, 6, true, 10)?;
+        let offset = padding_end(frame, 6, true, 10)?;
         let plain = &frame[offset..length - 10];
         if plain.len() < 12 {
             return Err(invalid());
@@ -64,7 +65,7 @@ impl Codec {
             time,
         )?;
         self.header_payload = plain[12..].to_vec();
-        self.buffer.drain(..length);
+        self.buffer.advance(length);
         Ok(true)
     }
     pub(super) fn v4_data(&mut self, data: &[u8]) -> Result<Vec<u8>> {
@@ -98,16 +99,16 @@ impl Codec {
         if self.buffer.len() < length {
             return Ok(None);
         }
-        let frame = self.buffer[..length].to_vec();
+        let frame = &self.buffer[..length];
         if !crypto::equal(
             &crypto::adler(&frame[..length - 4]).to_le_bytes(),
             &frame[length - 4..],
         ) {
             return Err(invalid());
         }
-        let offset = padding_end(&frame, 4, true, 4)?;
+        let offset = padding_end(frame, 4, true, 4)?;
         let data = frame[offset..length - 4].to_vec();
-        self.buffer.drain(..length);
+        self.buffer.advance(length);
         self.next_receive()?;
         Ok(Some(data))
     }

@@ -105,6 +105,27 @@ impl Decoder {
             let mut consumed = 0;
             let mut produced = 0;
             while consumed < wire.len() && produced < output.len() {
+                while bit_count == 0 && consumed + 4 <= wire.len() && produced + 3 <= output.len() {
+                    let g0 = group_index[wire[consumed] as usize];
+                    let g1 = group_index[wire[consumed + 1] as usize];
+                    let g2 = group_index[wire[consumed + 2] as usize];
+                    let g3 = group_index[wire[consumed + 3] as usize];
+                    if (g0 | g1 | g2 | g3) == 0xFF {
+                        break;
+                    }
+                    let v = (u32::from(g0) << 18)
+                        | (u32::from(g1) << 12)
+                        | (u32::from(g2) << 6)
+                        | u32::from(g3);
+                    output[produced] = (v >> 16) as u8;
+                    output[produced + 1] = (v >> 8) as u8;
+                    output[produced + 2] = v as u8;
+                    consumed += 4;
+                    produced += 3;
+                }
+                if consumed >= wire.len() || produced >= output.len() {
+                    break;
+                }
                 let byte = wire[consumed];
                 consumed += 1;
                 let group = group_index[byte as usize];
@@ -136,17 +157,11 @@ impl Decoder {
             let mut consumed = 0;
             let mut produced = 0;
             while produced < output.len() {
-                while consumed < wire.len() {
-                    let byte = wire[consumed];
+                while clue_count < 4 && consumed < wire.len() {
+                    let clue = hint_index[wire[consumed] as usize];
                     consumed += 1;
-                    let clue = hint_index[byte as usize];
-                    if clue != 0xFF {
-                        clues[clue_count] = clue;
-                        clue_count += 1;
-                        if clue_count == 4 {
-                            break;
-                        }
-                    }
+                    clues[clue_count] = clue;
+                    clue_count += usize::from(clue != 0xFF);
                 }
                 if clue_count < 4 {
                     break;
@@ -696,7 +711,7 @@ impl AsyncWrite for ObfsStream {
             return Poll::Ready(Err(closed()));
         }
         ready!(this.output(cx))?;
-        let count = bytes.len().min(65536);
+        let count = bytes.len().min(65596);
         this.encoder.encode(&bytes[..count], &mut this.pending);
         if count != 0 {
             match this.drain(cx) {

@@ -77,21 +77,25 @@ impl Cipher {
         }
         .map_err(|_| crate::invalid())
     }
-    fn seal_into(&self, nonce: &[u8; 12], plain: &[u8], out: &mut Vec<u8>) -> Result<()> {
-        out.clear();
+    fn seal_append(&self, nonce: &[u8; 12], plain: &[u8], out: &mut Vec<u8>) -> Result<()> {
+        let base = out.len();
         out.reserve(14 + plain.len() + 16);
         out.extend_from_slice(&((12 + plain.len() + 16) as u16).to_be_bytes());
         out.extend_from_slice(nonce);
         out.extend_from_slice(plain);
         let tag = match self {
             Self::Aes(cipher) => cipher
-                .encrypt_in_place_detached(aes_gcm::Nonce::from_slice(nonce), nonce, &mut out[14..])
+                .encrypt_in_place_detached(
+                    aes_gcm::Nonce::from_slice(nonce),
+                    nonce,
+                    &mut out[base + 14..],
+                )
                 .map(<[u8; 16]>::from),
             Self::ChaCha(cipher) => cipher
                 .encrypt_in_place_detached(
                     chacha20poly1305::Nonce::from_slice(nonce),
                     nonce,
-                    &mut out[14..],
+                    &mut out[base + 14..],
                 )
                 .map(<[u8; 16]>::from),
         }
@@ -175,18 +179,21 @@ impl Sender {
         Ok(frame)
     }
     pub fn seal_into(&mut self, plain: &[u8], out: &mut Vec<u8>) -> Result<()> {
+        out.clear();
+        self.seal_append(plain, out)
+    }
+    pub fn seal_append(&mut self, plain: &[u8], out: &mut Vec<u8>) -> Result<()> {
         if self.failed {
             return Err(crate::invalid());
         }
-        let result = self.seal_into_inner(plain, out);
+        let result = self.seal_append_inner(plain, out);
         if result.is_err() {
             self.failed = true;
         }
         result
     }
-    fn seal_into_inner(&mut self, plain: &[u8], out: &mut Vec<u8>) -> Result<()> {
+    fn seal_append_inner(&mut self, plain: &[u8], out: &mut Vec<u8>) -> Result<()> {
         if plain.is_empty() || self.method == Method::None {
-            out.clear();
             out.extend_from_slice(plain);
             return Ok(());
         }
@@ -211,7 +218,7 @@ impl Sender {
             .as_ref()
             .unwrap()
             .1
-            .seal_into(&nonce, plain, out)?;
+            .seal_append(&nonce, plain, out)?;
         self.sequence = next_sequence;
         self.plain_bytes = total;
         if self.threshold > 0
@@ -565,8 +572,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RecordStream<T> {
             }
             return result;
         }
-        let count = bytes.len().min(MAX_PLAIN);
-        match this.sender.seal_into(&bytes[..count], &mut this.pending) {
+        let total = bytes.len().min(65536);
+        this.pending.clear();
+        let seal_res = if total <= MAX_PLAIN {
+            this.sender.seal_append(&bytes[..total], &mut this.pending)
+        } else {
+            let half = total / 2;
+            this.sender
+                .seal_append(&bytes[..half], &mut this.pending)
+                .and_then(|()| {
+                    this.sender
+                        .seal_append(&bytes[half..total], &mut this.pending)
+                })
+        };
+        match seal_res {
             Ok(()) => match this.drain(cx) {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
@@ -577,7 +596,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RecordStream<T> {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, error)));
             }
         }
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(total))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();

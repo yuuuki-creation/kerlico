@@ -1,12 +1,13 @@
 use crate::{
     config::Shared,
-    crypto::{self, State},
+    crypto::{self, Method, State},
     invalid, obfs,
     protocol::{Codec, Role},
 };
 use bytes::Bytes;
 use futures_util::task::{ArcWake, AtomicWaker, waker_ref};
 use kerlico_core::{BoxStream, CancellationToken, Result};
+use shadowsocks::crypto::CipherKind;
 use std::{
     collections::VecDeque,
     future::Future,
@@ -31,6 +32,7 @@ impl ArcWake for Wakes {
     }
 }
 struct Writer {
+    method: Method,
     state: State,
     iv: Vec<u8>,
     sent: bool,
@@ -39,6 +41,10 @@ impl Writer {
     fn encode(&mut self, data: &[u8]) -> Result<Vec<u8>> {
         if data.is_empty() {
             return Ok(Vec::new());
+        }
+        if self.method == Method::Base(CipherKind::NONE) {
+            self.sent = true;
+            return Ok(data.to_vec());
         }
         let mut output = data.to_vec();
         self.state.apply(&mut output, true)?;
@@ -61,6 +67,9 @@ impl Reader {
     fn decode(&mut self, data: &[u8]) -> Result<Vec<u8>> {
         if data.is_empty() {
             return Ok(Vec::new());
+        }
+        if self.cfg.method == Method::Base(CipherKind::NONE) {
+            return Ok(data.to_vec());
         }
         let mut output = data.to_vec();
         if self.state.is_none() {
@@ -130,6 +139,7 @@ impl Stream {
     ) -> Result<Self> {
         let iv = crypto::random(cfg.method.iv_len());
         let writer = Writer {
+            method: cfg.method,
             state: State::new(cfg.method, &cfg.key, &iv)?,
             iv: iv.clone(),
             sent: false,
@@ -310,8 +320,10 @@ impl Stream {
                             self.incoming_end = true;
                             self.wakes.read.wake();
                         } else {
-                            let bytes = self.buffer[..count].to_vec();
-                            if self.input(&bytes).is_err() {
+                            let buf = std::mem::take(&mut self.buffer);
+                            let res = self.input(&buf[..count]);
+                            self.buffer = buf;
+                            if res.is_err() {
                                 return Err(self.error());
                             }
                         }

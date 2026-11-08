@@ -71,8 +71,9 @@ thiserror = "2"
 uuid = "1"
 idna = "1"
 prost = "0.14"
-rustls = { version = "=0.23.40", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "=0.23.40", default-features = false, features = ["aws-lc-rs", "ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+aws-lc-rs = "1"
 rustls-pemfile = "2"
 webpki-roots = "1"
 clap = { version = "4", features = ["derive"] }

@@ -58,17 +58,31 @@ impl Outbound for HttpOutbound {
                         }
                         request.push_str("\r\n");
                         stream.write_all(request.as_bytes()).await?;
+                        let mut buf = Vec::with_capacity(512);
+                        let mut chunk = [0u8; 4096];
                         for _ in 0..16 {
-                            let mut header = Vec::new();
-                            // 精确读取到头末尾，不能吞掉同一 TCP 包内的首段隧道数据。
-                            while !header.ends_with(b"\r\n\r\n") {
-                                if header.len() == 16_384 {
+                            let header_end = loop {
+                                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                    let end = pos + 4;
+                                    if end > 16_384 {
+                                        return Err(config::invalid());
+                                    }
+                                    break end;
+                                }
+                                if buf.len() >= 16_384 {
                                     return Err(config::invalid());
                                 }
-                                header.push(stream.read_u8().await?);
-                            }
-                            let header =
-                                std::str::from_utf8(&header).map_err(|_| config::invalid())?;
+                                let n = stream.read(&mut chunk).await?;
+                                if n == 0 {
+                                    return Err(std::io::Error::from(
+                                        std::io::ErrorKind::UnexpectedEof,
+                                    )
+                                    .into());
+                                }
+                                buf.extend_from_slice(&chunk[..n]);
+                            };
+                            let header = std::str::from_utf8(&buf[..header_end])
+                                .map_err(|_| config::invalid())?;
                             let mut lines = header.split("\r\n");
                             let status = lines.next().ok_or_else(config::invalid)?;
                             let mut parts = status.splitn(3, ' ');
@@ -95,11 +109,21 @@ impl Outbound for HttpOutbound {
                                 }
                             }
                             if (200..300).contains(&code) {
-                                return Ok(stream);
+                                let leftover = &buf[header_end..];
+                                if leftover.is_empty() {
+                                    return Ok(stream);
+                                }
+                                return Ok(kerlico_core::SpliceBox::boxed(
+                                    PrefixedOutboundStream {
+                                        inner: stream,
+                                        prefix: bytes::Bytes::copy_from_slice(leftover),
+                                    },
+                                ));
                             }
                             if !(100..200).contains(&code) || code == 101 {
                                 return Err(Error::Rejected);
                             }
+                            buf.drain(..header_end);
                         }
                         Err(config::invalid())
                     })
@@ -118,6 +142,83 @@ impl Outbound for HttpOutbound {
         _: &'a ConnectContext,
     ) -> BoxFuture<'a, Result<DatagramChannel>> {
         Box::pin(async { Err(Error::Unsupported("HTTP CONNECT 不提供 UDP")) })
+    }
+}
+
+struct PrefixedOutboundStream {
+    inner: BoxStream,
+    prefix: bytes::Bytes,
+}
+impl tokio::io::AsyncRead for PrefixedOutboundStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if buffer.remaining() == 0 {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        if !this.prefix.is_empty() {
+            let count = buffer.remaining().min(this.prefix.len());
+            buffer.put_slice(&this.prefix[..count]);
+            bytes::Buf::advance(&mut this.prefix, count);
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut this.inner).poll_read(cx, buffer)
+    }
+}
+impl tokio::io::AsyncWrite for PrefixedOutboundStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, bytes)
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+impl kerlico_core::SpliceIo for PrefixedOutboundStream {
+    fn supports_splice(&self) -> bool {
+        self.prefix.is_empty() && kerlico_core::stream_supports_splice(self.inner.as_ref())
+    }
+    #[cfg(target_os = "linux")]
+    fn poll_splice_to_pipe(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        pipe_wr: std::os::fd::BorrowedFd<'_>,
+        max_len: usize,
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if !self.prefix.is_empty() {
+            return std::task::Poll::Ready(Err(std::io::ErrorKind::Unsupported.into()));
+        }
+        match kerlico_core::as_splice_io(self.inner.as_mut()) {
+            Some(splice) => splice.poll_splice_to_pipe(cx, pipe_wr, max_len),
+            None => std::task::Poll::Ready(Err(std::io::ErrorKind::Unsupported.into())),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn poll_splice_from_pipe(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        pipe_rd: std::os::fd::BorrowedFd<'_>,
+        max_len: usize,
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match kerlico_core::as_splice_io(self.inner.as_mut()) {
+            Some(splice) => splice.poll_splice_from_pipe(cx, pipe_rd, max_len),
+            None => std::task::Poll::Ready(Err(std::io::ErrorKind::Unsupported.into())),
+        }
     }
 }
 pub struct HttpFactory;

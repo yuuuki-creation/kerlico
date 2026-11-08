@@ -115,8 +115,8 @@ pub(crate) async fn serve(
         let mut builder = hyper_util::server::conn::auto::Builder::new(executor);
         builder
             .http2()
-            .initial_stream_window_size(16 * 1024 * 1024)
-            .initial_connection_window_size(64 * 1024 * 1024)
+            .initial_stream_window_size(2 * 1024 * 1024)
+            .initial_connection_window_size(8 * 1024 * 1024)
             .adaptive_window(true);
         builder
             .serve_connection_with_upgrades(TokioIo::new(inner), service)
@@ -209,7 +209,7 @@ async fn handle(
                     Some(config),
                 )
                 .await;
-                let (local, peer) = tokio::io::duplex(256 * 1024);
+                let (local, peer) = tokio::io::duplex(64 * 1024);
                 let run = payload.serve(Box::new(local), access, context.clone());
                 let bridge = ws_bridge(websocket, peer);
                 tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),result=async{tokio::try_join!(run,bridge).map(|_|())}=>result}
@@ -264,9 +264,9 @@ async fn handle(
             {
                 return empty(StatusCode::NOT_FOUND);
             }
-            let (sender, receiver) = mpsc::channel(128);
+            let (sender, receiver) = mpsc::channel(32);
             let body = StreamBody::new(ReceiverStream::new(receiver)).boxed_unsync();
-            let (local, peer) = tokio::io::duplex(256 * 1024);
+            let (local, peer) = tokio::io::duplex(64 * 1024);
             if !spawn(&tasks, &context.tasks.clone(), async move {
                 let _lease = lease;
                 let run = payload.serve(Box::new(local), access, context.clone());
@@ -296,7 +296,8 @@ async fn grpc_bridge(
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(peer);
     let upload = async {
-        let mut pending = Vec::new();
+        use bytes::Buf;
+        let mut pending = bytes::BytesMut::new();
         while let Some(frame) = incoming.frame().await {
             let frame = frame.map_err(|_| Error::Protocol("VMess gRPC 请求体失败"))?;
             if let Ok(bytes) = frame.into_data() {
@@ -321,7 +322,7 @@ async fn grpc_bridge(
                     for data in hunk.data {
                         writer.write_all(&data).await?;
                     }
-                    pending.drain(..5 + n);
+                    pending.advance(5 + n);
                 }
             }
         }
@@ -332,22 +333,32 @@ async fn grpc_bridge(
         Ok::<_, Error>(())
     };
     let download = async move {
+        use bytes::BufMut;
         let mut bytes = vec![0; 65536];
         loop {
             let n = reader.read(&mut bytes).await?;
             if n == 0 {
                 break;
             }
-            use prost::Message;
-            let hunk = Hunk {
-                data: vec![bytes[..n].to_vec()],
+            let mut v = n;
+            let mut varint = [0u8; 5];
+            let mut vlen = 0;
+            while v >= 0x80 {
+                varint[vlen] = (v as u8) | 0x80;
+                v >>= 7;
+                vlen += 1;
             }
-            .encode_to_vec();
-            let mut frame = vec![0];
-            frame.extend_from_slice(&(hunk.len() as u32).to_be_bytes());
-            frame.extend(hunk);
+            varint[vlen] = v as u8;
+            vlen += 1;
+            let msg_len = (1 + vlen + n) as u32;
+            let mut frame = bytes::BytesMut::with_capacity(6 + vlen + n);
+            frame.put_u8(0);
+            frame.put_slice(&msg_len.to_be_bytes());
+            frame.put_u8(0x0a);
+            frame.put_slice(&varint[..vlen]);
+            frame.put_slice(&bytes[..n]);
             sender
-                .send(Ok(Frame::data(Bytes::from(frame))))
+                .send(Ok(Frame::data(frame.freeze())))
                 .await
                 .map_err(|_| Error::Cancelled)?;
         }

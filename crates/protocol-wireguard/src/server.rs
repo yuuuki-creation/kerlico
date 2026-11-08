@@ -252,7 +252,7 @@ impl WireGuardNode {
         let _ = sock_ref.set_recv_buffer_size(8 * 1024 * 1024);
         let _ = sock_ref.set_send_buffer_size(8 * 1024 * 1024);
         let (rx_tx, mut rx_rx) =
-            tokio::sync::mpsc::channel::<std::io::Result<(Vec<u8>, SocketAddr)>>(4096);
+            tokio::sync::mpsc::channel::<std::io::Result<(Vec<u8>, SocketAddr)>>(1024);
         let rx_socket = socket.clone();
         let rx_cancel = context.cancel.clone();
         tokio::spawn(async move {
@@ -324,7 +324,7 @@ impl WireGuardNode {
                                 }
                                 Identified::Peer(selected) => {
                                     let peer = &mut peers[selected];
-                                    peer.sent_in_window = peer.sent_in_window.saturating_sub(1);
+                                    peer.sent_in_window = peer.sent_in_window.saturating_sub(8);
                                     if let Ok(received) = peer.crypto.receive(source, &pkt) {
                                         for packet in received.network {
                                             send_or_drop(&socket, source, &packet, &context, &carrier).await;
@@ -379,7 +379,7 @@ impl WireGuardNode {
                     continue;
                 }
                 let budget = if peer.crypto.ready() {
-                    32usize.saturating_sub(peer.sent_in_window)
+                    128usize.saturating_sub(peer.sent_in_window)
                 } else {
                     1
                 };

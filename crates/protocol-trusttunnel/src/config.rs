@@ -61,16 +61,17 @@ impl Limits {
     pub fn quic(&self, incoming: usize) -> Result<Arc<quinn::TransportConfig>> {
         let mut value = quinn::TransportConfig::default();
         value.max_concurrent_bidi_streams((incoming as u32).into());
-        value.stream_receive_window((32 * 1024 * 1024u32).into());
-        value.receive_window((128 * 1024 * 1024u32).into());
-        value.send_window(128 * 1024 * 1024);
+        value.stream_receive_window((4 * 1024 * 1024u32).into());
+        value.receive_window((16 * 1024 * 1024u32).into());
+        value.send_window(16 * 1024 * 1024);
         let mut cubic = quinn::congestion::CubicConfig::default();
         cubic.initial_window(2 * 1024 * 1024);
         value.congestion_controller_factory(Arc::new(cubic));
         value.max_idle_timeout(Some(
             quinn::IdleTimeout::try_from(self.idle()).map_err(|_| invalid())?,
         ));
-        value.datagram_receive_buffer_size(None);
+        value.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
+        value.datagram_send_buffer_size(2 * 1024 * 1024);
         value.keep_alive_interval(None);
         Ok(Arc::new(value))
     }
@@ -332,7 +333,7 @@ pub(crate) fn client_tls(
         config.enable_early_data = false;
         return Ok((Arc::new(config), tls.server_name));
     }
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&versions(tls.version, transport)?)
         .map_err(|_| invalid())?;
@@ -378,14 +379,14 @@ pub(crate) fn server_tls(
     transport: Transport,
 ) -> Result<Arc<rustls::ServerConfig>> {
     let builder = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
+        rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_protocol_versions(&versions(tls.version, transport)?)
     .map_err(|_| invalid())?;
     let builder = if let Some(ca) = tls.client_ca_pem {
         let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
             Arc::new(roots(&ca)?),
-            Arc::new(rustls::crypto::ring::default_provider()),
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
         )
         .build()
         .map_err(|_| invalid())?;

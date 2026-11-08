@@ -83,6 +83,9 @@ struct Switch {
     origin: Instant,
 }
 impl Switch {
+    fn target(&self) -> u64 {
+        self.rate.get()
+    }
     fn active(&mut self) -> Option<&mut Brutal> {
         let rate = self.rate.get();
         if rate == 0 {
@@ -122,6 +125,7 @@ impl Controller for Switch {
     ) {
         if let Some(brutal) = self.active() {
             brutal.on_ack(now, rtt.get());
+            return;
         }
         self.fallback
             .on_ack_with_token(now, sent, bytes, app_limited, rtt, token);
@@ -136,11 +140,14 @@ impl Controller for Switch {
     ) {
         if let Some(brutal) = self.active() {
             brutal.on_ack(now, rtt.get());
+            return;
         }
         self.fallback.on_ack(now, sent, bytes, app_limited, rtt);
     }
     fn on_rtt_sample(&mut self, now: Instant, rtt: Duration, app_limited: bool) {
-        self.fallback.on_rtt_sample(now, rtt, app_limited);
+        if self.target() == 0 {
+            self.fallback.on_rtt_sample(now, rtt, app_limited);
+        }
     }
     fn on_end_acks(
         &mut self,
@@ -151,6 +158,7 @@ impl Controller for Switch {
     ) {
         if let Some(brutal) = self.active() {
             brutal.update_ack_rate(now);
+            return;
         }
         self.fallback
             .on_end_acks(now, in_flight, app_limited, largest_packet_num_acked);
@@ -164,6 +172,7 @@ impl Controller for Switch {
     ) {
         if let Some(brutal) = self.active() {
             brutal.on_loss(now, lost_bytes);
+            return;
         }
         self.fallback
             .on_congestion_event(now, sent, is_persistent_congestion, lost_bytes);

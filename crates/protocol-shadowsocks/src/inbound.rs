@@ -149,29 +149,44 @@ impl InboundProtocol for ShadowsocksNode {
         Box::pin(async move {
             let handshake =
                 ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
-            let (key, stream, target) =
-                if self.local && self.config.method() == shadowsocks::crypto::CipherKind::NONE {
-                    let mut stream = stream;
+            let (key, stream, target) = if self.local
+                && self.config.method() == shadowsocks::crypto::CipherKind::NONE
+            {
+                let mut stream = stream;
+                let addr = handshake
+                    .run(async {
+                        shadowsocks::relay::socks5::Address::read_from(&mut stream)
+                            .await
+                            .map_err(|_| crate::protocol_error())
+                    })
+                    .await?;
+                let target = destination(&addr)?;
+                (Vec::new(), stream, target)
+            } else {
+                let configurations: Vec<_> = if self.local {
+                    vec![self.config.clone()]
+                } else {
+                    self.credentials
+                        .rows()
+                        .map(|(_, row)| row.config.clone())
+                        .collect()
+                };
+                if configurations.len() == 1 {
+                    let config = &configurations[0];
+                    let mut stream = ProxyServerStream::from_stream(
+                        self.crypto.clone(),
+                        stream,
+                        config.method(),
+                        config.key(),
+                    );
                     let addr = handshake
-                        .run(async {
-                            shadowsocks::relay::socks5::Address::read_from(&mut stream)
-                                .await
-                                .map_err(|_| crate::protocol_error())
-                        })
+                        .run(async { stream.handshake().await.map_err(Error::from) })
                         .await?;
                     let target = destination(&addr)?;
-                    (Vec::new(), stream, target)
+                    (config.key().to_vec(), Box::new(stream) as BoxStream, target)
                 } else {
                     let candidates = Candidates::new(stream);
                     let mut tasks = JoinSet::new();
-                    let configurations: Vec<_> = if self.local {
-                        vec![self.config.clone()]
-                    } else {
-                        self.credentials
-                            .rows()
-                            .map(|(_, row)| row.config.clone())
-                            .collect()
-                    };
                     for config in configurations {
                         let stream = candidates.reader();
                         let crypto = crate::crypto(ServerType::Server);
@@ -219,7 +234,8 @@ impl InboundProtocol for ShadowsocksNode {
                         .check_nonce_replay(self.config.method(), &nonce)?;
                     candidates.accept();
                     (key, stream, target)
-                };
+                }
+            };
             let access = if self.local {
                 ingress.local(&context)?
             } else {

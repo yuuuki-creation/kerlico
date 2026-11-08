@@ -10,7 +10,7 @@ use tokio_rustls::client::TlsStream;
 
 use crate::TransportStream;
 
-const TLS_READ_CHUNK_LIMIT: usize = 8 * 1024;
+const TLS_READ_CHUNK_LIMIT: usize = 16 * 1024 + 256;
 
 pub(crate) type ServerReadLog = Arc<Mutex<Option<Vec<u8>>>>;
 
@@ -350,7 +350,32 @@ where
             // still decrypts our writes until Vision switches this direction.
             PenetratingTlsState::Tls(Some(stream))
             | PenetratingTlsState::ReadDirect { stream, .. } => {
-                Pin::new(stream).poll_write(cx, input)
+                if input.is_empty() {
+                    return Poll::Ready(Ok(0));
+                }
+                let limit = input.len().min(65536);
+                let mut total = 0;
+                while total < limit {
+                    match Pin::new(stream.as_mut()).poll_write(cx, &input[total..limit]) {
+                        Poll::Ready(Ok(0)) => break,
+                        Poll::Ready(Ok(n)) => total += n,
+                        Poll::Ready(Err(err)) => {
+                            return if total > 0 {
+                                Poll::Ready(Ok(total))
+                            } else {
+                                Poll::Ready(Err(err))
+                            };
+                        }
+                        Poll::Pending => {
+                            return if total > 0 {
+                                Poll::Ready(Ok(total))
+                            } else {
+                                Poll::Pending
+                            };
+                        }
+                    }
+                }
+                Poll::Ready(Ok(total))
             }
             PenetratingTlsState::Tls(None) => {
                 Poll::Ready(Err(io::Error::other("TLS stream was already taken")))

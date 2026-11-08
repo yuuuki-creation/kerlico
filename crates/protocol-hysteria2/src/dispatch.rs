@@ -148,18 +148,37 @@ impl AsyncRead for Bi {
         out: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if out.remaining() == 0 {
-            return Poll::Ready(Ok(()));
-        }
-        if this.prefix.is_empty() {
-            match std::task::ready!(this.inner.poll_data(cx)).map_err(io_error)? {
-                None => return Poll::Ready(Ok(())),
-                Some(bytes) => this.prefix = bytes,
+        let mut copied = false;
+        while out.remaining() > 0 {
+            if this.prefix.is_empty() {
+                match this.inner.poll_data(cx) {
+                    Poll::Ready(Ok(Some(bytes))) => {
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        this.prefix = bytes;
+                    }
+                    Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
+                    Poll::Ready(Err(err)) => {
+                        if copied {
+                            return Poll::Ready(Ok(()));
+                        }
+                        return Poll::Ready(Err(io_error(err)));
+                    }
+                    Poll::Pending => {
+                        return if copied {
+                            Poll::Ready(Ok(()))
+                        } else {
+                            Poll::Pending
+                        };
+                    }
+                }
             }
+            let count = out.remaining().min(this.prefix.len());
+            out.put_slice(&this.prefix[..count]);
+            this.prefix.advance(count);
+            copied = true;
         }
-        let count = out.remaining().min(this.prefix.len());
-        out.put_slice(&this.prefix[..count]);
-        this.prefix.advance(count);
         Poll::Ready(Ok(()))
     }
 }

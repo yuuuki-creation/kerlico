@@ -57,11 +57,11 @@ impl Limits {
         let mut config = quinn::TransportConfig::default();
         config.max_concurrent_bidi_streams((incoming.min(65535) as u32).into());
         config.max_concurrent_uni_streams(0u32.into());
-        config.stream_receive_window((16 * 1024 * 1024u32).into());
-        config.receive_window((64 * 1024 * 1024u32).into());
-        config.send_window(64 * 1024 * 1024);
-        config.datagram_receive_buffer_size(if udp { Some(256 * 1024) } else { None });
-        config.datagram_send_buffer_size(256 * 1024);
+        config.stream_receive_window((4 * 1024 * 1024u32).into());
+        config.receive_window((16 * 1024 * 1024u32).into());
+        config.send_window(16 * 1024 * 1024);
+        config.datagram_receive_buffer_size(if udp { Some(2 * 1024 * 1024) } else { None });
+        config.datagram_send_buffer_size(2 * 1024 * 1024);
         config.advertised_datagram_frame_size(if udp { Some(1200) } else { None });
         config.max_idle_timeout(Some(
             quinn::IdleTimeout::try_from(self.idle()).map_err(|_| invalid())?,

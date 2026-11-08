@@ -371,7 +371,7 @@ impl State {
         self.table.get_or_init(||{let limits=context.clone();let weak=Arc::downgrade(self);let handler:rust_xhttp::session::Handler=Arc::new(move |connection|{
             let Some(state)=weak.upgrade() else{return};let Ok(lease)=context.stream_budget.try_acquire() else{return};let payload=payload.clone();let access=access.clone();let mut context=context.clone();context.cancel=context.cancel.child_token();
             state.spawn(&context.tasks.clone(),async move {let _lease=lease;let stream=SessionIo::new(connection);let _=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),result=payload.serve(Box::new(Plain(Box::new(stream))),access,context.clone())=>result};});
-        });SessionTable::new(SessionConfig {max_sessions:limits.max_streams,max_pending_packets:256,max_pending_bytes:8*1024*1024,downlink_capacity:256,grace:limits.connect_timeout,..Default::default()},handler,Arc::new(rust_xhttp::metrics::Metrics::default()))}).clone()
+        });SessionTable::new(SessionConfig {max_sessions:limits.max_streams,max_pending_packets:64,max_pending_bytes:2*1024*1024,downlink_capacity:32,grace:limits.connect_timeout,..Default::default()},handler,Arc::new(rust_xhttp::metrics::Metrics::default()))}).clone()
     }
     pub async fn serve(
         self: Arc<Self>,
@@ -416,8 +416,8 @@ impl State {
         let mut builder = hyper_util::server::conn::auto::Builder::new(executor);
         builder
             .http2()
-            .initial_stream_window_size(16 * 1024 * 1024)
-            .initial_connection_window_size(64 * 1024 * 1024)
+            .initial_stream_window_size(2 * 1024 * 1024)
+            .initial_connection_window_size(8 * 1024 * 1024)
             .max_frame_size(64 * 1024)
             .adaptive_window(true);
         let serving = async {
@@ -761,7 +761,7 @@ impl State {
             return empty(StatusCode::TOO_MANY_REQUESTS);
         };
         let (sender, response_body) = body_channel();
-        let (local, peer) = tokio::io::duplex(256 * 1024);
+        let (local, peer) = tokio::io::duplex(64 * 1024);
         self.spawn(&context.tasks.clone(), async move {let _lease=lease;let running=payload.serve(Box::new(Plain(Box::new(local))),access,context.clone());let bridge=http_bridge(body,peer,sender,grpc);let _=tokio::select! {_=context.cancel.cancelled()=>Err(Error::Cancelled),r=async {tokio::try_join!(running,bridge).map(|_|())}=>r};});
         response(response_body, grpc.is_some())
     }
@@ -1272,15 +1272,16 @@ impl ServerWsStream {
             }
             if let Some(key) = mask_key {
                 let payload = &mut bytes[hdr..total];
-                let (chunks, tail) = payload.as_chunks_mut::<4>();
+                let key64 = u64::from_ne_bytes([
+                    key[0], key[1], key[2], key[3], key[0], key[1], key[2], key[3],
+                ]);
+                let (chunks, tail) = payload.as_chunks_mut::<8>();
                 for chunk in chunks {
-                    chunk[0] ^= key[0];
-                    chunk[1] ^= key[1];
-                    chunk[2] ^= key[2];
-                    chunk[3] ^= key[3];
+                    let v = u64::from_ne_bytes(*chunk) ^ key64;
+                    *chunk = v.to_ne_bytes();
                 }
                 for (i, b) in tail.iter_mut().enumerate() {
-                    *b ^= key[i];
+                    *b ^= key[i & 3];
                 }
             }
             let start = self.rx_consumed + hdr;
@@ -1473,7 +1474,7 @@ fn empty(status: StatusCode) -> Response<Body> {
         .unwrap_or_else(|_| Response::new(empty_body()))
 }
 fn body_channel() -> (mpsc::Sender<io::Result<Frame<Bytes>>>, Body) {
-    let (sender, receiver) = mpsc::channel(128);
+    let (sender, receiver) = mpsc::channel(32);
     (
         sender,
         StreamBody::new(ReceiverStream::new(receiver)).boxed_unsync(),
@@ -1718,17 +1719,18 @@ where
 {
     let (mut reader, mut writer) = tokio::io::split(peer);
     let upload = async {
-        let mut pending = Vec::new();
+        use bytes::Buf;
+        let mut pending = bytes::BytesMut::new();
         while let Some(frame) = incoming.frame().await {
             let frame = frame.map_err(|_| Error::Protocol("HTTP 请求体读取失败"))?;
             if let Ok(data) = frame.into_data() {
                 if grpc.is_none() {
                     writer.write_all(&data).await?;
                 } else {
-                    pending.extend_from_slice(&data);
-                    if pending.len() > 2 * 1024 * 1024 {
+                    if pending.len() + data.len() > 2 * 1024 * 1024 {
                         return Err(Error::ResourceLimit);
                     }
+                    pending.extend_from_slice(&data);
                     while pending.len() >= 5 {
                         if pending[0] != 0 {
                             return Err(Error::Protocol("不支持压缩 gRPC 帧"));
@@ -1750,7 +1752,7 @@ where
                         for data in hunk.data {
                             writer.write_all(&data).await?;
                         }
-                        pending.drain(..5 + length);
+                        pending.advance(5 + length);
                     }
                 }
             }
@@ -1762,6 +1764,7 @@ where
         Ok::<_, Error>(())
     };
     let download = async move {
+        use bytes::BufMut;
         let mut bytes = vec![0; 65536];
         loop {
             let n = reader.read(&mut bytes).await?;
@@ -1769,15 +1772,24 @@ where
                 break;
             }
             let data = if grpc.is_some() {
-                use prost::Message;
-                let data = Hunk {
-                    data: vec![bytes[..n].to_vec()],
+                let mut v = n;
+                let mut varint = [0u8; 5];
+                let mut vlen = 0;
+                while v >= 0x80 {
+                    varint[vlen] = (v as u8) | 0x80;
+                    v >>= 7;
+                    vlen += 1;
                 }
-                .encode_to_vec();
-                let mut frame = vec![0];
-                frame.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                frame.extend_from_slice(&data);
-                Bytes::from(frame)
+                varint[vlen] = v as u8;
+                vlen += 1;
+                let msg_len = (1 + vlen + n) as u32;
+                let mut frame = bytes::BytesMut::with_capacity(6 + vlen + n);
+                frame.put_u8(0);
+                frame.put_slice(&msg_len.to_be_bytes());
+                frame.put_u8(0x0a);
+                frame.put_slice(&varint[..vlen]);
+                frame.put_slice(&bytes[..n]);
+                frame.freeze()
             } else {
                 Bytes::copy_from_slice(&bytes[..n])
             };

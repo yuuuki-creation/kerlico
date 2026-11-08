@@ -107,6 +107,9 @@ impl CryptoPeer {
         if received.authenticated {
             self.endpoint = Some(source);
         }
+        if kind == 4 {
+            return Ok(received);
+        }
         for _ in 0..257 {
             match self.tunnel.decapsulate(None, &[], &mut output) {
                 TunnResult::WriteToNetwork(bytes) => {
@@ -129,7 +132,14 @@ impl CryptoPeer {
     pub fn encapsulate(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
         let mut output = vec![0; packet.len().saturating_add(32).max(148)];
         match self.tunnel.encapsulate(packet, &mut output) {
-            TunnResult::WriteToNetwork(bytes) => Ok(Some(with_reserved(bytes, self.reserved))),
+            TunnResult::WriteToNetwork(bytes) => {
+                let len = bytes.len();
+                output.truncate(len);
+                if output.len() >= 4 {
+                    output[1..4].copy_from_slice(&self.reserved);
+                }
+                Ok(Some(output))
+            }
             TunnResult::Done => Ok(None),
             TunnResult::Err(_) => Err(Error::Protocol("WireGuard加密失败")),
             _ => Err(Error::Protocol("WireGuard加密产生了意外内部包")),

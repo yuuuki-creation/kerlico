@@ -23,9 +23,9 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_flows: 256,
-            tcp_buffer_bytes: 1_048_560,
-            queue_packets: 8192,
-            queue_bytes: 32 * 1024 * 1024,
+            tcp_buffer_bytes: 65_535,
+            queue_packets: 2048,
+            queue_bytes: 8 * 1024 * 1024,
             fragment_packets: 256,
             fragment_bytes: 8 * 1024 * 1024,
             udp_idle_timeout_ms: 60_000,

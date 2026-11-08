@@ -276,7 +276,7 @@ fn metadata(
             meta[31] = frame.rotation;
         }
     }
-    Description::parse(meta, seconds)?;
+    debug_assert!(Description::parse(meta, seconds).is_ok());
     Ok(meta)
 }
 fn transform_body(mut encrypted: Vec<u8>, frame: &Frame, half: u32) -> Result<Vec<u8>> {

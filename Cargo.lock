@@ -4840,6 +4840,7 @@ name = "kerlico-snell"
 version = "1.14.0"
 dependencies = [
  "argon2 0.5.3",
+ "aws-lc-rs",
  "base64 0.23.1",
  "blake2 0.10.6",
  "kerlico-config",
@@ -4848,7 +4849,6 @@ dependencies = [
  "kerlico-engine",
  "kerlico-net",
  "rand 0.8.8",
- "ring",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -302,9 +302,9 @@ impl AsyncWrite for Stream {
             };
             let n = bytes.len().min(writer.stream_limit()).min(16 * 1024);
             writer.consume(n);
-            match writer.frame(&bytes[..n]) {
-                Ok(frame) => {
-                    this.pending = frame;
+            this.pending.clear();
+            match writer.frame_into(&bytes[..n], &mut this.pending) {
+                Ok(()) => {
                     this.accepted = Some(n);
                 }
                 Err(error) => {
@@ -345,12 +345,10 @@ impl AsyncWrite for Stream {
                 return Poll::Ready(Err(io_protocol()));
             };
             writer.stream_limit();
-            match writer.frame(&[]) {
-                Ok(frame) => this.pending = frame,
-                Err(error) => {
-                    this.failed = true;
-                    return Poll::Ready(Err(error));
-                }
+            this.pending.clear();
+            if let Err(error) = writer.frame_into(&[], &mut this.pending) {
+                this.failed = true;
+                return Poll::Ready(Err(error));
             }
             this.closing = true;
         }

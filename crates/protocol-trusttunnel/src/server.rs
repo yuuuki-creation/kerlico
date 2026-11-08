@@ -18,6 +18,88 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::{io::AsyncWriteExt, task::JoinSet};
 pub struct TrustTunnelNodeFactory;
+struct TlsStream<S> {
+    inner: S,
+}
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for TlsStream<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        out: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = out.filled().len();
+        match std::pin::Pin::new(&mut self.inner).poll_read(cx, out) {
+            std::task::Poll::Ready(Ok(())) => {
+                if out.filled().len() == before {
+                    return std::task::Poll::Ready(Ok(()));
+                }
+            }
+            other => return other,
+        }
+        while out.remaining() >= 16384 {
+            let mark = out.filled().len();
+            match std::pin::Pin::new(&mut self.inner).poll_read(cx, out) {
+                std::task::Poll::Ready(Ok(())) => {
+                    if out.filled().len() == mark {
+                        break;
+                    }
+                }
+                std::task::Poll::Pending => break,
+                std::task::Poll::Ready(Err(_)) => break,
+            }
+        }
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for TlsStream<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        input: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if input.is_empty() {
+            return std::task::Poll::Ready(Ok(0));
+        }
+        let limit = input.len().min(65536);
+        let mut offset = 0;
+        while offset < limit {
+            match std::pin::Pin::new(&mut self.inner).poll_write(cx, &input[offset..limit]) {
+                std::task::Poll::Ready(Ok(0)) => {
+                    if offset > 0 {
+                        return std::task::Poll::Ready(Ok(offset));
+                    }
+                    return std::task::Poll::Ready(Ok(0));
+                }
+                std::task::Poll::Ready(Ok(n)) => offset += n,
+                std::task::Poll::Pending => {
+                    if offset > 0 {
+                        return std::task::Poll::Ready(Ok(offset));
+                    }
+                    return std::task::Poll::Pending;
+                }
+                std::task::Poll::Ready(Err(err)) => {
+                    if offset > 0 {
+                        return std::task::Poll::Ready(Ok(offset));
+                    }
+                    return std::task::Poll::Ready(Err(err));
+                }
+            }
+        }
+        std::task::Poll::Ready(Ok(offset))
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
 #[derive(Clone)]
 struct Node {
     tls: Arc<rustls::ServerConfig>,
@@ -376,16 +458,17 @@ impl Node {
             ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
         let stream = connect
             .run(async {
-                let stream = tokio_rustls::TlsAcceptor::from(self.tls.clone())
+                let mut stream = tokio_rustls::TlsAcceptor::from(self.tls.clone())
                     .accept(stream)
                     .await?;
+                stream.get_mut().1.set_buffer_limit(Some(68 * 1024));
                 if stream.get_ref().1.alpn_protocol() != Some(self.transport.alpn()[0].as_slice())
                     && !(self.transport == Transport::H1
                         && stream.get_ref().1.alpn_protocol().is_none())
                 {
                     return Err(protocol());
                 }
-                Ok(Box::new(stream) as BoxStream)
+                Ok(Box::new(TlsStream { inner: stream }) as BoxStream)
             })
             .await?;
         if self.transport == Transport::H1 {
@@ -399,10 +482,10 @@ impl Node {
         let mut connection = connect
             .run(async {
                 h2::server::Builder::new()
-                    .initial_window_size(16 * 1024 * 1024)
-                    .initial_connection_window_size(64 * 1024 * 1024)
+                    .initial_window_size(2 * 1024 * 1024)
+                    .initial_connection_window_size(8 * 1024 * 1024)
                     .max_frame_size(65536)
-                    .max_send_buffer_size(4 * 1024 * 1024)
+                    .max_send_buffer_size(1024 * 1024)
                     .max_header_list_size(16384)
                     .max_concurrent_streams(self.limits.max_streams.min(context.max_streams) as u32)
                     .handshake(stream)

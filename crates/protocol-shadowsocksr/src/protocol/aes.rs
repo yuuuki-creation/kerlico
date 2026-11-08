@@ -1,5 +1,6 @@
 use super::{Codec, padding_end, short_padding};
 use crate::{crypto, invalid};
+use bytes::Buf;
 use kerlico_core::Result;
 impl Codec {
     pub(super) fn aes_auth(&self, metadata: &[u8], data: &[u8]) -> Result<Vec<u8>> {
@@ -73,7 +74,7 @@ impl Codec {
             time,
         )?;
         self.header_payload = self.buffer[31 + padding..length - 4].to_vec();
-        self.buffer.drain(..length);
+        self.buffer.advance(length);
         Ok(true)
     }
     pub(super) fn aes_data(&mut self, data: &[u8]) -> Result<Vec<u8>> {
@@ -113,14 +114,14 @@ impl Codec {
         if self.buffer.len() < length {
             return Ok(None);
         }
-        let frame = self.buffer[..length].to_vec();
+        let frame = &self.buffer[..length];
         let expected = crypto::mac(hash, &key, &frame[..length - 4]);
         if !crypto::equal(&expected[..4], &frame[length - 4..]) {
             return Err(invalid());
         }
-        let offset = padding_end(&frame, 4, false, 4)?;
+        let offset = padding_end(frame, 4, false, 4)?;
         let data = frame[offset..length - 4].to_vec();
-        self.buffer.drain(..length);
+        self.buffer.advance(length);
         self.next_receive()?;
         Ok(Some(data))
     }

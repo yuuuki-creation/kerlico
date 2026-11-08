@@ -367,34 +367,37 @@ impl EncryptedWriter {
     where
         S: AsyncWrite + Unpin + ?Sized,
     {
-        if buf.len() > MAX_PACKET_SIZE {
-            buf = &buf[..MAX_PACKET_SIZE];
+        if buf.len() > 4 * MAX_PACKET_SIZE {
+            buf = &buf[..4 * MAX_PACKET_SIZE];
         }
 
         loop {
             match self.state {
                 EncryptWriteState::AssemblePacket => {
-                    // Step 1. Append Length
-                    let length_size = 2 + self.cipher.tag_len();
-                    self.buffer.reserve(length_size);
+                    let tag_len = self.cipher.tag_len();
+                    for chunk in buf.chunks(MAX_PACKET_SIZE) {
+                        // Step 1. Append Length
+                        let length_size = 2 + tag_len;
+                        self.buffer.reserve(length_size);
 
-                    let mbuf = &mut self.buffer.chunk_mut()[..length_size];
-                    let mbuf = unsafe { slice::from_raw_parts_mut(mbuf.as_mut_ptr(), mbuf.len()) };
+                        let mbuf = &mut self.buffer.chunk_mut()[..length_size];
+                        let mbuf = unsafe { slice::from_raw_parts_mut(mbuf.as_mut_ptr(), mbuf.len()) };
 
-                    self.buffer.put_u16(buf.len() as u16);
-                    self.cipher.encrypt_packet(mbuf);
-                    unsafe { self.buffer.advance_mut(self.cipher.tag_len()) };
+                        self.buffer.put_u16(chunk.len() as u16);
+                        self.cipher.encrypt_packet(mbuf);
+                        unsafe { self.buffer.advance_mut(tag_len) };
 
-                    // Step 2. Append data
-                    let data_size = buf.len() + self.cipher.tag_len();
-                    self.buffer.reserve(data_size);
+                        // Step 2. Append data
+                        let data_size = chunk.len() + tag_len;
+                        self.buffer.reserve(data_size);
 
-                    let mbuf = &mut self.buffer.chunk_mut()[..data_size];
-                    let mbuf = unsafe { slice::from_raw_parts_mut(mbuf.as_mut_ptr(), mbuf.len()) };
+                        let mbuf = &mut self.buffer.chunk_mut()[..data_size];
+                        let mbuf = unsafe { slice::from_raw_parts_mut(mbuf.as_mut_ptr(), mbuf.len()) };
 
-                    self.buffer.put_slice(buf);
-                    self.cipher.encrypt_packet(mbuf);
-                    unsafe { self.buffer.advance_mut(self.cipher.tag_len()) };
+                        self.buffer.put_slice(chunk);
+                        self.cipher.encrypt_packet(mbuf);
+                        unsafe { self.buffer.advance_mut(tag_len) };
+                    }
 
                     // Step 3. Write all
                     self.state = EncryptWriteState::Writing { pos: 0, accepted: buf.len() };

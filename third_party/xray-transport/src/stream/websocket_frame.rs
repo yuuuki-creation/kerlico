@@ -80,15 +80,15 @@ pub(crate) fn encode_frame(out: &mut Vec<u8>, opcode: u8, fin: bool, payload: &[
     let start = out.len();
     out.extend_from_slice(payload);
     let dst = &mut out[start..];
-    for chunk in dst.chunks_exact_mut(4) {
-        chunk[0] ^= key[0];
-        chunk[1] ^= key[1];
-        chunk[2] ^= key[2];
-        chunk[3] ^= key[3];
+    let key32 = u32::from_ne_bytes(key) as u64;
+    let key64 = key32 | (key32 << 32);
+    let mut chunks = dst.chunks_exact_mut(8);
+    for chunk in &mut chunks {
+        let val = u64::from_ne_bytes(chunk.try_into().unwrap()) ^ key64;
+        chunk.copy_from_slice(&val.to_ne_bytes());
     }
-    let rem_start = (dst.len() / 4) * 4;
-    for (i, byte) in dst[rem_start..].iter_mut().enumerate() {
-        *byte ^= key[i];
+    for (i, byte) in chunks.into_remainder().iter_mut().enumerate() {
+        *byte ^= key[i & 3];
     }
 }
 

@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
     sync::mpsc,
     time::Instant,
 };
@@ -272,8 +272,10 @@ impl AsyncRead for LogicalStream {
                     if buf.remaining() >= data.len() {
                         buf.put_slice(&data);
                     } else {
+                        let n = buf.remaining();
+                        buf.put_slice(&data[..n]);
                         this.read_buf = data;
-                        this.read_pos = 0;
+                        this.read_pos = n;
                         break;
                     }
                 }
@@ -380,7 +382,7 @@ impl Session {
         incoming: Option<mpsc::Sender<Incoming>>,
         host: Owner,
     ) -> Result<Arc<Self>> {
-        let (tx, mut rx) = mpsc::channel::<QueuedFrame>(128);
+        let (tx, mut rx) = mpsc::channel::<QueuedFrame>(32);
         let session = Arc::new(Self {
             frames: tx,
             streams: Mutex::new(HashMap::new()),
@@ -397,7 +399,7 @@ impl Session {
             permit: Mutex::new(None),
         });
         let (reader, mut writer) = tokio::io::split(stream);
-        let mut reader = BufReader::with_capacity(131072, reader);
+        let mut reader = BufReader::with_capacity(65536, reader);
         let write_session = session.clone();
         session.spawn(async move {
             let result = async {
@@ -466,7 +468,17 @@ impl Session {
                             packet = packet.saturating_add(1);
                             next_frame.encode_into(&mut write_buf)?;
                             if let Some(d) = next_delivery {
-                                pending_deliveries.push(d);
+                                if let Some(last) = pending_deliveries.last_mut()
+                                    && Arc::ptr_eq(&last.stream, &d.stream)
+                                    && matches!(
+                                        (&last.mark, &d.mark),
+                                        (WriteMark::Bytes(_), WriteMark::Bytes(_))
+                                    )
+                                {
+                                    last.mark = d.mark;
+                                } else {
+                                    pending_deliveries.push(d);
+                                }
                             }
                         }
                         writer.write_all(&write_buf).await?;
@@ -586,7 +598,7 @@ impl Session {
         if streams.len() >= self.max_streams || streams.contains_key(&id) {
             return Err(Error::ResourceLimit);
         }
-        let (tx, rx) = mpsc::channel::<Vec<u8>>(128);
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(32);
         let cancel = CancellationToken::new();
         let delivery = Arc::new(Delivery::default());
         let fin_sent = Arc::new(AtomicBool::new(false));
@@ -656,24 +668,53 @@ impl Session {
     }
     async fn receive(
         self: &Arc<Self>,
-        reader: &mut (impl AsyncRead + Unpin),
+        reader: &mut BufReader<impl AsyncRead + Unpin>,
         incoming: Option<mpsc::Sender<Incoming>>,
     ) -> Result<()> {
         let mut settings = false;
         let mut last_id = 0;
+        let mut last_stream: Option<(u32, mpsc::Sender<Vec<u8>>)> = None;
         loop {
-            let frame = Frame::read(reader).await?;
+            let mut frame = Frame::read(reader).await?;
             match frame.command {
                 codec::PSH => {
-                    let sender = self
-                        .streams
-                        .lock()
-                        .unwrap()
-                        .get(&frame.id)
-                        .map(|e| e.data.clone());
+                    loop {
+                        let buf = reader.buffer();
+                        if buf.len() < 7 || buf[0] != codec::PSH {
+                            break;
+                        }
+                        let next_id = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
+                        if next_id != frame.id {
+                            break;
+                        }
+                        let next_len = u16::from_be_bytes([buf[5], buf[6]]) as usize;
+                        if buf.len() < 7 + next_len || frame.data.len() + next_len > 65536 {
+                            break;
+                        }
+                        frame.data.extend_from_slice(&buf[7..7 + next_len]);
+                        reader.consume(7 + next_len);
+                    }
+                    let sender = match &last_stream {
+                        Some((id, tx)) if *id == frame.id => Some(tx.clone()),
+                        _ => {
+                            let tx = self
+                                .streams
+                                .lock()
+                                .unwrap()
+                                .get(&frame.id)
+                                .map(|e| e.data.clone());
+                            if let Some(tx) = &tx {
+                                last_stream = Some((frame.id, tx.clone()));
+                            }
+                            tx
+                        }
+                    };
                     if let Some(sender) = sender
                         && sender.send(frame.data).await.is_err()
                     {
+                        if last_stream.as_ref().is_some_and(|(id, _)| *id == frame.id) {
+                            last_stream = None;
+                        }
                         self.finish(frame.id);
                         self.send(Frame::new(codec::FIN, frame.id, Vec::new()))
                             .await?;
@@ -721,6 +762,9 @@ impl Session {
                     }
                 }
                 codec::FIN => {
+                    if last_stream.as_ref().is_some_and(|(id, _)| *id == frame.id) {
+                        last_stream = None;
+                    }
                     let entry = self.streams.lock().unwrap().remove(&frame.id);
                     if let Some(entry) = entry {
                         entry.end(kerlico_core::FlowOutcome::ProtocolEnd);
@@ -759,6 +803,9 @@ impl Session {
                 }
                 codec::SYNACK if self.client => {
                     if !frame.data.is_empty() {
+                        if last_stream.as_ref().is_some_and(|(id, _)| *id == frame.id) {
+                            last_stream = None;
+                        }
                         self.finish(frame.id);
                     }
                 }

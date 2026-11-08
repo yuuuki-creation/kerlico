@@ -155,53 +155,84 @@ impl InboundProtocol for ShadowsocksRNode {
                 .map_err(|_| Error::ResourceLimit)?;
             let establish =
                 ConnectContext::new(context.connect_timeout).with_cancel(context.cancel.clone());
-            let candidates = Candidates::new(raw);
-            let mut tasks = JoinSet::new();
-            for (group, cfg) in self.groups.iter().enumerate() {
-                let cfg = cfg.candidate();
-                let raw = candidates.reader();
+            let (group, user, plain, target) = if self.groups.len() == 1 {
+                let cfg = self.groups[0].candidate();
                 let cancel = context.cancel.clone();
-                let owner = context.tasks.clone();
-                let task = owner.spawn_tracked(async move {
-                    let mut plain = stream::Stream::new(
-                        Box::new(raw),
-                        cfg.clone(),
-                        Role::Server,
-                        cancel,
-                        String::new(),
-                        0,
-                    )?;
-                    let target = Address::read_from(&mut plain)
-                        .await
-                        .map_err(|_| crate::invalid())?;
-                    let target = destination(&target)?;
-                    let user = if cfg.authenticated() {
-                        plain.authenticated_user()?
-                    } else {
-                        None
-                    };
-                    Ok::<_, Error>((group, user, plain, target, cfg))
-                })?;
-                tasks.spawn(async move {
-                    task.await
-                        .unwrap_or(Err(Error::Protocol("认证任务异常退出")))
-                });
-            }
-            let selected = establish
-                .run(async {
-                    while let Some(result) = tasks.join_next().await {
-                        if let Ok(Ok(result)) = result {
-                            return Ok(result);
+                let cfg_clone = cfg.clone();
+                let (user, plain, target) = establish
+                    .run(async move {
+                        let mut plain = stream::Stream::new(
+                            raw,
+                            cfg_clone.clone(),
+                            Role::Server,
+                            cancel,
+                            String::new(),
+                            0,
+                        )?;
+                        let target = Address::read_from(&mut plain)
+                            .await
+                            .map_err(|_| crate::invalid())?;
+                        let target = destination(&target)?;
+                        let user = if cfg_clone.authenticated() {
+                            plain.authenticated_user()?
+                        } else {
+                            None
+                        };
+                        Ok::<_, Error>((user, plain, target))
+                    })
+                    .await?;
+                cfg.replay.commit()?;
+                (0, user, plain, target)
+            } else {
+                let candidates = Candidates::new(raw);
+                let mut tasks = JoinSet::new();
+                for (group, cfg) in self.groups.iter().enumerate() {
+                    let cfg = cfg.candidate();
+                    let raw = candidates.reader();
+                    let cancel = context.cancel.clone();
+                    let owner = context.tasks.clone();
+                    let task = owner.spawn_tracked(async move {
+                        let mut plain = stream::Stream::new(
+                            Box::new(raw),
+                            cfg.clone(),
+                            Role::Server,
+                            cancel,
+                            String::new(),
+                            0,
+                        )?;
+                        let target = Address::read_from(&mut plain)
+                            .await
+                            .map_err(|_| crate::invalid())?;
+                        let target = destination(&target)?;
+                        let user = if cfg.authenticated() {
+                            plain.authenticated_user()?
+                        } else {
+                            None
+                        };
+                        Ok::<_, Error>((group, user, plain, target, cfg))
+                    })?;
+                    tasks.spawn(async move {
+                        task.await
+                            .unwrap_or(Err(Error::Protocol("认证任务异常退出")))
+                    });
+                }
+                let selected = establish
+                    .run(async {
+                        while let Some(result) = tasks.join_next().await {
+                            if let Ok(Ok(result)) = result {
+                                return Ok(result);
+                            }
                         }
-                    }
-                    Err(Error::Rejected)
-                })
-                .await;
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
-            let (group, user, plain, target, cfg) = selected?;
-            cfg.replay.commit()?;
-            candidates.accept();
+                        Err(Error::Rejected)
+                    })
+                    .await;
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                let (group, user, plain, target, cfg) = selected?;
+                cfg.replay.commit()?;
+                candidates.accept();
+                (group, user, plain, target)
+            };
             let access = if self.credentials.is_empty() {
                 ingress.local(&context)?
             } else {

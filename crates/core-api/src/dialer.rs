@@ -528,6 +528,11 @@ where
     F: Fn(A) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
+    if candidates.len() == 1 {
+        let candidate = candidates.into_iter().next().expect("checked len == 1");
+        let value = attempt(candidate.clone()).await?;
+        return Ok((value, candidate));
+    }
     let mut queue = candidates.into_iter();
     let start = |candidate: A| {
         let future = attempt(candidate.clone());

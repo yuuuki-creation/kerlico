@@ -259,11 +259,11 @@ pub(crate) fn transport(
     let mut config = quinn::TransportConfig::default();
     config.max_concurrent_bidi_streams((streams.min(65536) as u32).into());
     config.max_concurrent_uni_streams((streams.min(65536) as u32).into());
-    config.stream_receive_window((6 * 1024 * 1024u32).into());
-    config.receive_window((16 * 1024 * 1024u32).into());
-    config.send_window(16 * 1024 * 1024);
-    config.datagram_receive_buffer_size(Some(4 * 1024 * 1024));
-    config.datagram_send_buffer_size(4 * 1024 * 1024);
+    config.stream_receive_window((2 * 1024 * 1024u32).into());
+    config.receive_window((8 * 1024 * 1024u32).into());
+    config.send_window(8 * 1024 * 1024);
+    config.datagram_receive_buffer_size(Some(1024 * 1024));
+    config.datagram_send_buffer_size(1024 * 1024);
     config.max_idle_timeout(Some(
         quinn::IdleTimeout::try_from(idle).map_err(|_| invalid())?,
     ));

@@ -175,6 +175,22 @@ impl Destination {
         Ok(Self { address, port })
     }
 
+    /// 直接从字面 IP 与非零端口构造目标地址，省去字符串格式化与重解析。
+    pub fn from_ip(ip: IpAddr, port: u16) -> Result<Self> {
+        if port == 0 {
+            return Err(Error::InvalidAddress);
+        }
+        Ok(Self {
+            address: Address::Ip(ip.to_canonical()),
+            port,
+        })
+    }
+
+    /// 直接从套接字地址构造目标地址。
+    pub fn from_socket_addr(addr: std::net::SocketAddr) -> Result<Self> {
+        Self::from_ip(addr.ip(), addr.port())
+    }
+
     /// 借用字面地址或规范化域名。
     pub fn address(&self) -> &Address {
         &self.address

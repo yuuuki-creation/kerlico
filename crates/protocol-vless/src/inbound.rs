@@ -399,7 +399,8 @@ impl InboundProtocol for VlessNode {
                     return Ok::<_, Error>((reality.accept(stream, &context).await?, None, None));
                 }
                 if let Some(tls) = &self.tls {
-                    let tls_stream = tls.accept(RecordAligned::new(stream)).await?;
+                    let mut tls_stream = tls.accept(RecordAligned::new(stream)).await?;
+                    tls_stream.get_mut().1.set_buffer_limit(Some(68 * 1024));
                     let (_, conn) = tls_stream.get_ref();
                     let sni = conn.server_name().map(str::to_owned);
                     let alpn = conn

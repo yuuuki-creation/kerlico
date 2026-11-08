@@ -202,15 +202,11 @@ impl FlowLedger {
         }
     }
     fn increment(&self, counter: &AtomicU64, value: u64) {
-        let _ = counter.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            Some(match current.checked_add(value) {
-                Some(next) => next,
-                None => {
-                    self.saturated.store(true, Ordering::Release);
-                    u64::MAX
-                }
-            })
-        });
+        let prev = counter.fetch_add(value, Ordering::Relaxed);
+        if prev.checked_add(value).is_none() {
+            counter.store(u64::MAX, Ordering::Release);
+            self.saturated.store(true, Ordering::Release);
+        }
     }
     pub(crate) fn upload(&self, count: usize, packet: bool) {
         self.increment(&self.up, count as u64);

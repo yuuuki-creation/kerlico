@@ -315,7 +315,7 @@ pub(crate) async fn run(
     ));
     let socket = Arc::new(socket);
     let (rx_tx, mut rx_rx) =
-        tokio::sync::mpsc::channel::<std::io::Result<(Vec<u8>, SocketAddr)>>(4096);
+        tokio::sync::mpsc::channel::<std::io::Result<(Vec<u8>, SocketAddr)>>(1024);
     let rx_socket = socket.clone();
     let rx_cancel = stack.cancel.clone();
     tokio::spawn(async move {
@@ -392,12 +392,12 @@ pub(crate) async fn run(
                     }
                     next_pkt = rx_rx.try_recv().ok();
                 }
-                sent_in_window = sent_in_window.saturating_sub(batch);
+                sent_in_window = sent_in_window.saturating_sub(batch * 8);
             }
             _ = stack.notify.notified() => {}
         }
         let budget = if crypto.ready() {
-            32usize.saturating_sub(sent_in_window)
+            128usize.saturating_sub(sent_in_window)
         } else {
             1
         };

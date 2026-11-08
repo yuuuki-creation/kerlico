@@ -176,7 +176,10 @@ impl StreamCipher {
         let result = self.key.seal(&nonce, plain);
         match result {
             Ok(encrypted) => {
-                let mut out = Vec::with_capacity(encrypted.len() + usize::from(first) * 24);
+                if !first {
+                    return Ok(encrypted);
+                }
+                let mut out = Vec::with_capacity(encrypted.len() + 24);
                 if first {
                     out.extend(nonce);
                 }

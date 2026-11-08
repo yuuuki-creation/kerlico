@@ -7,6 +7,7 @@ use crate::{
     invalid,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use bytes::BytesMut;
 use kerlico_core::{Error, Result};
 use shadowsocks::crypto::CipherKind;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ pub(crate) struct Codec {
     pub recv_iv: Vec<u8>,
     pub sent_header: bool,
     pub received_header: bool,
-    pub buffer: Vec<u8>,
+    pub buffer: BytesMut,
     pub header_payload: Vec<u8>,
     pub user_key: Vec<u8>,
     pub uid: u32,
@@ -51,7 +52,7 @@ impl Codec {
             recv_iv: Vec::new(),
             sent_header: false,
             received_header: role == Role::Client || origin,
-            buffer: Vec::new(),
+            buffer: BytesMut::new(),
             header_payload: Vec::new(),
             user_key,
             uid,
@@ -145,7 +146,10 @@ impl Codec {
         if self.buffer.len() + data.len() > 2 * 1048576 {
             return Err(Error::ResourceLimit);
         }
-        self.recv_iv = iv.to_vec();
+        if self.recv_iv.as_slice() != iv {
+            self.recv_iv.clear();
+            self.recv_iv.extend_from_slice(iv);
+        }
         self.buffer.extend_from_slice(data);
         let mut output = Vec::new();
         let mut reply = false;

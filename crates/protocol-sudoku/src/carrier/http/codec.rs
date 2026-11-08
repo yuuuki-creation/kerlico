@@ -33,7 +33,8 @@ impl Mode {
         if self == Self::Stream {
             return bytes.to_vec();
         }
-        let mut out = Vec::new();
+        let lines = bytes.len().div_ceil(16 * 1024);
+        let mut out = Vec::with_capacity(bytes.len().div_ceil(3) * 4 + lines);
         for line in bytes.chunks(16 * 1024) {
             out.extend_from_slice(STANDARD.encode(line).as_bytes());
             out.push(b'\n');
@@ -47,7 +48,7 @@ impl Mode {
         if self == Self::Stream {
             return Ok(bytes.to_vec());
         }
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity((bytes.len() / 4 * 3).min(1024 * 1024));
         for line in bytes.split(|&b| b == b'\n') {
             let line = trim(line);
             if line.is_empty() {

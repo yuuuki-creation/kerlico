@@ -109,7 +109,11 @@ impl InboundProtocol for Node {
             if let Some(tls) = &self.tls {
                 inner = ConnectContext::new(context.connect_timeout)
                     .with_cancel(context.cancel.clone())
-                    .run(async { Ok(Box::new(tls.accept(inner).await?) as BoxStream) })
+                    .run(async {
+                        let mut tls_stream = tls.accept(inner).await?;
+                        tls_stream.get_mut().1.set_buffer_limit(Some(68 * 1024));
+                        Ok(Box::new(ServerTls(tls_stream)) as BoxStream)
+                    })
                     .await?;
             }
             if self.transport.raw() {
@@ -215,5 +219,78 @@ impl Payload {
             }
         });
         result
+    }
+}
+struct ServerTls(tokio_rustls::server::TlsStream<BoxStream>);
+impl tokio::io::AsyncRead for ServerTls {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        out: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = out.filled().len();
+        let poll = std::pin::Pin::new(&mut this.0).poll_read(cx, out);
+        if matches!(poll, std::task::Poll::Ready(Ok(()))) && out.filled().len() > before {
+            while out.remaining() >= 16384 {
+                let prev = out.filled().len();
+                match std::pin::Pin::new(&mut this.0).poll_read(cx, out) {
+                    std::task::Poll::Ready(Ok(())) if out.filled().len() > prev => {}
+                    _ => break,
+                }
+            }
+        }
+        poll
+    }
+}
+impl tokio::io::AsyncWrite for ServerTls {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        if bytes.is_empty() {
+            return std::pin::Pin::new(&mut this.0).poll_write(cx, bytes);
+        }
+        let limit = bytes.len().min(65536);
+        let mut total = 0;
+        while total < limit {
+            match std::pin::Pin::new(&mut this.0).poll_write(cx, &bytes[total..limit]) {
+                std::task::Poll::Ready(Ok(0)) => break,
+                std::task::Poll::Ready(Ok(n)) => total += n,
+                std::task::Poll::Ready(Err(_)) if total > 0 => {
+                    return std::task::Poll::Ready(Ok(total));
+                }
+                std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Pending if total > 0 => {
+                    return std::task::Poll::Ready(Ok(total));
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+        std::task::Poll::Ready(Ok(total))
+    }
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
     }
 }

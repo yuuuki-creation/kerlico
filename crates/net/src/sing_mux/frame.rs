@@ -57,7 +57,7 @@ const YAMUX_MAX_FRAME: usize = 32 * 1024;
 /// 与 sing-mux 的 yamux `StreamCloseTimeout` 一致：本端关闭后等待对端 FIN 的时长。
 const YAMUX_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-const DATA_QUEUE: usize = 256;
+const DATA_QUEUE: usize = 64;
 const ACCEPT_BACKLOG: usize = 256;
 const WRITE_BATCH: usize = 64 * 1024;
 
@@ -323,7 +323,10 @@ async fn write_loop<W: AsyncWrite>(
                 break;
             }
         }
-        if writer.write_all(&batch).await.is_err() || writer.flush().await.is_err() {
+        if writer.write_all(&batch).await.is_err() {
+            break;
+        }
+        if ctrl.is_empty() && data.is_empty() && writer.flush().await.is_err() {
             break;
         }
     }
@@ -343,10 +346,14 @@ async fn skip<R: AsyncRead + Unpin>(reader: &mut R, len: usize) -> io::Result<()
     Ok(())
 }
 
-async fn read_payload<R: AsyncRead + Unpin>(reader: &mut R, len: usize) -> io::Result<Bytes> {
-    let mut payload = vec![0u8; len];
-    reader.read_exact(&mut payload).await?;
-    Ok(payload.into())
+async fn read_payload<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut bytes::BytesMut,
+    len: usize,
+) -> io::Result<Bytes> {
+    buf.resize(len, 0);
+    reader.read_exact(&mut buf[..len]).await?;
+    Ok(buf.split_to(len).freeze())
 }
 
 async fn read_loop<R: AsyncRead + Unpin>(
@@ -428,6 +435,7 @@ async fn smux_read_loop<R: AsyncRead + Unpin>(
     accept: Option<mpsc::Sender<FrameStream>>,
 ) -> io::Result<()> {
     let mut hdr = [0u8; 8];
+    let mut scratch = bytes::BytesMut::with_capacity(64 * 1024);
     loop {
         loop {
             let drained = shared.drained.notified();
@@ -463,7 +471,7 @@ async fn smux_read_loop<R: AsyncRead + Unpin>(
                 if len == 0 {
                     continue;
                 }
-                let payload = read_payload(reader, len).await?;
+                let payload = read_payload(reader, &mut scratch, len).await?;
                 if let Some(entry) = shared.entry(sid) {
                     push_data(shared, &entry, payload);
                 }
@@ -480,6 +488,7 @@ async fn yamux_read_loop<R: AsyncRead + Unpin>(
     accept: Option<mpsc::Sender<FrameStream>>,
 ) -> io::Result<()> {
     let mut hdr = [0u8; 12];
+    let mut scratch = bytes::BytesMut::with_capacity(64 * 1024);
     loop {
         match reader.read_exact(&mut hdr).await {
             Ok(_) => {}
@@ -507,7 +516,7 @@ async fn yamux_read_loop<R: AsyncRead + Unpin>(
                     if length > YAMUX_INITIAL_WINDOW * 4 {
                         return Err(protocol_error("yamux 数据帧超过接收窗口"));
                     }
-                    let payload = read_payload(reader, length as usize).await?;
+                    let payload = read_payload(reader, &mut scratch, length as usize).await?;
                     if let Some(entry) = &entry {
                         {
                             let mut st = entry.lock().expect("流状态锁");
@@ -592,6 +601,9 @@ impl AsyncRead for FrameStream {
             copied += n;
         }
         st.recv_len -= copied;
+        if st.remote_fin && st.recv.is_empty() {
+            st.recv.shrink_to_fit();
+        }
         let mut credit = None;
         if this.shared.codec == Codec::Yamux {
             st.consumed += copied as u32;

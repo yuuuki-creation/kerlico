@@ -25,8 +25,14 @@ pub trait DeviceNetwork: Send + Sync {
         Box::pin(async move {
             let socket = context.run(self.connect_udp(target)).await?;
             Ok(DatagramChannel {
-                sender: Box::new(NativeDatagram(socket.clone())),
-                receiver: Box::new(NativeDatagram(socket)),
+                sender: Box::new(NativeDatagram {
+                    socket: socket.clone(),
+                    buf: Vec::new(),
+                }),
+                receiver: Box::new(NativeDatagram {
+                    socket,
+                    buf: vec![0; 65_535],
+                }),
             })
         })
     }
@@ -44,11 +50,13 @@ pub trait DeviceNetwork: Send + Sync {
                     socket: socket.clone(),
                     cancel: context.cancel.clone(),
                     ipv6,
+                    buf: Vec::new(),
                 }),
                 receiver: Box::new(NativeAssociation {
                     socket,
                     cancel: context.cancel.clone(),
                     ipv6,
+                    buf: vec![0; 65_535],
                 }),
             })
         })
@@ -91,11 +99,13 @@ impl DeviceLease {
                 socket: socket.clone(),
                 cancel: context.cancel.clone(),
                 ipv6,
+                buf: Vec::new(),
             }),
             receiver: Box::new(NativeAssociation {
                 socket,
                 cancel: context.cancel.clone(),
                 ipv6,
+                buf: vec![0; 65_535],
             }),
         })
     }
@@ -139,12 +149,16 @@ impl DeviceLease {
     }
 }
 
-struct NativeDatagram(Arc<UdpSocket>);
+struct NativeDatagram {
+    socket: Arc<UdpSocket>,
+    buf: Vec<u8>,
+}
 
 struct NativeAssociation {
     socket: Arc<UdpSocket>,
     cancel: crate::CancellationToken,
     ipv6: bool,
+    buf: Vec<u8>,
 }
 impl DatagramAssociationSender for NativeAssociation {
     fn send_to<'a>(
@@ -179,12 +193,10 @@ impl DatagramAssociationSender for NativeAssociation {
 impl DatagramAssociationReceiver for NativeAssociation {
     fn recv_from(&mut self) -> BoxFuture<'_, Result<Option<crate::AddressedDatagram>>> {
         Box::pin(async move {
-            let mut bytes = vec![0; 65_535];
-            let (count, source) = tokio::select! { biased; _ = self.cancel.cancelled() => return Err(Error::Cancelled), result = self.socket.recv_from(&mut bytes) => result? };
-            bytes.truncate(count);
+            let (count, source) = tokio::select! { biased; _ = self.cancel.cancelled() => return Err(Error::Cancelled), result = self.socket.recv_from(&mut self.buf) => result? };
             Ok(Some((
-                Destination::new(&source.ip().to_canonical().to_string(), source.port())?,
-                bytes,
+                Destination::from_socket_addr(source)?,
+                self.buf[..count].to_vec(),
             )))
         })
     }
@@ -193,7 +205,7 @@ impl DatagramAssociationReceiver for NativeAssociation {
 impl DatagramSender for NativeDatagram {
     fn send<'a>(&'a mut self, packet: &'a [u8]) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let count = self.0.send(packet).await?;
+            let count = self.socket.send(packet).await?;
             if count != packet.len() {
                 return Err(Error::Protocol("UDP通道未发送完整数据报"));
             }
@@ -204,15 +216,13 @@ impl DatagramSender for NativeDatagram {
 
 impl DatagramReceiver for NativeDatagram {
     fn peer_addr(&self) -> Option<Destination> {
-        let peer = self.0.peer_addr().ok()?;
-        Destination::new(&peer.ip().to_string(), peer.port()).ok()
+        let peer = self.socket.peer_addr().ok()?;
+        Destination::from_socket_addr(peer).ok()
     }
     fn recv(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>>> {
         Box::pin(async move {
-            let mut bytes = vec![0; 65_535];
-            let count = self.0.recv(&mut bytes).await?;
-            bytes.truncate(count);
-            Ok(Some(bytes))
+            let count = self.socket.recv(&mut self.buf).await?;
+            Ok(Some(self.buf[..count].to_vec()))
         })
     }
 }

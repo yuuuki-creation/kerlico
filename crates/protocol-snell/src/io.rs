@@ -4,30 +4,38 @@ use std::{
     future::Future,
     io,
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
-    sync::watch,
     time::Instant,
 };
 pub(crate) struct Activity {
     inner: BoxStream,
-    events: watch::Sender<Instant>,
+    activity: Arc<AtomicBool>,
 }
-pub(crate) fn observe(inner: BoxStream) -> (BoxStream, watch::Receiver<Instant>) {
-    let (events, receiver) = watch::channel(Instant::now());
-    (Box::new(Activity { inner, events }), receiver)
+pub(crate) fn observe(inner: BoxStream) -> (BoxStream, Arc<AtomicBool>) {
+    let activity = Arc::new(AtomicBool::new(false));
+    (
+        Box::new(Activity {
+            inner,
+            activity: activity.clone(),
+        }),
+        activity,
+    )
 }
 pub(crate) async fn bounded<T>(
     future: impl Future<Output = Result<T>>,
-    mut events: watch::Receiver<Instant>,
+    activity: Arc<AtomicBool>,
     idle: Duration,
     cancel: kerlico_core::CancellationToken,
 ) -> Result<T> {
     tokio::pin!(future);
-    let mut events_open = true;
     let timer = tokio::time::sleep(idle);
     tokio::pin!(timer);
     loop {
@@ -35,10 +43,12 @@ pub(crate) async fn bounded<T>(
             biased;
             _ = cancel.cancelled() => return Err(Error::Cancelled),
             result = &mut future => return result,
-            _ = &mut timer => return Err(Error::Timeout),
-            changed = events.changed(), if events_open => {
-                if changed.is_ok() { timer.as_mut().reset(*events.borrow_and_update() + idle); }
-                else { events_open = false; }
+            _ = &mut timer => {
+                if activity.swap(false, Ordering::Relaxed) {
+                    timer.as_mut().reset(Instant::now() + idle);
+                } else {
+                    return Err(Error::Timeout);
+                }
             },
         }
     }
@@ -53,7 +63,7 @@ impl AsyncRead for Activity {
         let before = out.filled().len();
         let result = Pin::new(&mut this.inner).poll_read(cx, out);
         if matches!(result, Poll::Ready(Ok(()))) && out.filled().len() > before {
-            this.events.send_replace(Instant::now());
+            this.activity.store(true, Ordering::Relaxed);
         }
         result
     }
@@ -67,7 +77,7 @@ impl AsyncWrite for Activity {
         let this = self.get_mut();
         let result = Pin::new(&mut this.inner).poll_write(cx, bytes);
         if matches!(result, Poll::Ready(Ok(n)) if n>0) {
-            this.events.send_replace(Instant::now());
+            this.activity.store(true, Ordering::Relaxed);
         }
         result
     }

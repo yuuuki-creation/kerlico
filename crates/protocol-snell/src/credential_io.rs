@@ -40,6 +40,7 @@ impl Candidates {
     pub fn accept(&self) {
         if let Ok(mut state) = self.0.lock() {
             state.accepted = true;
+            state.bytes = Vec::new();
             state.waiters.clear();
         }
     }

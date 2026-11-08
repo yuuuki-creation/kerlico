@@ -294,25 +294,31 @@ impl AsyncWrite for Encrypted {
         if bytes.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        let count = bytes.len().min(8192);
-        this.pending = if this.direct_write {
-            bytes[..count].to_vec()
-        } else {
-            match this.encrypt.seal(&bytes[..count]) {
-                Ok(v) => v,
-                Err(_) => {
-                    this.failed = true;
-                    return Poll::Ready(Err(malformed()));
+        let total = bytes.len().min(65536);
+        for chunk in bytes[..total].chunks(8192) {
+            let mut record = if this.direct_write {
+                chunk.to_vec()
+            } else {
+                match this.encrypt.seal(chunk) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        this.failed = true;
+                        return Poll::Ready(Err(malformed()));
+                    }
                 }
+            };
+            if let Some(mask) = &mut this.write_xor
+                && mask.apply(&mut record).is_err()
+            {
+                this.failed = true;
+                return Poll::Ready(Err(malformed()));
             }
-        };
-        if let Some(mask) = &mut this.write_xor
-            && mask.apply(&mut this.pending).is_err()
-        {
-            this.failed = true;
-            return Poll::Ready(Err(malformed()));
+            this.pending.extend_from_slice(&record);
         }
-        Poll::Ready(Ok(count))
+        if let Poll::Ready(Err(error)) = this.drain(cx) {
+            return Poll::Ready(Err(error));
+        }
+        Poll::Ready(Ok(total))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();

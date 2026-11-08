@@ -26,6 +26,7 @@ use tokio::{sync::mpsc, time::Instant};
 struct ConnectionPool {
     connections: tokio::sync::Mutex<Vec<Arc<Connection>>>,
     connecting: AtomicUsize,
+    dial_lock: tokio::sync::Mutex<()>,
 }
 type MemberConnection = ConnectionPool;
 struct ConnectingGuard(Arc<MemberConnection>);
@@ -469,6 +470,33 @@ impl Client {
                 .clone()
         };
         let max_pool = if reserve_tcp { 4usize } else { 1usize };
+        let _dial_guard = {
+            let mut connections = bucket.connections.lock().await;
+            connections.retain(|connection| {
+                connection.quic.close_reason().is_none()
+                    && connection.next.load(Ordering::Acquire)
+                        < if connection.version == 4 {
+                            u32::MAX
+                        } else {
+                            65535
+                        }
+            });
+            if !reserve_tcp {
+                if let Some(connection) = connections.first() {
+                    return Ok(connection.clone());
+                }
+            } else if let Some(best) = connections
+                .iter()
+                .min_by_key(|c| c.active.load(Ordering::Acquire))
+                && (best.active.load(Ordering::Acquire) < 32 || connections.len() >= max_pool)
+            {
+                best.active.fetch_add(1, Ordering::AcqRel);
+                best.touch();
+                return Ok(best.clone());
+            }
+            drop(connections);
+            bucket.dial_lock.lock().await
+        };
         {
             let mut connections = bucket.connections.lock().await;
             connections.retain(|connection| {
@@ -487,7 +515,10 @@ impl Client {
             } else {
                 if let Some(idle) = connections
                     .iter()
-                    .find(|c| c.active.load(Ordering::Acquire) == 0)
+                    .min_by_key(|c| c.active.load(Ordering::Acquire))
+                    .filter(|c| {
+                        c.active.load(Ordering::Acquire) < 32 || connections.len() >= max_pool
+                    })
                 {
                     idle.active.fetch_add(1, Ordering::AcqRel);
                     idle.touch();

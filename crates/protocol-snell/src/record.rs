@@ -26,6 +26,7 @@ pub(crate) struct Reader {
     pub physical_closed: bool,
     sequence: u32,
     pub v3_chacha_used: bool,
+    body_buf: Vec<u8>,
 }
 impl Reader {
     pub fn new(io: ReadHalf<BoxStream>, settings: Arc<Settings>) -> Self {
@@ -39,6 +40,7 @@ impl Reader {
             physical_closed: false,
             sequence: 0,
             v3_chacha_used,
+            body_buf: Vec::new(),
         }
     }
     pub fn salt(&self) -> Option<[u8; 16]> {
@@ -50,41 +52,47 @@ impl Reader {
         }
         if self.settings.version == 3 {
             let first = !self.initialized;
+            let mut derived_key = None;
             if first {
                 let mut salt = [0u8; 16];
                 self.io.read_exact(&mut salt).await?;
-                self.cipher = Some(Cipher::new_v3(
-                    &self.settings.psk,
-                    &salt,
-                    self.settings.v3_chacha,
-                )?);
+                let key = Cipher::derive_key(&self.settings.psk, &salt)?;
+                self.cipher = Some(Cipher::from_derived_key(&key, self.settings.v3_chacha)?);
+                derived_key = Some(key);
                 self.salt = Some(salt);
                 self.initialized = true;
             }
-            let mut head = vec![0; 18];
+            let mut head = [0u8; 18];
             let count = self.io.read(&mut head).await?;
             if count == 0 {
                 self.physical_closed = true;
                 return Ok(None);
             }
             self.io.read_exact(&mut head[count..]).await?;
-            let header = {
+            self.body_buf.clear();
+            self.body_buf.extend_from_slice(&head);
+            {
                 let cipher = self.cipher.as_mut().ok_or_else(io_protocol)?;
-                match cipher.open(head.clone(), &[]) {
-                    Ok(h) => h,
+                match cipher.open_in_place(&mut self.body_buf, &[]) {
+                    Ok(()) => {}
                     Err(_) if first => {
-                        let salt = self.salt.ok_or_else(io_protocol)?;
+                        let mut key = derived_key.ok_or_else(io_protocol)?;
                         let alt_chacha = !self.settings.v3_chacha;
-                        let mut alt = Cipher::new_v3(&self.settings.psk, &salt, alt_chacha)?;
-                        let h = alt.open(head, &[])?;
+                        let mut alt = Cipher::from_derived_key(&key, alt_chacha)?;
+                        key.fill(0);
+                        self.body_buf.clear();
+                        self.body_buf.extend_from_slice(&head);
+                        alt.open_in_place(&mut self.body_buf, &[])?;
                         self.v3_chacha_used = alt_chacha;
                         self.cipher = Some(alt);
-                        h
                     }
                     Err(e) => return Err(e),
                 }
-            };
-            let len = u16::from_be_bytes([header[0], header[1]]) as usize;
+            }
+            if let Some(mut key) = derived_key {
+                key.fill(0);
+            }
+            let len = u16::from_be_bytes([self.body_buf[0], self.body_buf[1]]) as usize;
             if len > 0x3fff {
                 return Err(io_protocol());
             }
@@ -95,16 +103,21 @@ impl Reader {
             let mut bytes = vec![0; len + 16];
             self.io.read_exact(&mut bytes).await?;
             let cipher = self.cipher.as_mut().ok_or_else(io_protocol)?;
-            return cipher.open(bytes, &[]).map(Some);
+            cipher.open_in_place(&mut bytes, &[])?;
+            return Ok(Some(bytes));
         }
         if !self.initialized {
             if !self.settings.raw() {
                 let length = self.settings.profile.as_ref().map_or(16, |p| p.salt_len);
-                let mut block = vec![0; length];
-                self.io.read_exact(&mut block).await?;
+                self.body_buf.resize(length, 0);
+                self.io.read_exact(&mut self.body_buf).await?;
                 let salt = match &self.settings.profile {
-                    Some(profile) => profile.extract_salt(&block),
-                    None => block.as_slice().try_into().map_err(|_| io_protocol())?,
+                    Some(profile) => profile.extract_salt(&self.body_buf),
+                    None => self
+                        .body_buf
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| io_protocol())?,
                 };
                 self.cipher = Some(Cipher::new(&self.settings.psk, &salt)?);
                 self.salt = Some(salt);
@@ -116,18 +129,29 @@ impl Reader {
             .profile
             .as_ref()
             .map_or(0, |p| p.prefix_len(self.sequence));
-        let mut head = vec![0; prefix_len + if self.settings.raw() { 7 } else { 23 }];
-        let count = self.io.read(&mut head).await?;
+        let head_len = prefix_len + if self.settings.raw() { 7 } else { 23 };
+        self.body_buf.resize(head_len, 0);
+        let count = self.io.read(&mut self.body_buf).await?;
         if count == 0 {
             self.physical_closed = true;
             return Ok(None);
         }
-        self.io.read_exact(&mut head[count..]).await?;
-        let prefix = head[..prefix_len].to_vec();
-        let wire = head[prefix_len..].to_vec();
-        let header = match &mut self.cipher {
-            Some(cipher) => cipher.open(wire, &prefix)?,
-            None => wire,
+        self.io.read_exact(&mut self.body_buf[count..]).await?;
+        let header: [u8; 7] = if prefix_len == 0 {
+            if let Some(cipher) = &mut self.cipher {
+                cipher.open_in_place(&mut self.body_buf, &[])?;
+            }
+            self.body_buf
+                .as_slice()
+                .try_into()
+                .map_err(|_| io_protocol())?
+        } else {
+            let prefix = &self.body_buf[..prefix_len];
+            let mut wire = self.body_buf[prefix_len..].to_vec();
+            if let Some(cipher) = &mut self.cipher {
+                cipher.open_in_place(&mut wire, prefix)?;
+            }
+            wire.as_slice().try_into().map_err(|_| io_protocol())?
         };
         if header[0] != 4 || (self.settings.profile.is_none() && (header[1] != 0 || header[2] != 0))
         {
@@ -143,8 +167,8 @@ impl Reader {
         if len == 0 && self.settings.version < 6 && pad != 0 {
             return Err(io_protocol());
         }
-        let mut padding = vec![0; pad];
-        self.io.read_exact(&mut padding).await?;
+        self.body_buf.resize(pad, 0);
+        self.io.read_exact(&mut self.body_buf).await?;
         let sequence = self.sequence;
         self.sequence = self.sequence.checked_add(1).ok_or_else(io_protocol)?;
         if len == 0 {
@@ -153,19 +177,19 @@ impl Reader {
         let mut bytes = vec![0; len + if self.cipher.is_some() { 16 } else { 0 }];
         self.io.read_exact(&mut bytes).await?;
         if let Some(profile) = &self.settings.profile {
-            profile.mix(sequence, &mut padding, &mut bytes);
+            profile.mix(sequence, &mut self.body_buf, &mut bytes);
         } else if self.settings.version < 6 {
-            interleave(&mut padding, &mut bytes);
+            interleave(&mut self.body_buf, &mut bytes);
         }
         let aad = if self.settings.profile.is_some() {
-            padding.as_slice()
+            self.body_buf.as_slice()
         } else {
             &[]
         };
-        match &mut self.cipher {
-            Some(cipher) => cipher.open(bytes, aad).map(Some),
-            None => Ok(Some(bytes)),
+        if let Some(cipher) = &mut self.cipher {
+            cipher.open_in_place(&mut bytes, aad)?;
         }
+        Ok(Some(bytes))
     }
 }
 pub(crate) struct Writer {
@@ -187,17 +211,10 @@ impl Writer {
         let mut salt = [0; 16];
         rand::rngs::OsRng.fill_bytes(&mut salt);
         let v3_chacha = settings.v3_chacha;
-        let cipher = if settings.raw() {
-            None
-        } else if settings.version == 3 {
-            Some(Cipher::new_v3(&settings.psk, &salt, v3_chacha)?)
-        } else {
-            Some(Cipher::new(&settings.psk, &salt)?)
-        };
         let initial_padding = 256 + (rand::rngs::OsRng.next_u32() as usize % 256);
         Ok(Self {
             settings,
-            cipher,
+            cipher: None,
             salt,
             v3_chacha,
             sent_salt: false,
@@ -213,7 +230,17 @@ impl Writer {
     pub fn sync_v3_cipher(&mut self, chacha: bool) -> io::Result<()> {
         if self.settings.version == 3 && !self.sent_salt && self.v3_chacha != chacha {
             self.v3_chacha = chacha;
-            self.cipher = Some(Cipher::new_v3(&self.settings.psk, &self.salt, chacha)?);
+            self.cipher = None;
+        }
+        Ok(())
+    }
+    fn ensure_cipher(&mut self) -> io::Result<()> {
+        if self.cipher.is_none() && !self.settings.raw() {
+            self.cipher = Some(if self.settings.version == 3 {
+                Cipher::new_v3(&self.settings.psk, &self.salt, self.v3_chacha)?
+            } else {
+                Cipher::new(&self.settings.psk, &self.salt)?
+            });
         }
         Ok(())
     }
@@ -270,28 +297,36 @@ impl Writer {
         self.batch_left = self.batch_left.saturating_sub(n);
     }
     pub fn frame(&mut self, payload: &[u8]) -> io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.frame_into(payload, &mut out)?;
+        Ok(out)
+    }
+    pub fn frame_into(&mut self, payload: &[u8], out: &mut Vec<u8>) -> io::Result<()> {
         if payload.len() > self.maximum() {
             return Err(io_protocol());
         }
+        self.ensure_cipher()?;
         let first = !self.sent_salt;
         if self.settings.version == 3 {
             let cipher = self.cipher.as_mut().ok_or_else(io_protocol)?;
-            let header = cipher.seal(&(payload.len() as u16).to_be_bytes(), &[])?;
-            let body = if payload.is_empty() {
-                Vec::new()
-            } else {
-                cipher.seal(payload, &[])?
-            };
-            let mut out =
-                Vec::with_capacity(if first { 16 } else { 0 } + header.len() + body.len());
+            let needed = (if first { 16 } else { 0 })
+                + 18
+                + if payload.is_empty() {
+                    0
+                } else {
+                    payload.len() + 16
+                };
+            out.reserve(needed);
             if first {
                 out.extend_from_slice(&self.salt);
             }
-            out.extend_from_slice(&header);
-            out.extend_from_slice(&body);
+            cipher.seal_into(&(payload.len() as u16).to_be_bytes(), &[], out)?;
+            if !payload.is_empty() {
+                cipher.seal_into(payload, &[], out)?;
+            }
             self.sent_salt = true;
             self.sequence = self.sequence.checked_add(1).ok_or_else(io_protocol)?;
-            return Ok(out);
+            return Ok(());
         }
         let padding_len = if let Some(profile) = &self.settings.profile {
             profile.padding_len(self.sequence, payload.len(), first)
@@ -300,42 +335,22 @@ impl Writer {
         } else {
             0
         };
-        let mut padding = match &self.settings.profile {
-            Some(profile) => profile.filler(self.sequence, padding_len),
-            None => vec![0; padding_len],
-        };
         let prefix = match &self.settings.profile {
             Some(profile) => profile.filler(self.sequence, profile.prefix_len(self.sequence)),
             None => Vec::new(),
         };
-        let mut header = vec![4, 0, 0];
-        header.extend_from_slice(&(padding_len as u16).to_be_bytes());
-        header.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-        let header = match &mut self.cipher {
-            Some(cipher) => cipher.seal(&header, &prefix)?,
-            None => header,
-        };
-        let aad = if self.settings.profile.is_some() {
-            padding.as_slice()
+        let mut header = [0u8; 7];
+        header[0] = 4;
+        header[3..5].copy_from_slice(&(padding_len as u16).to_be_bytes());
+        header[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        let body_len = if payload.is_empty() {
+            0
+        } else if self.cipher.is_some() {
+            payload.len() + 16
         } else {
-            &[]
+            payload.len()
         };
-        let mut body = if payload.is_empty() {
-            Vec::new()
-        } else {
-            match &mut self.cipher {
-                Some(cipher) => cipher.seal(payload, aad)?,
-                None => payload.to_vec(),
-            }
-        };
-        if let Some(profile) = &self.settings.profile {
-            profile.mix(self.sequence, &mut padding, &mut body);
-        } else if self.settings.version < 6 {
-            balanced_padding(&mut padding, &body);
-            interleave(&mut padding, &mut body);
-        }
-        let mut out =
-            Vec::with_capacity(160 + prefix.len() + header.len() + padding.len() + body.len());
+        out.reserve(160 + prefix.len() + 23 + padding_len + body_len);
         if first && !self.settings.raw() {
             match &self.settings.profile {
                 Some(profile) => out.extend_from_slice(&profile.salt_block(&self.salt)),
@@ -343,12 +358,42 @@ impl Writer {
             }
         }
         out.extend_from_slice(&prefix);
-        out.extend_from_slice(&header);
-        out.extend_from_slice(&padding);
-        out.extend_from_slice(&body);
+        match &mut self.cipher {
+            Some(cipher) => cipher.seal_into(&header, &prefix, out)?,
+            None => out.extend_from_slice(&header),
+        }
+        let pad_start = out.len();
+        if let Some(profile) = &self.settings.profile {
+            let padding = profile.filler(self.sequence, padding_len);
+            out.extend_from_slice(&padding);
+            if !payload.is_empty() {
+                match &mut self.cipher {
+                    Some(cipher) => cipher.seal_into(payload, &padding, out)?,
+                    None => out.extend_from_slice(payload),
+                }
+            }
+        } else {
+            out.resize(pad_start + padding_len, 0);
+            if !payload.is_empty() {
+                match &mut self.cipher {
+                    Some(cipher) => cipher.seal_into(payload, &[], out)?,
+                    None => out.extend_from_slice(payload),
+                }
+            }
+        }
+        if padding_len > 0 {
+            let (_, tail) = out.split_at_mut(pad_start);
+            let (padding_slice, body_slice) = tail.split_at_mut(padding_len);
+            if let Some(profile) = &self.settings.profile {
+                profile.mix(self.sequence, padding_slice, body_slice);
+            } else if self.settings.version < 6 {
+                balanced_padding(padding_slice, body_slice);
+                interleave(padding_slice, body_slice);
+            }
+        }
         self.sent_salt = true;
         self.sequence = self.sequence.checked_add(1).ok_or_else(io_protocol)?;
-        Ok(out)
+        Ok(())
     }
 }
 fn interleave(padding: &mut [u8], body: &mut [u8]) {

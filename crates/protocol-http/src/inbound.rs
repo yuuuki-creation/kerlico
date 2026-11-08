@@ -321,7 +321,7 @@ impl HttpNode {
                                 if parts.read_buf.is_empty() {
                                     inner
                                 } else {
-                                    Box::new(UpgradedConnectStream {
+                                    kerlico_core::SpliceBox::boxed(UpgradedConnectStream {
                                         inner,
                                         prefix: parts.read_buf,
                                     })
@@ -597,14 +597,63 @@ impl InboundProtocol for HttpNode {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             if let Some(tls) = &self.tls {
-                stream = Box::new(
-                    connect(&context)
-                        .run(async { Ok(tls.accept(stream).await?) })
-                        .await?,
-                );
+                let mut tls_stream = connect(&context)
+                    .run(async { Ok(tls.accept(stream).await?) })
+                    .await?;
+                tls_stream.get_mut().1.set_buffer_limit(Some(68 * 1024));
+                stream = Box::new(ServerTlsStream(tls_stream));
             }
             self.serve_http(stream, ingress, context).await
         })
+    }
+}
+
+struct ServerTlsStream(tokio_rustls::server::TlsStream<BoxStream>);
+impl AsyncRead for ServerTlsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = out.filled().len();
+        let poll = Pin::new(&mut this.0).poll_read(cx, out);
+        if matches!(poll, Poll::Ready(Ok(()))) && out.filled().len() > before {
+            while out.remaining() >= 16384 {
+                let prev = out.filled().len();
+                match Pin::new(&mut this.0).poll_read(cx, out) {
+                    Poll::Ready(Ok(())) if out.filled().len() > prev => {}
+                    _ => break,
+                }
+            }
+        }
+        poll
+    }
+}
+impl AsyncWrite for ServerTlsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let mut total = 0;
+        let limit = bytes.len().min(65536);
+        while total < limit {
+            match Pin::new(&mut this.0).poll_write(cx, &bytes[total..limit]) {
+                Poll::Ready(Ok(0)) => break,
+                Poll::Ready(Ok(n)) => total += n,
+                Poll::Pending if total > 0 => break,
+                other => return other,
+            }
+        }
+        Poll::Ready(Ok(total))
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
     }
 }
 
@@ -644,6 +693,38 @@ impl AsyncWrite for UpgradedConnectStream {
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+impl kerlico_core::SpliceIo for UpgradedConnectStream {
+    fn supports_splice(&self) -> bool {
+        self.prefix.is_empty() && kerlico_core::stream_supports_splice(self.inner.as_ref())
+    }
+    #[cfg(target_os = "linux")]
+    fn poll_splice_to_pipe(
+        &mut self,
+        cx: &mut Context<'_>,
+        pipe_wr: std::os::fd::BorrowedFd<'_>,
+        max_len: usize,
+    ) -> Poll<std::io::Result<usize>> {
+        if !self.prefix.is_empty() {
+            return Poll::Ready(Err(std::io::ErrorKind::Unsupported.into()));
+        }
+        match kerlico_core::as_splice_io(self.inner.as_mut()) {
+            Some(splice) => splice.poll_splice_to_pipe(cx, pipe_wr, max_len),
+            None => Poll::Ready(Err(std::io::ErrorKind::Unsupported.into())),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn poll_splice_from_pipe(
+        &mut self,
+        cx: &mut Context<'_>,
+        pipe_rd: std::os::fd::BorrowedFd<'_>,
+        max_len: usize,
+    ) -> Poll<std::io::Result<usize>> {
+        match kerlico_core::as_splice_io(self.inner.as_mut()) {
+            Some(splice) => splice.poll_splice_from_pipe(cx, pipe_rd, max_len),
+            None => Poll::Ready(Err(std::io::ErrorKind::Unsupported.into())),
+        }
     }
 }
 
@@ -835,11 +916,11 @@ impl InboundProtocol for MixedNode {
                 return Err(Error::Rejected);
             }
             if let Some(tls) = &self.http.tls {
-                stream = Box::new(
-                    connect(&context)
-                        .run(async { Ok(tls.accept(stream).await?) })
-                        .await?,
-                );
+                let mut tls_stream = connect(&context)
+                    .run(async { Ok(tls.accept(stream).await?) })
+                    .await?;
+                tls_stream.get_mut().1.set_buffer_limit(Some(68 * 1024));
+                stream = Box::new(ServerTlsStream(tls_stream));
             }
             let mut first = [0u8; 1];
             let read = connect(&context)

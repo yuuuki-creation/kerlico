@@ -520,6 +520,7 @@ async fn scripted_client_shutdown_sends_tail_then_reads_reverse_data() {
         let decoded = peer.feed(&cipher, &reader.iv, crate::now()).unwrap();
         assert_eq!(decoded.data, request());
         let mut writer = Writer {
+            method: server.method,
             state: State::new(server.method, &server.key, &server_iv).unwrap(),
             iv: server_iv,
             sent: false,

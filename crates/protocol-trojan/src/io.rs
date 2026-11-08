@@ -4,39 +4,38 @@ use std::{
     future::Future,
     io,
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
-    sync::watch,
     time::Instant,
 };
 pub(crate) struct Activity {
     inner: BoxStream,
-    events: watch::Sender<Instant>,
-    last: Instant,
+    active: Arc<AtomicBool>,
 }
-pub(crate) fn observe(inner: BoxStream) -> (BoxStream, watch::Receiver<Instant>) {
-    let now = Instant::now();
-    let (events, receiver) = watch::channel(now);
+pub(crate) fn observe(inner: BoxStream) -> (BoxStream, Arc<AtomicBool>) {
+    let active = Arc::new(AtomicBool::new(false));
     (
         Box::new(Activity {
             inner,
-            events,
-            last: now,
+            active: active.clone(),
         }),
-        receiver,
+        active,
     )
 }
 pub(crate) async fn bounded<T>(
     future: impl Future<Output = Result<T>>,
-    mut events: watch::Receiver<Instant>,
+    active: Arc<AtomicBool>,
     idle: Duration,
     cancel: kerlico_core::CancellationToken,
 ) -> Result<T> {
     tokio::pin!(future);
-    let mut events_open = true;
     let timer = tokio::time::sleep(idle);
     tokio::pin!(timer);
     loop {
@@ -44,10 +43,12 @@ pub(crate) async fn bounded<T>(
             biased;
             _ = cancel.cancelled() => return Err(Error::Cancelled),
             result = &mut future => return result,
-            _ = &mut timer => return Err(Error::Timeout),
-            changed = events.changed(), if events_open => {
-                if changed.is_ok() { timer.as_mut().reset(*events.borrow_and_update() + idle); }
-                else { events_open = false; }
+            _ = &mut timer => {
+                if active.swap(false, Ordering::Relaxed) {
+                    timer.as_mut().reset(Instant::now() + idle);
+                } else {
+                    return Err(Error::Timeout);
+                }
             },
         }
     }
@@ -62,11 +63,7 @@ impl AsyncRead for Activity {
         let before = out.filled().len();
         let result = Pin::new(&mut this.inner).poll_read(cx, out);
         if matches!(result, Poll::Ready(Ok(()))) && out.filled().len() > before {
-            let now = Instant::now();
-            if now.duration_since(this.last) >= Duration::from_secs(1) {
-                this.last = now;
-                this.events.send_replace(now);
-            }
+            this.active.store(true, Ordering::Relaxed);
         }
         result
     }
@@ -80,11 +77,7 @@ impl AsyncWrite for Activity {
         let this = self.get_mut();
         let result = Pin::new(&mut this.inner).poll_write(cx, bytes);
         if matches!(result, Poll::Ready(Ok(n)) if n>0) {
-            let now = Instant::now();
-            if now.duration_since(this.last) >= Duration::from_secs(1) {
-                this.last = now;
-                this.events.send_replace(now);
-            }
+            this.active.store(true, Ordering::Relaxed);
         }
         result
     }
@@ -96,11 +89,7 @@ impl AsyncWrite for Activity {
         let this = self.get_mut();
         let result = Pin::new(&mut this.inner).poll_write_vectored(cx, bufs);
         if matches!(result, Poll::Ready(Ok(n)) if n>0) {
-            let now = Instant::now();
-            if now.duration_since(this.last) >= Duration::from_secs(1) {
-                this.last = now;
-                this.events.send_replace(now);
-            }
+            this.active.store(true, Ordering::Relaxed);
         }
         result
     }
@@ -143,7 +132,23 @@ impl AsyncWrite for ServerTls {
         cx: &mut Context<'_>,
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().0).poll_write(cx, bytes)
+        let this = self.get_mut();
+        if bytes.is_empty() {
+            return Pin::new(&mut this.0).poll_write(cx, bytes);
+        }
+        let limit = bytes.len().min(65536);
+        let mut total = 0;
+        while total < limit {
+            match Pin::new(&mut this.0).poll_write(cx, &bytes[total..limit]) {
+                Poll::Ready(Ok(0)) => break,
+                Poll::Ready(Ok(n)) => total += n,
+                Poll::Ready(Err(_)) if total > 0 => return Poll::Ready(Ok(total)),
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending if total > 0 => return Poll::Ready(Ok(total)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Poll::Ready(Ok(total))
     }
     fn poll_write_vectored(
         self: Pin<&mut Self>,
