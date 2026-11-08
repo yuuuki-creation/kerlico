@@ -1,0 +1,7 @@
+[package]
+name = "kerlico-outbound"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kerlico-shared = { path = "../shared" }

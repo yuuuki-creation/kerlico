@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/shared",
+    "crates/client",
+    "crates/server",
+    "crates/outbound",
+    "crates/manifest",
+    "crates/wg",
+]
+default-members = ["crates/client", "crates/server"]

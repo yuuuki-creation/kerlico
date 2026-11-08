@@ -1,0 +1,8 @@
+[package]
+name = "kerlico-wireguard-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kerlico-shared = { path = "../../../crates/shared" }
+kerlico-wireguard = { path = "../shared" }

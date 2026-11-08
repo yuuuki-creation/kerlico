@@ -12,5 +12,5 @@
 *.log
 
 # Rust 构建及本地验证产物不提交。
-/target/
+target/
 __pycache__/

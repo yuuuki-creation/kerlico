@@ -1,0 +1,18 @@
+[package]
+name = "kerlico-wg"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+base64 = "0.22"
+blake2 = "0.10"
+chacha20poly1305 = "0.10"
+hmac = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json = "1"
+smoltcp = { version = "0.11", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "reusable_secrets"] }
+
+[target.'cfg(not(windows))'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"

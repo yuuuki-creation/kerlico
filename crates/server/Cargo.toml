@@ -1,0 +1,29 @@
+[package]
+name = "kerlico-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kerlico-shared = { path = "../shared" }
+kerlico-outbound = { path = "../outbound" }
+kerlico-wg = { path = "../wg" }
+wireguard = { package = "kerlico-wireguard-server", path = "../../protocols/wireguard/server", optional = true }
+openvpn = { package = "kerlico-openvpn-server", path = "../../protocols/openvpn/server", optional = true }
+mieru = { package = "kerlico-mieru-server", path = "../../protocols/mieru/server", optional = true }
+landing-mieru = { package = "kerlico-mieru-client", path = "../../protocols/mieru/client", optional = true }
+aes = "0.8"
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hpack = "0.3"
+if-addrs = "0.13"
+regex = "1"
+socket2 = "0.5"
+
+[dev-dependencies]
+kerlico-mieru = { path = "../../protocols/mieru/shared" }
+
+[build-dependencies]
+kerlico-manifest = { path = "../manifest" }

@@ -1,0 +1,9 @@
+[package]
+name = "kerlico-mieru-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kerlico-shared = { path = "../../../crates/shared" }
+kerlico-mieru = { path = "../shared" }
+socket2 = "0.5"
