@@ -58,6 +58,12 @@ struct ToggleFile {
 struct SettingsFile {
     #[serde(default)]
     users: Vec<UserFile>,
+    #[serde(default)]
+    transport: Option<String>,
+    #[serde(default, rename = "portRange")]
+    port_range: Option<String>,
+    #[serde(default)]
+    mtu: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -174,8 +180,18 @@ pub fn load(text: &str) -> Result<Loaded, String> {
                 Ok(Rule { lines, choice })
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let mut node_settings = Settings::default();
+        if let Some(transport) = inbound.settings.transport.clone() {
+            node_settings.insert_text("transport", transport);
+        }
+        if let Some(range) = inbound.settings.port_range.clone() {
+            node_settings.insert_text("portRange", range);
+        }
+        if let Some(mtu) = inbound.settings.mtu {
+            node_settings.insert_text("mtu", mtu.to_string());
+        }
         server
-            .listen_node(tag.clone(), protocol, listen, choice, &Settings::default())
+            .listen_node(tag.clone(), protocol, listen, choice, &node_settings)
             .map_err(|_| format!("listen {}", inbound.tag))?;
         server.set_rules(&tag, rules);
         if let Some(sniff) = inbound.sniffing.filter(|sniff| sniff.enabled) {

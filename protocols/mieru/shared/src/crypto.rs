@@ -1,4 +1,4 @@
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::aead::{Aead, AeadInPlace, KeyInit};
 use chacha20poly1305::XChaCha20Poly1305;
 use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest, Sha256};
@@ -58,11 +58,32 @@ impl Direction {
         }
     }
 
-    pub(crate) fn has_nonce(&self) -> bool {
-        self.nonce.is_some()
+    pub(crate) fn key_bytes(&self) -> [u8; 32] {
+        self.key
     }
 
+    pub(crate) fn from_key(key: [u8; 32]) -> Self {
+        Self { key, nonce: None }
+    }
+
+    pub(crate) fn seal_at(&self, nonce: &[u8; 24], plain: &[u8]) -> Vec<u8> {
+        XChaCha20Poly1305::new((&self.key).into())
+            .encrypt(nonce.into(), plain)
+            .expect("seal")
+    }
+
+    pub(crate) fn open_at(&self, nonce: &[u8; 24], sealed: &[u8]) -> Option<Vec<u8>> {
+        open_with(&self.key, nonce, sealed)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn seal(&mut self, username: &str, plain: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(plain.len() + 24 + 16);
+        self.seal_into(username, plain, &mut out);
+        out
+    }
+
+    pub(crate) fn seal_into(&mut self, username: &str, plain: &[u8], out: &mut Vec<u8>) {
         let first = self.nonce.is_none();
         let nonce = if let Some(current) = &mut self.nonce {
             bump(current);
@@ -74,16 +95,15 @@ impl Direction {
             self.nonce = Some(fresh);
             fresh
         };
-        let sealed = XChaCha20Poly1305::new((&self.key).into())
-            .encrypt((&nonce).into(), plain)
-            .expect("seal");
         if first {
-            let mut out = nonce.to_vec();
-            out.extend(sealed);
-            out
-        } else {
-            sealed
+            out.extend_from_slice(&nonce);
         }
+        let start = out.len();
+        out.extend_from_slice(plain);
+        let tag = XChaCha20Poly1305::new((&self.key).into())
+            .encrypt_in_place_detached((&nonce).into(), b"", &mut out[start..])
+            .expect("seal");
+        out.extend_from_slice(&tag);
     }
 
     pub fn open_next(&mut self, packet: &[u8]) -> Option<Vec<u8>> {
@@ -133,6 +153,13 @@ fn hint_matches(username: &str, nonce: &[u8; 24]) -> bool {
     hasher.update(username.as_bytes());
     hasher.update(&nonce[..16]);
     hasher.finalize()[..4] == nonce[20..]
+}
+
+pub(crate) fn nonce_with_hint(username: &str) -> [u8; 24] {
+    let mut fresh = [0u8; 24];
+    getrandom::getrandom(&mut fresh).expect("nonce");
+    apply_hint(username, &mut fresh);
+    fresh
 }
 
 fn apply_hint(username: &str, nonce: &mut [u8; 24]) {

@@ -1,7 +1,11 @@
-//! Mieru TCP segments. The username and password become an XChaCha20-Poly1305 key.
-//! The published layout is the one mihomo's mieru client speaks.
+//! Mieru segments. TCP and UDP share XChaCha20-Poly1305, metadata, and SOCKS5.
 
 mod crypto;
-mod link;
+mod engine;
+mod entropy;
+mod meta;
+mod replay;
 
-pub use link::{accept, connect, resolve_peer, Account, Conn, Target};
+pub use engine::{
+    accept, associate, connect, connect_udp, resolve_peer, serve_tcp, serve_udp, Account, Assoc, Conn, Ready, Target,
+};

@@ -1,12 +1,18 @@
-//! One exit, two directions. A stalled direction does not change the exit.
+//! One exit, two directions. Each direction blocks on its own read.
+//! A quiet direction does not pace the other, and neither side queues
+//! more bytes than the buffer it is writing.
 
-use std::sync::mpsc::{self, Receiver};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use kerlico_shared::{InboundStream, NodeTag, OpenError, PlaneFault, Traffic, UserEmail};
 
 use crate::Exit;
+
+const BUF: usize = 64 * 1024;
+const IDLE: Duration = Duration::from_secs(300);
 
 pub trait PipeRead: Send {
     fn read_pipe(&mut self, buf: &mut [u8]) -> Result<usize, OpenError>;
@@ -16,73 +22,139 @@ pub trait PipeWrite: Send {
     fn write_pipe(&mut self, buf: &[u8]) -> Result<(), OpenError>;
 }
 
+struct Pace {
+    start: Instant,
+    last_ms: AtomicU64,
+    stop: AtomicBool,
+}
+
+impl Pace {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            last_ms: AtomicU64::new(0),
+            stop: AtomicBool::new(false),
+        }
+    }
+
+    fn mark(&self) {
+        let ms = self.start.elapsed().as_millis() as u64;
+        self.last_ms.store(ms, Ordering::Release);
+    }
+
+    fn idle(&self) -> bool {
+        let now = self.start.elapsed().as_millis() as u64;
+        now.saturating_sub(self.last_ms.load(Ordering::Acquire)) > IDLE.as_millis() as u64
+    }
+
+    fn halt(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+
+    fn halted(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+}
+
 pub fn bridge(
     stream: &dyn InboundStream,
-    mut toward_exit: impl PipeWrite,
+    toward_exit: impl PipeWrite,
     from_exit: impl PipeRead + 'static,
     user: &UserEmail,
     node: &NodeTag,
     exit: Exit,
     traffic: &dyn Traffic,
 ) -> Result<(), OpenError> {
-    let incoming = spawn_reader(from_exit);
-    let (uplink_tx, uplink_rx) = mpsc::channel();
+    let pace = Arc::new(Pace::new());
     thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut buf = vec![0u8; 16 * 1024];
-            loop {
-                match stream.read_from_user(&mut buf) {
-                    Ok(0) | Err(PlaneFault::Closed) => {
-                        let _ = uplink_tx.send(Ok(Vec::new()));
-                        break;
-                    }
-                    Ok(n) => {
-                        if uplink_tx.send(Ok(buf[..n].to_vec())).is_err() {
-                            break;
-                        }
-                    }
-                    Err(PlaneFault::Again) => {}
-                    Err(PlaneFault::Transport) => {
-                        let _ = uplink_tx.send(Err(OpenError::Transport));
-                        break;
-                    }
+        let pace_up = Arc::clone(&pace);
+        let up = scope.spawn(move || pump_up(stream, toward_exit, user, node, exit, traffic, &pace_up));
+        let down = pump_down(stream, from_exit, user, node, exit, traffic, &pace);
+        pace.halt();
+        let up = up.join().unwrap_or(Err(OpenError::Transport));
+        down.and(up)
+    })
+}
+
+fn pump_up(
+    stream: &dyn InboundStream,
+    mut toward_exit: impl PipeWrite,
+    user: &UserEmail,
+    node: &NodeTag,
+    exit: Exit,
+    traffic: &dyn Traffic,
+    pace: &Pace,
+) -> Result<(), OpenError> {
+    let mut buf = vec![0u8; BUF];
+    loop {
+        if pace.halted() {
+            return Ok(());
+        }
+        match stream.read_from_user(&mut buf) {
+            Ok(0) | Err(PlaneFault::Closed) => {
+                pace.halt();
+                return Ok(());
+            }
+            Ok(n) => {
+                pace.mark();
+                if let Err(error) = toward_exit.write_pipe(&buf[..n]) {
+                    pace.halt();
+                    return Err(error);
+                }
+                traffic.add_uplink(user, node, n as u64);
+                traffic.add_exit_uplink(exit.tag(), n as u64);
+            }
+            Err(PlaneFault::Again) => {
+                if pace.idle() {
+                    pace.halt();
+                    return Ok(());
                 }
             }
-        });
-        let deadline_idle = Duration::from_secs(300);
-        let mut last = Instant::now();
-        loop {
-            match uplink_rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(Ok(chunk)) if chunk.is_empty() => break,
-                Ok(Ok(chunk)) => {
-                    let n = chunk.len();
-                    toward_exit.write_pipe(&chunk)?;
-                    traffic.add_uplink(user, node, n as u64);
-                    traffic.add_exit_uplink(exit.tag(), n as u64);
-                    last = Instant::now();
-                }
-                Ok(Err(error)) => return Err(error),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-            match incoming.recv_timeout(Duration::from_millis(20)) {
-                Ok(Ok(chunk)) if chunk.is_empty() => break,
-                Ok(Ok(chunk)) => {
-                    let n = write_all_user(stream, &chunk)?;
-                    traffic.add_downlink(user, node, n as u64);
-                    traffic.add_exit_downlink(exit.tag(), n as u64);
-                    last = Instant::now();
-                }
-                Ok(Err(error)) => return Err(error),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-            if last.elapsed() > deadline_idle {
-                break;
+            Err(PlaneFault::Transport) => {
+                pace.halt();
+                return Err(OpenError::Transport);
             }
         }
-        Ok(())
-    })
+    }
+}
+
+fn pump_down(
+    stream: &dyn InboundStream,
+    mut from_exit: impl PipeRead,
+    user: &UserEmail,
+    node: &NodeTag,
+    exit: Exit,
+    traffic: &dyn Traffic,
+    pace: &Pace,
+) -> Result<(), OpenError> {
+    let mut buf = vec![0u8; BUF];
+    loop {
+        if pace.halted() {
+            return Ok(());
+        }
+        match from_exit.read_pipe(&mut buf) {
+            Ok(0) => {
+                pace.halt();
+                return Ok(());
+            }
+            Ok(n) => {
+                pace.mark();
+                let n = write_all_user(stream, &buf[..n])?;
+                traffic.add_downlink(user, node, n);
+                traffic.add_exit_downlink(exit.tag(), n);
+            }
+            Err(OpenError::Again) => {
+                if pace.idle() {
+                    pace.halt();
+                    return Ok(());
+                }
+            }
+            Err(error) => {
+                pace.halt();
+                return Err(error);
+            }
+        }
+    }
 }
 
 fn write_all_user(stream: &dyn InboundStream, chunk: &[u8]) -> Result<u64, OpenError> {
@@ -97,30 +169,4 @@ fn write_all_user(stream: &dyn InboundStream, chunk: &[u8]) -> Result<u64, OpenE
         }
     }
     Ok(sent as u64)
-}
-
-fn spawn_reader(mut pipe: impl PipeRead + 'static) -> Receiver<Result<Vec<u8>, OpenError>> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let mut buf = vec![0u8; 16 * 1024];
-        loop {
-            match pipe.read_pipe(&mut buf) {
-                Ok(0) => {
-                    let _ = tx.send(Ok(Vec::new()));
-                    break;
-                }
-                Ok(n) => {
-                    if tx.send(Ok(buf[..n].to_vec())).is_err() {
-                        break;
-                    }
-                }
-                Err(OpenError::Again) => continue,
-                Err(error) => {
-                    let _ = tx.send(Err(error));
-                    break;
-                }
-            }
-        }
-    });
-    rx
 }
