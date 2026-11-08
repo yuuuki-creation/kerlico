@@ -37,3 +37,9 @@ DNS、嗅探和 FakeDNS 放在服务端，是因为地址族和域名规则要�
 WARP 是一条用户态 WireGuard 隧道。它如果接管机器的默认路由，入站监听会被吸进自己的隧道。所以它只承载出站模块发出的流。
 
 这条隧道和用户连接用的 WireGuard 协议必须是同一份 Rust 实现。放在协议目录里，则服务端在没编 WireGuard 入站时就没有 WARP。放在 `crates/outbound` 里，则客户端协议和出站会各写一遍。因此引擎单独占 `crates/wg`。服务端因为总是依赖出站模块，所以总是带上它。只编客户端、且不选 WireGuard 协议时不带上它。
+
+## mieru 跟官方线协议
+
+mieru 要和官方客户端、mihomo 互通，段和元数据就只能有一份。官方 `docs/protocol.md` 已经定义了这些字段。Kerlico 再写一份字段表，两边就会分叉。决定记在 `docs/reference/mieru.md`。
+
+官方 mita 自己的 DNS 和 RPC 不搬进来。解析、分流和拨号在服务端已经各有一条路径。客户端要的是官方的 SOCKS5 和 HTTP 入口。把 mieru 再做成数据包平面，会变成第二条客户端路径。

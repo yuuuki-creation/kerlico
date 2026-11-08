@@ -15,7 +15,7 @@
 - `Manual(Exit)` 是创建时写明的一种出口。
 - `Default` 是出站留空。
 
-协议 crate 实现 `Accept`。它负责 `add_user`、`remove_user` 和 `accept`。`accept` 交出 `Handoff`。`Handoff` 带着节点、用户、目标和明文流。目标里的主机名用来做域名匹配。协议 crate 不拨号，也不选择 `Exit`。WireGuard 和 OpenVPN 的这些函数体仍是 `unimplemented!`。mieru 的 `accept` 会交出 `Handoff`。
+协议 crate 实现 `Accept`。它负责 `add_user`、`remove_user` 和 `accept`。`accept` 交出 `Handoff`。`Handoff` 带着节点、用户、目标和明文流。目标里的主机名用来做域名匹配。协议 crate 不拨号，也不选择 `Exit`。WireGuard 和 OpenVPN 的这些函数体仍是 `unimplemented!`。mieru 的每个会话交出一个 `Handoff`。传输、多路复用和 SOCKS5 的范围在 `docs/reference/mieru.md`。
 
 报文类入站把一条流收成同一个 `Handoff`。目标一开始是 IP。嗅探或 FakeDNS 可以再补上主机名。
 

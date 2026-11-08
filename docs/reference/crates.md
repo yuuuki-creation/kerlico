@@ -18,7 +18,7 @@ protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依�
 
 工作区成员是 `crates/shared`、`crates/client`、`crates/server`、`crates/outbound`、`crates/manifest` 和 `crates/wg`。协议目录不是工作区成员。
 
-现在的协议目录是 `wireguard`、`openvpn` 和 `mieru`。WireGuard 和 OpenVPN 的协议体是 `unimplemented!`。mieru 走 TCP 段和 SOCKS5。
+现在的协议目录是 `wireguard`、`openvpn` 和 `mieru`。WireGuard 和 OpenVPN 的协议体是 `unimplemented!`。mieru 的决定在 `docs/reference/mieru.md`。
 
 ## 一次构建选一端和一组协议
 

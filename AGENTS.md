@@ -10,6 +10,8 @@ Do not read or use git branch `old`. The branch and everything on it are out of 
 
 改服务端入站、出站、用户或计数之前，读 `docs/reference/server.md`。
 
+改 mieru 的帧、握手或两端入口之前，读 `docs/reference/mieru.md`。
+
 要解释为什么是这个形状，读 `docs/explanation/shape.md`。那篇不写操作步骤。
 
 要上测试机，读 `docs/reference/workers.md`。连接资料在 `.private/machines/`，不要写进 git。
