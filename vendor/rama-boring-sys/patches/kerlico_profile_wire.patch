@@ -1,0 +1,83 @@
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -2523,7 +2523,8 @@
+       }
+       UniquePtr<SSLKeyShare> key_share;
+       if (std::find(supported_group_list.begin(), supported_group_list.end(),
+-                    group_id) != supported_group_list.end()) {
++                    group_id) != supported_group_list.end() ||
++          rama->unknown_values == RAMA_SSL_UNKNOWN_PRESERVE) {
+         key_share = SSLKeyShare::Create(group_id);
+       }
+       if (key_share == nullptr) {
+@@ -4893,7 +4894,8 @@
+                                         Span<const uint16_t> order,
+                                         ssl_client_hello_type_t type,
+                                         uint64_t *out_sent,
+-                                        bool *out_last_was_empty) {
++                                        bool *out_last_was_empty,
++                                        size_t *out_padding_position) {
+   const RamaConnectionConfig *rama = hs->config->rama.get();
+   uint16_t grease_sent[RAMA_SSL_MAX_GREASE_SLOTS];
+   size_t num_grease = 0;
+@@ -4947,7 +4949,9 @@
+         return false;
+       }
+     } else if (id == TLSEXT_TYPE_padding || id == TLSEXT_TYPE_pre_shared_key) {
+-      // Written natively: padding per the padding mode, and the PSK last.
++      if (id == TLSEXT_TYPE_padding && *out_padding_position == SIZE_MAX) {
++        *out_padding_position = CBB_len(extensions);
++      }
+       continue;
+     } else {
+       uint32_t index;
+@@ -5150,10 +5154,11 @@
+ 
+   bool last_was_empty = false;
+   uint64_t planned_sent = 0;
++  size_t padding_position = SIZE_MAX;
+   static_assert(kNumExtensions <= 64, "planned_sent is too small");
+   if (planned &&
+       !rama_add_planned_extensions(hs, &extensions, order, type, &planned_sent,
+-                                   &last_was_empty)) {
++                                   &last_was_empty, &padding_position)) {
+     return false;
+   }
+   for (size_t unpermuted = 0; unpermuted < kNumExtensions; unpermuted++) {
+@@ -5191,6 +5196,7 @@
+   // In cleartext ClientHellos, we add the padding extension to work around
+   // bugs. We also apply this padding to ClientHelloOuter, to keep the wire
+   // images aligned.
++  const size_t padding_start = CBB_len(&extensions);
+   size_t psk_len = ext_pre_shared_key_clienthello_length(hs, type);
+   const uint8_t padding =
+       rama == nullptr ? RAMA_SSL_PADDING_NATIVE : rama->padding;
+@@ -5213,7 +5219,7 @@
+     // The final extension must be non-empty. WebSphere Application
+     // Server 7.0 is intolerant to the last extension being zero-length. See
+     // https://crbug.com/363583.
+-    if (last_was_empty && psk_len == 0) {
++    if (last_was_empty && psk_len == 0 && !planned) {
+       padding_len = 1;
+       // The addition of the padding extension may push us into the F5 bug.
+       msg_len += 4 + padding_len;
+@@ -5245,6 +5251,19 @@
+         !add_padding_extension(&extensions, TLSEXT_TYPE_padding, padding_len)) {
+       return false;
+     }
++  }
++
++  // A profile's padding position is part of its wire format. Length is known
++  // only after the other extensions are encoded. Move the completed padding
++  // within this builder before the handshake is hashed; PSK is still appended last.
++  if (planned && padding_position != SIZE_MAX &&
++      padding_position < padding_start && CBB_len(&extensions) > padding_start) {
++    uint8_t *end;
++    if (!CBB_reserve(&extensions, &end, 0)) {
++      return false;
++    }
++    uint8_t *begin = end - CBB_len(&extensions);
++    std::rotate(begin + padding_position, begin + padding_start, end);
+   }
+ 
+   // The PSK extension must be last, including after the padding.

@@ -109,7 +109,7 @@ pub struct Pipe {
 }
 
 impl Pipe {
-    pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         let mut flow = self.flow.lock().expect("flow");
         if flow.stream {
             if flow.incoming.is_empty() {
@@ -137,7 +137,7 @@ impl Pipe {
         }
     }
 
-    pub fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }

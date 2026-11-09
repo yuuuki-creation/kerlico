@@ -103,7 +103,7 @@ FakeDNS 默认关闭。打开后，DNS 模块把本进程要回答的 A 记录�
 
 域名要得到「有 IPv4」「只有 IPv6」或「没有地址」时，走 DNS 一节。没有地址时失败，不改走 WARP，也不改走落地。
 
-`select_exit` 会看 `Native`。这一族没有原生地址时返回同一族的 WARP。内置私网规则在这一族没有原生地址时让这条流失败。`Server::run` 反复调用 `dispatch_next`。`dispatch_next` 接受一条已就绪的流并拨号。
+`select_exit` 会看 `Native`。这一族没有原生地址时返回同一族的 WARP。内置私网规则在这一族没有原生地址时让这条流失败。`Server::run` 反复调用 `dispatch_next`。`dispatch_next` 接受一条已就绪的流并拨号。刚拨出一条时马上再看下一条。一条都没有时才歇 1 毫秒。
 
 ## DNS
 
@@ -124,6 +124,9 @@ DNS 是服务端的一个模块。协议 crate 不解析域名。
 ## 落地
 
 进程里至多一条落地。配置写协议、地址、端口和 `settings`。协议必须是服务端叶子用 `landing-<id>` 编进来的客户端协议。`settings` 的字段由那个客户端协议解释。
+
+反向落地也占用这一个 `Landing` 出口，配置为 `"landing": {"node":"入口节点名","reverse":"该节点账号的反向标签"}`。它通过该节点提供的反向拨号函数开一个 Mux 会话，目标的连接和复制仍由出站模块驱动；不增加 Exit、全局路由或 outboundTag。该写法与普通落地的 protocol/address/port/settings 互斥。删除或替换反向账号后，旧 Portal 不再接受新会话。
+
 
 没有配置落地时，`Manual(Landing)` 使这条流失败。
 
@@ -157,7 +160,7 @@ TCP 复制在 300 秒没有字节时结束。UDP 会话的键是协议写在 `Ha
 
 用户挂在一个节点上。稳定的键是 `UserEmail`。空字符串、空白和 `>` 不能做邮箱或节点名。同一个邮箱可以出现在两个节点上，计数按邮箱合并。`remove_user` 只从那个节点去掉用户，不把计数清零。
 
-账号的协议字段放在 `Settings` 里，由那个协议的 `add_user` 解释。叶子不解析 UUID 或密码。`add_user` 和 `remove_user` 在 `Server` 上会找到节点并转给入站。mieru 的 `add_user` 读取 `username` 和 `password`。WireGuard 和 OpenVPN 的函数体仍是 `unimplemented!`。
+账号的协议字段放在 `Settings` 里，由那个协议的 `add_user` 解释。叶子不解析 UUID 或密码。节点 `settings` 和用户对象里，除 `users` 与 `email` 以外的字符串、数字和布尔值都原样进入 `Settings`；数组和对象序列化为 JSON 后交给协议解释。`add_user` 和 `remove_user` 在 `Server` 上会找到节点并转给入站。mieru 的 `add_user` 读取 `username` 和 `password`。vless 的 `add_user` 读取 `id`、`flow` 和可选 `reverse`，详细组合与反向 API 见 `docs/reference/vless.md`。WireGuard 和 OpenVPN 的函数体仍是 `unimplemented!`。
 
 计数的名字是这些形式。
 
@@ -217,3 +220,10 @@ outbound>>>出口>>>traffic>>>downlink
 `api` 可以不写。写了之后在 `listen` 和 `port` 上打开 gRPC。端口 0 拒绝。v6 套接字打开 `IPV6_V6ONLY`。`/kerlico.Users/Add` 和 `/kerlico.Users/Remove` 按节点名和邮箱添加或删除用户。添加时可以带一组文本设置，交给那个协议的 `add_user`。`/kerlico.Stats/Get` 按上一节的计数名字查询，回答是这个名字和当前值。节点、规则、DNS、WARP 和落地不在这个接口里改。改它们要重新加载配置。
 
 启动时会读 `inbounds`、`dns`、`warp`、`landing` 和 `api`。
+
+
+监听器创建前，服务端先安装 DNS 配置、共享的 GeoIP 目录、WARP 和普通落地；反向落地在节点和账号建立后安装。`Server::from_config_in` 使用配置所在目录准备这些服务，独立的 `from_config` 保持不注册外部 WARP 的嵌入式入口。
+
+协议设置携带有类型的运行时上下文。载体的配置 DNS、系统 DNS、SRV、TXT、ECH DNS 和 TLS 元数据请求都经该上下文交给服务端；协议不另建 DNS 或 GeoIP 解析器。GeoIP 回调携带分类实际含有的地址族，反选仍受该地址族约束。TLS 元数据的默认出口按本篇默认表选择；没有代理选择的传输载体明确请求原生直连。`sockopt.dialerProxy` 只接受本篇已有的出口名字和 `default`，普通落地的上下文禁止再次选择自身的 `landing`。原生套接字专用参数不能应用到用户态 WARP 或落地流时返回错误，不改走原生。
+
+出站打开载体套接字，运行时回调只弱引用出站所有者。原生 TCP/UDP 保留原生句柄，WARP 和落地交出可独立读写的两半；等待读取不占用写侧。TLS 配置与连接池按运行时所有者复用，池中的设置副本不强持有所有者。

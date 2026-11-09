@@ -1,0 +1,11 @@
+[package]
+name = "kerlico-vless-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kerlico-shared = { path = "../../../crates/shared" }
+kerlico-vless = { path = "../shared" }
+
+[dev-dependencies]
+rcgen = "0.13"

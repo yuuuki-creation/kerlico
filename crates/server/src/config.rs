@@ -58,20 +58,15 @@ struct ToggleFile {
 struct SettingsFile {
     #[serde(default)]
     users: Vec<UserFile>,
-    #[serde(default)]
-    transport: Option<String>,
-    #[serde(default, rename = "portRange")]
-    port_range: Option<String>,
-    #[serde(default)]
-    mtu: Option<u16>,
+    #[serde(flatten)]
+    fields: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct UserFile {
     email: String,
-    #[serde(default)]
-    username: String,
-    password: String,
+    #[serde(flatten)]
+    fields: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -93,11 +88,18 @@ struct ApiFile {
 
 #[derive(Deserialize)]
 struct LandingFile {
+    #[serde(default)]
     protocol: String,
+    #[serde(default)]
     address: String,
+    #[serde(default)]
     port: u16,
     #[serde(default)]
     settings: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    node: Option<String>,
+    #[serde(default)]
+    reverse: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -155,9 +157,24 @@ pub struct Loaded {
     pub warp: Option<String>,
 }
 
-pub fn load(text: &str) -> Result<Loaded, String> {
+pub fn load(text: &str) -> Result<Loaded, String> { load_prepared(text, None) }
+
+pub fn load_in(text: &str, dir: &std::path::Path) -> Result<Loaded, String> { load_prepared(text, Some(dir)) }
+
+fn load_prepared(text: &str, dir: Option<&std::path::Path>) -> Result<Loaded, String> {
     let file: File = serde_json::from_str(text).map_err(|error| error.to_string())?;
     let mut server = Server::new();
+    let dns = parse_dns(file.dns.as_ref())?;
+    server.set_dns(dns.clone());
+    if let Some(dir) = dir {
+        server.load_geodata(dir);
+        crate::attach_warp(&server, file.warp.as_ref().map(serde_json::Value::to_string).as_deref(), dir);
+    }
+    if let Some(landing) = file.landing.as_ref().filter(|landing| landing.node.is_none() && landing.reverse.is_none()) {
+        if landing.port == 0 || landing.address.is_empty() { return Err("bad landing".into()); }
+        server.install_landing(&landing.protocol, landing.address.clone(), landing.port, landing_settings(&landing.settings)?)
+            .map_err(|_| format!("bad landing {}", landing.protocol))?;
+    }
     for inbound in file.inbounds {
         let tag = NodeTag::parse(&inbound.tag).map_err(|_| format!("bad tag {}", inbound.tag))?;
         let protocol = Server::compiled()
@@ -181,14 +198,9 @@ pub fn load(text: &str) -> Result<Loaded, String> {
             })
             .collect::<Result<Vec<_>, String>>()?;
         let mut node_settings = Settings::default();
-        if let Some(transport) = inbound.settings.transport.clone() {
-            node_settings.insert_text("transport", transport);
-        }
-        if let Some(range) = inbound.settings.port_range.clone() {
-            node_settings.insert_text("portRange", range);
-        }
-        if let Some(mtu) = inbound.settings.mtu {
-            node_settings.insert_text("mtu", mtu.to_string());
+        for (key, value) in &inbound.settings.fields {
+            let text = scalar(value).ok_or_else(|| format!("bad settings {key}"))?;
+            node_settings.insert_text(key, text);
         }
         server
             .listen_node(tag.clone(), protocol, listen, choice, &node_settings)
@@ -206,9 +218,10 @@ pub fn load(text: &str) -> Result<Loaded, String> {
             let email = kerlico_shared::UserEmail::parse(&user.email)
                 .map_err(|_| format!("bad email {}", user.email))?;
             let mut account = Settings::default();
-            let username = if user.username.is_empty() { user.email.clone() } else { user.username };
-            account.insert_text("username", username);
-            account.insert_text("password", user.password);
+            for (key, value) in &user.fields {
+                let text = scalar(value).ok_or_else(|| format!("bad user field {key}"))?;
+                account.insert_text(key, text);
+            }
             server
                 .add_user(&tag, email, &account)
                 .map_err(|_| format!("user {}", inbound.tag))?;
@@ -225,19 +238,13 @@ pub fn load(text: &str) -> Result<Loaded, String> {
         server.set_api(SocketAddr::new(ip, api.port));
     }
     if let Some(landing) = file.landing.as_ref() {
-        if landing.port == 0 || landing.address.is_empty() {
-            return Err("bad landing".to_string());
+        if let (Some(node), Some(reverse)) = (&landing.node, &landing.reverse) {
+            if !landing.protocol.is_empty() || !landing.address.is_empty() || landing.port != 0 || !landing.settings.is_empty() { return Err("reverse landing cannot also configure a remote peer".into()); }
+            server.install_reverse_landing(&NodeTag::parse(node).map_err(|_| "bad reverse landing node")?, reverse).map_err(|_| "bad reverse landing")?;
+        } else {
+        if landing.node.is_some() || landing.reverse.is_some() { return Err("reverse landing requires node and reverse".into()); }
         }
-        server
-            .install_landing(
-                &landing.protocol,
-                landing.address.clone(),
-                landing.port,
-                landing_settings(&landing.settings)?,
-            )
-            .map_err(|_| format!("bad landing {}", landing.protocol))?;
     }
-    let dns = parse_dns(file.dns.as_ref())?;
     Ok(Loaded {
         server,
         dns,
@@ -306,15 +313,20 @@ fn parse_dns(file: Option<&DnsFile>) -> Result<crate::dns::Config, String> {
 fn landing_settings(settings: &serde_json::Map<String, serde_json::Value>) -> Result<Settings, String> {
     let mut out = Settings::default();
     for (key, value) in settings {
-        let text = match value {
-            serde_json::Value::String(text) => text.clone(),
-            serde_json::Value::Number(number) => number.to_string(),
-            serde_json::Value::Bool(flag) => flag.to_string(),
-            _ => return Err(format!("bad landing settings {key}")),
-        };
+        let text = scalar(value).ok_or_else(|| format!("bad landing settings {key}"))?;
         out.insert_text(key, text);
     }
     Ok(out)
+}
+
+fn scalar(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(flag) => Some(flag.to_string()),
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 fn parse_listen(host: &str, port: u16) -> Result<ListenAddr, String> {

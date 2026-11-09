@@ -34,7 +34,7 @@ struct Net {
 
 impl Catalog {
     pub fn empty() -> Self {
-        Self::load(Path::new(""))
+        Self { inner: Arc::new(Mutex::new(State { dir: PathBuf::new(), sites: BTreeMap::new(), nets: BTreeMap::new(), files: BTreeMap::new() })) }
     }
 
     pub fn load(dir: &Path) -> Self {
@@ -48,6 +48,31 @@ impl Catalog {
                 files: BTreeMap::new(),
             })),
         }
+    }
+
+    pub fn reload(&self, dir: &Path) {
+        let loaded = Self::load(dir);
+        let mut replacement = loaded.inner.lock().expect("geodata");
+        std::mem::swap(&mut *self.inner.lock().expect("geodata"), &mut *replacement);
+    }
+
+    pub fn network_set(&self, file: &str, category: &str) -> std::io::Result<kerlico_shared::runtime::GeoIpSet> {
+        let mut state = self.inner.lock().expect("geodata");
+        let category = category.to_ascii_lowercase();
+        let nets = if file == "geoip.dat" {
+            state.nets.get(&category)
+        } else {
+            remember(&mut state, file);
+            state.files.get(file).and_then(|data| data.nets.get(&category))
+        }.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("GeoIP category {file}:{category} is missing")))?;
+        let has_ipv4 = nets.iter().any(|net| net.ip.len() == 4);
+        let has_ipv6 = nets.iter().any(|net| net.ip.len() == 16);
+        drop(state);
+        let catalog = self.clone();
+        let file = file.to_owned();
+        Ok(kerlico_shared::runtime::GeoIpSet::new(has_ipv4, has_ipv6, move |ip| {
+            if file == "geoip.dat" { catalog.net_hit(&category, ip) } else { catalog.ext_net(&file, &category, ip) }
+        }))
     }
 
     pub fn site_hit(&self, category: &str, name: &str) -> bool {
@@ -94,6 +119,13 @@ impl Catalog {
         };
         hit_net(data.nets.get(&category.to_ascii_lowercase()), ip)
     }
+}
+
+impl std::fmt::Debug for Catalog {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { formatter.debug_struct("GeoIpCatalog").finish_non_exhaustive() }
+}
+impl kerlico_shared::runtime::GeoIpCatalog for Catalog {
+    fn load(&self, file: &str, category: &str) -> std::io::Result<kerlico_shared::runtime::GeoIpSet> { self.network_set(file, category) }
 }
 
 fn remember(state: &mut State, file: &str) {
@@ -410,5 +442,26 @@ mod tests {
         assert!(catalog.ext_site("extra.dat", "cn", "example.com"));
         assert!(!catalog.has_net("private"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn runtime_catalog_preserves_family_presence_and_reuses_loaded_ext_file() {
+        let dir = std::env::temp_dir().join(format!("kerlico-runtime-geo-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("geoip.dat"), ip_bytes()).unwrap();
+        std::fs::write(dir.join("extra.dat"), ip_bytes()).unwrap();
+        let catalog = Catalog::load(&dir);
+        let native = catalog.network_set("geoip.dat", "TEST").unwrap();
+        assert!(native.has_ipv4);
+        assert!(!native.has_ipv6);
+        assert!(native.contains("203.0.113.7".parse().unwrap()));
+        assert!(!native.contains("2001:db8::7".parse().unwrap()));
+        let external = catalog.network_set("extra.dat", "TEST").unwrap();
+        std::fs::remove_file(dir.join("extra.dat")).unwrap();
+        assert!(catalog.network_set("extra.dat", "test").unwrap().contains("203.0.113.7".parse().unwrap()));
+        assert!(external.has_ipv4 && !external.has_ipv6);
+        assert!(catalog.network_set("geoip.dat", "missing").is_err());
+        std::fs::remove_file(dir.join("geoip.dat")).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
     }
 }

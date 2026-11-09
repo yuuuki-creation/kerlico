@@ -9,3 +9,10 @@ members = [
     "crates/wg",
 ]
 default-members = ["crates/client", "crates/server"]
+
+[patch.crates-io]
+h3-quinn = { path = "vendor/h3-quinn" }
+quinn = { path = "vendor/quinn" }
+quinn-proto = { path = "vendor/quinn-proto" }
+rama-boring = { path = "vendor/rama-boring" }
+rama-boring-sys = { path = "vendor/rama-boring-sys" }

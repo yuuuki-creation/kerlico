@@ -3,6 +3,10 @@
 
 use std::net::SocketAddr;
 
+pub mod runtime;
+mod egress;
+pub use egress::{Exit, OutboundChoice};
+
 /// Grammar-checked protocol id.
 /// The text is one or more `[a-z0-9]+` segments separated by single hyphens.
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -168,10 +172,22 @@ impl Packet {
 
 /// Settings keys for one protocol.
 /// The protocol crate accepts or rejects a key when it reads this value.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct Settings {
     entries: std::collections::BTreeMap<String, Setting>,
+    runtime: Option<std::sync::Arc<runtime::RuntimeContext>>,
 }
+
+impl PartialEq for Settings {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries && match (&self.runtime, &other.runtime) {
+            (None, None) => true,
+            (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+}
+impl Eq for Settings {}
 
 /// One settings value. The TOML parser builds these values and stays private.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -202,6 +218,18 @@ pub enum PlaneFault {
 }
 
 impl Settings {
+    pub fn set_runtime(&mut self, runtime: std::sync::Arc<runtime::RuntimeContext>) {
+        self.runtime = Some(runtime);
+    }
+
+    pub fn runtime(&self) -> Option<&std::sync::Arc<runtime::RuntimeContext>> {
+        self.runtime.as_ref()
+    }
+
+    pub fn without_runtime(&self) -> Self {
+        Self { entries: self.entries.clone(), runtime: None }
+    }
+
     pub fn insert_text(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.entries.insert(key.into(), Setting::Text(value.into()));
     }
@@ -287,6 +315,15 @@ pub enum Transport {
 pub trait InboundStream: Send + Sync {
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault>;
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault>;
+
+    /// Raw user socket once this direction has no protocol bytes left to transform.
+    fn raw_read(&self) -> Option<std::net::TcpStream> {
+        None
+    }
+
+    fn raw_write(&self) -> Option<std::net::TcpStream> {
+        None
+    }
 }
 
 /// One accepted user flow. Protocol crates build this. They do not choose an exit.
@@ -308,10 +345,13 @@ pub trait Traffic: Send + Sync {
 }
 
 /// Server accept loop. `accept` returns a handoff, not a dialed socket.
+pub type ReverseDial = std::sync::Arc<dyn Fn(&Destination) -> Result<Box<dyn InboundStream>, OpenError> + Send + Sync>;
+
 pub trait Accept: Send {
     fn add_user(&mut self, email: &UserEmail, account: &Settings) -> Result<(), OpenError>;
     fn remove_user(&mut self, email: &UserEmail) -> Result<(), OpenError>;
     fn accept(&mut self) -> Result<Handoff, OpenError>;
+    fn reverse_landing(&self, _tag: &str) -> Result<ReverseDial, OpenError> { Err(OpenError::Settings) }
 }
 
 impl UserEmail {
@@ -448,6 +488,17 @@ impl InboundStream for PrefixStream {
 
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
         self.inner.write_to_user(buf)
+    }
+
+    fn raw_read(&self) -> Option<std::net::TcpStream> {
+        if !self.pending.lock().expect("prefix").is_empty() {
+            return None;
+        }
+        self.inner.raw_read()
+    }
+
+    fn raw_write(&self) -> Option<std::net::TcpStream> {
+        self.inner.raw_write()
     }
 }
 

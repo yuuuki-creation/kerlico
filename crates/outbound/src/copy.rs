@@ -11,7 +11,7 @@ use kerlico_shared::{InboundStream, NodeTag, OpenError, PlaneFault, Traffic, Use
 
 use crate::Exit;
 
-const BUF: usize = 64 * 1024;
+const BUF: usize = 1024 * 1024;
 const IDLE: Duration = Duration::from_secs(300);
 
 pub trait PipeRead: Send {

@@ -1,0 +1,40 @@
+[package]
+name = "rama-boring"
+version = { workspace = true }
+authors = [
+    "Steven Fackler <sfackler@gmail.com>",
+    "Ivan Nikulin <ifaaan@gmail.com>",
+    "Glen De Cauwsemaecker <glen@plabayo.tech>",
+]
+license = "Apache-2.0"
+description = "BoringSSL bindings for Rama"
+repository = { workspace = true }
+documentation = "https://docs.rs/rama-boring"
+readme = "README.md"
+keywords = ["crypto", "tls", "ssl", "dtls"]
+categories = ["cryptography", "api-bindings"]
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[package.metadata.docs.rs]
+features = []
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+# Applies a patch to enable
+# `ffi::X509_CHECK_FLAG_UNDERSCORE_WILDCARDS`. Same caveats as
+# those for `pq-experimental` feature apply.
+# Controlling key exchange preferences at compile time
+
+[dependencies]
+bitflags = { workspace = true }
+foreign-types = { workspace = true }
+libc = { workspace = true }
+openssl-macros = { workspace = true }
+rama-boring-sys = { workspace = true }
+
+[dev-dependencies]
+brotli = { workspace = true }
+hex = { workspace = true }
+proptest = { workspace = true }
+rusty-hook = { workspace = true }

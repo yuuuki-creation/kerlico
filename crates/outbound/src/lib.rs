@@ -2,6 +2,7 @@
 
 mod copy;
 mod native;
+mod network;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -12,64 +13,7 @@ use kerlico_shared::{Destination, Handoff, InboundStream, OpenError, PlaneFault,
 
 pub use native::{BytePipe, Native, PacketDevice};
 
-/// The five exits this module can choose.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Exit {
-    NativeV4,
-    NativeV6,
-    WarpV4,
-    WarpV6,
-    Landing,
-}
-
-impl Exit {
-    pub const fn tag(self) -> &'static str {
-        match self {
-            Self::NativeV4 => "native-v4",
-            Self::NativeV6 => "native-v6",
-            Self::WarpV4 => "warp-v4",
-            Self::WarpV6 => "warp-v6",
-            Self::Landing => "landing",
-        }
-    }
-
-    pub fn uplink_name(self) -> String {
-        format!("outbound>>>{}>>>traffic>>>uplink", self.tag())
-    }
-
-    pub fn downlink_name(self) -> String {
-        format!("outbound>>>{}>>>traffic>>>downlink", self.tag())
-    }
-
-    pub const fn is_v4(self) -> bool {
-        matches!(self, Self::NativeV4 | Self::WarpV4)
-    }
-
-    pub const fn is_v6(self) -> bool {
-        matches!(self, Self::NativeV6 | Self::WarpV6)
-    }
-}
-
-/// Set on the node at creation. `Default` is the blank outbound field.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OutboundChoice {
-    Manual(Exit),
-    Default,
-}
-
-impl OutboundChoice {
-    pub fn parse(text: &str) -> Option<Self> {
-        match text {
-            "default" => Some(Self::Default),
-            "native-v4" => Some(Self::Manual(Exit::NativeV4)),
-            "native-v6" => Some(Self::Manual(Exit::NativeV6)),
-            "warp-v4" => Some(Self::Manual(Exit::WarpV4)),
-            "warp-v6" => Some(Self::Manual(Exit::WarpV6)),
-            "landing" => Some(Self::Manual(Exit::Landing)),
-            _ => None,
-        }
-    }
-}
+pub use kerlico_shared::{Exit, OutboundChoice};
 
 /// What DNS, or an address literal, said about the destination.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,22 +78,30 @@ impl DialTarget {
 
 pub type LandFn = fn(&str, u16, &Settings, &Destination) -> Result<Box<dyn InboundStream>, OpenError>;
 
-#[derive(Clone)]
-struct Landing {
-    land: LandFn,
-    host: String,
-    port: u16,
-    settings: Settings,
-}
-
 /// One outbound module for every inbound on this process.
 #[derive(Clone)]
 pub struct Outbound {
     warp: Arc<native::WarpSlot>,
-    landing: Arc<Mutex<Option<Landing>>>,
+    landing: Arc<Mutex<Option<kerlico_shared::ReverseDial>>>,
+}
+
+/// Runtime callbacks do not keep the egress owner or its landing alive.
+#[derive(Clone)]
+pub struct WeakOutbound {
+    warp: std::sync::Weak<native::WarpSlot>,
+    landing: std::sync::Weak<Mutex<Option<kerlico_shared::ReverseDial>>>,
+}
+
+impl WeakOutbound {
+    pub fn upgrade(&self) -> Option<Outbound> {
+        Some(Outbound { warp: self.warp.upgrade()?, landing: self.landing.upgrade()? })
+    }
 }
 
 impl Outbound {
+    pub fn downgrade(&self) -> WeakOutbound {
+        WeakOutbound { warp: Arc::downgrade(&self.warp), landing: Arc::downgrade(&self.landing) }
+    }
     pub fn new() -> Self {
         Self {
             warp: Arc::new(native::WarpSlot::empty()),
@@ -158,12 +110,11 @@ impl Outbound {
     }
 
     pub fn install_landing(&self, land: LandFn, host: String, port: u16, settings: Settings) {
-        *self.landing.lock().expect("landing") = Some(Landing {
-            land,
-            host,
-            port,
-            settings,
-        });
+        *self.landing.lock().expect("landing") = Some(Arc::new(move |destination| land(&host, port, &settings, destination)));
+    }
+
+    pub fn install_reverse_landing(&self, dial: kerlico_shared::ReverseDial) {
+        *self.landing.lock().expect("landing") = Some(dial);
     }
 
     pub fn install_warp(&self, device: Arc<dyn native::PacketDevice>) {
@@ -208,12 +159,7 @@ impl Outbound {
             .expect("landing")
             .clone()
             .ok_or(OpenError::Transport)?;
-        let remote = (installed.land)(
-            &installed.host,
-            installed.port,
-            &installed.settings,
-            destination,
-        )?;
+        let remote = installed(destination)?;
         let remote: Arc<dyn InboundStream> = Arc::from(remote);
         copy::bridge(
             stream.as_ref(),

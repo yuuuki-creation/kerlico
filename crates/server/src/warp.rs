@@ -21,11 +21,11 @@ impl PacketDevice for WarpDevice {
 struct WarpPipe(Pipe);
 
 impl BytePipe for WarpPipe {
-    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<usize, OpenError> {
+    fn read_pipe(&self, buf: &mut [u8]) -> Result<usize, OpenError> {
         self.0.read(buf).map_err(map_io)
     }
 
-    fn write_pipe(&mut self, buf: &[u8]) -> Result<usize, OpenError> {
+    fn write_pipe(&self, buf: &[u8]) -> Result<usize, OpenError> {
         self.0.write(buf).map_err(map_io)
     }
 }

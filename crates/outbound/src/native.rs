@@ -60,9 +60,9 @@ pub trait PacketDevice: Send + Sync {
     fn connect_udp(&self, addr: SocketAddr) -> Result<Box<dyn BytePipe + Send>, OpenError>;
 }
 
-pub trait BytePipe: Send {
-    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<usize, OpenError>;
-    fn write_pipe(&mut self, buf: &[u8]) -> Result<usize, OpenError>;
+pub trait BytePipe: Send + Sync {
+    fn read_pipe(&self, buf: &mut [u8]) -> Result<usize, OpenError>;
+    fn write_pipe(&self, buf: &[u8]) -> Result<usize, OpenError>;
 }
 
 pub struct WarpSlot {
@@ -80,7 +80,7 @@ impl WarpSlot {
         *self.device.lock().expect("warp") = Some(device);
     }
 
-    fn get(&self) -> Result<Arc<dyn PacketDevice>, OpenError> {
+    pub(crate) fn get(&self) -> Result<Arc<dyn PacketDevice>, OpenError> {
         self.device
             .lock()
             .expect("warp")
@@ -104,6 +104,7 @@ pub fn dial_native(
                 .map_err(|_| OpenError::Transport)?;
             tcp.set_nodelay(true).ok();
             let read = tcp.try_clone().map_err(|_| OpenError::Transport)?;
+            read.set_read_timeout(Some(Duration::from_millis(200))).ok();
             copy::bridge(
                 stream.as_ref(),
                 TcpWrite(tcp),
@@ -155,7 +156,7 @@ pub fn dial_warp(
 }
 
 fn split_pipe(pipe: Box<dyn BytePipe + Send>) -> (WarpRead, WarpWrite) {
-    let shared = Arc::new(Mutex::new(pipe));
+    let shared: Arc<dyn BytePipe + Send> = Arc::from(pipe);
     (
         WarpRead {
             pipe: Arc::clone(&shared),
@@ -285,9 +286,6 @@ struct TcpRead(TcpStream);
 
 impl PipeRead for TcpRead {
     fn read_pipe(&mut self, buf: &mut [u8]) -> Result<usize, OpenError> {
-        self.0
-            .set_read_timeout(Some(Duration::from_millis(200)))
-            .ok();
         match self.0.read(buf) {
             Ok(n) => Ok(n),
             Err(error)
@@ -338,25 +336,24 @@ impl PipeWrite for UdpWrite {
 }
 
 struct WarpRead {
-    pipe: Arc<Mutex<Box<dyn BytePipe + Send>>>,
+    pipe: Arc<dyn BytePipe + Send>,
 }
 
 impl PipeRead for WarpRead {
     fn read_pipe(&mut self, buf: &mut [u8]) -> Result<usize, OpenError> {
-        self.pipe.lock().expect("warp pipe").read_pipe(buf)
+        self.pipe.read_pipe(buf)
     }
 }
 
 struct WarpWrite {
-    pipe: Arc<Mutex<Box<dyn BytePipe + Send>>>,
+    pipe: Arc<dyn BytePipe + Send>,
 }
 
 impl PipeWrite for WarpWrite {
     fn write_pipe(&mut self, buf: &[u8]) -> Result<(), OpenError> {
-        let mut pipe = self.pipe.lock().expect("warp pipe");
         let mut sent = 0;
         while sent < buf.len() {
-            let n = pipe.write_pipe(&buf[sent..])?;
+            let n = self.pipe.write_pipe(&buf[sent..])?;
             if n == 0 {
                 return Err(OpenError::Transport);
             }

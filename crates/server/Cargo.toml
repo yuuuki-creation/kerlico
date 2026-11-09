@@ -11,6 +11,8 @@ wireguard = { package = "kerlico-wireguard-server", path = "../../protocols/wire
 openvpn = { package = "kerlico-openvpn-server", path = "../../protocols/openvpn/server", optional = true }
 mieru = { package = "kerlico-mieru-server", path = "../../protocols/mieru/server", optional = true }
 landing-mieru = { package = "kerlico-mieru-client", path = "../../protocols/mieru/client", optional = true }
+vless = { package = "kerlico-vless-server", path = "../../protocols/vless/server", optional = true }
+landing-vless = { package = "kerlico-vless-client", path = "../../protocols/vless/client", optional = true }
 aes = "0.8"
 aes-gcm = "0.10"
 hkdf = "0.12"
@@ -23,7 +25,14 @@ regex = "1"
 socket2 = "0.5"
 
 [dev-dependencies]
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 kerlico-mieru = { path = "../../protocols/mieru/shared" }
+kerlico-vless = { path = "../../protocols/vless/shared" }
+rcgen = "0.13"
+tokio = { version = "1", features = ["rt", "net", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [build-dependencies]
 kerlico-manifest = { path = "../manifest" }

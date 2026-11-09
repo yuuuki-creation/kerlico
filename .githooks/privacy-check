@@ -3,6 +3,7 @@
 
 import getpass
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -58,6 +59,15 @@ UPSTREAM_NOTICES = {
     b"third_party/rust-reality/src/config/syntax.rs": "5b7a95c3cedb57efd5b478917420a44b4cd136a99bd0ac9c292eb51d2d01878a",
 }
 
+# Pinned upstream TLS crates may retain their public notices and binary fixtures.
+# The crate archive digest authenticates its contents; this manifest then pins
+# every patched vendored file. First-party paths never use this exemption.
+VENDORED_CARGO = {
+    b"vendor/rama-boring": ("0.7.0", "28b76d879a3b561760d7463249c8a38ba0296c4aceeb716e7a31cbe3f55b5459", "2123e54cc49092a1efaa6c23397383e33cf0e871a01d2bd5e4fd21533f8662ed"),
+    b"vendor/rama-boring-sys": ("0.7.0", "ef678124c4b9f6bee7238537229f25636a57cd669c612beb03c44c96aa3d9b67", "49fe8ae29733edb04ddcc6ee007873f797be4afb0edaff8f81fcb08e80b13d35"),
+    b"vendor/h3-quinn": ("0.0.10", "8b2e732c8d91a74731663ac8479ab505042fbf547b9a207213ab7fbcbfc4f8b4", "94eae310db966886ccf06aaf222312107d9dc55f306bc83f02f0bb7a98a90418"),
+}
+
 
 def scan_text(data):
     try:
@@ -111,9 +121,39 @@ def check_entry(mode, oid, name):
         if name in UPSTREAM_NOTICES:
             if hashlib.sha256(contents).hexdigest() != UPSTREAM_NOTICES[name]:
                 raise Rejected("upstream-notice-changed-needs-review")
+        elif approved_cargo_blob(name, contents):
+            return
         else:
             scan_text(contents)
             CHECKED_BLOBS.add(oid)
+
+
+def approved_cargo_blob(name, contents):
+    normalized = name.replace(b"\\", b"/")
+    for root, (_, package_hash, manifest_hash) in VENDORED_CARGO.items():
+        prefix = root + b"/"
+        if not normalized.startswith(prefix):
+            continue
+        manifest_path = Path(root.decode()) / ".cargo-checksum.json"
+        manifest_bytes = manifest_path.read_bytes()
+        if hashlib.sha256(manifest_bytes).hexdigest() != manifest_hash:
+            raise Rejected("upstream-crate-manifest-changed-needs-review")
+        try:
+            manifest = json.loads(manifest_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise Rejected("invalid-upstream-crate-manifest")
+        if manifest.get("package") != package_hash:
+            raise Rejected("upstream-crate-package-changed-needs-review")
+        if normalized == prefix + b".cargo-checksum.json":
+            if hashlib.sha256(contents).hexdigest() != manifest_hash:
+                raise Rejected("upstream-crate-manifest-changed-needs-review")
+            return True
+        relative = normalized[len(prefix):].decode("utf-8")
+        expected = manifest.get("files", {}).get(relative)
+        if expected is None or hashlib.sha256(contents).hexdigest() != expected:
+            raise Rejected("upstream-crate-file-changed-needs-review")
+        return True
+    return False
 
 
 def prefetch_blobs(oids):

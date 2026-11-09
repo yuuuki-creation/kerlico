@@ -8,6 +8,7 @@ kerlico-shared = { path = "../shared" }
 wireguard = { package = "kerlico-wireguard-client", path = "../../protocols/wireguard/client", optional = true }
 openvpn = { package = "kerlico-openvpn-client", path = "../../protocols/openvpn/client", optional = true }
 mieru = { package = "kerlico-mieru-client", path = "../../protocols/mieru/client", optional = true }
+vless = { package = "kerlico-vless-client", path = "../../protocols/vless/client", optional = true }
 
 [build-dependencies]
 kerlico-manifest = { path = "../manifest" }

@@ -17,6 +17,7 @@ mod config;
 mod dns;
 mod fakedns;
 mod geodata;
+mod runtime;
 mod udp;
 mod gen {
     include!(concat!(env!("OUT_DIR"), "/registry.rs"));
@@ -160,6 +161,9 @@ pub struct Server {
     fakedns: fakedns::Pool,
     fake_on: bool,
     geodata: geodata::Catalog,
+    dns: Arc<std::sync::RwLock<dns::Config>>,
+    runtime: Arc<kerlico_shared::runtime::RuntimeContext>,
+    landing_runtime: Arc<kerlico_shared::runtime::RuntimeContext>,
     udp: udp::Table,
     api: Option<std::net::SocketAddr>,
     api_tx: mpsc::Sender<api::Cmd>,
@@ -169,13 +173,21 @@ pub struct Server {
 impl Server {
     pub fn new() -> Self {
         let (api_tx, api_rx) = mpsc::channel();
+        let outbound = Outbound::new();
+        let geodata = geodata::Catalog::empty();
+        let dns = Arc::new(std::sync::RwLock::new(dns::Config::default()));
+        let runtime = runtime::context(&outbound, dns.clone(), geodata.clone(), true);
+        let landing_runtime = runtime::context(&outbound, dns.clone(), geodata.clone(), false);
         Self {
             nodes: Vec::new(),
-            outbound: Outbound::new(),
+            outbound,
             stats: Stats::new(),
             fakedns: fakedns::Pool::new(),
             fake_on: false,
-            geodata: geodata::Catalog::empty(),
+            geodata,
+            dns,
+            runtime,
+            landing_runtime,
             udp: udp::Table::new(),
             api: None,
             api_tx,
@@ -188,8 +200,12 @@ impl Server {
     }
 
     pub fn load_geodata(&mut self, dir: &std::path::Path) {
-        self.geodata = geodata::Catalog::load(dir);
+        self.geodata.reload(dir);
     }
+
+    pub fn runtime(&self) -> &Arc<kerlico_shared::runtime::RuntimeContext> { &self.runtime }
+
+    pub fn set_dns(&self, config: dns::Config) { *self.dns.write().expect("DNS runtime") = config; }
 
     pub fn enable_fakedns(&mut self) {
         self.fake_on = true;
@@ -234,7 +250,9 @@ impl Server {
             .find(|row| row.id == protocol)
             .map(|row| row.listen)
             .ok_or(Error::Config)?;
-        let inbound = open(&tag, &listen, settings)?;
+        let mut settings = settings.clone();
+        settings.set_runtime(self.runtime.clone());
+        let inbound = open(&tag, &listen, &settings)?;
         self.nodes.push(Node {
             tag,
             protocol,
@@ -280,6 +298,10 @@ impl Server {
         config::load(text).map_err(|_| Error::Config)
     }
 
+    pub fn from_config_in(text: &str, dir: &std::path::Path) -> Result<config::Loaded, Error> {
+        config::load_in(text, dir).map_err(|_| Error::Config)
+    }
+
     pub fn install_warp_device(&self, device: std::sync::Arc<dyn kerlico_outbound::PacketDevice>) {
         self.outbound.install_warp(device);
     }
@@ -296,12 +318,21 @@ impl Server {
             .find(|row| row.id.as_str() == protocol)
             .map(|row| row.land)
             .ok_or(Error::Config)?;
+        let mut settings = settings;
+        settings.set_runtime(self.landing_runtime.clone());
         self.outbound.install_landing(land, host, port, settings);
+        Ok(())
+    }
+
+    pub fn install_reverse_landing(&self, node: &NodeTag, tag: &str) -> Result<(), Error> {
+        let node = self.nodes.iter().find(|candidate| &candidate.tag == node).ok_or(Error::UnknownNode)?;
+        self.outbound.install_reverse_landing(node.inbound.reverse_landing(tag)?);
         Ok(())
     }
 
     /// Accepts flows and dials the chosen exit. This call does not return.
     pub fn run(&mut self, dns: dns::Config) -> Result<(), Error> {
+        self.set_dns(dns.clone());
         let native = Native::detect();
         let local = route::remember_locals();
         if let Some(addr) = dns.listen {
@@ -325,8 +356,9 @@ impl Server {
         }
         loop {
             self.drain_api();
-            self.dispatch_next_with(native, &local, &dns);
-            thread::sleep(Duration::from_millis(20));
+            if !self.dispatch_next_with(native, &local, &dns) {
+                thread::sleep(Duration::from_millis(1));
+            }
         }
     }
 
@@ -361,17 +393,12 @@ impl Server {
     pub fn dispatch_next(&mut self) -> Result<(), Error> {
         let native = Native::detect();
         let local = route::remember_locals();
-        let dns = dns::Config {
-            hosts: BTreeMap::new(),
-            upstreams: Vec::new(),
-            strategy: dns::Strategy::UseIp,
-            listen: None,
-        };
+        let dns = self.dns.read().expect("DNS runtime").clone();
         self.dispatch_next_with(native, &local, &dns);
         Ok(())
     }
 
-    fn dispatch_next_with(&mut self, native: Native, local: &[IpAddr], dns: &dns::Config) {
+    fn dispatch_next_with(&mut self, native: Native, local: &[IpAddr], dns: &dns::Config) -> bool {
         for index in 0..self.nodes.len() {
             let accepted = self.nodes[index].inbound.accept();
             let rules = self.nodes[index].rules.clone();
@@ -395,12 +422,13 @@ impl Server {
                             eprintln!("flow {error:?}");
                         }
                     });
-                    return;
+                    return true;
                 }
                 Err(OpenError::Again) => {}
                 Err(_) => {}
             }
         }
+        false
     }
 
     fn drive(

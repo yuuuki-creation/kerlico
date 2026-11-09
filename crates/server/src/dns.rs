@@ -33,6 +33,56 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn lookup_srv(&self, name: &str, native: Native, outbound: &Outbound) -> std::io::Result<Vec<kerlico_shared::runtime::SrvRecord>> {
+        let response = self.record_query(name, 33, native, outbound)?;
+        let mut result = Vec::new();
+        for (kind, offset, length) in record_locations(&response)? {
+            if kind != 33 { continue; }
+            if length < 7 { return Err(bad_dns("short SRV record")); }
+            let u16_at = |at| u16::from_be_bytes([response[at], response[at + 1]]);
+            let (target, end) = read_name(&response, offset + 6).ok_or_else(|| bad_dns("bad SRV target"))?;
+            if end > offset + length { return Err(bad_dns("SRV target exceeds record")); }
+            result.push(kerlico_shared::runtime::SrvRecord { target, port: u16_at(offset + 4), priority: u16_at(offset), weight: u16_at(offset + 2) });
+        }
+        Ok(result)
+    }
+
+    pub fn lookup_txt(&self, name: &str, native: Native, outbound: &Outbound) -> std::io::Result<Vec<String>> {
+        let response = self.record_query(name, 16, native, outbound)?;
+        let mut result = Vec::new();
+        for (kind, offset, length) in record_locations(&response)? {
+            if kind != 16 { continue; }
+            let mut at = offset;
+            let mut text = Vec::new();
+            while at < offset + length {
+                let size = response[at] as usize;
+                at += 1;
+                if at + size > offset + length { return Err(bad_dns("short TXT segment")); }
+                text.extend_from_slice(&response[at..at + size]);
+                at += size;
+            }
+            result.push(String::from_utf8(text).map_err(|_| bad_dns("non-UTF8 TXT endpoint"))?);
+        }
+        Ok(result)
+    }
+
+    fn record_query(&self, name: &str, kind: u16, native: Native, outbound: &Outbound) -> std::io::Result<Vec<u8>> {
+        let message = message(name, kind);
+        let fallback = Upstream { address: "1.1.1.1".parse().expect("literal DNS"), port: 53, tcp: false, choice: OutboundChoice::Default };
+        let upstreams = if self.upstreams.is_empty() { std::slice::from_ref(&fallback) } else { self.upstreams.as_slice() };
+        let mut error = bad_dns("no DNS upstream answered");
+        for upstream in upstreams {
+            let reach = if upstream.address.is_ipv4() { Reachability::HasV4 } else { Reachability::V6Only };
+            let exit = select_exit(upstream.choice, reach, native).map_err(|_| bad_dns("DNS upstream has no address"))?;
+            match outbound.exchange(exit, SocketAddr::new(upstream.address, upstream.port), upstream.tcp, &message) {
+                Ok(response) if response.len() >= 12 && response[..2] == message[..2] && response[2] & 0x80 != 0 && response[3] & 0xf == 0 => return Ok(response),
+                Ok(_) => error = bad_dns("invalid DNS response"),
+                Err(_) => error = std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "DNS upstream exchange failed"),
+            }
+        }
+        Err(error)
+    }
+
     pub fn lookup(&self, host: &str, native: Native, outbound: &Outbound) -> Vec<IpAddr> {
         if let Ok(ip) = host.parse::<IpAddr>() {
             return vec![ip];
@@ -66,6 +116,36 @@ impl Config {
         }
         found
     }
+}
+
+impl Default for Config {
+    fn default() -> Self { Self { hosts: BTreeMap::new(), upstreams: Vec::new(), strategy: Strategy::UseIp, listen: None } }
+}
+
+fn bad_dns(message: &str) -> std::io::Error { std::io::Error::new(std::io::ErrorKind::InvalidData, message) }
+
+fn record_locations(message: &[u8]) -> std::io::Result<Vec<(u16, usize, usize)>> {
+    if message.len() < 12 { return Err(bad_dns("short DNS header")); }
+    let questions = u16::from_be_bytes([message[4], message[5]]);
+    let answers = u16::from_be_bytes([message[6], message[7]]);
+    let mut at = 12;
+    for _ in 0..questions {
+        at = read_name(message, at).ok_or_else(|| bad_dns("bad DNS question"))?.1 + 4;
+        if at > message.len() { return Err(bad_dns("short DNS question")); }
+    }
+    let mut records = Vec::new();
+    for _ in 0..answers {
+        at = read_name(message, at).ok_or_else(|| bad_dns("bad DNS record name"))?.1;
+        if at + 10 > message.len() { return Err(bad_dns("short DNS record")); }
+        let kind = u16::from_be_bytes([message[at], message[at + 1]]);
+        let class = u16::from_be_bytes([message[at + 2], message[at + 3]]);
+        let length = u16::from_be_bytes([message[at + 8], message[at + 9]]) as usize;
+        at += 10;
+        if at + length > message.len() { return Err(bad_dns("short DNS record data")); }
+        if class == 1 { records.push((kind, at, length)); }
+        at += length;
+    }
+    Ok(records)
 }
 
 pub fn reply(
@@ -306,8 +386,10 @@ fn query(
 }
 
 fn message(host: &str, kind: u16) -> Vec<u8> {
-    let mut out = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
-    for label in host.split('.') {
+    static NEXT_ID: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(1);
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_be_bytes();
+    let mut out = vec![id[0], id[1], 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in host.trim_end_matches('.').split('.') {
         out.push(label.len() as u8);
         out.extend(label.as_bytes());
     }

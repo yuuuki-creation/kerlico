@@ -1,0 +1,19 @@
+Sources: crates.io rama-boring 0.7.0 and rama-boring-sys 0.7.0.
+Upstream: https://github.com/plabayo/rama-boring
+The original package license files and BoringSSL source licenses are retained.
+
+Kerlico changes:
+- rama-boring/src/ssl/connection.rs adds two ClientHelloShape switches.
+- rama-boring-sys/build/main.rs applies kerlico_legacy_extensions.patch after the upstream patches.
+- kerlico_legacy_extensions.patch controls initial EMS and renegotiation_info emission inside the TLS engine.
+- kerlico_profile_wire.patch preserves an explicitly ordered padding extension and known key shares requested by an explicit Preserve profile. PSK remains last.
+- rama-boring/src/ssl/quic.rs exposes SSL_quic_read_level through the existing EncryptionLevel enum for Quinn integration.
+- Existing SSL_key_update and zero-length SSL_write are exposed as safe Rust request_key_update/flush_tls methods so read-only TLS streams can acknowledge control messages.
+- Existing SSL_set1_tls_channel_id is exposed as a safe Rust setter for the old 360 profile.
+- Existing X509_sign with its documented null digest is exposed as sign_without_digest for Ed25519 certificate issuers.
+- QUIC ChromeParrot fields follow apernet/quic-go 184d081eef3e chromeQUICClientHelloSpec; captured UQUICClient output was compared with native output.
+
+Approved by the user on 2026-11-09 for exact Xray ClientHello fingerprints.
+Application logic remains Rust. The patch does not modify certificate verification,
+rewrite BIO bytes, enable renegotiation, or depend on private structure offsets.
+Builds use these pinned local packages without a Git download.

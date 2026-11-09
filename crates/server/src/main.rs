@@ -12,15 +12,13 @@ fn main() {
         eprintln!("{error}");
         String::new()
     });
-    let mut loaded = kerlico_server::Server::from_config(&text).unwrap_or_else(|_| {
-        eprintln!("config");
-        std::process::exit(1);
-    });
     let dir = std::path::Path::new(&path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    kerlico_server::attach_warp(&loaded.server, loaded.warp.as_deref(), dir);
-    loaded.server.load_geodata(dir);
+    let mut loaded = kerlico_server::Server::from_config_in(&text, dir).unwrap_or_else(|_| {
+        eprintln!("config");
+        std::process::exit(1);
+    });
     for id in kerlico_server::Server::compiled() {
         println!("{id}");
     }

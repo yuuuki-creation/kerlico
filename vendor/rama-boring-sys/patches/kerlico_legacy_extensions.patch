@@ -1,0 +1,59 @@
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -5734,6 +5734,8 @@
+   // SSL_R_NO_SUPPORTED_PSK_MODE. Tickets a server sends anyway still reach
+   // the new-session callback.
+   int omit_psk_key_exchange_modes;
++  int omit_extended_master_secret;
++  int omit_renegotiation_info;
+ } RAMA_SSL_CLIENT_HELLO_SHAPE;
+ 
+ // RAMA_SSL_set_client_hello_shape replaces this client's shape as a whole
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -3468,6 +3468,8 @@
+   // it every PSK offer.
+   bool ec_point_formats = false;
+   bool omit_psk_key_exchange_modes = false;
++  bool omit_extended_master_secret = false;
++  bool omit_renegotiation_info = false;
+ 
+   // padding is a `RAMA_SSL_PADDING_*` mode; `padding_length` is its target.
+   uint8_t padding = RAMA_SSL_PADDING_NATIVE;
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -3631,6 +3631,8 @@
+   rama->ech_grease_payload_len = shape->ech_grease_payload_len;
+   rama->ec_point_formats = !!shape->ec_point_formats;
+   rama->omit_psk_key_exchange_modes = !!shape->omit_psk_key_exchange_modes;
++  rama->omit_extended_master_secret = !!shape->omit_extended_master_secret;
++  rama->omit_renegotiation_info = !!shape->omit_renegotiation_info;
+   return 1;
+ }
+ 
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -706,6 +706,11 @@
+ static bool ext_ri_add_clienthello(const SSL_HANDSHAKE *hs, CBB *out,
+                                    CBB *out_compressible,
+                                    ssl_client_hello_type_t type) {
++  if (!hs->ssl->s3->initial_handshake_complete && hs->config->rama != nullptr &&
++      hs->config->rama->omit_renegotiation_info) {
++    return true;
++  }
++
+   const SSLImpl *const ssl = hs->ssl;
+   // Renegotiation indication is not necessary in TLS 1.3.
+   if ((hs->min_version >= TLS1_3_VERSION &&
+@@ -872,6 +877,11 @@
+ static bool ext_ems_add_clienthello(const SSL_HANDSHAKE *hs, CBB *out,
+                                     CBB *out_compressible,
+                                     ssl_client_hello_type_t type) {
++  if (!hs->ssl->s3->initial_handshake_complete && hs->config->rama != nullptr &&
++      hs->config->rama->omit_extended_master_secret) {
++    return true;
++  }
++
+   // Extended master secret is not necessary in TLS 1.3.
+   if ((hs->min_version >= TLS1_3_VERSION &&
+        (hs->config->rama == nullptr || !hs->config->rama->legacy_extensions)) ||

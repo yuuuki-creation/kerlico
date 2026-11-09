@@ -1,0 +1,823 @@
+use crate::asn1::Asn1Time;
+use crate::bn::{BigNum, MsbOption};
+use crate::hash::MessageDigest;
+use crate::nid::Nid;
+use crate::pkey::{PKey, Private};
+use crate::rsa::Rsa;
+use crate::stack::Stack;
+use crate::x509::extension::{
+    AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
+    SubjectKeyIdentifier,
+};
+use crate::x509::store::X509StoreBuilder;
+use crate::x509::{X509Extension, X509Name, X509Req, X509StoreContext, X509};
+
+mod trusted_first;
+
+fn pkey() -> PKey<Private> {
+    let rsa = Rsa::generate(2048).unwrap();
+    PKey::from_rsa(rsa).unwrap()
+}
+
+#[test]
+fn test_cert_loading() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let fingerprint = cert.digest(MessageDigest::sha1()).unwrap();
+
+    assert_eq!(fingerprint.len(), 20);
+}
+
+#[test]
+fn test_debug() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let debugged = format!("{cert:#?}");
+
+    assert!(debugged.contains(r#"serial_number: "8771f7bdee982fa5""#));
+    assert!(debugged.contains(r#"signature_algorithm: sha256WithRSAEncryption"#));
+    assert!(debugged.contains(r#"countryName = "AU""#));
+    assert!(debugged.contains(r#"stateOrProvinceName = "Some-State""#));
+    assert!(debugged.contains("not_before:"));
+    assert!(debugged.contains("not_after:"));
+}
+
+#[test]
+fn test_cert_issue_validity() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let one_year_from_now = Asn1Time::days_from_now(365).unwrap();
+
+    assert!(cert.not_before() < cert.not_after());
+    assert!(cert.not_after() > one_year_from_now);
+}
+
+#[test]
+fn test_save_der() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+
+    let der = cert.to_der().unwrap();
+    assert!(!der.is_empty());
+}
+
+#[test]
+fn test_subject_read_cn() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let subject = cert.subject_name();
+    let cn = subject.entries_by_nid(Nid::COMMONNAME).next().unwrap();
+    assert_eq!(cn.data().as_slice(), b"foobar.com");
+}
+
+#[test]
+fn test_nid_values() {
+    let cert = include_bytes!("../../../test/nid_test_cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let subject = cert.subject_name();
+
+    let cn = subject.entries_by_nid(Nid::COMMONNAME).next().unwrap();
+    assert_eq!(cn.data().as_slice(), b"example.com");
+
+    let email = subject
+        .entries_by_nid(Nid::PKCS9_EMAILADDRESS)
+        .next()
+        .unwrap();
+    assert_eq!(email.data().as_slice(), b"test@example.com");
+
+    let friendly = subject.entries_by_nid(Nid::FRIENDLYNAME).next().unwrap();
+    assert_eq!(&**friendly.data().as_utf8().unwrap(), "Example");
+}
+
+#[test]
+fn test_nameref_iterator() {
+    let cert = include_bytes!("../../../test/nid_test_cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let subject = cert.subject_name();
+    let mut all_entries = subject.entries();
+
+    let email = all_entries.next().unwrap();
+    assert_eq!(
+        email.object().nid().as_raw(),
+        Nid::PKCS9_EMAILADDRESS.as_raw()
+    );
+    assert_eq!(email.data().as_slice(), b"test@example.com");
+
+    let cn = all_entries.next().unwrap();
+    assert_eq!(cn.object().nid().as_raw(), Nid::COMMONNAME.as_raw());
+    assert_eq!(cn.data().as_slice(), b"example.com");
+
+    let friendly = all_entries.next().unwrap();
+    assert_eq!(friendly.object().nid().as_raw(), Nid::FRIENDLYNAME.as_raw());
+    assert_eq!(&**friendly.data().as_utf8().unwrap(), "Example");
+
+    if all_entries.next().is_some() {
+        panic!();
+    }
+}
+
+#[test]
+fn test_nid_uid_value() {
+    let cert = include_bytes!("../../../test/nid_uid_test_cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let subject = cert.subject_name();
+
+    let cn = subject.entries_by_nid(Nid::USERID).next().unwrap();
+    assert_eq!(cn.data().as_slice(), b"this is the userId");
+}
+
+#[test]
+fn test_subject_alt_name() {
+    let cert = include_bytes!("../../../test/alt_name_cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+
+    let subject_alt_names = cert.subject_alt_names().unwrap();
+    assert_eq!(5, subject_alt_names.len());
+    assert_eq!(Some("example.com"), subject_alt_names[0].dnsname());
+    assert_eq!(subject_alt_names[1].ipaddress(), Some(&[127, 0, 0, 1][..]));
+    assert_eq!(
+        subject_alt_names[2].ipaddress(),
+        Some(&b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x01"[..])
+    );
+    assert_eq!(Some("test@example.com"), subject_alt_names[3].email());
+    assert_eq!(Some("http://www.example.com"), subject_alt_names[4].uri());
+}
+
+#[test]
+fn test_subject_alt_name_iter() {
+    let cert = include_bytes!("../../../test/alt_name_cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+
+    let subject_alt_names = cert.subject_alt_names().unwrap();
+    let mut subject_alt_names_iter = subject_alt_names.iter();
+    assert_eq!(
+        subject_alt_names_iter.next().unwrap().dnsname(),
+        Some("example.com")
+    );
+    assert_eq!(
+        subject_alt_names_iter.next().unwrap().ipaddress(),
+        Some(&[127, 0, 0, 1][..])
+    );
+    assert_eq!(
+        subject_alt_names_iter.next().unwrap().ipaddress(),
+        Some(&b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x01"[..])
+    );
+    assert_eq!(
+        subject_alt_names_iter.next().unwrap().email(),
+        Some("test@example.com")
+    );
+    assert_eq!(
+        subject_alt_names_iter.next().unwrap().uri(),
+        Some("http://www.example.com")
+    );
+    assert!(subject_alt_names_iter.next().is_none());
+}
+
+#[test]
+fn test_subject_key_id() {
+    // nid_test_cert_pem has SKI, but no AKI
+    let cert = include_bytes!("../../../test/nid_test_cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+
+    let ski = cert.subject_key_id().expect("unable to extract SKI");
+    assert_eq!(
+        ski.as_slice(),
+        [
+            80, 107, 158, 237, 95, 61, 235, 100, 212, 115, 249, 244, 219, 163, 124, 55, 141, 2, 76,
+            5
+        ]
+    );
+
+    let aki = cert.authority_key_id();
+    assert!(aki.is_none());
+}
+
+#[test]
+fn test_pubkey_digest_matches_method1_ski() {
+    // nid_test_cert_pem has an SKI built via OpenSSL's `subjectKeyIdentifier = hash`,
+    // which is RFC 5280 §4.2.1.2 method (1): SHA-1 of the SubjectPublicKey BIT STRING
+    // contents. `pubkey_digest(sha1)` must reproduce the same 20 bytes.
+    let cert = include_bytes!("../../../test/nid_test_cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+
+    let ski = cert.subject_key_id().expect("unable to extract SKI");
+    let pubkey_sha1 = cert
+        .pubkey_digest(MessageDigest::sha1())
+        .expect("pubkey_digest sha1");
+
+    assert_eq!(pubkey_sha1.len(), 20);
+    assert_eq!(ski.as_slice(), &pubkey_sha1[..]);
+}
+
+#[test]
+fn test_pubkey_digest_length_varies_with_digest() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+
+    let sha1 = cert.pubkey_digest(MessageDigest::sha1()).expect("sha1");
+    assert_eq!(sha1.len(), 20);
+
+    let sha256 = cert.pubkey_digest(MessageDigest::sha256()).expect("sha256");
+    assert_eq!(sha256.len(), 32);
+
+    assert_ne!(&sha1[..], &sha256[..20]);
+}
+
+#[test]
+fn test_x509_name_print_ex() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+
+    let name_no_flags = cert
+        .subject_name()
+        .print_ex(0)
+        .expect("failed to print cert subject name");
+    assert_eq!(
+        name_no_flags,
+        "C=AU, ST=Some-State, O=Internet Widgits Pty Ltd, CN=foobar.com"
+    );
+
+    let name_rfc2253 = cert
+        .subject_name()
+        .print_ex(ffi::XN_FLAG_RFC2253)
+        .expect("failed to print cert subject name");
+    assert_eq!(
+        name_rfc2253,
+        "CN=foobar.com,O=Internet Widgits Pty Ltd,ST=Some-State,C=AU"
+    );
+}
+
+#[test]
+fn x509_builder() {
+    let pkey = pkey();
+
+    let mut name = X509Name::builder().unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "foobar.com")
+        .unwrap();
+    let name = name.build();
+
+    let mut builder = X509::builder().unwrap();
+    builder.set_version(2).unwrap();
+    builder.set_subject_name(&name).unwrap();
+    builder.set_issuer_name(&name).unwrap();
+    builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    builder
+        .set_not_after(&Asn1Time::days_from_now(365).unwrap())
+        .unwrap();
+    builder.set_pubkey(&pkey).unwrap();
+
+    let mut serial = BigNum::new().unwrap();
+    serial.rand(128, MsbOption::MAYBE_ZERO, false).unwrap();
+    builder
+        .set_serial_number(&serial.to_asn1_integer().unwrap())
+        .unwrap();
+
+    let basic_constraints = BasicConstraints::new().critical().ca().build().unwrap();
+    builder
+        .append_extension(basic_constraints.as_ref())
+        .unwrap();
+    let key_usage = KeyUsage::new()
+        .digital_signature()
+        .key_encipherment()
+        .build()
+        .unwrap();
+    builder.append_extension(&key_usage).unwrap();
+    let ext_key_usage = ExtendedKeyUsage::new()
+        .client_auth()
+        .server_auth()
+        .other("2.999.1")
+        .build()
+        .unwrap();
+    builder.append_extension(&ext_key_usage).unwrap();
+    let subject_key_identifier = SubjectKeyIdentifier::new()
+        .build(&builder.x509v3_context(None, None))
+        .unwrap();
+    builder.append_extension(&subject_key_identifier).unwrap();
+    let authority_key_identifier = AuthorityKeyIdentifier::new()
+        .keyid(true)
+        .build(&builder.x509v3_context(None, None))
+        .unwrap();
+    builder.append_extension(&authority_key_identifier).unwrap();
+    let subject_alternative_name = SubjectAlternativeName::new()
+        .dns("example.com")
+        .ip("127.0.0.1")
+        .ip("::1")
+        .build(&builder.x509v3_context(None, None))
+        .unwrap();
+    builder.append_extension(&subject_alternative_name).unwrap();
+
+    builder.sign(&pkey, MessageDigest::sha256()).unwrap();
+
+    let x509 = builder.build();
+
+    assert!(pkey.public_eq(&x509.public_key().unwrap()));
+    assert!(x509.verify(&pkey).unwrap());
+
+    let subject_alt_names = x509.subject_alt_names().unwrap();
+    assert_eq!(subject_alt_names[0].dnsname(), Some("example.com"));
+    assert_eq!(subject_alt_names[1].ipaddress(), Some(&[127, 0, 0, 1][..]));
+    assert_eq!(
+        subject_alt_names[2].ipaddress(),
+        Some(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1][..])
+    );
+
+    let cn = x509
+        .subject_name()
+        .entries_by_nid(Nid::COMMONNAME)
+        .next()
+        .unwrap();
+    assert_eq!(cn.data().as_slice(), b"foobar.com");
+    assert_eq!(serial, x509.serial_number().to_bn().unwrap());
+}
+
+#[test]
+fn x509_extension_accessors_and_append_from_cert() {
+    let pkey = pkey();
+
+    let mut name = X509Name::builder().unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "mirror-source.example")
+        .unwrap();
+    let name = name.build();
+
+    let mut source_builder = X509::builder().unwrap();
+    source_builder.set_version(2).unwrap();
+    source_builder.set_subject_name(&name).unwrap();
+    source_builder.set_issuer_name(&name).unwrap();
+    source_builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    source_builder
+        .set_not_after(&Asn1Time::days_from_now(30).unwrap())
+        .unwrap();
+    source_builder.set_pubkey(&pkey).unwrap();
+
+    let mut serial = BigNum::new().unwrap();
+    serial.rand(128, MsbOption::MAYBE_ZERO, false).unwrap();
+    source_builder
+        .set_serial_number(&serial.to_asn1_integer().unwrap())
+        .unwrap();
+
+    let basic_constraints = BasicConstraints::new().critical().ca().build().unwrap();
+    source_builder
+        .append_extension(basic_constraints.as_ref())
+        .unwrap();
+    let key_usage = KeyUsage::new()
+        .digital_signature()
+        .key_encipherment()
+        .build()
+        .unwrap();
+    source_builder.append_extension(&key_usage).unwrap();
+    source_builder.sign(&pkey, MessageDigest::sha256()).unwrap();
+    let source_cert = source_builder.build();
+
+    assert_eq!(source_cert.extension_count(), 2);
+    let mut source_exts = source_cert.extensions();
+    let source_ext0 = source_exts.next().unwrap();
+    assert_eq!(source_ext0.object().nid(), Nid::BASIC_CONSTRAINTS);
+    assert!(source_ext0.critical());
+    assert!(!source_ext0.data().is_empty());
+    let source_ext1 = source_exts.next().unwrap();
+    assert_eq!(source_ext1.object().nid(), Nid::KEY_USAGE);
+    assert!(!source_ext1.critical());
+    assert!(!source_ext1.data().is_empty());
+    assert!(source_exts.next().is_none());
+
+    let mut target_builder = X509::builder().unwrap();
+    target_builder.set_version(2).unwrap();
+    target_builder.set_subject_name(&name).unwrap();
+    target_builder.set_issuer_name(&name).unwrap();
+    target_builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    target_builder
+        .set_not_after(&Asn1Time::days_from_now(30).unwrap())
+        .unwrap();
+    target_builder.set_pubkey(&pkey).unwrap();
+
+    let mut target_serial = BigNum::new().unwrap();
+    target_serial
+        .rand(128, MsbOption::MAYBE_ZERO, false)
+        .unwrap();
+    target_builder
+        .set_serial_number(&target_serial.to_asn1_integer().unwrap())
+        .unwrap();
+
+    target_builder
+        .append_extensions_from_cert(&source_cert)
+        .unwrap();
+    target_builder.sign(&pkey, MessageDigest::sha256()).unwrap();
+    let target_cert = target_builder.build();
+
+    assert_eq!(target_cert.extension_count(), source_cert.extension_count());
+    for (source_ext, target_ext) in source_cert.extensions().zip(target_cert.extensions()) {
+        assert_eq!(source_ext.object().nid(), target_ext.object().nid());
+        assert_eq!(source_ext.critical(), target_ext.critical());
+        assert_eq!(source_ext.data().as_slice(), target_ext.data().as_slice());
+    }
+}
+
+#[test]
+fn x509_extension_append_der_payload() {
+    let pkey = pkey();
+
+    let mut name = X509Name::builder().unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "append-der.example")
+        .unwrap();
+    let name = name.build();
+
+    let mut source_builder = X509::builder().unwrap();
+    source_builder.set_version(2).unwrap();
+    source_builder.set_subject_name(&name).unwrap();
+    source_builder.set_issuer_name(&name).unwrap();
+    source_builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    source_builder
+        .set_not_after(&Asn1Time::days_from_now(30).unwrap())
+        .unwrap();
+    source_builder.set_pubkey(&pkey).unwrap();
+
+    let mut source_serial = BigNum::new().unwrap();
+    source_serial
+        .rand(128, MsbOption::MAYBE_ZERO, false)
+        .unwrap();
+    source_builder
+        .set_serial_number(&source_serial.to_asn1_integer().unwrap())
+        .unwrap();
+
+    let key_usage = KeyUsage::new()
+        .digital_signature()
+        .key_encipherment()
+        .build()
+        .unwrap();
+    source_builder.append_extension(&key_usage).unwrap();
+    source_builder.sign(&pkey, MessageDigest::sha256()).unwrap();
+    let source_cert = source_builder.build();
+    let source_ext = source_cert.extension(0).unwrap();
+
+    let mut target_builder = X509::builder().unwrap();
+    target_builder.set_version(2).unwrap();
+    target_builder.set_subject_name(&name).unwrap();
+    target_builder.set_issuer_name(&name).unwrap();
+    target_builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    target_builder
+        .set_not_after(&Asn1Time::days_from_now(30).unwrap())
+        .unwrap();
+    target_builder.set_pubkey(&pkey).unwrap();
+
+    let mut target_serial = BigNum::new().unwrap();
+    target_serial
+        .rand(128, MsbOption::MAYBE_ZERO, false)
+        .unwrap();
+    target_builder
+        .set_serial_number(&target_serial.to_asn1_integer().unwrap())
+        .unwrap();
+
+    target_builder
+        .append_extension_der_payload(
+            source_ext.object(),
+            source_ext.critical(),
+            source_ext.data().as_slice(),
+        )
+        .unwrap();
+    target_builder.sign(&pkey, MessageDigest::sha256()).unwrap();
+    let target_cert = target_builder.build();
+    let target_ext = target_cert.extension(0).unwrap();
+
+    assert_eq!(source_ext.object().nid(), target_ext.object().nid());
+    assert_eq!(source_ext.critical(), target_ext.critical());
+    assert_eq!(source_ext.data().as_slice(), target_ext.data().as_slice());
+}
+
+#[test]
+fn x509_extension_new() {
+    assert!(X509Extension::new(None, None, "crlDistributionPoints", "section").is_err());
+    assert!(X509Extension::new(None, None, "proxyCertInfo", "").is_err());
+    assert!(X509Extension::new(None, None, "certificatePolicies", "").is_err());
+    assert!(X509Extension::new(None, None, "subjectAltName", "dirName:section").is_err());
+}
+
+#[test]
+fn x509_extension_to_der() {
+    let builder = X509::builder().unwrap();
+
+    for (ext, expected) in [
+        (
+            BasicConstraints::new().critical().ca().build().unwrap(),
+            b"0\x0f\x06\x03U\x1d\x13\x01\x01\xff\x04\x050\x03\x01\x01\xff" as &[u8],
+        ),
+        (
+            SubjectAlternativeName::new()
+                .dns("example.com,DNS:example2.com")
+                .build(&builder.x509v3_context(None, None))
+                .unwrap(),
+            b"0'\x06\x03U\x1d\x11\x04 0\x1e\x82\x1cexample.com,DNS:example2.com",
+        ),
+        (
+            SubjectAlternativeName::new()
+                .rid("1.2.3.4")
+                .uri("https://example.com")
+                .build(&builder.x509v3_context(None, None))
+                .unwrap(),
+            b"0#\x06\x03U\x1d\x11\x04\x1c0\x1a\x88\x03*\x03\x04\x86\x13https://example.com",
+        ),
+        (
+            ExtendedKeyUsage::new()
+                .server_auth()
+                .other("2.999.1")
+                .other("clientAuth")
+                .build()
+                .unwrap(),
+            b"0\x22\x06\x03U\x1d%\x04\x1b0\x19\x06\x08+\x06\x01\x05\x05\x07\x03\x01\x06\x03\x887\x01\x06\x08+\x06\x01\x05\x05\x07\x03\x02",
+        ),
+    ] {
+        assert_eq!(&ext.to_der().unwrap(), expected);
+    }
+}
+
+#[test]
+fn eku_invalid_other() {
+    assert!(ExtendedKeyUsage::new()
+        .other("1.1.1.1.1,2.2.2.2.2")
+        .build()
+        .is_err());
+}
+
+#[test]
+fn x509_req_builder() {
+    let pkey = pkey();
+
+    let mut name = X509Name::builder().unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "foobar.com")
+        .unwrap();
+    let name = name.build();
+
+    let mut builder = X509Req::builder().unwrap();
+    builder.set_version(0).unwrap();
+    builder.set_subject_name(&name).unwrap();
+    builder.set_pubkey(&pkey).unwrap();
+
+    let mut extensions = Stack::new().unwrap();
+    let key_usage = KeyUsage::new()
+        .digital_signature()
+        .key_encipherment()
+        .build()
+        .unwrap();
+    extensions.push(key_usage).unwrap();
+    let subject_alternative_name = SubjectAlternativeName::new()
+        .dns("example.com")
+        .build(&builder.x509v3_context(None))
+        .unwrap();
+    extensions.push(subject_alternative_name).unwrap();
+    builder.add_extensions(&extensions).unwrap();
+
+    builder.sign(&pkey, MessageDigest::sha256()).unwrap();
+
+    let req = builder.build();
+    assert!(req.public_key().unwrap().public_eq(&pkey));
+    assert_eq!(req.extensions().unwrap().len(), extensions.len());
+    assert!(req.verify(&pkey).unwrap());
+}
+
+#[test]
+fn test_stack_from_pem() {
+    let certs = include_bytes!("../../../test/certs.pem");
+    let certs = X509::stack_from_pem(certs).unwrap();
+
+    assert_eq!(certs.len(), 2);
+    assert_eq!(
+        certs[0].to_der().unwrap(),
+        X509::from_pem(include_bytes!("../../../test/cert.pem"))
+            .unwrap()
+            .to_der()
+            .unwrap()
+    );
+    assert_eq!(
+        certs[1].to_der().unwrap(),
+        X509::from_pem(include_bytes!("../../../test/root-ca.pem"))
+            .unwrap()
+            .to_der()
+            .unwrap()
+    );
+}
+
+#[test]
+fn issued() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let ca = include_bytes!("../../../test/root-ca.pem");
+    let ca = X509::from_pem(ca).unwrap();
+
+    assert_eq!(ca.issued(&cert), Ok(()));
+    assert!(cert.issued(&cert).is_err());
+}
+
+#[test]
+fn signature() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let signature = cert.signature();
+    assert_eq!(signature.as_slice().len(), 256);
+    let algorithm = cert.signature_algorithm();
+    assert_eq!(algorithm.object().nid(), Nid::SHA256WITHRSAENCRYPTION);
+    assert_eq!(algorithm.object().to_string(), "sha256WithRSAEncryption");
+}
+
+#[test]
+#[allow(clippy::redundant_clone)]
+fn clone_x509() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    drop(cert.clone());
+}
+
+#[test]
+fn test_verify_cert() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let ca = include_bytes!("../../../test/root-ca.pem");
+    let ca = X509::from_pem(ca).unwrap();
+    let chain = Stack::new().unwrap();
+
+    let mut store_bldr = X509StoreBuilder::new().unwrap();
+    store_bldr.add_cert(&ca).unwrap();
+    let store = store_bldr.build();
+    let empty_store = X509StoreBuilder::new().unwrap().build();
+
+    let mut context = X509StoreContext::new().unwrap();
+    assert!(context
+        .init(&store, &cert, &chain, |c| c.verify_cert())
+        .unwrap());
+    assert!(!context
+        .init(&empty_store, &cert, &chain, |c| c.verify_cert())
+        .unwrap());
+    assert!(context
+        .init(&store, &cert, &chain, |c| c.verify_cert())
+        .unwrap());
+
+    context
+        .reset_with_context_data(empty_store, cert.clone(), Stack::new().unwrap())
+        .unwrap();
+    assert!(!context.verify_cert().unwrap());
+
+    context.reset_with_context_data(store, cert, chain).unwrap();
+    assert!(context.verify_cert().unwrap());
+}
+
+#[test]
+fn test_verify_fails() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let ca = include_bytes!("../../../test/alt_name_cert.pem");
+    let ca = X509::from_pem(ca).unwrap();
+    let chain = Stack::new().unwrap();
+
+    let mut store_bldr = X509StoreBuilder::new().unwrap();
+    store_bldr.add_cert(&ca).unwrap();
+    let store = store_bldr.build();
+
+    let mut context = X509StoreContext::new().unwrap();
+    assert!(!context
+        .init(&store, &cert, &chain, |c| c.verify_cert())
+        .unwrap());
+}
+
+#[test]
+fn verification_context_owns_replacement_parameters() {
+    use crate::x509::verify::{X509VerifyFlags, X509VerifyParam};
+
+    let cert = X509::from_pem(include_bytes!("../../../test/cert.pem")).unwrap();
+    let ca = X509::from_pem(include_bytes!("../../../test/root-ca.pem")).unwrap();
+    let mut builder = X509StoreBuilder::new().unwrap();
+    builder.add_cert(&ca).unwrap();
+    let store = builder.build();
+    let chain = Stack::new().unwrap();
+    let mut context = X509StoreContext::new().unwrap();
+    context
+        .init(&store, &cert, &chain, |context| {
+            let mut params = X509VerifyParam::new()?;
+            params.try_set_flags(X509VerifyFlags::TRUSTED_FIRST)?;
+            params.set_depth(10);
+            context.set_verify_param(params);
+            assert!(context
+                .verify_param_mut()
+                .flags()
+                .contains(X509VerifyFlags::TRUSTED_FIRST));
+            assert!(context.verify_cert()?);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn test_save_subject_der() {
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+
+    let der = cert.subject_name().to_der().unwrap();
+    println!("der: {der:?}");
+    assert!(!der.is_empty());
+}
+
+#[test]
+fn test_load_subject_der() {
+    // The subject from ../../../test/cert.pem
+    const SUBJECT_DER: &[u8] = &[
+        48, 90, 49, 11, 48, 9, 6, 3, 85, 4, 6, 19, 2, 65, 85, 49, 19, 48, 17, 6, 3, 85, 4, 8, 12,
+        10, 83, 111, 109, 101, 45, 83, 116, 97, 116, 101, 49, 33, 48, 31, 6, 3, 85, 4, 10, 12, 24,
+        73, 110, 116, 101, 114, 110, 101, 116, 32, 87, 105, 100, 103, 105, 116, 115, 32, 80, 116,
+        121, 32, 76, 116, 100, 49, 19, 48, 17, 6, 3, 85, 4, 3, 12, 10, 102, 111, 111, 98, 97, 114,
+        46, 99, 111, 109,
+    ];
+    X509Name::from_der(SUBJECT_DER).unwrap();
+}
+
+#[test]
+fn test_check_ip_asc() {
+    // Covers 127.0.0.1 and 0:0:0:0:0:0:0:1
+    let cert = include_bytes!("../../../test/alt_name_cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+
+    assert!(cert.check_ip_asc("127.0.0.1").unwrap());
+    assert!(!cert.check_ip_asc("127.0.0.2").unwrap());
+
+    assert!(cert.check_ip_asc("0:0:0:0:0:0:0:1").unwrap());
+    assert!(!cert.check_ip_asc("0:0:0:0:0:0:0:2").unwrap());
+}
+
+fn cert_with_ocsp_uri(uri: &[u8]) -> X509 {
+    let key = PKey::private_key_from_pem(include_bytes!("../../../test/key.pem")).unwrap();
+    let mut builder = X509::builder().unwrap();
+    builder.set_pubkey(&key).unwrap();
+    builder.set_version(2).unwrap();
+    let serial = BigNum::from_u32(7).unwrap().to_asn1_integer().unwrap();
+    builder.set_serial_number(&serial).unwrap();
+    let now = Asn1Time::days_from_now(1).unwrap();
+    builder.set_not_before(&now).unwrap();
+    builder.set_not_after(&now).unwrap();
+    let mut name = X509Name::builder().unwrap();
+    name.append_entry_by_text("CN", "ocsp").unwrap();
+    let name = name.build();
+    builder.set_subject_name(&name).unwrap();
+    builder.set_issuer_name(&name).unwrap();
+
+    // AuthorityInfoAccess: SEQ { SEQ { id-ad-ocsp, [6] IA5String uri } }
+    let access_location = [&[0x86, uri.len() as u8][..], uri].concat();
+    let access = [
+        &[0x30, (10 + access_location.len()) as u8][..],
+        &[0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01],
+        &access_location,
+    ]
+    .concat();
+    let aia = [&[0x30, access.len() as u8][..], &access].concat();
+    let oid = crate::asn1::Asn1Object::from_str("1.3.6.1.5.5.7.1.1").unwrap();
+    builder
+        .append_extension_der_payload(&oid, false, &aia)
+        .unwrap();
+    builder.sign(&key, MessageDigest::sha256()).unwrap();
+    // Round-trip through DER, as a peer certificate would arrive.
+    X509::from_der(&builder.build().to_der().unwrap()).unwrap()
+}
+
+#[test]
+fn ocsp_responders_skips_non_utf8_urls() {
+    // BoringSSL does not validate IA5String contents.
+    let cert = cert_with_ocsp_uri(b"\x80\xff");
+    assert!(cert.ocsp_responders().unwrap().is_empty());
+
+    let cert = cert_with_ocsp_uri(b"http://ocsp.example");
+    let responders = cert.ocsp_responders().unwrap();
+    assert_eq!(responders.len(), 1);
+    assert_eq!(&*responders[0], "http://ocsp.example");
+}
+
+#[test]
+fn verify_param_requires_an_initialized_context() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let mut ctx = X509StoreContext::new().unwrap();
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        ctx.verify_param_mut().set_depth(3);
+    }))
+    .is_err());
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        let _ = ctx.verify_param();
+    }))
+    .is_err());
+
+    // Inside `init` the param exists and can be used and replaced.
+    let store = X509StoreBuilder::new().unwrap().build();
+    let cert = X509::from_pem(include_bytes!("../../../test/cert.pem")).unwrap();
+    let chain = Stack::new().unwrap();
+    ctx.init(&store, &cert, &chain, |ctx| {
+        ctx.verify_param_mut().set_depth(3);
+        ctx.set_verify_param(crate::x509::verify::X509VerifyParam::new().unwrap());
+        ctx.verify_param_mut().set_depth(4);
+        Ok(())
+    })
+    .unwrap();
+}

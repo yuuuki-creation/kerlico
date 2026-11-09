@@ -1,0 +1,1911 @@
+use foreign_types::{ForeignType, ForeignTypeRef};
+use proptest::prelude::*;
+use std::io;
+use std::io::prelude::*;
+use std::mem;
+use std::net::{TcpListener, TcpStream};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+use crate::error::ErrorStack;
+use crate::hash::MessageDigest;
+use crate::pkey::PKey;
+use crate::srtp::SrtpProfileId;
+use crate::ssl::test::server::Server;
+use crate::ssl::{
+    self, ExtensionType, ShutdownResult, ShutdownState, Ssl, SslAcceptor, SslAcceptorBuilder,
+    SslConnector, SslContext, SslCurve, SslFiletype, SslMethod, SslMode, SslOptions, SslStream,
+    SslVerifyMode,
+};
+use crate::ssl::{HandshakeError, SslVersion};
+use crate::x509::store::X509StoreBuilder;
+use crate::x509::verify::X509CheckFlags;
+use crate::x509::{X509Name, X509};
+
+use super::CompliancePolicy;
+
+mod alps;
+mod ca_names;
+mod cert_compressor;
+mod cert_verify;
+mod certificate_selection;
+mod client_hello;
+mod credentials;
+mod custom_verify;
+mod ech;
+pub(crate) mod ech_grease;
+mod legacy;
+mod private_key_method;
+mod server;
+mod session;
+mod session_resumption;
+mod soundness;
+mod trust_anchors;
+
+#[test]
+fn per_connection_signature_preferences_accept_matching_scheme() {
+    use super::SslSignatureAlgorithm;
+    let server = Server::builder().build();
+    let client = server.client().build();
+    let mut builder = client.builder();
+    builder
+        .ssl()
+        .set_verify_algorithm_prefs(&[SslSignatureAlgorithm::RSA_PSS_RSAE_SHA256])
+        .unwrap();
+    let stream = builder.connect();
+    assert_eq!(
+        stream.ssl().peer_signature_algorithm(),
+        Some(SslSignatureAlgorithm::RSA_PSS_RSAE_SHA256)
+    );
+    assert_eq!(stream.ssl().signature_algorithm_used(), None);
+}
+
+#[test]
+fn per_connection_signature_preferences_reject_incompatible_scheme() {
+    use super::SslSignatureAlgorithm;
+    let mut server = Server::builder();
+    server.should_error();
+    let server = server.build();
+    let client = server.client().build();
+    let mut builder = client.builder();
+    builder
+        .ssl()
+        .set_verify_algorithm_prefs(&[SslSignatureAlgorithm::ED25519])
+        .unwrap();
+    builder.connect_err();
+}
+mod verify;
+
+static ROOT_CERT: &[u8] = include_bytes!("../../../test/root-ca.pem");
+static CERT: &[u8] = include_bytes!("../../../test/cert.pem");
+static KEY: &[u8] = include_bytes!("../../../test/key.pem");
+
+fn test_certificate_sha1(pem: &[u8]) -> Vec<u8> {
+    X509::from_pem(pem)
+        .unwrap()
+        .digest(MessageDigest::sha1())
+        .unwrap()
+        .to_vec()
+}
+
+fn capture_client_hello_ciphers(server: &mut server::Builder) -> Arc<Mutex<Vec<Vec<u16>>>> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let callback_captured = Arc::clone(&captured);
+    server
+        .ctx()
+        .set_select_certificate_callback(move |client_hello| {
+            let ciphers = client_hello
+                .ciphers()
+                .chunks_exact(2)
+                .map(|cipher| u16::from_be_bytes([cipher[0], cipher[1]]))
+                .collect();
+            callback_captured.lock().unwrap().push(ciphers);
+            Ok(())
+        });
+    captured
+}
+
+fn parse_client_hello_extension_order(mut extensions: &[u8]) -> Vec<u16> {
+    let mut order = Vec::new();
+    while !extensions.is_empty() {
+        assert!(extensions.len() >= 4, "truncated ClientHello extension");
+        let id = u16::from_be_bytes([extensions[0], extensions[1]]);
+        let len = u16::from_be_bytes([extensions[2], extensions[3]]) as usize;
+        assert!(extensions.len() >= 4 + len, "truncated extension data");
+        order.push(id);
+        extensions = &extensions[4 + len..];
+    }
+    order
+}
+
+fn capture_client_hello_extensions(server: &mut server::Builder) -> Arc<Mutex<Vec<Vec<u16>>>> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let callback_captured = Arc::clone(&captured);
+    server
+        .ctx()
+        .set_select_certificate_callback(move |client_hello| {
+            callback_captured
+                .lock()
+                .unwrap()
+                .push(parse_client_hello_extension_order(
+                    client_hello.extensions(),
+                ));
+            Ok(())
+        });
+    captured
+}
+
+#[test]
+fn get_ctx_options() {
+    let ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    let _ = ctx.options();
+}
+
+#[test]
+fn set_raw_cipher_list() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    // firefox 136 @ MacOS (2025-03-28)
+    ctx.set_raw_cipher_list(&[
+        0x1301, 0x1303, 0x1302, 0xc02b, 0xc02f, 0xcca9, 0xcca8, 0xc02c, 0xc030, 0xc00a, 0xc009,
+        0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
+    ])
+    .unwrap();
+}
+
+#[test]
+fn test_connect_with_set_raw_cipher_list_client_ctx() {
+    let server = Server::builder();
+    let server = server.build();
+
+    let mut client = server.client();
+    // firefox 136 @ MacOS (2025-03-28)
+    client
+        .ctx()
+        .set_raw_cipher_list(&[
+            0x1301, 0x1303, 0x1302, 0xc02b, 0xc02f, 0xcca9, 0xcca8, 0xc02c, 0xc030, 0xc00a, 0xc009,
+            0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
+        ])
+        .unwrap();
+    let _ = client.connect();
+}
+
+#[test]
+fn test_connect_with_set_raw_cipher_list_tls13_only() {
+    let mut server = Server::builder();
+    let captured = capture_client_hello_ciphers(&mut server);
+    let server = server.build();
+
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_min_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    client
+        .ctx()
+        .set_max_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    client
+        .ctx()
+        .set_raw_cipher_list(&[0x1301, 0x1303, 0x1302])
+        .unwrap();
+    let _ = client.connect();
+
+    assert_eq!(*captured.lock().unwrap(), [[0x1301, 0x1303, 0x1302]]);
+}
+
+#[test]
+fn test_standard_cipher_list_resets_raw_cipher_mode() {
+    let mut server = Server::builder();
+    server.expected_connections_count(2);
+    let captured = capture_client_hello_ciphers(&mut server);
+    let server = server.build();
+
+    for strict in [false, true] {
+        let mut client = server.client();
+        client.ctx().set_raw_cipher_list(&[0x1301]).unwrap();
+        if strict {
+            client
+                .ctx()
+                .set_strict_cipher_list("ECDHE-RSA-AES128-GCM-SHA256")
+                .unwrap();
+        } else {
+            client
+                .ctx()
+                .set_cipher_list("ECDHE-RSA-AES128-GCM-SHA256")
+                .unwrap();
+        }
+        client
+            .ctx()
+            .set_min_proto_version(Some(SslVersion::TLS1_3))
+            .unwrap();
+        client
+            .ctx()
+            .set_max_proto_version(Some(SslVersion::TLS1_3))
+            .unwrap();
+        let _ = client.connect();
+    }
+
+    let mut captured = captured.lock().unwrap().clone();
+    for ciphers in &mut captured {
+        ciphers.sort_unstable();
+    }
+    assert_eq!(captured, [[0x1301, 0x1302, 0x1303]; 2]);
+}
+
+#[test]
+fn test_per_ssl_compliance_policy_resets_raw_cipher_mode() {
+    let mut server = Server::builder();
+    let captured = capture_client_hello_ciphers(&mut server);
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_raw_cipher_list(&[0x1303]).unwrap();
+    let client = client.build();
+    let mut client = client.builder();
+    client
+        .ssl()
+        .set_compliance_policy(CompliancePolicy::FIPS_202205)
+        .unwrap();
+    let _ = client.connect();
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(&captured[0][..2], &[0x1301, 0x1302]);
+    assert!(!captured[0].contains(&0x1303));
+}
+
+#[test]
+fn test_failed_standard_cipher_list_resets_raw_cipher_mode() {
+    let mut server = Server::builder();
+    let captured = capture_client_hello_ciphers(&mut server);
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_raw_cipher_list(&[0x1301]).unwrap();
+    client.ctx().set_cipher_list("!ALL").unwrap_err();
+    client
+        .ctx()
+        .set_min_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    client
+        .ctx()
+        .set_max_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    let _ = client.connect();
+
+    let mut captured = captured.lock().unwrap()[0].clone();
+    captured.sort_unstable();
+    assert_eq!(captured, [0x1301, 0x1302, 0x1303]);
+}
+
+#[test]
+fn test_raw_cipher_list_preserves_unknown_values_and_duplicates() {
+    let mut server = Server::builder();
+    let captured = capture_client_hello_ciphers(&mut server);
+    let server = server.build();
+
+    let raw_ciphers = [0x0a0a, 0x1301, 0xffff, 0x1301];
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_min_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    client
+        .ctx()
+        .set_max_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    client.ctx().set_raw_cipher_list(&raw_ciphers).unwrap();
+    let _ = client.connect();
+
+    // A GREASE codepoint is a GREASE slot: a fresh GREASE value at its position.
+    let captured = captured.lock().unwrap();
+    let sent = &captured[0];
+    assert_eq!(sent[1..], raw_ciphers[1..]);
+    assert_eq!(sent[0] & 0x0f0f, 0x0a0a);
+    assert_eq!(sent[0] >> 8, sent[0] & 0xff);
+}
+
+#[test]
+fn test_raw_cipher_list_accepts_all_unknown_values() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_raw_cipher_list(&[0x0a0a, 0xffff]).unwrap();
+    assert!(ctx.ciphers().unwrap().is_empty());
+}
+
+#[test]
+fn test_empty_raw_cipher_list_does_not_replace_previous_list() {
+    let mut server = Server::builder();
+    let captured = capture_client_hello_ciphers(&mut server);
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_raw_cipher_list(&[0x1301]).unwrap();
+    let error = client.ctx().set_raw_cipher_list(&[]).unwrap_err();
+    assert!(
+        error
+            .errors()
+            .iter()
+            .any(|error| error.reason() == Some("NO_CIPHER_MATCH")),
+        "unexpected error stack: {error:?}",
+    );
+    client
+        .ctx()
+        .set_min_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    client
+        .ctx()
+        .set_max_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    let _ = client.connect();
+
+    assert_eq!(*captured.lock().unwrap(), [[0x1301]]);
+}
+
+#[test]
+fn test_raw_cipher_list_bypasses_version_filtering() {
+    let mut server = Server::builder();
+    server
+        .ctx()
+        .set_max_proto_version(Some(SslVersion::TLS1_2))
+        .unwrap();
+    let captured = capture_client_hello_ciphers(&mut server);
+    let server = server.build();
+
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_max_proto_version(Some(SslVersion::TLS1_2))
+        .unwrap();
+    client.ctx().set_raw_cipher_list(&[0x1301, 0xc02f]).unwrap();
+    let _ = client.connect();
+
+    assert_eq!(*captured.lock().unwrap(), [[0x1301, 0xc02f]]);
+}
+
+#[test]
+fn test_raw_cipher_list_is_exact_and_keeps_fallback_scsv() {
+    let mut server = Server::builder();
+    let captured = capture_client_hello_ciphers(&mut server);
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_grease_enabled(true);
+    client.ctx().set_mode(SslMode::SEND_FALLBACK_SCSV);
+    client.ctx().set_raw_cipher_list(&[0x1301]).unwrap();
+    client
+        .ctx()
+        .set_min_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    client
+        .ctx()
+        .set_max_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    let _ = client.connect();
+
+    // GREASE adds no cipher to a raw list; fallback SCSV still follows it.
+    assert_eq!(*captured.lock().unwrap(), [[0x1301, 0x5600]]);
+}
+
+#[test]
+fn test_raw_cipher_list_deduplicates_configured_signaling_values() {
+    let mut server = Server::builder();
+    let captured = capture_client_hello_ciphers(&mut server);
+    let server = server.build();
+
+    // This matches Rama's emulation path: the captured raw vector already
+    // contains a GREASE placeholder, while GREASE is also enabled globally so
+    // BoringSSL can generate the other GREASE-bearing fields.
+    let raw_ciphers = [0x0a0a, 0x1301, 0x1303, 0xc02f, 0x5600];
+    let mut client = server.client();
+    client.ctx().set_raw_cipher_list(&raw_ciphers).unwrap();
+    client
+        .ctx()
+        .set_min_proto_version(Some(SslVersion::TLS1_2))
+        .unwrap();
+    client
+        .ctx()
+        .set_max_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    client.ctx().set_grease_enabled(true);
+    client.ctx().set_mode(SslMode::SEND_FALLBACK_SCSV);
+    let _ = client.connect();
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(
+        captured[0]
+            .iter()
+            .filter(|cipher| **cipher & 0x0f0f == 0x0a0a)
+            .count(),
+        1,
+    );
+    assert_eq!(
+        captured[0]
+            .iter()
+            .filter(|cipher| **cipher == 0x5600)
+            .count(),
+        1,
+    );
+    assert_eq!(captured[0][0] & 0x0f0f, 0x0a0a);
+    assert_eq!(&captured[0][1..], &raw_ciphers[1..]);
+}
+
+#[test]
+fn test_raw_cipher_list_survives_tls13_hello_retry_request() {
+    let mut server = Server::builder();
+    server.ctx().set_curves(&[SslCurve::SECP384R1]).unwrap();
+    let captured = capture_client_hello_ciphers(&mut server);
+    let server = server.build();
+
+    let raw_ciphers = [0x1301, 0x1303, 0x1302];
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_curves(&[SslCurve::SECP256R1, SslCurve::SECP384R1])
+        .unwrap();
+    client.ctx().set_raw_cipher_list(&raw_ciphers).unwrap();
+    client
+        .ctx()
+        .set_min_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    client
+        .ctx()
+        .set_max_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    let stream = client.connect();
+
+    // Only P-256 is sent as the initial classical key share. The P-384-only
+    // server therefore forces an HRR before the successful P-384 handshake.
+    assert_eq!(stream.ssl().curve(), Some(SslCurve::SECP384R1));
+    assert!(stream.ssl().used_hello_retry_request());
+    assert_eq!(*captured.lock().unwrap(), [raw_ciphers]);
+}
+
+#[test]
+fn test_tls13_rejects_unoffered_raw_cipher() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut socket = listener.accept().unwrap().0;
+        // A client that never writes must fail the test, not hang it.
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let mut record_header = [0; 5];
+        socket.read_exact(&mut record_header).unwrap();
+        assert_eq!(record_header[0], 22);
+        let record_len = u16::from_be_bytes([record_header[3], record_header[4]]) as usize;
+        let mut client_hello = vec![0; record_len];
+        socket.read_exact(&mut client_hello).unwrap();
+
+        assert_eq!(client_hello[0], 1);
+        // 4-byte handshake header + 2-byte legacy version + 32-byte random.
+        let session_id_len = client_hello[38] as usize;
+        let session_id = &client_hello[39..39 + session_id_len];
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[1; 32]);
+        body.push(session_id_len as u8);
+        body.extend_from_slice(session_id);
+        body.extend_from_slice(&[0x13, 0x02, 0]);
+        body.extend_from_slice(&[0, 6, 0, 0x2b, 0, 2, 3, 4]);
+
+        let mut server_hello = vec![2];
+        server_hello.extend_from_slice(&[
+            ((body.len() >> 16) & 0xff) as u8,
+            ((body.len() >> 8) & 0xff) as u8,
+            (body.len() & 0xff) as u8,
+        ]);
+        server_hello.extend_from_slice(&body);
+
+        let mut response = vec![22, 3, 3];
+        response.extend_from_slice(&(server_hello.len() as u16).to_be_bytes());
+        response.extend_from_slice(&server_hello);
+        socket.write_all(&response).unwrap();
+    });
+
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_min_proto_version(Some(SslVersion::TLS1_3)).unwrap();
+    ctx.set_max_proto_version(Some(SslVersion::TLS1_3)).unwrap();
+    ctx.set_raw_cipher_list(&[0x1301]).unwrap();
+    let ssl = Ssl::new(&ctx.build()).unwrap();
+    let error = ssl.connect(TcpStream::connect(addr).unwrap()).unwrap_err();
+    let HandshakeError::Failure(handshake) = error else {
+        panic!("expected a failed TLS handshake");
+    };
+    let errors = handshake.error().ssl_error().unwrap().errors().to_vec();
+    // Close the client's socket before waiting for the server.
+    drop(handshake);
+    server.join().unwrap();
+
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.reason() == Some("WRONG_CIPHER_RETURNED")),
+        "unexpected error stack: {errors:?}",
+    );
+}
+
+#[test]
+fn set_extension_order() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    // firefox 136 @ MacOS (2025-03-29)
+    ctx.set_extension_order(&[
+        0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0023, 0x0010, 0x0005, 0x0022, 0x0012, 0x0033,
+        0x002b, 0x000d, 0x002d, 0x001c, 0x001b, 0xfe0d,
+    ])
+    .unwrap();
+}
+
+#[test]
+fn test_connect_with_set_extension_order_client_ctx() {
+    let server = Server::builder();
+    let server = server.build();
+
+    let mut client = server.client();
+    // firefox 136 @ MacOS (2025-03-29)
+    client
+        .ctx()
+        .set_extension_order(&[
+            0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0023, 0x0010, 0x0005, 0x0022, 0x0012, 0x0033,
+            0x002b, 0x000d, 0x002d, 0x001c, 0x001b, 0xfe0d,
+        ])
+        .unwrap();
+    let _ = client.connect();
+}
+
+#[test]
+fn short_extension_order_with_suppressed_alps_is_safe_and_ordered() {
+    let mut server = Server::builder();
+    let captured = capture_client_hello_extensions(&mut server);
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_alpn_protos(b"\x08http/1.1").unwrap();
+    client.ctx().set_extension_order(&[16, 17_613]).unwrap();
+    let _ = client.connect();
+
+    let captured = captured.lock().unwrap();
+    let order = captured.first().unwrap();
+    assert_eq!(order.first(), Some(&16));
+    assert!(!order.contains(&17_613));
+}
+
+/// The emitted order a requested order must start with: an order is exact, so
+/// each GREASE codepoint is a GREASE extension (`None`, its value is fresh) at
+/// its position, and known IDs follow once each.
+fn expected_emitted_prefix(requested: &[u16], emitted: &[u16]) -> Vec<Option<u16>> {
+    let mut prefix = Vec::new();
+    for id in requested {
+        if wire::is_grease(*id) {
+            prefix.push(None);
+        } else if emitted.contains(id) && !prefix.contains(&Some(*id)) {
+            prefix.push(Some(*id));
+        }
+    }
+    prefix
+}
+
+/// An emitted order with GREASE values as `None`.
+fn grease_masked(emitted: &[u16]) -> Vec<Option<u16>> {
+    emitted
+        .iter()
+        .map(|id| (!wire::is_grease(*id)).then_some(*id))
+        .collect()
+}
+
+// Every extension ID in the patched BoringSSL kExtensions table, in a
+// deliberately scrambled order. Requesting all of them leaves no random
+// tail to shuffle (the rem == 0 early-return path).
+const ALL_KNOWN_EXTENSION_IDS: [u16; 29] = [
+    51, 16, 0, 43, 45, 13, 10, 35, 23, 5, 11, 18, 14, 42, 44, 57, 27, 28, 34, 17_613, 17_513, 47,
+    13_172, 30_032, 65_037, 65_281, 65_445, 35_387, 51_764,
+];
+
+#[test]
+fn complete_extension_order_is_emitted_verbatim() {
+    let mut server = Server::builder();
+    let captured = capture_client_hello_extensions(&mut server);
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_alpn_protos(b"\x02h2").unwrap();
+    client
+        .ctx()
+        .set_extension_order(&ALL_KNOWN_EXTENSION_IDS)
+        .unwrap();
+    let _ = client.connect();
+
+    let captured = captured.lock().unwrap();
+    let emitted = captured.first().unwrap();
+    let expected = expected_emitted_prefix(&ALL_KNOWN_EXTENSION_IDS, emitted);
+    assert_eq!(
+        grease_masked(emitted),
+        expected,
+        "a complete requested order must determine the entire emitted order"
+    );
+}
+
+#[test]
+fn nearly_complete_extension_order_is_an_emitted_prefix() {
+    // All but one known ID, so exactly one table entry is left over
+    // (the rem == 1 path: a random tail exists but is never shuffled).
+    let requested: Vec<u16> = ALL_KNOWN_EXTENSION_IDS
+        .iter()
+        .copied()
+        .filter(|id| *id != 51)
+        .collect();
+
+    let mut server = Server::builder();
+    let captured = capture_client_hello_extensions(&mut server);
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_alpn_protos(b"\x02h2").unwrap();
+    client.ctx().set_extension_order(&requested).unwrap();
+    let _ = client.connect();
+
+    let captured = captured.lock().unwrap();
+    let emitted = captured.first().unwrap();
+    let expected = expected_emitted_prefix(&requested, emitted);
+    assert!(
+        grease_masked(emitted).starts_with(&expected),
+        "requested {expected:?}, emitted {emitted:?}"
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn requested_extension_order_is_an_emitted_prefix(
+        requested in prop::collection::vec(
+            prop_oneof![
+                Just(0_u16),
+                Just(10_u16),
+                Just(13_u16),
+                Just(16_u16),
+                Just(43_u16),
+                Just(45_u16),
+                Just(51_u16),
+                Just(17_513_u16),
+                Just(17_613_u16),
+                any::<u16>(),
+            ],
+            1..64,
+        ),
+    ) {
+        let mut server = Server::builder();
+        let captured = capture_client_hello_extensions(&mut server);
+        let server = server.build();
+
+        let mut client = server.client();
+        client.ctx().set_alpn_protos(b"\x02h2").unwrap();
+        let grease = requested.iter().filter(|id| wire::is_grease(**id)).count();
+        let set = client.ctx().set_extension_order(&requested);
+        // Each GREASE extension needs a distinct value: at most 16 slots.
+        prop_assert_eq!(set.is_ok(), grease <= 16);
+        if set.is_err() {
+            return Ok(());
+        }
+        let _ = client.connect();
+
+        let captured = captured.lock().unwrap();
+        let emitted = captured.first().unwrap();
+        let expected_prefix = expected_emitted_prefix(&requested, emitted);
+        prop_assert!(grease_masked(emitted).starts_with(&expected_prefix),
+            "requested {expected_prefix:?}, emitted {emitted:?}");
+        // The order's slots are its only GREASE extensions.
+        prop_assert_eq!(emitted.iter().filter(|id| wire::is_grease(**id)).count(), grease);
+    }
+}
+
+#[test]
+fn test_connect_with_set_extension_order_empty_client_ctx() {
+    let server = Server::builder();
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_extension_order(&[]).unwrap();
+    let _ = client.connect();
+}
+
+#[test]
+fn test_connect_with_set_extension_order_server_name_client_ctx() {
+    let server = Server::builder();
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_extension_order(&[0x0000]).unwrap();
+    let _ = client.connect();
+}
+
+#[test]
+fn set_ctx_options() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    let opts = ctx.set_options(SslOptions::NO_TICKET);
+    assert!(opts.contains(SslOptions::NO_TICKET));
+}
+
+#[test]
+fn clear_ctx_options() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_options(SslOptions::NO_TICKET);
+    let opts = ctx.clear_options(SslOptions::NO_TICKET);
+    assert!(!opts.contains(SslOptions::NO_TICKET));
+}
+
+#[test]
+fn zero_length_buffers() {
+    let server = Server::builder().build();
+
+    let mut s = server.client().connect();
+    assert_eq!(s.write(&[]).unwrap(), 0);
+    assert_eq!(s.read(&mut []).unwrap(), 0);
+}
+
+#[test]
+fn peer_certificate() {
+    let server = Server::builder().build();
+
+    let s = server.client().connect();
+    let cert = s.ssl().peer_certificate().unwrap();
+    let fingerprint = cert.digest(MessageDigest::sha1()).unwrap();
+    assert_eq!(&*fingerprint, test_certificate_sha1(CERT));
+}
+
+#[test]
+fn pending() {
+    let mut server = Server::builder();
+    server.io_cb(|mut s| s.write_all(&[0; 10]).unwrap());
+    let server = server.build();
+
+    let mut s = server.client().connect();
+    s.read_exact(&mut [0]).unwrap();
+
+    assert_eq!(s.ssl().pending(), 9);
+    assert_eq!(s.read(&mut [0; 10]).unwrap(), 9);
+}
+
+#[test]
+fn state() {
+    let server = Server::builder().build();
+
+    let s = server.client().connect();
+    // NOTE: Boring returs a placeholder string for state_string
+    assert_eq!(s.ssl().state_string(), "!!!!!!");
+    assert_eq!(
+        s.ssl().state_string_long(),
+        "SSL negotiation finished successfully"
+    );
+}
+
+/// Tests that when both the client as well as the server use SRTP and their
+/// lists of supported protocols have an overlap -- with only ONE protocol
+/// being valid for both.
+#[test]
+fn test_connect_with_srtp_ctx() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let guard = thread::spawn(move || {
+        let stream = listener.accept().unwrap().0;
+        let mut ctx = SslContext::builder(SslMethod::dtls()).unwrap();
+        ctx.set_tlsext_use_srtp("SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32")
+            .unwrap();
+        ctx.set_certificate_file(Path::new("test/cert.pem"), SslFiletype::PEM)
+            .unwrap();
+        ctx.set_private_key_file(Path::new("test/key.pem"), SslFiletype::PEM)
+            .unwrap();
+        let mut ssl = Ssl::new(&ctx.build()).unwrap();
+        ssl.set_mtu(1500).unwrap();
+        let mut stream = ssl.accept(stream).unwrap();
+
+        let mut buf = [0; 60];
+        stream
+            .ssl()
+            .export_keying_material(&mut buf, "EXTRACTOR-dtls_srtp", None)
+            .unwrap();
+
+        stream.write_all(&[0]).unwrap();
+
+        buf
+    });
+
+    let stream = TcpStream::connect(addr).unwrap();
+    let mut ctx = SslContext::builder(SslMethod::dtls()).unwrap();
+    ctx.set_tlsext_use_srtp("SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32")
+        .unwrap();
+    let mut ssl = Ssl::new(&ctx.build()).unwrap();
+    ssl.set_mtu(1500).unwrap();
+    let mut stream = ssl.connect(stream).unwrap();
+
+    let mut buf = [1; 60];
+    {
+        let srtp_profile = stream.ssl().selected_srtp_profile().unwrap();
+        assert_eq!("SRTP_AES128_CM_SHA1_80", srtp_profile.name());
+        assert_eq!(SrtpProfileId::SRTP_AES128_CM_SHA1_80, srtp_profile.id());
+    }
+    stream
+        .ssl()
+        .export_keying_material(&mut buf, "EXTRACTOR-dtls_srtp", None)
+        .expect("extract");
+
+    stream.read_exact(&mut [0]).unwrap();
+
+    let buf2 = guard.join().unwrap();
+
+    assert_eq!(buf[..], buf2[..]);
+}
+
+/// Tests that when both the client as well as the server use SRTP and their
+/// lists of supported protocols have an overlap -- with only ONE protocol
+/// being valid for both.
+#[test]
+fn test_connect_with_srtp_ssl() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let guard = thread::spawn(move || {
+        let stream = listener.accept().unwrap().0;
+        let mut ctx = SslContext::builder(SslMethod::dtls()).unwrap();
+        ctx.set_certificate_file(Path::new("test/cert.pem"), SslFiletype::PEM)
+            .unwrap();
+        ctx.set_private_key_file(Path::new("test/key.pem"), SslFiletype::PEM)
+            .unwrap();
+        let mut ssl = Ssl::new(&ctx.build()).unwrap();
+        ssl.set_tlsext_use_srtp("SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32")
+            .unwrap();
+        let mut profilenames = String::new();
+        for profile in ssl.srtp_profiles().unwrap() {
+            if !profilenames.is_empty() {
+                profilenames.push(':');
+            }
+            profilenames += profile.name();
+        }
+        assert_eq!(
+            "SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32",
+            profilenames
+        );
+        ssl.set_mtu(1500).unwrap();
+        let mut stream = ssl.accept(stream).unwrap();
+
+        let mut buf = [0; 60];
+        stream
+            .ssl()
+            .export_keying_material(&mut buf, "EXTRACTOR-dtls_srtp", None)
+            .unwrap();
+
+        stream.write_all(&[0]).unwrap();
+
+        buf
+    });
+
+    let stream = TcpStream::connect(addr).unwrap();
+    let ctx = SslContext::builder(SslMethod::dtls()).unwrap();
+    let mut ssl = Ssl::new(&ctx.build()).unwrap();
+    ssl.set_tlsext_use_srtp("SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32")
+        .unwrap();
+    ssl.set_mtu(1500).unwrap();
+    let mut stream = ssl.connect(stream).unwrap();
+
+    let mut buf = [1; 60];
+    {
+        let srtp_profile = stream.ssl().selected_srtp_profile().unwrap();
+        assert_eq!("SRTP_AES128_CM_SHA1_80", srtp_profile.name());
+        assert_eq!(SrtpProfileId::SRTP_AES128_CM_SHA1_80, srtp_profile.id());
+    }
+    stream
+        .ssl()
+        .export_keying_material(&mut buf, "EXTRACTOR-dtls_srtp", None)
+        .expect("extract");
+
+    stream.read_exact(&mut [0]).unwrap();
+
+    let buf2 = guard.join().unwrap();
+
+    assert_eq!(buf[..], buf2[..]);
+}
+
+/// Tests that when the `SslStream` is created as a server stream, the protocols
+/// are correctly advertised to the client.
+#[test]
+fn test_alpn_server_advertise_multiple() {
+    let mut server = Server::builder();
+    server.ctx().set_alpn_select_callback(|_, client| {
+        ssl::select_next_proto(b"\x08http/1.1\x08spdy/3.1", client).ok_or(ssl::AlpnError::NOACK)
+    });
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_alpn_protos(b"\x08spdy/3.1").unwrap();
+    let s = client.connect();
+    assert_eq!(s.ssl().selected_alpn_protocol(), Some(&b"spdy/3.1"[..]));
+}
+
+#[test]
+fn test_alpn_server_select_none_fatal() {
+    let mut server = Server::builder();
+    server.ctx().set_alpn_select_callback(|_, client| {
+        ssl::select_next_proto(b"\x08http/1.1\x08spdy/3.1", client)
+            .ok_or(ssl::AlpnError::ALERT_FATAL)
+    });
+    server.should_error();
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_alpn_protos(b"\x06http/2").unwrap();
+    client.connect_err();
+}
+
+#[test]
+fn test_alpn_server_select_none() {
+    let mut server = Server::builder();
+    server.ctx().set_alpn_select_callback(|_, client| {
+        ssl::select_next_proto(b"\x08http/1.1\x08spdy/3.1", client).ok_or(ssl::AlpnError::NOACK)
+    });
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_alpn_protos(b"\x06http/2").unwrap();
+    let s = client.connect();
+    assert_eq!(None, s.ssl().selected_alpn_protocol());
+}
+
+#[test]
+fn test_empty_alpn() {
+    assert_eq!(ssl::select_next_proto(b"", b""), None);
+    assert_eq!(ssl::select_next_proto(b"", b"\x08http/1.1"), None);
+    assert_eq!(ssl::select_next_proto(b"\x08http/1.1", b""), None);
+}
+
+#[test]
+fn test_alpn_server_unilateral() {
+    let server = Server::builder().build();
+
+    let mut client = server.client();
+    client.ctx().set_alpn_protos(b"\x06http/2").unwrap();
+    let s = client.connect();
+    assert_eq!(None, s.ssl().selected_alpn_protocol());
+}
+
+#[test]
+fn test_select_cert_ok() {
+    let mut server = Server::builder();
+    server
+        .ctx()
+        .set_select_certificate_callback(|_client_hello| Ok(()));
+    let server = server.build();
+
+    let client = server.client();
+    client.connect();
+}
+
+#[test]
+fn test_mutable_store() {
+    #![allow(deprecated)]
+
+    let cert = include_bytes!("../../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let cert2 = include_bytes!("../../../test/root-ca.pem");
+    let cert2 = X509::from_pem(cert2).unwrap();
+
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.cert_store_mut().add_cert(cert.clone()).unwrap();
+    assert_eq!(1, unsafe { ctx.cert_store().objects_len() });
+
+    ctx.set_cert_store_builder(X509StoreBuilder::new().unwrap());
+    assert_eq!(0, unsafe { ctx.cert_store().objects_len() });
+
+    ctx.cert_store_mut().add_cert(cert.clone()).unwrap();
+    assert_eq!(1, unsafe { ctx.cert_store().objects_len() });
+
+    let mut new_store = X509StoreBuilder::new().unwrap();
+    new_store.add_cert(&cert).unwrap();
+    new_store.add_cert(&cert2).unwrap();
+    let new_store = new_store.build();
+    assert_eq!(2, unsafe { new_store.objects_len() });
+
+    ctx.set_cert_store_ref(&new_store);
+    assert_eq!(2, unsafe { ctx.cert_store().objects_len() });
+    assert!(std::ptr::eq(new_store.as_ptr(), ctx.cert_store().as_ptr()));
+
+    let ctx = ctx.build();
+    assert!(std::ptr::eq(new_store.as_ptr(), ctx.cert_store().as_ptr()));
+
+    drop(new_store);
+    assert_eq!(2, unsafe { ctx.cert_store().objects_len() });
+}
+
+#[test]
+#[should_panic(expected = "mutated")]
+fn shared_store_must_not_be_mutated() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+
+    let shared = X509StoreBuilder::new().unwrap().build();
+    ctx.set_cert_store_ref(&shared);
+    ctx.cert_store_mut();
+}
+
+#[test]
+fn test_select_cert_error() {
+    let mut server = Server::builder();
+    server.should_error();
+    server
+        .ctx()
+        .set_select_certificate_callback(|_client_hello| Err(ssl::SelectCertError::ERROR));
+    let server = server.build();
+
+    let client = server.client();
+    client.connect_err();
+}
+
+#[test]
+fn test_select_cert_unknown_extension() {
+    let mut server = Server::builder();
+    let unknown_extension = std::sync::Arc::new(std::sync::Mutex::new(Some(vec![])));
+
+    server.ctx().set_select_certificate_callback({
+        let unknown = unknown_extension.clone();
+        move |client_hello| {
+            let ext = client_hello
+                .get_extension(ExtensionType::SERVER_NAME)
+                .map(ToOwned::to_owned);
+            assert!(ext.is_none());
+            *unknown.lock().unwrap() = ext;
+            Ok(())
+        }
+    });
+
+    let server = server.build();
+    let client = server.client();
+
+    client.connect();
+    assert_eq!(unknown_extension.lock().unwrap().as_deref(), None);
+}
+
+#[test]
+fn test_select_cert_alpn_extension() {
+    let mut server = Server::builder();
+    let alpn_extension = std::sync::Arc::new(std::sync::Mutex::new(None));
+    server.ctx().set_select_certificate_callback({
+        let alpn = alpn_extension.clone();
+        move |client_hello| {
+            *alpn.lock().unwrap() = Some(
+                client_hello
+                    .get_extension(ExtensionType::APPLICATION_LAYER_PROTOCOL_NEGOTIATION)
+                    .unwrap()
+                    .to_owned(),
+            );
+            Ok(())
+        }
+    });
+    let server = server.build();
+
+    let mut client = server.client();
+    client.ctx().set_alpn_protos(b"\x06http/2").unwrap();
+    client.connect();
+    assert_eq!(
+        alpn_extension.lock().unwrap().as_deref(),
+        Some(&b"\x00\x07\x06http/2"[..]),
+    );
+}
+
+#[test]
+fn test_io_retry() {
+    #[derive(Debug)]
+    struct RetryStream {
+        inner: TcpStream,
+        first_read: bool,
+        first_write: bool,
+        first_flush: bool,
+    }
+
+    impl Read for RetryStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if mem::replace(&mut self.first_read, false) {
+                Err(io::Error::new(io::ErrorKind::WouldBlock, "first read"))
+            } else {
+                self.inner.read(buf)
+            }
+        }
+    }
+
+    impl Write for RetryStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if mem::replace(&mut self.first_write, false) {
+                Err(io::Error::new(io::ErrorKind::WouldBlock, "first write"))
+            } else {
+                self.inner.write(buf)
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if mem::replace(&mut self.first_flush, false) {
+                Err(io::Error::new(io::ErrorKind::WouldBlock, "first flush"))
+            } else {
+                self.inner.flush()
+            }
+        }
+    }
+
+    let server = Server::builder().build();
+
+    let stream = RetryStream {
+        inner: server.connect_tcp(),
+        first_read: true,
+        first_write: true,
+        first_flush: true,
+    };
+
+    let ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    let mut s = match Ssl::new(&ctx.build()).unwrap().connect(stream) {
+        Ok(mut s) => return s.read_exact(&mut [0]).unwrap(),
+        Err(HandshakeError::WouldBlock(s)) => s,
+        Err(_) => panic!("should not fail on setup"),
+    };
+    loop {
+        match s.handshake() {
+            Ok(mut s) => return s.read_exact(&mut [0]).unwrap(),
+            Err(HandshakeError::WouldBlock(mid_s)) => s = mid_s,
+            Err(_) => panic!("should not fail on handshake"),
+        }
+    }
+}
+
+#[test]
+fn refcount_ssl_context() {
+    let mut ssl = {
+        let ctx = SslContext::builder(SslMethod::tls()).unwrap();
+        ssl::Ssl::new(&ctx.build()).unwrap()
+    };
+
+    {
+        let new_ctx_a = SslContext::builder(SslMethod::tls()).unwrap().build();
+        let _new_ctx_b = ssl.set_ssl_context(&new_ctx_a);
+    }
+}
+
+#[test]
+#[cfg_attr(target_os = "windows", ignore)]
+#[cfg_attr(all(target_os = "macos"), ignore)]
+fn default_verify_paths() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_default_verify_paths().unwrap();
+    ctx.set_verify(SslVerifyMode::PEER);
+    let ctx = ctx.build();
+    let s = match TcpStream::connect("google.com:443") {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut ssl = Ssl::new(&ctx).unwrap();
+    ssl.set_hostname("google.com").unwrap();
+    let mut socket = ssl.connect(s).unwrap();
+
+    socket.write_all(b"GET / HTTP/1.0\r\n\r\n").unwrap();
+    let mut result = vec![];
+    socket.read_to_end(&mut result).unwrap();
+
+    println!("{}", String::from_utf8_lossy(&result));
+    assert!(result.starts_with(b"HTTP/1.0"));
+    assert!(result.ends_with(b"</HTML>\r\n") || result.ends_with(b"</html>"));
+}
+
+#[test]
+fn add_extra_chain_cert() {
+    let cert = X509::from_pem(CERT).unwrap();
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.add_extra_chain_cert(cert).unwrap();
+}
+
+#[test]
+fn verify_valid_hostname() {
+    let server = Server::builder().build();
+    let mut client = server.client_with_root_ca();
+
+    client.ctx().set_verify(SslVerifyMode::PEER);
+
+    let mut client = client.build().builder();
+
+    client.ssl().param_mut().set_host("foobar.com").unwrap();
+    client.connect();
+}
+
+#[test]
+fn verify_valid_hostname_with_wildcard() {
+    let mut server = Server::builder();
+
+    server
+        .ctx()
+        .set_certificate_chain_file("test/cert-wildcard.pem")
+        .unwrap();
+
+    let server = server.build();
+    let mut client = server.client_with_root_ca();
+
+    client.ctx().set_verify(SslVerifyMode::PEER);
+
+    let mut client = client.build().builder();
+    client.ssl().param_mut().set_host("yes.foobar.com").unwrap();
+    client.connect();
+}
+
+#[test]
+fn verify_reject_underscore_hostname_with_wildcard() {
+    let mut server = Server::builder();
+
+    server.should_error();
+    server
+        .ctx()
+        .set_certificate_chain_file("test/cert-wildcard.pem")
+        .unwrap();
+
+    let server = server.build();
+    let mut client = server.client_with_root_ca();
+
+    client.ctx().set_verify(SslVerifyMode::PEER);
+
+    let mut client = client.build().builder();
+    client
+        .ssl()
+        .param_mut()
+        .set_host("not_allowed.foobar.com")
+        .unwrap();
+    client.connect_err();
+}
+
+#[test]
+fn verify_invalid_hostname() {
+    let mut server = Server::builder();
+
+    server.should_error();
+
+    let server = server.build();
+    let mut client = server.client_with_root_ca();
+
+    client.ctx().set_verify(SslVerifyMode::PEER);
+
+    let mut client = client.build().builder();
+    client
+        .ssl()
+        .param_mut()
+        .set_hostflags(X509CheckFlags::NO_PARTIAL_WILDCARDS);
+    client.ssl().param_mut().set_host("bogus.com").unwrap();
+    client.connect_err();
+}
+
+#[test]
+fn connector_valid_hostname() {
+    let server = Server::builder().build();
+
+    let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
+    connector.set_ca_file("test/root-ca.pem").unwrap();
+
+    let s = server.connect_tcp();
+    let mut s = connector.build().connect(Some("foobar.com"), s).unwrap();
+    s.read_exact(&mut [0]).unwrap();
+}
+
+#[test]
+fn connector_invalid_hostname() {
+    let mut server = Server::builder();
+    server.should_error();
+    let server = server.build();
+
+    let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
+    connector.set_ca_file("test/root-ca.pem").unwrap();
+
+    let s = server.connect_tcp();
+    connector.build().connect(Some("bogus.com"), s).unwrap_err();
+}
+
+#[test]
+fn connector_invalid_no_hostname_verification() {
+    let server = Server::builder().build();
+
+    let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
+    connector.set_ca_file("test/root-ca.pem").unwrap();
+
+    let s = server.connect_tcp();
+    let mut s = connector
+        .build()
+        .configure()
+        .unwrap()
+        .verify_hostname(false)
+        .connect(Some("bogus.com"), s)
+        .unwrap();
+    s.read_exact(&mut [0]).unwrap();
+}
+
+#[test]
+fn connector_invalid_no_domain() {
+    let server = Server::builder().build();
+
+    let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
+    connector.set_ca_file("test/root-ca.pem").unwrap();
+
+    let s = server.connect_tcp();
+    let mut s = connector
+        .build()
+        .configure()
+        .unwrap()
+        .connect(None, s)
+        .unwrap();
+    s.read_exact(&mut [0]).unwrap();
+}
+
+#[test]
+fn connector_no_hostname_still_verifies() {
+    let mut server = Server::builder();
+    server.should_error();
+    let server = server.build();
+
+    let connector = SslConnector::builder(SslMethod::tls()).unwrap().build();
+
+    let s = server.connect_tcp();
+    assert!(connector
+        .configure()
+        .unwrap()
+        .verify_hostname(false)
+        .connect(Some("fizzbuzz.com"), s)
+        .is_err());
+}
+
+#[test]
+fn connector_no_hostname_can_disable_verify() {
+    let server = Server::builder().build();
+
+    let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
+    connector.set_verify(SslVerifyMode::NONE);
+    let connector = connector.build();
+
+    let s = server.connect_tcp();
+    let mut s = connector
+        .configure()
+        .unwrap()
+        .verify_hostname(false)
+        .connect(Some("foobar.com"), s)
+        .unwrap();
+    s.read_exact(&mut [0]).unwrap();
+}
+
+#[test]
+fn connector_no_domain() {
+    let server = Server::builder().build();
+
+    let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
+    connector.set_verify(SslVerifyMode::NONE);
+    let connector = connector.build();
+
+    let s = server.connect_tcp();
+    let mut s = connector.configure().unwrap().connect(None, s).unwrap();
+    s.read_exact(&mut [0]).unwrap();
+}
+
+fn test_mozilla_server(new: fn(SslMethod) -> Result<SslAcceptorBuilder, ErrorStack>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let t = thread::spawn(move || {
+        let key = PKey::private_key_from_pem(KEY).unwrap();
+        let cert = X509::from_pem(CERT).unwrap();
+        let mut acceptor = new(SslMethod::tls()).unwrap();
+        acceptor.set_private_key(&key).unwrap();
+        acceptor.set_certificate(&cert).unwrap();
+        let acceptor = acceptor.build();
+        let stream = listener.accept().unwrap().0;
+        let mut stream = acceptor.accept(stream).unwrap();
+
+        stream.write_all(b"hello").unwrap();
+    });
+
+    let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
+    connector.set_ca_file("test/root-ca.pem").unwrap();
+    let connector = connector.build();
+
+    let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut stream = connector.connect(Some("foobar.com"), stream).unwrap();
+
+    let mut buf = [0; 5];
+    stream.read_exact(&mut buf).unwrap();
+    assert_eq!(b"hello", &buf);
+
+    t.join().unwrap();
+}
+
+#[test]
+fn connector_client_server_mozilla_intermediate() {
+    test_mozilla_server(SslAcceptor::mozilla_intermediate);
+}
+
+#[test]
+fn connector_client_server_mozilla_modern() {
+    test_mozilla_server(SslAcceptor::mozilla_modern);
+}
+
+#[test]
+fn connector_client_server_mozilla_intermediate_v5() {
+    test_mozilla_server(SslAcceptor::mozilla_intermediate_v5);
+}
+
+#[test]
+fn shutdown() {
+    let mut server = Server::builder();
+    server.io_cb(|mut s| {
+        assert_eq!(s.read(&mut [0]).unwrap(), 0);
+        assert_eq!(s.shutdown().unwrap(), ShutdownResult::Received);
+    });
+    let server = server.build();
+
+    let mut s = server.client().connect();
+
+    assert_eq!(s.get_shutdown(), ShutdownState::empty());
+    assert_eq!(s.shutdown().unwrap(), ShutdownResult::Sent);
+    assert_eq!(s.get_shutdown(), ShutdownState::SENT);
+    assert_eq!(s.shutdown().unwrap(), ShutdownResult::Received);
+    assert_eq!(
+        s.get_shutdown(),
+        ShutdownState::SENT | ShutdownState::RECEIVED
+    );
+}
+
+#[test]
+fn client_ca_list() {
+    let names = X509Name::load_client_ca_file("test/root-ca.pem").unwrap();
+    assert_eq!(names.len(), 1);
+
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_client_ca_list(names);
+}
+
+#[test]
+fn keying_export() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let label = "EXPERIMENTAL test";
+    let context = b"my context";
+
+    let guard = thread::spawn(move || {
+        let stream = listener.accept().unwrap().0;
+        let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+        ctx.set_certificate_file(Path::new("test/cert.pem"), SslFiletype::PEM)
+            .unwrap();
+        ctx.set_private_key_file(Path::new("test/key.pem"), SslFiletype::PEM)
+            .unwrap();
+        let ssl = Ssl::new(&ctx.build()).unwrap();
+        let mut stream = ssl.accept(stream).unwrap();
+
+        let mut buf = [0; 32];
+        stream
+            .ssl()
+            .export_keying_material(&mut buf, label, Some(context))
+            .unwrap();
+
+        stream.write_all(&[0]).unwrap();
+
+        buf
+    });
+
+    let stream = TcpStream::connect(addr).unwrap();
+    let ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    let ssl = Ssl::new(&ctx.build()).unwrap();
+    let mut stream = ssl.connect(stream).unwrap();
+
+    let mut buf = [1; 32];
+    stream
+        .ssl()
+        .export_keying_material(&mut buf, label, Some(context))
+        .unwrap();
+
+    stream.read_exact(&mut [0]).unwrap();
+
+    let buf2 = guard.join().unwrap();
+
+    assert_eq!(buf, buf2);
+}
+
+#[test]
+fn no_version_overlap() {
+    let mut server = Server::builder();
+    server.ctx().set_min_proto_version(None).unwrap();
+    server
+        .ctx()
+        .set_max_proto_version(Some(SslVersion::TLS1_1))
+        .unwrap();
+    assert_eq!(server.ctx().max_proto_version(), Some(SslVersion::TLS1_1));
+    server.should_error();
+    let server = server.build();
+
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_min_proto_version(Some(SslVersion::TLS1_2))
+        .unwrap();
+    assert_eq!(client.ctx().min_proto_version(), Some(SslVersion::TLS1_2));
+    client.ctx().set_max_proto_version(None).unwrap();
+
+    client.connect_err();
+}
+
+fn _check_kinds() {
+    fn is_send<T: Send>() {}
+    fn is_sync<T: Sync>() {}
+
+    is_send::<SslStream<TcpStream>>();
+    is_sync::<SslStream<TcpStream>>();
+}
+
+#[test]
+fn psk_ciphers() {
+    const CIPHER: &str = "PSK-AES128-CBC-SHA";
+    const PSK: &[u8] = b"thisisaverysecurekey";
+    const CLIENT_IDENT: &[u8] = b"thisisaclient";
+    static CLIENT_CALLED: AtomicBool = AtomicBool::new(false);
+    static SERVER_CALLED: AtomicBool = AtomicBool::new(false);
+
+    let mut server = Server::builder();
+    server.ctx().set_cipher_list(CIPHER).unwrap();
+    server.ctx().set_psk_server_callback(|_, identity, psk| {
+        assert!(identity.unwrap_or(&[]) == CLIENT_IDENT);
+        psk[..PSK.len()].copy_from_slice(PSK);
+        SERVER_CALLED.store(true, Ordering::SeqCst);
+        Ok(PSK.len())
+    });
+
+    let server = server.build();
+
+    let mut client = server.client();
+    // This test relies on TLS 1.2 suites
+    client.ctx().set_options(super::SslOptions::NO_TLSV1_3);
+    client.ctx().set_cipher_list(CIPHER).unwrap();
+    client
+        .ctx()
+        .set_psk_client_callback(move |_, _, identity, psk| {
+            identity[..CLIENT_IDENT.len()].copy_from_slice(CLIENT_IDENT);
+            identity[CLIENT_IDENT.len()] = 0;
+            psk[..PSK.len()].copy_from_slice(PSK);
+            CLIENT_CALLED.store(true, Ordering::SeqCst);
+            Ok(PSK.len())
+        });
+
+    client.connect();
+
+    assert!(CLIENT_CALLED.load(Ordering::SeqCst) && SERVER_CALLED.load(Ordering::SeqCst));
+}
+
+#[test]
+fn sni_callback_swapped_ctx() {
+    static CALLED_BACK: AtomicBool = AtomicBool::new(false);
+
+    let mut server = Server::builder();
+
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_servername_callback(|_, _| {
+        CALLED_BACK.store(true, Ordering::SeqCst);
+        Ok(())
+    });
+
+    let keyed_ctx = mem::replace(server.ctx(), ctx).build();
+    server.ssl_cb(move |ssl| ssl.set_ssl_context(&keyed_ctx).unwrap());
+
+    let server = server.build();
+
+    server.client().connect();
+
+    assert!(CALLED_BACK.load(Ordering::SeqCst));
+}
+
+#[test]
+fn get_curve() {
+    let server = Server::builder().build();
+    let client = server.client_with_root_ca();
+    let client_stream = client.connect();
+    let curve = client_stream.ssl().curve().expect("curve");
+    assert!(curve.name().is_some());
+}
+
+#[test]
+fn get_curve_name() {
+    assert_eq!(SslCurve::SECP256R1.name(), Some("P-256"));
+    assert_eq!(SslCurve::SECP384R1.name(), Some("P-384"));
+    assert_eq!(SslCurve::SECP521R1.name(), Some("P-521"));
+    assert_eq!(SslCurve::X25519.name(), Some("X25519"));
+}
+
+#[test]
+fn set_curves() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_curves(&[SslCurve::SECP256R1, SslCurve::SECP384R1, SslCurve::X25519])
+        .expect("Failed to set curves");
+}
+
+#[test]
+fn every_rama_group_completes_a_tls13_handshake() {
+    for group in [
+        SslCurve::SECP256R1,
+        SslCurve::SECP384R1,
+        SslCurve::SECP521R1,
+        SslCurve::X25519,
+        SslCurve::X25519_MLKEM768,
+        SslCurve::MLKEM1024,
+        SslCurve::X25519_KYBER768_DRAFT00,
+        SslCurve::X25519_KYBER512_DRAFT00,
+        SslCurve::X25519_KYBER768_DRAFT00_OLD,
+        SslCurve::P256_KYBER768_DRAFT00,
+    ] {
+        let mut server = Server::builder();
+        server.ctx().set_curves(&[group]).unwrap();
+        server
+            .ctx()
+            .set_min_proto_version(Some(SslVersion::TLS1_3))
+            .unwrap();
+        let server = server.build();
+        let mut client = server.client();
+        client.ctx().set_curves(&[group]).unwrap();
+        client
+            .ctx()
+            .set_min_proto_version(Some(SslVersion::TLS1_3))
+            .unwrap();
+        let stream = client.connect();
+        assert_eq!(stream.ssl().curve(), Some(group), "{group:?}");
+    }
+}
+
+#[test]
+fn test_get_ciphers() {
+    let ctx_builder = SslContext::builder(SslMethod::tls()).unwrap();
+    let ctx_builder_ciphers: Vec<&str> = ctx_builder
+        .ciphers()
+        .unwrap()
+        .into_iter()
+        .map(|v| v.name())
+        .collect();
+    assert!(!(ctx_builder_ciphers.is_empty()));
+
+    let ctx = ctx_builder.build();
+    let ctx_ciphers: Vec<&str> = ctx
+        .ciphers()
+        .unwrap()
+        .into_iter()
+        .map(|v| v.name())
+        .collect();
+    assert!(!(ctx_ciphers.is_empty()));
+
+    assert_eq!(ctx_builder_ciphers.len(), ctx_ciphers.len());
+
+    for (ctx_builder_cipher, ctx_cipher) in ctx_builder_ciphers.into_iter().zip(ctx_ciphers) {
+        assert_eq!(ctx_builder_cipher, ctx_cipher);
+    }
+}
+
+#[test]
+fn test_set_compliance() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_compliance_policy(CompliancePolicy::FIPS_202205)
+        .unwrap();
+
+    assert_eq!(ctx.max_proto_version().unwrap(), SslVersion::TLS1_3);
+    assert_eq!(ctx.min_proto_version().unwrap(), SslVersion::TLS1_2);
+
+    const FIPS_CIPHERS: [&str; 4] = [
+        "ECDHE-ECDSA-AES128-GCM-SHA256",
+        "ECDHE-RSA-AES128-GCM-SHA256",
+        "ECDHE-ECDSA-AES256-GCM-SHA384",
+        "ECDHE-RSA-AES256-GCM-SHA384",
+    ];
+
+    let ciphers = ctx.ciphers().unwrap();
+    assert_eq!(ciphers.len(), FIPS_CIPHERS.len());
+
+    for cipher in ciphers.into_iter().zip(FIPS_CIPHERS) {
+        assert_eq!(cipher.0.name(), cipher.1);
+    }
+
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_compliance_policy(CompliancePolicy::WPA3_192_202304)
+        .unwrap();
+
+    assert_eq!(ctx.max_proto_version().unwrap(), SslVersion::TLS1_3);
+    assert_eq!(ctx.min_proto_version().unwrap(), SslVersion::TLS1_2);
+
+    const WPA3_192_CIPHERS: [&str; 2] = [
+        "ECDHE-ECDSA-AES256-GCM-SHA384",
+        "ECDHE-RSA-AES256-GCM-SHA384",
+    ];
+
+    let ciphers = ctx.ciphers().unwrap();
+    assert_eq!(ciphers.len(), WPA3_192_CIPHERS.len());
+
+    for cipher in ciphers.into_iter().zip(WPA3_192_CIPHERS) {
+        assert_eq!(cipher.0.name(), cipher.1);
+    }
+
+    ctx.set_compliance_policy(CompliancePolicy::NONE)
+        .expect_err("Testing expect err if set compliance policy to NONE");
+}
+
+#[test]
+fn drop_ex_data_in_context() {
+    let index = SslContext::new_ex_index::<&'static str>().unwrap();
+    let mut ctx = SslContext::builder(SslMethod::dtls()).unwrap();
+
+    assert_eq!(ctx.replace_ex_data(index, "comté"), None);
+    assert_eq!(ctx.replace_ex_data(index, "camembert"), Some("comté"));
+    assert_eq!(ctx.replace_ex_data(index, "raclette"), Some("camembert"));
+}
+
+#[test]
+fn drop_ex_data_in_ssl() {
+    let index = Ssl::new_ex_index::<&'static str>().unwrap();
+    let ctx = SslContext::builder(SslMethod::dtls()).unwrap().build();
+    let mut ssl = Ssl::new(&ctx).unwrap();
+
+    assert_eq!(ssl.replace_ex_data(index, "comté"), None);
+    assert_eq!(ssl.replace_ex_data(index, "camembert"), Some("comté"));
+    assert_eq!(ssl.replace_ex_data(index, "raclette"), Some("camembert"));
+}
+
+#[test]
+fn test_info_callback() {
+    static CALLED_BACK: AtomicBool = AtomicBool::new(false);
+
+    let server = Server::builder().build();
+    let mut client = server.client();
+    client.ctx().set_info_callback(move |_, _, _| {
+        CALLED_BACK.store(true, Ordering::Relaxed);
+    });
+
+    client.connect();
+    assert!(CALLED_BACK.load(Ordering::Relaxed));
+}
+
+#[test]
+fn test_ssl_set_compliance() {
+    let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
+    let mut ssl = Ssl::new(&ctx).unwrap();
+    ssl.set_compliance_policy(CompliancePolicy::FIPS_202205)
+        .unwrap();
+
+    assert_eq!(ssl.max_proto_version().unwrap(), SslVersion::TLS1_3);
+    assert_eq!(ssl.min_proto_version().unwrap(), SslVersion::TLS1_2);
+
+    const FIPS_CIPHERS: [&str; 4] = [
+        "ECDHE-ECDSA-AES128-GCM-SHA256",
+        "ECDHE-RSA-AES128-GCM-SHA256",
+        "ECDHE-ECDSA-AES256-GCM-SHA384",
+        "ECDHE-RSA-AES256-GCM-SHA384",
+    ];
+
+    let ciphers = ssl.ciphers();
+    assert_eq!(ciphers.len(), FIPS_CIPHERS.len());
+
+    for cipher in ciphers.into_iter().zip(FIPS_CIPHERS) {
+        assert_eq!(cipher.0.name(), cipher.1);
+    }
+
+    let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
+    let mut ssl = Ssl::new(&ctx).unwrap();
+    ssl.set_compliance_policy(CompliancePolicy::WPA3_192_202304)
+        .unwrap();
+
+    assert_eq!(ssl.max_proto_version().unwrap(), SslVersion::TLS1_3);
+    assert_eq!(ssl.min_proto_version().unwrap(), SslVersion::TLS1_2);
+
+    const WPA3_192_CIPHERS: [&str; 2] = [
+        "ECDHE-ECDSA-AES256-GCM-SHA384",
+        "ECDHE-RSA-AES256-GCM-SHA384",
+    ];
+
+    let ciphers = ssl.ciphers();
+    assert_eq!(ciphers.len(), WPA3_192_CIPHERS.len());
+
+    for cipher in ciphers.into_iter().zip(WPA3_192_CIPHERS) {
+        assert_eq!(cipher.0.name(), cipher.1);
+    }
+
+    ssl.set_compliance_policy(CompliancePolicy::NONE)
+        .expect_err("Testing expect err if set compliance policy to NONE");
+}
+
+#[test]
+fn ex_data_drop() {
+    use crate::ssl::SslContextBuilder;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::Arc;
+
+    struct TrackDrop(Arc<AtomicU32>);
+    impl Drop for TrackDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Relaxed);
+        }
+    }
+
+    let mut ctx = SslContextBuilder::new(SslMethod::tls()).unwrap();
+    let index = SslContext::new_ex_index().unwrap();
+    let d1 = Arc::new(AtomicU32::new(100));
+    let d2 = Arc::new(AtomicU32::new(200));
+    let d3 = Arc::new(AtomicU32::new(300));
+    ctx.set_ex_data(index, TrackDrop(d1.clone()));
+    assert_eq!(100, d1.load(Relaxed));
+    assert_eq!(200, d2.load(Relaxed));
+    ctx.replace_ex_data(index, TrackDrop(d2.clone()));
+    assert_eq!(101, d1.load(Relaxed));
+    assert_eq!(200, d2.load(Relaxed));
+    ctx.replace_ex_data(index, TrackDrop(d3.clone()));
+    assert_eq!(101, d1.load(Relaxed));
+    assert_eq!(201, d2.load(Relaxed));
+    assert_eq!(300, d3.load(Relaxed));
+    drop(ctx);
+    assert_eq!(101, d1.load(Relaxed));
+    assert_eq!(201, d2.load(Relaxed));
+    assert_eq!(301, d3.load(Relaxed));
+
+    let mut ctx2 = SslContextBuilder::new(SslMethod::tls()).unwrap();
+
+    ctx2.set_ex_data(index, TrackDrop(d1.clone()));
+    ctx2.set_ex_data(index, TrackDrop(d2.clone()));
+    drop(ctx2);
+    assert_eq!(102, d1.load(Relaxed));
+    assert_eq!(202, d2.load(Relaxed));
+}
+
+#[test]
+fn per_session_extension_order_overrides_without_mutating_shared_context() {
+    let mut server = Server::builder();
+    server.expected_connections_count(5);
+    let captured = capture_client_hello_extensions(&mut server);
+    let server = server.build();
+    let mut client = server.client();
+    client.ctx().set_alpn_protos(b"\x08http/1.1").unwrap();
+    client.ctx().set_extension_order(&[43, 16]).unwrap();
+    let client = client.build();
+    for ids in [&[16, 43][..], &[43, 16][..], &[][..]] {
+        let mut connection = client.builder();
+        connection.ssl().set_extension_order(ids).unwrap();
+        connection
+            .ssl()
+            .set_extension_order(&[43; 257])
+            .unwrap_err();
+        let mut connected = connection.connect();
+        connected.ssl_mut().set_extension_order(ids).unwrap_err();
+    }
+    // A sibling from the retained context still inherits its original order.
+    let _sibling = client.builder().connect();
+    let mut canonical = server.client();
+    canonical.ctx().set_alpn_protos(b"\x08http/1.1").unwrap();
+    let _canonical = canonical.connect();
+    let captures = captured.lock().unwrap();
+    assert_eq!(&captures[0][..2], &[16, 43]);
+    assert_eq!(&captures[1][..2], &[43, 16]);
+    assert_eq!(&captures[3][..2], &[43, 16]);
+    assert_eq!(captures[2], captures[4]);
+}
+
+#[test]
+fn per_session_extension_order_bounds_and_server_role() {
+    let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
+    let mut ssl = Ssl::new(&ctx).unwrap();
+    ssl.set_extension_order(&[43; 256]).unwrap();
+    ssl.set_extension_order(&[43; 257]).unwrap_err();
+    let mut server = ssl.setup_accept(io::Cursor::new(Vec::<u8>::new()));
+    server.ssl_mut().set_extension_order(&[43]).unwrap_err();
+}
+
+mod browser_fixtures;
+mod client_hello_shape;
+mod connection;
+mod extension_presence;
+mod lifecycle;
+mod memory;
+mod panic_safety;
+mod renegotiation;
+mod session_order;
+pub(crate) mod wire;
+mod wire_fuzz;
+
+pub(crate) mod reverify;
+
+mod server_padding;

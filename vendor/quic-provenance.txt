@@ -1,0 +1,23 @@
+Quinn 0.11.12
+Source https://static.crates.io/crates/quinn/quinn-0.11.12.crate
+SHA-256 4051e23e9185c255a7e33ef59cdbca87a22d359052eecd22fc6b901fb37d9d11
+Local change exposes the negotiated congestion controller replacement on Connection.
+
+Quinn-proto 0.11.19
+Source https://static.crates.io/crates/quinn-proto/quinn-proto-0.11.19.crate
+SHA-256 0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe
+Local changes add receive window ceilings and tuning, explicit pacing and packet loss
+feedback, BBR profiles, per-endpoint stateless reset control, separate DATAGRAM
+transport limits, and Chrome Initial packet and transport parameter encoding.
+
+h3-quinn 0.0.10
+Source https://static.crates.io/crates/h3-quinn/h3-quinn-0.0.10.crate
+SHA-256 8b2e732c8d91a74731663ac8479ab505042fbf547b9a207213ab7fbcbfc4f8b4
+Local change passes classified bidirectional streams and any consumed prefix to
+the existing HTTP/3 driver. Hysteria uses it to handle HTTP and raw streams on one
+QUIC connection.
+
+The original package licenses are included. Chrome QUIC compatibility follows the
+MIT-licensed github.com/apernet/quic-go v0.61.1-0.20260806010916-184d081eef3e
+used by Xray 26.10.31. Hysteria rate negotiation and BBR profile values follow
+Xray 26.10.31 a4a3dff.
