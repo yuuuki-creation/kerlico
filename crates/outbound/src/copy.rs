@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use kerlico_shared::{
-    InboundStream, NodeTag, OpenError, PlaneFault, Traffic, Transport, UserEmail,
+    InboundStream, NodeTag, OpenError, PlaneFault, Traffic, TrafficCounters, Transport, UserEmail,
 };
 
 use crate::Exit;
@@ -82,10 +82,13 @@ pub fn bridge(
     flow: Flow<'_>,
 ) -> Result<(), OpenError> {
     let pace = Arc::new(Pace::new());
+    let counters = flow.traffic.bind(flow.user, flow.node, flow.exit.tag());
     thread::scope(|scope| {
         let pace_up = Arc::clone(&pace);
-        let up = scope.spawn(move || pump_up(stream, toward_exit, flow, &pace_up));
-        let down = pump_down(stream, from_exit, flow, &pace);
+        let traffic = &counters;
+        let up =
+            scope.spawn(move || pump_up(stream, toward_exit, traffic, flow.transport, &pace_up));
+        let down = pump_down(stream, from_exit, &counters, flow.transport, &pace);
         pace.halt();
         let up = up.join().unwrap_or(Err(OpenError::Transport));
         down.and(up)
@@ -95,16 +98,10 @@ pub fn bridge(
 fn pump_up(
     stream: &dyn InboundStream,
     mut toward_exit: impl PipeWrite,
-    flow: Flow<'_>,
+    traffic: &TrafficCounters,
+    transport: Transport,
     pace: &Pace,
 ) -> Result<(), OpenError> {
-    let Flow {
-        user,
-        node,
-        exit,
-        traffic,
-        transport,
-    } = flow;
     let mut buf = vec![0u8; BUF];
     loop {
         if pace.halted() {
@@ -129,8 +126,7 @@ fn pump_up(
                     pace.halt();
                     return Err(error);
                 }
-                traffic.add_uplink(user, node, n as u64);
-                traffic.add_exit_uplink(exit.tag(), n as u64);
+                traffic.add_uplink(n as u64);
             }
             Err(PlaneFault::Again) => {
                 if pace.idle() {
@@ -149,16 +145,10 @@ fn pump_up(
 fn pump_down(
     stream: &dyn InboundStream,
     mut from_exit: impl PipeRead,
-    flow: Flow<'_>,
+    traffic: &TrafficCounters,
+    transport: Transport,
     pace: &Pace,
 ) -> Result<(), OpenError> {
-    let Flow {
-        user,
-        node,
-        exit,
-        traffic,
-        transport,
-    } = flow;
     let mut buf = vec![0u8; BUF];
     loop {
         if pace.halted() {
@@ -184,8 +174,7 @@ fn pump_down(
                 } else {
                     write_all_user(stream, &buf[..n])?
                 };
-                traffic.add_downlink(user, node, n);
-                traffic.add_exit_downlink(exit.tag(), n);
+                traffic.add_downlink(n);
             }
             Err(OpenError::Again) => {
                 if pace.idle() {

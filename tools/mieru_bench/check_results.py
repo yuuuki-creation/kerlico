@@ -7,14 +7,22 @@ import math
 from pathlib import Path
 
 
-def check(document, client_events, expected_seconds=60):
+def check(document, client_events, expected_seconds=60, sides=('kerlico', 'mita')):
     failures = []
     if document.get('status') != 'pass':
         failures.append('comparison_incomplete')
     cases = {c.get('label'): c for c in document.get('cases', [])}
-    if set(cases) != {'baseline', 'kerlico', 'mita'}:
+    if set(cases) != {'baseline', *sides}:
         failures.append('missing_side')
-    for name in ['kerlico', 'mita']:
+    measurements = [cases.get(name, {}).get('measurement', {}) for name in sides]
+    profile_keys = {'transport', 'multiplexing', 'handshake', 'low_entropy', 'mtu'}
+    if any(not isinstance(m.get('profile'), dict) or not profile_keys.issubset(m['profile'])
+           for m in measurements):
+        failures.append('missing_profile')
+    elif any(measurements[0].get(key) != measurements[1].get(key)
+             for key in ['profile', 'concurrency', 'block_size', 'latency_size']):
+        failures.append('parameter_mismatch')
+    for name in sides:
         c = cases.get(name, {})
         m = c.get('measurement', {})
         try:

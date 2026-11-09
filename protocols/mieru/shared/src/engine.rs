@@ -1,5 +1,6 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::{self, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
@@ -134,6 +135,7 @@ struct Sess {
     next_send: AtomicU32,
     peer_window: AtomicU32,
     cwnd: AtomicU32,
+    open_response: AtomicBool,
     closed: AtomicBool,
     last_tx: Mutex<Instant>,
     last_rx: Mutex<Instant>,
@@ -150,6 +152,7 @@ struct Pipe {
 struct Reorder {
     next: u32,
     held: BTreeMap<u32, Vec<u8>>,
+    held_bytes: usize,
 }
 
 struct Flight {
@@ -642,11 +645,13 @@ impl Sess {
             reorder: Mutex::new(Reorder {
                 next: 0,
                 held: BTreeMap::new(),
+                held_bytes: 0,
             }),
             inflight: Mutex::new(BTreeMap::new()),
             next_send: AtomicU32::new(0),
             peer_window: AtomicU32::new(INITIAL_WINDOW),
             cwnd: AtomicU32::new(INITIAL_WINDOW),
+            open_response: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             last_tx: Mutex::new(Instant::now()),
             last_rx: Mutex::new(Instant::now()),
@@ -739,17 +744,25 @@ impl Sess {
         if seq != reorder.next && reorder.held.len() >= WINDOW as usize {
             return Vec::new();
         }
-        let held_bytes: usize = reorder.held.values().map(Vec::len).sum();
-        if held_bytes.saturating_add(payload.len()) > PIPE_LIMIT {
+        if reorder.held_bytes.saturating_add(payload.len()) > PIPE_LIMIT {
             return Vec::new();
         }
-        reorder.held.entry(seq).or_insert(payload);
-        let mut out = Vec::new();
+        if seq != reorder.next {
+            if let std::collections::btree_map::Entry::Vacant(entry) = reorder.held.entry(seq) {
+                let len = payload.len();
+                entry.insert(payload);
+                reorder.held_bytes += len;
+            }
+            return Vec::new();
+        }
+        let mut out = payload;
+        reorder.next = reorder.next.wrapping_add(1);
         loop {
             let next = reorder.next;
             let Some(payload) = reorder.held.remove(&next) else {
                 break;
             };
+            reorder.held_bytes -= payload.len();
             out.extend(payload);
             reorder.next = next.wrapping_add(1);
         }
@@ -813,6 +826,7 @@ impl Sess {
         if buf.is_empty() {
             return Ok(());
         }
+        self.wait_open_response()?;
         let mode = self.link.low_entropy.load(Ordering::Relaxed) as u8;
         let max = fragment_size(self.link.tcp, self.link.mtu, mode);
         for pdu in buf.chunks(meta::MAX_PDU) {
@@ -834,6 +848,33 @@ impl Sess {
             }
         }
         Ok(())
+    }
+
+    fn waiting_for_open_response(&self) -> bool {
+        !self.link.tcp
+            && self.link.role == Role::Client
+            && !self.open_response.load(Ordering::Acquire)
+    }
+
+    fn wait_open_response(&self) -> io::Result<()> {
+        if !self.waiting_for_open_response() {
+            return Ok(());
+        }
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+        let mut pipe = self.pipe.lock().expect("pipe");
+        loop {
+            if pipe.closed {
+                return Err(closed());
+            }
+            if self.open_response.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(timed_out());
+            }
+            pipe = self.cv.wait_timeout(pipe, left).expect("cv").0;
+        }
     }
 
     fn emit(&self, kind: u8, seq: u32, payload: &[u8], remember: bool) -> io::Result<()> {
@@ -906,7 +947,7 @@ impl Sess {
     }
 
     fn send_ack(&self) -> io::Result<()> {
-        if self.link.tcp || self.closed.load(Ordering::SeqCst) {
+        if self.link.tcp || self.closed.load(Ordering::SeqCst) || self.waiting_for_open_response() {
             return Ok(());
         }
         let seq = self.next_send.load(Ordering::Relaxed).saturating_sub(1);
@@ -1115,30 +1156,47 @@ impl Sess {
             encoded.extend(tag);
             Ok(encoded)
         };
-        let wire = if self.link.tcp {
+        let body_len = if mode == 0 {
+            payload.len()
+        } else {
+            usize::from(
+                crate::entropy::encoded_len(payload.len(), mode).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "低熵载荷长度无效")
+                })?,
+            )
+        };
+        let mut wire = Vec::with_capacity(
+            24 + meta_plain.len() + 16 + prefix.len() + body_len + 16 + suffix.len(),
+        );
+        if self.link.tcp {
             let mut guard = self.link.send_dir.lock().expect("send");
             let dir = guard
                 .as_mut()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "发送密钥未就绪"))?;
-            let mut out = dir.seal(&self.username, meta_plain);
-            out.extend_from_slice(prefix);
+            dir.seal_into(&self.username, meta_plain, &mut wire);
+            wire.extend_from_slice(prefix);
             if !payload.is_empty() {
-                out.extend(body(dir.seal(&self.username, payload))?);
+                if mode == 0 {
+                    dir.seal_into(&self.username, payload, &mut wire);
+                } else {
+                    wire.extend(body(dir.seal(&self.username, payload))?);
+                }
             }
-            out.extend_from_slice(suffix);
-            out
         } else {
             let nonce = crypto::nonce_with_hint(&self.username);
-            let dir = Direction::from_key(self.key);
-            let mut out = nonce.to_vec();
-            out.extend(dir.seal_at(&nonce, meta_plain));
-            out.extend_from_slice(prefix);
+            let mut dir = Direction::from_key(self.key);
+            wire.extend_from_slice(&nonce);
+            dir.seal_at_into(&nonce, meta_plain, &mut wire);
+            wire.extend_from_slice(prefix);
             if !payload.is_empty() {
-                out.extend(body(dir.seal_at(&nonce, payload))?);
+                if mode == 0 {
+                    dir.seal_at_into(&nonce, payload, &mut wire);
+                } else {
+                    wire.extend(body(dir.seal_at(&nonce, payload))?);
+                }
             }
-            out.extend_from_slice(suffix);
-            out
-        };
+        }
+        wire.extend_from_slice(suffix);
         self.send_wire(&wire)
     }
 
@@ -1316,14 +1374,14 @@ impl Leg {
     }
 }
 
-fn reader_tcp(mut tcp: TcpStream, link: Arc<Link>, peer: SocketAddr) {
-    let mut stash = Vec::new();
+fn reader_tcp(tcp: TcpStream, link: Arc<Link>, peer: SocketAddr) {
+    let mut tcp = BufReader::with_capacity(64 * 1024, tcp);
     let mut recv: Option<Direction> = None;
     loop {
         if !link.alive.load(Ordering::SeqCst) {
             break;
         }
-        match read_tcp_segment(&mut tcp, &mut stash, &mut recv, &link, peer) {
+        match read_tcp_segment(&mut tcp, &mut recv, &link, peer) {
             Ok(Some(incoming)) => dispatch(&link, incoming),
             Ok(None) => link.tick(),
             Err(_) => {
@@ -1436,6 +1494,11 @@ fn dispatch(link: &Arc<Link>, incoming: Incoming) {
         if let Some(sess) = link.get(incoming.peer, incoming.meta.session) {
             let delivered = sess.push_in(incoming.meta.seq, incoming.payload);
             sess.append(&delivered);
+            if incoming.meta.seq == 0 && sess.unack() != 0 {
+                let _pipe = sess.pipe.lock().expect("pipe");
+                sess.open_response.store(true, Ordering::Release);
+                sess.cv.notify_all();
+            }
             if !link.tcp {
                 let _ = sess.send_ack();
             }
@@ -1596,15 +1659,14 @@ fn open_raw(link: &Arc<Link>) -> io::Result<Arc<Sess>> {
 }
 
 fn read_tcp_segment(
-    tcp: &mut TcpStream,
-    stash: &mut Vec<u8>,
+    tcp: &mut BufReader<TcpStream>,
     recv: &mut Option<Direction>,
     link: &Arc<Link>,
     peer: SocketAddr,
 ) -> io::Result<Option<Incoming>> {
     let first = recv.is_none();
     let header_len = if first { 24 + 32 + 16 } else { 32 + 16 };
-    let header = match take_with_idle(tcp, stash, header_len, true) {
+    let header = match take(tcp, header_len, true) {
         Ok(header) => header,
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             return Ok(None);
@@ -1616,7 +1678,7 @@ fn read_tcp_segment(
     }
     let (plain, key, username) = if let Some(direction) = recv.as_mut() {
         let plain = direction
-            .open_next(&header)
+            .open_next(header)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "decrypt"))?;
         let key = direction.key_bytes();
         let username = link.bound_user.lock().expect("user").clone();
@@ -1647,7 +1709,7 @@ fn read_tcp_segment(
         (opened.plain, key, username)
     };
     let meta = meta::parse(&plain)?;
-    let payload = read_tcp_payload(tcp, stash, recv.as_mut().unwrap(), &meta)?;
+    let payload = read_tcp_payload(tcp, recv.as_mut().unwrap(), &meta)?;
     Ok(Some(Incoming {
         peer,
         meta,
@@ -1658,18 +1720,17 @@ fn read_tcp_segment(
 }
 
 fn read_tcp_payload(
-    tcp: &mut TcpStream,
-    stash: &mut Vec<u8>,
+    tcp: &mut BufReader<TcpStream>,
     direction: &mut Direction,
     meta: &Meta,
 ) -> io::Result<Vec<u8>> {
     if meta.prefix > 0 {
-        let _ = take(tcp, stash, meta.prefix as usize)?;
+        skip_padding(tcp, meta.prefix)?;
     }
     let payload = if meta.payload_len == 0 {
         Vec::new()
     } else {
-        let mut wire = take(tcp, stash, meta.payload_len as usize + 16)?;
+        let mut wire = take(tcp, meta.payload_len as usize + 16, false)?;
         if meta::is_low(meta.kind) {
             let body = crate::entropy::decode(
                 &wire[..meta.payload_len as usize],
@@ -1679,16 +1740,16 @@ fn read_tcp_payload(
                 meta.rotation,
             )
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "low entropy"))?;
-            let tag = wire[meta.payload_len as usize..].to_vec();
+            let tag: [u8; 16] = wire[meta.payload_len as usize..].try_into().unwrap();
             wire = body;
             wire.extend(tag);
         }
         direction
-            .open_next(&wire)
+            .open_next(wire)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "payload"))?
     };
     if meta.suffix > 0 {
-        let _ = take(tcp, stash, meta.suffix as usize)?;
+        skip_padding(tcp, meta.suffix)?;
     }
     Ok(payload)
 }
@@ -1810,35 +1871,41 @@ fn udp_body(meta: &Meta, nonce: &[u8; 24], mut rest: &[u8], key: [u8; 32]) -> Op
             meta.low_mask,
             meta.rotation,
         )?;
-        let tag = sealed[meta.payload_len as usize..].to_vec();
+        let tag: [u8; 16] = sealed[meta.payload_len as usize..].try_into().ok()?;
         sealed = body;
         sealed.extend(tag);
     }
-    Direction::from_key(key).open_at(nonce, &sealed)
+    Direction::from_key(key).open_at_in_place(nonce, &mut sealed)?;
+    Some(sealed)
 }
 
-fn take(tcp: &mut TcpStream, stash: &mut Vec<u8>, n: usize) -> io::Result<Vec<u8>> {
-    take_with_idle(tcp, stash, n, false)
+fn take(tcp: &mut BufReader<TcpStream>, n: usize, allow_idle: bool) -> io::Result<Vec<u8>> {
+    let mut bytes = vec![0; n];
+    read_tcp_exact(tcp, &mut bytes, allow_idle)?;
+    Ok(bytes)
 }
 
-fn take_with_idle(
-    tcp: &mut TcpStream,
-    stash: &mut Vec<u8>,
-    n: usize,
+fn skip_padding(tcp: &mut BufReader<TcpStream>, len: u8) -> io::Result<()> {
+    let mut padding = [0; u8::MAX as usize];
+    read_tcp_exact(tcp, &mut padding[..usize::from(len)], false)
+}
+
+fn read_tcp_exact(
+    tcp: &mut BufReader<TcpStream>,
+    bytes: &mut [u8],
     allow_idle: bool,
-) -> io::Result<Vec<u8>> {
+) -> io::Result<()> {
     let start = Instant::now();
-    while stash.len() < n {
-        let mut buf = [0u8; 64 * 1024];
-        ack_soon(tcp);
-        match tcp.read(&mut buf) {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        match tcp.read(&mut bytes[offset..]) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "tcp")),
-            Ok(read) => stash.extend_from_slice(&buf[..read]),
+            Ok(read) => offset += read,
             Err(error)
                 if error.kind() == io::ErrorKind::WouldBlock
                     || error.kind() == io::ErrorKind::TimedOut =>
             {
-                if allow_idle && stash.is_empty() {
+                if allow_idle && offset == 0 {
                     return Err(io::Error::new(io::ErrorKind::WouldBlock, "idle"));
                 }
                 if start.elapsed() > Duration::from_secs(20) {
@@ -1848,24 +1915,7 @@ fn take_with_idle(
             Err(error) => return Err(error),
         }
     }
-    Ok(stash.drain(..n).collect())
-}
-
-#[cfg(target_os = "linux")]
-fn ack_soon(tcp: &TcpStream) {
-    use std::os::fd::AsRawFd;
-    let on: i32 = 1;
-    unsafe {
-        setsockopt(tcp.as_raw_fd(), 6, 12, &on, 4);
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn ack_soon(_tcp: &TcpStream) {}
-
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn setsockopt(fd: i32, level: i32, name: i32, val: *const i32, len: u32) -> i32;
+    Ok(())
 }
 
 fn write_all_timeout(mut tcp: &TcpStream, bytes: &[u8]) -> io::Result<()> {
@@ -2157,12 +2207,27 @@ fn padding(max: usize) -> Vec<u8> {
     if max == 0 {
         return Vec::new();
     }
-    let mut byte = [0u8; 1];
-    let _ = getrandom::getrandom(&mut byte);
-    let len = 1 + (byte[0] as usize % max.min(32));
-    let mut out = vec![0u8; len];
-    let _ = getrandom::getrandom(&mut out);
-    out
+    struct PaddingRandom {
+        bytes: [u8; 1024],
+        cursor: usize,
+    }
+    thread_local! {
+        static RANDOM: RefCell<PaddingRandom> = const {
+            RefCell::new(PaddingRandom { bytes: [0; 1024], cursor: 1024 })
+        };
+    }
+    RANDOM.with(|random| {
+        let mut random = random.borrow_mut();
+        let max = max.min(32);
+        if random.cursor + max + 1 > random.bytes.len() {
+            getrandom::getrandom(&mut random.bytes).expect("random padding");
+            random.cursor = 0;
+        }
+        let start = random.cursor;
+        let len = 1 + usize::from(random.bytes[start]) % max;
+        random.cursor += len + 1;
+        random.bytes[start + 1..start + 1 + len].to_vec()
+    })
 }
 
 fn udp_budget(mtu: u16) -> usize {
@@ -2240,8 +2305,7 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
-    #[test]
-    fn ordered_delivery_waits_for_the_hole() {
+    fn detached_session() -> Arc<Sess> {
         let link = Link::new(LinkSetup {
             role: Role::Server,
             mtu: 1400,
@@ -2251,16 +2315,45 @@ mod tests {
             bound_user: String::new(),
             remote: "127.0.0.1:1".parse().unwrap(),
         });
-        let sess = Sess::new(
+        Sess::new(
             link,
             1,
             "127.0.0.1:2".parse().unwrap(),
             "alice".into(),
             [0; 32],
-        );
+        )
+    }
+
+    #[test]
+    fn ordered_delivery_waits_for_the_hole() {
+        let sess = detached_session();
         assert!(sess.push_in(1, b"b".to_vec()).is_empty());
+        assert!(sess.push_in(1, b"duplicate".to_vec()).is_empty());
         assert_eq!(sess.push_in(0, b"a".to_vec()), b"ab");
         assert!(sess.push_in(0, b"a".to_vec()).is_empty());
+    }
+
+    #[test]
+    fn ordered_delivery_crosses_the_sequence_wrap() {
+        let sess = detached_session();
+        sess.reorder.lock().unwrap().next = u32::MAX - 1;
+        assert!(sess.push_in(0, b"c".to_vec()).is_empty());
+        assert!(sess.push_in(u32::MAX, b"b".to_vec()).is_empty());
+        assert_eq!(sess.push_in(u32::MAX - 1, b"a".to_vec()), b"abc");
+        assert!(sess.push_in(u32::MAX, b"old".to_vec()).is_empty());
+        assert_eq!(sess.push_in(1, b"d".to_vec()), b"d");
+    }
+
+    #[test]
+    fn filling_a_gap_releases_the_reorder_byte_budget() {
+        let sess = detached_session();
+        let count = (PIPE_LIMIT / meta::MAX_PDU) as u32;
+        for seq in 1..=count {
+            assert!(sess.push_in(seq, vec![7; meta::MAX_PDU]).is_empty());
+        }
+        assert_eq!(sess.push_in(0, Vec::new()), vec![7; PIPE_LIMIT]);
+        assert!(sess.push_in(count + 2, vec![8; meta::MAX_PDU]).is_empty());
+        assert_eq!(sess.push_in(count + 1, Vec::new()), vec![8; meta::MAX_PDU]);
     }
 
     #[test]

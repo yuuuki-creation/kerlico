@@ -86,7 +86,7 @@ def wait_port(process, port):
     raise RuntimeError('代理端口未就绪')
 
 
-def run_side(args, name, duration, cpus):
+def run_side(args, name, duration, cpus, kerlico_bin=None):
     folder = args.output / name
     folder.mkdir(mode=0o700)
     os.chown(folder, args.uid, args.uid)
@@ -100,16 +100,16 @@ def run_side(args, name, duration, cpus):
         direct = name == 'baseline'
         if not direct:
             config = folder / 'server.json'
-            if name == 'kerlico':
+            if name == 'kerlico' or kerlico_bin is not None:
                 dump(config, {'warp': {'secretKey': 'invalid'}, 'inbounds': [{'tag': 'benchmark', 'protocol': 'mieru', 'listen': '127.0.0.1', 'port': proxy_port, 'outbound': 'native-v4', 'settings': {'transport': 'TCP', 'users': [{'email': 'test-user', 'username': 'test-user', 'password': 'test-password'}]}}]}, args.uid)
-                server = Process([str(args.kerlico_bin), str(config)], folder, 'server', cpus['server'], args.uid)
+                server = Process([str(kerlico_bin or args.kerlico_bin), str(config)], folder, 'server', cpus['server'], args.uid)
             else:
                 dump(config, {'listenIPAddress': '127.0.0.1', 'portBindings': [{'port': proxy_port, 'protocol': 'TCP'}], 'users': [{'name': 'test-user', 'password': 'test-password', 'allowPrivateIP': True, 'allowLoopbackIP': True}], 'mtu': 1400, 'loggingLevel': 'ERROR', 'trafficPattern': {'lowEntropy': {'mode': 'LOW_ENTROPY_MODE_OFF'}}}, args.uid)
                 server = Process([str(args.mita_bin), 'run'], folder, 'server', cpus['server'], args.uid, {'GOMAXPROCS': '4', 'MITA_CONFIG_JSON_FILE': str(config), 'MITA_UDS_PATH': str(folder / 'mita.sock'), 'MITA_INSECURE_UDS': '1'})
             wait_port(server, proxy_port)
         warmup = 2 if direct else 5
         planned_ms = int(time.time() * 1000) + 10000
-        command = [str(args.bench_bin), 'load', '--target', f'127.0.0.1:{target_port}', '--label', name, '--duration', f'{duration}s', '--warmup', f'{warmup}s', '--concurrency', '8', '--block-size', '32768', '--latency-size', '64', '--start-at', str(planned_ms), '--hold-after-final', '2s']
+        command = [str(args.bench_bin), 'load', '--target', f'127.0.0.1:{target_port}', '--label', name, '--duration', f'{duration}s', '--warmup', f'{warmup}s', '--concurrency', str(getattr(args, 'concurrency', 8)), '--block-size', str(getattr(args, 'block_size', 32768)), '--latency-size', '64', '--start-at', str(planned_ms), '--hold-after-final', '2s']
         if direct:
             command.append('--direct')
         else:

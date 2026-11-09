@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -9,7 +10,7 @@ use std::time::Duration;
 use kerlico_outbound::{DialTarget, Exit, Native, Outbound, OutboundChoice};
 use kerlico_shared::{
     Accept, AddrError, DocError, Handoff, IdError, ListenAddr, NodeTag, OpenError, PacketError,
-    PlaneFault, ProtocolId, Settings, Traffic, UserEmail,
+    PlaneFault, ProtocolId, Settings, Traffic, TrafficCounters, UserEmail,
 };
 
 mod api;
@@ -78,7 +79,7 @@ impl From<PlaneFault> for Error {
 /// Process-wide counters. Names follow the Xray `>>>` pattern.
 #[derive(Debug, Clone)]
 pub struct Stats {
-    counts: Arc<Mutex<BTreeMap<String, u64>>>,
+    counts: Arc<Mutex<BTreeMap<String, Arc<AtomicU64>>>>,
 }
 
 impl Stats {
@@ -109,13 +110,16 @@ impl Stats {
             .lock()
             .expect("stats")
             .get(name)
-            .copied()
+            .map(|counter| counter.load(Ordering::Relaxed))
             .unwrap_or(0)
     }
 
     fn add(&self, name: String, bytes: u64) {
         let mut counts = self.counts.lock().expect("stats");
-        *counts.entry(name).or_insert(0) += bytes;
+        counts
+            .entry(name)
+            .or_default()
+            .fetch_add(bytes, Ordering::Relaxed);
     }
 }
 
@@ -125,23 +129,42 @@ impl Default for Stats {
     }
 }
 
-impl Traffic for Stats {
-    fn add_uplink(&self, user: &UserEmail, node: &NodeTag, bytes: u64) {
+impl Stats {
+    pub fn add_uplink(&self, user: &UserEmail, node: &NodeTag, bytes: u64) {
         self.add(Self::user_uplink_name(user), bytes);
         self.add(Self::inbound_uplink_name(node), bytes);
     }
 
-    fn add_downlink(&self, user: &UserEmail, node: &NodeTag, bytes: u64) {
+    pub fn add_downlink(&self, user: &UserEmail, node: &NodeTag, bytes: u64) {
         self.add(Self::user_downlink_name(user), bytes);
         self.add(Self::inbound_downlink_name(node), bytes);
     }
 
-    fn add_exit_uplink(&self, exit: &str, bytes: u64) {
+    pub fn add_exit_uplink(&self, exit: &str, bytes: u64) {
         self.add(format!("outbound>>>{exit}>>>traffic>>>uplink"), bytes);
     }
 
-    fn add_exit_downlink(&self, exit: &str, bytes: u64) {
+    pub fn add_exit_downlink(&self, exit: &str, bytes: u64) {
         self.add(format!("outbound>>>{exit}>>>traffic>>>downlink"), bytes);
+    }
+}
+
+impl Traffic for Stats {
+    fn bind(&self, user: &UserEmail, node: &NodeTag, exit: &str) -> TrafficCounters {
+        let mut counts = self.counts.lock().expect("stats");
+        let mut counter = |name| Arc::clone(counts.entry(name).or_default());
+        TrafficCounters::new(
+            [
+                counter(Self::user_uplink_name(user)),
+                counter(Self::inbound_uplink_name(node)),
+                counter(format!("outbound>>>{exit}>>>traffic>>>uplink")),
+            ],
+            [
+                counter(Self::user_downlink_name(user)),
+                counter(Self::inbound_downlink_name(node)),
+                counter(format!("outbound>>>{exit}>>>traffic>>>downlink")),
+            ],
+        )
     }
 }
 
@@ -159,6 +182,7 @@ struct Node {
 /// One process. Every node hands flows to the same `Outbound`.
 pub struct Server {
     nodes: Vec<Node>,
+    next_node: usize,
     outbound: Outbound,
     stats: Stats,
     fakedns: fakedns::Pool,
@@ -175,6 +199,7 @@ impl Server {
         let (api_tx, api_rx) = mpsc::channel();
         Self {
             nodes: Vec::new(),
+            next_node: 0,
             outbound: Outbound::new(),
             stats: Stats::new(),
             fakedns: fakedns::Pool::new(),
@@ -338,8 +363,9 @@ impl Server {
         }
         loop {
             self.drain_api();
-            self.dispatch_next_with(native, &local, &dns);
-            thread::sleep(Duration::from_millis(20));
+            if !self.dispatch_next_with(native, &local, &dns) {
+                thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 
@@ -384,49 +410,54 @@ impl Server {
         Ok(())
     }
 
-    fn dispatch_next_with(&mut self, native: Native, local: &[IpAddr], dns: &dns::Config) {
-        for index in 0..self.nodes.len() {
-            let accepted = self.nodes[index].inbound.accept();
-            let rules = self.nodes[index].rules.clone();
-            let choice = self.nodes[index].outbound;
-            let sniff = self.nodes[index].sniff.clone();
-            match accepted {
-                Ok(handoff) => {
-                    let outbound = self.outbound.clone();
-                    let stats = self.stats.clone();
-                    let local = local.to_vec();
-                    let dns = dns.clone();
-                    let fakes = self.fakedns.clone();
-                    let fake_on = self.fake_on;
-                    let geodata = self.geodata.clone();
-                    let udp = self.udp.clone();
-                    thread::spawn(move || {
-                        if let Err(error) = Self::drive(
-                            handoff,
-                            FlowPlan {
-                                rules: &rules,
-                                choice,
-                                native,
-                                local: &local,
-                                dns: &dns,
-                                sniff: &sniff,
-                                fakes: &fakes,
-                                fake_on,
-                                geodata: &geodata,
-                                sessions: &udp,
-                                outbound: &outbound,
-                                traffic: &stats,
-                            },
-                        ) {
-                            eprintln!("flow {error:?}");
-                        }
-                    });
-                    return;
-                }
-                Err(OpenError::Again) => {}
-                Err(_) => {}
+    fn accept_next(&mut self) -> Option<(usize, Handoff)> {
+        for _ in 0..self.nodes.len() {
+            let index = self.next_node % self.nodes.len();
+            self.next_node = (index + 1) % self.nodes.len();
+            if let Ok(handoff) = self.nodes[index].inbound.accept() {
+                return Some((index, handoff));
             }
         }
+        None
+    }
+
+    fn dispatch_next_with(&mut self, native: Native, local: &[IpAddr], dns: &dns::Config) -> bool {
+        let Some((index, handoff)) = self.accept_next() else {
+            return false;
+        };
+        let rules = self.nodes[index].rules.clone();
+        let choice = self.nodes[index].outbound;
+        let sniff = self.nodes[index].sniff.clone();
+        let outbound = self.outbound.clone();
+        let stats = self.stats.clone();
+        let local = local.to_vec();
+        let dns = dns.clone();
+        let fakes = self.fakedns.clone();
+        let fake_on = self.fake_on;
+        let geodata = self.geodata.clone();
+        let udp = self.udp.clone();
+        thread::spawn(move || {
+            if let Err(error) = Self::drive(
+                handoff,
+                FlowPlan {
+                    rules: &rules,
+                    choice,
+                    native,
+                    local: &local,
+                    dns: &dns,
+                    sniff: &sniff,
+                    fakes: &fakes,
+                    fake_on,
+                    geodata: &geodata,
+                    sessions: &udp,
+                    outbound: &outbound,
+                    traffic: &stats,
+                },
+            ) {
+                eprintln!("flow {error:?}");
+            }
+        });
+        true
     }
 
     fn drive(mut handoff: Handoff, plan: FlowPlan<'_>) -> Result<(), Error> {
@@ -582,6 +613,7 @@ mod tests {
 
     struct MemoryInbound {
         users: BTreeSet<UserEmail>,
+        ready: std::collections::VecDeque<Handoff>,
     }
 
     impl Accept for MemoryInbound {
@@ -596,8 +628,62 @@ mod tests {
         }
 
         fn accept(&mut self) -> Result<Handoff, OpenError> {
-            unimplemented!("test inbound")
+            self.ready.pop_front().ok_or(OpenError::Again)
         }
+    }
+
+    struct EmptyStream;
+
+    impl kerlico_shared::InboundStream for EmptyStream {
+        fn read_from_user(&self, _buf: &mut [u8]) -> Result<usize, PlaneFault> {
+            Err(PlaneFault::Closed)
+        }
+
+        fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn busy_nodes_share_accepts_and_empty_nodes_do_not_block_them() {
+        let mut server = Server::new();
+        assert!(server.accept_next().is_none());
+        for (name, count) in [("a", 2), ("empty", 0), ("b", 2)] {
+            let tag = NodeTag::parse(name).unwrap();
+            let ready = (0..count)
+                .map(|_| {
+                    Handoff::new(
+                        tag.clone(),
+                        UserEmail::parse("alice@example").unwrap(),
+                        kerlico_shared::Destination::new(
+                            "127.0.0.1",
+                            443,
+                            kerlico_shared::Transport::Tcp,
+                        )
+                        .unwrap(),
+                        Box::new(EmptyStream),
+                    )
+                })
+                .collect();
+            server.nodes.push(Node {
+                tag,
+                protocol: ProtocolId::must("mieru"),
+                listen: ListenAddr::v4(std::net::Ipv4Addr::LOCALHOST, 443).unwrap(),
+                outbound: OutboundChoice::Default,
+                inbound: Box::new(MemoryInbound {
+                    users: BTreeSet::new(),
+                    ready,
+                }),
+                users: BTreeSet::new(),
+                rules: Vec::new(),
+                sniff: Vec::new(),
+            });
+        }
+        for expected in ["a", "b", "a", "b"] {
+            let (_, handoff) = server.accept_next().unwrap();
+            assert_eq!(handoff.node().as_str(), expected);
+        }
+        assert!(server.accept_next().is_none());
     }
 
     #[test]
@@ -611,6 +697,39 @@ mod tests {
         assert_eq!(stats.get("user>>>alice@example>>>traffic>>>downlink"), 7);
         assert_eq!(stats.get("inbound>>>node-a>>>traffic>>>uplink"), 12);
         assert_eq!(stats.get(&Stats::user_uplink_name(&email)), 12);
+    }
+
+    #[test]
+    fn bound_counters_remain_visible_and_merge_the_same_user_across_nodes() {
+        let stats = Stats::new();
+        let user = UserEmail::parse("alice@example").unwrap();
+        let a = NodeTag::parse("a").unwrap();
+        let b = NodeTag::parse("b").unwrap();
+        let first = stats.bind(&user, &a, "native-v4");
+        let second = stats.bind(&user, &b, "native-v4");
+        first.add_uplink(12);
+        second.add_uplink(5);
+        first.add_downlink(7);
+        second.add_downlink(3);
+        assert_eq!(stats.get("user>>>alice@example>>>traffic>>>uplink"), 17);
+        assert_eq!(stats.get("user>>>alice@example>>>traffic>>>downlink"), 10);
+        assert_eq!(stats.get("inbound>>>a>>>traffic>>>uplink"), 12);
+        assert_eq!(stats.get("inbound>>>b>>>traffic>>>uplink"), 5);
+        assert_eq!(stats.get("outbound>>>native-v4>>>traffic>>>uplink"), 17);
+        assert_eq!(stats.get("outbound>>>native-v4>>>traffic>>>downlink"), 10);
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                let first = &first;
+                scope.spawn(move || {
+                    for _ in 0..1000 {
+                        first.add_uplink(1);
+                    }
+                });
+            }
+        });
+        assert_eq!(stats.get("user>>>alice@example>>>traffic>>>uplink"), 4017);
+        assert_eq!(stats.get("inbound>>>a>>>traffic>>>uplink"), 4012);
+        assert_eq!(stats.get("outbound>>>native-v4>>>traffic>>>uplink"), 4017);
     }
 
     #[cfg(not(feature = "landing-mieru"))]
@@ -631,6 +750,7 @@ mod tests {
             outbound: OutboundChoice::Default,
             inbound: Box::new(MemoryInbound {
                 users: BTreeSet::new(),
+                ready: std::collections::VecDeque::new(),
             }),
             users: BTreeSet::new(),
             rules: Vec::new(),

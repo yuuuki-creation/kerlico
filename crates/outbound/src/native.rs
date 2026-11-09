@@ -103,6 +103,8 @@ pub fn dial_native(
             let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
                 .map_err(|_| OpenError::Transport)?;
             tcp.set_nodelay(true).ok();
+            tcp.set_read_timeout(Some(Duration::from_millis(200)))
+                .map_err(|_| OpenError::Transport)?;
             let read = tcp.try_clone().map_err(|_| OpenError::Transport)?;
             copy::bridge(
                 stream,
@@ -314,9 +316,6 @@ struct TcpRead(TcpStream);
 
 impl PipeRead for TcpRead {
     fn read_pipe(&mut self, buf: &mut [u8]) -> Result<ReadEvent, OpenError> {
-        self.0
-            .set_read_timeout(Some(Duration::from_millis(200)))
-            .ok();
         match self.0.read(buf) {
             Ok(0) => Ok(ReadEvent::Eof),
             Ok(n) => Ok(ReadEvent::Data(n)),

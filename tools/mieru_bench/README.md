@@ -53,3 +53,54 @@ python3 tools/mieru_bench/check_results.py \
 	/private/runtime/directory/new-result/comparison.json \
 	--output /private/runtime/directory/new-result/independent-check.json
 ```
+
+## Rust 优化前后对比
+
+`run_regression.py` 使用同一个官方 SDK 负载，交替运行两个 Rust 服务端。两侧使用相同 release 参数并分别构建到独立 target 目录。默认各运行五轮，每轮 60 秒，另有直连基线。负载仍是 8 条持久数据流和一条探针，不测新流派发速率。
+
+```sh
+python3 tools/mieru_bench/run_regression.py \
+	--before-bin /private/runtime/directory/server-before \
+	--after-bin /private/runtime/directory/server-after \
+	--bench-bin /private/runtime/directory/mieru-bench \
+	--output /private/runtime/directory/new-regression
+```
+
+`--duration` 可指定每轮计时秒数，`--rounds` 至少为 5。三个角色仍固定为服务端 4 核、负载 3 核、目标 1 核，并降权运行。输出目录必须不存在，其父目录和二进制路径必须可由该无特权 UID 遍历。
+
+每轮用 `check_results.check` 核对完成块、逐秒字节、采样窗口和目标实际工作，再运行错误总量、错误逐秒计数和缺少一侧的负面对照。任一检查失败，整次对比保留失败状态。`regression.json` 保存二进制 SHA-256、每轮原始摘要及中位数和范围。CPU 指标是服务端用户态与内核态 CPU 秒数除以单向完整校验的 bulk GiB；不能与按收发合计字节归一的值混用。
+
+工具不根据中位数自动宣布性能赢家。判断仍需要核对实际底层连接数、三种角色的瓶颈、环境负载和各轮波动。协议互通、短连接、慢消费者及其他传输模式另行验证。
+
+## 与固定版本 mita 验收
+
+`run_regression.py` 也接受 `--mita-bin`，与 `--before-bin` 二选一。该模式的 before 是官方 mita，after 是 Rust 服务端。mita 使用固定源码的官方 release 构建参数，配置和负载与前文一致。
+
+```sh
+python3 tools/mieru_bench/run_regression.py \
+	--mita-bin /private/runtime/directory/mita \
+	--after-bin /private/runtime/directory/kerlico-server \
+	--bench-bin /private/runtime/directory/mieru-bench \
+	--output /private/runtime/directory/new-mita-comparison \
+	--rounds 5 --duration 60 --require-cpu-reduction 30
+```
+
+`--concurrency` 和 `--block-size` 同时应用于两侧，默认仍为 8 和 32768。独立核对要求两侧的传输、复用、握手、低熵、MTU、并发和块大小一致；参数不一致和缺失参数也有负面对照。
+
+输出的 `ratios` 为 after 中位数除以 before 中位数。`cpu_30_percent_lower` 表示每 GiB 服务端 CPU 时间的中位数比值不超过 0.70；`all_pairs_cpu_30_percent_lower` 还要求每一对运行都满足该阈值。`status=pass` 只表示负载、资源采样和独立数据核对成功，不能替代 CPU 阈值或吞吐、P99、RSS 的检查。
+
+指定 `--require-cpu-reduction 30` 后，五组配对中任何一组未达到 30%，命令以状态码 2 退出，并保留完整测量数据与 `cpu_requirement.met=false`。空样本和零 CPU 比值不能通过目标检查。
+
+## 单独剖析 Rust 服务端
+
+`profile_server.py` 在独立目录启动自己的服务端、共同负载和回显目标，再用 perf 或 strace 附加到本次服务端。该入口需要 Linux worker 的调度账户，所有进程由入口回收；输出明确标记 `performance_measurement=false`，不计入正式对比。
+
+```sh
+python3 tools/mieru_bench/profile_server.py \
+	--server-bin /private/runtime/directory/kerlico-server \
+	--bench-bin /private/runtime/directory/mieru-bench \
+	--profiler-bin /path/to/perf --mode cpu \
+	--output /private/runtime/directory/new-cpu-profile
+```
+
+系统调用剖析改用 strace 路径和 `--mode syscalls`。剖析工具需要能在该账户下运行；可以在本次目录解包工具及依赖，不需要修改系统 TCP 参数。perf 的主动 SIGINT 收尾允许信号退出，但必须成功读取非空样本；其他退出和缺少汇总均视为失败。strace 的时间包含等待及跟踪开销，不能作为原程序 CPU 占比。

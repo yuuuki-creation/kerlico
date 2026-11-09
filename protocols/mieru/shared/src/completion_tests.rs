@@ -326,19 +326,27 @@ fn closing_a_client_wakes_a_blocked_reader() {
 
 #[test]
 fn slow_tcp_payload_can_arrive_after_the_socket_poll_timeout() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let writer = thread::spawn(move || {
-        let mut tcp = TcpStream::connect(addr).unwrap();
-        tcp.write_all(b"a").unwrap();
-        thread::sleep(Duration::from_millis(80));
-        tcp.write_all(b"bc").unwrap();
-    });
-    let (mut tcp, _) = listener.accept().unwrap();
-    tcp.set_read_timeout(Some(Duration::from_millis(20)))
-        .unwrap();
-    assert_eq!(take(&mut tcp, &mut Vec::new(), 3).unwrap(), b"abc");
-    writer.join().unwrap();
+    for allow_idle in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (started, ready) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let mut tcp = TcpStream::connect(addr).unwrap();
+            tcp.write_all(b"a").unwrap();
+            started.send(()).unwrap();
+            thread::sleep(Duration::from_millis(80));
+            tcp.write_all(b"bcdefgh").unwrap();
+        });
+        let (tcp, _) = listener.accept().unwrap();
+        tcp.set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        ready.recv().unwrap();
+        let mut tcp = BufReader::with_capacity(8, tcp);
+        assert_eq!(take(&mut tcp, 3, allow_idle).unwrap(), b"abc");
+        skip_padding(&mut tcp, 2).unwrap();
+        assert_eq!(take(&mut tcp, 3, false).unwrap(), b"fgh");
+        writer.join().unwrap();
+    }
 }
 
 #[test]
@@ -455,6 +463,103 @@ fn udp_retransmits_even_when_packets_keep_the_reader_busy() {
     conn.write_user(b"retried").unwrap();
     assert_eq!(read_bytes(&remote.conn, 7), b"retried");
     client.close();
+}
+
+#[test]
+fn udp_no_wait_defers_data_until_open_response_and_can_be_cancelled() {
+    for respond in [true, false] {
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let credentials = account();
+        let client = Client::new(
+            vec![peer.local_addr().unwrap()],
+            credentials.clone(),
+            ClientOptions {
+                transport: Transport::Udp,
+                handshake: HandshakeMode::NoWait,
+                low_entropy: 3,
+                ..ClientOptions::default()
+            },
+        )
+        .unwrap();
+        let conn = Arc::new(client.open(&target()).unwrap());
+        let writing = Arc::clone(&conn);
+        let (done, finished) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let _ = done.send(writing.write_user(b"payload"));
+        });
+        let mut wire = [0; 2048];
+        let (n, source) = peer.recv_from(&mut wire).unwrap();
+        let opened = crypto::open_first(
+            &credentials.username,
+            &credentials.password,
+            &wire[..72.min(n)],
+            meta::unix_now(),
+        )
+        .unwrap();
+        let request = meta::parse(&opened.plain).unwrap();
+        assert_eq!(request.kind, OPEN_REQUEST);
+        let key = opened.direction.key_bytes();
+        let reply = |plain: [u8; 32]| {
+            let nonce = crypto::nonce_with_hint(&credentials.username);
+            let mut packet = nonce.to_vec();
+            packet.extend(Direction::from_key(key).seal_at(&nonce, &plain));
+            peer.send_to(&packet, source).unwrap();
+        };
+        reply(meta::data(&Meta {
+            kind: ACK_S2C,
+            session: request.session,
+            seq: 0,
+            unack: 1,
+            window: 16,
+            fragment: 0,
+            prefix: 0,
+            payload_len: 0,
+            suffix: 0,
+            low_mode: 0,
+            low_mask: 0,
+            extracted: 0,
+            rotation: 0,
+        }));
+        peer.set_read_timeout(Some(Duration::from_millis(120)))
+            .unwrap();
+        let early = match peer.recv_from(&mut wire) {
+            Ok((n, _)) => {
+                let opened = crypto::open_first(
+                    &credentials.username,
+                    &credentials.password,
+                    &wire[..72.min(n)],
+                    meta::unix_now(),
+                )
+                .unwrap();
+                Some(meta::parse(&opened.plain).unwrap().kind)
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                None
+            }
+            Err(error) => panic!("receive: {error}"),
+        };
+        if respond {
+            reply(meta::session(OPEN_RESPONSE, request.session, 0, 0, 0));
+        } else {
+            client.close();
+        }
+        let result = finished.recv_timeout(Duration::from_secs(2));
+        client.close();
+        writer.join().unwrap();
+        assert_eq!(early, None, "client emitted a segment before OPEN_RESPONSE");
+        let result = result.expect("open wait must finish or cancel");
+        if respond {
+            result.unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        }
+    }
 }
 
 #[test]

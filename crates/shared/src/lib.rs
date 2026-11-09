@@ -2,6 +2,8 @@
 //! This crate has no role feature and no dependency on a role crate.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Grammar-checked protocol id.
 /// The text is one or more `[a-z0-9]+` segments separated by single hyphens.
@@ -309,12 +311,33 @@ pub struct Handoff {
     peer: Option<SocketAddr>,
 }
 
-/// Byte counters. The server owns the map. The outbound module calls this while copying.
+/// The server resolves names once when the outbound module starts copying a flow.
 pub trait Traffic: Send + Sync {
-    fn add_uplink(&self, user: &UserEmail, node: &NodeTag, bytes: u64);
-    fn add_downlink(&self, user: &UserEmail, node: &NodeTag, bytes: u64);
-    fn add_exit_uplink(&self, exit: &str, bytes: u64);
-    fn add_exit_downlink(&self, exit: &str, bytes: u64);
+    fn bind(&self, user: &UserEmail, node: &NodeTag, exit: &str) -> TrafficCounters;
+}
+
+/// User, inbound, and outbound counters shared with the server's query API.
+pub struct TrafficCounters {
+    uplink: [Arc<AtomicU64>; 3],
+    downlink: [Arc<AtomicU64>; 3],
+}
+
+impl TrafficCounters {
+    pub fn new(uplink: [Arc<AtomicU64>; 3], downlink: [Arc<AtomicU64>; 3]) -> Self {
+        Self { uplink, downlink }
+    }
+
+    pub fn add_uplink(&self, bytes: u64) {
+        for counter in &self.uplink {
+            counter.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    pub fn add_downlink(&self, bytes: u64) {
+        for counter in &self.downlink {
+            counter.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Server accept loop. `accept` returns a handoff, not a dialed socket.

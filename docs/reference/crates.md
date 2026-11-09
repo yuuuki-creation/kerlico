@@ -24,6 +24,8 @@ protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依�
 
 mieru 的本机代理从 `kerlico-client --mieru-proxy <配置文件>` 启动，需要 `mieru` feature。监听、设置与生命周期由 mieru 客户端 crate 拥有；该专用操作入口不增加另一份协议菜单，也不改变其他协议的注册签名。
 
+mieru 共享 crate 的运行时加密依赖是 `chacha20` 和 `ring`，组合实现既有 XChaCha20-Poly1305；原 `chacha20poly1305` 留作测试对照依赖。该变化没有增加协议或角色 feature。`kerlico-shared::Traffic` 在建流时返回 `TrafficCounters`，注册和查询仍由服务端拥有，出站持有计数句柄。
+
 ## 一次构建选一端和一组协议
 
 feature 名字就是协议 id，也是叶子 `[dependencies]` 里那条可选依赖的键。叶子没有 `[features]` 表。
