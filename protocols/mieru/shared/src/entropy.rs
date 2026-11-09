@@ -13,9 +13,13 @@ pub fn encoded_len(extracted: usize, mode: u8) -> Option<u16> {
     u16::try_from(bytes).ok()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn encode(src: &[u8], mode: u8, half_mask: u32, rotation: u8, padding_bit: u8) -> Option<Vec<u8>> {
+pub fn encode(
+    src: &[u8],
+    mode: u8,
+    half_mask: u32,
+    rotation: u8,
+    padding_bit: u8,
+) -> Option<Vec<u8>> {
     if padding_bit > 1 || !valid_params(mode, half_mask, rotation) {
         return None;
     }
@@ -46,7 +50,13 @@ pub fn encode(src: &[u8], mode: u8, half_mask: u32, rotation: u8, padding_bit: u
     Some(out)
 }
 
-pub fn decode(encoded: &[u8], extracted: usize, mode: u8, half_mask: u32, rotation: u8) -> Option<Vec<u8>> {
+pub fn decode(
+    encoded: &[u8],
+    extracted: usize,
+    mode: u8,
+    half_mask: u32,
+    rotation: u8,
+) -> Option<Vec<u8>> {
     if !valid_params(mode, half_mask, rotation) {
         return None;
     }
@@ -65,7 +75,11 @@ pub fn decode(encoded: &[u8], extracted: usize, mode: u8, half_mask: u32, rotati
     let mut padding_bit = None;
     while offset < extracted {
         let take = width.min(extracted - offset);
-        let chunk = u64::from_be_bytes(encoded[chunk_index * CHUNK..(chunk_index + 1) * CHUNK].try_into().ok()?);
+        let chunk = u64::from_be_bytes(
+            encoded[chunk_index * CHUNK..(chunk_index + 1) * CHUNK]
+                .try_into()
+                .ok()?,
+        );
         let mask = chunk_mask(initial, rotation, chunk_index)?;
         let data_mask = pdep(low_bits(take * 8), mask);
         let padding_mask = !data_mask;
@@ -119,7 +133,9 @@ fn half_ones(mode: u8) -> Option<u32> {
 }
 
 fn valid_rotation(rotation: u8) -> bool {
-    rotation == 0 || (1..=15).contains(&rotation) || (rotation >= 16 && rotation <= 240 && rotation % 16 == 0)
+    rotation == 0
+        || (1..=15).contains(&rotation)
+        || ((16..=240).contains(&rotation) && rotation.is_multiple_of(16))
 }
 
 fn chunk_mask(initial: u64, rotation: u8, index: usize) -> Option<u64> {
@@ -153,7 +169,7 @@ fn pdep(source: u64, mut mask: u64) -> u64 {
     let mut result = 0;
     let mut src_bit = 1u64;
     while mask != 0 {
-        let mask_bit = mask & mask.wrapping_neg();
+        let mask_bit = mask.isolate_lowest_one();
         if source & src_bit != 0 {
             result |= mask_bit;
         }
@@ -167,7 +183,7 @@ fn pext(value: u64, mut mask: u64) -> u64 {
     let mut result = 0;
     let mut out_bit = 1u64;
     while mask != 0 {
-        let mask_bit = mask & mask.wrapping_neg();
+        let mask_bit = mask.isolate_lowest_one();
         if value & mask_bit != 0 {
             result |= out_bit;
         }
@@ -187,7 +203,10 @@ mod tests {
         assert_eq!(encoded, [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
         let ones = encode(&[0x12, 0x34, 0x56, 0x78], 1, 0x0f0f_0f0f, 0, 1).unwrap();
         assert_eq!(ones, [0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8]);
-        assert_eq!(decode(&encoded, 4, 1, 0x0f0f_0f0f, 0).unwrap(), [0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(
+            decode(&encoded, 4, 1, 0x0f0f_0f0f, 0).unwrap(),
+            [0x12, 0x34, 0x56, 0x78]
+        );
     }
 
     #[test]

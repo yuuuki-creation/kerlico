@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use kerlico_shared::{InboundStream, NodeTag, OpenError, Traffic, Transport, UserEmail};
 
-use crate::copy::{self, PipeRead, PipeWrite};
+use crate::copy::{self, PipeRead, PipeWrite, ReadEvent};
 use crate::{DialTarget, Exit};
 
 /// Whether this host has a usable default route for each family.
@@ -91,7 +91,7 @@ impl WarpSlot {
 
 pub fn dial_native(
     target: &DialTarget,
-    stream: &Box<dyn InboundStream>,
+    stream: &dyn InboundStream,
     user: &UserEmail,
     node: &NodeTag,
     exit: Exit,
@@ -105,31 +105,41 @@ pub fn dial_native(
             tcp.set_nodelay(true).ok();
             let read = tcp.try_clone().map_err(|_| OpenError::Transport)?;
             copy::bridge(
-                stream.as_ref(),
+                stream,
                 TcpWrite(tcp),
                 TcpRead(read),
-                user,
-                node,
-                exit,
-                traffic,
+                copy::Flow {
+                    user,
+                    node,
+                    exit,
+                    traffic,
+                    transport: Transport::Tcp,
+                },
             )
         }
         Transport::Udp => {
-            let socket = UdpSocket::bind(if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" })
-                .map_err(|_| OpenError::Transport)?;
+            let socket = UdpSocket::bind(if addr.is_ipv4() {
+                "0.0.0.0:0"
+            } else {
+                "[::]:0"
+            })
+            .map_err(|_| OpenError::Transport)?;
             socket.connect(addr).map_err(|_| OpenError::Transport)?;
             socket
                 .set_read_timeout(Some(Duration::from_millis(200)))
                 .ok();
             let read = socket.try_clone().map_err(|_| OpenError::Transport)?;
             copy::bridge(
-                stream.as_ref(),
+                stream,
                 UdpWrite(socket),
                 UdpRead(read),
-                user,
-                node,
-                exit,
-                traffic,
+                copy::Flow {
+                    user,
+                    node,
+                    exit,
+                    traffic,
+                    transport: Transport::Udp,
+                },
             )
         }
     }
@@ -138,7 +148,7 @@ pub fn dial_native(
 pub fn dial_warp(
     slot: &WarpSlot,
     target: &DialTarget,
-    stream: &Box<dyn InboundStream>,
+    stream: &dyn InboundStream,
     user: &UserEmail,
     node: &NodeTag,
     exit: Exit,
@@ -150,17 +160,32 @@ pub fn dial_warp(
         Transport::Tcp => device.connect_tcp(addr)?,
         Transport::Udp => device.connect_udp(addr)?,
     };
-    let (read, write) = split_pipe(pipe);
-    copy::bridge(stream.as_ref(), write, read, user, node, exit, traffic)
+    let (read, write) = split_pipe(pipe, target.transport);
+    copy::bridge(
+        stream,
+        write,
+        read,
+        copy::Flow {
+            user,
+            node,
+            exit,
+            traffic,
+            transport: target.transport,
+        },
+    )
 }
 
-fn split_pipe(pipe: Box<dyn BytePipe + Send>) -> (WarpRead, WarpWrite) {
+fn split_pipe(pipe: Box<dyn BytePipe + Send>, transport: Transport) -> (WarpRead, WarpWrite) {
     let shared = Arc::new(Mutex::new(pipe));
     (
         WarpRead {
             pipe: Arc::clone(&shared),
+            transport,
         },
-        WarpWrite { pipe: shared },
+        WarpWrite {
+            pipe: shared,
+            transport,
+        },
     )
 }
 
@@ -205,12 +230,14 @@ pub fn exchange_warp(
 }
 
 fn exchange_udp(peer: SocketAddr, request: &[u8]) -> Result<Vec<u8>, OpenError> {
-    let socket = UdpSocket::bind(if peer.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" })
-        .map_err(|_| OpenError::Transport)?;
+    let socket = UdpSocket::bind(if peer.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    })
+    .map_err(|_| OpenError::Transport)?;
     socket.connect(peer).map_err(|_| OpenError::Transport)?;
-    socket
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .ok();
+    socket.set_read_timeout(Some(Duration::from_secs(3))).ok();
     socket.send(request).map_err(|_| OpenError::Transport)?;
     let mut buf = [0u8; 2048];
     let n = socket.recv(&mut buf).map_err(|_| OpenError::Transport)?;
@@ -225,10 +252,12 @@ fn exchange_tcp(peer: SocketAddr, request: &[u8]) -> Result<Vec<u8>, OpenError> 
     tcp.write_all(&len).map_err(|_| OpenError::Transport)?;
     tcp.write_all(request).map_err(|_| OpenError::Transport)?;
     let mut len_buf = [0u8; 2];
-    tcp.read_exact(&mut len_buf).map_err(|_| OpenError::Transport)?;
+    tcp.read_exact(&mut len_buf)
+        .map_err(|_| OpenError::Transport)?;
     let n = u16::from_be_bytes(len_buf) as usize;
     let mut body = vec![0u8; n];
-    tcp.read_exact(&mut body).map_err(|_| OpenError::Transport)?;
+    tcp.read_exact(&mut body)
+        .map_err(|_| OpenError::Transport)?;
     Ok(body)
 }
 
@@ -284,12 +313,13 @@ fn pick(target: &DialTarget, exit: Exit) -> Result<SocketAddr, OpenError> {
 struct TcpRead(TcpStream);
 
 impl PipeRead for TcpRead {
-    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<usize, OpenError> {
+    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<ReadEvent, OpenError> {
         self.0
             .set_read_timeout(Some(Duration::from_millis(200)))
             .ok();
         match self.0.read(buf) {
-            Ok(n) => Ok(n),
+            Ok(0) => Ok(ReadEvent::Eof),
+            Ok(n) => Ok(ReadEvent::Data(n)),
             Err(error)
                 if error.kind() == std::io::ErrorKind::WouldBlock
                     || error.kind() == std::io::ErrorKind::TimedOut =>
@@ -307,14 +337,19 @@ impl PipeWrite for TcpWrite {
     fn write_pipe(&mut self, buf: &[u8]) -> Result<(), OpenError> {
         self.0.write_all(buf).map_err(|_| OpenError::Transport)
     }
+    fn finish(&mut self) -> Result<(), OpenError> {
+        self.0
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(|_| OpenError::Transport)
+    }
 }
 
 struct UdpRead(UdpSocket);
 
 impl PipeRead for UdpRead {
-    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<usize, OpenError> {
+    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<ReadEvent, OpenError> {
         match self.0.recv(buf) {
-            Ok(n) => Ok(n),
+            Ok(n) => Ok(ReadEvent::Data(n)),
             Err(error)
                 if error.kind() == std::io::ErrorKind::WouldBlock
                     || error.kind() == std::io::ErrorKind::TimedOut =>
@@ -332,28 +367,48 @@ impl PipeWrite for UdpWrite {
     fn write_pipe(&mut self, buf: &[u8]) -> Result<(), OpenError> {
         self.0
             .send(buf)
-            .map(|_| ())
+            .and_then(|n| {
+                if n == buf.len() {
+                    Ok(())
+                } else {
+                    Err(std::io::ErrorKind::WriteZero.into())
+                }
+            })
             .map_err(|_| OpenError::Transport)
     }
 }
 
 struct WarpRead {
     pipe: Arc<Mutex<Box<dyn BytePipe + Send>>>,
+    transport: Transport,
 }
 
 impl PipeRead for WarpRead {
-    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<usize, OpenError> {
-        self.pipe.lock().expect("warp pipe").read_pipe(buf)
+    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<ReadEvent, OpenError> {
+        let n = self.pipe.lock().expect("warp pipe").read_pipe(buf)?;
+        Ok(if n == 0 && self.transport == Transport::Tcp {
+            ReadEvent::Eof
+        } else {
+            ReadEvent::Data(n)
+        })
     }
 }
 
 struct WarpWrite {
     pipe: Arc<Mutex<Box<dyn BytePipe + Send>>>,
+    transport: Transport,
 }
 
 impl PipeWrite for WarpWrite {
     fn write_pipe(&mut self, buf: &[u8]) -> Result<(), OpenError> {
         let mut pipe = self.pipe.lock().expect("warp pipe");
+        if self.transport == Transport::Udp {
+            return if pipe.write_pipe(buf)? == buf.len() {
+                Ok(())
+            } else {
+                Err(OpenError::Transport)
+            };
+        }
         let mut sent = 0;
         while sent < buf.len() {
             let n = pipe.write_pipe(&buf[sent..])?;

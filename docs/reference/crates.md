@@ -18,7 +18,11 @@ protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依�
 
 工作区成员是 `crates/shared`、`crates/client`、`crates/server`、`crates/outbound`、`crates/manifest` 和 `crates/wg`。协议目录不是工作区成员。
 
+代码未跟上：2026-11-09 的 `cargo metadata --format-version 1 --no-deps` 显示协议的 path 依赖也被 Cargo 自动纳入工作区，共 15 个成员。本轮没有改变工作区划分；功能裁剪分别检查叶子的运行时依赖图，不用工作区包数推断角色隔离。
+
 现在的协议目录是 `wireguard`、`openvpn` 和 `mieru`。WireGuard 和 OpenVPN 的协议体是 `unimplemented!`。mieru 的决定在 `docs/reference/mieru.md`。
+
+mieru 的本机代理从 `kerlico-client --mieru-proxy <配置文件>` 启动，需要 `mieru` feature。监听、设置与生命周期由 mieru 客户端 crate 拥有；该专用操作入口不增加另一份协议菜单，也不改变其他协议的注册签名。
 
 ## 一次构建选一端和一组协议
 

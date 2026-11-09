@@ -18,19 +18,35 @@ pub struct Resolved {
     pub port: u16,
 }
 
+pub struct Environment<'a> {
+    pub native: Native,
+    pub local: &'a [IpAddr],
+    pub catalog: &'a Catalog,
+}
+
 pub fn choose(
     rule_host: Option<&str>,
     rules: &[Rule],
     fallback: OutboundChoice,
-    native: Native,
     resolved: &mut Resolved,
-    local: &[IpAddr],
     resolve: &mut dyn FnMut(&str) -> Vec<IpAddr>,
-    catalog: &Catalog,
+    environment: Environment<'_>,
 ) -> Result<Exit, ()> {
+    let Environment {
+        native,
+        local,
+        catalog,
+    } = environment;
     let mut asked = !resolved.addresses.is_empty();
     for rule in rules {
-        if rule_hits(&rule.lines, rule_host, resolved, &mut asked, resolve, catalog) {
+        if rule_hits(
+            &rule.lines,
+            rule_host,
+            resolved,
+            &mut asked,
+            resolve,
+            catalog,
+        ) {
             return finish(rule.choice, resolved, native);
         }
     }
@@ -103,7 +119,10 @@ fn line_hits(
     }
     if let Some(rest) = line.strip_prefix("geoip:") {
         fill(resolved, asked, resolve);
-        return resolved.addresses.iter().any(|addr| geo_hit(catalog, rest, addr.ip()));
+        return resolved
+            .addresses
+            .iter()
+            .any(|addr| geo_hit(catalog, rest, addr.ip()));
     }
     if let Some(rest) = line.strip_prefix("ext:") {
         let Some((file, category)) = rest.split_once(':') else {
@@ -142,7 +161,9 @@ fn line_hits(
         return name.contains(&rest.to_ascii_lowercase());
     }
     if let Some(rest) = line.strip_prefix("regexp:") {
-        return regex::Regex::new(rest).map(|pattern| pattern.is_match(&name)).unwrap_or(false);
+        return regex::Regex::new(rest)
+            .map(|pattern| pattern.is_match(&name))
+            .unwrap_or(false);
     }
     name.contains(&line.to_ascii_lowercase())
 }
@@ -252,11 +273,16 @@ mod tests {
             None,
             &[],
             OutboundChoice::Default,
-            Native { v4: false, v6: true },
             &mut resolved,
-            &[],
             &mut |_| Vec::new(),
-            &crate::geodata::Catalog::empty(),
+            Environment {
+                native: Native {
+                    v4: false,
+                    v6: true,
+                },
+                local: &[],
+                catalog: &crate::geodata::Catalog::empty(),
+            },
         );
         assert_eq!(result, Err(()));
     }
@@ -273,14 +299,19 @@ mod tests {
             Some("example.com"),
             &rules,
             OutboundChoice::Default,
-            Native { v4: true, v6: false },
             &mut resolved,
-            &[],
             &mut |_| {
                 calls += 1;
                 vec![IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1))]
             },
-            &crate::geodata::Catalog::empty(),
+            Environment {
+                native: Native {
+                    v4: true,
+                    v6: false,
+                },
+                local: &[],
+                catalog: &crate::geodata::Catalog::empty(),
+            },
         )
         .unwrap();
         assert_eq!(calls, 1);

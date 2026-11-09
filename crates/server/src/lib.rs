@@ -76,8 +76,7 @@ impl From<PlaneFault> for Error {
 }
 
 /// Process-wide counters. Names follow the Xray `>>>` pattern.
-#[derive(Debug)]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Stats {
     counts: Arc<Mutex<BTreeMap<String, u64>>>,
 }
@@ -106,7 +105,12 @@ impl Stats {
     }
 
     pub fn get(&self, name: &str) -> u64 {
-        self.counts.lock().expect("stats").get(name).copied().unwrap_or(0)
+        self.counts
+            .lock()
+            .expect("stats")
+            .get(name)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn add(&self, name: String, bytes: u64) {
@@ -211,9 +215,10 @@ impl Server {
     }
 
     pub fn node(&self, tag: &NodeTag) -> Option<(ProtocolId, ListenAddr, OutboundChoice)> {
-        self.nodes.iter().find(|node| &node.tag == tag).map(|node| {
-            (node.protocol, node.listen, node.outbound)
-        })
+        self.nodes
+            .iter()
+            .find(|node| &node.tag == tag)
+            .map(|node| (node.protocol, node.listen, node.outbound))
     }
 
     /// Opens one inbound from the compiled registry and keeps it on this server.
@@ -254,14 +259,22 @@ impl Server {
         email: UserEmail,
         account: &Settings,
     ) -> Result<(), Error> {
-        let node = self.nodes.iter_mut().find(|node| &node.tag == tag).ok_or(Error::UnknownNode)?;
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| &node.tag == tag)
+            .ok_or(Error::UnknownNode)?;
         node.inbound.add_user(&email, account)?;
         node.users.insert(email);
         Ok(())
     }
 
     pub fn remove_user(&mut self, tag: &NodeTag, email: &UserEmail) -> Result<(), Error> {
-        let node = self.nodes.iter_mut().find(|node| &node.tag == tag).ok_or(Error::UnknownNode)?;
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| &node.tag == tag)
+            .ok_or(Error::UnknownNode)?;
         if !node.users.contains(email) {
             return Err(Error::UnknownUser);
         }
@@ -389,8 +402,21 @@ impl Server {
                     let udp = self.udp.clone();
                     thread::spawn(move || {
                         if let Err(error) = Self::drive(
-                            handoff, &rules, choice, native, &local, &dns, &sniff, &fakes,
-                            fake_on, &geodata, &udp, &outbound, &stats,
+                            handoff,
+                            FlowPlan {
+                                rules: &rules,
+                                choice,
+                                native,
+                                local: &local,
+                                dns: &dns,
+                                sniff: &sniff,
+                                fakes: &fakes,
+                                fake_on,
+                                geodata: &geodata,
+                                sessions: &udp,
+                                outbound: &outbound,
+                                traffic: &stats,
+                            },
                         ) {
                             eprintln!("flow {error:?}");
                         }
@@ -403,21 +429,21 @@ impl Server {
         }
     }
 
-    fn drive(
-        mut handoff: Handoff,
-        rules: &[route::Rule],
-        choice: OutboundChoice,
-        native: Native,
-        local: &[IpAddr],
-        dns: &dns::Config,
-        sniff: &[String],
-        fakes: &fakedns::Pool,
-        fake_on: bool,
-        geodata: &geodata::Catalog,
-        sessions: &udp::Table,
-        outbound: &Outbound,
-        traffic: &Stats,
-    ) -> Result<(), Error> {
+    fn drive(mut handoff: Handoff, plan: FlowPlan<'_>) -> Result<(), Error> {
+        let FlowPlan {
+            rules,
+            choice,
+            native,
+            local,
+            dns,
+            sniff,
+            fakes,
+            fake_on,
+            geodata,
+            sessions,
+            outbound,
+            traffic,
+        } = plan;
         if fake_on {
             if let Some(ip) = route::literal(handoff.destination()) {
                 if let Some(name) = fakes.rewrite(ip) {
@@ -439,25 +465,32 @@ impl Server {
                 None
             }
         });
-        let session = udp::key_from(handoff.peer(), &destination);
+        let session = udp::key_from(handoff.node(), handoff.user(), handoff.peer(), &destination);
         let fail = |key: Option<&udp::Key>| {
             if let Some(key) = key {
                 sessions.end(key);
             }
             Error::Connect
         };
-        let exit = udp::adopt(sessions, session.as_ref(), std::time::Instant::now(), || {
-            route::choose(
-                rule_host.as_deref(),
-                rules,
-                choice,
-                native,
-                &mut resolved,
-                local,
-                &mut |host| dns.lookup(host, native, outbound),
-                geodata,
-            )
-        })
+        let exit = udp::adopt(
+            sessions,
+            session.as_ref(),
+            std::time::Instant::now(),
+            || {
+                route::choose(
+                    rule_host.as_deref(),
+                    rules,
+                    choice,
+                    &mut resolved,
+                    &mut |host| dns.lookup(host, native, outbound),
+                    route::Environment {
+                        native,
+                        local,
+                        catalog: geodata,
+                    },
+                )
+            },
+        )
         .map_err(|_| fail(session.as_ref()))?;
         let mut addresses = family_addresses(&resolved.addresses, exit);
         if addresses.is_empty() && !matches!(exit, Exit::Landing) {
@@ -485,11 +518,34 @@ impl Server {
     }
 }
 
+struct FlowPlan<'a> {
+    rules: &'a [route::Rule],
+    choice: OutboundChoice,
+    native: Native,
+    local: &'a [IpAddr],
+    dns: &'a dns::Config,
+    sniff: &'a [String],
+    fakes: &'a fakedns::Pool,
+    fake_on: bool,
+    geodata: &'a geodata::Catalog,
+    sessions: &'a udp::Table,
+    outbound: &'a Outbound,
+    traffic: &'a Stats,
+}
+
 fn sniff_name(handoff: &mut Handoff, kinds: &[String]) -> Option<String> {
     if kinds.is_empty() || route::literal(handoff.destination()).is_none() {
         return None;
     }
-    let mut buf = [0u8; 2048];
+    // UDP 预读必须容纳整包，不能把一次数据报拆成两次出口发送。
+    let mut buf = vec![
+        0u8;
+        if handoff.destination().transport() == kerlico_shared::Transport::Udp {
+            65535
+        } else {
+            2048
+        }
+    ];
     let n = match handoff.read_into_prefix(&mut buf) {
         Ok(n) if n > 0 => n,
         _ => return None,
@@ -499,8 +555,16 @@ fn sniff_name(handoff: &mut Handoff, kinds: &[String]) -> Option<String> {
 
 fn family_addresses(addresses: &[std::net::SocketAddr], exit: Exit) -> Vec<std::net::SocketAddr> {
     match exit {
-        Exit::NativeV4 | Exit::WarpV4 => addresses.iter().copied().filter(|addr| addr.is_ipv4()).collect(),
-        Exit::NativeV6 | Exit::WarpV6 => addresses.iter().copied().filter(|addr| addr.is_ipv6()).collect(),
+        Exit::NativeV4 | Exit::WarpV4 => addresses
+            .iter()
+            .copied()
+            .filter(|addr| addr.is_ipv4())
+            .collect(),
+        Exit::NativeV6 | Exit::WarpV6 => addresses
+            .iter()
+            .copied()
+            .filter(|addr| addr.is_ipv6())
+            .collect(),
         Exit::Landing => Vec::new(),
     }
 }
@@ -573,7 +637,9 @@ mod tests {
             sniff: Vec::new(),
         });
         let email = UserEmail::parse("alice@example").unwrap();
-        server.add_user(&tag, email.clone(), &Settings::default()).unwrap();
+        server
+            .add_user(&tag, email.clone(), &Settings::default())
+            .unwrap();
         assert!(server.nodes[0].users.contains(&email));
         server.remove_user(&tag, &email).unwrap();
         assert!(server.nodes[0].users.is_empty());

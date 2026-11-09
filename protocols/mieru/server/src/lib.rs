@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use kerlico_mieru::{serve_tcp, serve_udp, Account, Conn, Ready};
+use kerlico_mieru::{serve_tcp, serve_udp, Account, Conn, Ready, ServerHandle};
 use kerlico_shared::{
     Accept, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError, PlaneFault,
     Settings, Transport, UserEmail,
@@ -37,15 +38,50 @@ pub struct MieruInbound {
     #[allow(dead_code)]
     ready_tx: Sender<Ready>,
     ready_rx: Receiver<Ready>,
+    control: Arc<Control>,
+    listeners: Vec<thread::JoinHandle<()>>,
+}
+
+struct Control {
+    closed: AtomicBool,
+    connections: Mutex<Vec<ServerHandle>>,
+}
+
+impl Control {
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        for connection in self.connections.lock().expect("连接句柄").drain(..) {
+            connection.close();
+        }
+    }
+}
+
+impl Drop for MieruInbound {
+    fn drop(&mut self) {
+        self.control.close();
+        for task in self.listeners.drain(..) {
+            let _ = task.join();
+        }
+    }
 }
 
 impl Accept for MieruInbound {
     fn add_user(&mut self, email: &UserEmail, account: &Settings) -> Result<(), OpenError> {
         let username = account
-            .text("username")
+            .optional_text("username")?
             .unwrap_or(email.as_str())
             .to_string();
         let password = account.text("password")?.to_string();
+        if username.is_empty()
+            || password.is_empty()
+            || self
+                .users
+                .get(&username)
+                .is_some_and(|user| &user.email != email)
+        {
+            return Err(OpenError::Settings);
+        }
+        self.users.retain(|_, user| &user.email != email);
         self.users.insert(
             username.clone(),
             User {
@@ -96,10 +132,19 @@ impl MieruInbound {
             .get(&ready.username)
             .map(|user| user.email.clone())
             .ok_or(OpenError::Settings)?;
-        let transport = if ready.udp { Transport::Udp } else { Transport::Tcp };
+        let transport = if ready.udp {
+            Transport::Udp
+        } else {
+            Transport::Tcp
+        };
         let destination = Destination::new(ready.target.host, ready.target.port, transport)
             .map_err(|_| OpenError::Settings)?;
-        let mut handoff = Handoff::new(self.tag.clone(), email, destination, Box::new(Stream(ready.conn)));
+        let mut handoff = Handoff::new(
+            self.tag.clone(),
+            email,
+            destination,
+            Box::new(Stream(ready.conn)),
+        );
         if ready.udp {
             handoff.set_peer(ready.peer);
         }
@@ -125,7 +170,9 @@ impl InboundStream for Stream {
 fn map_io(error: std::io::Error) -> PlaneFault {
     match error.kind() {
         ErrorKind::WouldBlock | ErrorKind::TimedOut => PlaneFault::Again,
-        ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::BrokenPipe => PlaneFault::Closed,
+        ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::BrokenPipe => {
+            PlaneFault::Closed
+        }
         _ => PlaneFault::Transport,
     }
 }
@@ -138,19 +185,54 @@ pub fn listen(
     let plan = plan(bind, settings)?;
     let accounts = Arc::new(Mutex::new(Vec::new()));
     let (ready_tx, ready_rx) = mpsc::channel();
+    let control = Arc::new(Control {
+        closed: AtomicBool::new(false),
+        connections: Mutex::new(Vec::new()),
+    });
+    let mut listeners = Vec::new();
+    enum Bound {
+        Tcp(TcpListener),
+        Udp(UdpSocket),
+    }
+    let mut bound = Vec::new();
+    // 完整绑定成功后才启动；后续端口失败不会遗留已启动的监听器。
     for port in plan.ports {
         let addr = with_port(*bind, port);
         match plan.underlay {
             Underlay::Tcp => {
                 let listener = bind_tcp(addr).map_err(|_| OpenError::Transport)?;
-                let accounts = Arc::clone(&accounts);
-                let ready = ready_tx.clone();
-                thread::spawn(move || accept_loop(listener, accounts, ready, plan.mtu));
+                listener
+                    .set_nonblocking(true)
+                    .map_err(|_| OpenError::Transport)?;
+                bound.push(Bound::Tcp(listener));
             }
             Underlay::Udp => {
                 let socket = bind_udp(addr).map_err(|_| OpenError::Transport)?;
-                serve_udp(socket, Arc::clone(&accounts), plan.mtu, ready_tx.clone())
-                    .map_err(|_| OpenError::Transport)?;
+                bound.push(Bound::Udp(socket));
+            }
+        }
+    }
+    for socket in bound {
+        match socket {
+            Bound::Tcp(listener) => {
+                let accounts = Arc::clone(&accounts);
+                let ready = ready_tx.clone();
+                let control = Arc::clone(&control);
+                listeners.push(thread::spawn(move || {
+                    accept_loop(listener, accounts, ready, plan.mtu, control)
+                }));
+            }
+            Bound::Udp(socket) => {
+                match serve_udp(socket, Arc::clone(&accounts), plan.mtu, ready_tx.clone()) {
+                    Ok(handle) => control.connections.lock().expect("连接句柄").push(handle),
+                    Err(_) => {
+                        control.close();
+                        for task in listeners {
+                            let _ = task.join();
+                        }
+                        return Err(OpenError::Transport);
+                    }
+                }
             }
         }
     }
@@ -160,14 +242,33 @@ pub fn listen(
         accounts,
         ready_tx,
         ready_rx,
+        control,
+        listeners,
     }))
 }
 
-fn accept_loop(listener: TcpListener, accounts: Arc<Mutex<Vec<Account>>>, ready: Sender<Ready>, mtu: u16) {
-    loop {
+fn accept_loop(
+    listener: TcpListener,
+    accounts: Arc<Mutex<Vec<Account>>>,
+    ready: Sender<Ready>,
+    mtu: u16,
+    control: Arc<Control>,
+) {
+    while !control.closed.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((tcp, peer)) => {
-                let _ = serve_tcp(tcp, peer, Arc::clone(&accounts), mtu, ready.clone());
+                let mut connections = control.connections.lock().expect("连接句柄");
+                if control.closed.load(Ordering::Acquire) {
+                    break;
+                }
+                connections.retain(|connection| !connection.is_closed());
+                if connections.len() >= 1024 {
+                    continue;
+                }
+                if let Ok(handle) = serve_tcp(tcp, peer, Arc::clone(&accounts), mtu, ready.clone())
+                {
+                    connections.push(handle);
+                }
             }
             Err(_) => thread::sleep(Duration::from_millis(20)),
         }
@@ -179,19 +280,18 @@ fn plan(bind: &ListenAddr, settings: &Settings) -> Result<Plan, OpenError> {
     if port < 1025 {
         return Err(OpenError::Settings);
     }
-    let underlay = match settings.text("transport") {
-        Err(_) => Underlay::Tcp,
-        Ok("TCP") => Underlay::Tcp,
-        Ok("UDP") => Underlay::Udp,
-        Ok(_) => return Err(OpenError::Settings),
+    let underlay = match settings.optional_text("transport")? {
+        None | Some("TCP") => Underlay::Tcp,
+        Some("UDP") => Underlay::Udp,
+        Some(_) => return Err(OpenError::Settings),
     };
-    let ports = match settings.text("portRange") {
-        Err(_) => vec![port],
-        Ok(text) => parse_range(text, port)?,
+    let ports = match settings.optional_text("portRange")? {
+        None => vec![port],
+        Some(text) => parse_range(text, port)?,
     };
-    let mtu = match settings.text("mtu") {
-        Err(_) => 1400,
-        Ok(text) => {
+    let mtu = match settings.optional_text("mtu")? {
+        None => 1400,
+        Some(text) => {
             let mtu = text.parse::<u16>().map_err(|_| OpenError::Settings)?;
             if !(1280..=1400).contains(&mtu) {
                 return Err(OpenError::Settings);
@@ -199,12 +299,20 @@ fn plan(bind: &ListenAddr, settings: &Settings) -> Result<Plan, OpenError> {
             mtu
         }
     };
-    Ok(Plan { underlay, ports, mtu })
+    Ok(Plan {
+        underlay,
+        ports,
+        mtu,
+    })
 }
 
 fn parse_range(text: &str, port: u16) -> Result<Vec<u16>, OpenError> {
     let (start, end) = text.split_once('-').ok_or(OpenError::Settings)?;
-    if start.is_empty() || end.is_empty() || !start.bytes().all(|byte| byte.is_ascii_digit()) || !end.bytes().all(|byte| byte.is_ascii_digit()) {
+    if start.is_empty()
+        || end.is_empty()
+        || !start.bytes().all(|byte| byte.is_ascii_digit())
+        || !end.bytes().all(|byte| byte.is_ascii_digit())
+    {
         return Err(OpenError::Settings);
     }
     let start = start.parse::<u16>().map_err(|_| OpenError::Settings)?;

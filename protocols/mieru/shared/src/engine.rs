@@ -1,18 +1,25 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::crypto::{self, Direction};
-use crate::meta::{self, Meta, ACK_C2S, ACK_S2C, CLOSE_REQUEST, CLOSE_RESPONSE, DATA_C2S, DATA_C2S_LOW, DATA_S2C, DATA_S2C_LOW, OPEN_REQUEST, OPEN_RESPONSE};
+use crate::meta::{
+    self, Meta, ACK_C2S, ACK_S2C, CLOSE_REQUEST, CLOSE_RESPONSE, DATA_C2S, DATA_C2S_LOW, DATA_S2C,
+    DATA_S2C_LOW, OPEN_REQUEST, OPEN_RESPONSE,
+};
+use crate::{ClientOptions, HandshakeMode, Multiplexing, Transport};
 
 const PIPE_LIMIT: usize = 2 * 1024 * 1024;
 const WINDOW: u16 = 4096;
 const INITIAL_WINDOW: u32 = 16;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+const LINK_IDLE: Duration = Duration::from_secs(60);
+const DATA_IDLE: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 pub struct Account {
@@ -47,10 +54,50 @@ pub struct Assoc {
     sess: Arc<Sess>,
 }
 
+#[derive(Clone)]
+pub struct Client {
+    inner: Arc<ClientInner>,
+}
+
+struct ClientInner {
+    peers: Vec<SocketAddr>,
+    account: Account,
+    options: ClientOptions,
+    links: Mutex<Vec<Arc<Link>>>,
+    closed: AtomicBool,
+}
+
+/// 服务端底层连接的关闭句柄；丢弃句柄不会自动关闭连接。
+pub struct ServerHandle(Weak<Link>);
+
+enum ClientPhase {
+    Established,
+    Lazy(Vec<u8>),
+    AwaitReply,
+    Failed,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
     Client,
     Server,
+}
+
+enum LinkSocket {
+    Tcp(TcpStream),
+    Udp(UdpSocket),
+    #[cfg(test)]
+    Detached(Transport),
+}
+
+struct LinkSetup {
+    role: Role,
+    mtu: u16,
+    accounts: Arc<Mutex<Vec<Account>>>,
+    socket: LinkSocket,
+    ready: Option<Sender<Ready>>,
+    bound_user: String,
+    remote: SocketAddr,
 }
 
 struct Link {
@@ -61,11 +108,16 @@ struct Link {
     send_dir: Mutex<Option<Direction>>,
     bound_user: Mutex<String>,
     remote: SocketAddr,
-    sessions: Mutex<HashMap<(SocketAddr, u32), Arc<Sess>>>,
-    write_tcp: Mutex<Option<TcpStream>>,
+    sessions: Mutex<HashMap<(SocketAddr, u32), Weak<Sess>>>,
+    write_tcp: Mutex<Option<Arc<TcpStream>>>,
     write_udp: Mutex<Option<UdpSocket>>,
     ready: Mutex<Option<Sender<Ready>>>,
     alive: AtomicBool,
+    last_activity: Mutex<Instant>,
+    wire_lock: Mutex<()>,
+    low_entropy: AtomicU32,
+    reusable: AtomicBool,
+    retired: Mutex<HashMap<(SocketAddr, u32), Instant>>,
 }
 
 struct Sess {
@@ -76,6 +128,7 @@ struct Sess {
     key: [u8; 32],
     pipe: Mutex<Pipe>,
     cv: Condvar,
+    send_cv: Condvar,
     reorder: Mutex<Reorder>,
     inflight: Mutex<BTreeMap<u32, Flight>>,
     next_send: AtomicU32,
@@ -83,6 +136,10 @@ struct Sess {
     cwnd: AtomicU32,
     closed: AtomicBool,
     last_tx: Mutex<Instant>,
+    last_rx: Mutex<Instant>,
+    write_lock: Mutex<()>,
+    read_lock: Mutex<()>,
+    phase: Mutex<ClientPhase>,
 }
 
 struct Pipe {
@@ -101,6 +158,7 @@ struct Flight {
     sent: Instant,
     timeout: Duration,
     tx: u8,
+    fragment: u8,
 }
 
 struct Leg {
@@ -112,7 +170,6 @@ struct Leg {
 }
 
 struct LegQueue {
-    current: VecDeque<u8>,
     later: VecDeque<Vec<u8>>,
     closed: bool,
 }
@@ -138,15 +195,154 @@ pub fn connect_udp(peer: SocketAddr, account: &Account, target: &Target) -> io::
 
 pub fn associate(peer: SocketAddr, account: &Account, udp_transport: bool) -> io::Result<Assoc> {
     let link = dial(peer, account, !udp_transport)?;
-    let sess = open_raw(&link)?;
+    open_association(&link)
+}
+
+fn open_association(link: &Arc<Link>) -> io::Result<Assoc> {
+    let sess = open_raw(link)?;
     let request = socks_request(3, "0.0.0.0", 0)?;
-    sess.write_open(&request)?;
-    read_socks_reply(&sess)?;
+    if let Err(error) = sess
+        .write_initial(&request)
+        .and_then(|_| read_socks_reply(&sess))
+    {
+        sess.shutdown(true);
+        return Err(error);
+    }
     Ok(Assoc { sess })
 }
 
+impl Client {
+    pub fn new(
+        peers: Vec<SocketAddr>,
+        account: Account,
+        options: ClientOptions,
+    ) -> io::Result<Self> {
+        if peers.is_empty()
+            || peers.iter().any(|peer| peer.port() < 1025)
+            || account.username.is_empty()
+            || account.password.is_empty()
+            || !(1280..=1400).contains(&options.mtu)
+            || options.low_entropy > 4
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "客户端设置无效",
+            ));
+        }
+        Ok(Self {
+            inner: Arc::new(ClientInner {
+                peers,
+                account,
+                options,
+                links: Mutex::new(Vec::new()),
+                closed: AtomicBool::new(false),
+            }),
+        })
+    }
+
+    fn link(&self) -> io::Result<Arc<Link>> {
+        {
+            let mut links = self.inner.links.lock().expect("links");
+            if self.inner.closed.load(Ordering::Acquire) {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "客户端已关闭"));
+            }
+            links.retain(|link| link.alive.load(Ordering::Acquire));
+            let factor = self.inner.options.multiplexing.factor();
+            let reuse = links.len().saturating_mul(factor);
+            let pick = random_below(reuse + 1);
+            if pick < reuse {
+                return Ok(Arc::clone(&links[pick / factor]));
+            }
+        }
+        let peer = self.inner.peers[random_below(self.inner.peers.len())];
+        let link = dial_options(peer, &self.inner.account, &self.inner.options)?;
+        let mut links = self.inner.links.lock().expect("links");
+        if self.inner.closed.load(Ordering::Acquire) {
+            drop(links);
+            link.close();
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "客户端已关闭"));
+        }
+        links.push(Arc::clone(&link));
+        Ok(link)
+    }
+
+    pub fn open(&self, target: &Target) -> io::Result<Conn> {
+        let request = socks_request(1, &target.host, target.port)?;
+        let link = self.link()?;
+        if self.inner.options.handshake == HandshakeMode::NoWait {
+            let sess = open_raw(&link)?;
+            *sess.phase.lock().expect("phase") = ClientPhase::Lazy(request);
+            Ok(Conn {
+                kind: ConnKind::Stream(sess),
+            })
+        } else {
+            open_connect(&link, target, &[])
+        }
+    }
+
+    pub fn associate(&self) -> io::Result<Assoc> {
+        open_association(&self.link()?)
+    }
+
+    pub fn close(&self) {
+        self.inner.closed.store(true, Ordering::Release);
+        let links = std::mem::take(&mut *self.inner.links.lock().expect("links"));
+        for link in links {
+            link.close();
+        }
+    }
+
+    pub fn active_connections(&self) -> usize {
+        self.inner
+            .links
+            .lock()
+            .expect("links")
+            .iter()
+            .filter(|link| link.alive.load(Ordering::Acquire))
+            .count()
+    }
+
+    pub fn active_sessions(&self) -> usize {
+        self.inner
+            .links
+            .lock()
+            .expect("links")
+            .iter()
+            .map(|link| link.session_count())
+            .sum()
+    }
+}
+
+impl Drop for ClientInner {
+    fn drop(&mut self) {
+        for link in self.links.get_mut().expect("links").drain(..) {
+            link.reusable.store(false, Ordering::Release);
+            if link.session_count() == 0 {
+                link.close();
+            }
+        }
+    }
+}
+
+impl ServerHandle {
+    pub fn close(&self) {
+        if let Some(link) = self.0.upgrade() {
+            link.close();
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.0
+            .upgrade()
+            .map(|link| !link.alive.load(Ordering::Acquire))
+            .unwrap_or(true)
+    }
+}
+
 pub fn accept(tcp: TcpStream, accounts: &[Account]) -> io::Result<(Conn, Target, String)> {
-    let peer = tcp.peer_addr().unwrap_or(SocketAddr::from(([127, 0, 0, 1], 0)));
+    let peer = tcp
+        .peer_addr()
+        .unwrap_or(SocketAddr::from(([127, 0, 0, 1], 0)));
     let (tx, rx) = std::sync::mpsc::channel();
     serve_tcp(tcp, peer, Arc::new(Mutex::new(accounts.to_vec())), 1400, tx)?;
     let ready = rx
@@ -161,73 +357,147 @@ pub fn serve_tcp(
     accounts: Arc<Mutex<Vec<Account>>>,
     mtu: u16,
     ready: Sender<Ready>,
-) -> io::Result<()> {
+) -> io::Result<ServerHandle> {
     tcp.set_nodelay(true).ok();
     tcp.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    tcp.set_write_timeout(Some(Duration::from_secs(2)))?;
     let write = tcp.try_clone()?;
-    let link = Link::new(Role::Server, true, mtu, accounts, Some(write), None, Some(ready), String::new(), peer);
-    thread::spawn(move || reader_tcp(tcp, link, peer));
-    Ok(())
-}
-
-pub fn serve_udp(socket: UdpSocket, accounts: Arc<Mutex<Vec<Account>>>, mtu: u16, ready: Sender<Ready>) -> io::Result<()> {
-    socket.set_read_timeout(Some(Duration::from_millis(200))).ok();
-    let write = socket.try_clone()?;
-    let link = Link::new(
-        Role::Server,
-        false,
+    let link = Link::new(LinkSetup {
+        role: Role::Server,
         mtu,
         accounts,
-        None,
-        Some(write),
-        Some(ready),
-        String::new(),
-        SocketAddr::from(([0, 0, 0, 0], 0)),
-    );
+        socket: LinkSocket::Tcp(write),
+        ready: Some(ready),
+        bound_user: String::new(),
+        remote: peer,
+    });
+    let handle = ServerHandle(Arc::downgrade(&link));
+    start_timer(&link);
+    thread::spawn(move || reader_tcp(tcp, link, peer));
+    Ok(handle)
+}
+
+pub fn serve_udp(
+    socket: UdpSocket,
+    accounts: Arc<Mutex<Vec<Account>>>,
+    mtu: u16,
+    ready: Sender<Ready>,
+) -> io::Result<ServerHandle> {
+    socket
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .ok();
+    socket.set_write_timeout(Some(Duration::from_millis(200)))?;
+    let write = socket.try_clone()?;
+    let link = Link::new(LinkSetup {
+        role: Role::Server,
+        mtu,
+        accounts,
+        socket: LinkSocket::Udp(write),
+        ready: Some(ready),
+        bound_user: String::new(),
+        remote: SocketAddr::from(([0, 0, 0, 0], 0)),
+    });
+    let handle = ServerHandle(Arc::downgrade(&link));
+    start_timer(&link);
     thread::spawn(move || reader_udp(socket, link));
-    Ok(())
+    Ok(handle)
 }
 
 fn dial(peer: SocketAddr, account: &Account, tcp: bool) -> io::Result<Arc<Link>> {
+    dial_options(
+        peer,
+        account,
+        &ClientOptions {
+            transport: if tcp { Transport::Tcp } else { Transport::Udp },
+            multiplexing: Multiplexing::Off,
+            ..ClientOptions::default()
+        },
+    )
+}
+
+fn dial_options(
+    peer: SocketAddr,
+    account: &Account,
+    options: &ClientOptions,
+) -> io::Result<Arc<Link>> {
     let accounts = Arc::new(Mutex::new(vec![account.clone()]));
     let now = meta::unix_now();
     let send = crypto::client_direction(&account.username, &account.password, now);
-    if tcp {
+    if options.transport == Transport::Tcp {
         let tcp = TcpStream::connect_timeout(&peer, Duration::from_secs(10))?;
         tcp.set_nodelay(true).ok();
         tcp.set_read_timeout(Some(Duration::from_millis(200))).ok();
+        tcp.set_write_timeout(Some(Duration::from_secs(2)))?;
         let write = tcp.try_clone()?;
-        let link = Link::new(Role::Client, true, 1400, accounts, Some(write), None, None, account.username.clone(), peer);
+        let link = Link::new(LinkSetup {
+            role: Role::Client,
+            mtu: options.mtu,
+            accounts,
+            socket: LinkSocket::Tcp(write),
+            ready: None,
+            bound_user: account.username.clone(),
+            remote: peer,
+        });
+        link.low_entropy
+            .store(u32::from(options.low_entropy), Ordering::Relaxed);
+        link.reusable
+            .store(options.multiplexing != Multiplexing::Off, Ordering::Relaxed);
         *link.send_dir.lock().expect("send") = Some(send);
         let reader = Arc::clone(&link);
+        start_timer(&link);
         thread::spawn(move || reader_tcp(tcp, reader, peer));
         Ok(link)
     } else {
-        let bind = if peer.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        let bind = if peer.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
         let socket = UdpSocket::bind(bind)?;
         socket.connect(peer)?;
-        socket.set_read_timeout(Some(Duration::from_millis(200))).ok();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .ok();
+        socket.set_write_timeout(Some(Duration::from_millis(200)))?;
         let write = socket.try_clone()?;
-        let link = Link::new(Role::Client, false, 1400, accounts, None, Some(write), None, account.username.clone(), peer);
+        let link = Link::new(LinkSetup {
+            role: Role::Client,
+            mtu: options.mtu,
+            accounts,
+            socket: LinkSocket::Udp(write),
+            ready: None,
+            bound_user: account.username.clone(),
+            remote: peer,
+        });
+        link.low_entropy
+            .store(u32::from(options.low_entropy), Ordering::Relaxed);
+        link.reusable
+            .store(options.multiplexing != Multiplexing::Off, Ordering::Relaxed);
         *link.send_dir.lock().expect("send") = Some(send);
         let reader = Arc::clone(&link);
+        start_timer(&link);
         thread::spawn(move || reader_udp(socket, reader));
         Ok(link)
     }
 }
 
 impl Link {
-    fn new(
-        role: Role,
-        tcp: bool,
-        mtu: u16,
-        accounts: Arc<Mutex<Vec<Account>>>,
-        write_tcp: Option<TcpStream>,
-        write_udp: Option<UdpSocket>,
-        ready: Option<Sender<Ready>>,
-        bound_user: String,
-        remote: SocketAddr,
-    ) -> Arc<Self> {
+    fn new(setup: LinkSetup) -> Arc<Self> {
+        let LinkSetup {
+            role,
+            mtu,
+            accounts,
+            socket,
+            ready,
+            bound_user,
+            remote,
+        } = setup;
+        let (tcp, write_tcp, write_udp) = match socket {
+            LinkSocket::Tcp(socket) => (true, Some(socket), None),
+            LinkSocket::Udp(socket) => (false, None, Some(socket)),
+            #[cfg(test)]
+            LinkSocket::Detached(transport) => (transport == Transport::Tcp, None, None),
+        };
         Arc::new(Self {
             role,
             tcp,
@@ -237,10 +507,15 @@ impl Link {
             bound_user: Mutex::new(bound_user),
             remote,
             sessions: Mutex::new(HashMap::new()),
-            write_tcp: Mutex::new(write_tcp),
+            write_tcp: Mutex::new(write_tcp.map(Arc::new)),
             write_udp: Mutex::new(write_udp),
             ready: Mutex::new(ready),
             alive: AtomicBool::new(true),
+            last_activity: Mutex::new(Instant::now()),
+            wire_lock: Mutex::new(()),
+            low_entropy: AtomicU32::new(0),
+            reusable: AtomicBool::new(true),
+            retired: Mutex::new(HashMap::new()),
         })
     }
 
@@ -254,19 +529,80 @@ impl Link {
     }
 
     fn tick(&self) {
-        let sessions: Vec<Arc<Sess>> = self.sessions.lock().expect("sessions").values().cloned().collect();
+        self.retired
+            .lock()
+            .expect("retired")
+            .retain(|_, at| at.elapsed() < DATA_IDLE);
+        let sessions = self.live_sessions();
         for sess in sessions {
             sess.tick();
         }
+        if (self.role == Role::Client || self.tcp)
+            && self.session_count() == 0
+            && self.last_activity.lock().expect("activity").elapsed() > LINK_IDLE
+        {
+            self.close();
+        }
     }
 
-    fn insert(&self, sess: Arc<Sess>) {
-        self.sessions.lock().expect("sessions").insert((sess.peer, sess.id), sess);
+    fn insert(&self, sess: Arc<Sess>) -> bool {
+        let mut sessions = self.sessions.lock().expect("sessions");
+        if !self.alive.load(Ordering::Acquire) {
+            return false;
+        }
+        sessions.insert((sess.peer, sess.id), Arc::downgrade(&sess));
+        *self.last_activity.lock().expect("activity") = Instant::now();
+        true
     }
 
     fn get(&self, peer: SocketAddr, id: u32) -> Option<Arc<Sess>> {
-        self.sessions.lock().expect("sessions").get(&(peer, id)).cloned()
+        self.sessions
+            .lock()
+            .expect("sessions")
+            .get(&(peer, id))
+            .and_then(Weak::upgrade)
     }
+
+    fn live_sessions(&self) -> Vec<Arc<Sess>> {
+        let mut sessions = self.sessions.lock().expect("sessions");
+        sessions.retain(|_, sess| sess.strong_count() != 0);
+        sessions.values().filter_map(Weak::upgrade).collect()
+    }
+
+    fn session_count(&self) -> usize {
+        self.live_sessions()
+            .into_iter()
+            .filter(|sess| !sess.closed.load(Ordering::Acquire))
+            .count()
+    }
+
+    fn close(&self) {
+        if !self.alive.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(tcp) = self.write_tcp.lock().expect("tcp").take() {
+            let _ = tcp.shutdown(Shutdown::Both);
+        }
+        self.write_udp.lock().expect("udp").take();
+        for sess in self.live_sessions() {
+            sess.shutdown(false);
+        }
+        self.ready.lock().expect("ready").take();
+    }
+}
+
+fn start_timer(link: &Arc<Link>) {
+    let weak = Arc::downgrade(link);
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(100));
+        let Some(link) = weak.upgrade() else {
+            break;
+        };
+        if !link.alive.load(Ordering::Acquire) {
+            break;
+        }
+        link.tick();
+    });
 }
 
 fn copy_deque(buf: &mut [u8], bytes: &mut VecDeque<u8>) -> usize {
@@ -284,7 +620,13 @@ fn copy_deque(buf: &mut [u8], bytes: &mut VecDeque<u8>) -> usize {
 }
 
 impl Sess {
-    fn new(link: Arc<Link>, id: u32, peer: SocketAddr, username: String, key: [u8; 32]) -> Arc<Self> {
+    fn new(
+        link: Arc<Link>,
+        id: u32,
+        peer: SocketAddr,
+        username: String,
+        key: [u8; 32],
+    ) -> Arc<Self> {
         Arc::new(Self {
             link,
             id,
@@ -296,6 +638,7 @@ impl Sess {
                 closed: false,
             }),
             cv: Condvar::new(),
+            send_cv: Condvar::new(),
             reorder: Mutex::new(Reorder {
                 next: 0,
                 held: BTreeMap::new(),
@@ -306,6 +649,10 @@ impl Sess {
             cwnd: AtomicU32::new(INITIAL_WINDOW),
             closed: AtomicBool::new(false),
             last_tx: Mutex::new(Instant::now()),
+            last_rx: Mutex::new(Instant::now()),
+            write_lock: Mutex::new(()),
+            read_lock: Mutex::new(()),
+            phase: Mutex::new(ClientPhase::Established),
         })
     }
 
@@ -314,42 +661,16 @@ impl Sess {
             return;
         }
         let mut pipe = self.pipe.lock().expect("pipe");
-        while !pipe.closed && pipe.bytes.len() >= PIPE_LIMIT {
-            let (next, _) = self
-                .cv
-                .wait_timeout(pipe, Duration::from_millis(200))
-                .expect("cv");
-            pipe = next;
+        if pipe.bytes.len().saturating_add(bytes.len()) > PIPE_LIMIT {
+            drop(pipe);
+            self.shutdown(true);
+            return;
         }
         if pipe.closed {
             return;
         }
         pipe.bytes.extend(bytes);
         self.cv.notify_all();
-    }
-
-    fn read_exact(&self, n: usize) -> io::Result<Vec<u8>> {
-        let start = Instant::now();
-        let mut pipe = self.pipe.lock().expect("pipe");
-        loop {
-            if pipe.bytes.len() >= n {
-                let out: Vec<u8> = pipe.bytes.drain(..n).collect();
-                self.cv.notify_all();
-                return Ok(out);
-            }
-            if pipe.closed {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "closed"));
-            }
-            if start.elapsed() > Duration::from_secs(20) {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "read"));
-            }
-            let (next, wait) = self
-                .cv
-                .wait_timeout(pipe, Duration::from_millis(200))
-                .expect("cv");
-            pipe = next;
-            let _ = wait;
-        }
     }
 
     fn read_some(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -402,11 +723,8 @@ impl Sess {
     }
 
     fn window(&self) -> u16 {
-        if self.queued() > PIPE_LIMIT {
-            0
-        } else {
-            WINDOW
-        }
+        let room = PIPE_LIMIT.saturating_sub(self.queued());
+        (room / fragment_size(self.link.tcp, self.link.mtu, 0)).min(WINDOW as usize) as u16
     }
 
     fn unack(&self) -> u32 {
@@ -415,13 +733,17 @@ impl Sess {
 
     fn push_in(&self, seq: u32, payload: Vec<u8>) -> Vec<u8> {
         let mut reorder = self.reorder.lock().expect("reorder");
-        if seq < reorder.next {
+        if seq.wrapping_sub(reorder.next) > WINDOW as u32 {
             return Vec::new();
         }
         if seq != reorder.next && reorder.held.len() >= WINDOW as usize {
             return Vec::new();
         }
-        reorder.held.insert(seq, payload);
+        let held_bytes: usize = reorder.held.values().map(Vec::len).sum();
+        if held_bytes.saturating_add(payload.len()) > PIPE_LIMIT {
+            return Vec::new();
+        }
+        reorder.held.entry(seq).or_insert(payload);
         let mut out = Vec::new();
         loop {
             let next = reorder.next;
@@ -437,15 +759,19 @@ impl Sess {
     fn on_ack(&self, unack: u32, window: u16) {
         let mut inflight = self.inflight.lock().expect("inflight");
         let before = inflight.len();
-        inflight.retain(|seq, _| *seq >= unack);
+        inflight.retain(|seq, _| seq.wrapping_sub(unack) < (1u32 << 31));
         let removed = before.saturating_sub(inflight.len());
         drop(inflight);
         if removed > 0 {
-            let cwnd = self.cwnd.load(Ordering::Relaxed).saturating_add(removed as u32).min(WINDOW as u32);
+            let cwnd = self
+                .cwnd
+                .load(Ordering::Relaxed)
+                .saturating_add(removed as u32)
+                .min(WINDOW as u32);
             self.cwnd.store(cwnd.max(INITIAL_WINDOW), Ordering::Relaxed);
         }
         self.peer_window.store(u32::from(window), Ordering::Relaxed);
-        self.cv.notify_all();
+        self.send_cv.notify_all();
     }
 
     fn wait_slot(&self) -> io::Result<()> {
@@ -458,7 +784,10 @@ impl Sess {
             if self.closed.load(Ordering::SeqCst) {
                 return Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"));
             }
-            let limit = self.cwnd.load(Ordering::Relaxed).min(self.peer_window.load(Ordering::Relaxed));
+            let limit = self
+                .cwnd
+                .load(Ordering::Relaxed)
+                .min(self.peer_window.load(Ordering::Relaxed));
             if limit > 0 && inflight.len() < limit as usize {
                 return Ok(());
             }
@@ -466,7 +795,7 @@ impl Sess {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "window"));
             }
             let (next, _) = self
-                .cv
+                .send_cv
                 .wait_timeout(inflight, Duration::from_millis(200))
                 .expect("cv");
             inflight = next;
@@ -484,24 +813,59 @@ impl Sess {
         if buf.is_empty() {
             return Ok(());
         }
-        let max = if self.link.tcp {
-            meta::MAX_PDU
-        } else {
-            udp_budget(self.link.mtu).max(1)
-        };
-        for chunk in buf.chunks(max) {
-            if self.closed.load(Ordering::SeqCst) {
-                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"));
+        let mode = self.link.low_entropy.load(Ordering::Relaxed) as u8;
+        let max = fragment_size(self.link.tcp, self.link.mtu, mode);
+        for pdu in buf.chunks(meta::MAX_PDU) {
+            let count = pdu.len().div_ceil(max);
+            for (index, chunk) in pdu.chunks(max).enumerate() {
+                if self.closed.load(Ordering::SeqCst) {
+                    return Err(closed());
+                }
+                self.wait_slot()?;
+                let seq = self.next_send.fetch_add(1, Ordering::Relaxed);
+                let kind = if mode == 0 {
+                    data_kind(self.link.role)
+                } else if self.link.role == Role::Client {
+                    DATA_C2S_LOW
+                } else {
+                    DATA_S2C_LOW
+                };
+                self.emit_fragment(kind, seq, chunk, true, (count - index - 1) as u8)?;
             }
-            self.wait_slot()?;
-            let seq = self.next_send.fetch_add(1, Ordering::Relaxed);
-            self.emit(data_kind(self.link.role), seq, chunk, true)?;
         }
         Ok(())
     }
 
     fn emit(&self, kind: u8, seq: u32, payload: &[u8], remember: bool) -> io::Result<()> {
-        let (prefix, suffix) = choose_padding(self.link.tcp, self.link.mtu, payload.len(), meta::is_session(kind));
+        self.emit_fragment(kind, seq, payload, remember, 0)
+    }
+
+    fn emit_fragment(
+        &self,
+        kind: u8,
+        seq: u32,
+        payload: &[u8],
+        remember: bool,
+        fragment: u8,
+    ) -> io::Result<()> {
+        let mode = if meta::is_low(kind) {
+            self.link.low_entropy.load(Ordering::Relaxed) as u8
+        } else {
+            0
+        };
+        let encoded_len = if mode == 0 {
+            payload.len() as u16
+        } else {
+            crate::entropy::encoded_len(payload.len(), mode)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "低熵载荷长度无效"))?
+        };
+        let mask = low_mask(mode);
+        let (prefix, suffix) = choose_padding(
+            self.link.tcp,
+            self.link.mtu,
+            usize::from(encoded_len),
+            meta::is_session(kind),
+        );
         let plain = if meta::is_session(kind) {
             meta::session(kind, self.id, seq, payload.len() as u16, suffix.len() as u8)
         } else {
@@ -511,17 +875,16 @@ impl Sess {
                 seq,
                 unack: self.unack(),
                 window: self.window(),
-                fragment: 0,
+                fragment,
                 prefix: prefix.len() as u8,
-                payload_len: payload.len() as u16,
+                payload_len: encoded_len,
                 suffix: suffix.len() as u8,
-                low_mode: 0,
-                low_mask: 0,
-                extracted: 0,
+                low_mode: mode,
+                low_mask: mask,
+                extracted: if mode == 0 { 0 } else { payload.len() as u16 },
                 rotation: 0,
             })
         };
-        self.write_wire(&plain, payload, &prefix, &suffix)?;
         if remember && !self.link.tcp {
             self.inflight.lock().expect("inflight").insert(
                 seq,
@@ -531,10 +894,15 @@ impl Sess {
                     sent: Instant::now(),
                     timeout: Duration::from_secs(3),
                     tx: 1,
+                    fragment,
                 },
             );
         }
-        Ok(())
+        let result = self.write_wire(&plain, payload, &prefix, &suffix, mode, mask);
+        if result.is_err() && remember {
+            self.inflight.lock().expect("inflight").remove(&seq);
+        }
+        result
     }
 
     fn send_ack(&self) -> io::Result<()> {
@@ -548,7 +916,11 @@ impl Sess {
     fn send_close(&self, response: bool) {
         if self.link.alive.load(Ordering::SeqCst) {
             let seq = self.next_send.fetch_add(1, Ordering::Relaxed);
-            let kind = if response { CLOSE_RESPONSE } else { CLOSE_REQUEST };
+            let kind = if response {
+                CLOSE_RESPONSE
+            } else {
+                CLOSE_REQUEST
+            };
             let _ = self.emit(kind, seq, &[], false);
         }
     }
@@ -557,42 +929,170 @@ impl Sess {
         let first = !self.closed.swap(true, Ordering::SeqCst);
         self.pipe.lock().expect("pipe").closed = true;
         self.cv.notify_all();
-        if first && request {
+        self.send_cv.notify_all();
+        let was_started = {
+            let mut phase = self.phase.lock().expect("phase");
+            if matches!(*phase, ClientPhase::Lazy(_)) {
+                *phase = ClientPhase::Failed;
+                false
+            } else {
+                true
+            }
+        };
+        if first && request && was_started {
             self.send_close(false);
+        }
+        if first {
+            self.link
+                .sessions
+                .lock()
+                .expect("sessions")
+                .remove(&(self.peer, self.id));
+            if !self.link.tcp && was_started {
+                let mut retired = self.link.retired.lock().expect("retired");
+                if retired.len() >= WINDOW as usize {
+                    if let Some(key) = retired
+                        .iter()
+                        .min_by_key(|(_, at)| **at)
+                        .map(|(key, _)| *key)
+                    {
+                        retired.remove(&key);
+                    }
+                }
+                retired.insert((self.peer, self.id), Instant::now());
+            }
+            self.inflight.lock().expect("inflight").clear();
+            if self.link.role == Role::Client
+                && !self.link.reusable.load(Ordering::Acquire)
+                && self.link.session_count() == 0
+            {
+                self.link.close();
+            }
+        }
+    }
+
+    fn write_initial(&self, payload: &[u8]) -> io::Result<()> {
+        if payload.len() <= meta::MAX_SESSION_PAYLOAD
+            && self.link.low_entropy.load(Ordering::Relaxed) == 0
+        {
+            self.write_open(payload)
+        } else {
+            self.write_open(&[])?;
+            self.write_app(payload)
+        }
+    }
+
+    fn write_client(&self, payload: &[u8]) -> io::Result<()> {
+        if payload.is_empty() {
+            return Ok(());
+        }
+        let _write = self.write_lock.lock().expect("write");
+        if self.closed.load(Ordering::Acquire) {
+            return Err(closed());
+        }
+        let lazy = {
+            let mut phase = self.phase.lock().expect("phase");
+            if matches!(*phase, ClientPhase::Lazy(_)) {
+                match std::mem::replace(&mut *phase, ClientPhase::AwaitReply) {
+                    ClientPhase::Lazy(request) => Some(request),
+                    _ => unreachable!(),
+                }
+            } else {
+                None
+            }
+        };
+        let result = if let Some(mut request) = lazy {
+            request.extend_from_slice(payload);
+            let result = self.write_initial(&request);
+            self.cv.notify_all();
+            result
+        } else {
+            self.write_app(payload)
+        };
+        if result.is_err() {
+            self.shutdown(true);
+        }
+        result
+    }
+
+    fn read_client(&self, buf: &mut [u8], wait: Option<Duration>) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let _read = self.read_lock.lock().expect("read");
+        let deadline = wait.map(|duration| Instant::now() + duration);
+        loop {
+            let phase = self.phase.lock().expect("phase");
+            match &*phase {
+                ClientPhase::Established => break,
+                ClientPhase::Failed => return Err(closed()),
+                ClientPhase::AwaitReply => {
+                    drop(phase);
+                    let result = read_socks_reply_for(
+                        self,
+                        Some(remaining(deadline)?.unwrap_or(HANDSHAKE_TIMEOUT)),
+                    );
+                    match result {
+                        Ok(()) => *self.phase.lock().expect("phase") = ClientPhase::Established,
+                        Err(error) => {
+                            if error.kind() != io::ErrorKind::TimedOut {
+                                *self.phase.lock().expect("phase") = ClientPhase::Failed;
+                                self.shutdown(true);
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+                ClientPhase::Lazy(_) => {
+                    drop(phase);
+                    let left = remaining(deadline)?.unwrap_or(Duration::from_millis(200));
+                    let pipe = self.pipe.lock().expect("pipe");
+                    if pipe.closed {
+                        return Err(closed());
+                    }
+                    drop(
+                        self.cv
+                            .wait_timeout(pipe, left.min(Duration::from_millis(200)))
+                            .expect("cv"),
+                    );
+                }
+            }
+        }
+        match remaining(deadline)? {
+            Some(wait) => self.read_for(buf, wait),
+            None => self.read_some(buf),
         }
     }
 
     #[cfg(test)]
     fn write_low_entropy(&self, payload: &[u8]) -> io::Result<()> {
-        let mode = 1u8;
-        let mask = 0x0f0f_0f0fu32;
-        let rotation = 0u8;
-        let encoded_len = crate::entropy::encoded_len(payload.len(), mode)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "low entropy"))?;
-        self.wait_slot()?;
-        let seq = self.next_send.fetch_add(1, Ordering::Relaxed);
-        let (prefix, suffix) = choose_padding(self.link.tcp, self.link.mtu, encoded_len as usize, false);
-        let plain = meta::data(&Meta {
-            kind: if self.link.role == Role::Client { DATA_C2S_LOW } else { DATA_S2C_LOW },
-            session: self.id,
-            seq,
-            unack: self.unack(),
-            window: self.window(),
-            fragment: 0,
-            prefix: prefix.len() as u8,
-            payload_len: encoded_len,
-            suffix: suffix.len() as u8,
-            low_mode: mode,
-            low_mask: mask,
-            extracted: payload.len() as u16,
-            rotation,
-        });
-        let wire = self.seal_low(&plain, payload, &prefix, &suffix, mode, mask, rotation)?;
-        self.send_wire(&wire)
+        self.link.low_entropy.store(1, Ordering::Relaxed);
+        self.write_client(payload)
     }
 
-    #[cfg(test)]
-    fn seal_low(
+    fn send_wire(&self, wire: &[u8]) -> io::Result<()> {
+        if self.link.tcp {
+            let tcp = self
+                .link
+                .write_tcp
+                .lock()
+                .expect("tcp")
+                .clone()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "tcp"))?;
+            write_all_timeout(tcp.as_ref(), wire)?;
+        } else {
+            let udp = self.link.write_udp.lock().expect("udp");
+            let udp = udp
+                .as_ref()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "udp"))?;
+            udp.send_to(wire, self.peer)?;
+        }
+        *self.last_tx.lock().expect("tx") = Instant::now();
+        *self.link.last_activity.lock().expect("activity") = Instant::now();
+        Ok(())
+    }
+
+    fn write_wire(
         &self,
         meta_plain: &[u8],
         payload: &[u8],
@@ -600,65 +1100,30 @@ impl Sess {
         suffix: &[u8],
         mode: u8,
         mask: u32,
-        rotation: u8,
-    ) -> io::Result<Vec<u8>> {
-        let encode_body = |mut sealed: Vec<u8>| -> io::Result<Vec<u8>> {
-            if sealed.len() < 16 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "low entropy"));
+    ) -> io::Result<()> {
+        let _order = self.link.wire_lock.lock().expect("wire order");
+        if !self.link.alive.load(Ordering::Acquire) {
+            return Err(closed());
+        }
+        let body = |mut sealed: Vec<u8>| -> io::Result<Vec<u8>> {
+            if mode == 0 {
+                return Ok(sealed);
             }
             let tag = sealed.split_off(sealed.len() - 16);
-            let mut body = crate::entropy::encode(&sealed, mode, mask, rotation, 0)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "low entropy"))?;
-            body.extend(tag);
-            Ok(body)
+            let mut encoded = crate::entropy::encode(&sealed, mode, mask, 0, 0)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "低熵编码参数无效"))?;
+            encoded.extend(tag);
+            Ok(encoded)
         };
-        if self.link.tcp {
-            let mut guard = self.link.send_dir.lock().expect("send");
-            let dir = guard
-                .as_mut()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "send"))?;
-            let mut out = dir.seal(&self.username, meta_plain);
-            out.extend_from_slice(prefix);
-            out.extend(encode_body(dir.seal(&self.username, payload))?);
-            out.extend_from_slice(suffix);
-            Ok(out)
-        } else {
-            let nonce = crypto::nonce_with_hint(&self.username);
-            let dir = Direction::from_key(self.key);
-            let mut out = nonce.to_vec();
-            out.extend(dir.seal_at(&nonce, meta_plain));
-            out.extend_from_slice(prefix);
-            out.extend(encode_body(dir.seal_at(&nonce, payload))?);
-            out.extend_from_slice(suffix);
-            Ok(out)
-        }
-    }
-
-    fn send_wire(&self, wire: &[u8]) -> io::Result<()> {
-        if self.link.tcp {
-            let mut tcp = self.link.write_tcp.lock().expect("tcp");
-            let tcp = tcp.as_mut().ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "tcp"))?;
-            write_all_timeout(tcp, wire)?;
-        } else {
-            let udp = self.link.write_udp.lock().expect("udp");
-            let udp = udp.as_ref().ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "udp"))?;
-            udp.send_to(wire, self.peer)?;
-        }
-        *self.last_tx.lock().expect("tx") = Instant::now();
-        Ok(())
-    }
-
-    fn write_wire(&self, meta_plain: &[u8], payload: &[u8], prefix: &[u8], suffix: &[u8]) -> io::Result<()> {
         let wire = if self.link.tcp {
             let mut guard = self.link.send_dir.lock().expect("send");
             let dir = guard
                 .as_mut()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "send"))?;
-            let mut out = Vec::with_capacity(meta_plain.len() + payload.len() + prefix.len() + suffix.len() + 96);
-            dir.seal_into(&self.username, meta_plain, &mut out);
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "发送密钥未就绪"))?;
+            let mut out = dir.seal(&self.username, meta_plain);
             out.extend_from_slice(prefix);
             if !payload.is_empty() {
-                dir.seal_into(&self.username, payload, &mut out);
+                out.extend(body(dir.seal(&self.username, payload))?);
             }
             out.extend_from_slice(suffix);
             out
@@ -669,7 +1134,7 @@ impl Sess {
             out.extend(dir.seal_at(&nonce, meta_plain));
             out.extend_from_slice(prefix);
             if !payload.is_empty() {
-                out.extend(dir.seal_at(&nonce, payload));
+                out.extend(body(dir.seal_at(&nonce, payload))?);
             }
             out.extend_from_slice(suffix);
             out
@@ -679,6 +1144,10 @@ impl Sess {
 
     fn tick(&self) {
         if self.link.tcp || self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.last_rx.lock().expect("rx").elapsed() > DATA_IDLE {
+            self.shutdown(true);
             return;
         }
         let due = {
@@ -696,12 +1165,17 @@ impl Sess {
                 flight.tx = flight.tx.saturating_add(1);
                 flight.sent = Instant::now();
                 flight.timeout = (flight.timeout.mul_f32(1.5)).min(Duration::from_secs(10));
-                due.push((*seq, flight.kind, flight.payload.clone()));
+                due.push((*seq, flight.kind, flight.payload.clone(), flight.fragment));
             }
             due
         };
-        for (seq, kind, payload) in due {
-            let _ = self.emit(kind, seq, &payload, false);
+        for (seq, kind, payload, fragment) in due {
+            self.cwnd
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    Some((n / 2).max(1))
+                })
+                .ok();
+            let _ = self.emit_fragment(kind, seq, &payload, false, fragment);
         }
         if self.last_tx.lock().expect("tx").elapsed() > Duration::from_secs(5) {
             let _ = self.send_ack();
@@ -720,31 +1194,38 @@ impl Conn {
 
     pub fn read_user(&self, buf: &mut [u8]) -> io::Result<usize> {
         match &self.kind {
-            ConnKind::Stream(sess) => sess.read_some(buf),
+            ConnKind::Stream(sess) => sess.read_client(buf, None),
             ConnKind::Leg(leg) => leg.read(buf),
         }
     }
 
     pub fn read_for(&self, buf: &mut [u8], wait: Duration) -> io::Result<usize> {
         match &self.kind {
-            ConnKind::Stream(sess) => sess.read_for(buf, wait),
+            ConnKind::Stream(sess) => sess.read_client(buf, Some(wait)),
             ConnKind::Leg(leg) => leg.read_for(buf, wait),
         }
     }
 
     pub fn write_user(&self, buf: &[u8]) -> io::Result<()> {
         match &self.kind {
-            ConnKind::Stream(sess) => sess.write_app(buf),
+            ConnKind::Stream(sess) => sess.write_client(buf),
             ConnKind::Leg(leg) => leg.write(buf),
+        }
+    }
+}
+
+impl Conn {
+    pub fn close(&self) {
+        match &self.kind {
+            ConnKind::Stream(sess) => sess.shutdown(true),
+            ConnKind::Leg(leg) => leg.close(),
         }
     }
 }
 
 impl Drop for Conn {
     fn drop(&mut self) {
-        if let ConnKind::Stream(sess) = &self.kind {
-            sess.shutdown(true);
-        }
+        self.close();
     }
 }
 
@@ -755,21 +1236,30 @@ impl Assoc {
     }
 
     pub fn recv_from(&self) -> io::Result<(String, u16, Vec<u8>)> {
-        let packet = read_frame(&self.sess)?;
+        self.recv_for(DATA_IDLE)
+    }
+
+    pub fn recv_for(&self, wait: Duration) -> io::Result<(String, u16, Vec<u8>)> {
+        let _read = self.sess.read_lock.lock().expect("read");
+        let packet = read_frame_for(&self.sess, wait)?;
         parse_datagram(&packet)
+    }
+
+    pub fn close(&self) {
+        self.sess.shutdown(true);
+    }
+}
+
+impl Drop for Assoc {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
 impl Leg {
     fn push(&self, payload: Vec<u8>) {
-        if payload.is_empty() {
-            return;
-        }
         let mut queue = self.queue.lock().expect("leg");
-        if queue.closed {
-            return;
-        }
-        if queue.later.len() >= 64 {
+        if queue.closed || queue.later.len() >= 64 {
             return;
         }
         queue.later.push_back(payload);
@@ -777,64 +1267,49 @@ impl Leg {
     }
 
     fn close(&self) {
-        self.queue.lock().expect("leg").closed = true;
+        let mut queue = self.queue.lock().expect("leg");
+        queue.closed = true;
         self.cv.notify_all();
     }
 
+    fn is_closed(&self) -> bool {
+        self.queue.lock().expect("leg").closed
+    }
+
     fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let mut queue = self.queue.lock().expect("leg");
-        loop {
-            if queue.current.is_empty() {
-                if let Some(next) = queue.later.pop_front() {
-                    queue.current.extend(next);
-                }
-            }
-            if !queue.current.is_empty() {
-                return Ok(copy_deque(buf, &mut queue.current));
-            }
-            if queue.closed {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "closed"));
-            }
-            queue = self.cv.wait(queue).expect("leg");
-        }
+        self.read_for(buf, DATA_IDLE)
     }
 
     fn read_for(&self, buf: &mut [u8], wait: Duration) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
+        let deadline = Instant::now() + wait;
         let mut queue = self.queue.lock().expect("leg");
-        let start = Instant::now();
         loop {
-            if queue.current.is_empty() {
-                if let Some(next) = queue.later.pop_front() {
-                    queue.current.extend(next);
+            if let Some(packet) = queue.later.front() {
+                if packet.len() > buf.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "缓冲区不足以容纳完整数据报",
+                    ));
                 }
-            }
-            if !queue.current.is_empty() {
-                return Ok(copy_deque(buf, &mut queue.current));
+                let packet = queue.later.pop_front().expect("packet");
+                buf[..packet.len()].copy_from_slice(&packet);
+                return Ok(packet.len());
             }
             if queue.closed {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "closed"));
+                return Err(closed());
             }
-            let left = wait.saturating_sub(start.elapsed());
+            let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "idle"));
+                return Err(timed_out());
             }
-            let (next, status) = self.cv.wait_timeout(queue, left).expect("leg");
+            let (next, _) = self.cv.wait_timeout(queue, left).expect("leg");
             queue = next;
-            if status.timed_out() && queue.current.is_empty() && queue.later.is_empty() {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "idle"));
-            }
         }
     }
 
     fn write(&self, payload: &[u8]) -> io::Result<()> {
-        if payload.is_empty() {
-            return Ok(());
+        if self.is_closed() {
+            return Err(closed());
         }
         let packet = udp_datagram(&self.host, self.port, payload)?;
         write_frame(&self.sess, &packet)
@@ -852,11 +1327,7 @@ fn reader_tcp(mut tcp: TcpStream, link: Arc<Link>, peer: SocketAddr) {
             Ok(Some(incoming)) => dispatch(&link, incoming),
             Ok(None) => link.tick(),
             Err(_) => {
-                link.alive.store(false, Ordering::SeqCst);
-                let sessions: Vec<_> = link.sessions.lock().expect("sessions").values().cloned().collect();
-                for sess in sessions {
-                    sess.shutdown(false);
-                }
+                link.close();
                 break;
             }
         }
@@ -872,17 +1343,16 @@ fn reader_udp(socket: UdpSocket, link: Arc<Link>) {
                     dispatch(&link, incoming);
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::TimedOut => {
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::TimedOut =>
+            {
                 link.tick();
             }
             Err(_) => break,
         }
     }
-    link.alive.store(false, Ordering::SeqCst);
-    let sessions: Vec<_> = link.sessions.lock().expect("sessions").values().cloned().collect();
-    for sess in sessions {
-        sess.shutdown(false);
-    }
+    link.close();
 }
 
 struct Incoming {
@@ -896,6 +1366,10 @@ struct Incoming {
 fn dispatch(link: &Arc<Link>, incoming: Incoming) {
     if !from_peer(link.role, incoming.meta.kind) {
         return;
+    }
+    *link.last_activity.lock().expect("activity") = Instant::now();
+    if let Some(sess) = link.get(incoming.peer, incoming.meta.session) {
+        *sess.last_rx.lock().expect("rx") = Instant::now();
     }
     if meta::is_ack(incoming.meta.kind) {
         if let Some(sess) = link.get(incoming.peer, incoming.meta.session) {
@@ -916,7 +1390,22 @@ fn dispatch(link: &Arc<Link>, incoming: Incoming) {
         if incoming.meta.session == 0 {
             return;
         }
+        if link
+            .retired
+            .lock()
+            .expect("retired")
+            .contains_key(&(incoming.peer, incoming.meta.session))
+        {
+            return;
+        }
         if link.get(incoming.peer, incoming.meta.session).is_some() {
+            if let Some(sess) = link.get(incoming.peer, incoming.meta.session) {
+                let _ = sess.send_ack();
+            }
+            return;
+        }
+        if link.session_count() >= WINDOW as usize {
+            close_unknown(link, &incoming);
             return;
         }
         let sess = Sess::new(
@@ -928,7 +1417,10 @@ fn dispatch(link: &Arc<Link>, incoming: Incoming) {
         );
         let delivered = sess.push_in(incoming.meta.seq, incoming.payload);
         sess.append(&delivered);
-        link.insert(Arc::clone(&sess));
+        if !link.insert(Arc::clone(&sess)) {
+            sess.shutdown(false);
+            return;
+        }
         if !link.tcp {
             let _ = sess.send_ack();
         }
@@ -1015,34 +1507,32 @@ fn handshake(sess: Arc<Sess>, link: Arc<Link>) {
 }
 
 fn fanout(sess: Arc<Sess>, ready: Sender<Ready>) {
-    let mut legs: HashMap<(String, u16), Arc<Leg>> = HashMap::new();
-    loop {
-        let packet = match read_frame(&sess) {
-            Ok(packet) => packet,
-            Err(_) => break,
-        };
+    let mut legs: HashMap<(String, u16), Weak<Leg>> = HashMap::new();
+    while let Ok(packet) = read_frame(&sess) {
         let (host, port, payload) = match parse_datagram(&packet) {
             Ok(parsed) => parsed,
             Err(_) => break,
         };
         let key = (host.to_ascii_lowercase(), port);
-        if let Some(leg) = legs.get(&key) {
-            leg.push(payload);
-            continue;
+        if let Some(leg) = legs.get(&key).and_then(Weak::upgrade) {
+            if !leg.is_closed() {
+                leg.push(payload);
+                continue;
+            }
         }
+        legs.retain(|_, leg| leg.strong_count() != 0);
         let leg = Arc::new(Leg {
             sess: Arc::clone(&sess),
             host: host.clone(),
             port,
             queue: Mutex::new(LegQueue {
-                current: VecDeque::new(),
                 later: VecDeque::new(),
                 closed: false,
             }),
             cv: Condvar::new(),
         });
         leg.push(payload);
-        legs.insert(key, Arc::clone(&leg));
+        legs.insert(key, Arc::downgrade(&leg));
         if ready
             .send(Ready {
                 username: sess.username.clone(),
@@ -1058,34 +1548,50 @@ fn fanout(sess: Arc<Sess>, ready: Sender<Ready>) {
             break;
         }
     }
-    for leg in legs.values() {
+    for leg in legs.values().filter_map(Weak::upgrade) {
         leg.close();
     }
     sess.shutdown(true);
 }
 
 fn open_connect(link: &Arc<Link>, target: &Target, early: &[u8]) -> io::Result<Conn> {
-    let sess = open_raw(link)?;
     let mut payload = socks_request(1, &target.host, target.port)?;
     payload.extend_from_slice(early);
-    if payload.len() <= meta::MAX_SESSION_PAYLOAD {
-        sess.write_open(&payload)?;
-    } else {
-        sess.write_open(&[])?;
-        sess.write_app(&payload)?;
+    let sess = open_raw(link)?;
+    if let Err(error) = sess
+        .write_initial(&payload)
+        .and_then(|_| read_socks_reply(&sess))
+    {
+        sess.shutdown(true);
+        return Err(error);
     }
-    read_socks_reply(&sess)?;
     Ok(Conn {
         kind: ConnKind::Stream(sess),
     })
 }
 
 fn open_raw(link: &Arc<Link>) -> io::Result<Arc<Sess>> {
-    let id = random_u32().max(1);
+    if !link.alive.load(Ordering::Acquire) {
+        return Err(closed());
+    }
+    let id = loop {
+        let candidate = random_u32().max(1);
+        if link.get(link.remote, candidate).is_none()
+            && !link
+                .retired
+                .lock()
+                .expect("retired")
+                .contains_key(&(link.remote, candidate))
+        {
+            break candidate;
+        }
+    };
     let username = link.bound_user.lock().expect("user").clone();
     let key = link.key_bytes()?;
     let sess = Sess::new(Arc::clone(link), id, link.remote, username, key);
-    link.insert(Arc::clone(&sess));
+    if !link.insert(Arc::clone(&sess)) {
+        return Err(closed());
+    }
     Ok(sess)
 }
 
@@ -1098,9 +1604,9 @@ fn read_tcp_segment(
 ) -> io::Result<Option<Incoming>> {
     let first = recv.is_none();
     let header_len = if first { 24 + 32 + 16 } else { 32 + 16 };
-    let header = match take(tcp, stash, header_len) {
+    let header = match take_with_idle(tcp, stash, header_len, true) {
         Ok(header) => header,
-        Err(error) if error.kind() == io::ErrorKind::TimedOut || error.kind() == io::ErrorKind::WouldBlock => {
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             return Ok(None);
         }
         Err(error) => return Err(error),
@@ -1119,12 +1625,18 @@ fn read_tcp_segment(
         let accounts = link.accounts.lock().expect("accounts").clone();
         let mut opened = None;
         for account in &accounts {
-            if let Some(found) = crypto::open_first(&account.username, &account.password, &header, meta::unix_now()) {
+            if let Some(found) = crypto::open_first(
+                &account.username,
+                &account.password,
+                &header,
+                meta::unix_now(),
+            ) {
                 opened = Some(found);
                 break;
             }
         }
-        let opened = opened.ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "user"))?;
+        let opened =
+            opened.ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "user"))?;
         if link.role == Role::Server {
             *link.send_dir.lock().expect("send") = Some(opened.direction.fork_send());
         }
@@ -1145,7 +1657,12 @@ fn read_tcp_segment(
     }))
 }
 
-fn read_tcp_payload(tcp: &mut TcpStream, stash: &mut Vec<u8>, direction: &mut Direction, meta: &Meta) -> io::Result<Vec<u8>> {
+fn read_tcp_payload(
+    tcp: &mut TcpStream,
+    stash: &mut Vec<u8>,
+    direction: &mut Direction,
+    meta: &Meta,
+) -> io::Result<Vec<u8>> {
     if meta.prefix > 0 {
         let _ = take(tcp, stash, meta.prefix as usize)?;
     }
@@ -1190,7 +1707,12 @@ fn parse_udp_packet(packet: &[u8], peer: SocketAddr, link: &Arc<Link>) -> Option
     if link.role != Role::Server {
         let accounts = link.accounts.lock().expect("accounts").clone();
         for account in &accounts {
-            if let Some(opened) = crypto::open_first(&account.username, &account.password, &packet[..72], meta::unix_now()) {
+            if let Some(opened) = crypto::open_first(
+                &account.username,
+                &account.password,
+                &packet[..72],
+                meta::unix_now(),
+            ) {
                 let meta = meta::parse(&opened.plain).ok()?;
                 let payload = udp_body(&meta, &nonce, &packet[72..], opened.direction.key_bytes())?;
                 return Some(Incoming {
@@ -1206,7 +1728,12 @@ fn parse_udp_packet(packet: &[u8], peer: SocketAddr, link: &Arc<Link>) -> Option
     }
     let accounts = link.accounts.lock().expect("accounts").clone();
     for account in &accounts {
-        if let Some(opened) = crypto::open_first(&account.username, &account.password, &packet[..72], meta::unix_now()) {
+        if let Some(opened) = crypto::open_first(
+            &account.username,
+            &account.password,
+            &packet[..72],
+            meta::unix_now(),
+        ) {
             let meta = meta::parse(&opened.plain).ok()?;
             if meta.kind != OPEN_REQUEST || meta.session == 0 {
                 return None;
@@ -1224,14 +1751,16 @@ fn parse_udp_packet(packet: &[u8], peer: SocketAddr, link: &Arc<Link>) -> Option
     None
 }
 
-fn decrypt_known(link: &Link, peer: SocketAddr, packet: &[u8], nonce: &[u8; 24]) -> Option<Incoming> {
+fn decrypt_known(
+    link: &Link,
+    peer: SocketAddr,
+    packet: &[u8],
+    nonce: &[u8; 24],
+) -> Option<Incoming> {
     let sessions: Vec<Arc<Sess>> = link
-        .sessions
-        .lock()
-        .expect("sessions")
-        .values()
+        .live_sessions()
+        .into_iter()
         .filter(|sess| sess.peer == peer)
-        .cloned()
         .collect();
     for sess in sessions {
         let Some(plain) = Direction::from_key(sess.key).open_at(nonce, &packet[24..72]) else {
@@ -1289,6 +1818,15 @@ fn udp_body(meta: &Meta, nonce: &[u8; 24], mut rest: &[u8], key: [u8; 32]) -> Op
 }
 
 fn take(tcp: &mut TcpStream, stash: &mut Vec<u8>, n: usize) -> io::Result<Vec<u8>> {
+    take_with_idle(tcp, stash, n, false)
+}
+
+fn take_with_idle(
+    tcp: &mut TcpStream,
+    stash: &mut Vec<u8>,
+    n: usize,
+    allow_idle: bool,
+) -> io::Result<Vec<u8>> {
     let start = Instant::now();
     while stash.len() < n {
         let mut buf = [0u8; 64 * 1024];
@@ -1296,12 +1834,15 @@ fn take(tcp: &mut TcpStream, stash: &mut Vec<u8>, n: usize) -> io::Result<Vec<u8
         match tcp.read(&mut buf) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "tcp")),
             Ok(read) => stash.extend_from_slice(&buf[..read]),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::TimedOut => {
-                if stash.is_empty() {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "idle"));
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::TimedOut =>
+            {
+                if allow_idle && stash.is_empty() {
+                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "idle"));
                 }
                 if start.elapsed() > Duration::from_secs(20) {
-                    return Err(error);
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "接收完整段超时"));
                 }
             }
             Err(error) => return Err(error),
@@ -1327,14 +1868,17 @@ unsafe extern "C" {
     fn setsockopt(fd: i32, level: i32, name: i32, val: *const i32, len: u32) -> i32;
 }
 
-fn write_all_timeout(tcp: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
+fn write_all_timeout(mut tcp: &TcpStream, bytes: &[u8]) -> io::Result<()> {
     let mut rest = bytes;
     let start = Instant::now();
     while !rest.is_empty() {
         match tcp.write(rest) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "tcp")),
             Ok(n) => rest = &rest[n..],
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::TimedOut => {
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::TimedOut =>
+            {
                 if start.elapsed() > Duration::from_secs(20) {
                     return Err(error);
                 }
@@ -1352,103 +1896,96 @@ struct SocksRequest {
 }
 
 fn read_socks(sess: &Sess) -> io::Result<SocksRequest> {
-    let first = sess.read_exact(2)?;
-    if first[0] != 5 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "socks"));
-    }
-    let more = sess.read_exact(2)?;
-    if matches!(first[1], 1 | 3) && more[0] == 0 && matches!(more[1], 1 | 3 | 4) {
-        let target = read_addr(sess, more[1])?;
-        return Ok(SocksRequest {
-            command: first[1],
-            target,
-        });
-    }
-    let nmethods = first[1] as usize;
-    if nmethods == 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "socks"));
-    }
-    let mut methods = more;
-    if nmethods > 2 {
-        methods.extend(sess.read_exact(nmethods - 2)?);
-    }
-    let mut leftover = methods.split_off(nmethods.min(methods.len()));
-    if !methods[..nmethods.min(methods.len())].contains(&0) {
-        let _ = sess.write_app(&[5, 0xff]);
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "socks"));
-    }
-    sess.write_app(&[5, 0])?;
-    if leftover.len() < 4 {
-        leftover.extend(sess.read_exact(4 - leftover.len())?);
-    }
-    if leftover[0] != 5 || !matches!(leftover[1], 1 | 3) || leftover[2] != 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "socks"));
-    }
-    let pending = leftover[4..].to_vec();
-    let target = read_addr_prefix(sess, leftover[3], &pending)?;
+    // 加密底层已完成认证，mieru 会话直接承载 SOCKS 请求。
+    let mut request = read_record(sess, Some(HANDSHAKE_TIMEOUT), |bytes| {
+        if bytes.len() < 4 {
+            return Ok(None);
+        }
+        if bytes[0] != 5 || !matches!(bytes[1], 1 | 3) || bytes[2] != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "SOCKS 请求无效"));
+        }
+        socks_record_len(bytes)
+    })?;
+    let command = request[1];
+    request[..3].fill(0);
+    let (host, port, _) = parse_datagram(&request)?;
     Ok(SocksRequest {
-        command: leftover[1],
-        target,
+        command,
+        target: Target { host, port },
     })
 }
 
-fn read_addr(sess: &Sess, atyp: u8) -> io::Result<Target> {
-    read_addr_prefix(sess, atyp, &[])
-}
-
-fn read_addr_prefix(sess: &Sess, atyp: u8, prefix: &[u8]) -> io::Result<Target> {
-    let mut cursor = prefix.to_vec();
-    let need = match atyp {
-        1 => 4,
-        4 => 16,
-        3 => 1,
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "atyp")),
-    };
-    if cursor.len() < need {
-        cursor.extend(sess.read_exact(need - cursor.len())?);
-    }
-    let host = match atyp {
-        1 => format!("{}.{}.{}.{}", cursor[0], cursor[1], cursor[2], cursor[3]),
-        4 => {
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(&cursor[..16]);
-            std::net::Ipv6Addr::from(octets).to_string()
-        }
+fn socks_record_len(bytes: &VecDeque<u8>) -> io::Result<Option<usize>> {
+    let length = match bytes[3] {
+        1 => 10,
+        4 => 22,
         3 => {
-            let len = cursor[0] as usize;
-            if cursor.len() < 1 + len {
-                cursor.extend(sess.read_exact(1 + len - cursor.len())?);
+            if bytes.len() < 5 {
+                return Ok(None);
             }
-            String::from_utf8(cursor[1..1 + len].to_vec())
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "host"))?
+            7 + usize::from(bytes[4])
         }
-        _ => unreachable!(),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SOCKS 地址类型无效",
+            ))
+        }
     };
-    let used = match atyp {
-        1 => 4,
-        4 => 16,
-        3 => 1 + host.len(),
-        _ => 0,
-    };
-    let mut port_bytes = cursor.get(used..).unwrap_or(&[]).to_vec();
-    if port_bytes.len() < 2 {
-        port_bytes.extend(sess.read_exact(2 - port_bytes.len())?);
-    }
-    let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
-    Ok(Target { host, port })
+    Ok(Some(length))
 }
 
 fn read_socks_reply(sess: &Sess) -> io::Result<()> {
-    let head = sess.read_exact(3)?;
-    if head[0] != 5 || head[1] != 0 {
-        return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "socks"));
+    read_socks_reply_for(sess, Some(HANDSHAKE_TIMEOUT))
+}
+
+fn read_socks_reply_for(sess: &Sess, wait: Option<Duration>) -> io::Result<()> {
+    read_record(sess, wait, |bytes| {
+        if bytes.len() < 4 {
+            return Ok(None);
+        }
+        if bytes[0] != 5 || bytes[1] != 0 || bytes[2] != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "SOCKS 应答失败",
+            ));
+        }
+        socks_record_len(bytes)
+    })
+    .map(|_| ())
+}
+
+fn read_record(
+    sess: &Sess,
+    wait: Option<Duration>,
+    length: impl Fn(&VecDeque<u8>) -> io::Result<Option<usize>>,
+) -> io::Result<Vec<u8>> {
+    let deadline = wait.map(|duration| Instant::now() + duration);
+    let mut pipe = sess.pipe.lock().expect("pipe");
+    loop {
+        if let Some(n) = length(&pipe.bytes)? {
+            if pipe.bytes.len() >= n {
+                let out = pipe.bytes.drain(..n).collect();
+                sess.cv.notify_all();
+                return Ok(out);
+            }
+        }
+        if pipe.closed {
+            return Err(closed());
+        }
+        let left = remaining(deadline)?.unwrap_or(DATA_IDLE);
+        let (next, _) = sess.cv.wait_timeout(pipe, left).expect("pipe");
+        pipe = next;
     }
-    let atyp = sess.read_exact(1)?[0];
-    let _ = read_addr(sess, atyp)?;
-    Ok(())
 }
 
 fn socks_request(command: u8, host: &str, port: u16) -> io::Result<Vec<u8>> {
+    if command == 1 && (host.is_empty() || port == 0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "目标地址或端口无效",
+        ));
+    }
     let mut out = vec![5, command, 0];
     if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
         out.push(1);
@@ -1481,21 +2018,31 @@ fn write_frame(sess: &Sess, packet: &[u8]) -> io::Result<()> {
     frame.extend((packet.len() as u16).to_be_bytes());
     frame.extend_from_slice(packet);
     frame.push(0xff);
-    sess.write_app(&frame)
+    sess.write_client(&frame)
 }
 
 fn read_frame(sess: &Sess) -> io::Result<Vec<u8>> {
-    let marker = sess.read_exact(1)?;
-    if marker[0] != 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame"));
+    read_frame_for(sess, DATA_IDLE)
+}
+
+fn read_frame_for(sess: &Sess, wait: Duration) -> io::Result<Vec<u8>> {
+    let record = read_record(sess, Some(wait), |bytes| {
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        if bytes[0] != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "UDP 封装帧无效"));
+        }
+        if bytes.len() < 3 {
+            return Ok(None);
+        }
+        let length = u16::from_be_bytes([bytes[1], bytes[2]]) as usize;
+        Ok(Some(4 + length))
+    })?;
+    if record.last() != Some(&0xff) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "UDP 封装帧无效"));
     }
-    let len = u16::from_be_bytes(sess.read_exact(2)?.try_into().unwrap()) as usize;
-    let data = sess.read_exact(len)?;
-    let end = sess.read_exact(1)?;
-    if end[0] != 0xff {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame"));
-    }
-    Ok(data)
+    Ok(record[3..record.len() - 1].to_vec())
 }
 
 fn udp_datagram(host: &str, port: u16, payload: &[u8]) -> io::Result<Vec<u8>> {
@@ -1529,7 +2076,10 @@ fn parse_datagram(packet: &[u8]) -> io::Result<(String, u16, Vec<u8>)> {
             if packet.len() < 10 {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "udp"));
             }
-            (format!("{}.{}.{}.{}", packet[4], packet[5], packet[6], packet[7]), 8)
+            (
+                format!("{}.{}.{}.{}", packet[4], packet[5], packet[6], packet[7]),
+                8,
+            )
         }
         4 => {
             if packet.len() < 22 {
@@ -1593,7 +2143,7 @@ fn choose_padding(tcp: bool, mtu: u16, payload: usize, session: bool) -> (Vec<u8
         32
     } else {
         let base = 24 + 32 + 16 + if payload == 0 { 0 } else { payload + 16 };
-        mtu as usize - base.min(mtu as usize)
+        (mtu as usize).saturating_sub(48 + base)
     };
     if session {
         return (Vec::new(), padding(room.min(32)));
@@ -1616,7 +2166,63 @@ fn padding(max: usize) -> Vec<u8> {
 }
 
 fn udp_budget(mtu: u16) -> usize {
-    mtu as usize - (24 + 32 + 16 + 16 + 64)
+    // 预留 IPv6 和 UDP 头、nonce、元数据、两个认证标签及最多 32 字节填充。
+    mtu as usize - (48 + 24 + 32 + 16 + 16 + 32)
+}
+
+fn fragment_size(tcp: bool, mtu: u16, mode: u8) -> usize {
+    let budget = if tcp { meta::MAX_PDU } else { udp_budget(mtu) };
+    if mode == 0 {
+        return budget;
+    }
+    let width = usize::from(mode) + 3;
+    if tcp {
+        budget.min((u16::MAX as usize / 8) * width)
+    } else {
+        (budget / 8) * width
+    }
+}
+
+fn low_mask(mode: u8) -> u32 {
+    if mode == 0 {
+        0
+    } else {
+        (1u32 << (12 + 4 * u32::from(mode))) - 1
+    }
+}
+
+fn closed() -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, "会话已关闭")
+}
+fn timed_out() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "等待数据超时")
+}
+
+fn remaining(deadline: Option<Instant>) -> io::Result<Option<Duration>> {
+    match deadline {
+        None => Ok(None),
+        Some(deadline) => {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                Err(timed_out())
+            } else {
+                Ok(Some(left))
+            }
+        }
+    }
+}
+
+fn random_below(upper: usize) -> usize {
+    let upper = upper as u64;
+    let ceiling = u64::MAX - u64::MAX % upper;
+    loop {
+        let mut bytes = [0u8; 8];
+        getrandom::getrandom(&mut bytes).expect("random");
+        let value = u64::from_ne_bytes(bytes);
+        if value < ceiling {
+            return (value % upper) as usize;
+        }
+    }
 }
 
 fn random_u32() -> u32 {
@@ -1626,24 +2232,32 @@ fn random_u32() -> u32 {
 }
 
 #[cfg(test)]
+#[path = "completion_tests.rs"]
+mod completion_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::net::TcpListener;
 
     #[test]
     fn ordered_delivery_waits_for_the_hole() {
-        let link = Link::new(
-            Role::Server,
-            false,
-            1400,
-            Arc::new(Mutex::new(Vec::new())),
-            None,
-            None,
-            None,
-            String::new(),
-            "127.0.0.1:1".parse().unwrap(),
+        let link = Link::new(LinkSetup {
+            role: Role::Server,
+            mtu: 1400,
+            accounts: Arc::new(Mutex::new(Vec::new())),
+            socket: LinkSocket::Detached(Transport::Udp),
+            ready: None,
+            bound_user: String::new(),
+            remote: "127.0.0.1:1".parse().unwrap(),
+        });
+        let sess = Sess::new(
+            link,
+            1,
+            "127.0.0.1:2".parse().unwrap(),
+            "alice".into(),
+            [0; 32],
         );
-        let sess = Sess::new(link, 1, "127.0.0.1:2".parse().unwrap(), "alice".into(), [0; 32]);
         assert!(sess.push_in(1, b"b".to_vec()).is_empty());
         assert_eq!(sess.push_in(0, b"a".to_vec()), b"ab");
         assert!(sess.push_in(0, b"a".to_vec()).is_empty());
@@ -1712,7 +2326,12 @@ mod tests {
             let (tcp, peer) = listener.accept().unwrap();
             serve_tcp(tcp, peer, Arc::new(Mutex::new(vec![account()])), 1400, tx).unwrap();
         });
-        let link = dial(format!("127.0.0.1:{port}").parse().unwrap(), &account(), true).unwrap();
+        let link = dial(
+            format!("127.0.0.1:{port}").parse().unwrap(),
+            &account(),
+            true,
+        )
+        .unwrap();
         let early = open_connect(
             &link,
             &Target {
@@ -1731,7 +2350,7 @@ mod tests {
             b"",
         )
         .unwrap();
-        let mut ready = vec![
+        let mut ready = [
             rx.recv_timeout(Duration::from_secs(5)).unwrap(),
             rx.recv_timeout(Duration::from_secs(5)).unwrap(),
         ];
@@ -1828,11 +2447,19 @@ mod tests {
             serve_tcp(tcp, peer, Arc::new(Mutex::new(vec![account()])), 1400, tx).unwrap();
         });
         let client = thread::spawn(move || {
-            let assoc = associate(format!("127.0.0.1:{port}").parse().unwrap(), &account(), false).unwrap();
+            let assoc = associate(
+                format!("127.0.0.1:{port}").parse().unwrap(),
+                &account(),
+                false,
+            )
+            .unwrap();
             assoc.send_to("1.2.3.4", 53, b"dns").unwrap();
             assoc.send_to("example.com", 443, b"hi").unwrap();
             let (host, port, payload) = assoc.recv_from().unwrap();
-            assert_eq!((host.as_str(), port, payload.as_slice()), ("1.2.3.4", 53, b"ok".as_slice()));
+            assert_eq!(
+                (host.as_str(), port, payload.as_slice()),
+                ("1.2.3.4", 53, b"ok".as_slice())
+            );
         });
         let mut first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let mut second = rx.recv_timeout(Duration::from_secs(5)).unwrap();
