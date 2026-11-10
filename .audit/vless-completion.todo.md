@@ -41,5 +41,5 @@ Session 2026-11-10 (pickup, Claude):
 Rule from user 2026-11-10: no compiling or testing on the local machine; all builds and tests run on the worker. Worker toolchains stay installed after use.
 - [x] Independent review of ce51460..114f21b; findings fixed in unit F2 (merged a6e3af8).
 - [x] Unit F3: one Mux uplink for every Mux carrier (merged c6f1cb5).
-- [ ] Unit F4: TLS server group choice so Xray `randomized` fingerprints never get a HelloRetryRequest (running; found by running the ignored lib Xray tests the gate skipped).
+- [x] Unit F4: TLS server group choice so Xray `randomized` fingerprints never get a HelloRetryRequest (merged; deliberately more lenient than Go, which retries and fails with uTLS too).
 - [ ] Unit F5: VLESS response header leaves with the first downlink bytes, as Xray's SetFlushNext (running; Xray HTTPUpgrade ed client drops bytes buffered after the 101).
