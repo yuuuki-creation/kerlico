@@ -311,10 +311,9 @@ fn proxy_header_preserves_vless_payload_and_datagram_peer() {
 fn outbound_landing_uses_the_nodes_reverse_portal() {
     struct Counters;
     impl kerlico_shared::Traffic for Counters {
-        fn add_uplink(&self, _: &UserEmail, _: &NodeTag, _: u64) {}
-        fn add_downlink(&self, _: &UserEmail, _: &NodeTag, _: u64) {}
-        fn add_exit_uplink(&self, _: &str, _: u64) {}
-        fn add_exit_downlink(&self, _: &str, _: u64) {}
+        fn bind(&self, _: &UserEmail, _: &NodeTag, _: &str) -> kerlico_shared::TrafficCounters {
+            kerlico_shared::TrafficCounters::new(Default::default(), Default::default())
+        }
     }
     let (server, client) = settings("raw", "none", "auto");
     let (mut inbound, port) = inbound(&server);

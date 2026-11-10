@@ -30,3 +30,12 @@ Advanced phase (explicitly confirmed by user):
 
 2026-11-09 core review found reverse user revocation and H1 chunk partial-write defects; patches integrated, behavior regressions pending.
 2026-11-10 local checkpoint: 15/15 VPS carrier flows and 210 library tests passed. Pinned Xray matrix on an earlier integrated snapshot was 353/354; the sole failure remains the documented plain HTTPUpgrade early-data peer bug. Work continues on the items above; this checkpoint is not full-replacement completion.
+
+Session 2026-11-10 (pickup, Claude):
+- [x] Session pickup: prior trail read; resume point is the unchecked Advanced-phase items and Phase C/D/E.
+- [x] Rebuild worker: perf-01 toolchain reinstalled after the 2026-11-10 worker wipe; pinned Xray 26.10.31 a4a3dff rebuilt from reference source.
+- [ ] Baseline on ce51460: lib, vless_flow, official matrix with control, leaf builds.
+- [ ] Client leaf: local SOCKS5/HTTP entry for VLESS sharing one front-end with mieru (architect pass running).
+- [ ] REALITY, XHTTP h2Params/XMUX, Mux reuse/GlobalID/UDP443/reverse bridge, sockopt: gap map running, then one unit at a time.
+- [ ] Final: full matrix on final snapshot, independent review, separate leaf builds, vless.md updated.
+Rule from user 2026-11-10: no compiling or testing on the local machine; all builds and tests run on the worker. Worker toolchains stay installed after use.
