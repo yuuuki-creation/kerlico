@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::num::NonZeroU64;
@@ -13,14 +12,13 @@ use kerlico_shared::{
     Transport, UserEmail,
 };
 use kerlico_vless::{
-    accept_native, accept_tls, accept_tls_split, decode_reality_key, decode_short_id, decode_udp, encode_response, encode_udp, grpc_path, host_matches, normalize_path, parse_id, read_client_finished, read_tls_record, reality_accept, reality_reader, reality_writer, server_flight, server_key, AppReader, AppWriter, EncReader, EncWriter, RealityDuplex, TlsRead, TlsWrite,
-    server_config, Command, Request, Response, TlsLink,
-    Vision, WsIo, GrpcConnection, GrpcStream, HttpIo, Session, XhttpBodyWriter, ChunkPair,
+    decode_reality_key, decode_short_id, decode_udp, encode_response, encode_udp, grpc_path, host_matches, normalize_path, parse_id, read_client_finished, reality_reader, reality_writer, server_key, AppReader, AppWriter, EncReader, EncWriter, RealityDuplex,
+    Command, Request, Response,
+    GrpcConnection, GrpcStream, HttpIo, Session, XhttpBodyWriter, ChunkPair,
     decode_mux, encode_mux, MuxFrame, DATA, END, KEEP, KEEPALIVE, NEW, HTTP2_PREFACE,
     ChunkReader, HttpHead, XhttpConfig, XhttpRequestKind, read_http_head_with_limit, write_xhttp_response,
     HttpPrefaceRead, RawHttpConfig, RawHttpWrite, UpgradeConfig,
 };
-use socket2::{Domain, Protocol, Socket, Type};
 
 #[derive(Clone)]
 struct RealityConfig {
@@ -273,7 +271,7 @@ struct RealityApp {
 
 /// Finishes an authenticated REALITY handshake. `Err` carries the fallback
 /// handoff for an unauthenticated connection, or nothing when the connection ends here.
-fn accept_reality(mut read: Link, mut write: Link, config: &RealityConfig, fallback: &FallbackSet, peer: SocketAddr, local: Option<SocketAddr>) -> Result<RealityApp, Option<Ready>> {
+fn accept_reality(mut read: Link, mut write: Link, config: &RealityConfig, fallback: &FallbackSet, peer: SocketAddr, local: Option<SocketAddr>) -> Result<RealityApp, Option<Box<Ready>>> {
     // Bytes that do not parse as a ClientHello still reach the target, as Xray mirrors every byte it reads.
     let mut recorded = Recorded { inner: &mut read, bytes: Vec::new() };
     let hello = kerlico_vless::read_client_hello(&mut recorded).ok().map(|(record, _)| record);
@@ -282,8 +280,8 @@ fn accept_reality(mut read: Link, mut write: Link, config: &RealityConfig, fallb
     let Some(record) = hello.filter(|record| kerlico_vless::reality_accept_with_policy(record, &config.private, &config.policy)) else {
         return Err(match &config.target {
             Some(target) => target.fall_back(read, write, peer, target.head(peer, local, &wire)),
-            None => fall_back(read, write, peer, local, wire, fallback, &name, &alpn),
-        });
+            None => fall_back(read, write, wire, fallback, &Arrival { peer, local, name, alpn }),
+        }.map(Box::new));
     };
     let head = config.target.as_ref().map(|target| target.head(peer, local, &wire)).unwrap_or_default();
     let Some(accepted) = config.flight(&record, &head) else { return Err(None) };
@@ -477,7 +475,8 @@ pub fn listen(
     let sockopt = kerlico_vless::socket::SocketOptions::parse(settings.text("sockopt").ok()).map_err(|_| OpenError::Settings)?;
     let accept_proxy = settings.text("acceptProxyProtocol").ok() == Some("true") || sockopt.accept_proxy_protocol;
     let forwarded_for = sockopt.trusted_forwarded_for;
-    thread::spawn(move || accept_loop(listener, shared, ready_tx, tls, upgrade, raw_http, grpc, http, fallback, reality, accept_proxy, forwarded_for));
+    let front = Front { tls, upgrade, raw_http, grpc, http, fallback, reality, accept_proxy, forwarded_for };
+    thread::spawn(move || accept_loop(listener, shared, ready_tx, front));
     Ok(Box::new(VlessInbound {
         tag: tag.clone(),
         default_flow,
@@ -515,7 +514,7 @@ fn listen_xdrive(tag: &NodeTag, settings: &Settings, native: Option<Decryption>)
         let accounts = shared.clone();
         let ready_tx = ready_tx.clone();
         thread::spawn(move || {
-            if let Some(ready) = handshake(Link::XdriveRead(read), Link::XdriveWrite(write), SocketAddr::from(([127,0,0,1], 0)), None, &accounts, &ready_tx, FallbackSet::empty(), Vec::new(), String::new(), String::new()) {
+            if let Some(ready) = handshake(Link::XdriveRead(read), Link::XdriveWrite(write), &accounts, &ready_tx, FallbackSet::empty(), Vec::new(), Arrival::bare(SocketAddr::from(([127,0,0,1], 0)))) {
                 ready_tx.send(ready).ok();
             }
         });
@@ -538,7 +537,7 @@ fn listen_hysteria(tag: &NodeTag, bind: &ListenAddr, settings: &Settings, native
         let accounts = shared.clone();
         let ready_tx = ready_tx.clone();
         thread::spawn(move || {
-            if let Some(ready) = handshake(Link::HysteriaRead(read), Link::HysteriaWrite(write), peer, None, &accounts, &ready_tx, FallbackSet::empty(), Vec::new(), String::new(), String::new()) {
+            if let Some(ready) = handshake(Link::HysteriaRead(read), Link::HysteriaWrite(write), &accounts, &ready_tx, FallbackSet::empty(), Vec::new(), Arrival::bare(peer)) {
                 ready_tx.send(ready).ok();
             }
         });
@@ -629,7 +628,7 @@ fn kcp_loop(socket: Arc<dyn kerlico_vless::finalmask::PacketIo>, accounts: Arc<U
                     let Ok((read, write)) = kerlico_vless::accept_advanced_tls_over(Box::new(read), Box::new(write), tls) else { return; };
                     (Link::TlsRead(Box::new(read)), Link::TlsWrite(Box::new(write)))
                 } else { (read, write) };
-                if let Some(ready) = handshake(read, write, peer, None, &accounts, &ready_tx, FallbackSet::empty(), Vec::new(), String::new(), String::new()) {
+                if let Some(ready) = handshake(read, write, &accounts, &ready_tx, FallbackSet::empty(), Vec::new(), Arrival::bare(peer)) {
                     ready_tx.send(ready).ok();
                 }
             });
@@ -770,7 +769,7 @@ fn listen_xhttp(
         thread::spawn(move || {
             while let Ok((peer, stream)) = listener.accept() {
                 let shared = shared.clone();
-                thread::spawn(move || shared.serve_stream(HttpStream::H3(stream), peer));
+                thread::spawn(move || shared.serve_stream(HttpStream::H3(Box::new(stream)), peer));
             }
         });
     } else {
@@ -921,11 +920,13 @@ fn tcp_pair(socket: TcpStream, masks: &kerlico_vless::finalmask::FinalMask, peer
     } else { Ok((Link::Tcp(socket.try_clone()?), Link::Tcp(socket))) }
 }
 
-fn open_reality(read: Link, write: Link, config: &RealityConfig, ready: &Sender<Ready>, peer: SocketAddr, local: Option<SocketAddr>) -> Option<RealityDuplex<AppReader<Box<Link>>, AppWriter<Box<Link>>>> {
+type RealityLink = RealityDuplex<AppReader<Box<Link>>, AppWriter<Box<Link>>>;
+
+fn open_reality(read: Link, write: Link, config: &RealityConfig, ready: &Sender<Ready>, peer: SocketAddr, local: Option<SocketAddr>) -> Option<RealityLink> {
     match accept_reality(read, write, config, &FallbackSet::empty(), peer, local) {
         Ok(app) => Some(RealityDuplex::new(app.read, app.write)),
         Err(handoff) => {
-            if let Some(handoff) = handoff { ready.send(handoff).ok(); }
+            if let Some(handoff) = handoff { ready.send(*handoff).ok(); }
             None
         }
     }
@@ -987,18 +988,7 @@ impl XhttpListener {
     }
 
     fn handoff(&self, read: Link, write: Link, peer: SocketAddr) {
-        if let Some(ready) = handshake(
-            read,
-            write,
-            peer,
-            None,
-            &self.accounts,
-            &self.ready,
-            FallbackSet::empty(),
-            Vec::new(),
-            String::new(),
-            String::new(),
-        ) {
+        if let Some(ready) = handshake(read, write, &self.accounts, &self.ready, FallbackSet::empty(), Vec::new(), Arrival::bare(peer)) {
             let _ = self.ready.send(ready);
         }
     }
@@ -1252,10 +1242,7 @@ impl XhttpListener {
         let (live, closed) = mpsc::channel::<()>();
         thread::spawn(move || {
             let mut interval = interval;
-            loop {
-                let Ok(padding) = config.stream_up_padding() else {
-                    break;
-                };
+            while let Ok(padding) = config.stream_up_padding() {
                 if write.write_all(&padding).is_err() {
                     break;
                 }
@@ -1563,11 +1550,10 @@ struct HttpCfg {
     method: String,
 }
 
-fn accept_loop(
-    listener: TcpListener,
-    accounts: Arc<Users>,
-    ready_tx: Sender<Ready>,
-    tls: Option<std::sync::Arc<kerlico_vless::AdvancedTlsServerConfig>>,
+/// The layers a TCP inbound's connections pass through before VLESS. Each connection takes a copy.
+#[derive(Clone)]
+struct Front {
+    tls: Option<Arc<kerlico_vless::AdvancedTlsServerConfig>>,
     upgrade: Option<Arc<UpgradeConfig>>,
     raw_http: Option<Arc<RawHttpConfig>>,
     grpc: Option<GrpcCfg>,
@@ -1576,23 +1562,18 @@ fn accept_loop(
     reality: Option<RealityConfig>,
     accept_proxy: bool,
     forwarded_for: kerlico_vless::TrustedForwardedFor,
-) {
+}
+
+fn accept_loop(listener: TcpListener, accounts: Arc<Users>, ready_tx: Sender<Ready>, front: Front) {
     loop {
         let Ok((mut socket, peer)) = listener.accept() else {
             break;
         };
         if !accounts.allows(peer) { continue; }
         let local = socket.local_addr().ok();
-        let forwarded_for = forwarded_for.clone();
         let accounts = Arc::clone(&accounts);
         let ready_tx = ready_tx.clone();
-        let tls = tls.clone();
-        let upgrade = upgrade.clone();
-        let raw_http = raw_http.clone();
-        let grpc = grpc.clone();
-        let http = http.clone();
-        let fallback = fallback.clone();
-        let reality = reality.clone();
+        let Front { tls, upgrade, raw_http, grpc, http, fallback, reality, accept_proxy, forwarded_for } = front.clone();
         thread::spawn(move || {
             let ready = (|| {
                 socket.set_nodelay(true).ok();
@@ -1610,7 +1591,7 @@ fn accept_loop(
                 if let Some(config) = reality {
                     let app = match accept_reality(read, write, &config, &fallback, peer, local) {
                         Ok(app) => app,
-                        Err(handoff) => return handoff,
+                        Err(handoff) => return handoff.map(|ready| *ready),
                     };
                     (seen_name, seen_alpn) = (app.name, app.alpn);
                     read = Link::RealityRead(app.read);
@@ -1633,7 +1614,7 @@ fn accept_loop(
                         let ready_tx = ready_tx.clone();
                         let (fallback, name, alpn) = (fallback.clone(), seen_name.clone(), seen_alpn.clone());
                         thread::spawn(move || {
-                            if let Some(ready) = handshake(read, write, peer, local, &accounts, &ready_tx, fallback, Vec::new(), name, alpn) {
+                            if let Some(ready) = handshake(read, write, &accounts, &ready_tx, fallback, Vec::new(), Arrival { peer, local, name, alpn }) {
                                 let _ = ready_tx.send(ready);
                             }
                         });
@@ -1666,7 +1647,7 @@ fn accept_loop(
                 } else {
                     (read, write, prelude.0)
                 };
-                handshake(read, write, peer, local, &accounts, &ready_tx, fallback, prelude, seen_name, seen_alpn)
+                handshake(read, write, &accounts, &ready_tx, fallback, prelude, Arrival { peer, local, name: seen_name, alpn: seen_alpn })
             })();
             if let Some(ready) = ready {
                 let _ = ready_tx.send(ready);
@@ -1711,7 +1692,7 @@ type Half = Link;
 
 enum HttpStream {
     H2(kerlico_vless::H2Stream<Half>),
-    H3(kerlico_vless::H3Stream),
+    H3(Box<kerlico_vless::H3Stream>),
 }
 
 impl HttpStream {
@@ -1736,19 +1717,19 @@ impl HttpStream {
     fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Self::H2(io) => io.read(buf),
-            Self::H3(io) => io.read(buf),
+            Self::H3(io) => (**io).read(buf),
         }
     }
     fn write(&self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             Self::H2(io) => io.write(buf),
-            Self::H3(io) => io.write(buf),
+            Self::H3(io) => (**io).write(buf),
         }
     }
     fn flush(&self) -> std::io::Result<()> {
         match self {
             Self::H2(io) => io.flush(),
-            Self::H3(io) => io.flush(),
+            Self::H3(io) => (**io).flush(),
         }
     }
 }
@@ -1968,18 +1949,6 @@ impl kerlico_vless::VisionTransport for Link {
     }
 }
 
-fn pem(settings: &Settings, inline: &str, file: &str) -> Result<String, OpenError> {
-    if let Ok(text) = settings.text(inline) {
-        if !text.is_empty() {
-            return Ok(text.to_string());
-        }
-    }
-    if let Ok(path) = settings.text(file) {
-        return fs::read_to_string(path).map_err(|_| OpenError::Settings);
-    }
-    Err(OpenError::Settings)
-}
-
 fn alpn(settings: &Settings) -> Vec<String> {
     let names = kerlico_vless::string_list(settings.text("alpn").unwrap_or("")).unwrap_or_default();
     if names.is_empty() && settings.text("network").ok() == Some("xdrive") {
@@ -2124,7 +2093,23 @@ fn release_mux_session(id: u16, session: &Mutex<MuxSession>, writer: &MuxOut) {
     writer.lock().expect("mux").send(&MuxFrame { id, status: END, ..MuxFrame::default() }).ok();
 }
 
-fn demux(mut read: Link, write: Link, peer: SocketAddr, email: UserEmail, mut pending: Vec<u8>, ready_tx: &Sender<Ready>, xudp: &XudpSessions, udp_only: bool, xudp_only: bool) {
+/// The user and client address every flow on one carrier is handed off with.
+struct FlowOwner {
+    email: UserEmail,
+    peer: SocketAddr,
+}
+
+/// The sessions a Mux carrier may open. A Vision account's Mux carries only UDP, and only the
+/// XUDP session 0 when the request itself has no Vision flow.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MuxScope {
+    Any,
+    Udp,
+    Xudp,
+}
+
+fn demux(mut read: Link, write: Link, owner: FlowOwner, mut pending: Vec<u8>, ready_tx: &Sender<Ready>, xudp: &XudpSessions, scope: MuxScope) {
+    let FlowOwner { email, peer } = owner;
     read.set_timeout(Duration::from_millis(200));
     let writer: MuxOut = Arc::new(Mutex::new(kerlico_vless::MuxWriter::new(write)));
     let mut sessions: HashMap<u16, Arc<Mutex<MuxSession>>> = HashMap::new();
@@ -2167,9 +2152,9 @@ fn demux(mut read: Link, write: Link, peer: SocketAddr, email: UserEmail, mut pe
             continue;
         }
         if frame.status == NEW {
-            if sessions.contains_key(&frame.id) || (xudp_only && frame.id != 0) { return; }
+            if sessions.contains_key(&frame.id) || (scope == MuxScope::Xudp && frame.id != 0) { return; }
             let udp = frame.network == 2;
-            if udp_only && !udp { return; }
+            if scope != MuxScope::Any && !udp { return; }
             let Some(destination) = mux_destination(frame.address.clone(), frame.port, udp) else { return; };
             let route = Route::Attached(frame.id, writer.clone());
             let session = match frame.global_id {
@@ -2403,16 +2388,14 @@ impl FallbackSet {
         }
         let mut name = name.to_ascii_lowercase();
         let mut alpn = alpn.to_ascii_lowercase();
-        if self.map.len() > 1 || !self.map.contains_key("") {
-            if !name.is_empty() && !self.map.contains_key(&name) {
-                let mut matched = String::new();
-                for key in self.map.keys() {
-                    if !key.is_empty() && name.contains(key) && key.len() > matched.len() {
-                        matched = key.clone();
-                    }
+        if (self.map.len() > 1 || !self.map.contains_key("")) && !name.is_empty() && !self.map.contains_key(&name) {
+            let mut matched = String::new();
+            for key in self.map.keys() {
+                if !key.is_empty() && name.contains(key) && key.len() > matched.len() {
+                    matched = key.clone();
                 }
-                name = matched;
             }
+            name = matched;
         }
         if !self.map.contains_key(&name) {
             name.clear();
@@ -2423,27 +2406,25 @@ impl FallbackSet {
         }
         let paths = alpns.get(&alpn)?;
         let mut path = String::new();
-        if paths.len() > 1 || !paths.contains_key("") {
-            if first.len() >= 18 && first.get(4) != Some(&b'*') {
-                let end = first.len().min(9);
-                for index in 4..end {
-                    if first[index] == b'/' && first[index - 1] == b' ' {
-                        let search = first.len().min(64);
-                        for stop in index + 1..search {
-                            let byte = first[stop];
-                            if byte == b'\r' || byte == b'\n' {
-                                break;
-                            }
-                            if byte == b'?' || byte == b' ' {
-                                let candidate = String::from_utf8_lossy(&first[index..stop]).into_owned();
-                                if paths.contains_key(&candidate) {
-                                    path = candidate;
-                                }
-                                break;
-                            }
+        if (paths.len() > 1 || !paths.contains_key("")) && first.len() >= 18 && first.get(4) != Some(&b'*') {
+            let end = first.len().min(9);
+            for index in 4..end {
+                if first[index] == b'/' && first[index - 1] == b' ' {
+                    let search = first.len().min(64);
+                    for stop in index + 1..search {
+                        let byte = first[stop];
+                        if byte == b'\r' || byte == b'\n' {
+                            break;
                         }
-                        break;
+                        if byte == b'?' || byte == b' ' {
+                            let candidate = String::from_utf8_lossy(&first[index..stop]).into_owned();
+                            if paths.contains_key(&candidate) {
+                                path = candidate;
+                            }
+                            break;
+                        }
                     }
+                    break;
                 }
             }
         }
@@ -2528,8 +2509,10 @@ struct Portal {
     sessions: Mutex<HashMap<u16, Weak<MuxLane>>>,
 }
 
-fn portals() -> &'static Mutex<HashMap<(NodeTag, String), Arc<Portal>>> {
-    static PORTALS: std::sync::OnceLock<Mutex<HashMap<(NodeTag, String), Arc<Portal>>>> = std::sync::OnceLock::new();
+type Portals = Mutex<HashMap<(NodeTag, String), Arc<Portal>>>;
+
+fn portals() -> &'static Portals {
+    static PORTALS: std::sync::OnceLock<Portals> = std::sync::OnceLock::new();
     PORTALS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -2623,12 +2606,11 @@ fn open_reverse_portal(portal: Arc<Portal>, host: &str, port: u16, tcp: bool, pa
     let mut sessions = portal.sessions.lock().expect("reverse");
     let id = {
         let mut next = portal.next.lock().expect("reverse");
-        let id = (0..32767).find_map(|_| {
+        (0..32767).find_map(|_| {
             let id = *next;
             *next = next.wrapping_add(2).max(3);
             (!sessions.contains_key(&id)).then_some(id)
-        }).ok_or(OpenError::Again)?;
-        id
+        }).ok_or(OpenError::Again)?
     };
     let lane = Arc::new(MuxLane {
         plain: Mutex::new(VecDeque::new()), packets: Mutex::new(VecDeque::new()),
@@ -2670,25 +2652,33 @@ fn parse_fallback(text: &str) -> Result<(String, u16), OpenError> {
     Ok((host.to_string(), port))
 }
 
-fn fall_back(
-    read: Link,
-    write: Link,
+/// Where a connection came from and the TLS server name and ALPN it arrived with, which pick
+/// and address its fallback.
+struct Arrival {
     peer: SocketAddr,
     local: Option<SocketAddr>,
-    mut prefix: Vec<u8>,
-    dest: &FallbackSet,
-    name: &str,
-    alpn: &str,
-) -> Option<Ready> {
+    name: String,
+    alpn: String,
+}
+
+impl Arrival {
+    /// A carrier that names no local address, server name or ALPN.
+    fn bare(peer: SocketAddr) -> Self {
+        Self { peer, local: None, name: String::new(), alpn: String::new() }
+    }
+}
+
+fn fall_back(read: Link, write: Link, mut prefix: Vec<u8>, dest: &FallbackSet, arrival: &Arrival) -> Option<Ready> {
     let (name, alpn) = if let Link::TlsRead(link) = &read {
         link.identity()
     } else {
-        (name.to_string(), alpn.to_string())
+        (arrival.name.clone(), arrival.alpn.clone())
     };
     let rule = dest.pick(&name, &alpn, &prefix)?;
     let destination = Destination::new(rule.host.clone(), rule.port, Transport::Tcp).ok()?;
+    let peer = arrival.peer;
     if rule.xver != 0 {
-        let mut headed = proxy_header(rule.xver, peer, local);
+        let mut headed = proxy_header(rule.xver, peer, arrival.local);
         headed.append(&mut prefix);
         prefix = headed;
     }
@@ -2797,14 +2787,11 @@ fn hello_identity(record: &[u8]) -> (String, String) {
 fn handshake(
     mut read: Link,
     mut write: Link,
-    peer: SocketAddr,
-    local: Option<SocketAddr>,
     accounts: &Users,
     ready_tx: &Sender<Ready>,
     fallback: FallbackSet,
     prelude: Vec<u8>,
-    name: String,
-    alpn: String,
+    arrival: Arrival,
 ) -> Option<Ready> {
     let fallback = if fallback.rules.is_empty() { accounts.fallback.clone() } else { fallback };
     read.set_timeout(Duration::from_secs(10));
@@ -2817,12 +2804,12 @@ fn handshake(
     }
     let (request, prefix, full) = match read_request(&mut read, Vec::new()) {
         Ok(value) => value,
-        Err(buf) => return fall_back(read, write, peer, local, buf, &fallback, &name, &alpn),
+        Err(buf) => return fall_back(read, write, buf, &fallback, &arrival),
     };
     let (email, account_vision, reverse, active) = {
         let accounts = accounts.lock().expect("accounts");
         let Some(account) = accounts.get(&account_id(request.id)) else {
-            return fall_back(read, write, peer, local, full, &fallback, &name, &alpn);
+            return fall_back(read, write, full, &fallback, &arrival);
         };
         let flow_ok = account.flow == request.flow || (vision_flow(&account.flow) && request.flow.is_empty() && request.command != Command::Tcp);
         if !flow_ok || (!account.reverse.is_empty() && request.command != Command::Reverse) {
@@ -2834,7 +2821,7 @@ fn handshake(
     if vision && !read.supports_vision() { return None; }
     if (vision && request.command == Command::Udp) || (request.command == Command::Reverse && reverse.is_empty()) { return None; }
     if matches!(request.command, Command::Tcp | Command::Udp) && request.port == 0 {
-        return fall_back(read, write, peer, local, full, &fallback, &name, &alpn);
+        return fall_back(read, write, full, &fallback, &arrival);
     }
     let response = encode_response(&Response { flow: String::new(), seed: Vec::new() }).ok()?;
     write.write_all(&response).ok()?;
@@ -2858,7 +2845,12 @@ fn handshake(
         return None;
     }
     if request.command == Command::Mux {
-        demux(read, write, peer, email, prefix, ready_tx, &accounts.xudp, account_vision, account_vision && !vision);
+        let scope = match (account_vision, vision) {
+            (false, _) => MuxScope::Any,
+            (true, true) => MuxScope::Udp,
+            (true, false) => MuxScope::Xudp,
+        };
+        demux(read, write, FlowOwner { email, peer: arrival.peer }, prefix, ready_tx, &accounts.xudp, scope);
         return None;
     }
     let host = match request.address {
@@ -2868,7 +2860,7 @@ fn handshake(
     };
     let udp = request.command == Command::Udp;
     let destination = Destination::new(host, request.port, if udp { Transport::Udp } else { Transport::Tcp }).ok()?;
-    Some(Ready { email, destination, peer, read, write, udp, prefix })
+    Some(Ready { email, destination, peer: arrival.peer, read, write, udp, prefix })
 }
 
 fn read_request(socket: &mut Link, prelude: Vec<u8>) -> Result<(Request, Vec<u8>, Vec<u8>), Vec<u8>> {
@@ -3104,6 +3096,7 @@ fn bind_tcp(addr: SocketAddr, settings: &Settings) -> std::io::Result<TcpListene
 mod tests {
     use super::*;
     use kerlico_shared::ListenAddr;
+    use std::fs;
     use kerlico_vless::{decode_mux, decode_udp, encode_request, encode_udp, Addr, Command, Request, Vision, NEW};
     use std::net::Ipv4Addr;
 
@@ -3435,7 +3428,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let mut settings = Settings::default();
-        settings.insert_text("decryption", &kerlico_vless::encode_key("mlkem768x25519plus.native.0s.", &secret));
+        settings.insert_text("decryption", kerlico_vless::encode_key("mlkem768x25519plus.native.0s.", &secret));
         let mut inbound = listen(
             &NodeTag::parse("v").unwrap(),
             &ListenAddr::v4(Ipv4Addr::LOCALHOST, port).unwrap(),
@@ -3475,7 +3468,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.insert_text("decryption", "none");
         settings.insert_text("security", "reality");
-        settings.insert_text("privateKey", &kerlico_vless::encode_reality_key(&private));
+        settings.insert_text("privateKey", kerlico_vless::encode_reality_key(&private));
         settings.insert_text("shortId", "0102030405060708");
         let mut inbound = listen(
             &NodeTag::parse("v").unwrap(),
@@ -4010,7 +4003,7 @@ mod tests {
         settings.insert_text("network", "grpc");
         settings.insert_text("serviceName", "GunService");
         settings.insert_text("security", "reality");
-        settings.insert_text("privateKey", &kerlico_vless::encode_reality_key(&private));
+        settings.insert_text("privateKey", kerlico_vless::encode_reality_key(&private));
         settings.insert_text("shortId", "0102030405060708");
         let mut inbound = listen(
             &NodeTag::parse("v").unwrap(),
@@ -4304,7 +4297,7 @@ mod tests {
         settings.insert_text("path", "/xh");
         settings.insert_text("host", "example.com");
         settings.insert_text("security", "reality");
-        settings.insert_text("privateKey", &kerlico_vless::encode_reality_key(&private));
+        settings.insert_text("privateKey", kerlico_vless::encode_reality_key(&private));
         settings.insert_text("shortId", "0102030405060708");
         let mut inbound = listen(
             &NodeTag::parse("v").unwrap(),
@@ -4385,7 +4378,7 @@ mod tests {
         settings.insert_text("path", "/xh");
         settings.insert_text("host", "example.com");
         settings.insert_text("security", "reality");
-        settings.insert_text("privateKey", &kerlico_vless::encode_reality_key(&private));
+        settings.insert_text("privateKey", kerlico_vless::encode_reality_key(&private));
         settings.insert_text("shortId", "0102030405060708");
         let mut inbound = listen(
             &NodeTag::parse("v").unwrap(),
@@ -4464,7 +4457,7 @@ mod tests {
         settings.insert_text("path", "/xh");
         settings.insert_text("host", "example.com");
         settings.insert_text("security", "reality");
-        settings.insert_text("privateKey", &kerlico_vless::encode_reality_key(&private));
+        settings.insert_text("privateKey", kerlico_vless::encode_reality_key(&private));
         settings.insert_text("shortId", "0102030405060708");
         let mut inbound = listen(
             &NodeTag::parse("v").unwrap(),
@@ -4546,7 +4539,7 @@ mod tests {
         settings.insert_text("path", "/xh");
         settings.insert_text("host", "example.com");
         settings.insert_text("security", "reality");
-        settings.insert_text("privateKey", &kerlico_vless::encode_reality_key(&private));
+        settings.insert_text("privateKey", kerlico_vless::encode_reality_key(&private));
         settings.insert_text("shortId", "0102030405060708");
         let mut inbound = listen(
             &NodeTag::parse("v").unwrap(),
@@ -4622,7 +4615,7 @@ mod tests {
         settings.insert_text("path", "/xh");
         settings.insert_text("host", "example.com");
         settings.insert_text("security", "reality");
-        settings.insert_text("privateKey", &kerlico_vless::encode_reality_key(&private));
+        settings.insert_text("privateKey", kerlico_vless::encode_reality_key(&private));
         settings.insert_text("shortId", "0102030405060708");
         let mut inbound = listen(
             &NodeTag::parse("v").unwrap(),
