@@ -1,8 +1,11 @@
 //! Xray mux frames carried inside a VLESS connection whose command is `mux`.
 
+use std::collections::VecDeque;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU64;
-use std::sync::OnceLock;
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::{Addr, HeaderError};
 
@@ -36,33 +39,136 @@ pub const KEEP: u8 = 0x02;
 pub const END: u8 = 0x03;
 pub const KEEPALIVE: u8 = 0x04;
 pub const DATA: u8 = 0x01;
+/// Xray's `OptionError` on an END frame.
+const ERROR: u8 = 0x02;
 
-pub struct MuxWriter<T> {
-    inner: T,
-    pending: Vec<u8>,
+/// Xray's Mux writes into a 64 KiB pipe that its worker copies to the carrier.
+const UPLINK_BYTES: usize = 64 * 1024;
+/// How long a send waits for room, one carrier poll.
+const UPLINK_WAIT: Duration = Duration::from_millis(200);
+
+/// The write half of one Mux carrier: the encoded frames its writer thread, `run`, has yet to
+/// take. The writer finishes each frame on its own, so a frame the link took only in part
+/// completes while nobody sends and while the carrier's reader is busy.
+#[derive(Default)]
+pub struct MuxUplink {
+    queue: Mutex<Uplink>,
+    /// Wakes the writer for a queued frame and senders for room.
+    changed: Condvar,
 }
 
-impl<T: std::io::Write> MuxWriter<T> {
-    pub fn new(inner: T) -> Self { Self { inner, pending: Vec::new() } }
-    pub fn inner_mut(&mut self) -> &mut T { &mut self.inner }
+#[derive(Default)]
+struct Uplink {
+    frames: VecDeque<Vec<u8>>,
+    bytes: usize,
+    /// Takes no more frames; the writer drains what is queued and stops.
+    closed: bool,
+}
 
-    pub fn send(&mut self, frame: &MuxFrame) -> std::io::Result<()> {
-        if frame.payload.len() > u16::MAX as usize { return Err(std::io::Error::other("mux frame too large")); }
-        self.flush()?;
-        self.pending = encode_mux(frame);
-        match self.flush() {
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Ok(()),
-            result => result,
+impl Uplink {
+    fn push(&mut self, frame: Vec<u8>) {
+        self.bytes += frame.len();
+        self.frames.push_back(frame);
+    }
+}
+
+impl MuxUplink {
+    /// Waits up to one poll for room, as a write into Xray's full pipe blocks, then fails with
+    /// `TimedOut`. A closed uplink fails with `BrokenPipe`.
+    pub fn send(&self, frame: &MuxFrame) -> io::Result<()> {
+        if frame.payload.len() > usize::from(u16::MAX) {
+            return Err(io::Error::other("mux frame too large"));
+        }
+        let frame = encode_mux(frame);
+        let deadline = Instant::now() + UPLINK_WAIT;
+        let mut queue = self.queue.lock().expect("mux uplink");
+        while !queue.closed && queue.bytes > 0 && queue.bytes + frame.len() > UPLINK_BYTES {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            if wait.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            queue = self.changed.wait_timeout(queue, wait).expect("mux uplink").0;
+        }
+        if queue.closed {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        queue.push(frame);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    /// Queues END for session `id`, with Xray's error option when `failed`. It never waits, so
+    /// ending a session never holds a reader or a drop. Each session ends once, so these frames
+    /// stay few; a queue twice the bound means the peer stopped reading, and the uplink closes.
+    pub fn end(&self, id: u16, failed: bool) {
+        let frame = encode_mux(&MuxFrame { id, status: END, option: if failed { ERROR } else { 0 }, ..MuxFrame::default() });
+        let mut queue = self.queue.lock().expect("mux uplink");
+        if queue.closed {
+            return;
+        }
+        if queue.bytes + frame.len() > 2 * UPLINK_BYTES {
+            queue.closed = true;
+        } else {
+            queue.push(frame);
+        }
+        self.changed.notify_all();
+    }
+
+    pub fn close(&self) {
+        self.queue.lock().expect("mux uplink").closed = true;
+        self.changed.notify_all();
+    }
+
+    /// Closed by its owner, by an END past the bound, or because the writer stopped.
+    pub fn closed(&self) -> bool {
+        self.queue.lock().expect("mux uplink").closed
+    }
+
+    /// The carrier's writer thread. Writes the queued frames to `link` in order until the uplink
+    /// is closed and drained or a write fails, and leaves the uplink closed.
+    pub fn run(&self, mut link: impl io::Write) {
+        while let Some(frame) = self.next_frame() {
+            if self.write_frame(&mut link, &frame).is_err() {
+                break;
+            }
+        }
+        self.close();
+    }
+
+    fn next_frame(&self) -> Option<Vec<u8>> {
+        let mut queue = self.queue.lock().expect("mux uplink");
+        loop {
+            if let Some(frame) = queue.frames.pop_front() {
+                queue.bytes -= frame.len();
+                self.changed.notify_all();
+                return Some(frame);
+            }
+            if queue.closed {
+                return None;
+            }
+            queue = self.changed.wait(queue).expect("mux uplink");
         }
     }
 
-    pub fn flush(&mut self) -> std::io::Result<()> {
-        while !self.pending.is_empty() {
-            let n = self.inner.write(&self.pending)?;
-            if n == 0 { return Err(std::io::ErrorKind::WriteZero.into()); }
-            self.pending.drain(..n);
+    /// A write timeout gives up only once the uplink is closed.
+    fn write_frame(&self, link: &mut impl io::Write, mut frame: &[u8]) -> io::Result<()> {
+        let retry = |error: &io::Error| {
+            matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) && !self.closed()
+        };
+        while !frame.is_empty() {
+            match link.write(frame) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => frame = &frame[n..],
+                Err(error) if retry(&error) => {}
+                Err(error) => return Err(error),
+            }
         }
-        self.inner.flush()
+        loop {
+            match link.flush() {
+                Err(error) if retry(&error) => {}
+                result => return result,
+            }
+        }
     }
 }
 
@@ -407,6 +513,88 @@ mod tests {
         assert_eq!(decode_mux(&empty).unwrap().0.global_id, None, "frame without data");
         let keep = MuxFrame { status: KEEP, global_id: NonZeroU64::new(7), ..decode_mux(&xray_xudp_new(&[])).unwrap().0 };
         assert_eq!(decode_mux(&encode_mux(&keep)).unwrap().0.global_id, None, "KEEP frame");
+    }
+
+    /// Takes at most 100 bytes per write and times out every other write, as a carrier socket
+    /// with a full send buffer does.
+    struct Choppy {
+        out: std::sync::Arc<Mutex<Vec<u8>>>,
+        stall: bool,
+    }
+
+    impl io::Write for Choppy {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.stall = !self.stall;
+            if self.stall {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            let n = buf.len().min(100);
+            self.out.lock().unwrap().extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn keep(id: u16, len: usize) -> MuxFrame {
+        MuxFrame { id, status: KEEP, option: DATA, payload: vec![7; len], ..MuxFrame::default() }
+    }
+
+    #[test]
+    fn uplink_writer_finishes_a_cut_frame_without_another_send() {
+        let uplink = std::sync::Arc::new(MuxUplink::default());
+        let out: std::sync::Arc<Mutex<Vec<u8>>> = std::sync::Arc::default();
+        let writer = {
+            let (uplink, out) = (uplink.clone(), std::sync::Arc::clone(&out));
+            std::thread::spawn(move || uplink.run(Choppy { out, stall: false }))
+        };
+        uplink.send(&keep(1, 1000)).unwrap();
+        let expected = encode_mux(&keep(1, 1000));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while out.lock().unwrap().len() < expected.len() {
+            assert!(Instant::now() < deadline, "the writer left the frame cut");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*out.lock().unwrap(), expected);
+        uplink.close();
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn full_uplink_times_out_a_send_but_never_holds_an_end() {
+        let uplink = MuxUplink::default();
+        uplink.send(&keep(1, usize::from(u16::MAX))).unwrap();
+        let start = Instant::now();
+        assert_eq!(uplink.send(&keep(1, 1)).unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() >= UPLINK_WAIT, "a send into a full uplink waits one poll for room");
+        let start = Instant::now();
+        uplink.end(1, false);
+        assert!(start.elapsed() < UPLINK_WAIT, "END does not wait for room");
+        let mut id = 2;
+        while !uplink.closed() {
+            assert!(id < 20_000, "ENDs past twice the bound never closed the uplink");
+            uplink.end(id, true);
+            id += 1;
+        }
+        assert_eq!(uplink.send(&keep(1, 1)).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn closed_uplink_drains_what_it_queued_in_order() {
+        let uplink = MuxUplink::default();
+        uplink.send(&keep(3, 4)).unwrap();
+        uplink.end(3, true);
+        uplink.close();
+        uplink.end(5, false);
+        let mut out = Vec::new();
+        uplink.run(&mut out);
+        let (data, used) = decode_mux(&out).unwrap();
+        let (end, rest) = decode_mux(&out[used..]).unwrap();
+        assert_eq!((data.id, data.status, data.payload), (3, KEEP, vec![7; 4]));
+        assert_eq!((end.id, end.status, end.option), (3, END, ERROR), "a failed session ends with Xray's error option");
+        assert_eq!(used + rest, out.len(), "nothing is queued after close");
     }
 
     #[test]
