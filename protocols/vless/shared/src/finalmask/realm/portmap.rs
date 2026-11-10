@@ -145,6 +145,101 @@ impl PortMap {
     }
 }
 
+enum Gateway {
+    NatPmp {
+        nat: NatpmpAsync<UdpSocket>,
+        port: u16,
+    },
+    Upnp {
+        igd: Box<aio::Gateway<aio::tokio::Tokio>>,
+        inside: SocketAddr,
+    },
+}
+
+impl Gateway {
+    async fn renew(&mut self, external: u16, lifetime: u32) -> io::Result<SocketAddr> {
+        let usable_ip = |ip: IpAddr| {
+            let ip = ip.to_canonical();
+            if ip.is_unspecified() || ip.is_loopback() {
+                return Err(invalid("Realm gateway returned an unusable external IP"));
+            }
+            Ok(ip)
+        };
+        let (ip, port) = match self {
+            Gateway::NatPmp { nat, port } => {
+                nat.send_public_address_request()
+                    .await
+                    .map_err(io::Error::other)?;
+                let Response::Gateway(reply) = nat
+                    .read_response_or_retry()
+                    .await
+                    .map_err(io::Error::other)?
+                else {
+                    return Err(invalid("NAT-PMP external address response"));
+                };
+                let ip = usable_ip((*reply.public_address()).into())?;
+                nat.send_port_mapping_request(natpmp::Protocol::UDP, *port, external, lifetime)
+                    .await
+                    .map_err(io::Error::other)?;
+                let Response::UDP(reply) = nat
+                    .read_response_or_retry()
+                    .await
+                    .map_err(io::Error::other)?
+                else {
+                    return Err(invalid("NAT-PMP UDP lease response"));
+                };
+                if reply.private_port() != *port {
+                    return Err(invalid("NAT-PMP UDP lease port mismatch"));
+                }
+                (ip, reply.public_port())
+            }
+            Gateway::Upnp { igd, inside } => {
+                let ip = usable_ip(igd.get_external_ip().await.map_err(io::Error::other)?)?;
+                let port = if external == 0 {
+                    igd.add_any_port(PortMappingProtocol::UDP, *inside, lifetime, MAPPING)
+                        .await
+                        .map_err(io::Error::other)?
+                } else {
+                    igd.add_port(
+                        PortMappingProtocol::UDP,
+                        external,
+                        *inside,
+                        lifetime,
+                        MAPPING,
+                    )
+                    .await
+                    .map_err(io::Error::other)?;
+                    external
+                };
+                (ip, port)
+            }
+        };
+        if port == 0 {
+            return Err(invalid("Realm gateway returned an unusable mapping"));
+        }
+        Ok(SocketAddr::new(ip, port))
+    }
+
+    async fn delete(&self, external: u16) -> io::Result<()> {
+        match self {
+            Gateway::NatPmp { nat, port } => {
+                nat.send_port_mapping_request(natpmp::Protocol::UDP, *port, 0, 0)
+                    .await
+                    .map_err(io::Error::other)?;
+                let _ = nat
+                    .read_response_or_retry()
+                    .await
+                    .map_err(io::Error::other)?;
+                Ok(())
+            }
+            Gateway::Upnp { igd, .. } => igd
+                .remove_port(PortMappingProtocol::UDP, external)
+                .await
+                .map_err(io::Error::other),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,100 +401,5 @@ mod tests {
         })
         .await
         .unwrap();
-    }
-}
-
-enum Gateway {
-    NatPmp {
-        nat: NatpmpAsync<UdpSocket>,
-        port: u16,
-    },
-    Upnp {
-        igd: Box<aio::Gateway<aio::tokio::Tokio>>,
-        inside: SocketAddr,
-    },
-}
-
-impl Gateway {
-    async fn renew(&mut self, external: u16, lifetime: u32) -> io::Result<SocketAddr> {
-        let usable_ip = |ip: IpAddr| {
-            let ip = ip.to_canonical();
-            if ip.is_unspecified() || ip.is_loopback() {
-                return Err(invalid("Realm gateway returned an unusable external IP"));
-            }
-            Ok(ip)
-        };
-        let (ip, port) = match self {
-            Gateway::NatPmp { nat, port } => {
-                nat.send_public_address_request()
-                    .await
-                    .map_err(io::Error::other)?;
-                let Response::Gateway(reply) = nat
-                    .read_response_or_retry()
-                    .await
-                    .map_err(io::Error::other)?
-                else {
-                    return Err(invalid("NAT-PMP external address response"));
-                };
-                let ip = usable_ip((*reply.public_address()).into())?;
-                nat.send_port_mapping_request(natpmp::Protocol::UDP, *port, external, lifetime)
-                    .await
-                    .map_err(io::Error::other)?;
-                let Response::UDP(reply) = nat
-                    .read_response_or_retry()
-                    .await
-                    .map_err(io::Error::other)?
-                else {
-                    return Err(invalid("NAT-PMP UDP lease response"));
-                };
-                if reply.private_port() != *port {
-                    return Err(invalid("NAT-PMP UDP lease port mismatch"));
-                }
-                (ip, reply.public_port())
-            }
-            Gateway::Upnp { igd, inside } => {
-                let ip = usable_ip(igd.get_external_ip().await.map_err(io::Error::other)?)?;
-                let port = if external == 0 {
-                    igd.add_any_port(PortMappingProtocol::UDP, *inside, lifetime, MAPPING)
-                        .await
-                        .map_err(io::Error::other)?
-                } else {
-                    igd.add_port(
-                        PortMappingProtocol::UDP,
-                        external,
-                        *inside,
-                        lifetime,
-                        MAPPING,
-                    )
-                    .await
-                    .map_err(io::Error::other)?;
-                    external
-                };
-                (ip, port)
-            }
-        };
-        if port == 0 {
-            return Err(invalid("Realm gateway returned an unusable mapping"));
-        }
-        Ok(SocketAddr::new(ip, port))
-    }
-
-    async fn delete(&self, external: u16) -> io::Result<()> {
-        match self {
-            Gateway::NatPmp { nat, port } => {
-                nat.send_port_mapping_request(natpmp::Protocol::UDP, *port, 0, 0)
-                    .await
-                    .map_err(io::Error::other)?;
-                let _ = nat
-                    .read_response_or_retry()
-                    .await
-                    .map_err(io::Error::other)?;
-                Ok(())
-            }
-            Gateway::Upnp { igd, .. } => igd
-                .remove_port(PortMappingProtocol::UDP, external)
-                .await
-                .map_err(io::Error::other),
-        }
     }
 }

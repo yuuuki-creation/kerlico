@@ -324,7 +324,7 @@ impl Proxy {
 fn proxy_tls(insecure: bool) -> io::Result<Arc<rustls::ClientConfig>> {
     if insecure {
         return crate::client_config(&["h2".into(), "http/1.1".into()], true)
-            .map_err(|()| invalid("Hysteria proxy TLS configuration"));
+            .map_err(|_| invalid("Hysteria proxy TLS configuration"));
     }
     let mut roots = rustls::RootCertStore::empty();
     roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);

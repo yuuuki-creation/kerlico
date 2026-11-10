@@ -120,7 +120,7 @@ fn profile_uuid(value: &str) -> io::Result<[u8; 16]> {
 
 fn derive_prime(password: &[u8], label: &[u8], different_from: Option<&BigUint>) -> BigUint {
     let mut bytes = [0; 64];
-    for (chunk, suffix) in bytes.chunks_exact_mut(32).zip([b"-0", b"-1"]) {
+    for (chunk, suffix) in bytes.as_chunks_mut::<32>().0.iter_mut().zip([b"-0", b"-1"]) {
         let mut hash = Sha256::new();
         hash.update(password);
         hash.update(label);

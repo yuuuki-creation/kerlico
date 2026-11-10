@@ -17,40 +17,44 @@ use sha2::{Digest, Sha256};
 
 pub use rustls::{ClientConfig, ServerConfig};
 
-pub fn server_config(cert_pem: &str, key_pem: &str, alpn: &[String]) -> Result<Arc<ServerConfig>, ()> {
+/// A certificate, key, pin or protocol-version option that does not build a TLS config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TlsConfigError;
+
+pub fn server_config(cert_pem: &str, key_pem: &str, alpn: &[String]) -> Result<Arc<ServerConfig>, TlsConfigError> {
     server_config_versions(cert_pem, key_pem, alpn, "", "")
 }
 
-pub fn server_config_versions(cert_pem: &str, key_pem: &str, alpn: &[String], min: &str, max: &str) -> Result<Arc<ServerConfig>, ()> {
+pub fn server_config_versions(cert_pem: &str, key_pem: &str, alpn: &[String], min: &str, max: &str) -> Result<Arc<ServerConfig>, TlsConfigError> {
     install();
     let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
         .collect::<Result<Vec<CertificateDer>, _>>()
-        .map_err(|_| ())?;
+        .map_err(|_| TlsConfigError)?;
     let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-        .map_err(|_| ())?
-        .ok_or(())?;
+        .map_err(|_| TlsConfigError)?
+        .ok_or(TlsConfigError)?;
     let mut config = RustlsServer::builder_with_protocol_versions(&versions(min, max)?)
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .map_err(|_| ())?;
+        .map_err(|_| TlsConfigError)?;
     config.alpn_protocols = alpn.iter().map(|name| name.as_bytes().to_vec()).collect();
     Ok(Arc::new(config))
 }
 
-pub fn client_config(alpn: &[String], insecure: bool) -> Result<Arc<ClientConfig>, ()> {
+pub fn client_config(alpn: &[String], insecure: bool) -> Result<Arc<ClientConfig>, TlsConfigError> {
     client_config_pinned(alpn, insecure, "")
 }
 
-pub fn client_config_pinned(alpn: &[String], insecure: bool, pins: &str) -> Result<Arc<ClientConfig>, ()> {
+pub fn client_config_pinned(alpn: &[String], insecure: bool, pins: &str) -> Result<Arc<ClientConfig>, TlsConfigError> {
     client_config_versions(alpn, insecure, pins, "", "")
 }
 
-pub fn client_config_versions(alpn: &[String], insecure: bool, pins: &str, min: &str, max: &str) -> Result<Arc<ClientConfig>, ()> {
+pub fn client_config_versions(alpn: &[String], insecure: bool, pins: &str, min: &str, max: &str) -> Result<Arc<ClientConfig>, TlsConfigError> {
     install();
     let pins = parse_pins(pins)?;
     let builder = RustlsClient::builder_with_protocol_versions(&versions(min, max)?);
     let mut config = if insecure || !pins.is_empty() {
-        let provider = CryptoProvider::get_default().cloned().ok_or(())?;
+        let provider = CryptoProvider::get_default().cloned().ok_or(TlsConfigError)?;
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(CertificatePolicy { pins, provider }))
@@ -65,24 +69,24 @@ pub fn client_config_versions(alpn: &[String], insecure: bool, pins: &str, min: 
     Ok(Arc::new(config))
 }
 
-fn versions(min: &str, max: &str) -> Result<Vec<&'static rustls::SupportedProtocolVersion>, ()> {
-    let min = match min { "" | "1.2" => 12, "1.3" => 13, _ => return Err(()) };
-    let max = match max { "" | "1.3" => 13, "1.2" => 12, _ => return Err(()) };
-    if min > max { return Err(()); }
+fn versions(min: &str, max: &str) -> Result<Vec<&'static rustls::SupportedProtocolVersion>, TlsConfigError> {
+    let min = match min { "" | "1.2" => 12, "1.3" => 13, _ => return Err(TlsConfigError) };
+    let max = match max { "" | "1.3" => 13, "1.2" => 12, _ => return Err(TlsConfigError) };
+    if min > max { return Err(TlsConfigError); }
     Ok([(13, &rustls::version::TLS13), (12, &rustls::version::TLS12)]
         .into_iter().filter_map(|(version, config)| (min <= version && version <= max).then_some(config)).collect())
 }
 
-pub(crate) fn parse_pins(text: &str) -> Result<Vec<[u8; 32]>, ()> {
+pub(crate) fn parse_pins(text: &str) -> Result<Vec<[u8; 32]>, TlsConfigError> {
     text.split(',').map(str::trim).filter(|pin| !pin.is_empty()).map(|pin| {
         let hex: Vec<_> = pin.bytes().filter(|&byte| byte != b':').collect();
         if hex.len() != 64 {
-            return Err(());
+            return Err(TlsConfigError);
         }
         let mut digest = [0; 32];
-        for (dest, pair) in digest.iter_mut().zip(hex.chunks_exact(2)) {
-            let high = (pair[0] as char).to_digit(16).ok_or(())?;
-            let low = (pair[1] as char).to_digit(16).ok_or(())?;
+        for (dest, pair) in digest.iter_mut().zip(hex.as_chunks::<2>().0) {
+            let high = (pair[0] as char).to_digit(16).ok_or(TlsConfigError)?;
+            let low = (pair[1] as char).to_digit(16).ok_or(TlsConfigError)?;
             *dest = ((high << 4) | low) as u8;
         }
         Ok(digest)

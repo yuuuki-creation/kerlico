@@ -174,7 +174,7 @@ pub fn reality_offer_fingerprint(
                 share.extend_from_slice(&public);
                 Ok(share)
             }
-            23 | 24 | 25 => {
+            23..=25 => {
                 let nid = match group {
                     23 => Nid::X9_62_PRIME256V1,
                     24 => Nid::SECP384R1,
@@ -463,7 +463,7 @@ pub fn decode_short_id(text: &str) -> Option<[u8; 8]> {
     if text.is_empty() {
         return Some([0; 8]);
     }
-    if text.len() > 16 || text.len() % 2 != 0 {
+    if text.len() > 16 || !text.len().is_multiple_of(2) {
         return None;
     }
     let mut out = [0u8; 8];
@@ -580,7 +580,7 @@ fn handshake_message(
     let record_len = 5 + hs.len();
     if record_len < 512 {
         let need = 512 - record_len;
-        let body = if need > 4 { need - 4 } else { 0 };
+        let body = need.saturating_sub(4);
         push_ext(&mut hs, 0x0015, &vec![0u8; body]);
         finish_hello(&mut hs, ext_at, ext_start);
     }
@@ -659,7 +659,7 @@ pub(crate) fn client_suites(handshake: &[u8]) -> Option<&[u8]> {
         return None;
     }
     let suites = u16::from_be_bytes([handshake[71], handshake[72]]) as usize;
-    if suites == 0 || suites % 2 != 0 {
+    if suites == 0 || !suites.is_multiple_of(2) {
         return None;
     }
     handshake.get(73..73 + suites)

@@ -3,7 +3,6 @@ mod mux;
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::num::NonZeroU64;
 use kerlico_shared::runtime::NetworkConnection;
 use kerlico_vless::runtime::CarrierNetwork;
@@ -15,9 +14,9 @@ use kerlico_shared::{
     ClientEntry, Destination, InboundStream, OpenError, PlaneFault, Settings, Transport,
 };
 use kerlico_vless::{
-    client_config, client_key, client_keys, connect_native, connect_tls, decode_reality_key, decode_short_id, decode_udp, encode_request, encode_udp, encode_mux, decode_mux, reality_offer_hybrid, reality_reader, reality_writer, take_flight, AppReader, AppWriter, EncReader, EncWriter, RealityDuplex,
-    grpc_path, normalize_path, parse_id, Addr, Command, Request, TlsLink,
-    Vision, GrpcConnection, GrpcStream, HttpIo, H2Conn, H2Stream, KcpIo, read_packet_ack, read_response_head,
+    client_key, decode_reality_key, decode_short_id, decode_udp, encode_request, encode_udp, decode_mux, reality_reader, reality_writer, AppReader, AppWriter, EncReader, EncWriter,
+    grpc_path, normalize_path, parse_id, Addr, Command, Request,
+    GrpcConnection, GrpcStream, HttpIo, H2Conn, H2Request, H2Stream, KcpIo, read_packet_ack, read_response_head,
     ChunkReader, ChunkPair, MuxFrame, DATA, KEEP, NEW,
     XhttpBodyWriter, XhttpConfig, XhttpMode, XhttpRequest, XhttpRequestKind,
     HttpPrefaceRead, RawHttpConfig, UpgradeConfig, UpgradeRead, UpgradeWrite, upgrade_pair,
@@ -33,7 +32,7 @@ pub fn land(
     destination: &Destination,
 ) -> Result<Box<dyn InboundStream>, OpenError> {
     Ok(match open(host, port, settings, destination, None)? {
-        Opened::Relay(relay) => Box::new(relay),
+        Opened::Relay(relay) => relay,
         Opened::Mux(session) => Box::new(session),
         Opened::Reverse(bridge) => Box::new(Bridge::from_reverse(bridge)),
     })
@@ -68,7 +67,7 @@ pub struct UdpSession {
 }
 
 enum UdpCarrier {
-    Plain(Relay),
+    Plain(Box<Relay>),
     Mux(mux::Session),
 }
 
@@ -107,7 +106,7 @@ pub fn reverse_bridge(host: &str, port: u16, settings: &Settings) -> Result<Reve
 }
 
 enum Opened {
-    Relay(Relay),
+    Relay(Box<Relay>),
     Mux(mux::Session),
     Reverse(ReverseBridge),
 }
@@ -123,7 +122,7 @@ fn open(host: &str, port: u16, settings: &Settings, destination: &Destination, g
     Ok(match mux::route(flow, policy, destination)? {
         mux::Route::Direct(command) => {
             let (read, write) = connect(command)?;
-            Opened::Relay(Relay::new(read, write, command == Command::Udp))
+            Opened::Relay(Box::new(Relay::new(read, write, command == Command::Udp)))
         }
         mux::Route::Xudp => Opened::Mux(mux::Session::xudp(connect(Command::Mux)?, destination, global_id)?),
         mux::Route::Pooled(kind, concurrency) => Opened::Mux(
@@ -574,7 +573,7 @@ fn parse_addr(host: &str) -> Result<Addr, OpenError> {
 }
 
 enum Link {
-    Leased(Box<Link>, Arc<Vec<XhttpLease>>),
+    Leased { link: Box<Link>, _leases: Arc<Vec<XhttpLease>> },
     MaskedRead(kerlico_vless::MaskedRead),
     MaskedWrite(kerlico_vless::MaskedWrite),
     XdriveRead(kerlico_vless::xdrive::XdriveRead),
@@ -582,7 +581,8 @@ enum Link {
     HysteriaRead(kerlico_vless::HysteriaRead),
     HysteriaWrite(kerlico_vless::HysteriaWrite),
     H3(Arc<kerlico_vless::H3Stream>),
-    Tcp(TcpStream),
+    #[cfg(test)]
+    Tcp(std::net::TcpStream),
     TlsRead(Box<kerlico_vless::AdvancedTlsRead<Box<Link>>>),
     TlsWrite(Box<kerlico_vless::AdvancedTlsWrite<Box<Link>>>),
     HttpPrefaceRead(Box<HttpPrefaceRead<Box<Link>>>),
@@ -617,13 +617,6 @@ impl Write for HttpLink {
     fn flush(&mut self) -> std::io::Result<()> { self.write.flush() }
 }
 
-fn tcp_pair(socket: TcpStream, masks: &kerlico_vless::finalmask::FinalMask) -> std::io::Result<(Link, Link)> {
-    if masks.has_tcp() {
-        let (read, write) = kerlico_vless::mask_tcp(socket, masks, kerlico_vless::finalmask::Side::Client)?;
-        Ok((Link::MaskedRead(read), Link::MaskedWrite(write)))
-    } else { Ok((Link::Tcp(socket.try_clone()?), Link::Tcp(socket))) }
-}
-
 struct HttpDial {
     network: Option<Arc<CarrierNetwork>>,
     socket_options: SocketOptions,
@@ -653,7 +646,7 @@ impl HttpDial {
                 "public plaintext VLESS requires a trusted link or encryption",
             ));
         }
-        let (mut read, mut write) = carrier_pair(socket, &self.masks, peer)?;
+        let (read, write) = carrier_pair(socket, &self.masks, peer)?;
         if let Some(config) = &self.tls {
             let (read, write) = kerlico_vless::connect_advanced_tls_over(Box::new(read), Box::new(write), config.clone(), &self.name)?;
             let h2 = read.alpn().as_deref() == Some(b"h2");
@@ -675,7 +668,7 @@ impl HttpDial {
 }
 
 enum XhttpConnection {
-    H1(Option<HttpLink>),
+    H1(Box<Option<HttpLink>>),
     // Go's HTTP/2 transport dials another connection when the peer's stream limit is reached.
     H2(Vec<H2Conn<Link>>),
     H3(kerlico_vless::H3Conn),
@@ -822,7 +815,7 @@ impl XhttpEndpoint {
         if socket.h2() {
             return self.h2(socket).map(|conn| XhttpConnection::H2(vec![conn]));
         }
-        Ok(XhttpConnection::H1(Some(socket)))
+        Ok(XhttpConnection::H1(Box::new(Some(socket))))
     }
 
     fn h2(&self, socket: HttpLink) -> std::io::Result<H2Conn<Link>> {
@@ -840,7 +833,14 @@ impl XhttpEndpoint {
     ) -> std::io::Result<H2Stream<Link>> {
         let headers = request.header_pairs();
         let open = |conn: &H2Conn<Link>| {
-            conn.try_request(&request.method, &request.target, &self.authority, self.scheme, &headers, end, wait)
+            let target = H2Request {
+                method: &request.method,
+                path: &request.target,
+                authority: &self.authority,
+                scheme: self.scheme,
+                extra: &headers,
+            };
+            conn.try_request(&target, end, wait)
         };
         conns.retain(H2Conn::is_open);
         for conn in conns.iter() {
@@ -930,7 +930,7 @@ impl XhttpEndpoint {
                     &headers,
                     true,
                 )
-                .map(Xdown::H3),
+                .map(|stream| Xdown::H3(Box::new(stream))),
         }
     }
 }
@@ -1001,7 +1001,7 @@ fn open_xhttp(
                     _ => unreachable!("XHTTP streaming transport"),
                 };
             let leases = Arc::new(vec![upload_connection]);
-            return Ok((Link::Leased(Box::new(read), leases.clone()), Link::Leased(Box::new(write), leases)));
+            return Ok((Link::Leased { link: Box::new(read), _leases: leases.clone() }, Link::Leased { link: Box::new(write), _leases: leases }));
         }
 
         let session = upload.config.session_id()?;
@@ -1042,7 +1042,7 @@ fn open_xhttp(
             writer: Mutex::new(writer),
         });
         let leases = Arc::new(vec![upload_connection, download_connection]);
-        Ok((Link::Leased(Box::new(Link::Xhttp(client.clone())), leases.clone()), Link::Leased(Box::new(Link::Xhttp(client)), leases)))
+        Ok((Link::Leased { link: Box::new(Link::Xhttp(client.clone())), _leases: leases.clone() }, Link::Leased { link: Box::new(Link::Xhttp(client)), _leases: leases }))
     };
     open().map_err(|_| OpenError::Transport)
 }
@@ -1050,7 +1050,7 @@ fn open_xhttp(
 enum Xdown {
     H1(ChunkReader),
     H2(H2Stream<Link>),
-    H3(kerlico_vless::H3Stream),
+    H3(Box<kerlico_vless::H3Stream>),
 }
 
 impl Xdown {
@@ -1257,7 +1257,7 @@ impl XhttpPacketUpload {
                     result => result?,
                 };
                 if keep {
-                    *slot = Some(socket);
+                    **slot = Some(socket);
                 }
             }
             XhttpConnection::H2(conns) => {
@@ -1303,7 +1303,7 @@ impl Link {
 
     fn set_timeout(&mut self, timeout: Duration) {
         match self {
-            Self::Leased(inner, _) => inner.set_timeout(timeout),
+            Self::Leased { link: inner, .. } => inner.set_timeout(timeout),
             Self::MaskedRead(link) => link.set_timeout(timeout),
             Self::MaskedWrite(link) => link.set_timeout(timeout),
             Self::XdriveRead(io) => io.set_timeout(Some(timeout)),
@@ -1311,6 +1311,7 @@ impl Link {
             Self::HysteriaRead(io) => io.set_timeout(timeout),
             Self::HysteriaWrite(io) => io.set_timeout(timeout),
             Self::H3(io) => io.set_timeout(timeout),
+            #[cfg(test)]
             Self::Tcp(tcp) => {
                 tcp.set_read_timeout(Some(timeout)).ok();
                 tcp.set_write_timeout(Some(timeout)).ok();
@@ -1340,13 +1341,14 @@ impl Link {
 impl Read for Link {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
-            Self::Leased(inner, _) => inner.read(buf),
+            Self::Leased { link: inner, .. } => inner.read(buf),
             Self::MaskedRead(link) => link.read(buf),
             Self::MaskedWrite(_) => Err(std::io::ErrorKind::Unsupported.into()),
             Self::XdriveRead(io) => io.read(buf),
             Self::HysteriaRead(io) => io.read(buf),
             Self::H3(io) => io.read(buf),
             Self::XdriveWrite(_) | Self::HysteriaWrite(_) => Err(std::io::Error::other("write half")),
+            #[cfg(test)]
             Self::Tcp(tcp) => tcp.read(buf),
             Self::TlsRead(tls) => tls.read(buf),
             Self::TlsWrite(_) => Err(std::io::Error::other("write half")),
@@ -1373,13 +1375,14 @@ impl Read for Link {
 impl Write for Link {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
-            Self::Leased(inner, _) => inner.write(buf),
+            Self::Leased { link: inner, .. } => inner.write(buf),
             Self::MaskedWrite(link) => link.write(buf),
             Self::MaskedRead(_) => Err(std::io::ErrorKind::Unsupported.into()),
             Self::XdriveWrite(io) => io.write(buf),
             Self::HysteriaWrite(io) => io.write(buf),
             Self::H3(io) => io.write(buf),
             Self::XdriveRead(_) | Self::HysteriaRead(_) => Err(std::io::Error::other("read half")),
+            #[cfg(test)]
             Self::Tcp(tcp) => tcp.write(buf),
             Self::TlsWrite(tls) => tls.write(buf),
             Self::TlsRead(_) => Err(std::io::Error::other("read half")),
@@ -1403,13 +1406,14 @@ impl Write for Link {
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            Self::Leased(inner, _) => inner.flush(),
+            Self::Leased { link: inner, .. } => inner.flush(),
             Self::MaskedWrite(link) => link.flush(),
             Self::MaskedRead(_) => Ok(()),
             Self::XdriveWrite(io) => io.flush(),
             Self::HysteriaWrite(io) => io.flush(),
             Self::H3(io) => io.flush(),
             Self::XdriveRead(_) | Self::HysteriaRead(_) => Ok(()),
+            #[cfg(test)]
             Self::Tcp(tcp) => tcp.flush(),
             Self::TlsWrite(tls) => tls.flush(),
             Self::TlsRead(_) => Ok(()),
@@ -2046,8 +2050,8 @@ fn map_io(error: std::io::Error) -> PlaneFault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kerlico_vless::{decode_request, encode_response, Response};
-    use std::net::TcpListener;
+    use kerlico_vless::{decode_request, encode_mux, encode_response, Response};
+    use std::net::{TcpListener, TcpStream};
 
     fn reverse_fixture() -> (ReverseBridge, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2425,7 +2429,7 @@ mod tests {
             writer.write_all(b"ok").unwrap();
         });
         let mut settings = Settings::default();
-        settings.insert_text("encryption", &kerlico_vless::encode_key("mlkem768x25519plus.native.1rtt.", &public));
+        settings.insert_text("encryption", kerlico_vless::encode_key("mlkem768x25519plus.native.1rtt.", &public));
         settings.insert_text("id", "我爱🍉老师1314");
         let destination = Destination::new("example.com", 443, Transport::Tcp).unwrap();
         let stream = land("127.0.0.1", port, &settings, &destination).unwrap();
@@ -2469,7 +2473,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.insert_text("encryption", "none");
         settings.insert_text("security", "reality");
-        settings.insert_text("publicKey", &kerlico_vless::encode_reality_key(&public));
+        settings.insert_text("publicKey", kerlico_vless::encode_reality_key(&public));
         settings.insert_text("shortId", "0102030405060708");
         settings.insert_text("serverName", "www.example.com");
         settings.insert_text("id", "我爱🍉老师1314");
@@ -2739,7 +2743,7 @@ mod tests {
         settings.insert_text("network", "grpc");
         settings.insert_text("serviceName", "GunService");
         settings.insert_text("security", "reality");
-        settings.insert_text("publicKey", &kerlico_vless::encode_reality_key(&public));
+        settings.insert_text("publicKey", kerlico_vless::encode_reality_key(&public));
         settings.insert_text("shortId", "0102030405060708");
         settings.insert_text("serverName", "www.example.com");
         settings.insert_text("id", "我爱🍉老师1314");
@@ -2911,7 +2915,7 @@ mod tests {
         settings.insert_text("path", "/xh");
         settings.insert_text("host", "example.com");
         settings.insert_text("security", "reality");
-        settings.insert_text("publicKey", &kerlico_vless::encode_reality_key(&public));
+        settings.insert_text("publicKey", kerlico_vless::encode_reality_key(&public));
         settings.insert_text("shortId", "0102030405060708");
         settings.insert_text("serverName", "example.com");
         settings.insert_text("id", "我爱🍉老师1314");
@@ -2980,7 +2984,7 @@ mod tests {
         settings.insert_text("path", "/xh");
         settings.insert_text("host", "example.com");
         settings.insert_text("security", "reality");
-        settings.insert_text("publicKey", &kerlico_vless::encode_reality_key(&public));
+        settings.insert_text("publicKey", kerlico_vless::encode_reality_key(&public));
         settings.insert_text("shortId", "0102030405060708");
         settings.insert_text("serverName", "example.com");
         settings.insert_text("id", "我爱🍉老师1314");
@@ -3046,7 +3050,7 @@ mod tests {
         settings.insert_text("path", "/xh");
         settings.insert_text("host", "example.com");
         settings.insert_text("security", "reality");
-        settings.insert_text("publicKey", &kerlico_vless::encode_reality_key(&public));
+        settings.insert_text("publicKey", kerlico_vless::encode_reality_key(&public));
         settings.insert_text("shortId", "0102030405060708");
         settings.insert_text("serverName", "example.com");
         settings.insert_text("id", "我爱🍉老师1314");

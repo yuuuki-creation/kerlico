@@ -491,7 +491,7 @@ fn browser_hello_fields_match_pinned_xray_captures() {
         let length = word(&bytes[p..]) as usize;
         p += 2;
         let ciphers: Vec<_> = bytes[p..p + length]
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|b| grease(word(b)))
             .collect();
         p += length;
@@ -512,7 +512,7 @@ fn browser_hello_fields_match_pinned_xray_captures() {
                 10 | 13 | 43 => {
                     let start = if id == 43 { 1 } else { 2 };
                     let values: Vec<_> = data[start..]
-                        .chunks_exact(2)
+                        .as_chunks::<2>().0.iter()
                         .map(|b| grease(word(b)))
                         .collect();
                     extension = json!({"id":id,"values":values});

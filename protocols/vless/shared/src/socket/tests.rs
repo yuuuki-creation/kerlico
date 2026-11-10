@@ -5,13 +5,15 @@ use std::net::{TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+type Lookup = (String, u16, Option<AddressFamily>, ResolutionSource);
+
 #[derive(Default)]
 struct Resolver {
     configured: Vec<IpAddr>,
     system: Vec<IpAddr>,
     srv: Vec<SrvRecord>,
     txt: Vec<String>,
-    lookups: RefCell<Vec<(String, u16, Option<AddressFamily>, ResolutionSource)>>,
+    lookups: RefCell<Vec<Lookup>>,
 }
 
 impl TransportResolver for Resolver {

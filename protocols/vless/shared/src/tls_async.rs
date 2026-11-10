@@ -14,6 +14,7 @@ use crate::{
 };
 
 /// Dropping a pending handshake closes its socket.
+#[cfg(test)]
 pub(crate) async fn connect_async_tls(
     tcp: TcpStream,
     config: Arc<AdvancedTlsClientConfig>,

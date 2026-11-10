@@ -656,8 +656,9 @@ mod tests {
         let (kind, flags, settings) = frame(&mut peer);
         assert_eq!((kind, flags), (4, 0));
         assert!(settings
-            .chunks_exact(6)
-            .any(|setting| setting == [0, 4, 0, 2, 0, 0]));
+            .as_chunks::<6>()
+            .0
+            .contains(&[0, 4, 0, 2, 0, 0]));
         peer.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).unwrap();
         assert_eq!(frame(&mut peer), (4, 1, Vec::new()));
 

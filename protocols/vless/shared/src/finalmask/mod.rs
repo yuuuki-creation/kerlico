@@ -384,10 +384,10 @@ fn decode_bytes(value: Value, kind: &str) -> io::Result<Vec<u8>> {
         "base64" => base64(string()?),
         "hex" => {
             let bytes = string()?.as_bytes();
-            if bytes.len() % 2 != 0 {
+            if !bytes.len().is_multiple_of(2) {
                 return Err(invalid("odd hexadecimal packet length"));
             }
-            bytes.chunks_exact(2).map(|pair| {
+            bytes.as_chunks::<2>().0.iter().map(|pair| {
                 let digit = |b: u8| char::from(b).to_digit(16).map(|n| n as u8).ok_or_else(|| invalid("invalid hexadecimal packet"));
                 Ok(digit(pair[0])? << 4 | digit(pair[1])?)
             }).collect()

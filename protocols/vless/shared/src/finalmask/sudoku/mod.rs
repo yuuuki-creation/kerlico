@@ -291,56 +291,6 @@ impl Write for Writer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::finalmask::wire_writer::tests::Pause;
-    use std::io::Cursor;
-
-    #[test]
-    fn both_stream_directions_retry_at_every_wire_offset() {
-        let sudoku = Sudoku::parse(serde_json::json!({
-            "password": "backpressure fixture",
-            "customTables": ["xxppvvvv", "pvpvvxvx", ""]
-        })).unwrap();
-        let data = b"payload";
-        for (side, opposite, length) in [(Side::Client, Side::Server, 28), (Side::Server, Side::Client, 11)] {
-            for at in 0..length {
-                let wire = Arc::new(Mutex::new(Vec::new()));
-                let kind = if at % 2 == 0 { io::ErrorKind::WouldBlock } else { io::ErrorKind::TimedOut };
-                let pause = Pause { at: Some(at), kind, wire: wire.clone() };
-                let (_, mut send) = sudoku.tcp((Box::new(io::empty()), Box::new(pause)), side);
-                assert_eq!(send.write(data).unwrap_err().kind(), kind);
-                assert_eq!(wire.lock().unwrap().len(), at);
-                if at % 2 == 1 {
-                    send.flush().unwrap();
-                }
-                assert_eq!(send.write(data).unwrap(), data.len());
-                assert_eq!(wire.lock().unwrap().len(), length);
-                send.write_all(b" after retry").unwrap();
-                send.flush().unwrap();
-
-                let wire = wire.lock().unwrap().clone();
-                let (mut read, _) = sudoku.tcp((Box::new(Cursor::new(wire)), Box::new(io::sink())), opposite);
-                let mut recovered = Vec::new();
-                read.read_to_end(&mut recovered).unwrap();
-                assert_eq!(recovered, b"payload after retry", "{side:?} paused after {at} wire bytes");
-            }
-        }
-    }
-
-    #[test]
-    fn a_fatal_short_write_closes_the_encoded_stream() {
-        let sudoku = Sudoku::parse(serde_json::json!({"password":"backpressure fixture"})).unwrap();
-        let wire = Arc::new(Mutex::new(Vec::new()));
-        let pause = Pause { at: Some(3), kind: io::ErrorKind::OutOfMemory, wire: wire.clone() };
-        let (_, mut send) = sudoku.tcp((Box::new(io::empty()), Box::new(pause)), Side::Client);
-        assert_eq!(send.write(b"payload").unwrap_err().kind(), io::ErrorKind::OutOfMemory);
-        assert_eq!(send.write(b"payload").unwrap_err().kind(), io::ErrorKind::BrokenPipe);
-        assert_eq!(wire.lock().unwrap().len(), 3);
-    }
-}
-
 struct Packets {
     inner: Arc<dyn PacketIo>,
     config: Sudoku,
@@ -388,5 +338,55 @@ impl PacketIo for Packets {
             return Err(io::Error::new(io::ErrorKind::WriteZero, "partial Sudoku datagram"));
         }
         Ok(packet.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::finalmask::wire_writer::tests::Pause;
+    use std::io::Cursor;
+
+    #[test]
+    fn both_stream_directions_retry_at_every_wire_offset() {
+        let sudoku = Sudoku::parse(serde_json::json!({
+            "password": "backpressure fixture",
+            "customTables": ["xxppvvvv", "pvpvvxvx", ""]
+        })).unwrap();
+        let data = b"payload";
+        for (side, opposite, length) in [(Side::Client, Side::Server, 28), (Side::Server, Side::Client, 11)] {
+            for at in 0..length {
+                let wire = Arc::new(Mutex::new(Vec::new()));
+                let kind = if at % 2 == 0 { io::ErrorKind::WouldBlock } else { io::ErrorKind::TimedOut };
+                let pause = Pause { at: Some(at), kind, wire: wire.clone() };
+                let (_, mut send) = sudoku.tcp((Box::new(io::empty()), Box::new(pause)), side);
+                assert_eq!(send.write(data).unwrap_err().kind(), kind);
+                assert_eq!(wire.lock().unwrap().len(), at);
+                if at % 2 == 1 {
+                    send.flush().unwrap();
+                }
+                assert_eq!(send.write(data).unwrap(), data.len());
+                assert_eq!(wire.lock().unwrap().len(), length);
+                send.write_all(b" after retry").unwrap();
+                send.flush().unwrap();
+
+                let wire = wire.lock().unwrap().clone();
+                let (mut read, _) = sudoku.tcp((Box::new(Cursor::new(wire)), Box::new(io::sink())), opposite);
+                let mut recovered = Vec::new();
+                read.read_to_end(&mut recovered).unwrap();
+                assert_eq!(recovered, b"payload after retry", "{side:?} paused after {at} wire bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn a_fatal_short_write_closes_the_encoded_stream() {
+        let sudoku = Sudoku::parse(serde_json::json!({"password":"backpressure fixture"})).unwrap();
+        let wire = Arc::new(Mutex::new(Vec::new()));
+        let pause = Pause { at: Some(3), kind: io::ErrorKind::OutOfMemory, wire: wire.clone() };
+        let (_, mut send) = sudoku.tcp((Box::new(io::empty()), Box::new(pause)), Side::Client);
+        assert_eq!(send.write(b"payload").unwrap_err().kind(), io::ErrorKind::OutOfMemory);
+        assert_eq!(send.write(b"payload").unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(wire.lock().unwrap().len(), 3);
     }
 }

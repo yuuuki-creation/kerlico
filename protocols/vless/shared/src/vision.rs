@@ -166,7 +166,7 @@ impl Vision {
             let end = (self.remaining_hello as usize).min(buf.len());
             self.remaining_hello -= buf.len() as i32;
             if buf[..end].windows(TLS13.len()).any(|window| window == TLS13) {
-                if matches!(self.cipher, 0x1301 | 0x1302 | 0x1303 | 0x1304) {
+                if matches!(self.cipher, 0x1301..=0x1304) {
                     self.enable_xtls = true;
                 }
                 self.packets_left = 0;

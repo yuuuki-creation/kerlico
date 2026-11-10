@@ -482,7 +482,7 @@ pub(super) fn configure_connection(
             }
             18 => ssl.enable_signed_cert_timestamps(),
             27 => {
-                for algorithm in data.get(1..).unwrap_or_default().chunks_exact(2) {
+                for algorithm in data.get(1..).unwrap_or_default().as_chunks::<2>().0 {
                     compression.push(match u16::from_be_bytes([algorithm[0], algorithm[1]]) {
                         1 => Compression::ZLIB,
                         2 => Compression::BROTLI,
@@ -501,7 +501,7 @@ pub(super) fn configure_connection(
                 let schemes: Vec<_> = data
                     .get(2..)
                     .unwrap_or_default()
-                    .chunks_exact(2)
+                    .as_chunks::<2>().0.iter()
                     .map(|v| SslSignatureAlgorithm::from(u16::from_be_bytes([v[0], v[1]])))
                     .collect();
                 ssl.set_delegated_credential_schemes(&schemes)
@@ -867,7 +867,7 @@ fn shuffle_extensions<T>(items: &mut [T], id: impl Fn(&T) -> u16) -> io::Result<
 fn hex(value: &str) -> io::Result<Vec<u8>> {
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|pair| {
             let high = (pair[0] as char)
                 .to_digit(16)

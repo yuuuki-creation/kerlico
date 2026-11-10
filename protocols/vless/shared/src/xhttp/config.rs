@@ -188,7 +188,7 @@ impl XhttpConfig {
         {
             return Err(setting_error("sessionIDTable or sessionIDLength"));
         }
-        let padding = Padding::parse(&field)?;
+        let padding = Padding::parse(field)?;
         let uplink_data = match field("uplinkDataPlacement").as_str() {
             "" | "auto" => UplinkData::Auto,
             "body" => UplinkData::Body,

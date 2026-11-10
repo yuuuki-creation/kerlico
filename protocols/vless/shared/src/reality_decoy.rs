@@ -107,8 +107,8 @@ pub(super) fn verify_signature(
         if header[..2] == [0, 13] {
             offered = data.get(2..).is_some_and(|values| {
                 values
-                    .chunks_exact(2)
-                    .any(|value| value == scheme.to_be_bytes())
+                    .as_chunks::<2>().0.iter()
+                    .any(|value| *value == scheme.to_be_bytes())
             });
         }
         extensions = &extensions[4 + length..];

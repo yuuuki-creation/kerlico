@@ -39,12 +39,12 @@ pub use reality::{auth_key, decode_reality_key, decode_short_id, encode_reality_
 pub use reality_tls::{client_keys, read_client_finished, read_server_flight, read_server_flight_with_alpn, reader as reality_reader, server_flight, server_flight_with_alpn, take_flight, writer as reality_writer, AppReader, AppWriter, RealityDuplex, ServerHello};
 pub use grpc::{grpc_path, GrpcConnection, GrpcOptions, GrpcStream};
 pub use kcp::{kcp_mask, KcpIo, KcpMask, KcpOptions, Session};
-pub use http::{goaway_frame, H2Conn, H2Limits, H2Stream, HttpIo, SharedHttp, HTTP2_PREFACE, INADEQUATE_SECURITY};
+pub use http::{goaway_frame, H2Conn, H2Limits, H2Request, H2Stream, HttpIo, SharedHttp, HTTP2_PREFACE, INADEQUATE_SECURITY};
 pub use h2_params::{h2_tls_rejection, H2Params};
 pub use header::{decode_request, decode_response, encode_request, encode_response, Addr, Command, Request, Response};
 pub use mux::{control_frame, control_keep, control_state, decode_mux, encode_mux, heartbeat_due, session_frame, xudp_global_id, MuxFrame, MuxWriter, DATA, END, KEEP, KEEPALIVE, NEW};
 pub use header::{decode_udp, encode_udp, HeaderError};
-pub use tls::{accept_tls, accept_tls_split, accept_tls_over, client_config, client_config_pinned, client_config_versions, connect_tls, connect_tls_split, connect_tls_over, server_config, server_config_versions, ClientConfig, ServerConfig, TlsLink, TlsRead, TlsWrite};
+pub use tls::{accept_tls, accept_tls_split, accept_tls_over, client_config, client_config_pinned, client_config_versions, connect_tls, connect_tls_split, connect_tls_over, server_config, server_config_versions, ClientConfig, ServerConfig, TlsConfigError, TlsLink, TlsRead, TlsWrite};
 pub use upgrade::{
     header_value, host_matches, normalize_path, take_upgrade_request, take_upgrade_response, upgrade_request,
     upgrade_pair, upgrade_response, UpgradeConfig, UpgradeError, UpgradeRead, UpgradeWrite,

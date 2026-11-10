@@ -157,6 +157,7 @@ impl SendFailure {
 }
 
 impl ServiceHttp {
+    #[cfg(test)]
     pub fn new(options: XdriveHttpOptions, redirects: Redirects) -> io::Result<Self> {
         let config = crate::xmux::XmuxConfig::xdrive(None, false, options.quic.is_some())?;
         Self::configured(options, redirects, config, 32)
@@ -238,7 +239,7 @@ impl ServiceHttp {
                     )
                 });
             }
-            if matches!(reply.status, 301 | 302 | 303) && !matches!(method, "GET" | "HEAD") {
+            if matches!(reply.status, 301..=303) && !matches!(method, "GET" | "HEAD") {
                 method = "GET";
                 body = &[];
                 headers.remove("content-length");
@@ -277,7 +278,7 @@ impl ServiceHttp {
         if url.scheme() == "https"
             && self.options.quic.is_some()
         {
-            return self.h3(&client, &key, method, url, authority, &headers, body);
+            return self.h3(&client, &key, method, url, &headers, body);
         }
         let run = async {
             let conn = self.connection(&client, &key, url).await?;
@@ -304,10 +305,10 @@ impl ServiceHttp {
         key: &str,
         method: &str,
         url: &Url,
-        authority: &str,
         headers: &Headers,
         body: &[u8],
     ) -> io::Result<HttpReply> {
+        let authority = &url[Position::BeforeHost..Position::AfterPort];
         let cached = client
             .h3_connections
             .lock()

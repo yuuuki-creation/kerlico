@@ -175,9 +175,11 @@ type Sessions = Arc<Mutex<HashMap<String, SslSession>>>;
 
 /// Keep this factory with the node or outbound settings across separate dials.
 /// The key includes all TLS policy, loaded certificate contents and provider identity.
+type CacheKey = (Vec<u8>, usize);
+
 #[derive(Default)]
 pub struct AdvancedTlsClientCache {
-    entries: Mutex<HashMap<(Vec<u8>, usize), Arc<AdvancedTlsClientConfig>>>,
+    entries: Mutex<HashMap<CacheKey, Arc<AdvancedTlsClientConfig>>>,
 }
 
 impl AdvancedTlsClientCache {

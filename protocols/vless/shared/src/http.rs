@@ -711,7 +711,7 @@ impl H2State {
         let id = block.stream;
         let headers = decode_headers(&mut self.decoder, &block.bytes, self.header_limit, self.limits.decoder_table as usize)?;
         if !self.closed_stream(id) {
-            if !self.server || id % 2 == 0 {
+            if !self.server || id.is_multiple_of(2) {
                 return Err(protocol_error("HTTP/2 HEADERS on invalid stream"));
             }
             self.last_peer = id;
@@ -768,10 +768,10 @@ impl H2State {
                 Err(protocol_error("HTTP/2 SETTINGS ACK payload"))
             };
         }
-        if payload.len() % 6 != 0 {
+        if !payload.len().is_multiple_of(6) {
             return Err(protocol_error("HTTP/2 SETTINGS length"));
         }
-        for setting in payload.chunks_exact(6) {
+        for setting in payload.as_chunks::<6>().0.iter() {
             let id = u16::from_be_bytes(setting[..2].try_into().unwrap());
             let value = u32::from_be_bytes(setting[2..].try_into().unwrap());
             match id {
@@ -846,21 +846,25 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
-fn header_list<'a>(
-    method: &'a str,
-    path: &'a str,
-    authority: &'a str,
-    scheme: &'a str,
-    extra: &'a [(&str, &str)],
-) -> Vec<(&'a str, &'a str)> {
-    let mut headers = vec![
-        (":method", method),
-        (":scheme", scheme),
-        (":path", path),
-        (":authority", authority),
-    ];
-    headers.extend_from_slice(extra);
-    headers
+pub struct H2Request<'a> {
+    pub method: &'a str,
+    pub path: &'a str,
+    pub authority: &'a str,
+    pub scheme: &'a str,
+    pub extra: &'a [(&'a str, &'a str)],
+}
+
+impl<'a> H2Request<'a> {
+    fn header_list(&self) -> Vec<(&'a str, &'a str)> {
+        let mut headers = vec![
+            (":method", self.method),
+            (":scheme", self.scheme),
+            (":path", self.path),
+            (":authority", self.authority),
+        ];
+        headers.extend_from_slice(self.extra);
+        headers
+    }
 }
 
 fn setting(settings: &mut Vec<u8>, id: u16, value: u32) {
@@ -1106,7 +1110,7 @@ impl<T: Read + Write> HttpIo<T> {
     ) -> io::Result<Self> {
         let mut state = H2State::new(false, true, 1);
         let id = state
-            .open(&header_list(method, path, authority, scheme, extra), false)?
+            .open(&H2Request { method, path, authority, scheme, extra }.header_list(), false)?
             .expect("initial stream");
         let mut io = Self { inner, state, id };
         io.flush_out()?;
@@ -1469,7 +1473,7 @@ impl<W: Write + Send + 'static> H2Conn<W> {
         &self, method: &str, path: &str, authority: &str, scheme: &str,
         extra: &[(&str, &str)], end: bool,
     ) -> io::Result<H2Stream<W>> {
-        let stream = self.request(method, path, authority, scheme, extra, end, false)?;
+        let stream = self.request(&H2Request { method, path, authority, scheme, extra }, end, false)?;
         self.shared.state.lock().expect("HTTP/2 state").streams.get_mut(&stream.id).expect("open stream").any_status = true;
         self.shared.drive(|state| state.status(stream.id))?;
         Ok(stream)
@@ -1587,34 +1591,16 @@ impl<W: Write + Send + 'static> H2Conn<W> {
         extra: &[(&str, &str)],
         wait: bool,
     ) -> io::Result<H2Stream<W>> {
-        self.request(method, path, authority, scheme, extra, method == "GET", wait)
+        self.request(&H2Request { method, path, authority, scheme, extra }, method == "GET", wait)
     }
 
-    pub fn request(
-        &self,
-        method: &str,
-        path: &str,
-        authority: &str,
-        scheme: &str,
-        extra: &[(&str, &str)],
-        end: bool,
-        wait: bool,
-    ) -> io::Result<H2Stream<W>> {
-        self.request_with_headers(&header_list(method, path, authority, scheme, extra), end, wait, None)
+    pub fn request(&self, request: &H2Request<'_>, end: bool, wait: bool) -> io::Result<H2Stream<W>> {
+        self.request_with_headers(&request.header_list(), end, wait, None)
     }
 
     /// Like `request`, but a peer at its concurrent-stream limit gives `None` at once instead of a wait.
-    pub fn try_request(
-        &self,
-        method: &str,
-        path: &str,
-        authority: &str,
-        scheme: &str,
-        extra: &[(&str, &str)],
-        end: bool,
-        wait: bool,
-    ) -> io::Result<Option<H2Stream<W>>> {
-        let headers = header_list(method, path, authority, scheme, extra);
+    pub fn try_request(&self, request: &H2Request<'_>, end: bool, wait: bool) -> io::Result<Option<H2Stream<W>>> {
+        let headers = request.header_list();
         let opened = self.shared.drive(|state| {
             state.check_goaway()?;
             if !state.settings_received {
@@ -2102,7 +2088,7 @@ mod tests {
         let (kind, _, id, payload) = next_frame(&mut wire);
         assert_eq!((kind, id), (SETTINGS, 0));
         let mut settings: Vec<_> = payload
-            .chunks_exact(6)
+            .as_chunks::<6>().0.iter()
             .map(|pair| (u16::from_be_bytes([pair[0], pair[1]]), u32::from_be_bytes(pair[2..].try_into().unwrap())))
             .collect();
         settings.sort_unstable();

@@ -164,7 +164,7 @@ impl Rules {
 
 fn reverse(text: &str) -> (&str, bool) {
     let value = text.trim_start_matches('!');
-    (value, (text.len() - value.len()) % 2 != 0)
+    (value, !(text.len() - value.len()).is_multiple_of(2))
 }
 
 #[derive(Default, Deserialize)]

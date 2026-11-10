@@ -36,13 +36,15 @@ pub struct RealityClientFlight {
     pub alpn: Option<Vec<u8>>,
 }
 
+pub type ServerFlight = (Traffic, Traffic, Vec<u8>, Option<Vec<u8>>);
+
 pub enum RealityClientResult {
     Verified(RealityClientFlight),
     Decoy(RealityClientFlight),
 }
 
 impl RealityClientResult {
-    fn verified(self) -> io::Result<(Traffic, Traffic, Vec<u8>, Option<Vec<u8>>)> {
+    fn verified(self) -> io::Result<ServerFlight> {
         match self {
             Self::Verified(flight) => Ok((flight.read, flight.write, flight.finished, flight.alpn)),
             Self::Decoy(_) => Err(invalid_record()),
@@ -140,8 +142,8 @@ impl Transcript {
 }
 
 enum RecordCipher {
-    Aes128(Aes128Gcm),
-    Aes256(Aes256Gcm),
+    Aes128(Box<Aes128Gcm>),
+    Aes256(Box<Aes256Gcm>),
     ChaCha(ChaCha20Poly1305),
 }
 
@@ -279,10 +281,10 @@ fn server_flight_impl<P: AsRef<str>>(
         .or_else(|| {
             Suite::PREFERENCE
                 .into_iter()
-                .find(|suite| offered_suites.chunks_exact(2).any(|id| id == suite.id()))
+                .find(|suite| offered_suites.as_chunks::<2>().0.contains(&suite.id()))
         })
         .ok_or_else(invalid_record)?;
-    if !offered_suites.chunks_exact(2).any(|id| id == suite.id()) {
+    if !offered_suites.as_chunks::<2>().0.contains(&suite.id()) {
         return Err(invalid_record());
     }
     let offered_alpn = client_alpn(hello).ok_or_else(invalid_record)?;
@@ -420,7 +422,7 @@ pub fn read_server_flight_with_alpn<R: Read>(
     client_secret: &[u8; 32],
     kem_secret: Option<&[u8]>,
     server_public: &[u8; 32],
-) -> io::Result<(Traffic, Traffic, Vec<u8>, Option<Vec<u8>>)> {
+) -> io::Result<ServerFlight> {
     read_server_flight_with_auth(
         reader,
         record,
@@ -438,7 +440,7 @@ pub fn read_server_flight_with_auth<R: Read>(
     kem_secret: Option<&[u8]>,
     server_public: &[u8; 32],
     proof: Option<&RealityMldsa65Verifier>,
-) -> io::Result<(Traffic, Traffic, Vec<u8>, Option<Vec<u8>>)> {
+) -> io::Result<ServerFlight> {
     read_server_flight_impl(
         reader,
         record,
@@ -456,7 +458,7 @@ pub fn read_server_flight_for_offer<R: Read>(
     offer: &crate::reality::RealityOffer,
     server_public: &[u8; 32],
     proof: Option<&RealityMldsa65Verifier>,
-) -> io::Result<(Traffic, Traffic, Vec<u8>, Option<Vec<u8>>)> {
+) -> io::Result<ServerFlight> {
     read_server_flight_impl(
         reader,
         &offer.record,
@@ -507,8 +509,9 @@ fn read_server_flight_impl<R: Read>(
         server_share(&server_hello, &hello[39..71]).ok_or_else(invalid_record)?;
     if !client_suites(hello)
         .ok_or_else(invalid_record)?
-        .chunks_exact(2)
-        .any(|id| id == suite.id())
+        .as_chunks::<2>()
+        .0
+        .contains(&suite.id())
     {
         return Err(invalid_record());
     }
@@ -1341,8 +1344,8 @@ fn traffic_keys(suite: Suite, secret: &[u8]) -> Traffic {
     let key = expand_label(suite, secret, "key", &[], key_len);
     let iv = expand_label(suite, secret, "iv", &[], 12);
     let cipher = match suite {
-        Suite::Aes128 => RecordCipher::Aes128(Aes128Gcm::new_from_slice(&key).expect("key")),
-        Suite::Aes256 => RecordCipher::Aes256(Aes256Gcm::new_from_slice(&key).expect("key")),
+        Suite::Aes128 => RecordCipher::Aes128(Box::new(Aes128Gcm::new_from_slice(&key).expect("key"))),
+        Suite::Aes256 => RecordCipher::Aes256(Box::new(Aes256Gcm::new_from_slice(&key).expect("key"))),
         Suite::ChaCha => RecordCipher::ChaCha(ChaCha20Poly1305::new_from_slice(&key).expect("key")),
     };
     Traffic {
@@ -1606,8 +1609,8 @@ mod tests {
             hello[44..76].fill(0);
             let plain = open_session(&auth, &hello[5..], &random, &sealed).unwrap();
             let len = client_suites(&hello[5..]).unwrap().len();
-            for id in hello[78..78 + len].chunks_exact_mut(2) {
-                if id[0] == 0x13 && id != suite.id() {
+            for id in hello[78..78 + len].as_chunks_mut::<2>().0 {
+                if id[0] == 0x13 && *id != suite.id() {
                     id[0] = 0x2a;
                     id[1] = 0x2a;
                 }

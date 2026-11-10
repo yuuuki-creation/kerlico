@@ -14,6 +14,8 @@ pub(crate) const CHROME_HINT: &str =
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+// Deserialization intermediate that `RawHttpConfig::parse` destructures at once; boxing would only add allocations.
+#[allow(clippy::large_enum_variant)]
 enum Config {
     None,
     Http {

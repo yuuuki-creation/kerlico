@@ -373,10 +373,12 @@ enum ReadSide<R, W> {
     WebSocket(WsRead<R, W>),
 }
 
+type ReadMap<R> = Box<dyn FnOnce(&mut R) + Send>;
+
 pub struct UpgradeRead<R, W> {
     ready: mpsc::Receiver<ReadSide<R, W>>,
     open: Option<ReadSide<R, W>>,
-    map: Option<Box<dyn FnOnce(&mut R) + Send>>,
+    map: Option<ReadMap<R>>,
 }
 
 enum WriteSide<W> {
@@ -844,7 +846,7 @@ mod tests {
     fn raw_start_sends_the_request_before_any_payload() {
         for (websocket, ed) in [(false, 2048), (false, 0), (true, 2048)] {
             let headers = r#"{"x-custom":"fixture","User-Agent":"fixture-agent","Sec-WebSocket-Key":"custom-upgrade-key"}"#;
-            let config = UpgradeConfig::new(websocket, &format!("/carrier?ed={ed}&q=1"), "", "cover.example", Some(headers).filter(|_| !websocket)).unwrap();
+            let config = UpgradeConfig::new(websocket, &format!("/carrier?ed={ed}&q=1"), "", "cover.example", (!websocket).then_some(headers)).unwrap();
             let wire = Rc::new(RefCell::new(Vec::new()));
             let peer = Peer { request: wire.clone(), response: None, websocket, early: ed != 0 };
             let (mut read, mut write) = upgrade_pair(peer, Capture(wire.clone()), config);

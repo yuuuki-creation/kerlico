@@ -248,7 +248,7 @@ impl XdriveListener {
                 .drive
                 .storage
                 .slots()
-                .and_then(|_| entry.inline.as_deref())
+                .and(entry.inline.as_deref())
                 .and_then(ring::Ring::decode);
             let connection = self.drive.open(id, false, ring, Some(guard))?;
             self.handled.insert(id.into(), Instant::now());
@@ -741,6 +741,8 @@ impl Write for XdriveWrite {
     }
 }
 
+type SegmentStore<'a> = dyn FnMut(u64, ObjectKind, &[u8]) -> io::Result<()> + 'a;
+
 fn write_chunks(
     params: Params,
     input: &mpsc::Receiver<WriteItem>,
@@ -750,7 +752,7 @@ fn write_chunks(
     let mut seq = 0;
     let mut bytes = Vec::new();
     let mut due = None;
-    let flush = |store: &mut dyn FnMut(u64, ObjectKind, &[u8]) -> io::Result<()>,
+    let flush = |store: &mut SegmentStore<'_>,
                  seq: &mut u64,
                  bytes: &mut Vec<u8>,
                  len: usize|

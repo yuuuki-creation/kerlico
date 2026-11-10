@@ -142,7 +142,7 @@ impl<T> XmuxLease<T> {
 
     pub fn request(&self) -> bool {
         if self.client.deadline.is_some_and(|deadline| Instant::now() >= deadline) { return false; }
-        self.client.requests.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| (remaining > 0).then_some(remaining - 1)).is_ok()
+        self.client.requests.try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| (remaining > 0).then_some(remaining - 1)).is_ok()
     }
 
     /// Xray's `LeftRequests.Add(-1)` for a request that stays on its connection: the budget can go negative.
