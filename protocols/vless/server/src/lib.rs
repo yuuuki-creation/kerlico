@@ -156,7 +156,6 @@ pub fn listen(
         Some(GrpcCfg {
             paths: vec![grpc_path(settings.text("serviceName").unwrap_or(""), false), grpc_path(settings.text("serviceName").unwrap_or(""), true)],
             options: kerlico_vless::GrpcOptions::parse(|name| settings.text(name).ok(), true).map_err(|_| OpenError::Settings)?,
-            forwarded_for: kerlico_vless::TrustedForwardedFor::from_sockopt(settings.text("sockopt").ok()).map_err(|_| OpenError::Settings)?,
         })
     } else {
         None
@@ -200,8 +199,10 @@ pub fn listen(
     let accounts = Arc::new(Users::new(native, settings, tag)?);
     let (ready_tx, ready_rx) = mpsc::channel();
     let shared = Arc::clone(&accounts);
-    let accept_proxy = settings.text("acceptProxyProtocol").ok() == Some("true") || kerlico_vless::socket::SocketOptions::parse(settings.text("sockopt").ok()).map_err(|_| OpenError::Settings)?.accept_proxy_protocol;
-    thread::spawn(move || accept_loop(listener, shared, ready_tx, tls, upgrade, raw_http, grpc, http, fallback, reality, accept_proxy));
+    let sockopt = kerlico_vless::socket::SocketOptions::parse(settings.text("sockopt").ok()).map_err(|_| OpenError::Settings)?;
+    let accept_proxy = settings.text("acceptProxyProtocol").ok() == Some("true") || sockopt.accept_proxy_protocol;
+    let forwarded_for = sockopt.trusted_forwarded_for;
+    thread::spawn(move || accept_loop(listener, shared, ready_tx, tls, upgrade, raw_http, grpc, http, fallback, reality, accept_proxy, forwarded_for));
     Ok(Box::new(VlessInbound {
         tag: tag.clone(),
         default_flow,
@@ -480,6 +481,7 @@ fn listen_xhttp(
         ready: ready_tx,
         config,
         h2,
+        forwarded_for: kerlico_vless::TrustedForwardedFor::from_sockopt(settings.text("sockopt").ok()).map_err(|_| OpenError::Settings)?,
         sessions: Mutex::new(HashMap::new()),
     });
     if h3 {
@@ -669,6 +671,7 @@ struct H2Serve {
 struct XhttpListener {
     config: Arc<XhttpConfig>,
     h2: H2Serve,
+    forwarded_for: kerlico_vless::TrustedForwardedFor,
     accounts: Arc<Users>,
     ready: Sender<Ready>,
     sessions: Mutex<HashMap<String, XhttpSession>>,
@@ -783,6 +786,7 @@ impl XhttpListener {
                     )
                 }
             };
+            let peer = self.forwarded_for.peer(peer, |name| head.header(name));
             let mut headers = self
                 .config
                 .response_headers(&kind, &head.method, |name| head.header(name))?;
@@ -900,6 +904,7 @@ impl XhttpListener {
             Ok(kind) => kind,
             Err(error) => return stream.respond(xhttp_error_status(&error), &[], true),
         };
+        let peer = self.forwarded_for.peer(peer, |name| stream.header(name));
         let headers = self
             .config
             .response_headers(&kind, &method, |name| stream.header(name))?;
@@ -1280,7 +1285,6 @@ impl Accept for VlessInbound {
 struct GrpcCfg {
     paths: Vec<String>,
     options: kerlico_vless::GrpcOptions,
-    forwarded_for: kerlico_vless::TrustedForwardedFor,
 }
 
 #[derive(Clone)]
@@ -1302,6 +1306,7 @@ fn accept_loop(
     fallback: FallbackSet,
     reality: Option<RealityConfig>,
     accept_proxy: bool,
+    forwarded_for: kerlico_vless::TrustedForwardedFor,
 ) {
     loop {
         let Ok((mut socket, peer)) = listener.accept() else {
@@ -1309,6 +1314,7 @@ fn accept_loop(
         };
         if !accounts.allows(peer) { continue; }
         let local = socket.local_addr().ok();
+        let forwarded_for = forwarded_for.clone();
         let accounts = Arc::clone(&accounts);
         let ready_tx = ready_tx.clone();
         let tls = tls.clone();
@@ -1357,7 +1363,7 @@ fn accept_loop(
                     let connection = GrpcConnection::serve_with(read, write, cfg.options).ok()?;
                     let paths = cfg.paths.iter().map(String::as_str).collect::<Vec<_>>();
                     while let Ok(stream) = connection.accept(&paths) {
-                        let peer = cfg.forwarded_for.peer(peer, |name| stream.header(name));
+                        let peer = forwarded_for.peer(peer, |name| stream.header(name));
                         let stream = Arc::new(stream);
                         let read = Link::Grpc(Arc::clone(&stream));
                         let write = Link::Grpc(stream);
@@ -1372,12 +1378,14 @@ fn accept_loop(
                     }
                     return None;
                 }
-                let prelude = match &upgrade {
+                let (prelude, peer) = match &upgrade {
                     Some(cfg) => {
                         read.set_timeout(Duration::from_secs(4));
-                        cfg.accept(&mut read, &mut write).ok()?
+                        let (rest, early, head) = cfg.accept(&mut read, &mut write).ok()?;
+                        let peer = forwarded_for.peer(peer, |name| kerlico_vless::header_value(&head, name));
+                        ((rest, early), peer)
                     }
-                    None => (Vec::new(), Vec::new()),
+                    None => ((Vec::new(), Vec::new()), peer),
                 };
                 let websocket = upgrade.as_ref().is_some_and(|cfg| cfg.websocket());
                 let (read, write, prelude) = if let Some(cfg) = raw_http {

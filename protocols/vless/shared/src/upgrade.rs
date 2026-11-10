@@ -147,11 +147,12 @@ impl UpgradeConfig {
         self.websocket
     }
 
+    /// Returns the bytes after the request, WebSocket early data, and the request head for header policies.
     pub fn accept(
         &self,
         read: &mut dyn Read,
         write: &mut dyn Write,
-    ) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    ) -> io::Result<(Vec<u8>, Vec<u8>, String)> {
         let bad = || io::Error::new(ErrorKind::InvalidData, "HTTP upgrade request");
         let mut buffer = Vec::new();
         let end = read_prelude(read, &mut buffer, MAX_HEAD)?;
@@ -159,11 +160,11 @@ impl UpgradeConfig {
         if path != self.path || (!self.host.is_empty() && !host_matches(&host, &self.host)) {
             return Err(bad());
         }
-        let head = std::str::from_utf8(&buffer[..end]).map_err(|_| bad())?;
+        let head = std::str::from_utf8(&buffer[..end]).map_err(|_| bad())?.to_owned();
         let mut early = Vec::new();
         if self.websocket {
-            let key = websocket_key(head).ok_or_else(bad)?;
-            let token = header_value(head, "sec-websocket-protocol").filter(|token| {
+            let key = websocket_key(&head).ok_or_else(bad)?;
+            let token = header_value(&head, "sec-websocket-protocol").filter(|token| {
                 if let Some(data) = decode_websocket_early_data(token) {
                     early = data;
                     true
@@ -173,13 +174,13 @@ impl UpgradeConfig {
             });
             write.write_all(&switch_response_with_early_data(&key, token.as_deref()))?;
         } else if let Some(key) =
-            header_value(head, "sec-websocket-key").filter(|key| !key.is_empty())
+            header_value(&head, "sec-websocket-key").filter(|key| !key.is_empty())
         {
             write.write_all(&switch_response(&key))?;
         } else {
             write.write_all(upgrade_response())?;
         }
-        Ok((buffer.split_off(end), early))
+        Ok((buffer.split_off(end), early, head))
     }
 
     fn request(&self, early: &[u8]) -> io::Result<(Vec<u8>, String)> {
