@@ -37,9 +37,11 @@ Session 2026-11-10 (pickup, Claude):
 - [x] Baseline on ce51460: lib, vless_flow, official matrix with control, leaf builds.
 - [x] Client leaf: local SOCKS5/HTTP entry for VLESS sharing one front-end with mieru (merged, 18/18 against Xray).
 - [x] REALITY target/Unix/xver/limits, XHTTP h2Params/XMUX, Mux reuse/GlobalID/UDP443/reverse bridge, sockopt, UDP size rules: merged unit by unit. REALITY camouflage (R2) stopped by a safety check; left to the user.
-- [ ] Final: full matrix on final snapshot, independent review, separate leaf builds, vless.md updated.
+- [x] Final: full matrix on final snapshot (456/456 twice on d631f25), independent review, separate leaf builds, vless.md updated.
 Rule from user 2026-11-10: no compiling or testing on the local machine; all builds and tests run on the worker. Worker toolchains stay installed after use.
 - [x] Independent review of ce51460..114f21b; findings fixed in unit F2 (merged a6e3af8).
 - [x] Unit F3: one Mux uplink for every Mux carrier (merged c6f1cb5).
 - [x] Unit F4: TLS server group choice so Xray `randomized` fingerprints never get a HelloRetryRequest (merged; deliberately more lenient than Go, which retries and fails with uTLS too).
-- [ ] Unit F5: VLESS response header leaves with the first downlink bytes, as Xray's SetFlushNext (running; Xray HTTPUpgrade ed client drops bytes buffered after the 101).
+- [x] Unit F5: VLESS response header leaves with the first downlink bytes, as Xray's SetFlushNext (merged d631f25).
+- [ ] Open for the user: REALITY camouflage (R2, stopped by a safety check); REALITY X25519-only key_share leniency; TLS group choice more lenient than Go; REALITY Unix-target relay inside the protocol crate (AGENTS.md exception); push of claude/vless-completion.
+- [ ] Follow-up outside VLESS: intermittent mieru 02-rust-to-official UDP order/boundary failure (1 in 10 full runs).

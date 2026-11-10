@@ -141,21 +141,27 @@ XUDP 和 Mux 会话的回复来源取自帧里的地址，独立 UDP 连接的�
 
 ```text
 cargo test -p kerlico-vless -p kerlico-vless-client -p kerlico-vless-server --lib
+XRAY=/path/to/xray XRAY_BIN=/path/to/xray cargo test -p kerlico-vless -p kerlico-vless-client -p kerlico-vless-server --lib -- --ignored --test-threads=1
 cargo test -p kerlico-server --no-default-features --features vless,landing-vless --test vless_flow
 XRAY=/path/to/xray VLESS_XRAY_CONTROL=1 cargo test -p kerlico-server --no-default-features --features vless,landing-vless --test vless_xray -- --ignored --nocapture
+python3 tools/verify_vless_client.py --xray-bin /path/to/xray --client-bin <kerlico-client> --server-bin <kerlico-server>
 ```
 
-Windows 当前可用 GNU 工具链，加 `+stable-x86_64-pc-windows-gnu`。叶子隔离构建仍按 `crates.md` 分别执行，不能把上述互操作测试的 feature 联合用于隔离结论。
+库测试里有四个 ignored 测试对照 Xray：`xray_advanced_tls_bidirectional` 检查 TLS 1.0 至 1.3 和各指纹的双向握手，`xray_reality_browser_fingerprints` 检查 Kerlico 客户端用各指纹连 Xray 的 REALITY，另两个检查客户端和服务端的反向 API。`vless_xray` 有八个测试：完整矩阵、拒绝用例、XUDP 续接、反向桥、XUDP 多目标、UDP 大小、h2Params 和 REALITY target。`verify_vless_client.py` 的覆盖见「客户端入口」。
 
-本地实现现已接入完整 finalmask 模块、运行时 DNS/出口回调、socket 配置、mKCP 与 QUIC 参数、TLS 指纹/ECH/证书轮换/OCSP，以及 XHTTP/XDrive/Hysteria 的高级传输选项。VPS 上的阶段性验证包括 15 项真实载体回归、210 项库测试、21 项 QUIC/Hysteria 官方对照；完整 Xray 矩阵曾在较早的整合快照通过 353/354 项。结果和证据见本地 `.audit/vless-completion.tsv`，这些数字不代表当前工作区最终快照已通过全部验收。
+叶子隔离按 `crates.md` 分别构建四条命令：客户端只编 WireGuard、服务端只编 OpenVPN、客户端只编 VLESS、服务端只编 VLESS 加 `landing-vless`，再用 `cargo tree` 检查只编 WireGuard 和只编 OpenVPN 的依赖图。上面互操作测试的 feature 组合不能用作隔离结论。
 
-仍在收尾和复核的部分：
+2026-11-11 在 Linux worker 上对代码快照 `d631f25` 验收：库测试 194、31、44 项全部通过，四个 ignored 的 Xray 对照全部通过；`vless_flow` 19 项通过；官方矩阵连跑两遍都是 456/456，拒绝用例 15/15，h2Params 2/2，UDP 大小 11/11，反向桥 2/2，XUDP 续接 2/2，REALITY target 10/10；`verify_vless_client.py` 18/18；两个 TLS 对照各重复 20 次全部通过；库测试连跑 30 次、加满负载再跑 30 次都没有失败；三个 VLESS crate 的 clippy 没有告警，四条叶子构建和依赖检查通过。过程和证据记录在 `.audit/vless-completion.tsv`。
 
-- REALITY 目标 TLS flight 重用、Unix target、fallback 速率限制与 spider 的服务端接线；现有基础模块已验证，prepared outbound handoff 尚未完成最终集成与矩阵验证。
-- XHTTP server `h2Params` 的完整设置，以及 H1/H2/H3 下全部 XMUX 连接预算和关闭策略的最终复核。
-- 出站 Mux 连接跨会话复用、XUDP GlobalID 跨 carrier、UDP/443 通用策略，以及服务端 reverse bridge 配置入口。
-- socket 选项与所有出口/载体的最终互操作矩阵；XDrive 云服务当前通过本地协议模拟器验证，不推断实际账号或配额。
-- 独立客户端叶子的 VLESS 报文 `DataPlane` 仍明确返回错误；当前可运行的是服务端入站、落地 `land` 和反向流 API。
-- 最终完整官方矩阵、独立审查，以及 `crates.md` 要求的客户端 WireGuard 和服务端 OpenVPN 两条分离构建。
+已知差异和未完成项：
+
+- REALITY 认证之后的伪装没有与 Xray 逐项对齐，包括认证后记录长度的模仿、与 NewSessionTicket 同长的记录、`MaxUselessRecords`，以及 target 探测失败时的处理。
+- REALITY 服务端比 Xray 宽松。固定版本的 REALITY 服务端要求 ClientHello 的 key_share 里 X25519MLKEM768 排在 X25519 之前，Kerlico 也接受只有 X25519 的 key_share。所以 Xray 客户端用 ios、edge、qq 和部分 `randomized` 指纹时连 Xray 的 REALITY 服务端失败，连 Kerlico 成功。android 和 360 指纹只有 TLS 1.2，两边都不能用于 REALITY。
+- TLS 1.3 服务端的组选择有意与 Go 不同，见上文 TLS 段。`curvePreferences` 中 Xray 接受的 `SecP256r1MLKEM768`、`SecP384r1MLKEM1024` 因 BoringSSL 没有实现而拒绝；不认识的组名报错，Xray 忽略它们。
+- XHTTP 服务端没有配置 h2Params 时使用 Kerlico 的默认值，见上文 h2Params 段；Xray 的 H2 服务端还发送 SETTINGS 9（`SETTINGS_NO_RFC7540_PRIORITIES`），Kerlico 不发。`WriteByteTimeout` 和 `PermitProhibitedCipherSuites` 只有单元测试，没有对照 Xray 的字节级证明。
+- XHTTP H1 的 XMUX 连接数没有与 Xray 比较，因为 Xray 对照自己的 H1 连接数每次不同。
+- 门户的第一个数据报超限时，会话用不带数据的 NEW 帧打开；这个分支没有对照 Xray 测试。
+- XDrive 云服务只用本地协议模拟器验证，不推断实际账号、权限或配额。
+- 明文 HTTPUpgrade 早期数据下，Kerlico 客户端连 Xray 服务端仍会偶发失败，原因是 Xray 服务端的缺陷，见下一段。
 
 固定版本 Xray 的 HTTPUpgrade 服务端用带缓冲的读取解析请求头后返回原始连接，与请求头同一次读到的 VLESS 字节随之丢失（`transport/internet/httpupgrade/hub.go`）。明文早期数据下，请求之后越早写出数据越容易触发。Kerlico 客户端因此像 Xray 的拨号器那样在建连时发出请求，不再在首批数据时与请求连续写出。同一快照各重复 20 次：修正前 kerlico 到 Xray 失败 11 次，修正后 2 次；Xray 自对照两轮均为 0 次，此前完整矩阵中也出现过 1 次失败。TLS 记录把请求和数据分开，TLS 组合不受影响。剩余失败属于对端缺陷，不能把偶然通过计作已消除，也不使用 sleep 或补齐字节掩盖它。Xray 客户端连 Kerlico 服务端时的失败来自 Xray 客户端的缺陷：`ed` 大于 0 时，拨号器到第一次读取才解析 101，VLESS 响应解码的第一次读取只有 1 字节，随后清空缓冲，与 101 同时到达的响应字节随之丢失（`transport/internet/httpupgrade/dialer.go`、`proxy/vless/encoding/addons.go`）。Xray 服务端的响应随第一批下行数据写出，不会触发它；Kerlico 服务端改用同样的时机后，perf-01 上该行重复 200 次为 0 次失败，同一测试改回立即写响应时失败 21 次。
