@@ -335,6 +335,33 @@ fn proxy_header_preserves_vless_payload_and_datagram_peer() {
 }
 
 #[test]
+fn trusted_forwarding_sets_the_handoff_peer_on_every_http_carrier() {
+    for (carrier, security) in [("ws", "none"), ("httpupgrade", "none"), ("xhttp", "none"), ("xhttp", "tls")] {
+        for marker in [true, false] {
+            let (mut server, mut client) = settings(carrier, security, "stream-one");
+            server.insert_text("sockopt", r#"{"trustedXForwardedFor":["X-Trusted-CDN"]}"#);
+            let headers = if marker {
+                r#"{"X-Forwarded-For":"203.0.113.8, 198.51.100.1","X-Trusted-CDN":"1"}"#
+            } else {
+                r#"{"X-Forwarded-For":"203.0.113.8, 198.51.100.1"}"#
+            };
+            client.insert_text("headers", headers);
+            let (mut inbound, port) = inbound(&server);
+            let destination = Destination::new("example.test", 53, Transport::Udp).unwrap();
+            let stream = landing_vless::land("127.0.0.1", port, &client, &destination).unwrap();
+            send(stream.as_ref(), b"ping", true);
+            let flow = wait_handoff(inbound.as_mut());
+            let peer = flow.peer().expect("UDP session source");
+            if marker {
+                assert_eq!(peer, "203.0.113.8:0".parse().unwrap(), "{carrier} {security} trusted");
+            } else {
+                assert!(peer.ip().is_loopback() && peer.port() != 0, "{carrier} {security} forged: {peer}");
+            }
+        }
+    }
+}
+
+#[test]
 fn outbound_landing_uses_the_nodes_reverse_portal() {
     struct Counters;
     impl kerlico_shared::Traffic for Counters {

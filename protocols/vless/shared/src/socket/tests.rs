@@ -56,7 +56,6 @@ fn rejects_invalid_settings_and_parses_transport_metadata() {
     ))
     .is_err());
     assert!(SocketOptions::parse(Some(r#"{"domainStrategy":"UseAddress"}"#)).is_err());
-    assert!(SocketOptions::parse(Some(r#"{"tcpKeepAliveIntervl":13}"#)).is_err());
     let options = settings(
         r#"{"acceptProxyProtocol":true,"penetrate":true,"trustedXForwardedFor":["X-CDN"],"tproxy":"REDIRECT"}"#,
     );
@@ -71,6 +70,27 @@ fn rejects_invalid_settings_and_parses_transport_metadata() {
         }),
         "[2001:db8::8]:0".parse().unwrap()
     );
+}
+
+#[test]
+fn keys_match_case_insensitively_and_unknown_keys_are_ignored_like_go_json() {
+    let options = settings(
+        r#"{"ACCEPTPROXYPROTOCOL":true,"Penetrate":true,"tcpkeepaliveintervl":13,"TrustedXForwardedFor":["X-CDN"],
+            "HappyEyeballs":{"TRYDELAYMS":9,"extra":1},"CustomSockopt":[{"SYSTEM":"linux","Type":"int","other":0}],"mark":null}"#,
+    );
+    assert!(options.accept_proxy_protocol && options.penetrate);
+    assert_eq!(options.happy_eyeballs.try_delay_ms, 9);
+    assert_eq!(options.custom_sockopt[0].system, "linux");
+    assert_eq!(options.custom_sockopt[0].value_type, "int");
+    assert!(options.trusted_forwarded_for.peer("127.0.0.1:1".parse().unwrap(), |name| match name {
+        "x-cdn" | "x-forwarded-for" => Some("2001:db8::8"),
+        _ => None,
+    }).ip().to_string() == "2001:db8::8");
+    assert_eq!(settings(r#"{"mark":1,"MARK":2}"#).mark, 2);
+    assert!(SocketOptions::parse(Some(r#"{"TCPFASTOPEN":"true"}"#)).is_err());
+    assert!(SocketOptions::parse(Some(r#"{"customSockopt":{"system":"linux"}}"#)).is_err());
+    assert!(SocketOptions::parse(Some(r#"["mark"]"#)).is_err());
+    assert!(SocketOptions::parse(Some("null")).is_ok());
 }
 
 #[test]

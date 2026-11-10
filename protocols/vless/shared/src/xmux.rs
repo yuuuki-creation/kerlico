@@ -144,6 +144,17 @@ impl<T> XmuxLease<T> {
         if self.client.deadline.is_some_and(|deadline| Instant::now() >= deadline) { return false; }
         self.client.requests.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| (remaining > 0).then_some(remaining - 1)).is_ok()
     }
+
+    /// Xray's `LeftRequests.Add(-1)` for a request that stays on its connection: the budget can go negative.
+    pub fn charge(&self) {
+        self.client.requests.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Xray charges a packet-up POST and moves it to another connection once the budget is spent or the connection expired.
+    pub fn charge_spent(&self) -> bool {
+        let left = self.client.requests.fetch_sub(1, Ordering::Relaxed).wrapping_sub(1);
+        left <= 0 || self.client.deadline.is_some_and(|deadline| Instant::now() >= deadline)
+    }
 }
 
 impl<T> Drop for XmuxLease<T> {
@@ -170,6 +181,23 @@ mod tests {
         assert!(first.request());
         assert!(!first.request());
         drop(first);
+        let replacement = pool.acquire(|| Ok(Connection(3))).unwrap();
+        assert_eq!(replacement.connection().0, 3);
+    }
+
+    #[test]
+    fn packet_budget_switches_on_the_charge_that_spends_it_and_streams_never_switch() {
+        let config = XmuxConfig::xhttp(Some(&serde_json::json!({"hMaxRequestTimes": 3}))).unwrap();
+        let pool = XmuxPool::new(config);
+        let first = pool.acquire(|| Ok(Connection(1))).unwrap();
+        first.charge();
+        assert!(!first.charge_spent());
+        assert!(first.charge_spent());
+        let next = pool.acquire(|| Ok(Connection(2))).unwrap();
+        assert_eq!(next.connection().0, 2);
+        next.charge();
+        next.charge();
+        next.charge();
         let replacement = pool.acquire(|| Ok(Connection(3))).unwrap();
         assert_eq!(replacement.connection().0, 3);
     }

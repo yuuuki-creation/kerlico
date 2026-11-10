@@ -42,6 +42,47 @@ const STREAM_LIMIT: usize = 128;
 
 type Headers = Vec<(String, String)>;
 
+/// Server-side HTTP/2 limits. The defaults are what gRPC, HTTP and XHTTP serve without `h2Params`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct H2Limits {
+    pub streams: u32,
+    pub frame_size: u32,
+    pub decoder_table: u32,
+    pub stream_window: u32,
+    pub connection_window: u32,
+    pub header_list: Option<u32>,
+    pub ping_after: Option<Duration>,
+    pub ping_timeout: Duration,
+    pub write_timeout: Option<Duration>,
+}
+
+impl Default for H2Limits {
+    fn default() -> Self {
+        Self {
+            streams: STREAM_LIMIT as u32,
+            frame_size: FRAME_SIZE as u32,
+            decoder_table: HEADER_TABLE_SIZE as u32,
+            stream_window: RECEIVE_WINDOW,
+            connection_window: RECEIVE_WINDOW,
+            header_list: None,
+            ping_after: None,
+            ping_timeout: Duration::from_secs(15),
+            write_timeout: None,
+        }
+    }
+}
+
+pub fn goaway_frame(code: u32, debug: &str) -> Vec<u8> {
+    let mut payload = vec![0; 4];
+    payload.extend_from_slice(&code.to_be_bytes());
+    payload.extend_from_slice(debug.as_bytes());
+    let mut frame = Vec::new();
+    queue_frame(&mut frame, GOAWAY, 0, 0, &payload);
+    frame
+}
+
+pub const INADEQUATE_SECURITY: u32 = 12;
+
 struct ReceiveWindow {
     available: u32,
     consumed: u32,
@@ -129,7 +170,9 @@ struct H2State {
     peer_goaway: Option<u32>,
     next: u32,
     last_peer: u32,
-    stream_limit: usize,
+    limits: H2Limits,
+    last_frame: Instant,
+    ping: Option<(Instant, [u8; 8])>,
     peer_stream_limit: usize,
     initial_send_window: i64,
     initial_receive_window: u32,
@@ -149,20 +192,10 @@ struct H2State {
 
 impl H2State {
     fn new(server: bool, preface: bool, stream_limit: usize) -> Self {
-        Self::with_header_limit(server, preface, stream_limit, None)
+        Self::with_limits(server, preface, H2Limits { streams: stream_limit as u32, ..H2Limits::default() })
     }
 
-    fn with_header_limit(server: bool, preface: bool, stream_limit: usize, header_limit: Option<u32>) -> Self {
-        Self::with_limits(server, preface, stream_limit, header_limit, None)
-    }
-
-    fn with_limits(
-        server: bool,
-        preface: bool,
-        stream_limit: usize,
-        header_limit: Option<u32>,
-        receive_window: Option<u32>,
-    ) -> Self {
+    fn with_limits(server: bool, preface: bool, limits: H2Limits) -> Self {
         let mut outbound = Vec::new();
         if !server {
             outbound.extend_from_slice(HTTP2_PREFACE);
@@ -171,25 +204,30 @@ impl H2State {
         if !server {
             setting(&mut settings, 2, 0);
         } else {
-            setting(&mut settings, 3, stream_limit as u32);
+            setting(&mut settings, 3, limits.streams);
         }
-        let stream_window = receive_window.unwrap_or(RECEIVE_WINDOW);
-        setting(&mut settings, 4, stream_window);
-        if let Some(limit) = header_limit {
+        setting(&mut settings, 4, limits.stream_window);
+        if let Some(limit) = limits.header_list {
             setting(&mut settings, 6, limit);
         }
+        if limits.frame_size != FRAME_SIZE as u32 {
+            setting(&mut settings, 5, limits.frame_size);
+        }
+        if limits.decoder_table != HEADER_TABLE_SIZE as u32 {
+            setting(&mut settings, 1, limits.decoder_table);
+        }
         queue_frame(&mut outbound, SETTINGS, 0, 0, &settings);
-        // An explicit gRPC stream window disables automatic connection-window expansion.
-        let connection_window = if receive_window.is_some() { DEFAULT_WINDOW } else { RECEIVE_WINDOW };
-        if connection_window > DEFAULT_WINDOW {
+        if limits.connection_window > DEFAULT_WINDOW {
             queue_frame(
                 &mut outbound,
                 WINDOW_UPDATE,
                 0,
                 0,
-                &(connection_window - DEFAULT_WINDOW).to_be_bytes(),
+                &(limits.connection_window - DEFAULT_WINDOW).to_be_bytes(),
             );
         }
+        let mut decoder = hpack::Decoder::new();
+        decoder.set_max_table_size(limits.decoder_table as usize);
         Self {
             server,
             preface,
@@ -197,22 +235,47 @@ impl H2State {
             peer_goaway: None,
             next: 1,
             last_peer: 0,
-            stream_limit,
+            limits,
+            last_frame: Instant::now(),
+            ping: None,
             peer_stream_limit: usize::MAX,
             initial_send_window: i64::from(DEFAULT_WINDOW),
-            initial_receive_window: stream_window,
+            initial_receive_window: limits.stream_window,
             send_window: i64::from(DEFAULT_WINDOW),
-            receive_window: ReceiveWindow::new(connection_window),
+            receive_window: ReceiveWindow::new(limits.connection_window),
             streams: HashMap::new(),
             accepted: VecDeque::new(),
             inbound: Vec::new(),
             outbound,
-            header_limit: header_limit.map_or(HEADER_LIMIT, |limit| limit as usize),
+            header_limit: limits.header_list.map_or(HEADER_LIMIT, |limit| limit as usize),
             peer_header_limit: HEADER_LIMIT,
             header_block: None,
-            decoder: hpack::Decoder::new(),
+            decoder,
             failure: None,
             reading: false,
+        }
+    }
+
+    /// Go's server pings after `SendPingTimeout` without a received frame and closes after `PingTimeout` without the ACK.
+    fn tick(&mut self, now: Instant) -> bool {
+        let Some(after) = self.limits.ping_after else {
+            return false;
+        };
+        if self.failure.is_some() {
+            return false;
+        }
+        match self.ping {
+            Some((sent, _)) if now.saturating_duration_since(sent) >= self.limits.ping_timeout => {
+                self.fail(&io::Error::new(ErrorKind::ConnectionReset, "HTTP/2 ping timeout"));
+                true
+            }
+            None if now.saturating_duration_since(self.last_frame) >= after => {
+                let data: [u8; 8] = rand::random();
+                queue_frame(&mut self.outbound, PING, 0, 0, &data);
+                self.ping = Some((now, data));
+                false
+            }
+            _ => false,
         }
     }
 
@@ -479,6 +542,9 @@ impl H2State {
     }
 
     fn receive(&mut self, bytes: &[u8]) -> io::Result<bool> {
+        if self.limits.ping_after.is_some() {
+            self.last_frame = Instant::now();
+        }
         self.inbound.extend_from_slice(bytes);
         let mut offset = 0;
         if !self.preface {
@@ -495,7 +561,7 @@ impl H2State {
         while self.inbound.len() - offset >= 9 {
             let head = &self.inbound[offset..offset + 9];
             let len = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
-            if len > FRAME_SIZE {
+            if len > self.limits.frame_size as usize {
                 return Err(protocol_error("HTTP/2 frame too large"));
             }
             let end = offset + 9 + len;
@@ -549,7 +615,7 @@ impl H2State {
                     .header_block
                     .take()
                     .ok_or_else(|| protocol_error("HTTP/2 unexpected CONTINUATION"))?;
-                if block.bytes.len() + payload.len() > self.header_limit.saturating_add(FRAME_SIZE) {
+                if block.bytes.len() + payload.len() > self.header_limit.saturating_add(self.limits.frame_size as usize) {
                     return Err(protocol_error("HTTP/2 header block too large"));
                 }
                 block.bytes.extend_from_slice(payload);
@@ -572,6 +638,8 @@ impl H2State {
             PING if stream == 0 && payload.len() == 8 => {
                 if flags & ACK == 0 {
                     queue_frame(&mut self.outbound, PING, ACK, 0, payload);
+                } else if self.ping.is_some_and(|(_, data)| data[..] == *payload) {
+                    self.ping = None;
                 }
                 Ok(())
             }
@@ -641,13 +709,13 @@ impl H2State {
             return Ok(());
         }
         let id = block.stream;
-        let headers = decode_headers(&mut self.decoder, &block.bytes, self.header_limit)?;
+        let headers = decode_headers(&mut self.decoder, &block.bytes, self.header_limit, self.limits.decoder_table as usize)?;
         if !self.closed_stream(id) {
             if !self.server || id % 2 == 0 {
                 return Err(protocol_error("HTTP/2 HEADERS on invalid stream"));
             }
             self.last_peer = id;
-            if self.streams.len() >= self.stream_limit {
+            if self.streams.len() >= self.limits.streams as usize {
                 self.reset(id, REFUSED_STREAM, true);
                 return Ok(());
             }
@@ -873,9 +941,9 @@ fn send_headers_with_limit(
     Ok(())
 }
 
-fn decode_headers(decoder: &mut hpack::Decoder<'_>, bytes: &[u8], limit: usize) -> io::Result<Headers> {
+fn decode_headers(decoder: &mut hpack::Decoder<'_>, bytes: &[u8], limit: usize, table: usize) -> io::Result<Headers> {
     // hpack 0.3 assumes a well-formed table update and does not enforce the advertised limit.
-    validate_hpack(bytes)?;
+    validate_hpack(bytes, table)?;
     let mut headers = Vec::new();
     let mut decoded_size = 0usize;
     decoder
@@ -895,12 +963,12 @@ fn decode_headers(decoder: &mut hpack::Decoder<'_>, bytes: &[u8], limit: usize) 
     Ok(headers)
 }
 
-fn validate_hpack(mut bytes: &[u8]) -> io::Result<()> {
+fn validate_hpack(mut bytes: &[u8], table: usize) -> io::Result<()> {
     let mut fields = false;
     while let Some(&first) = bytes.first() {
         if first & 0xe0 == 0x20 {
             let size = hpack_integer(&mut bytes, 5)?;
-            if fields || size > HEADER_TABLE_SIZE {
+            if fields || size > table {
                 return Err(protocol_error("HTTP/2 HPACK table size"));
             }
             continue;
@@ -1229,7 +1297,7 @@ impl<R, W: Write> SharedConnection<R, W> {
             drop(state);
             if let Err(error) = flush_bytes(writer.io.as_mut().expect("HTTP/2 writer"), &mut bytes) {
                 let mut state = self.state.lock().expect("HTTP/2 state");
-                if retryable(&error) {
+                if retryable(&error) && state.limits.write_timeout.is_none() {
                     writer.pending_flush = true;
                     bytes.append(&mut state.outbound);
                     state.outbound = bytes;
@@ -1286,8 +1354,17 @@ impl<R: Read, W: Write> SharedConnection<R, W> {
                 continue;
             };
             // Any waiting direction may read control frames. Socket reads never hold the state or writer lock.
+            let now = Instant::now();
+            if state.tick(now) {
+                self.wake.notify_all();
+                continue;
+            }
             state.reading = true;
+            let pinging = state.ping.is_some_and(|(sent, _)| sent == now);
             drop(state);
+            if pinging {
+                let _ = self.flush(false);
+            }
             let received = read_retry(&mut *reader.lock().expect("HTTP/2 reader"), &mut bytes);
             state = self.state.lock().expect("HTTP/2 state");
             state.reading = false;
@@ -1407,15 +1484,15 @@ impl<W: Write + Send + 'static> H2Conn<W> {
     }
 
     pub fn serve<R: Read + Send + 'static>(read: R, write: W) -> io::Result<Self> {
-        Self::start(read, write, true, None)
+        Self::start(read, write, true, H2Limits::default())
     }
 
-    pub fn serve_with_header_limit<R: Read + Send + 'static>(read: R, write: W, limit: u32) -> io::Result<Self> {
-        Self::start(read, write, true, Some(limit))
+    pub fn serve_with_limits<R: Read + Send + 'static>(read: R, write: W, limits: H2Limits) -> io::Result<Self> {
+        Self::start(read, write, true, limits)
     }
 
     pub fn connect<R: Read + Send + 'static>(read: R, write: W) -> io::Result<Self> {
-        Self::start(read, write, false, None)
+        Self::start(read, write, false, H2Limits::default())
     }
 
     pub fn connect_with_keepalive<R: Read + Send + 'static>(read: R, write: W, seconds: i64) -> io::Result<Self> {
@@ -1425,12 +1502,12 @@ impl<W: Write + Send + 'static> H2Conn<W> {
         }))
     }
 
-    fn start<R: Read + Send + 'static>(read: R, write: W, server: bool, limit: Option<u32>) -> io::Result<Self> {
+    fn start<R: Read + Send + 'static>(read: R, write: W, server: bool, limits: H2Limits) -> io::Result<Self> {
         let read: Box<dyn Read + Send> = Box::new(read);
         let shared = Arc::new(SharedConnection::new(
             read,
             write,
-            H2State::with_header_limit(server, true, STREAM_LIMIT, limit),
+            H2State::with_limits(server, true, limits),
         ));
         shared.flush(true)?;
         Ok(Self { shared })
@@ -1446,7 +1523,12 @@ impl<W: Write + Send + 'static> H2Conn<W> {
         let shared: Arc<Multiplexed<W>> = Arc::new(SharedConnection::with_reader(
             None,
             write,
-            H2State::with_limits(server, !server, STREAM_LIMIT, None, receive_window),
+            H2State::with_limits(server, !server, receive_window.map_or_else(H2Limits::default, |window| H2Limits {
+                // An explicit gRPC stream window disables automatic connection-window expansion.
+                stream_window: window,
+                connection_window: DEFAULT_WINDOW,
+                ..H2Limits::default()
+            })),
         ));
         shared.flush(true)?;
         let connection = Arc::downgrade(&shared);
@@ -1519,6 +1601,40 @@ impl<W: Write + Send + 'static> H2Conn<W> {
         wait: bool,
     ) -> io::Result<H2Stream<W>> {
         self.request_with_headers(&header_list(method, path, authority, scheme, extra), end, wait, None)
+    }
+
+    /// Like `request`, but a peer at its concurrent-stream limit gives `None` at once instead of a wait.
+    pub fn try_request(
+        &self,
+        method: &str,
+        path: &str,
+        authority: &str,
+        scheme: &str,
+        extra: &[(&str, &str)],
+        end: bool,
+        wait: bool,
+    ) -> io::Result<Option<H2Stream<W>>> {
+        let headers = header_list(method, path, authority, scheme, extra);
+        let opened = self.shared.drive(|state| {
+            state.check_goaway()?;
+            if !state.settings_received {
+                return Ok(None);
+            }
+            state.open(&headers, end).map(Some)
+        })?;
+        let Some(id) = opened else {
+            return Ok(None);
+        };
+        let stream = H2Stream {
+            id,
+            shared: Arc::clone(&self.shared),
+            grpc: false,
+        };
+        self.shared.flush(true)?;
+        if wait {
+            self.shared.drive(|state| state.status(id))?;
+        }
+        Ok(Some(stream))
     }
 
     pub(crate) fn request_with_headers(
@@ -1965,5 +2081,88 @@ mod tests {
             assert_eq!(error.kind(), ErrorKind::InvalidData);
             assert_eq!(next_frame(&state.outbound[..]).0, GOAWAY);
         }
+    }
+
+    fn custom_limits() -> H2Limits {
+        H2Limits {
+            streams: 7,
+            frame_size: 32_768,
+            decoder_table: 8192,
+            stream_window: 524_288,
+            connection_window: 2_097_152,
+            header_list: Some(8512),
+            ..H2Limits::default()
+        }
+    }
+
+    #[test]
+    fn server_limits_set_settings_and_connection_window() {
+        let state = H2State::with_limits(true, true, custom_limits());
+        let mut wire = &state.outbound[..];
+        let (kind, _, id, payload) = next_frame(&mut wire);
+        assert_eq!((kind, id), (SETTINGS, 0));
+        let mut settings: Vec<_> = payload
+            .chunks_exact(6)
+            .map(|pair| (u16::from_be_bytes([pair[0], pair[1]]), u32::from_be_bytes(pair[2..].try_into().unwrap())))
+            .collect();
+        settings.sort_unstable();
+        assert_eq!(settings, [(1, 8192), (3, 7), (4, 524_288), (5, 32_768), (6, 8512)]);
+        let (kind, _, id, payload) = next_frame(&mut wire);
+        assert_eq!((kind, id), (WINDOW_UPDATE, 0));
+        assert_eq!(u32::from_be_bytes(payload.try_into().unwrap()), 2_097_152 - DEFAULT_WINDOW);
+        assert!(wire.is_empty());
+    }
+
+    #[test]
+    fn default_limits_keep_the_settings_frame_unchanged() {
+        let state = H2State::new(true, true, 128);
+        let (_, _, _, payload) = next_frame(&state.outbound[..]);
+        assert_eq!(payload.len(), 12);
+    }
+
+    #[test]
+    fn frames_above_the_advertised_size_close_the_connection() {
+        for (limits, accepted, rejected) in [
+            (custom_limits(), 32_768, 32_769),
+            (H2Limits::default(), FRAME_SIZE, FRAME_SIZE + 1),
+        ] {
+            let mut state = H2State::with_limits(true, true, limits);
+            let mut wire = Vec::new();
+            queue_frame(&mut wire, SETTINGS, 0, 0, &[]);
+            queue_frame(&mut wire, 0xfa, 0, 0, &vec![0; accepted]);
+            state.receive(&wire).unwrap();
+            wire.clear();
+            queue_frame(&mut wire, 0xfa, 0, 0, &vec![0; rejected]);
+            assert!(state.receive(&wire).is_err());
+        }
+    }
+
+    #[test]
+    fn server_pings_after_idle_and_closes_without_an_ack() {
+        let limits = H2Limits {
+            ping_after: Some(Duration::from_millis(10)),
+            ping_timeout: Duration::from_millis(20),
+            ..H2Limits::default()
+        };
+        let mut state = H2State::with_limits(true, true, limits);
+        state.outbound.clear();
+        let start = state.last_frame;
+        assert!(!state.tick(start + Duration::from_millis(5)));
+        assert!(state.outbound.is_empty());
+        assert!(!state.tick(start + Duration::from_millis(15)));
+        let (kind, flags, id, data) = next_frame(&state.outbound[..]);
+        assert_eq!((kind, flags, id, data.len()), (PING, 0, 0, 8));
+        assert!(!state.tick(start + Duration::from_millis(30)));
+        let mut ack = Vec::new();
+        queue_frame(&mut ack, SETTINGS, 0, 0, &[]);
+        queue_frame(&mut ack, PING, ACK, 0, &data);
+        state.receive(&ack).unwrap();
+        assert!(state.ping.is_none());
+        state.outbound.clear();
+        let later = Instant::now() + Duration::from_millis(15);
+        assert!(!state.tick(later));
+        assert!(state.ping.is_some());
+        assert!(state.tick(later + Duration::from_millis(25)));
+        assert!(state.check_connection().is_err());
     }
 }
