@@ -22,7 +22,7 @@ Go 模块变动和 `go.sum` 只在 worker 副本生成。输出内的 upstream_s
 
 默认是五个因素（TCP/UDP、四级复用、两种握手、低熵 0..4、MTU 1280/1400）的确定性两两覆盖，每行运行两个方向。`--full` 显式选择同一默认矩阵；`--quick` 为 8 行 smoke，JSON 会明确标注 smoke，不能当完整矩阵报告。每个方向有自己的总期限，默认每 case 90 秒、整套 2400 秒；更慢的 worker 可通过 `--case-timeout` 和 `--suite-timeout` 显式调整。IPv6 fixture 不能绑定会直接失败，没有静默跳过。
 
-`--case-index 0` 只复现所选矩阵的第一行双向 case，JSON 明确标记 `coverage=partial`，不执行单独的配置负面 case，也不代表完整通过。UDP 失败同时留下包序号、预期与实际长度、目标、来源、内容前缀和原始错误；目标回显器接收上限显式设为 65535 字节，避免 `socketserver` 默认 8192 字节截断制造假失败。
+`--case-index 0` 只复现所选矩阵的第一行双向 case，JSON 明确标记 `coverage=partial`，不执行单独的配置负面 case，也不代表完整通过。UDP 失败同时留下包序号、预期与实际长度、目标、来源、内容前缀和原始错误，连发阶段还按到达顺序列出收到的全部包；目标回显器接收上限显式设为 65535 字节，避免 `socketserver` 默认 8192 字节截断制造假失败。UDP 回显器在收包线程里按到达顺序逐包回发，不用每包一个线程的 `ThreadingUDPServer`：那样回包先后取决于线程调度，连发检查会把夹具自己的乱序当成代理乱序。
 
 `--node-host` 默认 `127.0.0.1`。传入 `--node-host ::1` 可以验证 IPv6 节点承载；Rust 服务端监听、官方对端地址、Rust 客户端远端地址、临时端口分配及退出后的绑定检查都会使用 IPv6，IPv6 检查设置 `IPV6_V6ONLY` 并实际执行 `bind+listen`。本机 SOCKS/HTTP 入口仍使用 `127.0.0.1`，独立目标夹具不变。`--quick --node-host ::1` 是 8 行双向加配置负面共 17 项 smoke，结果明确记录 `coverage=smoke` 与 `node_host=::1`，不能据此宣称完整两两矩阵通过。
 

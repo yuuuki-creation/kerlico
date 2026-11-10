@@ -122,9 +122,10 @@ class ThreadedTCP(socketserver.ThreadingTCPServer):
     block_on_close = False
 
 
-class ThreadedUDP(socketserver.ThreadingUDPServer):
+class SequentialUDP(socketserver.UDPServer):
+    # 回显在收包线程里按到达顺序逐包回发。ThreadingUDPServer 每包一个线程，
+    # 回包先后取决于线程调度，连发检查会把夹具自己的乱序当成代理乱序。
     allow_reuse_address = True
-    daemon_threads = True
     # socketserver 默认只收 8192 字节，会让大包在到达代理之前被夹具截断。
     max_packet_size = 65535
 
@@ -221,12 +222,12 @@ class Fixtures:
         try:
             self.tcp4 = self.add(ThreadedTCP, "127.0.0.1", EchoTCP, "tcp4")
             self.tcp6 = self.add(ThreadedTCP, "::1", EchoTCP, "tcp6")
-            self.udp4 = self.add(ThreadedUDP, "127.0.0.1", EchoUDP, "udp4")
-            self.udp4b = self.add(ThreadedUDP, "127.0.0.1", EchoUDP, "udp4b")
-            self.udp6 = self.add(ThreadedUDP, "::1", EchoUDP, "udp6")
+            self.udp4 = self.add(SequentialUDP, "127.0.0.1", EchoUDP, "udp4")
+            self.udp4b = self.add(SequentialUDP, "127.0.0.1", EchoUDP, "udp4b")
+            self.udp6 = self.add(SequentialUDP, "::1", EchoUDP, "udp6")
             # UDP 不会失败后切换连接；localhost 选到任一地址族都必须
             # 到达相同的回显端口，避免平台 hosts 顺序影响结果。
-            self.udp_domain6 = self.add(ThreadedUDP, "::1", EchoUDP, "udp-domain6",
+            self.udp_domain6 = self.add(SequentialUDP, "::1", EchoUDP, "udp-domain6",
                                         self.udp4.server_address[1])
             self.http4 = self.add(ThreadedTCP, "127.0.0.1", Origin, "origin-a")
             self.http4b = self.add(ThreadedTCP, "127.0.0.1", Origin, "origin-b")
@@ -521,13 +522,25 @@ def udp_check(socks, fixtures, negatives=False):
         pending = [b"order-a", b"order-b" * 19, b"order-c" * 300]
         for payload in pending:
             udp.sendto(b"\x00\x00\x00" + encode_address(host, port) + payload, bound)
-        for index, payload in enumerate(pending):
+        arrived = []
+
+        def arrive():
             source, got = unpack_udp(udp.recvfrom(65535)[0])
+            arrived.append({"length": len(got), "source": list(source), "prefix": got[:24].hex()})
+            return source, got
+
+        for index, payload in enumerate(pending):
+            source, got = arrive()
             if source[1] != port or got != payload:
+                # 先收齐其余的包，证据给出实际到达顺序，区分乱序与丢包。
+                udp.settimeout(1)
+                with contextlib.suppress(socket.timeout, Failure):
+                    while len(arrived) < len(pending):
+                        arrive()
                 raise PacketFailure("UDP 顺序或边界不符", {"index": index, "phase": "burst",
                                     "expected_length": len(payload), "actual_length": len(got),
                                     "target": authority(host, port), "source": list(source),
-                                    "actual_prefix": got[:24].hex(), "error": None})
+                                    "actual_prefix": got[:24].hex(), "arrived": arrived, "error": None})
         if negatives:
             before = fixtures.udp_count()
             udp.sendto(b"\x00\x00\x01" + encode_address(host, port) + b"fragment", bound)
