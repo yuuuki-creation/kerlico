@@ -27,7 +27,217 @@ struct RealityConfig {
     policy: kerlico_vless::RealityPolicy,
     alpn: Vec<String>,
     proof: Option<kerlico_vless::RealityMldsa65Signer>,
-    target: Option<FallbackSet>,
+    target: Option<RealityTarget>,
+}
+
+impl RealityConfig {
+    /// Xray builds every authenticated flight from the target's answer to the
+    /// same ClientHello. Without that answer the flight stays synthetic.
+    fn flight(&self, record: &[u8], head: &[u8]) -> Option<kerlico_vless::ServerHello> {
+        let shape = self.target.as_ref().and_then(|target| target.shape(record, head));
+        shape
+            .and_then(|shape| kerlico_vless::server_flight_with_target(record, &self.private, &self.policy, &self.alpn, self.proof.as_ref(), &shape).ok())
+            .or_else(|| kerlico_vless::server_flight_with_auth(record, &self.private, &self.policy, &self.alpn, self.proof.as_ref()).ok())
+    }
+}
+
+#[derive(Clone)]
+struct RealityTarget {
+    origin: RealityOrigin,
+    xver: u8,
+    upload: kerlico_vless::RealityRateLimit,
+    download: kerlico_vless::RealityRateLimit,
+    network: Option<Arc<dyn kerlico_shared::runtime::Network>>,
+}
+
+#[derive(Clone)]
+enum RealityOrigin {
+    /// Unauthenticated connections leave through a `Handoff`, so node rules and exits apply.
+    Tcp { host: String, port: u16 },
+    /// No exit reaches a local socket, so the protocol relays to it itself.
+    Unix(std::path::PathBuf),
+}
+
+const REALITY_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl RealityTarget {
+    fn parse(settings: &Settings) -> Result<Option<Self>, OpenError> {
+        let Ok(target) = settings.text("target").or_else(|_| settings.text("dest")) else { return Ok(None) };
+        let origin = if target.starts_with(['/', '@']) {
+            RealityOrigin::Unix(unix_target(target))
+        } else {
+            let (host, port) = parse_fallback(target)?;
+            RealityOrigin::Tcp { host, port }
+        };
+        let xver = match settings.text("xver") {
+            Err(_) => 0,
+            Ok(text) => text.parse::<u8>().ok().filter(|xver| *xver <= 2).ok_or(OpenError::Settings)?,
+        };
+        let limit = |key| match settings.text(key) {
+            Err(_) => Ok(kerlico_vless::RealityRateLimit::default()),
+            Ok(text) => kerlico_vless::RealityRateLimit::parse(text).ok_or(OpenError::Settings),
+        };
+        let network = settings.runtime().map(|context| context.network.clone());
+        if matches!(origin, RealityOrigin::Unix(_)) && network.is_none() {
+            return Err(OpenError::Settings);
+        }
+        Ok(Some(Self { origin, xver, upload: limit("limitFallbackUpload")?, download: limit("limitFallbackDownload")?, network }))
+    }
+
+    /// The bytes the target receives first: the PROXY header `xver` asks for, then the client's own bytes.
+    fn head(&self, peer: SocketAddr, local: Option<SocketAddr>, wire: &[u8]) -> Vec<u8> {
+        let mut head = if self.xver == 0 {
+            Vec::new()
+        } else {
+            let (peer, local) = proxyproto_pair(peer, local);
+            proxy_header(self.xver, peer, local)
+        };
+        head.extend_from_slice(wire);
+        head
+    }
+
+    fn connect(&self) -> io::Result<kerlico_shared::runtime::NetworkConnection> {
+        let network = self.network.clone().ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
+        match &self.origin {
+            RealityOrigin::Tcp { host, port } => kerlico_vless::runtime::CarrierNetwork::new(network, Default::default()).tcp(host, *port),
+            RealityOrigin::Unix(path) => network.connect_unix(path),
+        }
+    }
+
+    fn shape(&self, record: &[u8], head: &[u8]) -> Option<kerlico_vless::RealityTargetShape> {
+        let mut target = self.connect().ok()?;
+        target.set_timeout(REALITY_PROBE_TIMEOUT).ok()?;
+        target.write_all(head).ok()?;
+        kerlico_vless::RealityTargetShape::read_from(&mut target, record, &mut Vec::new()).ok()
+    }
+
+    fn fall_back(&self, read: Link, write: Link, peer: SocketAddr, head: Vec<u8>) -> Option<Ready> {
+        let read = if self.upload.is_limited() { Link::LimitedRead(Box::new(kerlico_vless::RealityRateLimitedRead::new(read, self.upload))) } else { read };
+        let write = if self.download.is_limited() { Link::LimitedWrite(Box::new(kerlico_vless::RealityRateLimitedWrite::new(write, self.download))) } else { write };
+        match &self.origin {
+            RealityOrigin::Tcp { host, port } => Some(Ready {
+                email: UserEmail::parse("fallback").ok()?,
+                destination: Destination::new(host.clone(), *port, Transport::Tcp).ok()?,
+                peer,
+                read,
+                write,
+                udp: false,
+                prefix: head,
+            }),
+            RealityOrigin::Unix(_) => {
+                relay(self.connect().ok()?, read, write, &head);
+                None
+            }
+        }
+    }
+}
+
+/// Xray pads `@@name` to the whole `sun_path` on Linux, as HAProxy names abstract sockets.
+fn unix_target(target: &str) -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    if target.starts_with("@@") {
+        let mut name = target.as_bytes()[1..].to_vec();
+        name.resize(108, 0);
+        return std::path::PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(name));
+    }
+    std::path::PathBuf::from(target)
+}
+
+/// go-proxyproto, which writes REALITY's header, keeps IPv4 only when both
+/// ends are IPv4 and otherwise writes both ends as IPv6.
+fn proxyproto_pair(peer: SocketAddr, local: Option<SocketAddr>) -> (SocketAddr, Option<SocketAddr>) {
+    let Some(local) = local else { return (peer, None) };
+    let canonical = |address: SocketAddr| SocketAddr::new(address.ip().to_canonical(), address.port());
+    let (peer, local) = (canonical(peer), canonical(local));
+    if peer.is_ipv4() && local.is_ipv4() {
+        return (peer, Some(local));
+    }
+    let six = |address: SocketAddr| match address.ip() {
+        std::net::IpAddr::V4(ip) => SocketAddr::new(ip.to_ipv6_mapped().into(), address.port()),
+        std::net::IpAddr::V6(_) => address,
+    };
+    (six(peer), Some(six(local)))
+}
+
+/// Copies each direction until EOF, then half-closes the other side, like Xray's REALITY fallback.
+fn relay(target: kerlico_shared::runtime::NetworkConnection, mut read: Link, mut write: Link, head: &[u8]) {
+    let Ok((mut from_target, mut to_target)) = target.split() else { return };
+    if to_target.write_all(head).is_err() {
+        return;
+    }
+    let upload = thread::spawn(move || {
+        let _ = pump(&mut read, &mut to_target);
+        let _ = to_target.shutdown();
+    });
+    let _ = pump(&mut from_target, &mut write);
+    write.close_write();
+    let _ = upload.join();
+}
+
+fn pump(from: &mut impl Read, to: &mut impl Write) -> io::Result<()> {
+    let retryable = |error: &io::Error| matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted);
+    let mut buffer = vec![0; 32 * 1024];
+    loop {
+        let count = match from.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(count) => count,
+            Err(error) if retryable(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        let mut rest = &buffer[..count];
+        while !rest.is_empty() {
+            match to.write(rest) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(written) => rest = &rest[written..],
+                Err(error) if retryable(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+struct RealityApp {
+    read: AppReader<Box<Link>>,
+    write: AppWriter<Box<Link>>,
+    name: String,
+    alpn: String,
+}
+
+/// Finishes an authenticated REALITY handshake. `Err` carries the fallback
+/// handoff for an unauthenticated connection, or nothing when the connection ends here.
+fn accept_reality(mut read: Link, mut write: Link, config: &RealityConfig, fallback: &FallbackSet, peer: SocketAddr, local: Option<SocketAddr>) -> Result<RealityApp, Option<Ready>> {
+    // Bytes that do not parse as a ClientHello still reach the target, as Xray mirrors every byte it reads.
+    let mut recorded = Recorded { inner: &mut read, bytes: Vec::new() };
+    let hello = kerlico_vless::read_client_hello(&mut recorded).ok().map(|(record, _)| record);
+    let wire = recorded.bytes;
+    let (name, alpn) = hello.as_deref().map(hello_identity).unwrap_or_default();
+    let Some(record) = hello.filter(|record| kerlico_vless::reality_accept_with_policy(record, &config.private, &config.policy)) else {
+        return Err(match &config.target {
+            Some(target) => target.fall_back(read, write, peer, target.head(peer, local, &wire)),
+            None => fall_back(read, write, peer, local, wire, fallback, &name, &alpn),
+        });
+    };
+    let head = config.target.as_ref().map(|target| target.head(peer, local, &wire)).unwrap_or_default();
+    let Some(accepted) = config.flight(&record, &head) else { return Err(None) };
+    if write.write_all(&accepted.flight).is_err() || read_client_finished(&mut read, &accepted.handshake, &accepted.expect).is_err() {
+        return Err(None);
+    }
+    let alpn = String::from_utf8_lossy(accepted.alpn().unwrap_or_default()).into_owned();
+    let (client_app, server_app) = accepted.application_keys();
+    Ok(RealityApp { read: reality_reader(Box::new(read), client_app), write: reality_writer(Box::new(write), server_app), name, alpn })
+}
+
+struct Recorded<'a, R> {
+    inner: &'a mut R,
+    bytes: Vec<u8>,
+}
+
+impl<R: Read> Read for Recorded<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        self.bytes.extend_from_slice(&buf[..count]);
+        Ok(count)
+    }
 }
 
 fn reality_config(settings: &Settings) -> Result<RealityConfig, OpenError> {
@@ -52,11 +262,7 @@ fn reality_config(settings: &Settings) -> Result<RealityConfig, OpenError> {
     };
     let mut names = alpn(settings);
     if names.is_empty() { names = vec!["h2".into(), "http/1.1".into()]; }
-    let target = settings.text("target").or_else(|_| settings.text("dest")).ok().map(|target| {
-        let (host, port) = parse_fallback(target)?;
-        Ok::<_, OpenError>(FallbackSet::build(vec![(String::new(), String::new(), String::new(), Fallback { host, port, xver: 0 })]))
-    }).transpose()?;
-    Ok(RealityConfig { private, policy: kerlico_vless::RealityPolicy { server_names, short_ids, min_client_ver: version("minClientVer")?, max_client_ver: version("maxClientVer")?, max_time_diff }, alpn: names, proof, target })
+    Ok(RealityConfig { private, policy: kerlico_vless::RealityPolicy { server_names, short_ids, min_client_ver: version("minClientVer")?, max_client_ver: version("maxClientVer")?, max_time_diff }, alpn: names, proof, target: RealityTarget::parse(settings)? })
 }
 
 type Decryption = (Vec<kerlico_vless::NfsKey>, u8, u64, u64, kerlico_vless::Pad);
@@ -614,20 +820,14 @@ fn tcp_pair(socket: TcpStream, masks: &kerlico_vless::finalmask::FinalMask, peer
     } else { Ok((Link::Tcp(socket.try_clone()?), Link::Tcp(socket))) }
 }
 
-fn open_reality(mut read: Link, mut write: Link, config: &RealityConfig, ready: &Sender<Ready>, peer: SocketAddr, local: Option<SocketAddr>) -> Option<RealityDuplex<AppReader<Box<Link>>, AppWriter<Box<Link>>>> {
-    let (record, wire) = kerlico_vless::read_client_hello(&mut read).ok()?;
-    if !kerlico_vless::reality_accept_with_policy(&record, &config.private, &config.policy) {
-        let (name, alpn) = hello_identity(&record);
-        if let Some(target) = &config.target {
-            if let Some(handoff) = fall_back(read, write, peer, local, wire, target, &name, &alpn) { ready.send(handoff).ok(); }
+fn open_reality(read: Link, write: Link, config: &RealityConfig, ready: &Sender<Ready>, peer: SocketAddr, local: Option<SocketAddr>) -> Option<RealityDuplex<AppReader<Box<Link>>, AppWriter<Box<Link>>>> {
+    match accept_reality(read, write, config, &FallbackSet::empty(), peer, local) {
+        Ok(app) => Some(RealityDuplex::new(app.read, app.write)),
+        Err(handoff) => {
+            if let Some(handoff) = handoff { ready.send(handoff).ok(); }
+            None
         }
-        return None;
     }
-    let accepted = kerlico_vless::server_flight_with_auth(&record, &config.private, &config.policy, &config.alpn, config.proof.as_ref()).ok()?;
-    write.write_all(&accepted.flight).ok()?;
-    read_client_finished(&mut read, &accepted.handshake, &accepted.expect).ok()?;
-    let (client_app, server_app) = accepted.application_keys();
-    Some(RealityDuplex::new(reality_reader(Box::new(read), client_app), reality_writer(Box::new(write), server_app)))
 }
 
 struct XhttpListener {
@@ -1296,20 +1496,13 @@ fn accept_loop(
                     (Link::TlsRead(Box::new(read)), Link::TlsWrite(Box::new(write)))
                 } else { (read, write) };
                 if let Some(config) = reality {
-                    let (record, wire) = kerlico_vless::read_client_hello(&mut read).ok()?;
-                    let (hello_name, hello_alpn) = hello_identity(&record);
-                    seen_name = hello_name;
-                    seen_alpn = hello_alpn;
-                    if !kerlico_vless::reality_accept_with_policy(&record, &config.private, &config.policy) {
-                        return fall_back(read, write, peer, local, wire, config.target.as_ref().unwrap_or(&fallback), &seen_name, &seen_alpn);
-                    }
-                    let accepted = kerlico_vless::server_flight_with_auth(&record, &config.private, &config.policy, &config.alpn, config.proof.as_ref()).ok()?;
-                    seen_alpn = String::from_utf8_lossy(accepted.alpn().unwrap_or_default()).into_owned();
-                    write.write_all(&accepted.flight).ok()?;
-                    read_client_finished(&mut read, &accepted.handshake, &accepted.expect).ok()?;
-                    let (client_app, server_app) = accepted.application_keys();
-                    read = Link::RealityRead(reality_reader(Box::new(read), client_app));
-                    write = Link::RealityWrite(reality_writer(Box::new(write), server_app));
+                    let app = match accept_reality(read, write, &config, &fallback, peer, local) {
+                        Ok(app) => app,
+                        Err(handoff) => return handoff,
+                    };
+                    (seen_name, seen_alpn) = (app.name, app.alpn);
+                    read = Link::RealityRead(app.read);
+                    write = Link::RealityWrite(app.write);
                 }
                 if let Some(cfg) = grpc {
                     if !seen_alpn.is_empty() && seen_alpn != "h2" {
@@ -1396,6 +1589,8 @@ enum Link {
     Vision(Box<kerlico_vless::VisionIo<Link>>),
     Duplex(Box<Link>, Box<Link>),
     Prefix(Box<Link>, VecDeque<u8>),
+    LimitedRead(Box<kerlico_vless::RealityRateLimitedRead<Link>>),
+    LimitedWrite(Box<kerlico_vless::RealityRateLimitedWrite<Link>>),
 }
 
 type Half = Link;
@@ -1480,6 +1675,14 @@ impl Link {
         matches!(self, Self::Tcp(_))
     }
 
+    fn close_write(&mut self) {
+        match self {
+            Self::Tcp(tcp) => { let _ = tcp.shutdown(std::net::Shutdown::Write); }
+            Self::LimitedWrite(link) => link.inner_mut().close_write(),
+            _ => {}
+        }
+    }
+
     fn set_timeout(&mut self, timeout: Duration) {
         match self {
             Self::MaskedRead(link) => link.set_timeout(timeout),
@@ -1512,6 +1715,8 @@ impl Link {
             Self::Vision(link) => link.inner_mut().set_timeout(timeout),
             Self::Duplex(read, write) => { read.set_timeout(timeout); write.set_timeout(timeout); },
             Self::Prefix(inner, _) => inner.set_timeout(timeout),
+            Self::LimitedRead(link) => link.inner_mut().set_timeout(timeout),
+            Self::LimitedWrite(link) => link.inner_mut().set_timeout(timeout),
         }
     }
 }
@@ -1550,6 +1755,8 @@ impl Read for Link {
                 for (slot, byte) in buf.iter_mut().zip(prefix.drain(..n)) { *slot = byte; }
                 Ok(n)
             },
+            Self::LimitedRead(link) => link.read(buf),
+            Self::LimitedWrite(_) => Err(std::io::Error::other("write half")),
         }
     }
 }
@@ -1583,6 +1790,8 @@ impl Write for Link {
             Self::Vision(link) => link.write(buf),
             Self::Duplex(_, write) => write.write(buf),
             Self::Prefix(inner, _) => inner.write(buf),
+            Self::LimitedWrite(link) => link.write(buf),
+            Self::LimitedRead(_) => Err(std::io::Error::other("read half")),
         }
     }
 
@@ -1614,6 +1823,8 @@ impl Write for Link {
             Self::Vision(link) => link.flush(),
             Self::Duplex(_, write) => write.flush(),
             Self::Prefix(inner, _) => inner.flush(),
+            Self::LimitedWrite(link) => link.flush(),
+            Self::LimitedRead(_) => Ok(()),
         }
     }
 }
@@ -4594,6 +4805,34 @@ mod tests {
         let n = stream.read_from_user(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"GET / HTTP/1.1\r\n\r\n");
         client.join().unwrap();
+    }
+
+    #[test]
+    fn reality_target_settings_follow_xray() {
+        let mut settings = Settings::default();
+        settings.insert_text("target", "8443");
+        settings.insert_text("xver", "2");
+        settings.insert_text("limitFallbackDownload", r#"{"BytesPerSec":1}"#);
+        let target = RealityTarget::parse(&settings).unwrap().unwrap();
+        assert!(matches!(&target.origin, RealityOrigin::Tcp { host, port: 8443 } if host == "127.0.0.1"));
+        assert_eq!((target.xver, target.download.bytes_per_sec, target.upload.is_limited()), (2, 1, false));
+        settings.insert_text("xver", "3");
+        assert!(RealityTarget::parse(&settings).is_err());
+        settings.insert_text("xver", "0");
+        settings.insert_text("target", "/run/decoy.sock");
+        assert!(RealityTarget::parse(&settings).is_err(), "a Unix target needs the runtime network");
+    }
+
+    #[test]
+    fn reality_proxy_header_uses_go_proxyproto_families() {
+        let v4: SocketAddr = "192.0.2.1:1000".parse().unwrap();
+        let mapped: SocketAddr = "[::ffff:192.0.2.2]:443".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        let (peer, local) = proxyproto_pair(v4, Some(mapped));
+        assert_eq!(proxy_header(1, peer, local), b"PROXY TCP4 192.0.2.1 192.0.2.2 1000 443\r\n");
+        let (peer, local) = proxyproto_pair(v4, Some(v6));
+        assert_eq!(proxy_header(1, peer, local), b"PROXY TCP6 ::ffff:192.0.2.1 2001:db8::1 1000 443\r\n");
+        assert_eq!(&proxy_header(2, peer, local)[12..16], [0x21, 0x21, 0, 36]);
     }
 
     #[test]
