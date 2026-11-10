@@ -10,8 +10,9 @@ pub use dial::{
     TransportResolver,
 };
 
-use crate::TrustedForwardedFor;
+use crate::{go_json, TrustedForwardedFor};
 use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -130,7 +131,7 @@ impl TryFrom<String> for AddressPortStrategy {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase")]
 struct HappyEyeballs {
     #[serde(rename = "prioritizeIPv6")]
     prioritize_ipv6: bool,
@@ -151,7 +152,7 @@ impl Default for HappyEyeballs {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct CustomSockopt {
     system: String,
     network: String,
@@ -164,7 +165,7 @@ struct CustomSockopt {
 
 /// Options from the Xray `streamSettings.sockopt` object.
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase")]
 pub struct SocketOptions {
     mark: i32,
     #[serde(deserialize_with = "fast_open")]
@@ -208,9 +209,7 @@ impl SocketOptions {
     pub fn parse(json: Option<&str>) -> io::Result<Self> {
         let mut options = match json {
             None => Self::default(),
-            Some(json) => serde_json::from_str::<Option<Self>>(json)
-                .map_err(|err| invalid(format!("sockopt: {err}")))?
-                .unwrap_or_default(),
+            Some(json) => decode(json).map_err(|err| invalid(format!("sockopt: {err}")))?.unwrap_or_default(),
         };
         options.dialer_proxy = options.dialer_proxy.filter(|selector| !selector.is_empty());
         if (options.tcp_keep_alive_idle > 0 && options.tcp_keep_alive_interval < 0)
@@ -266,6 +265,38 @@ impl SocketOptions {
         }
         Ok(())
     }
+}
+
+const OPTION_FIELDS: [&str; 20] = [
+    "mark", "tcpFastOpen", "tproxy", "acceptProxyProtocol", "domainStrategy", "dialerProxy",
+    "tcpKeepAliveInterval", "tcpKeepAliveIdle", "tcpCongestion", "tcpWindowClamp", "tcpMaxSeg", "penetrate",
+    "tcpUserTimeout", "v6only", "interface", "tcpMptcp", "customSockopt", "addressPortStrategy",
+    "happyEyeballs", "trustedXForwardedFor",
+];
+const HAPPY_EYEBALLS_FIELDS: [&str; 4] = ["prioritizeIPv6", "tryDelayMs", "interleave", "maxConcurrentTry"];
+const CUSTOM_SOCKOPT_FIELDS: [&str; 6] = ["system", "network", "level", "opt", "value", "type"];
+
+/// Go matches keys case-insensitively and ignores keys no field has, so both are settled before serde sees the object.
+fn decode(json: &str) -> serde_json::Result<Option<SocketOptions>> {
+    let Some(pairs) = go_json::object(json)? else {
+        return Ok(None);
+    };
+    let mut map = go_json::fields(pairs, &OPTION_FIELDS);
+    let nested = |value: Value, names: &[&str]| match value {
+        Value::Object(object) => Value::Object(go_json::fields(object.into_iter().collect(), names)),
+        other => other,
+    };
+    if let Some(value) = map.remove("happyEyeballs") {
+        map.insert("happyEyeballs".to_owned(), nested(value, &HAPPY_EYEBALLS_FIELDS));
+    }
+    if let Some(value) = map.remove("customSockopt") {
+        let value = match value {
+            Value::Array(items) => Value::Array(items.into_iter().map(|item| nested(item, &CUSTOM_SOCKOPT_FIELDS)).collect()),
+            other => other,
+        };
+        map.insert("customSockopt".to_owned(), value);
+    }
+    serde_json::from_value(Value::Object(map)).map(Some)
 }
 
 fn default_on_null<'de, D, T>(deserializer: D) -> Result<T, D::Error>

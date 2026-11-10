@@ -3,10 +3,9 @@
 use std::io;
 use std::time::Duration;
 
-use serde::de::{Deserializer, MapAccess, Visitor};
-use serde::Deserialize;
 use serde_json::Value;
 
+use crate::go_json::{fold, object};
 use crate::http::H2Limits;
 
 const GO_DEFAULT_PING_TIMEOUT: Duration = Duration::from_secs(15);
@@ -25,42 +24,6 @@ pub struct H2Params {
     pub permit_prohibited_ciphers: bool,
 }
 
-struct Pairs(Vec<(String, Value)>);
-
-impl<'de> Deserialize<'de> for Pairs {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Ordered;
-        impl<'de> Visitor<'de> for Ordered {
-            type Value = Pairs;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("an object")
-            }
-
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Pairs, A::Error> {
-                let mut pairs = Vec::new();
-                while let Some(pair) = map.next_entry::<String, Value>()? {
-                    pairs.push(pair);
-                }
-                Ok(Pairs(pairs))
-            }
-        }
-        deserializer.deserialize_map(Ordered)
-    }
-}
-
-/// Go matches keys case-insensitively with Unicode simple folding. Only the two non-ASCII
-/// characters that fold into the ASCII field names can matter here.
-fn fold(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            '\u{212a}' => 'k',
-            '\u{17f}' => 's',
-            c => c.to_ascii_lowercase(),
-        })
-        .collect()
-}
-
 fn invalid(key: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, format!("h2Params {key}"))
 }
@@ -75,9 +38,7 @@ fn integer(key: &str, value: &Value) -> io::Result<Option<i64>> {
 
 impl H2Params {
     pub fn parse(text: &str) -> io::Result<Self> {
-        let pairs = serde_json::from_str::<Option<Pairs>>(text)
-            .map_err(|_| invalid("object"))?
-            .map_or_else(Vec::new, |pairs| pairs.0);
+        let pairs = object(text).map_err(|_| invalid("object"))?.unwrap_or_default();
         let mut params = Self::default();
         for (key, value) in &pairs {
             let slot = match fold(key).as_str() {

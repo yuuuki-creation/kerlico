@@ -23,6 +23,7 @@ mod kcp;
 mod header;
 mod mux;
 mod http;
+mod go_json;
 mod h2_params;
 mod tls;
 mod upgrade;
