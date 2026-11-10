@@ -43,5 +43,5 @@ Rule from user 2026-11-10: no compiling or testing on the local machine; all bui
 - [x] Unit F3: one Mux uplink for every Mux carrier (merged c6f1cb5).
 - [x] Unit F4: TLS server group choice so Xray `randomized` fingerprints never get a HelloRetryRequest (merged; deliberately more lenient than Go, which retries and fails with uTLS too).
 - [x] Unit F5: VLESS response header leaves with the first downlink bytes, as Xray's SetFlushNext (merged d631f25).
-- [ ] Open for the user: REALITY camouflage (R2, stopped by a safety check); REALITY X25519-only key_share leniency; TLS group choice more lenient than Go; REALITY Unix-target relay inside the protocol crate (AGENTS.md exception); push of claude/vless-completion.
-- [ ] Follow-up outside VLESS: intermittent mieru 02-rust-to-official UDP order/boundary failure (1 in 10 full runs).
+- [x] User decisions 2026-11-11: REALITY key_share and the Unix-target exception aligned with Xray; TLS group choice stays more lenient than Go. REALITY camouflage (R2) stays undone: a safety check stopped it.
+- [x] Follow-up outside VLESS: intermittent mieru 02-rust-to-official UDP order failure was the test fixture; fixed and merged (539b8c3).

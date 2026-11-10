@@ -64,26 +64,6 @@ pub fn reality_pair() -> ([u8; 32], [u8; 32]) {
     (secret.to_bytes(), public)
 }
 
-pub fn reality_offer(
-    server_public: &[u8; 32],
-    short_id: &[u8; 8],
-    server_name: &str,
-) -> std::io::Result<(Vec<u8>, [u8; 32])> {
-    let (secret, public) = ephemeral();
-    let mut random = [0u8; 32];
-    getrandom::getrandom(&mut random).map_err(|error| std::io::Error::other(error.to_string()))?;
-    let alpn = encode_alpn(&["h2", "http/1.1"])?;
-    let handshake = handshake_message(
-        &random,
-        &classical_share(&public),
-        false,
-        server_name,
-        &alpn,
-    );
-    let record = seal_hello(handshake, server_public, &secret, short_id, &random)?;
-    Ok((record, secret.to_bytes()))
-}
-
 pub fn reality_offer_hybrid(
     server_public: &[u8; 32],
     short_id: &[u8; 8],
@@ -105,13 +85,7 @@ pub fn reality_offer_hybrid_with_alpn<P: AsRef<str>>(
     let mut random = [0u8; 32];
     getrandom::getrandom(&mut random).map_err(|error| std::io::Error::other(error.to_string()))?;
     let alpn = encode_alpn(protocols)?;
-    let handshake = handshake_message(
-        &random,
-        &hybrid_share(&share, &public),
-        true,
-        server_name,
-        &alpn,
-    );
+    let handshake = handshake_message(&random, &hybrid_share(&share, &public), server_name, &alpn);
     let record = seal_hello(handshake, server_public, &secret, short_id, &random)?;
     Ok((record, secret.to_bytes(), kem_secret))
 }
@@ -266,10 +240,6 @@ fn seal_hello(
     Ok(record)
 }
 
-fn classical_share(share: &[u8; 32]) -> Vec<u8> {
-    key_share_body(&[(0x001d, share)])
-}
-
 fn hybrid_share(share: &[u8], classical: &[u8; 32]) -> Vec<u8> {
     key_share_body(&[(0x11ec, share), (0x001d, classical)])
 }
@@ -295,14 +265,6 @@ fn kem_keypair() -> std::io::Result<(Vec<u8>, Vec<u8>)> {
     let mut rng = rand_core::OsRng;
     let (secret, public) = ml_kem::MlKem768::generate(&mut rng);
     Ok((secret.as_bytes().to_vec(), public.as_bytes().to_vec()))
-}
-
-pub fn reality_hello(
-    server_public: &[u8; 32],
-    short_id: &[u8; 8],
-    server_name: &str,
-) -> std::io::Result<Vec<u8>> {
-    Ok(reality_offer(server_public, short_id, server_name)?.0)
 }
 
 pub fn reality_accept(record: &[u8], private: &[u8; 32], short_id: &[u8; 8]) -> bool {
@@ -515,7 +477,6 @@ fn encode_alpn<P: AsRef<str>>(protocols: &[P]) -> io::Result<Vec<u8>> {
 fn handshake_message(
     random: &[u8; 32],
     key_share: &[u8],
-    hybrid: bool,
     server_name: &str,
     alpn: &[u8],
 ) -> Vec<u8> {
@@ -548,14 +509,11 @@ fn handshake_message(
     }
     push_ext(&mut hs, 0x0017, &[]);
     push_ext(&mut hs, 0xff01, &[0]);
-    let groups: &[u8] = if hybrid {
-        &[
-            0, 10, 0x0a, 0x0a, 0x11, 0xec, 0x00, 0x1d, 0x00, 0x17, 0x00, 0x18,
-        ]
-    } else {
-        &[0, 8, 0x0a, 0x0a, 0x00, 0x1d, 0x00, 0x17, 0x00, 0x18]
-    };
-    push_ext(&mut hs, 0x000a, groups);
+    push_ext(
+        &mut hs,
+        0x000a,
+        &[0, 10, 0x0a, 0x0a, 0x11, 0xec, 0x00, 0x1d, 0x00, 0x17, 0x00, 0x18],
+    );
     push_ext(&mut hs, 0x000b, &[1, 0]);
     push_ext(&mut hs, 0x0023, &[]);
     if alpn.len() > 2 {
@@ -607,21 +565,21 @@ pub(crate) enum ClientKem {
     Hybrid { kem: Vec<u8>, x25519: [u8; 32] },
 }
 
+/// The X25519 key a REALITY server authenticates with, picked as xtls/reality 83f621788ca8
+/// (`tls.go`) does: one X25519MLKEM768 share must come before any X25519 share, the first
+/// X25519 share after it wins, and otherwise the hybrid share's X25519 half. Any other
+/// ClientHello is not a REALITY one and goes to the target.
 pub(crate) fn client_share(handshake: &[u8]) -> Option<[u8; 32]> {
-    let shares = key_shares(handshake)?;
-    if let Some((_, key)) = shares
-        .iter()
-        .find(|(group, key)| *group == 0x001d && key.len() == 32)
-    {
-        return key.as_slice().try_into().ok();
+    let mut hybrid: Option<[u8; 32]> = None;
+    for (group, key) in key_shares(handshake)? {
+        match (group, key.len()) {
+            (0x11ec, 1216) if hybrid.is_some() => return None,
+            (0x11ec, 1216) => hybrid = key[1184..].try_into().ok(),
+            (0x001d, 32) => return hybrid.and(key.as_slice().try_into().ok()),
+            _ => {}
+        }
     }
-    if let Some((_, key)) = shares
-        .iter()
-        .find(|(group, key)| *group == 0x11ec && key.len() == 1216)
-    {
-        return key[1184..].try_into().ok();
-    }
-    None
+    hybrid
 }
 
 pub(crate) fn client_kem(handshake: &[u8]) -> Option<ClientKem> {
@@ -819,7 +777,7 @@ mod tests {
     fn reality_policy_checks_sni_short_id_version_and_skew() {
         let (private, public) = reality_pair();
         let short_id = [9; 8];
-        let (mut hello, secret) = reality_offer(&public, &short_id, "example.com").unwrap();
+        let (mut hello, secret, _) = reality_offer_hybrid(&public, &short_id, "example.com").unwrap();
         let mut policy = RealityPolicy {
             server_names: vec!["other.example".into(), "example.com".into()],
             short_ids: vec![[0; 8], short_id],
@@ -861,6 +819,24 @@ mod tests {
     }
 
     #[test]
+    fn auth_share_follows_xray_key_share_order() {
+        let x25519 = [1u8; 32];
+        let mut hybrid = vec![2u8; 1184];
+        hybrid.extend_from_slice(&[3; 32]);
+        let p256 = [4u8; 65];
+        let pick = |shares: &[(u16, &[u8])]| {
+            client_share(&handshake_message(&[5; 32], &key_share_body(shares), "example.com", &[0, 0]))
+        };
+        assert_eq!(pick(&[(0x11ec, &hybrid[..]), (0x001d, &x25519[..])]), Some(x25519), "the X25519 share after the hybrid one");
+        assert_eq!(pick(&[(0x11ec, &hybrid[..])]), Some([3; 32]), "the hybrid share's X25519 half");
+        assert_eq!(pick(&[(23, &p256[..]), (0x11ec, &hybrid[..]), (0x001d, &x25519[..])]), Some(x25519), "other groups are skipped");
+        assert_eq!(pick(&[(0x001d, &x25519[..])]), None, "X25519 alone is an outdated ClientHello");
+        assert_eq!(pick(&[(0x001d, &x25519[..]), (0x11ec, &hybrid[..])]), None, "X25519 before the hybrid share");
+        assert_eq!(pick(&[(0x11ec, &hybrid[..]), (0x11ec, &hybrid[..]), (0x001d, &x25519[..])]), None, "two hybrid shares");
+        assert_eq!(pick(&[(0x11ec, &hybrid[..1100]), (0x001d, &x25519[..])]), None, "a short hybrid share does not count");
+    }
+
+    #[test]
     fn malformed_and_low_order_hellos_are_rejected() {
         for len in [71, 72] {
             let mut record = vec![22, 3, 1, 0, len as u8];
@@ -872,13 +848,8 @@ mod tests {
         }
 
         let random = [3; 32];
-        let mut hello = handshake_message(
-            &random,
-            &classical_share(&[0; 32]),
-            false,
-            "example.com",
-            &[0, 0],
-        );
+        let mut hello = handshake_message(&random, &hybrid_share(&[0; 1216], &[0; 32]), "example.com", &[0, 0]);
+        assert_eq!(client_share(&hello), Some([0; 32]), "the hello reaches the low-order check");
         let mut plain = [0; 16];
         let seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -897,7 +868,7 @@ mod tests {
     fn client_hello_spans_records_without_losing_wire_prefix() {
         let (private, public) = reality_pair();
         let short_id = [9; 8];
-        let hello = reality_hello(&public, &short_id, "example.com").unwrap();
+        let hello = reality_offer_hybrid(&public, &short_id, "example.com").unwrap().0;
         let mut wire = Vec::new();
         for fragment in hello[5..].chunks(37) {
             wire.extend_from_slice(&[22, 3, 1, 0, fragment.len() as u8]);
@@ -933,7 +904,7 @@ mod tests {
         let secret = x25519_dalek::StaticSecret::from(secret);
         let public = x25519_dalek::PublicKey::from(&secret).to_bytes();
         let short_id = [1u8, 2, 3, 4, 5, 6, 7, 8];
-        let record = reality_hello(&public, &short_id, "www.example.com").unwrap();
+        let record = reality_offer_hybrid(&public, &short_id, "www.example.com").unwrap().0;
         assert!(reality_accept(&record, &secret.to_bytes(), &short_id));
         assert!(!reality_accept(&record, &secret.to_bytes(), &[0; 8]));
         assert!(record.len() >= 512);

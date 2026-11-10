@@ -3596,12 +3596,12 @@ mod tests {
         let short_id = [1u8, 2, 3, 4, 5, 6, 7, 8];
         let client = thread::spawn(move || {
             let socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            let (hello, secret) = kerlico_vless::reality_offer(&public, &short_id, "www.example.com").unwrap();
+            let (hello, secret, kem) = kerlico_vless::reality_offer_hybrid(&public, &short_id, "www.example.com").unwrap();
             let mut writer = socket.try_clone().unwrap();
             writer.write_all(&hello).unwrap();
             let mut reader = socket;
             let flight = kerlico_vless::take_flight(&mut reader).unwrap();
-            let (read_key, write_key, finished) = kerlico_vless::client_keys(&hello, &flight, &secret, None, &public).unwrap();
+            let (read_key, write_key, finished) = kerlico_vless::client_keys(&hello, &flight, &secret, Some(&kem), &public).unwrap();
             writer.write_all(&finished).unwrap();
             let mut reader = kerlico_vless::reality_reader(reader, read_key);
             let mut writer = kerlico_vless::reality_writer(writer, write_key);

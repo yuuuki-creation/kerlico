@@ -35,7 +35,7 @@ mod ws;
 pub use encrypt::{accept_native, accept_encrypted, client_key, connect_native, connect_encrypted, encode_key, native_pair, server_key, EncReader, EncWriter, NfsKey, Pad};
 pub use proxy::{accept_proxy, TrustedForwardedFor};
 pub use transport::{mask_network, mask_tcp, mask_tcp_at, MaskedRead, MaskedWrite};
-pub use reality::{auth_key, decode_reality_key, decode_short_id, encode_reality_key, open_session, read_tls_record, read_client_hello, reality_accept, reality_hello, reality_offer, reality_offer_hybrid, reality_offer_hybrid_with_alpn, reality_pair, seal_session};
+pub use reality::{auth_key, decode_reality_key, decode_short_id, encode_reality_key, open_session, read_tls_record, read_client_hello, reality_accept, reality_offer_hybrid, reality_offer_hybrid_with_alpn, reality_pair, seal_session};
 pub use reality_tls::{client_keys, read_client_finished, read_server_flight, read_server_flight_with_alpn, reader as reality_reader, server_flight, server_flight_with_alpn, take_flight, writer as reality_writer, AppReader, AppWriter, RealityDuplex, ServerHello};
 pub use grpc::{grpc_path, GrpcConnection, GrpcOptions, GrpcStream};
 pub use kcp::{kcp_mask, KcpIo, KcpMask, KcpOptions, Session};

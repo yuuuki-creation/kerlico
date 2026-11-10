@@ -22,7 +22,7 @@ Do not read or use git branch `old`. The branch and everything on it are out of 
 
 实现可以使用 crates.io 上的 Rust 包。语言保持 Rust。
 
-一个行为只留一条路径。协议 crate 负责入站握手，并交出 `Handoff`。拨号只放在 `crates/outbound`。分流规则只挂在节点上，命中结果是 `OutboundChoice`。规则集与 Xray 的域名规则、`geosite.dat` 和 `geoip.dat` 使用同一套写法。不要按网址路径匹配，不要做一份全局路由表，也不要做 `outboundTag`。DNS、嗅探和 FakeDNS 属于服务端。落地用的客户端协议只通过服务端叶子上的 `landing-<id>` 依赖引进来。
+一个行为只留一条路径。协议 crate 负责入站握手，并交出 `Handoff`。拨号只放在 `crates/outbound`。唯一的例外是 VLESS REALITY 的 Unix 套接字 `target`：未认证的连接没有出口可选，协议经运行时上下文的 `connect_unix` 打开套接字并在协议内转发，与 Xray 在 REALITY 层直接连 target 相同，见 `docs/reference/vless.md`。分流规则只挂在节点上，命中结果是 `OutboundChoice`。规则集与 Xray 的域名规则、`geosite.dat` 和 `geoip.dat` 使用同一套写法。不要按网址路径匹配，不要做一份全局路由表，也不要做 `outboundTag`。DNS、嗅探和 FakeDNS 属于服务端。落地用的客户端协议只通过服务端叶子上的 `landing-<id>` 依赖引进来。
 
 WireGuard 引擎只放在 `crates/wg`，包名 `kerlico-wg`。不要把引擎写进 `protocols/wireguard`，也不要写进 `crates/outbound`。
 

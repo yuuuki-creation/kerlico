@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256, Sha384, Sha512};
 
 use crate::encrypt::checked_x25519;
 use crate::reality::{
-    alpn_protocols, auth_key, authenticate_hello, b64, client_alpn, client_kem, client_share,
+    alpn_protocols, auth_key, authenticate_hello, b64, client_alpn, client_kem,
     client_suites, read_plain_handshake, u24, ClientKem, RealityPolicy,
 };
 
@@ -501,7 +501,7 @@ fn read_server_flight_impl<R: Read>(
 ) -> io::Result<RealityClientResult> {
     let hello = record
         .get(5..)
-        .filter(|hello| client_share(hello).is_some())
+        .filter(|hello| client_kem(hello).is_some())
         .ok_or_else(invalid_record)?;
     let (server_hello, _) = read_plain_handshake(reader, 2)
         .map_err(|error| io::Error::new(error.kind(), format!("REALITY ServerHello: {error}")))?;
@@ -1482,7 +1482,7 @@ fn invalid_record() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reality::{encode_base64, open_session, reality_offer, reality_pair, seal_session};
+    use crate::reality::{encode_base64, open_session, reality_offer_hybrid, reality_pair, seal_session};
     use std::io::{Read, Write};
 
     #[test]
@@ -1518,7 +1518,7 @@ mod tests {
     fn reality_mldsa_flight_requires_the_configured_proof() {
         let (private, public) = reality_pair();
         let short_id = [7; 8];
-        let (hello, secret) = reality_offer(&public, &short_id, "example.com").unwrap();
+        let (hello, secret, kem) = reality_offer_hybrid(&public, &short_id, "example.com").unwrap();
         let signer = RealityMldsa65Signer::from_base64(&encode_base64(&[5; 32])).unwrap();
         let verify = |signer: &RealityMldsa65Signer| {
             let key = signer.0.as_ref().as_ref().encode();
@@ -1541,7 +1541,7 @@ mod tests {
             &mut signed.flight.as_slice(),
             &hello,
             &secret,
-            None,
+            Some(&kem),
             &public,
             Some(&verifier),
         )
@@ -1552,7 +1552,7 @@ mod tests {
             &mut signed.flight.as_slice(),
             &hello,
             &secret,
-            None,
+            Some(&kem),
             &public,
             Some(&other)
         )
@@ -1561,7 +1561,7 @@ mod tests {
             &mut signed.flight.as_slice(),
             &hello,
             &secret,
-            None,
+            Some(&kem),
             &public
         )
         .is_ok());
@@ -1571,7 +1571,7 @@ mod tests {
             &mut unsigned.flight.as_slice(),
             &hello,
             &secret,
-            None,
+            Some(&kem),
             &public,
             Some(&verifier)
         )
@@ -1602,7 +1602,7 @@ mod tests {
         for suite in Suite::PREFERENCE {
             let (private, public) = reality_pair();
             let short_id = [7; 8];
-            let (mut hello, secret) = reality_offer(&public, &short_id, "example.com").unwrap();
+            let (mut hello, secret, kem) = reality_offer_hybrid(&public, &short_id, "example.com").unwrap();
             let random: [u8; 32] = hello[11..43].try_into().unwrap();
             let auth = reality_auth_client(&secret, &public, &random).unwrap();
             let sealed: [u8; 32] = hello[44..76].try_into().unwrap();
@@ -1624,7 +1624,7 @@ mod tests {
                 &mut accepted.flight.as_slice(),
                 &hello,
                 &secret,
-                None,
+                Some(&kem),
                 &public,
             )
             .unwrap();
@@ -1653,9 +1653,9 @@ mod tests {
     fn server_flight_and_client_finished_can_span_records() {
         let (private, public) = reality_pair();
         let short_id = [7; 8];
-        let (hello, secret) = reality_offer(&public, &short_id, "example.com").unwrap();
+        let (hello, secret, kem) = reality_offer_hybrid(&public, &short_id, "example.com").unwrap();
         let accepted = server_flight(&hello, &private, &short_id).unwrap();
-        let (server_hello, traffic, _, messages) = server_messages(&hello, &secret, &accepted);
+        let (server_hello, traffic, _, messages) = server_messages(&hello, &secret, &kem, &accepted);
         let mut flight = Vec::new();
         for fragment in server_hello.chunks(13) {
             flight.extend(wrap_handshake(fragment));
@@ -1667,7 +1667,7 @@ mod tests {
         flight.extend_from_slice(b"next");
         let mut incoming = flight.as_slice();
         let (_, _, finished) =
-            read_server_flight(&mut incoming, &hello, &secret, None, &public).unwrap();
+            read_server_flight(&mut incoming, &hello, &secret, Some(&kem), &public).unwrap();
         assert_eq!(incoming, b"next");
         let plain = open_record(&accepted.handshake, 0, &finished).unwrap();
         let (_, finished) = split_inner(&plain).unwrap();
@@ -1689,10 +1689,10 @@ mod tests {
     fn forged_certificate_verify_fails_even_with_valid_finished() {
         let (private, public) = reality_pair();
         let short_id = [7; 8];
-        let (hello, secret) = reality_offer(&public, &short_id, "example.com").unwrap();
+        let (hello, secret, kem) = reality_offer_hybrid(&public, &short_id, "example.com").unwrap();
         let accepted = server_flight(&hello, &private, &short_id).unwrap();
         let (server_hello, traffic, server_hs, mut messages) =
-            server_messages(&hello, &secret, &accepted);
+            server_messages(&hello, &secret, &kem, &accepted);
         let before_finished = messages.len() - 4 - accepted.suite.hash_len();
         messages[before_finished - 1] ^= 1;
         let mut transcript = accepted.suite.transcript();
@@ -1706,19 +1706,20 @@ mod tests {
             seal_record(&traffic, 0, 22, &messages),
         ]
         .concat();
-        assert!(client_keys(&hello, &forged, &secret, None, &public).is_err());
+        assert!(client_keys(&hello, &forged, &secret, Some(&kem), &public).is_err());
         assert!(cert_der(&[0]).is_none());
     }
 
     fn server_messages(
         hello: &[u8],
         secret: &[u8; 32],
+        kem: &[u8],
         accepted: &ServerHello,
     ) -> (Vec<u8>, Traffic, Vec<u8>, Vec<u8>) {
         let mut wire = accepted.flight.as_slice();
         let (server_hello, _) = read_plain_handshake(&mut wire, 2).unwrap();
         let (suite, group, share) = server_share(&server_hello, &hello[44..76]).unwrap();
-        let shared = traffic_shared(secret, None, group, share).unwrap();
+        let shared = traffic_shared(secret, Some(kem), group, share).unwrap();
         let mut transcript = suite.transcript();
         transcript.update(&hello[5..]);
         transcript.update(&server_hello);
@@ -1737,10 +1738,10 @@ mod tests {
     fn flight_then_application_data() {
         let (private, public) = reality_pair();
         let short_id = [1u8, 2, 3, 4, 5, 6, 7, 8];
-        let (hello, secret) = reality_offer(&public, &short_id, "www.example.com").unwrap();
+        let (hello, secret, kem) = reality_offer_hybrid(&public, &short_id, "www.example.com").unwrap();
         let accepted = server_flight(&hello, &private, &short_id).unwrap();
         let (read_key, write_key, finished_record) =
-            client_keys(&hello, &accepted.flight, &secret, None, &public).unwrap();
+            client_keys(&hello, &accepted.flight, &secret, Some(&kem), &public).unwrap();
         let _messages = read_client_finished(
             &mut std::io::Cursor::new(&finished_record),
             &accepted.handshake,
@@ -1762,7 +1763,7 @@ mod tests {
         let (private, public) = reality_pair();
         let short_id = [1u8, 2, 3, 4, 5, 6, 7, 8];
         let (hello, secret, kem) =
-            crate::reality::reality_offer_hybrid(&public, &short_id, "www.example.com").unwrap();
+            reality_offer_hybrid(&public, &short_id, "www.example.com").unwrap();
         let accepted = server_flight(&hello, &private, &short_id).unwrap();
         let (read_key, write_key, finished_record) =
             client_keys(&hello, &accepted.flight, &secret, Some(&kem), &public).unwrap();
