@@ -241,6 +241,22 @@ fn masquerade_and_rate_negotiation_share_a_quic_connection() {
 }
 
 #[test]
+fn masquerade_stops_an_unread_request_without_error_and_keeps_its_answer() {
+    let masq = HysteriaMasquerade::parse(Some(r#"{"type":"string","content":"front page","statusCode":418}"#)).unwrap();
+    let (listener, client) = hysteria_server(masq, &FinalMask::default());
+    let conn = H3Conn::connect(listener.local_addr().unwrap(), client, "localhost").unwrap();
+    let mut stream = conn.request("POST", "/upload", "cover.example", "https", &[], false).unwrap();
+    assert_eq!(stream.response_status().unwrap(), 418);
+    let mut body = String::new();
+    stream.read_to_string(&mut body).unwrap();
+    assert_eq!(body, "front page", "the server answers before the client sends its body");
+    // Larger than any stream window, so the write ends only through the server's STOP_SENDING.
+    let late = stream.write(&vec![0; 64 << 20]).unwrap_err();
+    assert_eq!(peer_stopped(&late), Some(h3::error::Code::H3_NO_ERROR), "the server stops the unread request without error: {late:?}");
+    stream.finish_write().expect("a request the server stopped counts as finished");
+}
+
+#[test]
 fn masquerade_proxy_preserves_body_and_rewrites_forwarding_headers() {
     let origin = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let origin_addr = origin.local_addr().unwrap();
