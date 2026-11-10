@@ -575,9 +575,6 @@ fn xudp_keep_routes_each_datagram_to_its_own_target() {
         id: kerlico_vless::parse_id("test-user").unwrap(), flow: String::new(), seed: Vec::new(),
         command: Command::Mux, port: 0, address: Addr::Domain(String::new()),
     }).unwrap()).unwrap();
-    let mut response = [0; 2];
-    socket.read_exact(&mut response).unwrap();
-    assert_eq!(response, [0, 0]);
     socket.write_all(&kerlico_vless::encode_mux(&MuxFrame {
         id: 0, status: NEW, option: DATA, network: 2, port: 80,
         address: Some(Addr::V4(Ipv4Addr::LOCALHOST)), payload: b"A".to_vec(), global_id: None,
@@ -596,6 +593,9 @@ fn xudp_keep_routes_each_datagram_to_its_own_target() {
     receive(second.as_ref(), b"B", true);
     send(first.as_ref(), b"one", true);
     send(second.as_ref(), b"two", true);
+    let mut response = [0; 2];
+    socket.read_exact(&mut response).unwrap();
+    assert_eq!(response, [0, 0], "the response leads the first reply frame");
     let mut wire = Vec::new();
     for (port, ip, payload) in [(80, Ipv4Addr::LOCALHOST, b"one"), (81, Ipv4Addr::new(127, 0, 0, 2), b"two")] {
         let frame = loop {

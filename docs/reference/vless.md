@@ -6,7 +6,7 @@
 
 链路按套接字及 finalmask、TLS/REALITY、传输、VLESS Encryption、VLESS 请求、Vision、Mux/数据报的顺序组合。协议服务端完成握手后交出 `Handoff`，目标拨号仍由 `crates/outbound` 执行。分流、DNS、嗅探和 FakeDNS 使用 `server.md` 的规则。
 
-版本字节是 0。请求依次带 UUID、addons、命令、端口、地址；响应带版本和 addons。addons 是 protobuf，字段 1 是 flow，字段 2 是 seed，未知字段按 protobuf 规则跳过。命令为 TCP(1)、UDP(2)、Mux(3)、Reverse(4)。Mux 和 Reverse 的请求在命令之后结束，没有目标字段。
+版本字节是 0。请求依次带 UUID、addons、命令、端口、地址；响应带版本和 addons。addons 是 protobuf，字段 1 是 flow，字段 2 是 seed，未知字段按 protobuf 规则跳过。命令为 TCP(1)、UDP(2)、Mux(3)、Reverse(4)。Mux 和 Reverse 的请求在命令之后结束，没有目标字段。服务端与 Xray 的入站一样，不在读完请求后立即写响应，而是把响应和第一批下行字节放在同一次写入里：TCP 和 UDP 的首个回复、Vision 的首个填充帧、Mux 的首帧或门户的控制帧，交出原始套接字之前也先写出。流结束前没有下行字节时不发送响应。
 
 UUID 可以写标准形式或 1 至 30 字节的自定义字符串。自定义 ID 按 Xray 的 UUID v5 映射；`我爱🍉老师1314` 对应 `5783a3e7-e373-51cd-8642-c83782b807c5`。认证比较时清零字节 6、7，保留线上的原始 UUID 给 Vision。路由字节不创建全局路由。
 
@@ -158,4 +158,4 @@ Windows 当前可用 GNU 工具链，加 `+stable-x86_64-pc-windows-gnu`。叶�
 - 独立客户端叶子的 VLESS 报文 `DataPlane` 仍明确返回错误；当前可运行的是服务端入站、落地 `land` 和反向流 API。
 - 最终完整官方矩阵、独立审查，以及 `crates.md` 要求的客户端 WireGuard 和服务端 OpenVPN 两条分离构建。
 
-固定版本 Xray 的 HTTPUpgrade 服务端用带缓冲的读取解析请求头后返回原始连接，与请求头同一次读到的 VLESS 字节随之丢失（`transport/internet/httpupgrade/hub.go`）。明文早期数据下，请求之后越早写出数据越容易触发。Kerlico 客户端因此像 Xray 的拨号器那样在建连时发出请求，不再在首批数据时与请求连续写出。同一快照各重复 20 次：修正前 kerlico 到 Xray 失败 11 次，修正后 2 次；Xray 自对照两轮均为 0 次，此前完整矩阵中也出现过 1 次失败。TLS 记录把请求和数据分开，TLS 组合不受影响。剩余失败属于对端缺陷，不能把偶然通过计作已消除，也不使用 sleep 或补齐字节掩盖它。
+固定版本 Xray 的 HTTPUpgrade 服务端用带缓冲的读取解析请求头后返回原始连接，与请求头同一次读到的 VLESS 字节随之丢失（`transport/internet/httpupgrade/hub.go`）。明文早期数据下，请求之后越早写出数据越容易触发。Kerlico 客户端因此像 Xray 的拨号器那样在建连时发出请求，不再在首批数据时与请求连续写出。同一快照各重复 20 次：修正前 kerlico 到 Xray 失败 11 次，修正后 2 次；Xray 自对照两轮均为 0 次，此前完整矩阵中也出现过 1 次失败。TLS 记录把请求和数据分开，TLS 组合不受影响。剩余失败属于对端缺陷，不能把偶然通过计作已消除，也不使用 sleep 或补齐字节掩盖它。Xray 客户端连 Kerlico 服务端时的失败来自 Xray 客户端的缺陷：`ed` 大于 0 时，拨号器到第一次读取才解析 101，VLESS 响应解码的第一次读取只有 1 字节，随后清空缓冲，与 101 同时到达的响应字节随之丢失（`transport/internet/httpupgrade/dialer.go`、`proxy/vless/encoding/addons.go`）。Xray 服务端的响应随第一批下行数据写出，不会触发它；Kerlico 服务端改用同样的时机后，perf-01 上该行重复 200 次为 0 次失败，同一测试改回立即写响应时失败 21 次。

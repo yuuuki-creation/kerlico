@@ -502,43 +502,50 @@ fn serve_kerlico(path: &Path) -> Result<()> {
         .map_err(|error| format!("Kerlico run: {error:?}").into())
 }
 
-fn open_front(port: u16, origin: u16, inject: bool, udp: bool) -> Result<TcpStream> {
-    let mut stream = tcp_connect(port).map_err(|error| format!("connect front {port}: {error}"))?;
-    if inject {
-        // The ingress fixture is VLESS version 0, no addons, a DNS target, and command 1 or 2.
-        let mut request = vec![0];
-        request.extend_from_slice(&INGRESS_ID);
-        request.extend_from_slice(&[0, if udp { 2 } else { 1 }]);
-        request.extend_from_slice(&origin.to_be_bytes());
-        request.extend_from_slice(&[2, ORIGIN_NAME.len() as u8]);
-        request.extend_from_slice(ORIGIN_NAME.as_bytes());
-        stream.write_all(&request)?;
-        let mut response = [0; 2];
-        stream
-            .read_exact(&mut response)
-            .map_err(|error| format!("Kerlico injection header: {error}"))?;
-        if response != [0, 0] {
-            return Err(format!("unexpected Kerlico injection response {response:?}").into());
-        }
-    }
-    Ok(stream)
+fn open_front(port: u16) -> Result<TcpStream> {
+    Ok(tcp_connect(port).map_err(|error| format!("connect front {port}: {error}"))?)
+}
+
+/// Kerlico's ingress, like Xray's inbound, sends the VLESS response only with the first reply
+/// bytes, so the response is read on the first read.
+fn open_ingress(port: u16, origin: u16, udp: bool) -> Result<kerlico_vless::ResponseReader<TcpStream>> {
+    let mut stream = open_front(port)?;
+    // The ingress fixture is VLESS version 0, no addons, a DNS target, and command 1 or 2.
+    let mut request = vec![0];
+    request.extend_from_slice(&INGRESS_ID);
+    request.extend_from_slice(&[0, if udp { 2 } else { 1 }]);
+    request.extend_from_slice(&origin.to_be_bytes());
+    request.extend_from_slice(&[2, ORIGIN_NAME.len() as u8]);
+    request.extend_from_slice(ORIGIN_NAME.as_bytes());
+    stream.write_all(&request)?;
+    Ok(kerlico_vless::ResponseReader::new(stream))
 }
 
 fn exercise_tcp(front: u16, origin: u16, inject: bool, payload: Payload, concurrent: bool) -> Result<()> {
-    let mut stream = open_front(front, origin, inject, false)?;
+    if inject {
+        exercise_tcp_over(|| open_ingress(front, origin, false), payload, concurrent)
+    } else {
+        exercise_tcp_over(|| open_front(front), payload, concurrent)
+    }
+}
+
+fn exercise_tcp_over<S: Read + Write + Send>(open: impl Fn() -> Result<S>, payload: Payload, concurrent: bool) -> Result<()> {
+    use tokio_rustls::rustls::{pki_types::ServerName, ClientConnection, StreamOwned};
+    let mut stream = open()?;
     if let Payload::Rounds(rounds) = payload {
         return (0..rounds).try_for_each(|round| tcp_exchange(&mut stream, 17, 33 + round));
     }
     if payload == Payload::InnerTls {
         let tls = kerlico_vless::client_config(&[], true).map_err(|_| "make inner TLS client")?;
-        let mut stream = kerlico_vless::connect_tls(stream, tls, TLS_NAME)
-            .map_err(|error| format!("inner TLS handshake: {error}"))?;
+        let client = ClientConnection::new(tls, ServerName::try_from(TLS_NAME)?)
+            .map_err(|error| format!("inner TLS client: {error}"))?;
+        let mut stream = StreamOwned::new(client, stream);
         return tcp_exchange(&mut stream, 17, 33)
             .and_then(|_| tcp_exchange(&mut stream, 196_613, 123));
     }
     tcp_exchange(&mut stream, 17, 33)?;
     if payload == Payload::TwoTcp {
-        let mut second = open_front(front, origin, inject, false)?;
+        let mut second = open()?;
         tcp_exchange(&mut second, 19, 77)?;
         if concurrent {
             thread::scope(|scope| {
@@ -572,7 +579,7 @@ fn tcp_exchange(stream: &mut (impl Read + Write), len: usize, seed: usize) -> Re
 fn exercise_udp(front: u16, origin: u16, inject: bool) -> Result<()> {
     let sizes = [1, 7171, 39, 4103];
     if inject {
-        let mut stream = open_front(front, origin, true, true)?;
+        let mut stream = open_ingress(front, origin, true)?;
         for (index, len) in sizes.into_iter().enumerate() {
             let expected = pattern(len, index);
             stream.write_all(&(len as u16).to_be_bytes())?;
@@ -990,7 +997,7 @@ fn run_bridge(xray: &Path, dir: &Path, kerlico: bool) -> Result<()> {
         if Instant::now() >= deadline {
             return Err(format!("{flows} sequential flows never replaced the connection the portal drains after 256 sessions").into());
         }
-        let mut stream = open_front(front_tcp, 0, false, false)?;
+        let mut stream = open_front(front_tcp)?;
         tcp_exchange(&mut stream, 1, flows).map_err(|error| format!("sequential flow {flows}: {error}"))?;
         flows += 1;
     }
@@ -999,7 +1006,7 @@ fn run_bridge(xray: &Path, dir: &Path, kerlico: bool) -> Result<()> {
 
     let mut held = Vec::new();
     for seed in 0..20 {
-        let mut stream = open_front(front_tcp, 0, false, false)?;
+        let mut stream = open_front(front_tcp)?;
         tcp_exchange(&mut stream, 64, seed).map_err(|error| format!("concurrent flow {seed}: {error}"))?;
         held.push(stream);
     }
@@ -1077,7 +1084,7 @@ impl BridgedPortal {
             }), false)?
         };
         let deadline = Instant::now() + TIMEOUT * 2;
-        while let Err(error) = open_front(front_tcp, 0, false, false).and_then(|mut stream| tcp_exchange(&mut stream, 17, 33)) {
+        while let Err(error) = open_front(front_tcp).and_then(|mut stream| tcp_exchange(&mut stream, 17, 33)) {
             if Instant::now() >= deadline {
                 return Err(format!("no flow crossed the bridge: {error}").into());
             }
@@ -1360,7 +1367,7 @@ impl SizeClient {
         let udp = UdpSocket::bind(localhost(0))?;
         udp.connect(localhost(front_udp))?;
         udp.set_read_timeout(Some(TIMEOUT))?;
-        Ok(Self::Xray { tcp: open_front(front_tcp, 0, false, false)?, udp })
+        Ok(Self::Xray { tcp: open_front(front_tcp)?, udp })
     }
 
     fn kerlico(peer: u16, settings: &kerlico_shared::Settings, tcp: u16, udp: u16) -> Result<Self> {
