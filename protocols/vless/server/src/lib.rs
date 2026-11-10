@@ -1968,18 +1968,44 @@ impl MuxSession {
     }
 }
 
+type XudpSessions = Mutex<XudpTable>;
+type XudpKey = (UserEmail, NonZeroU64);
+
 /// One node's XUDP sessions by user and GlobalID. Xray keys its process-wide map by GlobalID
 /// alone. The user in the key keeps one user from taking over another user's session.
-type XudpSessions = Mutex<HashMap<(UserEmail, NonZeroU64), Arc<Mutex<MuxSession>>>>;
+struct XudpTable {
+    sessions: HashMap<XudpKey, Arc<Mutex<MuxSession>>>,
+    /// A lookup checks only its own key, so other expired sessions leave in a sweep at most
+    /// once a minute, as Xray's `XUDPManager` sweeps its map.
+    swept: Instant,
+}
+
+impl Default for XudpTable {
+    fn default() -> Self {
+        Self { sessions: HashMap::new(), swept: Instant::now() }
+    }
+}
+
+impl XudpTable {
+    fn sweep(&mut self) {
+        if self.swept.elapsed() < XUDP_DETACHED {
+            return;
+        }
+        self.swept = Instant::now();
+        self.sessions.retain(|_, session| session.lock().expect("mux").reusable());
+    }
+}
 
 /// Returns the XUDP session for `key`, bound to `route` on this carrier. A known session
-/// leaves its earlier carrier and keeps its lanes and the outbound flows behind them.
-fn attach_xudp(xudp: &XudpSessions, key: (UserEmail, NonZeroU64), destination: Destination, route: Route) -> Arc<Mutex<MuxSession>> {
-    let mut sessions = xudp.lock().expect("xudp");
-    sessions.retain(|_, session| session.lock().expect("mux").reusable());
-    let Some(session) = sessions.get(&key).cloned() else {
+/// leaves its earlier carrier and keeps its lanes and the outbound flows behind them. An
+/// expired session under the key is replaced.
+fn attach_xudp(xudp: &XudpSessions, key: XudpKey, destination: Destination, route: Route) -> Arc<Mutex<MuxSession>> {
+    let mut table = xudp.lock().expect("xudp");
+    table.sweep();
+    let reusable = table.sessions.get(&key).filter(|session| session.lock().expect("mux").reusable()).cloned();
+    let Some(session) = reusable else {
         let session = MuxSession::new(destination, route, Some(key.1));
-        sessions.insert(key, session.clone());
+        table.sessions.insert(key, session.clone());
         return session;
     };
     let mut found = session.lock().expect("mux");
@@ -1987,7 +2013,7 @@ fn attach_xudp(xudp: &XudpSessions, key: (UserEmail, NonZeroU64), destination: D
     found.last = Instant::now();
     let previous = std::mem::replace(&mut *found.route.lock().expect("mux"), route);
     drop(found);
-    drop(sessions);
+    drop(table);
     if let Route::Attached(id, writer) = previous {
         writer.lock().expect("mux").send(&MuxFrame { id, status: END, ..MuxFrame::default() }).ok();
     }
@@ -5160,6 +5186,51 @@ mod tests {
         assert_eq!(bob.user().as_str(), "bob", "the same GlobalID from another user opens its own flow");
         assert_eq!(read_datagram(&*bob.stream()), Ok(b"bob".to_vec()));
         assert_eq!(read_datagram(&*alice.stream()), Ok(b"alice".to_vec()));
+    }
+
+    fn xudp_key(global_id: u64) -> XudpKey {
+        (UserEmail::parse("alice").unwrap(), NonZeroU64::new(global_id).unwrap())
+    }
+
+    /// Attaches a detached XUDP session and gives it one open flow, which keeps it reusable
+    /// until it has waited a minute.
+    fn detached_xudp(xudp: &XudpSessions, global_id: u64, since: Instant) -> (Arc<Mutex<MuxSession>>, Arc<MuxLane>) {
+        let destination = Destination::new("127.0.0.1", 53, Transport::Udp).unwrap();
+        let session = attach_xudp(xudp, xudp_key(global_id), destination, Route::Detached(since));
+        let route = session.lock().unwrap().route.clone();
+        let lane = Arc::new(MuxLane {
+            plain: Mutex::default(), packets: Mutex::default(), datagram: true, cv: Condvar::new(),
+            closed: Mutex::new(false), reply_target: None, route, resumable: true,
+        });
+        session.lock().unwrap().lanes.insert(("127.0.0.1".into(), 53), Arc::downgrade(&lane));
+        (session, lane)
+    }
+
+    #[test]
+    fn xudp_lookup_reuses_its_session_until_it_waited_a_minute() {
+        let xudp = XudpSessions::default();
+        let (waiting, _flow) = detached_xudp(&xudp, 1, Instant::now());
+        let (again, _) = detached_xudp(&xudp, 1, Instant::now());
+        assert!(Arc::ptr_eq(&waiting, &again), "a detached session with an open flow is taken over");
+        let (stale, _flow) = detached_xudp(&xudp, 2, Instant::now() - XUDP_DETACHED);
+        let (fresh, _) = detached_xudp(&xudp, 2, Instant::now());
+        assert!(!Arc::ptr_eq(&stale, &fresh), "a session that waited a minute is replaced");
+    }
+
+    #[test]
+    fn xudp_table_sweeps_other_keys_once_a_minute() {
+        let xudp = XudpSessions::default();
+        let (_stale, _stale_flow) = detached_xudp(&xudp, 1, Instant::now() - XUDP_DETACHED);
+        let (_live, _live_flow) = detached_xudp(&xudp, 2, Instant::now());
+        detached_xudp(&xudp, 3, Instant::now());
+        assert_eq!(xudp.lock().unwrap().sessions.len(), 3, "an attach looks only at its own key");
+        xudp.lock().unwrap().swept -= XUDP_DETACHED;
+        detached_xudp(&xudp, 4, Instant::now());
+        let table = xudp.lock().unwrap();
+        let mut kept: Vec<_> = table.sessions.keys().map(|key| key.1.get()).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, [2, 4], "the minute sweep drops the expired session and the one without flows");
+        assert!(table.swept.elapsed() < Duration::from_secs(1), "the sweep restarts the minute");
     }
 
     fn wait_handoff(inbound: &mut dyn Accept) -> Handoff {
