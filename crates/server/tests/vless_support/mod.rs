@@ -192,7 +192,7 @@ impl Echo {
         Self::udp_with(0, |peer, bytes| [&peer.port().to_be_bytes()[..], bytes].concat())
     }
 
-    fn udp_with(port: u16, reply: fn(SocketAddr, &[u8]) -> Vec<u8>) -> Result<Self> {
+    pub fn udp_with(port: u16, reply: fn(SocketAddr, &[u8]) -> Vec<u8>) -> Result<Self> {
         let socket = UdpSocket::bind(localhost(port))?;
         let port = socket.local_addr()?.port();
         socket.set_read_timeout(Some(Duration::from_millis(25)))?;

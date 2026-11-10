@@ -9,7 +9,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use kerlico_shared::{Destination, InboundStream, OpenError, PlaneFault, Settings, Transport};
-use kerlico_vless::{decode_mux, Addr, Command, HeaderError, MuxFrame, DATA, END, KEEP, KEEPALIVE, NEW};
+use kerlico_vless::{decode_mux, Addr, Command, HeaderError, MuxFrame, UdpFraming, DATA, END, KEEP, KEEPALIVE, NEW};
 
 use super::{map_io, parse_addr, retry_io, shared, Flow, Link, MuxOutbox, Shared};
 
@@ -182,7 +182,7 @@ impl Pool {
         let udp = destination.transport() == Transport::Udp;
         let target = target(destination)?;
         let (carrier, id, inbox) = picker.session(concurrency, udp, dial)?;
-        Ok(Session::new(carrier, id, inbox, udp, target, global_id))
+        Ok(Session::new(carrier, id, inbox, udp, UdpFraming::Mux, target, global_id))
     }
 }
 
@@ -493,6 +493,8 @@ pub(crate) struct Session {
     id: u16,
     inbox: Arc<Inbox>,
     udp: bool,
+    /// XUDP for the only session on a carrier of its own, Mux on a shared carrier.
+    framing: UdpFraming,
     target: Target,
     /// Sent on the NEW frame of a UDP session, as Xray's mux and XUDP writers do.
     global_id: Option<NonZeroU64>,
@@ -501,8 +503,8 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    fn new(carrier: Arc<Carrier>, id: u16, inbox: Arc<Inbox>, udp: bool, target: Target, global_id: Option<NonZeroU64>) -> Self {
-        Self { carrier, id, inbox, udp, target, global_id, opened: Mutex::new(false), created: Instant::now() }
+    fn new(carrier: Arc<Carrier>, id: u16, inbox: Arc<Inbox>, udp: bool, framing: UdpFraming, target: Target, global_id: Option<NonZeroU64>) -> Self {
+        Self { carrier, id, inbox, udp, framing, target, global_id, opened: Mutex::new(false), created: Instant::now() }
     }
 
     /// The only session on a carrier of its own, which closes with it.
@@ -510,7 +512,7 @@ impl Session {
         let target = target(destination)?;
         let carrier = Carrier::start(read, write, 0..1);
         let (id, inbox) = carrier.allocate(1, true).ok_or(OpenError::Transport)?;
-        Ok(Self::new(carrier, id, inbox, true, target, global_id))
+        Ok(Self::new(carrier, id, inbox, true, UdpFraming::Xudp, target, global_id))
     }
 
     fn frame(&self, first: bool, payload: Option<&[u8]>, to: Option<&Target>) -> MuxFrame {
@@ -558,12 +560,9 @@ impl Session {
     }
 
     pub(crate) fn send_datagram(&self, datagram: &[u8], to: Option<&Target>) -> Result<usize, PlaneFault> {
-        if datagram.len() > usize::from(u16::MAX) {
-            return Err(PlaneFault::Transport);
-        }
-        // Xray's XUDP writer skips empty datagrams.
-        if datagram.is_empty() {
-            return Ok(0);
+        // Xray's writers skip an empty datagram and one too large for the framing.
+        if datagram.is_empty() || !self.framing.carries(datagram) {
+            return Ok(datagram.len());
         }
         match self.send(datagram, to) {
             Ok(()) => Ok(datagram.len()),

@@ -7,6 +7,7 @@
 //! The separate `vless_xray_rejections` test checks the configs Xray refuses and the flows it refuses at dispatch.
 //! `vless_xray_bridge` runs a Kerlico reverse bridge and an Xray control bridge against an Xray portal.
 //! `vless_xray_h2_params` compares raw HTTP/2 server behavior under the same `h2Params`.
+//! `vless_xray_udp_size` sends datagrams at and over Xray's size limit for each UDP framing.
 
 #[path = "vless_support/cases.rs"]
 mod cases;
@@ -974,67 +975,14 @@ fn vless_xray_bridge() {
     finish_report("VLESS bridge", 2, &failed, &root);
 }
 
-/// Only the bridge resolves the origin name and the portal's default outbound is blackhole,
-/// so every echoed byte crossed the bridge and left through the bridge's exit.
 fn run_bridge(xray: &Path, dir: &Path, kerlico: bool) -> Result<()> {
     let tcp = Echo::tcp(None)?;
     let udp = Echo::udp(0)?;
-    let mut ports = Vec::new();
-    while ports.len() < 3 {
-        let port = available_port()?;
-        if ![tcp.port, udp.port].contains(&port) && !ports.contains(&port) {
-            ports.push(port);
-        }
-    }
-    let (portal, front_tcp, front_udp) = (ports[0], ports[1], ports[2]);
-    let (link, carriers) = count_tcp_carriers(portal, Duration::from_secs(300))?;
-    let _portal = start_xray(xray, dir, "xray-portal", &json!({
-        "log": {"loglevel": "info"},
-        "inbounds": [
-            {"tag": "portal-link", "protocol": "vless", "listen": "127.0.0.1", "port": portal,
-                "settings": {"decryption": "none", "users": [{"id": ID, "reverse": {"tag": "portal-out"}}]}},
-            {"tag": "front-tcp", "protocol": "tunnel", "listen": "127.0.0.1", "port": front_tcp,
-                "settings": {"address": ORIGIN_NAME, "port": tcp.port, "network": "tcp"}},
-            {"tag": "front-udp", "protocol": "tunnel", "listen": "127.0.0.1", "port": front_udp,
-                "settings": {"address": ORIGIN_NAME, "port": udp.port, "network": "udp"}},
-        ],
-        "outbounds": [{"protocol": "blackhole"}],
-        "routing": {"rules": [{"inboundTag": ["front-tcp", "front-udp"], "outboundTag": "portal-out"}]},
-    }), false)?;
-    let _bridge = if kerlico {
-        start_kerlico(dir, &json!({
-            "inbounds": [],
-            "dns": {"hosts": {ORIGIN_NAME: "127.0.0.1"}},
-            "bridges": [{"tag": "bridge", "address": "127.0.0.1", "port": link,
-                "outbound": "warp-v4",
-                "rules": [{"domain": [format!("full:{ORIGIN_NAME}")], "outbound": "native-v4"}],
-                "settings": {"id": ID, "encryption": "none"}}],
-        }))?
-    } else {
-        start_xray(xray, dir, "xray-bridge", &json!({
-            "log": {"loglevel": "info"},
-            "dns": {"hosts": {ORIGIN_NAME: "127.0.0.1"}},
-            "outbounds": [
-                {"tag": "bridge-link", "protocol": "vless", "settings": {"address": "127.0.0.1", "port": link,
-                    "id": ID, "encryption": "none", "reverse": {"tag": "bridge"}}},
-                {"tag": "direct", "protocol": "freedom",
-                    "streamSettings": {"sockopt": {"domainStrategy": "ForceIPv4"}},
-                    "settings": {"finalRules": [{"action": "allow", "network": "tcp,udp", "ip": ["127.0.0.1/32"],
-                        "port": format!("{},{}", tcp.port, udp.port)}]}},
-            ],
-            "routing": {"rules": [{"inboundTag": ["bridge"], "outboundTag": "direct"}]},
-        }), false)?
-    };
-    let deadline = Instant::now() + TIMEOUT * 2;
-    while let Err(error) = open_front(front_tcp, 0, false, false).and_then(|mut stream| tcp_exchange(&mut stream, 17, 33)) {
-        if Instant::now() >= deadline {
-            return Err(format!("no flow crossed the bridge: {error}").into());
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
+    let portal = BridgedPortal::start(xray, dir, kerlico, tcp.port, udp.port)?;
+    let (front_tcp, front_udp, carriers) = (portal.front_tcp, portal.front_udp, &portal.carriers);
     exercise_tcp(front_tcp, tcp.port, false, Payload::Tcp, false)?;
     exercise_udp(front_udp, udp.port, false)?;
-    settle_carriers(&carriers, 1, "light traffic")?;
+    settle_carriers(carriers, 1, "light traffic")?;
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut flows = 0;
@@ -1047,7 +995,7 @@ fn run_bridge(xray: &Path, dir: &Path, kerlico: bool) -> Result<()> {
         flows += 1;
     }
     eprintln!("bridge replaced the drained connection after {flows} sequential flows");
-    settle_carriers(&carriers, 2, "after the drain")?;
+    settle_carriers(carriers, 2, "after the drain")?;
 
     let mut held = Vec::new();
     for seed in 0..20 {
@@ -1066,7 +1014,77 @@ fn run_bridge(xray: &Path, dir: &Path, kerlico: bool) -> Result<()> {
     for (seed, stream) in held.iter_mut().enumerate() {
         tcp_exchange(stream, 4099, seed).map_err(|error| format!("held flow {seed}: {error}"))?;
     }
-    settle_carriers(&carriers, 3, "with 20 concurrent flows")
+    settle_carriers(carriers, 3, "with 20 concurrent flows")
+}
+
+/// An Xray portal whose fronts reach the origins only through a Kerlico or Xray bridge. Only
+/// the bridge resolves the origin name and the portal's default outbound is blackhole, so every
+/// echoed byte crossed the bridge and left through the bridge's exit.
+struct BridgedPortal {
+    front_tcp: u16,
+    front_udp: u16,
+    /// Reverse connections the bridge opened to the portal.
+    carriers: Arc<AtomicUsize>,
+    _processes: [Process; 2],
+}
+
+impl BridgedPortal {
+    fn start(xray: &Path, dir: &Path, kerlico: bool, tcp: u16, udp: u16) -> Result<Self> {
+        let mut ports = Vec::new();
+        while ports.len() < 3 {
+            let port = available_port()?;
+            if ![tcp, udp].contains(&port) && !ports.contains(&port) {
+                ports.push(port);
+            }
+        }
+        let (portal, front_tcp, front_udp) = (ports[0], ports[1], ports[2]);
+        let (link, carriers) = count_tcp_carriers(portal, Duration::from_secs(300))?;
+        let portal = start_xray(xray, dir, "xray-portal", &json!({
+            "log": {"loglevel": "info"},
+            "inbounds": [
+                {"tag": "portal-link", "protocol": "vless", "listen": "127.0.0.1", "port": portal,
+                    "settings": {"decryption": "none", "users": [{"id": ID, "reverse": {"tag": "portal-out"}}]}},
+                {"tag": "front-tcp", "protocol": "tunnel", "listen": "127.0.0.1", "port": front_tcp,
+                    "settings": {"address": ORIGIN_NAME, "port": tcp, "network": "tcp"}},
+                {"tag": "front-udp", "protocol": "tunnel", "listen": "127.0.0.1", "port": front_udp,
+                    "settings": {"address": ORIGIN_NAME, "port": udp, "network": "udp"}},
+            ],
+            "outbounds": [{"protocol": "blackhole"}],
+            "routing": {"rules": [{"inboundTag": ["front-tcp", "front-udp"], "outboundTag": "portal-out"}]},
+        }), false)?;
+        let bridge = if kerlico {
+            start_kerlico(dir, &json!({
+                "inbounds": [],
+                "dns": {"hosts": {ORIGIN_NAME: "127.0.0.1"}},
+                "bridges": [{"tag": "bridge", "address": "127.0.0.1", "port": link,
+                    "outbound": "warp-v4",
+                    "rules": [{"domain": [format!("full:{ORIGIN_NAME}")], "outbound": "native-v4"}],
+                    "settings": {"id": ID, "encryption": "none"}}],
+            }))?
+        } else {
+            start_xray(xray, dir, "xray-bridge", &json!({
+                "log": {"loglevel": "info"},
+                "dns": {"hosts": {ORIGIN_NAME: "127.0.0.1"}},
+                "outbounds": [
+                    {"tag": "bridge-link", "protocol": "vless", "settings": {"address": "127.0.0.1", "port": link,
+                        "id": ID, "encryption": "none", "reverse": {"tag": "bridge"}}},
+                    {"tag": "direct", "protocol": "freedom",
+                        "streamSettings": {"sockopt": {"domainStrategy": "ForceIPv4"}},
+                        "settings": {"finalRules": [{"action": "allow", "network": "tcp,udp", "ip": ["127.0.0.1/32"],
+                            "port": format!("{tcp},{udp}")}]}},
+                ],
+                "routing": {"rules": [{"inboundTag": ["bridge"], "outboundTag": "direct"}]},
+            }), false)?
+        };
+        let deadline = Instant::now() + TIMEOUT * 2;
+        while let Err(error) = open_front(front_tcp, 0, false, false).and_then(|mut stream| tcp_exchange(&mut stream, 17, 33)) {
+            if Instant::now() >= deadline {
+                return Err(format!("no flow crossed the bridge: {error}").into());
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        Ok(Self { front_tcp, front_udp, carriers, _processes: [portal, bridge] })
+    }
 }
 
 /// Two 2-second supervision rounds pass before the count is final.
@@ -1116,6 +1134,307 @@ fn vless_xray_xudp_destinations() {
         };
         assert_eq!(&buf[..n], datagram.as_slice(), "reply {index} payload");
         assert_eq!(&source, target, "reply {index} source");
+    }
+}
+
+/// Xray's `buf.Size`: every Xray UDP read fills at most one buffer this large.
+const XRAY_BUFFER: usize = 8192;
+
+#[test]
+#[ignore = "requires XRAY pointing to Xray 26.10.31 a4a3dff"]
+fn vless_xray_udp_size() {
+    let root = run_dir("udp-size").expect("UDP size directory");
+    let xray = xray_binary(&root).expect("pinned Xray peer");
+    let mut runs = 0;
+    let mut failed = Vec::new();
+    for framing in [SizeFraming::Mux, SizeFraming::Xudp, SizeFraming::Plain] {
+        for direction in [Direction::XrayControl, Direction::XrayToKerlico, Direction::KerlicoToXray] {
+            let label = format!("udp-size-{}/{}", framing.name(), direction.name());
+            let dir = root.join(&label);
+            let result = fs::create_dir_all(&dir).map_err(Into::into).and_then(|_| udp_size(&xray, &dir, &label, framing, direction));
+            report(&label, result, &dir, &mut failed);
+            runs += 1;
+        }
+    }
+    for (label, kerlico) in [("udp-size-reverse/xray-control", false), ("udp-size-reverse/kerlico-bridge", true)] {
+        let dir = root.join(label);
+        let result = fs::create_dir_all(&dir).map_err(Into::into).and_then(|_| udp_size_reverse(&xray, &dir, label, kerlico));
+        report(label, result, &dir, &mut failed);
+        runs += 1;
+    }
+    finish_report("VLESS UDP size", runs, &failed, &root);
+}
+
+/// How the client under test carries its UDP flow, and the largest datagram the client and
+/// the server may each write in it.
+#[derive(Clone, Copy)]
+enum SizeFraming {
+    /// Sessions on one Mux carrier, which also carries the TCP flow.
+    Mux,
+    /// A client XUDP carrier of its own, Xray's `v1.mux.cool:666`.
+    Xudp,
+    /// The UDP command, which both clients keep for port 443 without Mux.
+    Plain,
+}
+
+impl SizeFraming {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Mux => "mux",
+            Self::Xudp => "xudp",
+            Self::Plain => "plain",
+        }
+    }
+
+    fn limits(self) -> (usize, usize) {
+        match self {
+            Self::Mux => (XRAY_BUFFER, XRAY_BUFFER),
+            Self::Xudp => (XRAY_BUFFER - 666, XRAY_BUFFER),
+            Self::Plain => (XRAY_BUFFER - 2, XRAY_BUFFER - 2),
+        }
+    }
+
+    fn udp_port(self) -> u16 {
+        if matches!(self, Self::Plain) { 443 } else { 0 }
+    }
+
+    fn carriers(self) -> usize {
+        if matches!(self, Self::Mux) { 1 } else { 2 }
+    }
+}
+
+fn udp_size(xray: &Path, dir: &Path, label: &str, framing: SizeFraming, direction: Direction) -> Result<()> {
+    let _fixed_origin = (framing.udp_port() != 0)
+        .then(|| FIXED_ORIGIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    let case = Case::new("udp-size", Network::Raw, Security::None, Payload::Udp);
+    let keys = Keys::generate(dir, &case)?;
+    let tcp = Echo::tcp(None)?;
+    let udp = sized_origin(framing.udp_port())?;
+    let peer = available_port()?;
+    let (link, carriers) = count_tcp_carriers(peer, Duration::from_secs(120))?;
+    let _server = if matches!(direction, Direction::XrayToKerlico) {
+        start_kerlico(dir, &case.kerlico_server(&keys, peer))?
+    } else {
+        let mut config = case.xray_server(&keys, peer, udp.port);
+        config["outbounds"][0]["settings"]["finalRules"][0]["port"] = json!(format!("{},{}", tcp.port, udp.port));
+        start_xray(xray, dir, "xray-server", &config, true)?
+    };
+    let mux = matches!(framing, SizeFraming::Mux).then(|| json!({"enabled": true}));
+    let (mut client, _client) = if matches!(direction, Direction::KerlicoToXray) {
+        let mut settings = kerlico_shared::Settings::default();
+        for (key, value) in [("network", "raw"), ("security", "none"), ("encryption", "none"), ("id", cases::ID)] {
+            settings.insert_text(key, value);
+        }
+        if let Some(mux) = mux {
+            settings.insert_text("mux", mux.to_string());
+        }
+        (SizeClient::kerlico(link, &settings, tcp.port, udp.port)?, None)
+    } else {
+        let (front_tcp, front_udp) = (available_port()?, available_port()?);
+        let mut config = case.xray_client(&keys, front_udp, link, udp.port);
+        config["inbounds"].as_array_mut().ok_or("client inbounds")?.push(json!({
+            "protocol": "tunnel", "listen": "127.0.0.1", "port": front_tcp,
+            "settings": {"address": "127.0.0.1", "port": tcp.port, "network": "tcp"},
+        }));
+        if let Some(mux) = mux {
+            config["outbounds"][0]["mux"] = mux;
+        }
+        let process = launch_xray(xray, dir, "xray-client", &config, &[])?;
+        (SizeClient::xray(front_tcp, front_udp)?, Some(process))
+    };
+    let xray_client = !matches!(direction, Direction::KerlicoToXray);
+    let xray_server = !matches!(direction, Direction::XrayToKerlico);
+    size_sequence(&mut client, label, framing.limits(), xray_client, xray_server)?;
+    let count = carriers.load(Ordering::Acquire);
+    if count != framing.carriers() {
+        return Err(format!("{count} carriers, expected {}", framing.carriers()).into());
+    }
+    Ok(())
+}
+
+/// The Xray portal writes the client side of each datagram and the bridge writes the replies.
+fn udp_size_reverse(xray: &Path, dir: &Path, label: &str, kerlico: bool) -> Result<()> {
+    let tcp = Echo::tcp(None)?;
+    let udp = sized_origin(0)?;
+    let portal = BridgedPortal::start(xray, dir, kerlico, tcp.port, udp.port)?;
+    let mut client = SizeClient::xray(portal.front_tcp, portal.front_udp)?;
+    size_sequence(&mut client, label, (XRAY_BUFFER, XRAY_BUFFER), true, !kerlico)?;
+    settle_carriers(&portal.carriers, 1, "after the datagrams")
+}
+
+/// Echoes each datagram, except that `[b'Z', length as big-endian u16, seed]` asks for a reply
+/// of `pattern(length, seed)`.
+fn sized_origin(port: u16) -> Result<Echo> {
+    Echo::udp_with(port, |_, bytes| match *bytes {
+        [b'Z', high, low, seed] => pattern(u16::from_be_bytes([high, low]).into(), seed.into()),
+        _ => bytes.to_vec(),
+    })
+}
+
+/// The client writes a datagram at its limit, the datagrams over it, then a short one. It then
+/// asks the origin for replies of the same sizes and for an empty one. Each short datagram must
+/// be the next to arrive, and the TCP flow must keep working.
+fn size_sequence(client: &mut SizeClient, label: &str, (client_limit, server_limit): (usize, usize), xray_client: bool, xray_server: bool) -> Result<()> {
+    let over = |limit: usize| {
+        let mut sizes = vec![limit + 1, XRAY_BUFFER + 1];
+        sizes.dedup();
+        sizes
+    };
+    let ask = |len: usize, seed: u8| [&[b'Z'][..], &(len as u16).to_be_bytes()[..], &[seed][..]].concat();
+    client.tcp_exchange(17, 33).map_err(|error| format!("TCP before the datagrams: {error}"))?;
+
+    let at_limit = pattern(client_limit, 1);
+    client.send(&at_limit)?;
+    next_datagram(client, &at_limit, &[], false)?;
+    let oversized: Vec<_> = over(client_limit).into_iter().zip(10..).map(|(len, seed)| pattern(len, seed)).collect();
+    for datagram in &oversized {
+        client.send(datagram)?;
+    }
+    let short = pattern(100, 3);
+    client.send(&short)?;
+    let from_client = next_datagram(client, &short, &oversized, xray_client)
+        .map_err(|error| format!("after the client wrote {:?} bytes: {error}", over(client_limit)))?;
+
+    client.send(&ask(server_limit, 4))?;
+    next_datagram(client, &pattern(server_limit, 4), &[], false)?;
+    let mut replies = Vec::new();
+    for (len, seed) in over(server_limit).into_iter().zip(20u8..) {
+        client.send(&ask(len, seed))?;
+        replies.push(pattern(len, seed.into()));
+    }
+    client.send(&ask(0, 6))?;
+    let short = pattern(100, 7);
+    client.send(&short)?;
+    let from_server = next_datagram(client, &short, &replies, xray_server)
+        .map_err(|error| format!("after the server wrote {:?} bytes: {error}", over(server_limit)))?;
+    client.tcp_exchange(19, 77).map_err(|error| format!("TCP after the datagrams: {error}"))?;
+    eprintln!(
+        "UDP-SIZE {label}: client oversized truncated {}, server oversized truncated {}, empty replies delivered {}",
+        from_client.truncated, from_server.truncated, from_server.empty,
+    );
+    Ok(())
+}
+
+#[derive(Default)]
+struct Skipped {
+    truncated: usize,
+    empty: usize,
+}
+
+/// Reads until `expected` arrives. Empty datagrams are counted. An oversized datagram may come
+/// back only from an Xray writer, cut to its read buffer, because Xray truncates rather than drops.
+fn next_datagram(client: &SizeClient, expected: &[u8], oversized: &[Vec<u8>], xray_wrote: bool) -> Result<Skipped> {
+    let mut skipped = Skipped::default();
+    loop {
+        let received = client
+            .recv()
+            .map_err(|error| format!("waiting for the {}-byte datagram: {error}", expected.len()))?;
+        if received == expected {
+            return Ok(skipped);
+        }
+        if received.is_empty() {
+            skipped.empty += 1;
+        } else if xray_wrote && oversized.iter().any(|sent| sent.len() > XRAY_BUFFER && received == sent[..XRAY_BUFFER]) {
+            skipped.truncated += 1;
+        } else {
+            return Err(format!("a {}-byte datagram arrived before the {}-byte one", received.len(), expected.len()).into());
+        }
+    }
+}
+
+/// The application end of one TCP flow and one UDP flow through the client under test.
+enum SizeClient {
+    Xray {
+        tcp: TcpStream,
+        udp: UdpSocket,
+    },
+    Kerlico {
+        tcp: Box<dyn kerlico_shared::InboundStream>,
+        udp: landing_vless::UdpSession,
+        target: kerlico_shared::Destination,
+    },
+}
+
+impl SizeClient {
+    fn xray(front_tcp: u16, front_udp: u16) -> Result<Self> {
+        let udp = UdpSocket::bind(localhost(0))?;
+        udp.connect(localhost(front_udp))?;
+        udp.set_read_timeout(Some(TIMEOUT))?;
+        Ok(Self::Xray { tcp: open_front(front_tcp, 0, false, false)?, udp })
+    }
+
+    fn kerlico(peer: u16, settings: &kerlico_shared::Settings, tcp: u16, udp: u16) -> Result<Self> {
+        use kerlico_shared::{Destination, Transport};
+        let origin = |port, transport| Destination::new("127.0.0.1", port, transport).map_err(|_| "origin destination");
+        let target = origin(udp, Transport::Udp)?;
+        let tcp = landing_vless::land("127.0.0.1", peer, settings, &origin(tcp, Transport::Tcp)?)
+            .map_err(|error| format!("Kerlico TCP flow: {error:?}"))?;
+        let udp = landing_vless::land_udp("127.0.0.1", peer, settings, &target)
+            .map_err(|error| format!("Kerlico UDP flow: {error:?}"))?;
+        Ok(Self::Kerlico { tcp, udp, target })
+    }
+
+    fn send(&self, datagram: &[u8]) -> Result<()> {
+        let sent = match self {
+            Self::Xray { udp, .. } => udp.send(datagram)?,
+            Self::Kerlico { udp, target, .. } => retry_flow(|| udp.send_to(target, datagram))?,
+        };
+        if sent != datagram.len() {
+            return Err(format!("sent {sent}/{} UDP bytes", datagram.len()).into());
+        }
+        Ok(())
+    }
+
+    fn recv(&self) -> Result<Vec<u8>> {
+        let mut bytes = vec![0; 65536];
+        let len = match self {
+            Self::Xray { udp, .. } => udp.recv(&mut bytes)?,
+            Self::Kerlico { udp, .. } => retry_flow(|| udp.recv_from(&mut bytes))?.0,
+        };
+        bytes.truncate(len);
+        Ok(bytes)
+    }
+
+    fn tcp_exchange(&mut self, len: usize, seed: usize) -> Result<()> {
+        match self {
+            Self::Xray { tcp, .. } => tcp_exchange(tcp, len, seed),
+            Self::Kerlico { tcp, .. } => tcp_exchange(&mut FlowIo(&**tcp), len, seed),
+        }
+    }
+}
+
+/// Repeats a Kerlico flow call that returns `Again` until `TIMEOUT`.
+fn retry_flow<T>(mut call: impl FnMut() -> std::result::Result<T, kerlico_shared::PlaneFault>) -> std::io::Result<T> {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match call() {
+            Ok(value) => return Ok(value),
+            Err(kerlico_shared::PlaneFault::Again) if Instant::now() < deadline => {}
+            Err(fault) => return Err(std::io::Error::other(format!("Kerlico flow: {fault:?}"))),
+        }
+    }
+}
+
+struct FlowIo<'a>(&'a dyn kerlico_shared::InboundStream);
+
+impl Read for FlowIo<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let flow = self.0;
+        retry_flow(|| match flow.read_from_user(buf) {
+            Err(kerlico_shared::PlaneFault::Closed) => Ok(0),
+            read => read,
+        })
+    }
+}
+
+impl Write for FlowIo<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let flow = self.0;
+        retry_flow(|| flow.write_to_user(buf))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
