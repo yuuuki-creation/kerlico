@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, U
 use std::thread;
 use std::time::Duration;
 
-use kerlico_outbound::{Native, Outbound, OutboundChoice, Reachability, select_exit};
+use kerlico_outbound::{select_exit, Native, Outbound, OutboundChoice, Reachability};
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::fakedns::Pool;
@@ -248,7 +248,14 @@ fn encode(query: &[u8], question_end: usize, ips: &[IpAddr]) -> Vec<u8> {
     out
 }
 
-fn udp_loop(socket: UdpSocket, config: Config, pool: Pool, fake: bool, native: Native, outbound: Outbound) {
+fn udp_loop(
+    socket: UdpSocket,
+    config: Config,
+    pool: Pool,
+    fake: bool,
+    native: Native,
+    outbound: Outbound,
+) {
     let mut buf = [0u8; 2048];
     loop {
         let Ok((n, peer)) = socket.recv_from(&mut buf) else {
@@ -260,7 +267,14 @@ fn udp_loop(socket: UdpSocket, config: Config, pool: Pool, fake: bool, native: N
     }
 }
 
-fn tcp_loop(listener: TcpListener, config: Config, pool: Pool, fake: bool, native: Native, outbound: Outbound) {
+fn tcp_loop(
+    listener: TcpListener,
+    config: Config,
+    pool: Pool,
+    fake: bool,
+    native: Native,
+    outbound: Outbound,
+) {
     for stream in listener.incoming().flatten() {
         let config = config.clone();
         let pool = pool.clone();
@@ -311,7 +325,11 @@ fn bind_tcp(addr: SocketAddr) -> std::io::Result<TcpListener> {
 }
 
 fn open_socket(addr: SocketAddr, kind: Type, protocol: Protocol) -> std::io::Result<Socket> {
-    let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
     let socket = Socket::new(domain, kind, Some(protocol))?;
     if addr.is_ipv6() {
         socket.set_only_v6(true)?;
@@ -421,7 +439,12 @@ fn answers(buf: &[u8], kind: u16) -> Vec<IpAddr> {
             break;
         }
         if record_kind == kind && kind == 1 && len == 4 {
-            found.push(IpAddr::V4(Ipv4Addr::new(buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3])));
+            found.push(IpAddr::V4(Ipv4Addr::new(
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+            )));
         }
         if record_kind == kind && kind == 28 && len == 16 {
             let mut octets = [0u8; 16];
@@ -431,6 +454,20 @@ fn answers(buf: &[u8], kind: u16) -> Vec<IpAddr> {
         offset += len;
     }
     found
+}
+
+fn skip_name(buf: &[u8], mut offset: usize) -> usize {
+    while offset < buf.len() {
+        let len = buf[offset] as usize;
+        if len == 0 {
+            return offset + 1;
+        }
+        if len & 0xc0 == 0xc0 {
+            return offset + 2;
+        }
+        offset += 1 + len;
+    }
+    offset
 }
 
 #[cfg(test)]
@@ -485,7 +522,9 @@ mod tests {
         )
         .unwrap();
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         socket.send_to(&query, bound).unwrap();
         let mut buf = [0u8; 512];
         let n = socket.recv(&mut buf).unwrap();
@@ -496,18 +535,4 @@ mod tests {
         let n = socket.recv(&mut buf).unwrap();
         assert_eq!(answers(&buf[..n], 1), first);
     }
-}
-
-fn skip_name(buf: &[u8], mut offset: usize) -> usize {
-    while offset < buf.len() {
-        let len = buf[offset] as usize;
-        if len == 0 {
-            return offset + 1;
-        }
-        if len & 0xc0 == 0xc0 {
-            return offset + 2;
-        }
-        offset += 1 + len;
-    }
-    offset
 }

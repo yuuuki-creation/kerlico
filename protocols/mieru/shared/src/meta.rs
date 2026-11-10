@@ -82,7 +82,10 @@ pub fn parse(plain: &[u8]) -> io::Result<Meta> {
     if is_session(kind) {
         let payload_len = u16::from_be_bytes(plain[15..17].try_into().unwrap());
         if payload_len as usize > MAX_SESSION_PAYLOAD {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "session payload"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session payload",
+            ));
         }
         return Ok(Meta {
             kind,
@@ -104,6 +107,12 @@ pub fn parse(plain: &[u8]) -> io::Result<Meta> {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "protocol"));
     }
     let payload_len = u16::from_be_bytes(plain[22..24].try_into().unwrap());
+    if !is_low(kind) && payload_len as usize > MAX_PDU {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "数据段载荷超过上限",
+        ));
+    }
     let low_mode = if is_low(kind) { plain[1] } else { 0 };
     let low_mask = if is_low(kind) {
         u32::from_be_bytes(plain[25..29].try_into().unwrap())
@@ -122,7 +131,11 @@ pub fn parse(plain: &[u8]) -> io::Result<Meta> {
         if payload_len != expect || !crate::entropy::valid_params(low_mode, low_mask, rotation) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "low entropy"));
         }
-        let limit = if low_mode == 1 { LOW_ENTROPY_PDU } else { MAX_PDU };
+        let limit = if low_mode == 1 {
+            LOW_ENTROPY_PDU
+        } else {
+            MAX_PDU
+        };
         if extracted as usize > limit {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "low entropy"));
         }
@@ -145,7 +158,10 @@ pub fn parse(plain: &[u8]) -> io::Result<Meta> {
 }
 
 pub fn is_session(kind: u8) -> bool {
-    matches!(kind, OPEN_REQUEST | OPEN_RESPONSE | CLOSE_REQUEST | CLOSE_RESPONSE)
+    matches!(
+        kind,
+        OPEN_REQUEST | OPEN_RESPONSE | CLOSE_REQUEST | CLOSE_RESPONSE
+    )
 }
 
 pub fn is_data(kind: u8) -> bool {

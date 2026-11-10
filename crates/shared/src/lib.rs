@@ -2,6 +2,8 @@
 //! This crate has no role feature and no dependency on a role crate.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 pub mod runtime;
 mod egress;
@@ -241,6 +243,15 @@ impl Settings {
         }
     }
 
+    /// 缺少可选项时返回 None；已有键的类型错误仍然拒绝。
+    pub fn optional_text(&self, key: &str) -> Result<Option<&str>, OpenError> {
+        match self.entries.get(key) {
+            None => Ok(None),
+            Some(Setting::Text(value)) => Ok(Some(value)),
+            _ => Err(OpenError::Settings),
+        }
+    }
+
     pub fn table(&self, key: &str) -> Result<&Settings, OpenError> {
         match self.entries.get(key) {
             Some(Setting::Table(value)) => Ok(value),
@@ -333,15 +344,37 @@ pub struct Handoff {
     destination: Destination,
     stream: Box<dyn InboundStream>,
     prefix: Vec<u8>,
+    prefix_packet: bool,
     peer: Option<SocketAddr>,
 }
 
-/// Byte counters. The server owns the map. The outbound module calls this while copying.
+/// The server resolves names once when the outbound module starts copying a flow.
 pub trait Traffic: Send + Sync {
-    fn add_uplink(&self, user: &UserEmail, node: &NodeTag, bytes: u64);
-    fn add_downlink(&self, user: &UserEmail, node: &NodeTag, bytes: u64);
-    fn add_exit_uplink(&self, exit: &str, bytes: u64);
-    fn add_exit_downlink(&self, exit: &str, bytes: u64);
+    fn bind(&self, user: &UserEmail, node: &NodeTag, exit: &str) -> TrafficCounters;
+}
+
+/// User, inbound, and outbound counters shared with the server's query API.
+pub struct TrafficCounters {
+    uplink: [Arc<AtomicU64>; 3],
+    downlink: [Arc<AtomicU64>; 3],
+}
+
+impl TrafficCounters {
+    pub fn new(uplink: [Arc<AtomicU64>; 3], downlink: [Arc<AtomicU64>; 3]) -> Self {
+        Self { uplink, downlink }
+    }
+
+    pub fn add_uplink(&self, bytes: u64) {
+        for counter in &self.uplink {
+            counter.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    pub fn add_downlink(&self, bytes: u64) {
+        for counter in &self.downlink {
+            counter.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Server accept loop. `accept` returns a handoff, not a dialed socket.
@@ -381,7 +414,11 @@ impl NodeTag {
 }
 
 impl Destination {
-    pub fn new(host: impl Into<String>, port: u16, transport: Transport) -> Result<Self, AddrError> {
+    pub fn new(
+        host: impl Into<String>,
+        port: u16,
+        transport: Transport,
+    ) -> Result<Self, AddrError> {
         let host = host.into();
         if host.is_empty() || port == 0 {
             return Err(AddrError);
@@ -419,6 +456,7 @@ impl Handoff {
             destination,
             stream,
             prefix: Vec::new(),
+            prefix_packet: false,
             peer: None,
         }
     }
@@ -441,6 +479,7 @@ impl Handoff {
     pub fn read_into_prefix(&mut self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
         let n = self.stream.read_from_user(buf)?;
         self.prefix.extend_from_slice(&buf[..n]);
+        self.prefix_packet = self.destination.transport == Transport::Udp;
         Ok(n)
     }
 
@@ -457,11 +496,12 @@ impl Handoff {
     }
 
     pub fn stream(self) -> Box<dyn InboundStream> {
-        if self.prefix.is_empty() {
+        if self.prefix.is_empty() && !self.prefix_packet {
             self.stream
         } else {
             Box::new(PrefixStream {
-                pending: std::sync::Mutex::new(self.prefix),
+                pending: std::sync::Mutex::new(Some(self.prefix)),
+                datagram: self.prefix_packet,
                 inner: self.stream,
             })
         }
@@ -469,20 +509,33 @@ impl Handoff {
 }
 
 struct PrefixStream {
-    pending: std::sync::Mutex<Vec<u8>>,
+    pending: std::sync::Mutex<Option<Vec<u8>>>,
+    datagram: bool,
     inner: Box<dyn InboundStream>,
 }
 
 impl InboundStream for PrefixStream {
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
         let mut pending = self.pending.lock().expect("prefix");
-        if pending.is_empty() {
+        let Some(bytes) = pending.as_ref() else {
             drop(pending);
             return self.inner.read_from_user(buf);
+        };
+        if self.datagram {
+            if bytes.len() > buf.len() {
+                return Err(PlaneFault::Transport);
+            }
+            let bytes = pending.take().expect("预读数据报");
+            buf[..bytes.len()].copy_from_slice(&bytes);
+            return Ok(bytes.len());
         }
-        let n = pending.len().min(buf.len());
-        buf[..n].copy_from_slice(&pending[..n]);
-        pending.drain(..n);
+        let bytes = pending.as_mut().expect("预读字节");
+        let n = bytes.len().min(buf.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        bytes.drain(..n);
+        if bytes.is_empty() {
+            *pending = None;
+        }
         Ok(n)
     }
 
@@ -491,7 +544,7 @@ impl InboundStream for PrefixStream {
     }
 
     fn raw_read(&self) -> Option<std::net::TcpStream> {
-        if !self.pending.lock().expect("prefix").is_empty() {
+        if self.pending.lock().expect("prefix").is_some() {
             return None;
         }
         self.inner.raw_read()
@@ -514,5 +567,46 @@ mod tests {
         assert!(ListenAddr::v6(Ipv6Addr::UNSPECIFIED, 443).is_ok());
         let mapped = Ipv4Addr::LOCALHOST.to_ipv6_mapped();
         assert!(ListenAddr::v6(mapped, 443).is_err());
+    }
+
+    struct Datagram(std::sync::Mutex<Option<Vec<u8>>>);
+    impl InboundStream for Datagram {
+        fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
+            let mut data = self.0.lock().unwrap();
+            let packet = data.as_ref().ok_or(PlaneFault::Closed)?;
+            if buf.len() < packet.len() {
+                return Err(PlaneFault::Transport);
+            }
+            let packet = data.take().unwrap();
+            buf[..packet.len()].copy_from_slice(&packet);
+            Ok(packet.len())
+        }
+        fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn udp_prefix_preserves_empty_packets_and_rejects_splitting() {
+        for packet in [Vec::new(), vec![1, 2, 3]] {
+            let mut handoff = Handoff::new(
+                NodeTag::parse("test-node").unwrap(),
+                UserEmail::parse("test-user").unwrap(),
+                Destination::new("127.0.0.1", 9000, Transport::Udp).unwrap(),
+                Box::new(Datagram(std::sync::Mutex::new(Some(packet.clone())))),
+            );
+            assert_eq!(
+                handoff.read_into_prefix(&mut [0; 64]).unwrap(),
+                packet.len()
+            );
+            let stream = handoff.stream();
+            if !packet.is_empty() {
+                assert!(stream.read_from_user(&mut [0; 1]).is_err());
+            }
+            let mut buf = [0; 64];
+            assert_eq!(stream.read_from_user(&mut buf).unwrap(), packet.len());
+            assert_eq!(&buf[..packet.len()], packet);
+            assert_eq!(stream.read_from_user(&mut buf), Err(PlaneFault::Closed));
+        }
     }
 }

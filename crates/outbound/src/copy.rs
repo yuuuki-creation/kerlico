@@ -7,19 +7,38 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kerlico_shared::{InboundStream, NodeTag, OpenError, PlaneFault, Traffic, UserEmail};
+use kerlico_shared::{
+    InboundStream, NodeTag, OpenError, PlaneFault, Traffic, TrafficCounters, Transport, UserEmail,
+};
 
 use crate::Exit;
 
 const BUF: usize = 1024 * 1024;
 const IDLE: Duration = Duration::from_secs(300);
 
+#[derive(Clone, Copy)]
+pub struct Flow<'a> {
+    pub user: &'a UserEmail,
+    pub node: &'a NodeTag,
+    pub exit: Exit,
+    pub traffic: &'a dyn Traffic,
+    pub transport: Transport,
+}
+
 pub trait PipeRead: Send {
-    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<usize, OpenError>;
+    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<ReadEvent, OpenError>;
+}
+
+pub enum ReadEvent {
+    Data(usize),
+    Eof,
 }
 
 pub trait PipeWrite: Send {
     fn write_pipe(&mut self, buf: &[u8]) -> Result<(), OpenError>;
+    fn finish(&mut self) -> Result<(), OpenError> {
+        Ok(())
+    }
 }
 
 struct Pace {
@@ -60,16 +79,16 @@ pub fn bridge(
     stream: &dyn InboundStream,
     toward_exit: impl PipeWrite,
     from_exit: impl PipeRead + 'static,
-    user: &UserEmail,
-    node: &NodeTag,
-    exit: Exit,
-    traffic: &dyn Traffic,
+    flow: Flow<'_>,
 ) -> Result<(), OpenError> {
     let pace = Arc::new(Pace::new());
+    let counters = flow.traffic.bind(flow.user, flow.node, flow.exit.tag());
     thread::scope(|scope| {
         let pace_up = Arc::clone(&pace);
-        let up = scope.spawn(move || pump_up(stream, toward_exit, user, node, exit, traffic, &pace_up));
-        let down = pump_down(stream, from_exit, user, node, exit, traffic, &pace);
+        let traffic = &counters;
+        let up =
+            scope.spawn(move || pump_up(stream, toward_exit, traffic, flow.transport, &pace_up));
+        let down = pump_down(stream, from_exit, &counters, flow.transport, &pace);
         pace.halt();
         let up = up.join().unwrap_or(Err(OpenError::Transport));
         down.and(up)
@@ -79,10 +98,8 @@ pub fn bridge(
 fn pump_up(
     stream: &dyn InboundStream,
     mut toward_exit: impl PipeWrite,
-    user: &UserEmail,
-    node: &NodeTag,
-    exit: Exit,
-    traffic: &dyn Traffic,
+    traffic: &TrafficCounters,
+    transport: Transport,
     pace: &Pace,
 ) -> Result<(), OpenError> {
     let mut buf = vec![0u8; BUF];
@@ -91,8 +108,16 @@ fn pump_up(
             return Ok(());
         }
         match stream.read_from_user(&mut buf) {
-            Ok(0) | Err(PlaneFault::Closed) => {
-                pace.halt();
+            Ok(0) if transport == Transport::Tcp => {
+                toward_exit.finish()?;
+                return Ok(());
+            }
+            Err(PlaneFault::Closed) => {
+                if transport == Transport::Tcp {
+                    toward_exit.finish()?;
+                } else {
+                    pace.halt();
+                }
                 return Ok(());
             }
             Ok(n) => {
@@ -101,8 +126,7 @@ fn pump_up(
                     pace.halt();
                     return Err(error);
                 }
-                traffic.add_uplink(user, node, n as u64);
-                traffic.add_exit_uplink(exit.tag(), n as u64);
+                traffic.add_uplink(n as u64);
             }
             Err(PlaneFault::Again) => {
                 if pace.idle() {
@@ -121,10 +145,8 @@ fn pump_up(
 fn pump_down(
     stream: &dyn InboundStream,
     mut from_exit: impl PipeRead,
-    user: &UserEmail,
-    node: &NodeTag,
-    exit: Exit,
-    traffic: &dyn Traffic,
+    traffic: &TrafficCounters,
+    transport: Transport,
     pace: &Pace,
 ) -> Result<(), OpenError> {
     let mut buf = vec![0u8; BUF];
@@ -133,15 +155,26 @@ fn pump_down(
             return Ok(());
         }
         match from_exit.read_pipe(&mut buf) {
-            Ok(0) => {
+            Ok(ReadEvent::Eof) => {
                 pace.halt();
                 return Ok(());
             }
-            Ok(n) => {
+            Ok(ReadEvent::Data(n)) => {
                 pace.mark();
-                let n = write_all_user(stream, &buf[..n])?;
-                traffic.add_downlink(user, node, n);
-                traffic.add_exit_downlink(exit.tag(), n);
+                let n = if transport == Transport::Udp {
+                    // 每次写入恰好一个数据报，零长度也必须实际调用。
+                    let written = stream
+                        .write_to_user(&buf[..n])
+                        .map_err(|_| OpenError::Transport)?;
+                    if written != n {
+                        pace.halt();
+                        return Err(OpenError::Transport);
+                    }
+                    n as u64
+                } else {
+                    write_all_user(stream, &buf[..n])?
+                };
+                traffic.add_downlink(n);
             }
             Err(OpenError::Again) => {
                 if pace.idle() {

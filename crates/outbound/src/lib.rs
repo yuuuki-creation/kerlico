@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use kerlico_shared::{Destination, Handoff, InboundStream, OpenError, PlaneFault, Settings, Traffic, Transport};
+use kerlico_shared::{
+    Destination, Handoff, InboundStream, OpenError, PlaneFault, Settings, Traffic, Transport,
+};
 
 pub use native::{BytePipe, Native, PacketDevice};
 
@@ -76,7 +78,8 @@ impl DialTarget {
     }
 }
 
-pub type LandFn = fn(&str, u16, &Settings, &Destination) -> Result<Box<dyn InboundStream>, OpenError>;
+pub type LandFn =
+    fn(&str, u16, &Settings, &Destination) -> Result<Box<dyn InboundStream>, OpenError>;
 
 /// One outbound module for every inbound on this process.
 #[derive(Clone)]
@@ -136,19 +139,27 @@ impl Outbound {
         let stream = handoff.stream();
         match exit {
             Exit::NativeV4 | Exit::NativeV6 => {
-                native::dial_native(&target, &stream, &user, &node, exit, traffic)
+                native::dial_native(&target, stream.as_ref(), &user, &node, exit, traffic)
             }
-            Exit::WarpV4 | Exit::WarpV6 => {
-                native::dial_warp(&self.warp, &target, &stream, &user, &node, exit, traffic)
+            Exit::WarpV4 | Exit::WarpV6 => native::dial_warp(
+                &self.warp,
+                &target,
+                stream.as_ref(),
+                &user,
+                &node,
+                exit,
+                traffic,
+            ),
+            Exit::Landing => {
+                self.dial_landing(&destination, stream.as_ref(), &user, &node, traffic)
             }
-            Exit::Landing => self.dial_landing(&destination, &stream, &user, &node, traffic),
         }
     }
 
     fn dial_landing(
         &self,
         destination: &Destination,
-        stream: &Box<dyn InboundStream>,
+        stream: &dyn InboundStream,
         user: &kerlico_shared::UserEmail,
         node: &kerlico_shared::NodeTag,
         traffic: &dyn Traffic,
@@ -162,13 +173,22 @@ impl Outbound {
         let remote = installed(destination)?;
         let remote: Arc<dyn InboundStream> = Arc::from(remote);
         copy::bridge(
-            stream.as_ref(),
-            RemoteWrite(remote.clone()),
-            RemoteRead(remote),
-            user,
-            node,
-            Exit::Landing,
-            traffic,
+            stream,
+            RemoteWrite {
+                stream: remote.clone(),
+                transport: destination.transport(),
+            },
+            RemoteRead {
+                stream: remote,
+                transport: destination.transport(),
+            },
+            copy::Flow {
+                user,
+                node,
+                exit: Exit::Landing,
+                traffic,
+                transport: destination.transport(),
+            },
         )
     }
 
@@ -196,26 +216,45 @@ impl Outbound {
     }
 }
 
-struct RemoteRead(Arc<dyn InboundStream>);
+struct RemoteRead {
+    stream: Arc<dyn InboundStream>,
+    transport: Transport,
+}
 
 impl copy::PipeRead for RemoteRead {
-    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<usize, OpenError> {
-        match self.0.read_from_user(buf) {
-            Ok(n) => Ok(n),
+    fn read_pipe(&mut self, buf: &mut [u8]) -> Result<copy::ReadEvent, OpenError> {
+        match self.stream.read_from_user(buf) {
+            Ok(0) if self.transport == Transport::Tcp => Ok(copy::ReadEvent::Eof),
+            Ok(n) => Ok(copy::ReadEvent::Data(n)),
             Err(PlaneFault::Again) => Err(OpenError::Again),
-            Err(PlaneFault::Closed) => Ok(0),
+            Err(PlaneFault::Closed) => Ok(copy::ReadEvent::Eof),
             Err(PlaneFault::Transport) => Err(OpenError::Transport),
         }
     }
 }
 
-struct RemoteWrite(Arc<dyn InboundStream>);
+struct RemoteWrite {
+    stream: Arc<dyn InboundStream>,
+    transport: Transport,
+}
 
 impl copy::PipeWrite for RemoteWrite {
     fn write_pipe(&mut self, buf: &[u8]) -> Result<(), OpenError> {
+        if self.transport == Transport::Udp {
+            return if self
+                .stream
+                .write_to_user(buf)
+                .map_err(|_| OpenError::Transport)?
+                == buf.len()
+            {
+                Ok(())
+            } else {
+                Err(OpenError::Transport)
+            };
+        }
         let mut sent = 0;
         while sent < buf.len() {
-            match self.0.write_to_user(&buf[sent..]) {
+            match self.stream.write_to_user(&buf[sent..]) {
                 Ok(0) => return Err(OpenError::Transport),
                 Ok(n) => sent += n,
                 Err(PlaneFault::Again) => thread::sleep(Duration::from_millis(5)),
@@ -259,7 +298,10 @@ mod tests {
             select_exit(
                 OutboundChoice::Default,
                 Reachability::HasV4,
-                Native { v4: false, v6: true }
+                Native {
+                    v4: false,
+                    v6: true
+                }
             ),
             Ok(Exit::WarpV4)
         );
@@ -267,7 +309,10 @@ mod tests {
             select_exit(
                 OutboundChoice::Default,
                 Reachability::V6Only,
-                Native { v4: true, v6: false }
+                Native {
+                    v4: true,
+                    v6: false
+                }
             ),
             Ok(Exit::WarpV6)
         );
@@ -292,7 +337,10 @@ mod tests {
 
     #[test]
     fn manual_exit_does_not_switch() {
-        let native = Native { v4: false, v6: false };
+        let native = Native {
+            v4: false,
+            v6: false,
+        };
         assert_eq!(
             select_exit(
                 OutboundChoice::Manual(Exit::WarpV4),

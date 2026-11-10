@@ -65,7 +65,10 @@ fn parse(text: &str) -> io::Result<Profile> {
             bytes
         })
         .unwrap_or([0, 0, 0]);
-    let mtu = value.get("mtu").and_then(|item| item.as_u64()).unwrap_or(1280) as usize;
+    let mtu = value
+        .get("mtu")
+        .and_then(|item| item.as_u64())
+        .unwrap_or(1280) as usize;
     Ok(Profile {
         private_key,
         peer_public,
@@ -136,7 +139,10 @@ fn registration_document(private_key: &[u8; 32], value: &Value) -> io::Result<St
     let endpoint = peer
         .pointer("/endpoint/v4")
         .and_then(|item| item.as_str())
-        .or_else(|| peer.pointer("/endpoint/host").and_then(|item| item.as_str()))
+        .or_else(|| {
+            peer.pointer("/endpoint/host")
+                .and_then(|item| item.as_str())
+        })
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "endpoint"))?;
     let endpoint = if endpoint.contains(':') {
         endpoint.to_string()
@@ -144,10 +150,16 @@ fn registration_document(private_key: &[u8; 32], value: &Value) -> io::Result<St
         format!("{endpoint}:2408")
     };
     let mut addresses = Vec::new();
-    if let Some(v4) = config.pointer("/interface/addresses/v4").and_then(|item| item.as_str()) {
+    if let Some(v4) = config
+        .pointer("/interface/addresses/v4")
+        .and_then(|item| item.as_str())
+    {
         addresses.push(with_prefix(v4, 32));
     }
-    if let Some(v6) = config.pointer("/interface/addresses/v6").and_then(|item| item.as_str()) {
+    if let Some(v6) = config
+        .pointer("/interface/addresses/v6")
+        .and_then(|item| item.as_str())
+    {
         addresses.push(with_prefix(v6, 128));
     }
     let client_id = config
@@ -213,7 +225,7 @@ fn https_post(host: &str, path: &str, body: &str) -> io::Result<String> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "sni"))?
         .to_owned();
     let mut connection = rustls::ClientConnection::new(Arc::new(config), name)
-        .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let mut tcp = TcpStream::connect((host, 443))?;
     tcp.set_read_timeout(Some(Duration::from_secs(15)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(15)))?;
@@ -225,7 +237,8 @@ fn https_post(host: &str, path: &str, body: &str) -> io::Result<String> {
     stream.write_all(request.as_bytes())?;
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw)?;
-    let text = String::from_utf8(raw).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let text = String::from_utf8(raw)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     http_body(&text)
 }
 
@@ -236,9 +249,12 @@ fn http_body(raw: &str) -> io::Result<String> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "http"))?;
     let status = head.lines().next().unwrap_or("");
     if !status.contains(" 200 ") {
-        return Err(io::Error::new(io::ErrorKind::Other, status.to_string()));
+        return Err(io::Error::other(status.to_string()));
     }
-    if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    if head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         return decode_chunks(rest);
     }
     Ok(rest.to_string())
@@ -342,9 +358,13 @@ mod tests {
 
     #[test]
     fn http_body_reads_plain_and_chunked_payloads() {
-        assert_eq!(http_body("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap(), "{}");
         assert_eq!(
-            http_body("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n").unwrap(),
+            http_body("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap(),
+            "{}"
+        );
+        assert_eq!(
+            http_body("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n")
+                .unwrap(),
             "{}"
         );
         assert!(http_body("HTTP/1.1 403 Forbidden\r\n\r\nno").is_err());

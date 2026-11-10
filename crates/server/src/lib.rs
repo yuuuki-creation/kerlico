@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -9,7 +10,7 @@ use std::time::Duration;
 use kerlico_outbound::{DialTarget, Exit, Native, Outbound, OutboundChoice};
 use kerlico_shared::{
     Accept, AddrError, DocError, Handoff, IdError, ListenAddr, NodeTag, OpenError, PacketError,
-    PlaneFault, ProtocolId, Settings, Traffic, UserEmail,
+    PlaneFault, ProtocolId, Settings, Traffic, TrafficCounters, UserEmail,
 };
 
 mod api;
@@ -77,10 +78,9 @@ impl From<PlaneFault> for Error {
 }
 
 /// Process-wide counters. Names follow the Xray `>>>` pattern.
-#[derive(Debug)]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Stats {
-    counts: Arc<Mutex<BTreeMap<String, u64>>>,
+    counts: Arc<Mutex<BTreeMap<String, Arc<AtomicU64>>>>,
 }
 
 impl Stats {
@@ -107,12 +107,20 @@ impl Stats {
     }
 
     pub fn get(&self, name: &str) -> u64 {
-        self.counts.lock().expect("stats").get(name).copied().unwrap_or(0)
+        self.counts
+            .lock()
+            .expect("stats")
+            .get(name)
+            .map(|counter| counter.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     fn add(&self, name: String, bytes: u64) {
         let mut counts = self.counts.lock().expect("stats");
-        *counts.entry(name).or_insert(0) += bytes;
+        counts
+            .entry(name)
+            .or_default()
+            .fetch_add(bytes, Ordering::Relaxed);
     }
 }
 
@@ -122,23 +130,42 @@ impl Default for Stats {
     }
 }
 
-impl Traffic for Stats {
-    fn add_uplink(&self, user: &UserEmail, node: &NodeTag, bytes: u64) {
+impl Stats {
+    pub fn add_uplink(&self, user: &UserEmail, node: &NodeTag, bytes: u64) {
         self.add(Self::user_uplink_name(user), bytes);
         self.add(Self::inbound_uplink_name(node), bytes);
     }
 
-    fn add_downlink(&self, user: &UserEmail, node: &NodeTag, bytes: u64) {
+    pub fn add_downlink(&self, user: &UserEmail, node: &NodeTag, bytes: u64) {
         self.add(Self::user_downlink_name(user), bytes);
         self.add(Self::inbound_downlink_name(node), bytes);
     }
 
-    fn add_exit_uplink(&self, exit: &str, bytes: u64) {
+    pub fn add_exit_uplink(&self, exit: &str, bytes: u64) {
         self.add(format!("outbound>>>{exit}>>>traffic>>>uplink"), bytes);
     }
 
-    fn add_exit_downlink(&self, exit: &str, bytes: u64) {
+    pub fn add_exit_downlink(&self, exit: &str, bytes: u64) {
         self.add(format!("outbound>>>{exit}>>>traffic>>>downlink"), bytes);
+    }
+}
+
+impl Traffic for Stats {
+    fn bind(&self, user: &UserEmail, node: &NodeTag, exit: &str) -> TrafficCounters {
+        let mut counts = self.counts.lock().expect("stats");
+        let mut counter = |name| Arc::clone(counts.entry(name).or_default());
+        TrafficCounters::new(
+            [
+                counter(Self::user_uplink_name(user)),
+                counter(Self::inbound_uplink_name(node)),
+                counter(format!("outbound>>>{exit}>>>traffic>>>uplink")),
+            ],
+            [
+                counter(Self::user_downlink_name(user)),
+                counter(Self::inbound_downlink_name(node)),
+                counter(format!("outbound>>>{exit}>>>traffic>>>downlink")),
+            ],
+        )
     }
 }
 
@@ -156,6 +183,7 @@ struct Node {
 /// One process. Every node hands flows to the same `Outbound`.
 pub struct Server {
     nodes: Vec<Node>,
+    next_node: usize,
     outbound: Outbound,
     stats: Stats,
     fakedns: fakedns::Pool,
@@ -180,6 +208,7 @@ impl Server {
         let landing_runtime = runtime::context(&outbound, dns.clone(), geodata.clone(), false);
         Self {
             nodes: Vec::new(),
+            next_node: 0,
             outbound,
             stats: Stats::new(),
             fakedns: fakedns::Pool::new(),
@@ -227,9 +256,10 @@ impl Server {
     }
 
     pub fn node(&self, tag: &NodeTag) -> Option<(ProtocolId, ListenAddr, OutboundChoice)> {
-        self.nodes.iter().find(|node| &node.tag == tag).map(|node| {
-            (node.protocol, node.listen, node.outbound)
-        })
+        self.nodes
+            .iter()
+            .find(|node| &node.tag == tag)
+            .map(|node| (node.protocol, node.listen, node.outbound))
     }
 
     /// Opens one inbound from the compiled registry and keeps it on this server.
@@ -272,14 +302,22 @@ impl Server {
         email: UserEmail,
         account: &Settings,
     ) -> Result<(), Error> {
-        let node = self.nodes.iter_mut().find(|node| &node.tag == tag).ok_or(Error::UnknownNode)?;
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| &node.tag == tag)
+            .ok_or(Error::UnknownNode)?;
         node.inbound.add_user(&email, account)?;
         node.users.insert(email);
         Ok(())
     }
 
     pub fn remove_user(&mut self, tag: &NodeTag, email: &UserEmail) -> Result<(), Error> {
-        let node = self.nodes.iter_mut().find(|node| &node.tag == tag).ok_or(Error::UnknownNode)?;
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| &node.tag == tag)
+            .ok_or(Error::UnknownNode)?;
         if !node.users.contains(email) {
             return Err(Error::UnknownUser);
         }
@@ -398,54 +436,71 @@ impl Server {
         Ok(())
     }
 
-    fn dispatch_next_with(&mut self, native: Native, local: &[IpAddr], dns: &dns::Config) -> bool {
-        for index in 0..self.nodes.len() {
-            let accepted = self.nodes[index].inbound.accept();
-            let rules = self.nodes[index].rules.clone();
-            let choice = self.nodes[index].outbound;
-            let sniff = self.nodes[index].sniff.clone();
-            match accepted {
-                Ok(handoff) => {
-                    let outbound = self.outbound.clone();
-                    let stats = self.stats.clone();
-                    let local = local.to_vec();
-                    let dns = dns.clone();
-                    let fakes = self.fakedns.clone();
-                    let fake_on = self.fake_on;
-                    let geodata = self.geodata.clone();
-                    let udp = self.udp.clone();
-                    thread::spawn(move || {
-                        if let Err(error) = Self::drive(
-                            handoff, &rules, choice, native, &local, &dns, &sniff, &fakes,
-                            fake_on, &geodata, &udp, &outbound, &stats,
-                        ) {
-                            eprintln!("flow {error:?}");
-                        }
-                    });
-                    return true;
-                }
-                Err(OpenError::Again) => {}
-                Err(_) => {}
+    fn accept_next(&mut self) -> Option<(usize, Handoff)> {
+        for _ in 0..self.nodes.len() {
+            let index = self.next_node % self.nodes.len();
+            self.next_node = (index + 1) % self.nodes.len();
+            if let Ok(handoff) = self.nodes[index].inbound.accept() {
+                return Some((index, handoff));
             }
         }
-        false
+        None
     }
 
-    fn drive(
-        mut handoff: Handoff,
-        rules: &[route::Rule],
-        choice: OutboundChoice,
-        native: Native,
-        local: &[IpAddr],
-        dns: &dns::Config,
-        sniff: &[String],
-        fakes: &fakedns::Pool,
-        fake_on: bool,
-        geodata: &geodata::Catalog,
-        sessions: &udp::Table,
-        outbound: &Outbound,
-        traffic: &Stats,
-    ) -> Result<(), Error> {
+    fn dispatch_next_with(&mut self, native: Native, local: &[IpAddr], dns: &dns::Config) -> bool {
+        let Some((index, handoff)) = self.accept_next() else {
+            return false;
+        };
+        let rules = self.nodes[index].rules.clone();
+        let choice = self.nodes[index].outbound;
+        let sniff = self.nodes[index].sniff.clone();
+        let outbound = self.outbound.clone();
+        let stats = self.stats.clone();
+        let local = local.to_vec();
+        let dns = dns.clone();
+        let fakes = self.fakedns.clone();
+        let fake_on = self.fake_on;
+        let geodata = self.geodata.clone();
+        let udp = self.udp.clone();
+        thread::spawn(move || {
+            if let Err(error) = Self::drive(
+                handoff,
+                FlowPlan {
+                    rules: &rules,
+                    choice,
+                    native,
+                    local: &local,
+                    dns: &dns,
+                    sniff: &sniff,
+                    fakes: &fakes,
+                    fake_on,
+                    geodata: &geodata,
+                    sessions: &udp,
+                    outbound: &outbound,
+                    traffic: &stats,
+                },
+            ) {
+                eprintln!("flow {error:?}");
+            }
+        });
+        true
+    }
+
+    fn drive(mut handoff: Handoff, plan: FlowPlan<'_>) -> Result<(), Error> {
+        let FlowPlan {
+            rules,
+            choice,
+            native,
+            local,
+            dns,
+            sniff,
+            fakes,
+            fake_on,
+            geodata,
+            sessions,
+            outbound,
+            traffic,
+        } = plan;
         if fake_on {
             if let Some(ip) = route::literal(handoff.destination()) {
                 if let Some(name) = fakes.rewrite(ip) {
@@ -467,25 +522,32 @@ impl Server {
                 None
             }
         });
-        let session = udp::key_from(handoff.peer(), &destination);
+        let session = udp::key_from(handoff.node(), handoff.user(), handoff.peer(), &destination);
         let fail = |key: Option<&udp::Key>| {
             if let Some(key) = key {
                 sessions.end(key);
             }
             Error::Connect
         };
-        let exit = udp::adopt(sessions, session.as_ref(), std::time::Instant::now(), || {
-            route::choose(
-                rule_host.as_deref(),
-                rules,
-                choice,
-                native,
-                &mut resolved,
-                local,
-                &mut |host| dns.lookup(host, native, outbound),
-                geodata,
-            )
-        })
+        let exit = udp::adopt(
+            sessions,
+            session.as_ref(),
+            std::time::Instant::now(),
+            || {
+                route::choose(
+                    rule_host.as_deref(),
+                    rules,
+                    choice,
+                    &mut resolved,
+                    &mut |host| dns.lookup(host, native, outbound),
+                    route::Environment {
+                        native,
+                        local,
+                        catalog: geodata,
+                    },
+                )
+            },
+        )
         .map_err(|_| fail(session.as_ref()))?;
         let mut addresses = family_addresses(&resolved.addresses, exit);
         if addresses.is_empty() && !matches!(exit, Exit::Landing) {
@@ -513,11 +575,34 @@ impl Server {
     }
 }
 
+struct FlowPlan<'a> {
+    rules: &'a [route::Rule],
+    choice: OutboundChoice,
+    native: Native,
+    local: &'a [IpAddr],
+    dns: &'a dns::Config,
+    sniff: &'a [String],
+    fakes: &'a fakedns::Pool,
+    fake_on: bool,
+    geodata: &'a geodata::Catalog,
+    sessions: &'a udp::Table,
+    outbound: &'a Outbound,
+    traffic: &'a Stats,
+}
+
 fn sniff_name(handoff: &mut Handoff, kinds: &[String]) -> Option<String> {
     if kinds.is_empty() || route::literal(handoff.destination()).is_none() {
         return None;
     }
-    let mut buf = [0u8; 2048];
+    // UDP 预读必须容纳整包，不能把一次数据报拆成两次出口发送。
+    let mut buf = vec![
+        0u8;
+        if handoff.destination().transport() == kerlico_shared::Transport::Udp {
+            65535
+        } else {
+            2048
+        }
+    ];
     let n = match handoff.read_into_prefix(&mut buf) {
         Ok(n) if n > 0 => n,
         _ => return None,
@@ -527,8 +612,16 @@ fn sniff_name(handoff: &mut Handoff, kinds: &[String]) -> Option<String> {
 
 fn family_addresses(addresses: &[std::net::SocketAddr], exit: Exit) -> Vec<std::net::SocketAddr> {
     match exit {
-        Exit::NativeV4 | Exit::WarpV4 => addresses.iter().copied().filter(|addr| addr.is_ipv4()).collect(),
-        Exit::NativeV6 | Exit::WarpV6 => addresses.iter().copied().filter(|addr| addr.is_ipv6()).collect(),
+        Exit::NativeV4 | Exit::WarpV4 => addresses
+            .iter()
+            .copied()
+            .filter(|addr| addr.is_ipv4())
+            .collect(),
+        Exit::NativeV6 | Exit::WarpV6 => addresses
+            .iter()
+            .copied()
+            .filter(|addr| addr.is_ipv6())
+            .collect(),
         Exit::Landing => Vec::new(),
     }
 }
@@ -546,6 +639,7 @@ mod tests {
 
     struct MemoryInbound {
         users: BTreeSet<UserEmail>,
+        ready: std::collections::VecDeque<Handoff>,
     }
 
     impl Accept for MemoryInbound {
@@ -560,8 +654,62 @@ mod tests {
         }
 
         fn accept(&mut self) -> Result<Handoff, OpenError> {
-            unimplemented!("test inbound")
+            self.ready.pop_front().ok_or(OpenError::Again)
         }
+    }
+
+    struct EmptyStream;
+
+    impl kerlico_shared::InboundStream for EmptyStream {
+        fn read_from_user(&self, _buf: &mut [u8]) -> Result<usize, PlaneFault> {
+            Err(PlaneFault::Closed)
+        }
+
+        fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn busy_nodes_share_accepts_and_empty_nodes_do_not_block_them() {
+        let mut server = Server::new();
+        assert!(server.accept_next().is_none());
+        for (name, count) in [("a", 2), ("empty", 0), ("b", 2)] {
+            let tag = NodeTag::parse(name).unwrap();
+            let ready = (0..count)
+                .map(|_| {
+                    Handoff::new(
+                        tag.clone(),
+                        UserEmail::parse("alice@example").unwrap(),
+                        kerlico_shared::Destination::new(
+                            "127.0.0.1",
+                            443,
+                            kerlico_shared::Transport::Tcp,
+                        )
+                        .unwrap(),
+                        Box::new(EmptyStream),
+                    )
+                })
+                .collect();
+            server.nodes.push(Node {
+                tag,
+                protocol: ProtocolId::must("mieru"),
+                listen: ListenAddr::v4(std::net::Ipv4Addr::LOCALHOST, 443).unwrap(),
+                outbound: OutboundChoice::Default,
+                inbound: Box::new(MemoryInbound {
+                    users: BTreeSet::new(),
+                    ready,
+                }),
+                users: BTreeSet::new(),
+                rules: Vec::new(),
+                sniff: Vec::new(),
+            });
+        }
+        for expected in ["a", "b", "a", "b"] {
+            let (_, handoff) = server.accept_next().unwrap();
+            assert_eq!(handoff.node().as_str(), expected);
+        }
+        assert!(server.accept_next().is_none());
     }
 
     #[test]
@@ -575,6 +723,39 @@ mod tests {
         assert_eq!(stats.get("user>>>alice@example>>>traffic>>>downlink"), 7);
         assert_eq!(stats.get("inbound>>>node-a>>>traffic>>>uplink"), 12);
         assert_eq!(stats.get(&Stats::user_uplink_name(&email)), 12);
+    }
+
+    #[test]
+    fn bound_counters_remain_visible_and_merge_the_same_user_across_nodes() {
+        let stats = Stats::new();
+        let user = UserEmail::parse("alice@example").unwrap();
+        let a = NodeTag::parse("a").unwrap();
+        let b = NodeTag::parse("b").unwrap();
+        let first = stats.bind(&user, &a, "native-v4");
+        let second = stats.bind(&user, &b, "native-v4");
+        first.add_uplink(12);
+        second.add_uplink(5);
+        first.add_downlink(7);
+        second.add_downlink(3);
+        assert_eq!(stats.get("user>>>alice@example>>>traffic>>>uplink"), 17);
+        assert_eq!(stats.get("user>>>alice@example>>>traffic>>>downlink"), 10);
+        assert_eq!(stats.get("inbound>>>a>>>traffic>>>uplink"), 12);
+        assert_eq!(stats.get("inbound>>>b>>>traffic>>>uplink"), 5);
+        assert_eq!(stats.get("outbound>>>native-v4>>>traffic>>>uplink"), 17);
+        assert_eq!(stats.get("outbound>>>native-v4>>>traffic>>>downlink"), 10);
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                let first = &first;
+                scope.spawn(move || {
+                    for _ in 0..1000 {
+                        first.add_uplink(1);
+                    }
+                });
+            }
+        });
+        assert_eq!(stats.get("user>>>alice@example>>>traffic>>>uplink"), 4017);
+        assert_eq!(stats.get("inbound>>>a>>>traffic>>>uplink"), 4012);
+        assert_eq!(stats.get("outbound>>>native-v4>>>traffic>>>uplink"), 4017);
     }
 
     #[cfg(not(feature = "landing-mieru"))]
@@ -595,13 +776,16 @@ mod tests {
             outbound: OutboundChoice::Default,
             inbound: Box::new(MemoryInbound {
                 users: BTreeSet::new(),
+                ready: std::collections::VecDeque::new(),
             }),
             users: BTreeSet::new(),
             rules: Vec::new(),
             sniff: Vec::new(),
         });
         let email = UserEmail::parse("alice@example").unwrap();
-        server.add_user(&tag, email.clone(), &Settings::default()).unwrap();
+        server
+            .add_user(&tag, email.clone(), &Settings::default())
+            .unwrap();
         assert!(server.nodes[0].users.contains(&email));
         server.remove_user(&tag, &email).unwrap();
         assert!(server.nodes[0].users.is_empty());

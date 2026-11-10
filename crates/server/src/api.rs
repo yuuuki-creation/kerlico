@@ -28,7 +28,11 @@ pub fn serve(addr: SocketAddr, tx: Sender<Cmd>, stats: Stats) -> Option<SocketAd
 }
 
 fn bind(addr: SocketAddr) -> std::io::Result<TcpListener> {
-    let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     if addr.is_ipv6() {
         socket.set_only_v6(true)?;
@@ -141,13 +145,22 @@ fn route(path: &str, message: &[u8], tx: &Sender<Cmd>, stats: &Stats) -> (String
         "/kerlico.Users/Remove" => {
             let tag = text_field(message, 1);
             let email = text_field(message, 2);
-            (user_status(tx, false, tag, email, Settings::default()), Vec::new())
+            (
+                user_status(tx, false, tag, email, Settings::default()),
+                Vec::new(),
+            )
         }
         _ => ("12".to_string(), Vec::new()),
     }
 }
 
-fn user_status(tx: &Sender<Cmd>, add: bool, tag: String, email: String, settings: Settings) -> String {
+fn user_status(
+    tx: &Sender<Cmd>,
+    add: bool,
+    tag: String,
+    email: String,
+    settings: Settings,
+) -> String {
     if tag.is_empty() || email.is_empty() {
         return "3".to_string();
     }
@@ -373,7 +386,6 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
     use std::sync::mpsc::Receiver;
-    use kerlico_shared::Traffic;
 
     fn call(addr: SocketAddr, path: &str, message: &[u8]) -> (String, Vec<u8>) {
         let mut tcp = TcpStream::connect(addr).unwrap();
@@ -388,7 +400,8 @@ mod tests {
             (&b"content-type"[..], &b"application/grpc"[..]),
         ]);
         tcp.write_all(&frame(1, 0x4, 1, &headers)).unwrap();
-        tcp.write_all(&frame(0, 1, 1, &grpc_prefix(message))).unwrap();
+        tcp.write_all(&frame(0, 1, 1, &grpc_prefix(message)))
+            .unwrap();
         let mut decoder = hpack::Decoder::new();
         let mut status = String::new();
         let mut body = Vec::new();
@@ -439,9 +452,9 @@ mod tests {
         let (status, body) = call(addr, "/kerlico.Stats/Get", &proto_bytes(1, name.as_bytes()));
         assert_eq!(status, "0");
         assert_eq!(text_field(&body, 1), name);
-        assert!(proto_fields(&body).iter().any(|(field, value)| {
-            *field == 2 && matches!(value, Value::Varint(12))
-        }));
+        assert!(proto_fields(&body)
+            .iter()
+            .any(|(field, value)| { *field == 2 && matches!(value, Value::Varint(12)) }));
         let mut add = proto_bytes(1, b"node-a");
         add.extend(proto_bytes(2, b"a@b.c"));
         let mut setting = proto_bytes(1, b"password");
