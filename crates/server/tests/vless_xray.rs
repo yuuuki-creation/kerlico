@@ -4,7 +4,7 @@
 //! --features vless,landing-vless --test vless_xray vless_xray_matrix -- --ignored --nocapture`.
 //! `VLESS_CASE` filters case/direction labels by comma-separated substrings.
 //! `VLESS_XRAY_CONTROL=1` adds an Xray-to-Xray run. `VLESS_RUN_DIR` holds logs and configs.
-//! The separate `vless_xray_rejections` test checks Xray's config rejection boundaries.
+//! The separate `vless_xray_rejections` test checks the configs Xray refuses and the flows it refuses at dispatch.
 
 #[path = "vless_support/cases.rs"]
 mod cases;
@@ -18,13 +18,13 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use cases::{Case, Keys, Network, Payload, Security, INGRESS_ID, ORIGIN_NAME, TLS_NAME};
+use cases::{Carriers, Case, Keys, Network, Payload, Security, INGRESS_ID, ORIGIN_NAME, TLS_NAME};
 use support::{
     available_port, localhost, print_logs, run_dir, tcp_connect, write_json, Echo, Process, Result,
     TIMEOUT,
@@ -105,11 +105,7 @@ fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Resul
         None
     };
     let origin = if case.payload.udp() {
-        let port = if case.payload == Payload::Udp443 {
-            443
-        } else {
-            0
-        };
+        let port = case.payload.origin_port();
         Echo::udp(port).map_err(|error| format!("UDP echo origin on port {port}: {error}"))?
     } else {
         let tls = if case.payload == Payload::InnerTls {
@@ -138,12 +134,9 @@ fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Resul
         front = available_port()?;
     }
 
-    let carrier = if case.name.starts_with("grpc-") && case.payload == Payload::TwoTcp {
-        Some(count_tcp_carriers(peer)?)
-    } else {
-        None
-    };
-    let client_peer = carrier.as_ref().map_or(peer, |(port, _)| *port);
+    let tap = case.carriers.map(|_| tap_carriers(peer)).transpose()?;
+    let client_peer = tap.as_ref().map_or(peer, |(port, _)| *port);
+    let cone = case.cone;
     let peers = match direction {
         Direction::XrayToKerlico => (
             start_kerlico(dir, &case.kerlico_server(&keys, peer))?,
@@ -152,6 +145,7 @@ fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Resul
                 dir,
                 "xray-client",
                 &case.xray_client(&keys, front, client_peer, origin.port),
+                cone,
             )?,
         ),
         Direction::KerlicoToXray => (
@@ -160,6 +154,7 @@ fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Resul
                 dir,
                 "xray-server",
                 &case.xray_server(&keys, peer, origin.port),
+                cone,
             )?,
             start_kerlico(dir, &case.kerlico_landing(&keys, front, client_peer))?,
         ),
@@ -169,25 +164,33 @@ fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Resul
                 dir,
                 "xray-server",
                 &case.xray_server(&keys, peer, origin.port),
+                cone,
             )?,
             start_xray(
                 xray,
                 dir,
                 "xray-client",
                 &case.xray_client(&keys, front, client_peer, origin.port),
+                cone,
             )?,
         ),
     };
 
     let inject = matches!(direction, Direction::KerlicoToXray);
     let rounds = if case.resume { 3 } else { 1 };
-    for round in 0..rounds {
+    let traffic = (0..rounds).try_for_each(|round| {
         let result = if case.payload.udp() {
             exercise_udp(front, origin.port, inject)
         } else {
-            exercise_tcp(front, origin.port, inject, case.payload, carrier.is_some())
+            exercise_tcp(front, origin.port, inject, case.payload, case.carriers.is_some())
         };
-        result.map_err(|error| format!("traffic round {}: {error}", round + 1))?;
+        result.map_err(|error| format!("traffic round {}: {error}", round + 1))
+    });
+    if case.rejected && traffic.is_ok() {
+        return Err("the client delivered a flow it must reject".into());
+    }
+    if !case.rejected {
+        traffic?;
     }
     if case.name.starts_with("hysteria-quic-") {
         exercise_hysteria_http(peer, &case.name)?;
@@ -195,11 +198,8 @@ fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Resul
     if download.is_some_and(|used| !used.load(Ordering::Relaxed)) {
         return Err("XHTTP did not use the downloadSettings endpoint".into());
     }
-    if let Some((_, count)) = carrier {
-        let count = count.load(Ordering::Acquire);
-        if count != 1 {
-            return Err(format!("two gRPC calls opened {count} TCP connections").into());
-        }
+    if let (Some((_, heads)), Some(expected)) = (&tap, case.carriers) {
+        check_carriers(&heads.lock().expect("tap"), expected)?;
     }
     drop(peers);
     if let Some(storage) = storage {
@@ -239,12 +239,16 @@ fn exercise_hysteria_http(peer: u16, case: &str) -> Result<()> {
     Ok(())
 }
 
-fn count_tcp_carriers(peer: u16) -> Result<(u16, Arc<AtomicUsize>)> {
+type CarrierHeads = Arc<Mutex<Vec<Vec<u8>>>>;
+
+/// Forwards each client carrier to `peer` and keeps its first bytes.
+fn tap_carriers(peer: u16) -> Result<(u16, CarrierHeads)> {
+    const HEAD: usize = 64;
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
-    let count = Arc::new(AtomicUsize::new(0));
-    let observed = count.clone();
+    let heads = CarrierHeads::default();
+    let observed = heads.clone();
     thread::spawn(move || {
         let deadline = Instant::now() + TIMEOUT * 2;
         while Instant::now() < deadline {
@@ -256,12 +260,31 @@ fn count_tcp_carriers(peer: u16) -> Result<(u16, Arc<AtomicUsize>)> {
                 }
                 Err(_) => return,
             };
-            observed.fetch_add(1, Ordering::Release);
+            let index = {
+                let mut heads = observed.lock().expect("tap");
+                heads.push(Vec::new());
+                heads.len() - 1
+            };
+            let heads = observed.clone();
             thread::spawn(move || {
                 let Ok(mut server) = TcpStream::connect(("127.0.0.1", peer)) else { return };
                 let (Ok(mut input), Ok(mut output)) = (client.try_clone(), server.try_clone()) else { return };
                 thread::spawn(move || {
-                    let _ = std::io::copy(&mut input, &mut output);
+                    let mut bytes = [0; 16 * 1024];
+                    while let Ok(n) = input.read(&mut bytes) {
+                        if n == 0 {
+                            break;
+                        }
+                        {
+                            let mut heads = heads.lock().expect("tap");
+                            let head = &mut heads[index];
+                            let room = HEAD.saturating_sub(head.len());
+                            head.extend_from_slice(&bytes[..n.min(room)]);
+                        }
+                        if output.write_all(&bytes[..n]).is_err() {
+                            break;
+                        }
+                    }
                     let _ = output.shutdown(Shutdown::Write);
                 });
                 let _ = std::io::copy(&mut server, &mut client);
@@ -269,7 +292,22 @@ fn count_tcp_carriers(peer: u16) -> Result<(u16, Arc<AtomicUsize>)> {
             });
         }
     });
-    Ok((port, count))
+    Ok((port, heads))
+}
+
+fn check_carriers(heads: &[Vec<u8>], expected: Carriers) -> Result<()> {
+    if heads.len() != expected.count {
+        return Err(format!("{} carriers, expected {}", heads.len(), expected.count).into());
+    }
+    let Some(command) = expected.command else { return Ok(()) };
+    for head in heads {
+        // A plaintext VLESS request: version, UUID, addons length, addons, command.
+        let seen = head.get(17).and_then(|addons| head.get(18 + *addons as usize));
+        if seen != Some(&command) {
+            return Err(format!("carrier command {seen:?}, expected {command}").into());
+        }
+    }
+    Ok(())
 }
 
 fn download_proxy(peer: u16) -> Result<(u16, Arc<AtomicBool>)> {
@@ -330,12 +368,14 @@ fn xray_binary(dir: &Path) -> Result<PathBuf> {
     Ok(xray)
 }
 
-fn start_xray(xray: &Path, dir: &Path, name: &str, config: &Value) -> Result<Process> {
+fn start_xray(xray: &Path, dir: &Path, name: &str, config: &Value, cone: bool) -> Result<Process> {
     let path = write_json(dir, &format!("{name}.json"), config)?;
     let mut command = Command::new(xray);
     command.args(["run", "-c"]).arg(path);
-    // Keep un-muxed UDP cases on VLESS command 2. Vision and explicit mux still use XUDP.
-    command.env("xray.cone.disabled", "true");
+    // Keep most un-muxed Xray UDP cases on VLESS command 2. Vision and explicit mux still use XUDP.
+    if !cone {
+        command.env("xray.cone.disabled", "true");
+    }
     let mut process = Process::spawn(command, dir, name)?;
     process.wait_for_log(&format!("Xray {XRAY_VERSION} started"))?;
     Ok(process)
@@ -385,7 +425,7 @@ fn open_front(port: u16, origin: u16, inject: bool, udp: bool) -> Result<TcpStre
     Ok(stream)
 }
 
-fn exercise_tcp(front: u16, origin: u16, inject: bool, payload: Payload, shared_grpc: bool) -> Result<()> {
+fn exercise_tcp(front: u16, origin: u16, inject: bool, payload: Payload, concurrent: bool) -> Result<()> {
     let mut stream = open_front(front, origin, inject, false)?;
     if payload == Payload::InnerTls {
         let tls = kerlico_vless::client_config(&[], true).map_err(|_| "make inner TLS client")?;
@@ -398,7 +438,7 @@ fn exercise_tcp(front: u16, origin: u16, inject: bool, payload: Payload, shared_
     if payload == Payload::TwoTcp {
         let mut second = open_front(front, origin, inject, false)?;
         tcp_exchange(&mut second, 19, 77)?;
-        if shared_grpc {
+        if concurrent {
             thread::scope(|scope| {
                 let first = scope.spawn(|| tcp_exchange(&mut stream, 2_300_013, 123).map_err(|error| error.to_string()));
                 tcp_exchange(&mut second, 2_000_017, 11)?;
@@ -556,6 +596,20 @@ fn vless_xray_rejections() {
             Ok(())
         })();
         report(&name, result, &dir, &mut failed);
+    }
+    for case in cases::rejected_cases() {
+        for direction in [Direction::XrayControl, Direction::KerlicoToXray] {
+            let label = format!("{}/{}", case.name, direction.name());
+            if !selected(&filter, &label) {
+                continue;
+            }
+            runs += 1;
+            let dir = root.join(&case.name).join(direction.name());
+            let result = fs::create_dir_all(&dir)
+                .map_err(Into::into)
+                .and_then(|_| run_case(&xray, &dir, &case, direction));
+            report(&label, result, &dir, &mut failed);
+        }
     }
     finish_report(runs, &failed, &root);
 }
