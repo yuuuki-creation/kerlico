@@ -69,7 +69,7 @@ Vision 只保留一条实现路径。END 结束填充；DIRECT 在最后一块�
 
 账号 `reverse` 可以是标签字符串或 `{"tag":"bridge"}`。该账号拒绝正向请求。反向握手后服务端发送 UDP 控制会话到 `reverse:0`，之后按 Xray 节拍发送 ACTIVE。协议标签不创建全局路由表或新的 `OutboundChoice`。服务端可用 `landing: {"node":"节点名","reverse":"标签"}` 将这个节点的 Portal 作为既有 Landing 出口，检查 Portal 归属和账号代际。
 
-服务端 `open_reverse(tag, host, port, tcp, payload)` 返回双向流。客户端 `reverse_bridge(host, port, settings)` 返回 `ReverseBridge`，`accept()` 给出各自包含 `Destination` 和 `InboundStream` 的 `ReverseFlow`，可以并发处理 TCP、UDP 和同一 XUDP 会话里的多个目的地。实际目标拨号仍归调用它的出站层。落地 `land` 只有显式 `reverse` 配置时才进入反向兼容入口；普通目标 `v1.rvs.cool` 不会触发反向模式。
+服务端 `open_reverse(tag, host, port, tcp, payload)` 返回双向流。客户端 `reverse_bridge(host, port, settings)` 返回 `ReverseBridge`，`accept()` 给出各自包含 `Destination` 和 `InboundStream` 的 `ReverseFlow`，可以并发处理 TCP、UDP 和同一 XUDP 会话里的多个目的地。实际目标拨号仍归调用它的出站层。`load()` 给出 Xray 桥监控读的状态：活动会话数（含 Portal 的控制会话）、Draining 或 Closed。控制会话里 `Control.state` 不是 ACTIVE 时为 Draining；控制消息不是合法 protobuf 时关闭这条连接，和 Xray 相同。服务端配置的 `bridges` 把桥作为节点运行，每条 `ReverseFlow` 成为该节点的 `Handoff`，并按 Xray 的 2 秒检查、平均超过 16 个会话加开连接的规则维护连接，见 `server.md`「配置和运行时接口」。落地 `land` 只有显式 `reverse` 配置时才进入反向兼容入口；普通目标 `v1.rvs.cool` 不会触发反向模式。
 
 `fallback` 为默认 `host:port`、`[IPv6]:port` 或本机端口。`fallbacks` 接受 Xray 的 JSON 数组，也接受分号分隔的 `name=...,alpn=...,path=...,dest=...,xver=...`。SNI 匹配最长子串，ALPN 和路径逐级使用默认值；h2 规则不能再带路径。`xver` 为 0、1、2。回落交出已读取的全部字节及可选 PROXY 头，正常出口选择仍生效。
 

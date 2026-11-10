@@ -83,7 +83,7 @@ landing-vless = { package = "kerlico-vless-client", path = "../../protocols/vles
 - `protocols/<id>/shared` 缺失，或它依赖角色 crate。
 - 协议源码里出现 `PROTOCOL_ID`。id 以目录名为准。
 
-服务端叶子上的 `landing-<id>` 依赖指向该协议的客户端 crate，并且不进入入站菜单。出站模块调用该 crate 的 `land`。见 `docs/reference/server.md`。
+服务端叶子上的 `landing-<id>` 依赖指向该协议的客户端 crate，并且不进入入站菜单。出站模块调用该 crate 的 `land`。`landing-vless` 还让服务端叶子用该 crate 的 `reverse_bridge` 运行配置里的 `bridges` 节点，桥上的流仍由出站模块拨号。见 `docs/reference/server.md`。
 
 ## 引擎和协议是两个 crate
 

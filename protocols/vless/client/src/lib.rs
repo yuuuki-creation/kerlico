@@ -1459,6 +1459,16 @@ pub struct ReverseBridge {
     incoming: Mutex<std::sync::mpsc::Receiver<ReverseFlow>>,
 }
 
+/// What Xray's bridge monitor reads from one reverse connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BridgeLoad {
+    /// Open mux sessions, the portal's control session included.
+    Active(usize),
+    /// The portal's last control message was not ACTIVE. Open sessions keep running.
+    Draining,
+    Closed,
+}
+
 impl ReverseBridge {
     fn new(mut read: Link, mut write: Link, prefix: Vec<u8>) -> Self {
         read.set_timeout(Duration::from_millis(200));
@@ -1466,6 +1476,7 @@ impl ReverseBridge {
         let shared = Arc::new(ReverseShared {
             writer: Mutex::new(Some(ReverseWriter { mux: kerlico_vless::MuxWriter::new(write), ends: std::collections::VecDeque::new() })),
             sessions: Mutex::new(std::collections::HashMap::new()),
+            control: Mutex::new(PortalControl { sessions: std::collections::HashSet::new(), draining: false }),
             queued: std::sync::atomic::AtomicUsize::new(0),
             closed: std::sync::atomic::AtomicBool::new(false),
         });
@@ -1481,6 +1492,13 @@ impl ReverseBridge {
             Err(std::sync::mpsc::TryRecvError::Empty) if !self.shared.closed() => Err(OpenError::Again),
             Err(_) => Err(OpenError::Transport),
         }
+    }
+
+    pub fn load(&self) -> BridgeLoad {
+        if self.shared.closed() { return BridgeLoad::Closed; }
+        let control = self.shared.control.lock().expect("reverse");
+        if control.draining { return BridgeLoad::Draining; }
+        BridgeLoad::Active(control.sessions.len() + self.shared.sessions.lock().expect("reverse").len())
     }
 }
 
@@ -1519,8 +1537,14 @@ struct ReverseSession {
 struct ReverseShared {
     writer: Mutex<Option<ReverseWriter>>,
     sessions: Mutex<std::collections::HashMap<u16, ReverseSession>>,
+    control: Mutex<PortalControl>,
     queued: std::sync::atomic::AtomicUsize,
     closed: std::sync::atomic::AtomicBool,
+}
+
+struct PortalControl {
+    sessions: std::collections::HashSet<u16>,
+    draining: bool,
 }
 
 impl ReverseShared {
@@ -1650,7 +1674,6 @@ fn reverse_destination(address: Option<&Addr>, port: u16, network: u8) -> std::i
 }
 
 fn reverse_loop(mut read: Link, mut pending: Vec<u8>, shared: Arc<ReverseShared>, incoming: std::sync::mpsc::SyncSender<ReverseFlow>) {
-    let mut controls = std::collections::HashSet::new();
     let mut buf = [0; 8192];
     'connection: loop {
         if shared.closed() { break; }
@@ -1660,14 +1683,21 @@ fn reverse_loop(mut read: Link, mut pending: Vec<u8>, shared: Arc<ReverseShared>
                 Ok((frame, used)) => {
                     pending.drain(..used);
                     if frame.status == kerlico_vless::KEEPALIVE { continue; }
-                    if frame.status == NEW && frame.network == 2 && frame.port == 0 && matches!(frame.address, Some(Addr::Domain(ref host)) if host == "reverse") {
-                        controls.insert(frame.id);
+                    let opens_control = frame.status == NEW && frame.network == 2 && frame.port == 0 && matches!(frame.address, Some(Addr::Domain(ref host)) if host == "reverse");
+                    let mut control = shared.control.lock().expect("reverse");
+                    if opens_control || control.sessions.contains(&frame.id) {
+                        if frame.status == kerlico_vless::END {
+                            control.sessions.remove(&frame.id);
+                        } else {
+                            control.sessions.insert(frame.id);
+                        }
+                        if !frame.payload.is_empty() {
+                            let Some(state) = kerlico_vless::control_state(&frame.payload) else { break 'connection };
+                            control.draining = state != 0;
+                        }
                         continue;
                     }
-                    if controls.contains(&frame.id) {
-                        if frame.status == kerlico_vless::END { controls.remove(&frame.id); }
-                        continue;
-                    }
+                    drop(control);
                     if shared.route(frame, &incoming).is_err() { break 'connection; }
                 }
                 Err(kerlico_vless::HeaderError::Short) => break,
@@ -2047,6 +2077,31 @@ mod tests {
         drop(udp_b);
         let end = reverse_frame(&mut peer, &mut pending);
         assert_eq!((end.id, end.status), (7, kerlico_vless::END));
+    }
+
+    #[test]
+    fn reverse_load_counts_the_control_session_and_follows_drain() {
+        let (bridge, mut peer) = reverse_fixture();
+        let settle = |expected: BridgeLoad| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while bridge.load() != expected {
+                assert!(std::time::Instant::now() < deadline, "load {:?}, expected {expected:?}", bridge.load());
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        assert_eq!(bridge.load(), BridgeLoad::Active(0));
+        let mut frames = encode_mux(&kerlico_vless::control_frame(1));
+        frames.extend(encode_mux(&kerlico_vless::session_frame(3, true, 80, "first.test", b"first")));
+        peer.write_all(&frames).unwrap();
+        let flow = accept_reverse(&bridge);
+        assert_eq!(bridge.load(), BridgeLoad::Active(2), "control session plus one flow");
+        drop(flow);
+        assert_eq!(bridge.load(), BridgeLoad::Active(1), "a finished flow leaves the count");
+        let drain = vec![0x08, 0x01, 0x9a, 0x06, 0x01, 0x00];
+        peer.write_all(&encode_mux(&MuxFrame { id: 1, status: KEEP, option: DATA, network: 0, port: 0, address: None, payload: drain })).unwrap();
+        settle(BridgeLoad::Draining);
+        drop(peer);
+        settle(BridgeLoad::Closed);
     }
 
     #[test]

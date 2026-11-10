@@ -5,6 +5,7 @@
 //! `VLESS_CASE` filters case/direction labels by comma-separated substrings.
 //! `VLESS_XRAY_CONTROL=1` adds an Xray-to-Xray run. `VLESS_RUN_DIR` holds logs and configs.
 //! The separate `vless_xray_rejections` test checks Xray's config rejection boundaries.
+//! `vless_xray_bridge` runs a Kerlico reverse bridge and an Xray control bridge against an Xray portal.
 
 #[path = "vless_support/cases.rs"]
 mod cases;
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use cases::{Case, Keys, Network, Payload, Security, INGRESS_ID, ORIGIN_NAME, TLS_NAME};
+use cases::{Case, Keys, Network, Payload, Security, ID, INGRESS_ID, ORIGIN_NAME, TLS_NAME};
 use support::{
     available_port, localhost, print_logs, run_dir, tcp_connect, write_json, Echo, Process, Result,
     TIMEOUT,
@@ -82,7 +83,7 @@ fn vless_xray_matrix() {
             report(&label, result, &dir, &mut failed);
         }
     }
-    finish_report(runs, &failed, &root);
+    finish_report("VLESS matrix", runs, &failed, &root);
 }
 
 fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Result<()> {
@@ -139,7 +140,7 @@ fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Resul
     }
 
     let carrier = if case.name.starts_with("grpc-") && case.payload == Payload::TwoTcp {
-        Some(count_tcp_carriers(peer)?)
+        Some(count_tcp_carriers(peer, TIMEOUT * 2)?)
     } else {
         None
     };
@@ -239,14 +240,14 @@ fn exercise_hysteria_http(peer: u16, case: &str) -> Result<()> {
     Ok(())
 }
 
-fn count_tcp_carriers(peer: u16) -> Result<(u16, Arc<AtomicUsize>)> {
+fn count_tcp_carriers(peer: u16, lifetime: Duration) -> Result<(u16, Arc<AtomicUsize>)> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let count = Arc::new(AtomicUsize::new(0));
     let observed = count.clone();
     thread::spawn(move || {
-        let deadline = Instant::now() + TIMEOUT * 2;
+        let deadline = Instant::now() + lifetime;
         while Instant::now() < deadline {
             let mut client = match listener.accept() {
                 Ok((socket, _)) => socket,
@@ -519,10 +520,10 @@ fn report(label: &str, result: Result<()>, dir: &Path, failures: &mut Vec<String
     }
 }
 
-fn finish_report(runs: usize, failures: &[String], root: &Path) {
+fn finish_report(title: &str, runs: usize, failures: &[String], root: &Path) {
     assert!(runs > 0, "no cases matched VLESS_CASE");
     eprintln!(
-        "VLESS matrix: {}/{} passed. Artifacts: {}",
+        "{title}: {}/{} passed. Artifacts: {}",
         runs - failures.len(),
         runs,
         root.display()
@@ -560,7 +561,7 @@ fn vless_xray_rejections() {
         })();
         report(&name, result, &dir, &mut failed);
     }
-    finish_report(runs, &failed, &root);
+    finish_report("VLESS rejections", runs, &failed, &root);
 }
 
 #[test]
@@ -803,4 +804,125 @@ fn rejection_configs(dir: &Path) -> Result<Vec<(String, Value)>> {
     config["inbounds"][0]["settings"]["fallbacks"] = json!([{"dest": 20503}]);
     configs.push(("reject-encryption-with-fallback".into(), config));
     Ok(configs)
+}
+
+#[test]
+#[ignore = "requires XRAY pointing to Xray 26.10.31 a4a3dff"]
+fn vless_xray_bridge() {
+    let root = run_dir("bridge").expect("bridge directory");
+    let xray = xray_binary(&root).expect("pinned Xray peer");
+    let mut failed = Vec::new();
+    for (label, kerlico) in [("bridge/xray-control", false), ("bridge/kerlico", true)] {
+        let dir = root.join(label);
+        let result = fs::create_dir_all(&dir)
+            .map_err(Into::into)
+            .and_then(|_| run_bridge(&xray, &dir, kerlico));
+        report(label, result, &dir, &mut failed);
+    }
+    finish_report("VLESS bridge", 2, &failed, &root);
+}
+
+/// Only the bridge resolves the origin name and the portal's default outbound is blackhole,
+/// so every echoed byte crossed the bridge and left through the bridge's exit.
+fn run_bridge(xray: &Path, dir: &Path, kerlico: bool) -> Result<()> {
+    let tcp = Echo::tcp(None)?;
+    let udp = Echo::udp(0)?;
+    let mut ports = Vec::new();
+    while ports.len() < 3 {
+        let port = available_port()?;
+        if ![tcp.port, udp.port].contains(&port) && !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+    let (portal, front_tcp, front_udp) = (ports[0], ports[1], ports[2]);
+    let (link, carriers) = count_tcp_carriers(portal, Duration::from_secs(300))?;
+    let _portal = start_xray(xray, dir, "xray-portal", &json!({
+        "log": {"loglevel": "info"},
+        "inbounds": [
+            {"tag": "portal-link", "protocol": "vless", "listen": "127.0.0.1", "port": portal,
+                "settings": {"decryption": "none", "users": [{"id": ID, "reverse": {"tag": "portal-out"}}]}},
+            {"tag": "front-tcp", "protocol": "tunnel", "listen": "127.0.0.1", "port": front_tcp,
+                "settings": {"address": ORIGIN_NAME, "port": tcp.port, "network": "tcp"}},
+            {"tag": "front-udp", "protocol": "tunnel", "listen": "127.0.0.1", "port": front_udp,
+                "settings": {"address": ORIGIN_NAME, "port": udp.port, "network": "udp"}},
+        ],
+        "outbounds": [{"protocol": "blackhole"}],
+        "routing": {"rules": [{"inboundTag": ["front-tcp", "front-udp"], "outboundTag": "portal-out"}]},
+    }))?;
+    let _bridge = if kerlico {
+        start_kerlico(dir, &json!({
+            "inbounds": [],
+            "dns": {"hosts": {ORIGIN_NAME: "127.0.0.1"}},
+            "bridges": [{"tag": "bridge", "address": "127.0.0.1", "port": link,
+                "outbound": "warp-v4",
+                "rules": [{"domain": [format!("full:{ORIGIN_NAME}")], "outbound": "native-v4"}],
+                "settings": {"id": ID, "encryption": "none"}}],
+        }))?
+    } else {
+        start_xray(xray, dir, "xray-bridge", &json!({
+            "log": {"loglevel": "info"},
+            "dns": {"hosts": {ORIGIN_NAME: "127.0.0.1"}},
+            "outbounds": [
+                {"tag": "bridge-link", "protocol": "vless", "settings": {"address": "127.0.0.1", "port": link,
+                    "id": ID, "encryption": "none", "reverse": {"tag": "bridge"}}},
+                {"tag": "direct", "protocol": "freedom",
+                    "streamSettings": {"sockopt": {"domainStrategy": "ForceIPv4"}},
+                    "settings": {"finalRules": [{"action": "allow", "network": "tcp,udp", "ip": ["127.0.0.1/32"],
+                        "port": format!("{},{}", tcp.port, udp.port)}]}},
+            ],
+            "routing": {"rules": [{"inboundTag": ["bridge"], "outboundTag": "direct"}]},
+        }))?
+    };
+    let deadline = Instant::now() + TIMEOUT * 2;
+    while let Err(error) = open_front(front_tcp, 0, false, false).and_then(|mut stream| tcp_exchange(&mut stream, 17, 33)) {
+        if Instant::now() >= deadline {
+            return Err(format!("no flow crossed the bridge: {error}").into());
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    exercise_tcp(front_tcp, tcp.port, false, Payload::Tcp, false)?;
+    exercise_udp(front_udp, udp.port, false)?;
+    settle_carriers(&carriers, 1, "light traffic")?;
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut flows = 0;
+    while carriers.load(Ordering::Acquire) == 1 {
+        if Instant::now() >= deadline {
+            return Err(format!("{flows} sequential flows never replaced the connection the portal drains after 256 sessions").into());
+        }
+        let mut stream = open_front(front_tcp, 0, false, false)?;
+        tcp_exchange(&mut stream, 1, flows).map_err(|error| format!("sequential flow {flows}: {error}"))?;
+        flows += 1;
+    }
+    eprintln!("bridge replaced the drained connection after {flows} sequential flows");
+    settle_carriers(&carriers, 2, "after the drain")?;
+
+    let mut held = Vec::new();
+    for seed in 0..20 {
+        let mut stream = open_front(front_tcp, 0, false, false)?;
+        tcp_exchange(&mut stream, 64, seed).map_err(|error| format!("concurrent flow {seed}: {error}"))?;
+        held.push(stream);
+    }
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while carriers.load(Ordering::Acquire) < 3 {
+        if Instant::now() >= deadline {
+            return Err("20 concurrent flows on one connection did not open another".into());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    // The echo origin drops a connection after 6 idle seconds, so check the held flows first.
+    for (seed, stream) in held.iter_mut().enumerate() {
+        tcp_exchange(stream, 4099, seed).map_err(|error| format!("held flow {seed}: {error}"))?;
+    }
+    settle_carriers(&carriers, 3, "with 20 concurrent flows")
+}
+
+/// Two 2-second supervision rounds pass before the count is final.
+fn settle_carriers(carriers: &AtomicUsize, expected: usize, when: &str) -> Result<()> {
+    thread::sleep(Duration::from_millis(4500));
+    let count = carriers.load(Ordering::Acquire);
+    if count != expected {
+        return Err(format!("{when}: the tap saw {count} bridge connections, expected {expected}").into());
+    }
+    Ok(())
 }

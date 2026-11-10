@@ -14,6 +14,19 @@ use kerlico_shared::{
 };
 
 mod api;
+#[cfg(feature = "landing-vless")]
+mod bridge;
+#[cfg(not(feature = "landing-vless"))]
+mod bridge {
+    pub(crate) fn open(
+        _: &kerlico_shared::NodeTag,
+        _: String,
+        _: u16,
+        _: kerlico_shared::Settings,
+    ) -> Result<Box<dyn kerlico_shared::Accept>, crate::Error> {
+        Err(crate::Error::Config)
+    }
+}
 mod config;
 mod dns;
 mod fakedns;
@@ -171,8 +184,6 @@ impl Traffic for Stats {
 
 struct Node {
     tag: NodeTag,
-    protocol: ProtocolId,
-    listen: ListenAddr,
     outbound: OutboundChoice,
     inbound: Box<dyn Accept>,
     users: BTreeSet<UserEmail>,
@@ -255,13 +266,6 @@ impl Server {
         &self.stats
     }
 
-    pub fn node(&self, tag: &NodeTag) -> Option<(ProtocolId, ListenAddr, OutboundChoice)> {
-        self.nodes
-            .iter()
-            .find(|node| &node.tag == tag)
-            .map(|node| (node.protocol, node.listen, node.outbound))
-    }
-
     /// Opens one inbound from the compiled registry and keeps it on this server.
     /// `listen` is v4 or v6. `outbound` is a fixed exit, or `Default` when the field was left empty.
     pub fn listen_node(
@@ -285,8 +289,34 @@ impl Server {
         let inbound = open(&tag, &listen, &settings)?;
         self.nodes.push(Node {
             tag,
-            protocol,
-            listen,
+            outbound,
+            inbound,
+            users: BTreeSet::new(),
+            rules: Vec::new(),
+            sniff: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Runs a VLESS reverse bridge to the portal at `host:port` as a node, like an Xray VLESS
+    /// outbound with `reverse.tag`. Flows the portal opens follow this node's rules and
+    /// `outbound`. Builds without `landing-vless` reject it.
+    pub fn bridge_node(
+        &mut self,
+        tag: NodeTag,
+        host: String,
+        port: u16,
+        outbound: OutboundChoice,
+        settings: &Settings,
+    ) -> Result<(), Error> {
+        if self.nodes.iter().any(|node| node.tag == tag) {
+            return Err(Error::DuplicateNode);
+        }
+        let mut settings = settings.clone();
+        settings.set_runtime(self.runtime.clone());
+        let inbound = bridge::open(&tag, host, port, settings)?;
+        self.nodes.push(Node {
+            tag,
             outbound,
             inbound,
             users: BTreeSet::new(),
@@ -635,7 +665,6 @@ impl Default for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kerlico_shared::ProtocolId;
 
     struct MemoryInbound {
         users: BTreeSet<UserEmail>,
@@ -693,8 +722,6 @@ mod tests {
                 .collect();
             server.nodes.push(Node {
                 tag,
-                protocol: ProtocolId::must("mieru"),
-                listen: ListenAddr::v4(std::net::Ipv4Addr::LOCALHOST, 443).unwrap(),
                 outbound: OutboundChoice::Default,
                 inbound: Box::new(MemoryInbound {
                     users: BTreeSet::new(),
@@ -765,14 +792,34 @@ mod tests {
         assert!(Server::from_config(text).is_err());
     }
 
+    fn bridges(entries: &[(&str, u16)]) -> String {
+        let entries: Vec<String> = entries
+            .iter()
+            .map(|(tag, port)| format!(r#"{{"tag":"{tag}","address":"127.0.0.1","port":{port}}}"#))
+            .collect();
+        format!(r#"{{"inbounds":[],"bridges":[{}]}}"#, entries.join(","))
+    }
+
+    #[cfg(feature = "landing-vless")]
+    #[test]
+    fn bridges_are_nodes_with_their_own_tag_and_portal() {
+        assert!(Server::from_config(&bridges(&[("home", 1)])).is_ok());
+        assert!(Server::from_config(&bridges(&[("home", 1), ("home", 2)])).is_err(), "duplicate tag");
+        assert!(Server::from_config(&bridges(&[("home", 0)])).is_err(), "port 0");
+    }
+
+    #[cfg(not(feature = "landing-vless"))]
+    #[test]
+    fn bridges_without_the_vless_client_are_rejected() {
+        assert!(Server::from_config(&bridges(&[("home", 1)])).is_err());
+    }
+
     #[test]
     fn add_user_reaches_only_the_named_node() {
         let mut server = Server::new();
         let tag = NodeTag::parse("node-a").unwrap();
         server.nodes.push(Node {
             tag: tag.clone(),
-            protocol: ProtocolId::must("wireguard"),
-            listen: ListenAddr::v4(std::net::Ipv4Addr::LOCALHOST, 443).unwrap(),
             outbound: OutboundChoice::Default,
             inbound: Box::new(MemoryInbound {
                 users: BTreeSet::new(),
