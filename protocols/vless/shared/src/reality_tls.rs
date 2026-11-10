@@ -225,6 +225,41 @@ pub fn is_too_many_useless_records(error: &io::Error) -> bool {
         .is_some_and(|inner| inner.is::<TooManyUselessRecords>())
 }
 
+/// A record-layer failure that xtls/reality answers with this fatal alert before it closes.
+#[derive(Debug)]
+pub struct TlsAlert(u8);
+
+impl std::fmt::Display for TlsAlert {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tls: alert {}", self.0)
+    }
+}
+
+impl std::error::Error for TlsAlert {}
+
+fn alert_error(description: u8) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, TlsAlert(description))
+}
+
+/// The alert description xtls/reality sends for `error` while it reads the client's Finished.
+/// `None` for failures that end the connection without one, such as a closed socket.
+pub fn alert_for(error: &io::Error) -> Option<u8> {
+    let inner = error.get_ref()?;
+    if inner.is::<TooManyUselessRecords>() {
+        Some(ALERT_UNEXPECTED_MESSAGE)
+    } else {
+        inner.downcast_ref::<TlsAlert>().map(|alert| alert.0)
+    }
+}
+
+const ALERT_BAD_RECORD_MAC: u8 = 20;
+const ALERT_RECORD_OVERFLOW: u8 = 22;
+const ALERT_DECODE_ERROR: u8 = 50;
+const ALERT_DECRYPT_ERROR: u8 = 51;
+const ALERT_PROTOCOL_VERSION: u8 = 70;
+const ALERT_INTERNAL_ERROR: u8 = 80;
+const ALERT_USER_CANCELED: u8 = 90;
+
 pub struct AppReader<S> {
     inner: S,
     traffic: Traffic,
@@ -492,8 +527,13 @@ pub fn read_client_finished_limited<R: Read>(
 ) -> std::io::Result<Vec<u8>> {
     let mut records = HandshakeRecords::new(reader, handshake);
     records.max_ccs = max_useless;
+    // xtls/reality's `maxHandshake`.
+    records.max_body = 65536;
     let finished = records.next(0x14)?;
-    if !equal_finished(expect, &finished[4..]) || !records.pending.is_empty() {
+    if !equal_finished(expect, &finished[4..]) {
+        return Err(alert_error(ALERT_DECRYPT_ERROR));
+    }
+    if !records.pending.is_empty() {
         return Err(invalid_record());
     }
     Ok(finished)
@@ -782,9 +822,12 @@ struct HandshakeRecords<'a, R> {
     traffic: &'a Traffic,
     seq: u64,
     pending: Vec<u8>,
-    /// ChangeCipherSpec records seen so far, and how many are tolerated.
+    /// Records that advance nothing (ChangeCipherSpec, a user_canceled alert) in a row, and how
+    /// many are tolerated.
     ccs: usize,
     max_ccs: usize,
+    /// The longest handshake message body accepted.
+    max_body: usize,
 }
 
 impl<'a, R: Read> HandshakeRecords<'a, R> {
@@ -797,42 +840,69 @@ impl<'a, R: Read> HandshakeRecords<'a, R> {
             pending: Vec::new(),
             ccs: 0,
             max_ccs: 1,
+            max_body: 1_048_576 - 4,
         }
+    }
+
+    /// Counts a record that advances nothing, as `retryReadRecord` does. xtls/reality also
+    /// refuses one that would split a handshake message.
+    fn useless(&mut self) -> io::Result<()> {
+        if !self.pending.is_empty() {
+            return Err(alert_error(ALERT_UNEXPECTED_MESSAGE));
+        }
+        self.ccs += 1;
+        if self.ccs > self.max_ccs {
+            return Err(too_many_useless_records());
+        }
+        Ok(())
     }
 
     fn next(&mut self, kind: u8) -> io::Result<Vec<u8>> {
         self.next_any(&[kind])
     }
 
+    /// Reads one handshake message. A failure carries the alert xtls/reality's record layer sends
+    /// for it, see [`alert_for`].
     fn next_any(&mut self, kinds: &[u8]) -> io::Result<Vec<u8>> {
         loop {
             if self.pending.first().is_some_and(|got| !kinds.contains(got)) {
-                return Err(invalid_record());
+                return Err(alert_error(ALERT_UNEXPECTED_MESSAGE));
             }
             if self.pending.len() >= 4 {
-                let len = u24(&self.pending[1..4]) + 4;
-                if len > 1_048_576 {
-                    return Err(invalid_record());
+                let body = u24(&self.pending[1..4]);
+                if body > self.max_body {
+                    return Err(alert_error(ALERT_INTERNAL_ERROR));
                 }
-                if self.pending.len() >= len {
-                    return Ok(self.pending.drain(..len).collect());
+                if self.pending.len() >= body + 4 {
+                    return Ok(self.pending.drain(..body + 4).collect());
                 }
             }
             let record = read_outer(self.reader)?;
-            if record == [20, 3, 3, 0, 1, 1] {
-                self.ccs += 1;
-                if self.ccs > self.max_ccs {
-                    return Err(too_many_useless_records());
+            if record[0] == 20 {
+                // TLS 1.3 ignores a ChangeCipherSpec without decrypting it.
+                if record[5..] != [1] {
+                    return Err(alert_error(ALERT_DECODE_ERROR));
                 }
+                self.useless()?;
                 continue;
             }
-            let plain = open_record(self.traffic, self.seq, &record).ok_or_else(invalid_record)?;
+            let plain = open_record(self.traffic, self.seq, &record)
+                .ok_or_else(|| alert_error(ALERT_BAD_RECORD_MAC))?;
             self.seq += 1;
-            let (inner, messages) = split_inner(&plain).ok_or_else(invalid_record)?;
-            if inner != 22 || messages.is_empty() {
-                return Err(invalid_record());
+            let (inner, messages) =
+                split_inner(&plain).ok_or_else(|| alert_error(ALERT_UNEXPECTED_MESSAGE))?;
+            match (inner, messages) {
+                (22, [_, ..]) => {
+                    self.ccs = 0;
+                    self.pending.extend_from_slice(messages);
+                }
+                (20, [1]) => self.useless()?,
+                (20, _) => return Err(alert_error(ALERT_DECODE_ERROR)),
+                (21, [_, ALERT_USER_CANCELED]) => self.useless()?,
+                // close_notify, or an alert the peer meant: the connection ends without a reply.
+                (21, [_, _]) => return Err(invalid_record()),
+                _ => return Err(alert_error(ALERT_UNEXPECTED_MESSAGE)),
             }
-            self.pending.extend_from_slice(messages);
         }
     }
 }
@@ -1580,8 +1650,20 @@ fn read_outer_into(reader: &mut impl Read, record: &mut Vec<u8>) -> io::Result<b
         return Ok(false);
     }
     let len = u16::from_be_bytes([record[3], record[4]]) as usize;
-    if record[1..3] != [3, 3] || !(1..=16640).contains(&len) {
-        return Err(invalid_record());
+    // The checks and their alerts follow xtls/reality's `readRecordOrCCS`.
+    if record[0] == 0x80 || record[1..3] != [3, 3] {
+        return Err(alert_error(ALERT_PROTOCOL_VERSION));
+    }
+    if len > 16640 {
+        return Err(alert_error(ALERT_RECORD_OVERFLOW));
+    }
+    if len == 0 {
+        // An empty ChangeCipherSpec is malformed, anything else fails to authenticate.
+        return Err(alert_error(if record[0] == 20 {
+            ALERT_DECODE_ERROR
+        } else {
+            ALERT_BAD_RECORD_MAC
+        }));
     }
     fill_record(reader, record, 5 + len)
 }
@@ -2016,5 +2098,61 @@ mod tests {
         let (_, reading) = accepted.application_keys();
         let plain = open_record(&reading, 4, &record).unwrap();
         assert_eq!(split_inner(&plain), Some((21, &[2, ALERT_UNEXPECTED_MESSAGE][..])));
+    }
+
+    /// The alert xtls/reality's record layer sends when the client's answer to the server flight is `wire`.
+    fn alert_for_answer(accepted: &ServerHello, wire: Vec<u8>) -> Option<u8> {
+        let error = read_client_finished_limited(
+            &mut std::io::Cursor::new(wire),
+            &accepted.handshake,
+            &accepted.expect,
+            DEFAULT_MAX_USELESS_RECORDS,
+        )
+        .unwrap_err();
+        alert_for(&error)
+    }
+
+    #[test]
+    fn a_bad_answer_to_the_server_flight_gets_the_alert_xtls_reality_sends() {
+        let (accepted, _) = finished_after_flight();
+        let keys = &accepted.handshake;
+        let junk = |header: &[u8]| {
+            let mut wire = header.to_vec();
+            wire.resize(5 + usize::from(u16::from_be_bytes([header[3], header[4]])).min(64), 0x5a);
+            wire
+        };
+        // Records that cannot be authenticated, whatever their outer type.
+        assert_eq!(alert_for_answer(&accepted, junk(&[23, 3, 3, 0, 32])), Some(20));
+        assert_eq!(alert_for_answer(&accepted, junk(&[22, 3, 3, 0, 4])), Some(20));
+        assert_eq!(alert_for_answer(&accepted, junk(&[23, 3, 3, 0, 0])), Some(20));
+        // Version, size and a malformed ChangeCipherSpec.
+        assert_eq!(alert_for_answer(&accepted, junk(&[23, 3, 1, 0, 32])), Some(70));
+        assert_eq!(alert_for_answer(&accepted, junk(&[0x80, 3, 3, 0, 32])), Some(70));
+        assert_eq!(alert_for_answer(&accepted, junk(&[23, 3, 3, 0x41, 1])[..5].to_vec()), Some(22));
+        assert_eq!(alert_for_answer(&accepted, vec![20, 3, 3, 0, 1, 2]), Some(50));
+        assert_eq!(alert_for_answer(&accepted, vec![20, 3, 3, 0, 0]), Some(50));
+        // Authenticated records that say the wrong thing.
+        assert_eq!(alert_for_answer(&accepted, seal_record(keys, 0, 23, b"x")), Some(10));
+        assert_eq!(alert_for_answer(&accepted, seal_record(keys, 0, 22, b"")), Some(10));
+        assert_eq!(alert_for_answer(&accepted, seal_record(keys, 0, 21, &[1])), Some(10));
+        assert_eq!(
+            alert_for_answer(&accepted, seal_record(keys, 0, 22, &handshake_msg(0x0b, b""))),
+            Some(10),
+            "a handshake message other than Finished"
+        );
+        assert_eq!(
+            alert_for_answer(&accepted, seal_record(keys, 0, 22, &[0x14, 0x01, 0x11, 0x70])),
+            Some(80),
+            "a handshake message longer than 65536 bytes"
+        );
+        let wrong = handshake_msg(0x14, &vec![0; accepted.expect.len()]);
+        assert_eq!(alert_for_answer(&accepted, seal_record(keys, 0, 22, &wrong)), Some(51));
+        // A flood of authenticated ChangeCipherSpec records counts like the plain ones.
+        let flood: Vec<u8> = (0..33).flat_map(|seq| seal_record(keys, seq, 20, &[1])).collect();
+        assert_eq!(alert_for_answer(&accepted, flood), Some(10));
+        // No alert when the peer simply goes away or says goodbye.
+        assert_eq!(alert_for_answer(&accepted, Vec::new()), None);
+        assert_eq!(alert_for_answer(&accepted, vec![23, 3, 3]), None);
+        assert_eq!(alert_for_answer(&accepted, seal_record(keys, 0, 21, &[1, 0])), None);
     }
 }

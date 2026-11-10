@@ -18,7 +18,7 @@ mod reality_spider;
 pub use reality_rate::{RealityRateLimit, RealityRateLimitedRead, RealityRateLimitedWrite};
 pub use reality_spider::{RealitySpiderConfig, run_reality_spider};
 pub use reality_tls::{RealityTargetShape, RealityTargetFailure, server_flight_with_target, RealityDecoyVerifier, RealityClientFlight, RealityClientResult, read_server_flight_or_decoy};
-pub use reality_tls::{alert_record, is_too_many_useless_records, post_handshake_records, read_client_finished_limited, writer_at as reality_writer_at, ALERT_UNEXPECTED_MESSAGE, DEFAULT_MAX_USELESS_RECORDS};
+pub use reality_tls::{alert_for, alert_record, is_too_many_useless_records, post_handshake_records, read_client_finished_limited, writer_at as reality_writer_at, ALERT_UNEXPECTED_MESSAGE, DEFAULT_MAX_USELESS_RECORDS};
 pub use reality_tls::{probe_post_handshake_lengths, probe_useless_record_limit, RealityAlpn, RealityProbeStream, ALERT_WINDOW, POST_HANDSHAKE_WINDOW};
 mod grpc;
 mod kcp;

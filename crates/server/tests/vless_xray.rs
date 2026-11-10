@@ -1707,6 +1707,37 @@ fn authenticated_flight(xray: &Path, dir: &Path, case: &Case, keys: &Keys, decoy
     if !tickets.iter().any(|tail| mirrored[sent.len()..].starts_with(tail)) {
         return Err(format!("records behind the server flight {:?} do not start with the decoy's ticket records {tickets:?}", &mirrored[sent.len()..]).into());
     }
+    replay_probe(&carrier.input, port, sent.len())
+}
+
+/// A prober that replays a client's ClientHello gets the server's flight but cannot seal what comes
+/// next. Xray answers a record it cannot authenticate with a fatal alert sealed under the server's
+/// application key, 24 bytes long, and closes. So must Kerlico.
+fn replay_probe(client_bytes: &[u8], port: u16, flight_records: usize) -> Result<()> {
+    let length = 5 + u16::from_be_bytes([*client_bytes.get(3).ok_or("no ClientHello")?, *client_bytes.get(4).ok_or("no ClientHello")?]) as usize;
+    let mut stream = tcp_connect(port)?;
+    stream.set_read_timeout(Some(TIMEOUT * 3))?;
+    stream.write_all(client_bytes.get(..length).ok_or("short ClientHello")?)?;
+    for _ in 0..flight_records {
+        let mut header = [0; 5];
+        stream.read_exact(&mut header)?;
+        let mut body = vec![0; u16::from_be_bytes([header[3], header[4]]) as usize];
+        stream.read_exact(&mut body)?;
+    }
+    stream.write_all(&[23, 3, 3, 0, 32])?;
+    stream.write_all(&[0x5a; 32])?;
+    let mut reply = Vec::new();
+    let mut buffer = [0; 256];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => reply.extend_from_slice(&buffer[..count]),
+        }
+    }
+    eprintln!("answer to a record that cannot be authenticated: {} bytes {:02x?}", reply.len(), &reply[..reply.len().min(5)]);
+    if reply.len() != 24 || reply[..5] != [23, 3, 3, 0, 19] {
+        return Err(format!("expected one 24-byte alert record and a close, got {} bytes", reply.len()).into());
+    }
     Ok(())
 }
 

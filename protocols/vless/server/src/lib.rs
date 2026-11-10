@@ -504,8 +504,9 @@ fn accept_reality(mut read: Link, mut write: Link, config: &RealityConfig, fallb
         return Err(None);
     }
     if let Err(error) = kerlico_vless::read_client_finished_limited(&mut read, &accepted.handshake, &accepted.expect, tolerated.unwrap_or(kerlico_vless::DEFAULT_MAX_USELESS_RECORDS)) {
-        if kerlico_vless::is_too_many_useless_records(&error) {
-            let _ = write.write_all(&kerlico_vless::alert_record(&server_app, sequence, kerlico_vless::ALERT_UNEXPECTED_MESSAGE));
+        // Xray's record layer answers a bad record with a fatal alert, sealed with the server's application key.
+        if let Some(description) = kerlico_vless::alert_for(&error) {
+            let _ = write.write_all(&kerlico_vless::alert_record(&server_app, sequence, description));
         }
         return Err(None);
     }
