@@ -2,9 +2,9 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use boring2::hpke::HpkeKey;
 use boring2::pkey::{PKey, Private};
 use boring2::ssl::{
-    select_next_proto, AlpnError, NameType, SniError, Ssl, SslConnector, SslContext,
-    SslContextBuilder, SslEchKeys, SslMethod, SslOptions, SslRef, SslSession, SslSessionCacheMode,
-    SslVerifyMode, SslVersion,
+    select_next_proto, AlpnError, ExtensionType, NameType, SelectCertError, SniError, Ssl,
+    SslConnector, SslContext, SslContextBuilder, SslCurve, SslEchKeys, SslMethod, SslOptions,
+    SslRef, SslSession, SslSessionCacheMode, SslVerifyMode, SslVersion,
 };
 use boring2::x509::X509;
 use rustls::client::{danger::ServerCertVerifier, WebPkiServerVerifier};
@@ -577,6 +577,38 @@ pub fn advanced_server_config(
     let mut context = SslContextBuilder::new(SslMethod::tls()).map_err(io::Error::other)?;
     common(&mut context, options)?;
     configure_server(&mut context, options)?;
+    let groups = if options.curve_preferences.is_empty() {
+        GROUPS
+            .iter()
+            .filter(|&&(id, ..)| id != MLKEM1024)
+            .map(|&(id, curve, _)| (id, curve))
+            .collect()
+    } else {
+        curve_preferences(&options.curve_preferences)?
+    };
+    context
+        .set_curves(&groups.iter().map(|&(_, curve)| curve).collect::<Vec<_>>())
+        .map_err(io::Error::other)?;
+    if version(&options.max_version, SslVersion::TLS1_3)? == SslVersion::TLS1_3 {
+        // BoringSSL picks the client's first listed group and retries when that group has
+        // no key share. Xray's uTLS clients list X25519MLKEM768 without a share and abort a
+        // HelloRetryRequest for it (Go 1.27 retries there too), so the first server group
+        // the client already sent a share for wins. Narrowing is TLS 1.3 only: a TLS 1.2
+        // handshake narrowed to a hybrid group would have no ECDHE group left.
+        context.set_select_certificate_callback(move |mut hello| {
+            let offered = hello
+                .get_extension(ExtensionType::SUPPORTED_GROUPS)
+                .zip(hello.get_extension(ExtensionType::KEY_SHARE))
+                .and_then(|(supported, shares)| key_share_group(&groups, supported, shares));
+            if let Some(curve) = offered {
+                hello
+                    .ssl_mut()
+                    .set_curves(&[curve])
+                    .map_err(|_| SelectCertError::ERROR)?;
+            }
+            Ok(())
+        });
+    }
     if identities.is_empty() && issuers.is_empty() {
         return Err(invalid(
             "TLS server has no encipherment or issue certificate",
@@ -822,18 +854,11 @@ fn common(builder: &mut SslContextBuilder, options: &AdvancedTlsOptions) -> io::
             .map_err(io::Error::other)?;
     }
     if !options.curve_preferences.is_empty() {
-        let curves = options
-            .curve_preferences
-            .iter()
-            .map(|curve| match curve.as_str() {
-                "CurveP256" | "P256" => "P-256",
-                "CurveP384" | "P384" => "P-384",
-                "CurveP521" | "P521" => "P-521",
-                other => other,
-            })
-            .collect::<Vec<_>>()
-            .join(":");
-        builder.set_curves_list(&curves).map_err(io::Error::other)?;
+        let curves: Vec<_> = curve_preferences(&options.curve_preferences)?
+            .into_iter()
+            .map(|(_, curve)| curve)
+            .collect();
+        builder.set_curves(&curves).map_err(io::Error::other)?;
     }
     builder
         .set_alpn_protos(&wire_alpn(&options.alpn)?)
@@ -851,6 +876,65 @@ fn common(builder: &mut SslContextBuilder, options: &AdvancedTlsOptions) -> io::
         });
     }
     Ok(())
+}
+
+type Group = (u16, SslCurve);
+
+const MLKEM1024: u16 = 0x0202;
+
+/// The groups BoringSSL implements, in Go's fixed preference order, with the
+/// `curvePreferences` names Xray and BoringSSL give them. Go enables all but
+/// MLKEM1024 by default.
+const GROUPS: [(u16, SslCurve, &[&str]); 6] = [
+    (0x11ec, SslCurve::X25519_MLKEM768, &["X25519MLKEM768"]),
+    (MLKEM1024, SslCurve::MLKEM1024, &["MLKEM1024"]),
+    (29, SslCurve::X25519, &["X25519"]),
+    (
+        23,
+        SslCurve::SECP256R1,
+        &["CurveP256", "P256", "P-256", "prime256v1"],
+    ),
+    (
+        24,
+        SslCurve::SECP384R1,
+        &["CurveP384", "P384", "P-384", "secp384r1"],
+    ),
+    (
+        25,
+        SslCurve::SECP521R1,
+        &["CurveP521", "P521", "P-521", "secp521r1"],
+    ),
+];
+
+fn curve_preferences(names: &[String]) -> io::Result<Vec<Group>> {
+    names
+        .iter()
+        .map(|name| {
+            GROUPS
+                .iter()
+                .find(|(_, _, names)| names.iter().any(|known| known.eq_ignore_ascii_case(name)))
+                .map(|&(id, curve, _)| (id, curve))
+                .ok_or_else(|| invalid("unknown TLS curve"))
+        })
+        .collect()
+}
+
+/// The first of `groups` that the ClientHello both lists and sent a key share for.
+fn key_share_group(groups: &[Group], supported: &[u8], shares: &[u8]) -> Option<SslCurve> {
+    let supported = supported.get(2..)?.as_chunks::<2>().0;
+    let mut offered = Vec::new();
+    let mut rest = shares.get(2..)?;
+    while let [a, b, c, d, tail @ ..] = rest {
+        offered.push([*a, *b]);
+        rest = tail.get(usize::from(u16::from_be_bytes([*c, *d]))..)?;
+    }
+    groups
+        .iter()
+        .find(|(id, _)| {
+            let id = id.to_be_bytes();
+            offered.contains(&id) && supported.contains(&id)
+        })
+        .map(|&(_, curve)| curve)
 }
 
 fn version(value: &str, default: SslVersion) -> io::Result<SslVersion> {
