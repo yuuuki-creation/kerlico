@@ -1,5 +1,5 @@
 use super::{invalid, read_exact, timed_out, Client, State};
-use kerlico_mieru::Conn;
+use kerlico_shared::Stream;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -118,15 +118,15 @@ fn stream_addr(stream: &TcpStream) -> SocketAddr {
 
 pub(super) fn relay(
     mut local: TcpStream,
-    conn: Conn,
+    conn: Box<dyn Stream>,
     initial: Vec<u8>,
     state: Arc<State>,
 ) -> io::Result<()> {
     if !initial.is_empty() {
-        conn.write_user(&initial)?;
+        conn.write_all(&initial)?;
     }
     let mut writer = local.try_clone()?;
-    let conn = Arc::new(conn);
+    let conn: Arc<dyn Stream> = Arc::from(conn);
     let done = Arc::new(AtomicBool::new(false));
     let activity = Arc::new(Mutex::new(Instant::now()));
     thread::scope(|scope| {
@@ -144,7 +144,7 @@ pub(super) fn relay(
                     Ok(0) => break,
                     Ok(n) => {
                         *activity2.lock().unwrap() = Instant::now();
-                        if conn2.write_user(&buf[..n]).is_err() {
+                        if conn2.write_all(&buf[..n]).is_err() {
                             done2.store(true, Ordering::Release);
                             break;
                         }
@@ -227,7 +227,7 @@ fn associate(
     bind.set_port(0);
     let socket = UdpSocket::bind(bind)?;
     socket.set_read_timeout(Some(POLL))?;
-    let assoc = Arc::new(client.associate()?);
+    let assoc: Arc<dyn kerlico_shared::Association> = Arc::from(client.associate()?);
     reply(&mut control, 0, socket.local_addr()?)?;
     let destination = Arc::new(Mutex::new(None::<SocketAddr>));
     let running = Arc::new(AtomicBool::new(true));
@@ -258,7 +258,7 @@ fn associate(
                         *fixed = Some(src);
                         drop(fixed);
                         *activity2.lock().unwrap() = Instant::now();
-                        if assoc2.send_to(&host, port, payload).is_err() {
+                        if assoc2.send_to(src, &host, port, payload).is_err() {
                             running2.store(false, Ordering::Release);
                             break;
                         }

@@ -6,14 +6,47 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::Client;
-use kerlico_shared::{OpenError, Settings};
+use kerlico_shared::{OpenError, Settings, Upstream};
 use socket2::{Domain, Protocol, Socket, Type};
 
-#[path = "http.rs"]
 mod http;
-#[path = "socks.rs"]
 mod socks;
+
+type Client = Arc<dyn Upstream>;
+
+/// The four local entry keys a proxy document carries in `settings`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalEntry {
+    socks5_port: u16,
+    http_port: u16,
+    socks5_lan: bool,
+    http_lan: bool,
+}
+
+impl LocalEntry {
+    /// Ports are 1025 to 65535 and differ.
+    pub fn new(socks5_port: u16, http_port: u16, socks5_lan: bool, http_lan: bool) -> Result<Self, OpenError> {
+        if socks5_port < 1025 || http_port < 1025 || socks5_port == http_port {
+            return Err(OpenError::Settings);
+        }
+        Ok(Self { socks5_port, http_port, socks5_lan, http_lan })
+    }
+
+    /// Reads `socks5Port`, `httpProxyPort`, `socks5ListenLAN` and `httpProxyListenLAN` and removes
+    /// them, so the protocol sees only its own keys.
+    pub(crate) fn take(settings: &mut Settings) -> Result<Self, OpenError> {
+        let entry = Self::new(
+            port(settings, "socks5Port", 1080)?,
+            port(settings, "httpProxyPort", 8080)?,
+            flag(settings, "socks5ListenLAN")?,
+            flag(settings, "httpProxyListenLAN")?,
+        )?;
+        for key in ["socks5Port", "httpProxyPort", "socks5ListenLAN", "httpProxyListenLAN"] {
+            settings.remove(key);
+        }
+        Ok(entry)
+    }
+}
 
 pub struct Proxy {
     state: Arc<State>,
@@ -49,16 +82,9 @@ impl State {
 }
 
 impl Proxy {
-    pub fn start(client: Client, settings: &Settings) -> Result<Self, OpenError> {
-        let socks_port = port(settings, "socks5Port", 1080)?;
-        let http_port = port(settings, "httpProxyPort", 8080)?;
-        if socks_port == http_port {
-            return Err(OpenError::Settings);
-        }
-        let socks_lan = flag(settings, "socks5ListenLAN")?;
-        let http_lan = flag(settings, "httpProxyListenLAN")?;
-        let socks = bind_all(socks_port, socks_lan)?;
-        let http = bind_all(http_port, http_lan)?;
+    pub fn start(client: Client, entry: &LocalEntry) -> Result<Self, OpenError> {
+        let socks = bind_all(entry.socks5_port, entry.socks5_lan)?;
+        let http = bind_all(entry.http_port, entry.http_lan)?;
         let socks_addrs = socks
             .iter()
             .map(|l| l.local_addr().map_err(|_| OpenError::Transport))
@@ -308,6 +334,18 @@ mod tests {
         assert_eq!(port(&s, "socks5Port", 1080).unwrap(), 65535);
         s.insert_text("socks5ListenLAN", "yes");
         assert!(flag(&s, "socks5ListenLAN").is_err());
+    }
+    #[test]
+    fn 本机入口键不交给协议() {
+        let mut s = Settings::default();
+        s.insert_text("username", "test-user");
+        s.insert_text("socks5Port", "2080");
+        s.insert_text("httpProxyListenLAN", "true");
+        let entry = LocalEntry::take(&mut s).unwrap();
+        assert_eq!(entry, LocalEntry::new(2080, 8080, false, true).unwrap());
+        assert_eq!(s.keys().collect::<Vec<_>>(), ["username"]);
+        s.insert_text("httpProxyPort", "1080");
+        assert!(LocalEntry::take(&mut s).is_err(), "两个端口默认值冲突");
     }
     #[test]
     fn 只选择局域网地址() {

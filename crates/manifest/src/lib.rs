@@ -333,15 +333,13 @@ fn write_registry(
     enabled: &[&str],
     landings: &[&str],
 ) -> Result<(), CheckFailure> {
-    let mut body = String::from(
-        "use kerlico_shared::{OpenError, ProtocolId, Settings};\n",
-    );
+    let mut body = String::new();
     match role {
         Role::Client => body.push_str(
-            "use kerlico_shared::{DataPlane, PeerAddr};\n#[allow(dead_code)]\npub(super) type ConnectFn = fn(&PeerAddr, &Settings) -> Result<Box<dyn DataPlane>, OpenError>;\n#[allow(dead_code)]\npub(super) struct Registration { pub(super) id: ProtocolId, pub(super) connect: ConnectFn }\n",
+            "use kerlico_shared::{ClientEntry, ProtocolId};\n#[allow(dead_code)]\npub(super) struct Registration { pub(super) id: ProtocolId, pub(super) entry: ClientEntry }\n",
         ),
         Role::Server => body.push_str(
-            "use kerlico_shared::{Accept, Destination, InboundStream, ListenAddr, NodeTag};\n#[allow(dead_code)]\npub(super) type ListenFn = fn(&NodeTag, &ListenAddr, &Settings) -> Result<Box<dyn Accept>, OpenError>;\n#[allow(dead_code)]\npub(super) struct Registration { pub(super) id: ProtocolId, pub(super) listen: ListenFn }\n#[allow(dead_code)]\npub(super) type LandFn = fn(&str, u16, &Settings, &Destination) -> Result<Box<dyn InboundStream>, OpenError>;\n#[allow(dead_code)]\npub(super) struct LandRegistration { pub(super) id: ProtocolId, pub(super) land: LandFn }\n",
+            "use kerlico_shared::{OpenError, ProtocolId, Settings};\nuse kerlico_shared::{Accept, Destination, InboundStream, ListenAddr, NodeTag};\n#[allow(dead_code)]\npub(super) type ListenFn = fn(&NodeTag, &ListenAddr, &Settings) -> Result<Box<dyn Accept>, OpenError>;\n#[allow(dead_code)]\npub(super) struct Registration { pub(super) id: ProtocolId, pub(super) listen: ListenFn }\n#[allow(dead_code)]\npub(super) type LandFn = fn(&str, u16, &Settings, &Destination) -> Result<Box<dyn InboundStream>, OpenError>;\n#[allow(dead_code)]\npub(super) struct LandRegistration { pub(super) id: ProtocolId, pub(super) land: LandFn }\n",
         ),
     }
     body.push_str("pub(super) static REGISTRY: &[Registration] = &[\n");
@@ -349,7 +347,7 @@ fn write_registry(
         let rust_name = id.replace('-', "_");
         match role {
             Role::Client => body.push_str(&format!(
-                "    Registration {{ id: ProtocolId::must(\"{id}\"), connect: {rust_name}::connect }},\n"
+                "    Registration {{ id: ProtocolId::must(\"{id}\"), entry: {rust_name}::CLIENT }},\n"
             )),
             Role::Server => body.push_str(&format!(
                 "    Registration {{ id: ProtocolId::must(\"{id}\"), listen: {rust_name}::listen }},\n"

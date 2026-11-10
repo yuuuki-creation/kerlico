@@ -9,6 +9,9 @@ wireguard = { package = "kerlico-wireguard-client", path = "../../protocols/wire
 openvpn = { package = "kerlico-openvpn-client", path = "../../protocols/openvpn/client", optional = true }
 mieru = { package = "kerlico-mieru-client", path = "../../protocols/mieru/client", optional = true }
 vless = { package = "kerlico-vless-client", path = "../../protocols/vless/client", optional = true }
+httparse = "1"
+if-addrs = "0.13"
+socket2 = "0.5"
 
 [build-dependencies]
 kerlico-manifest = { path = "../manifest" }

@@ -1418,12 +1418,15 @@ dependencies = [
 name = "kerlico-client"
 version = "0.1.0"
 dependencies = [
+ "httparse",
+ "if-addrs",
  "kerlico-manifest",
  "kerlico-mieru-client",
  "kerlico-openvpn-client",
  "kerlico-shared",
  "kerlico-vless-client",
  "kerlico-wireguard-client",
+ "socket2 0.5.10",
 ]
 
 [[package]]
@@ -1446,12 +1449,8 @@ dependencies = [
 name = "kerlico-mieru-client"
 version = "0.1.0"
 dependencies = [
- "httparse",
- "if-addrs",
  "kerlico-mieru",
  "kerlico-shared",
- "serde_json",
- "socket2 0.5.10",
 ]
 
 [[package]]
@@ -1540,6 +1539,7 @@ dependencies = [
 name = "kerlico-shared"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "socket2 0.6.5",
 ]
 

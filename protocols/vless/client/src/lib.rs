@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use kerlico_shared::{
-    DataPlane, Destination, InboundStream, OpenError, Packet, PeerAddr, PlaneFault, Settings, Transport,
+    ClientEntry, Destination, InboundStream, OpenError, PeerAddr, PlaneFault, Settings, Transport, Upstream,
 };
 use kerlico_vless::{
     client_config, client_key, client_keys, connect_native, connect_tls, decode_reality_key, decode_short_id, decode_udp, encode_request, encode_udp, encode_mux, decode_mux, reality_offer_hybrid, reality_reader, reality_writer, take_flight, AppReader, AppWriter, EncReader, EncWriter, RealityDuplex,
@@ -21,10 +21,10 @@ use kerlico_vless::{
     HttpPrefaceRead, RawHttpConfig, UpgradeConfig, UpgradeRead, UpgradeWrite, upgrade_pair,
 };
 
-pub fn connect(
-    _peer: &PeerAddr,
-    _settings: &Settings,
-) -> Result<Box<dyn DataPlane>, OpenError> {
+/// The client leaf runs its local SOCKS5 and HTTP entry in front of VLESS.
+pub const CLIENT: ClientEntry = ClientEntry::Proxy(upstream);
+
+fn upstream(_peer: &PeerAddr, _settings: &Settings) -> Result<Arc<dyn Upstream>, OpenError> {
     Err(OpenError::Settings)
 }
 
