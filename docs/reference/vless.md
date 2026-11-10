@@ -43,13 +43,19 @@ TLS 的 `certificate` / `key` 接受 PEM，也可用 `certificateFile` / `keyFil
 
 REALITY 使用服务端 `privateKey`、客户端 `publicKey`，客户端 `shortId`，服务端 `shortIds` 数组或单个 `shortId`。服务端 `serverNames`、`minClientVer`、`maxClientVer`、毫秒单位的 `maxTimeDiff` 限制认证。`mldsa65Seed` / `mldsa65Verify` 增加 ML-DSA-65 验证。支持 X25519 和 X25519MLKEM768，严格验证证书结构、CertificateVerify、Finished 和协商套件。H2 载体接受 Xray REALITY 未发送 ALPN 的握手，明确协商其他协议则拒绝。`target`（旧名 `dest`）接收未认证的原始 ClientHello，仍通过 `Handoff` 交出，不在协议里拨目标。
 
-WS 和 HTTPUpgrade 的 `path` 默认 `/`、`host` 可选，路径比较排除查询串。WS 服务端按帧方向检查掩码，处理 Ping/Pong/Close 和分片，保留 HTTP 升级后的预读字节。`?ed=N` 的 WebSocket 早期数据通过 `Sec-WebSocket-Protocol` 携带。RAW HTTP 用 `header: {"type":"http","request":{...},"response":{...}}` 指定首个请求/响应伪装。WS/HTTPUpgrade 用 `headers` 对象指定自定义头。客户端在第一笔真实写入时发送升级请求和指定早期数据，因此 Encryption 握手也走同一条路径。
+WS 和 HTTPUpgrade 的 `path` 默认 `/`、`host` 可选，路径比较排除查询串。WS 服务端按帧方向检查掩码，处理 Ping/Pong/Close 和分片，保留 HTTP 升级后的预读字节。`?ed=N` 的 WebSocket 早期数据通过 `Sec-WebSocket-Protocol` 携带。RAW HTTP 用 `header: {"type":"http","request":{...},"response":{...}}` 指定首个请求/响应伪装。WS/HTTPUpgrade 用 `headers` 对象指定自定义头。客户端在第一笔真实写入时发送升级请求和指定早期数据，因此 Encryption 握手也走同一条路径。WS、HTTPUpgrade、XHTTP、gRPC 服务端共用同一条 `sockopt.trustedXForwardedFor` 规则：请求同时带 `X-Forwarded-For` 和列表中任一标记头时，才以前者的第一个 IP（端口 0）作为 `Handoff` 来源；缺少标记头、第一个值不是 IP 或列表为空时保留 TCP 对端。
 
-gRPC 同一条 HTTP/2 连接可以并发承载 Tun 和 TunMulti。每个 RPC 独立完成 VLESS 握手并交出 Handoff。`serviceName` 支持 Xray 的 `/service/method|multi-method` 写法和转义。H2 保留 HPACK 状态，按连接和流分别处理窗口、END_STREAM、RST 和 GOAWAY。收到响应头之前允许先写应用数据。RPC 结束时先交付已接收的数据，服务端发送 gRPC trailers 和 END_STREAM，连接继续处理控制帧和其他 RPC。落地按对端和配置复用连接，GOAWAY 或断开后在下一次开流时重连。 客户端可用 `authority` 覆盖 HTTP/2 authority，用 `user_agent` 选择 chrome、edge、firefox、golang 或自定义值。`initial_windows_size` 指定接收流窗口。`idle_timeout` 和 `health_check_timeout` 以秒为单位控制 PING 探测与超时，`permit_without_stream` 允许客户端在没有 RPC 时探测。服务端仅在请求包含 `sockopt.trustedXForwardedFor` 列出的一种标记头时，才用 `X-Forwarded-For` 的第一个 IP 恢复会话来源。
+gRPC 同一条 HTTP/2 连接可以并发承载 Tun 和 TunMulti。每个 RPC 独立完成 VLESS 握手并交出 Handoff。`serviceName` 支持 Xray 的 `/service/method|multi-method` 写法和转义。H2 保留 HPACK 状态，按连接和流分别处理窗口、END_STREAM、RST 和 GOAWAY。收到响应头之前允许先写应用数据。RPC 结束时先交付已接收的数据，服务端发送 gRPC trailers 和 END_STREAM，连接继续处理控制帧和其他 RPC。落地按对端和配置复用连接，GOAWAY 或断开后在下一次开流时重连。 客户端可用 `authority` 覆盖 HTTP/2 authority，用 `user_agent` 选择 chrome、edge、firefox、golang 或自定义值。`initial_windows_size` 指定接收流窗口。`idle_timeout` 和 `health_check_timeout` 以秒为单位控制 PING 探测与超时，`permit_without_stream` 允许客户端在没有 RPC 时探测。服务端按 `sockopt.trustedXForwardedFor` 恢复会话来源，规则见 WS 与 HTTPUpgrade 段。
 
 XHTTP 的 `auto` 通常选择 packet-up；REALITY 下选择 stream-one，有独立 `downloadSettings` 时选择 stream-up。`downloadSettings` 可单独指定地址、端口、安全、路径及 HTTP 版本。支持配置上传方法、headers、padding 位置、会话 ID/序号的 path/query/header/cookie 位置、header/cookie 上传载荷、上传分块限额及间隔、缓冲包数量、stream-up 保活。上传必须消费响应；packet-up 要求 HTTP 200。H1 流式请求使用 `Connection: close` 以启用 Xray 的全双工处理。
 
+XHTTP 服务端的 `h2Params` 只作用于 H2 入口（h2c、TLS H2、REALITY H2），不作用于 H3。客户端配置里的 h2Params 既不生效也不校验。键名按 Go `http.HTTP2Config` 字段匹配，不区分大小写，未知键忽略，重复键后者生效，类型错误、小数、字符串数字或非空 `CountError` 会拒绝配置。`MaxConcurrentStreams`、`MaxReadFrameSize`、`MaxDecoderHeaderTableSize`、`MaxReceiveBufferPerStream` 写入 SETTINGS 并被强制执行，`MaxReceiveBufferPerConnection` 决定连接窗口和首个 WINDOW_UPDATE；`SendPingTimeout`、`PingTimeout`、`WriteByteTimeout` 以纳秒计，分别控制空闲探测、探测应答期限和写停滞断开；`PermitProhibitedCipherSuites` 为假时，协商到 RFC 7540 禁用套件的 TLS 1.2 连接以 INADEQUATE_SECURITY 拒绝，低于 TLS 1.2 无论如何都拒绝。零值或越界值取 Kerlico 默认值（128 流、16 MiB 窗口、16 KiB 帧、4096 字节 HPACK 表），Go 的默认值是 250 流和 1 MiB 窗口。`MaxEncoderHeaderTableSize` 只校验类型，Kerlico 的 HPACK 编码器不使用动态表。H2 客户端遇到对端流数已满时在同一份 XMUX 连接下另开 TCP 连接，不等待。
+
+XHTTP 客户端的 `hMaxRequestTimes` 与 Xray 同样记账：下载 GET、stream-up 上传和 stream-one 请求直接扣减，不换连接；packet-up 的 POST 扣减后预算已尽才换连接，换到的新连接不记这次 POST。packet-up 的 VLESS 请求头和第一笔数据最多等 100 毫秒后合并成一个 POST，启用 Encryption 时不合并。H1 的 XMUX 连接数不与 Xray 对齐，Go 的 H1 上传连接池会不确定地多开连接。
+
 mKCP 处理绝对接收窗口、累积确认、丢包重传、乱序、重复数据重新确认和关闭前的数据排空。空闲时每 3 秒发 PING，30 秒无对端活动才过期。`header` 支持 none、original、srtp、utp、wechat、dtls、wireguard、dns，`domain` 是 DNS 名，`seed` 启用 AES-GCM。旧 original 包装使用 FNV-1a 和错位异或。其他通用 finalmask 正在补齐。
+
+`sockopt` 的键按 Go `encoding/json` 匹配，不区分大小写，未知键忽略，`null` 保持默认值，类型错误仍然拒绝配置。
 
 `acceptProxyProtocol: true` 在 TCP 载体握手之前消费 PROXY v1/v2，普通非 PROXY 连接仍可使用；解析后的来源用于 UDP Handoff，目的地址用于 fallback PROXY 头。该选项只应配置在实际接收 PROXY 头的入口上。
 
