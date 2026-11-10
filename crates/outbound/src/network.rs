@@ -19,7 +19,13 @@ use crate::{select_exit, BytePipe, Exit, Native, Outbound, Reachability};
 thread_local! { static IN_LANDING: Cell<bool> = const { Cell::new(false) }; }
 
 impl Outbound {
+    /// A path starting with `@` names a Linux abstract socket, as in Go.
     pub fn connect_unix_transport(&self, path: &std::path::Path) -> io::Result<NetworkConnection> {
+        #[cfg(target_os = "linux")]
+        if let Some(name) = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()).strip_prefix(b"@") {
+            let address = <std::os::unix::net::SocketAddr as std::os::linux::net::SocketAddrExt>::from_abstract_name(name)?;
+            return Ok(NetworkConnection::Stream(Box::new(UnixStream(std::os::unix::net::UnixStream::connect_addr(&address)?))));
+        }
         #[cfg(unix)]
         { Ok(NetworkConnection::Stream(Box::new(UnixStream(std::os::unix::net::UnixStream::connect(path)?)))) }
         #[cfg(not(unix))]
@@ -186,7 +192,10 @@ impl kerlico_shared::runtime::NetworkStream for UnixStream {
 #[cfg(unix)]
 impl kerlico_shared::runtime::NetworkRead for UnixStream { fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> { self.0.set_read_timeout(Some(timeout)) } }
 #[cfg(unix)]
-impl kerlico_shared::runtime::NetworkWrite for UnixStream { fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> { self.0.set_write_timeout(Some(timeout)) } }
+impl kerlico_shared::runtime::NetworkWrite for UnixStream {
+    fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> { self.0.set_write_timeout(Some(timeout)) }
+    fn shutdown(&mut self) -> io::Result<()> { self.0.shutdown(std::net::Shutdown::Write) }
+}
 
 fn selected_exit(request: &NetworkDial, native: Native) -> io::Result<Exit> {
     if request.port == 0 || request.host.is_empty() || request.timeout.is_zero() {

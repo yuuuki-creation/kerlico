@@ -15,7 +15,7 @@ mod reality;
 mod reality_tls;
 mod reality_rate;
 mod reality_spider;
-pub use reality_rate::{RealityRateLimit, RealityRateLimitedRead};
+pub use reality_rate::{RealityRateLimit, RealityRateLimitedRead, RealityRateLimitedWrite};
 pub use reality_spider::{RealitySpiderConfig, run_reality_spider};
 pub use reality_tls::{RealityTargetShape, server_flight_with_target, RealityDecoyVerifier, RealityClientFlight, RealityClientResult, read_server_flight_or_decoy};
 mod grpc;

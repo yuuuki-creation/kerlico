@@ -96,6 +96,10 @@ pub trait NetworkRead: Read + Send {
 }
 pub trait NetworkWrite: Write + Send {
     fn set_timeout(&mut self, timeout: Duration) -> io::Result<()>;
+    /// Sends FIN while the read half keeps receiving.
+    fn shutdown(&mut self) -> io::Result<()> {
+        Err(unsupported("write half-close"))
+    }
 }
 pub type NetworkPair = (Box<dyn NetworkRead>, Box<dyn NetworkWrite>);
 
@@ -150,6 +154,9 @@ impl NetworkRead for TcpHalf {
 impl NetworkWrite for TcpHalf {
     fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> {
         self.0.set_write_timeout(Some(timeout))
+    }
+    fn shutdown(&mut self) -> io::Result<()> {
+        self.0.shutdown(std::net::Shutdown::Write)
     }
 }
 struct UdpHalf(UdpSocket);

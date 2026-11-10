@@ -38,6 +38,15 @@ const XRAY_VERSION: &str = "26.10.31";
 const XRAY_BUILD: &str = "a4a3dff";
 const KERLICO_CHILD: &str = "KERLICO_VLESS_XRAY_PEER_CONFIG";
 
+/// The matrix and the paced REALITY target checks run one at a time. Run together,
+/// the cleartext HTTPUpgrade early-data row loses bytes against the pinned Xray
+/// although it passes alone, and the pacing bounds would measure the extra load.
+static PEER_RUNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn exclusive_peer_run() -> std::sync::MutexGuard<'static, ()> {
+    PEER_RUNS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[derive(Clone, Copy)]
 enum Direction {
     XrayControl,
@@ -62,6 +71,7 @@ fn vless_xray_matrix() {
         serve_kerlico(Path::new(&config)).expect("Kerlico peer");
         return;
     }
+    let _exclusive = exclusive_peer_run();
     let root = run_dir("matrix").expect("matrix directory");
     let xray = xray_binary(&root).expect("pinned Xray peer");
     let filter = std::env::var("VLESS_CASE").unwrap_or_default();
@@ -1165,6 +1175,477 @@ fn h2_params_case(xray: &Path, root: &Path, security: Security) -> Result<()> {
         if xray.settings.get(id).is_some_and(|other| other != value) {
             return Err(format!("SETTINGS {id}: Kerlico {value}, Xray {:?}", xray.settings.get(id)).into());
         }
+    }
+    Ok(())
+}
+
+const LIMITED_BYTES: usize = 1024 * 1024;
+const LIMIT_AFTER: u64 = 64 * 1024;
+const LIMIT_BURST: u64 = 384 * 1024;
+const LIMIT_RATE: u64 = 256 * 1024;
+/// Xray leaves its first 17 KiB read of the target unmetered, and the whole
+/// 32 KiB read that crosses afterBytes.
+const LIMIT_SLACK: u64 = 64 * 1024;
+
+#[derive(Clone, Copy)]
+enum RealityServer {
+    Xray,
+    Kerlico,
+}
+
+#[derive(Clone, Copy)]
+enum DecoyAddress {
+    Tcp,
+    UnixPath,
+    UnixAbstract,
+    UnixPadded,
+}
+
+/// Each REALITY server gets the same target settings. Unauthenticated probes must reach
+/// the decoy with the PROXY header and pacing the settings ask for, and an Xray client's
+/// handshake must carry the record lengths the decoy sent for that client's ClientHello.
+#[test]
+#[ignore = "requires XRAY pointing to Xray 26.10.31 a4a3dff"]
+fn vless_xray_reality_target() {
+    let _exclusive = exclusive_peer_run();
+    let root = run_dir("reality-target").expect("reality target directory");
+    let xray = xray_binary(&root).expect("pinned Xray peer");
+    let filter = std::env::var("VLESS_CASE").unwrap_or_default();
+    let mut targets = vec![("tcp-xver1", DecoyAddress::Tcp, 1), ("tcp-xver2", DecoyAddress::Tcp, 2)];
+    if cfg!(target_os = "linux") {
+        targets.extend([
+            ("unix-path-xver2", DecoyAddress::UnixPath, 2),
+            ("unix-abstract-xver1", DecoyAddress::UnixAbstract, 1),
+            ("unix-padded-xver2", DecoyAddress::UnixPadded, 2),
+        ]);
+    }
+    let mut runs = 0;
+    let mut failed = Vec::new();
+    for (name, address, xver) in targets {
+        for (server, side) in [(RealityServer::Xray, "xray-server"), (RealityServer::Kerlico, "kerlico-server")] {
+            let label = format!("reality-target-{name}/{side}");
+            if !selected(&filter, &label) {
+                continue;
+            }
+            runs += 1;
+            let dir = root.join(name).join(side);
+            let result = fs::create_dir_all(&dir)
+                .map_err(Into::into)
+                .and_then(|_| reality_target(&xray, &dir, server, address, xver));
+            report(&label, result, &dir, &mut failed);
+        }
+    }
+    finish_report("VLESS REALITY target", runs, &failed, &root);
+}
+
+fn reality_target(xray: &Path, dir: &Path, server: RealityServer, address: DecoyAddress, xver: u8) -> Result<()> {
+    let case = Case::new("reality-target", Network::Raw, Security::Reality, Payload::Tcp);
+    let keys = Keys::generate(dir, &case)?;
+    let decoy = Decoy::start(address, &keys)?;
+    let origin = Echo::tcp(None)?;
+    let port = available_port()?;
+    let limit = json!({"afterBytes": LIMIT_AFTER, "bytesPerSec": LIMIT_RATE, "burstBytesPerSec": LIMIT_BURST});
+    let reality = json!({"target": decoy.target, "xver": xver,
+        "limitFallbackUpload": limit, "limitFallbackDownload": limit});
+    let (mut config, settings) = match server {
+        RealityServer::Xray => (case.xray_server(&keys, port, origin.port), "/inbounds/0/streamSettings/realitySettings"),
+        RealityServer::Kerlico => (case.kerlico_server(&keys, port), "/inbounds/0/settings"),
+    };
+    let fields = config.pointer_mut(settings).and_then(Value::as_object_mut).ok_or("REALITY settings")?;
+    fields.extend(reality.as_object().cloned().unwrap_or_default());
+    let _server = match server {
+        RealityServer::Xray => start_xray(xray, dir, "xray-server", &config, false)?,
+        RealityServer::Kerlico => start_kerlico(dir, &config)?,
+    };
+    let mut failures = Vec::new();
+    let mut check = |label: &str, result: Result<()>| {
+        if let Err(error) = result {
+            failures.push(format!("{label}: {error}"));
+        }
+    };
+    match tls_probe(&keys, port) {
+        Err(error) => check("TLS probe with the decoy certificate", Err(error)),
+        Ok((mut read, mut write, prober)) => {
+            let header = proxy_header(xver, prober, port);
+            check("PROXY header", wait_recording(&decoy.recordings, |session| session.header == header).map(drop));
+            check("limited download", limited_download(&mut read, &mut write));
+            check("limited upload", limited_upload(&mut read, &mut write));
+        }
+    }
+    check("plaintext probe", plaintext_probe(&decoy, port, xver));
+    check("authenticated flight", authenticated_flight(xray, dir, &case, &keys, &decoy, port, origin.port));
+    if failures.is_empty() {
+        return Ok(());
+    }
+    Err(failures.join("; ").into())
+}
+
+/// Completes TLS before returning, so a pin mismatch means the prober did not see the decoy certificate.
+fn tls_probe(keys: &Keys, port: u16) -> Result<(kerlico_vless::TlsRead, kerlico_vless::TlsWrite, std::net::SocketAddr)> {
+    let stream = tcp_connect(port)?;
+    let prober = stream.local_addr()?;
+    let tls = kerlico_vless::client_config_pinned(&[], false, &keys.pin).map_err(|_| "prober TLS")?;
+    let (read, write) = kerlico_vless::connect_tls_split(stream, tls, TLS_NAME)?;
+    Ok((read, write, prober))
+}
+
+fn limited_download(read: &mut kerlico_vless::TlsRead, write: &mut kerlico_vless::TlsWrite) -> Result<()> {
+    let started = Instant::now();
+    write.write_all(&decoy_command(b'D', LIMITED_BYTES))?;
+    write.flush()?;
+    let mut bytes = vec![0; LIMITED_BYTES];
+    read.read_exact(&mut bytes)?;
+    compare(&pattern(LIMITED_BYTES, 3), &bytes, "download")?;
+    paced(started.elapsed())
+}
+
+fn limited_upload(read: &mut kerlico_vless::TlsRead, write: &mut kerlico_vless::TlsWrite) -> Result<()> {
+    let started = Instant::now();
+    write.write_all(&decoy_command(b'U', LIMITED_BYTES))?;
+    write.write_all(&pattern(LIMITED_BYTES, 5))?;
+    write.flush()?;
+    let mut done = [0; 2];
+    read.read_exact(&mut done)?;
+    paced(started.elapsed())
+}
+
+fn plaintext_probe(decoy: &Decoy, port: u16, xver: u8) -> Result<()> {
+    let mut plain = tcp_connect(port)?;
+    let header = proxy_header(xver, plain.local_addr()?, port);
+    let request = b"GET /reality-probe HTTP/1.1\r\nHost: probe\r\n\r\n";
+    plain.write_all(request)?;
+    wait_recording(&decoy.recordings, |session| session.header == header && session.input.starts_with(request))?;
+    Ok(())
+}
+
+fn paced(elapsed: Duration) -> Result<()> {
+    // The bucket holds at least one second of the rate, whatever burstBytesPerSec says.
+    let metered = LIMITED_BYTES as u64 - LIMIT_AFTER - LIMIT_BURST.max(LIMIT_RATE) - LIMIT_SLACK;
+    let least = Duration::from_secs_f64(metered as f64 / LIMIT_RATE as f64);
+    let most = Duration::from_secs_f64(2.0 * LIMITED_BYTES as f64 / LIMIT_RATE as f64) + Duration::from_secs(2);
+    eprintln!("{LIMITED_BYTES} limited bytes took {elapsed:?}; expected {least:?}..{most:?}");
+    if elapsed < least || elapsed > most {
+        return Err(format!("{LIMITED_BYTES} bytes took {elapsed:?}, expected {least:?}..{most:?}").into());
+    }
+    Ok(())
+}
+
+fn authenticated_flight(xray: &Path, dir: &Path, case: &Case, keys: &Keys, decoy: &Decoy, port: u16, origin: u16) -> Result<()> {
+    let (tap, carriers) = record_tcp(port)?;
+    let front = available_port()?;
+    let _client = start_xray(xray, dir, "xray-client", &case.xray_client(keys, front, tap, origin), false)?;
+    let mut stream = tcp_connect(front)?;
+    // Xray's REALITY server holds its first handshakes until its post-handshake probe of the target ends.
+    stream.set_read_timeout(Some(TIMEOUT * 3))?;
+    tcp_exchange(&mut stream, 196_613, 41)?;
+    let carrier = wait_recording(&carriers, |carrier| record_lengths(&carrier.output).len() >= 3)?;
+    let random = carrier.input.get(11..43).ok_or("the client sent no ClientHello")?.to_vec();
+    let target = wait_recording(&decoy.recordings, |session| session.input.windows(32).any(|window| window == random))
+        .map_err(|error| format!("decoy never received the client's ClientHello: {error}"))?;
+    let sent = record_lengths(&target.output);
+    let mirrored = record_lengths(&carrier.output);
+    eprintln!("decoy flight records {sent:?}; server flight records {mirrored:?}");
+    if sent.len() < 3 || mirrored.get(..sent.len()) != Some(&sent[..]) {
+        return Err(format!("server flight records {mirrored:?}, decoy sent {sent:?}").into());
+    }
+    Ok(())
+}
+
+fn record_lengths(mut bytes: &[u8]) -> Vec<usize> {
+    let mut lengths = Vec::new();
+    while bytes.len() >= 5 {
+        let length = 5 + u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+        if length > bytes.len() {
+            break;
+        }
+        lengths.push(length);
+        bytes = &bytes[length..];
+    }
+    lengths
+}
+
+fn proxy_header(xver: u8, source: std::net::SocketAddr, port: u16) -> Vec<u8> {
+    let std::net::SocketAddr::V4(source) = source else { unreachable!("loopback prober is IPv4") };
+    if xver == 1 {
+        return format!("PROXY TCP4 {} 127.0.0.1 {} {port}\r\n", source.ip(), source.port()).into_bytes();
+    }
+    let mut header = b"\r\n\r\n\0\r\nQUIT\n".to_vec();
+    header.extend([0x21, 0x11, 0, 12]);
+    header.extend(source.ip().octets());
+    header.extend([127, 0, 0, 1]);
+    header.extend(source.port().to_be_bytes());
+    header.extend(port.to_be_bytes());
+    header
+}
+
+fn decoy_command(kind: u8, len: usize) -> Vec<u8> {
+    let mut command = vec![kind];
+    command.extend((len as u32).to_be_bytes());
+    command
+}
+
+#[derive(Clone, Default)]
+struct Recording {
+    header: Vec<u8>,
+    input: Vec<u8>,
+    output: Vec<u8>,
+}
+
+type Recordings = Arc<std::sync::Mutex<Vec<Arc<std::sync::Mutex<Recording>>>>>;
+
+fn wait_recording(recordings: &Recordings, matches: impl Fn(&Recording) -> bool) -> Result<Recording> {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let found = recordings.lock().unwrap().iter().map(|entry| entry.lock().unwrap().clone()).find(|entry| matches(entry));
+        if let Some(found) = found {
+            return Ok(found);
+        }
+        if Instant::now() >= deadline {
+            let seen = recordings.lock().unwrap().len();
+            return Err(format!("no matching connection among {seen}").into());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+struct Recorder<T> {
+    inner: T,
+    record: Arc<std::sync::Mutex<Recording>>,
+}
+
+const RECORDED: usize = 64 * 1024;
+
+impl<T: Read> Read for Recorder<T> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        let mut record = self.record.lock().unwrap();
+        let keep = count.min(RECORDED.saturating_sub(record.input.len()));
+        record.input.extend_from_slice(&buf[..keep]);
+        Ok(count)
+    }
+}
+
+impl<T: Write> Write for Recorder<T> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let count = self.inner.write(buf)?;
+        let mut record = self.record.lock().unwrap();
+        let keep = count.min(RECORDED.saturating_sub(record.output.len()));
+        record.output.extend_from_slice(&buf[..keep]);
+        Ok(count)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Records what a client sends (`input`) and what the server returns (`output`) on each connection.
+fn record_tcp(upstream: u16) -> Result<(u16, Recordings)> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let port = listener.local_addr()?.port();
+    let recordings = Recordings::default();
+    let sessions = recordings.clone();
+    thread::spawn(move || {
+        let deadline = Instant::now() + TIMEOUT * 4;
+        while Instant::now() < deadline {
+            let client = match listener.accept() {
+                Ok((socket, _)) => socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                Err(_) => return,
+            };
+            let record = Arc::new(std::sync::Mutex::new(Recording::default()));
+            sessions.lock().unwrap().push(record.clone());
+            thread::spawn(move || {
+                let Ok(mut server) = TcpStream::connect(("127.0.0.1", upstream)) else { return };
+                let (Ok(input), Ok(mut output)) = (client.try_clone(), server.try_clone()) else { return };
+                let mut input = Recorder { inner: input, record: record.clone() };
+                thread::spawn(move || {
+                    let _ = std::io::copy(&mut input, &mut output);
+                    let _ = output.shutdown(Shutdown::Write);
+                });
+                let mut client = Recorder { inner: client, record };
+                let _ = std::io::copy(&mut server, &mut client);
+                let _ = client.inner.shutdown(Shutdown::Write);
+            });
+        }
+    });
+    Ok((port, recordings))
+}
+
+/// A TLS target that records the PROXY header, the bytes it receives and the bytes it
+/// sends. After the handshake, `D n` asks for n bytes and `U n` sends n bytes.
+struct Decoy {
+    target: String,
+    recordings: Recordings,
+    stop: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl Decoy {
+    fn start(address: DecoyAddress, keys: &Keys) -> Result<Self> {
+        let tls = kerlico_vless::server_config(&keys.cert_pem, &keys.key_pem, &["h2".into(), "http/1.1".into()])
+            .map_err(|_| "decoy TLS")?;
+        let recordings = Recordings::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (target, worker) = match address {
+            DecoyAddress::Tcp => {
+                let listener = TcpListener::bind(localhost(0))?;
+                listener.set_nonblocking(true)?;
+                let target = format!("127.0.0.1:{}", listener.local_addr()?.port());
+                (target, decoy_loop(move || listener.accept().map(|(stream, _)| stream), tls, recordings.clone(), stop.clone()))
+            }
+            #[cfg(target_os = "linux")]
+            address => {
+                use std::os::linux::net::SocketAddrExt;
+                use std::os::unix::net::{SocketAddr, UnixListener};
+                static NEXT: AtomicUsize = AtomicUsize::new(0);
+                let name = format!("kerlico-reality-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+                let (target, listener) = match address {
+                    DecoyAddress::UnixPath => {
+                        // sun_path holds 108 bytes, too few for the run directory.
+                        let path = std::env::temp_dir().join(format!("{name}.sock"));
+                        let _ = fs::remove_file(&path);
+                        (path.display().to_string(), UnixListener::bind(&path)?)
+                    }
+                    DecoyAddress::UnixAbstract => (format!("@{name}"), UnixListener::bind_addr(&SocketAddr::from_abstract_name(&name)?)?),
+                    _ => {
+                        let mut padded = name.clone().into_bytes();
+                        padded.resize(107, 0);
+                        (format!("@@{name}"), UnixListener::bind_addr(&SocketAddr::from_abstract_name(&padded)?)?)
+                    }
+                };
+                listener.set_nonblocking(true)?;
+                (target, decoy_loop(move || listener.accept().map(|(stream, _)| stream), tls, recordings.clone(), stop.clone()))
+            }
+            #[cfg(not(target_os = "linux"))]
+            _ => return Err("Unix targets need Linux".into()),
+        };
+        Ok(Self { target, recordings, stop, worker: Some(worker) })
+    }
+}
+
+impl Drop for Decoy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+trait DecoyStream: Read + Write + Send + Sized + 'static {
+    fn split(self) -> std::io::Result<(Self, Self)>;
+}
+
+impl DecoyStream for TcpStream {
+    fn split(self) -> std::io::Result<(Self, Self)> {
+        self.set_read_timeout(Some(TIMEOUT))?;
+        self.set_write_timeout(Some(TIMEOUT))?;
+        Ok((self.try_clone()?, self))
+    }
+}
+
+#[cfg(unix)]
+impl DecoyStream for std::os::unix::net::UnixStream {
+    fn split(self) -> std::io::Result<(Self, Self)> {
+        self.set_read_timeout(Some(TIMEOUT))?;
+        self.set_write_timeout(Some(TIMEOUT))?;
+        Ok((self.try_clone()?, self))
+    }
+}
+
+fn decoy_loop<S: DecoyStream>(
+    accept: impl Fn() -> std::io::Result<S> + Send + 'static,
+    tls: Arc<kerlico_vless::ServerConfig>,
+    recordings: Recordings,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            match accept() {
+                Ok(stream) => {
+                    let record = Arc::new(std::sync::Mutex::new(Recording::default()));
+                    recordings.lock().unwrap().push(record.clone());
+                    let tls = tls.clone();
+                    thread::spawn(move || {
+                        if let Ok((read, write)) = stream.split() {
+                            let _ = decoy_session(read, write, tls, record);
+                        }
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn decoy_session<S: Read + Write>(
+    mut read: S,
+    write: S,
+    tls: Arc<kerlico_vless::ServerConfig>,
+    record: Arc<std::sync::Mutex<Recording>>,
+) -> std::io::Result<()> {
+    let mut header = vec![0; 1];
+    read.read_exact(&mut header)?;
+    let mut lead = match header[0] {
+        b'P' => {
+            while !header.ends_with(b"\r\n") && header.len() < 108 {
+                let mut byte = [0; 1];
+                read.read_exact(&mut byte)?;
+                header.push(byte[0]);
+            }
+            vec![0; 1]
+        }
+        b'\r' => {
+            header.resize(16, 0);
+            read.read_exact(&mut header[1..])?;
+            let length = u16::from_be_bytes([header[14], header[15]]) as usize;
+            header.resize(16 + length, 0);
+            read.read_exact(&mut header[16..])?;
+            vec![0; 1]
+        }
+        _ => Vec::new(),
+    };
+    if lead.is_empty() {
+        lead = std::mem::take(&mut header);
+    } else {
+        read.read_exact(&mut lead)?;
+    }
+    record.lock().unwrap().header = header;
+    let handshake = lead == [0x16];
+    let mut read = Recorder { inner: std::io::Cursor::new(lead).chain(read), record: record.clone() };
+    if !handshake {
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") && request.len() < RECORDED {
+            let mut byte = [0; 1];
+            read.read_exact(&mut byte)?;
+            request.push(byte[0]);
+        }
+        return Ok(());
+    }
+    let write = Recorder { inner: write, record };
+    let (mut read, mut write) = kerlico_vless::accept_tls_over(read, write, tls)?;
+    let mut command = [0; 5];
+    while read.read_exact(&mut command).is_ok() {
+        let len = u32::from_be_bytes([command[1], command[2], command[3], command[4]]) as usize;
+        match command[0] {
+            b'D' => write.write_all(&pattern(len, 3))?,
+            b'U' => {
+                let received = std::io::copy(&mut (&mut read).take(len as u64), &mut std::io::sink())?;
+                if received != len as u64 {
+                    return Err(std::io::ErrorKind::UnexpectedEof.into());
+                }
+                write.write_all(b"ok")?;
+            }
+            _ => break,
+        }
+        write.flush()?;
     }
     Ok(())
 }
