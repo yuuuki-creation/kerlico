@@ -119,6 +119,7 @@ impl HysteriaMasquerade {
         let (mut send, mut receive) = stream.split();
         if !matches!(self.mode, Mode::Proxy(_)) {
             // Only the proxy reads the request body; the other answers stop it before replying.
+            // No read has run since the headers, so h3-quinn still holds the stream.
             receive.stop_sending(h3::error::Code::H3_NO_ERROR);
         }
         let response = match &self.mode {
@@ -140,7 +141,7 @@ impl HysteriaMasquerade {
             }
             Mode::File(root) => file::response(root, &request).await,
             Mode::Proxy(proxy) => {
-                match tokio::time::timeout(Duration::from_secs(30), proxy.request(request, peer, RequestBody { stream: receive, reading: false })).await {
+                match tokio::time::timeout(Duration::from_secs(30), proxy.request(request, peer, receive)).await {
                     Ok(Ok(response)) => response.map(|body| body.map_err(io::Error::other).boxed_unsync()),
                     _ => Response::builder().status(StatusCode::BAD_GATEWAY).body(empty()).unwrap(),
                 }
@@ -233,7 +234,7 @@ impl Proxy {
         &self,
         request: Request<()>,
         peer: SocketAddr,
-        receive: RequestBody,
+        receive: H3Recv,
     ) -> io::Result<Response<Incoming>> {
         let (mut parts, ()) = request.into_parts();
         let original_host = parts.uri.authority().map(|value| value.as_str()).unwrap_or_default().to_owned();
@@ -349,37 +350,17 @@ pub(super) fn date() -> header::HeaderValue {
     httpdate::fmt_http_date(SystemTime::now()).parse().expect("HTTP date")
 }
 
-/// A request body the masquerade may stop reading before its end. Dropping it at rest stops
-/// the stream with H3_NO_ERROR, as RFC 9114 section 4.1 asks of a server that needs no more of
-/// the request; quinn would stop it with code 0.
-struct RequestBody {
-    stream: H3Recv,
-    /// h3-quinn moves the stream into a pending read, so only a body at rest can be stopped.
-    reading: bool,
-}
-
-impl Drop for RequestBody {
-    fn drop(&mut self) {
-        if !self.reading {
-            self.stream.stop_sending(h3::error::Code::H3_NO_ERROR);
-        }
-    }
-}
-
-fn receive_body(receive: RequestBody) -> Body {
+/// hyper drops the body once it has what the origin needs. h3 can hand back a frame while
+/// h3-quinn still has a read in flight, and stopping the stream then panics, so a body hyper
+/// leaves unread is stopped by quinn with code 0 rather than H3_NO_ERROR.
+fn receive_body(receive: H3Recv) -> Body {
     let frames = stream::try_unfold(Some(receive), |receive| async {
         let Some(mut receive) = receive else { return Ok(None); };
-        receive.reading = true;
-        let data = receive.stream.recv_data().await;
-        receive.reading = false;
-        if let Some(mut data) = data.map_err(io::Error::other)? {
+        if let Some(mut data) = receive.recv_data().await.map_err(io::Error::other)? {
             let bytes = data.copy_to_bytes(data.remaining());
             return Ok(Some((Frame::data(bytes), Some(receive))));
         }
-        receive.reading = true;
-        let trailers = receive.stream.recv_trailers().await;
-        receive.reading = false;
-        Ok(trailers.map_err(io::Error::other)?.map(|trailers| (Frame::trailers(trailers), None)))
+        Ok(receive.recv_trailers().await.map_err(io::Error::other)?.map(|trailers| (Frame::trailers(trailers), None)))
     });
     StreamBody::new(frames).boxed_unsync()
 }

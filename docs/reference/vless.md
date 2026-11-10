@@ -27,7 +27,7 @@ UUID 可以写标准形式或 1 至 30 字节的自定义字符串。自定义 I
 | `hysteria` | TLS | Hysteria v2 的认证 QUIC 字节流；VLESS 自己封装 UDP |
 | `xdrive` | 存储服务的 HTTP/TLS | local、template、S3、Google Drive；必须 Encryption、空 flow、普通连接使用 Mux |
 
-XHTTP 的 none 使用 H1，TLS 可选 H1/H2/H3，REALITY 使用 H2。服务端也接受 H2 prior knowledge。Hysteria 必须 `version: 2` 且两端 `auth` 相同。Hysteria 的 HTTP/3 服务端（认证和伪装）不再读请求体时，按 RFC 9114 第 4.1 节用 H3_NO_ERROR 停止请求流；HTTP/3 客户端收到对端的 STOP_SENDING 时把请求当作已结束，照常读取响应。XDrive 的 TLS 配置用于存储服务，并非用户流的额外 TLS 层。
+XHTTP 的 none 使用 H1，TLS 可选 H1/H2/H3，REALITY 使用 H2。服务端也接受 H2 prior knowledge。Hysteria 必须 `version: 2` 且两端 `auth` 相同。Hysteria 的 HTTP/3 服务端在认证回答和伪装的 string、file、404 回答之前，按 RFC 9114 第 4.1 节用 H3_NO_ERROR 停止请求流；伪装代理把请求体交给 hyper，hyper 不再读时 h3-quinn 可能还有读取在进行，无法停止，这时由 quinn 以错误码 0 停止。HTTP/3 客户端收到对端的 STOP_SENDING 时把请求当作已结束，照常读取响应。XDrive 的 TLS 配置用于存储服务，并非用户流的额外 TLS 层。
 
 Xray 26 已删除独立 `http` / `h2` / `h3` / `quic` 和 `security: xtls`，禁止 VLESS + MASQUE；它们不计入正例。Kerlico 保留的 `network: http` 是旧 HTTP/2 字节流接口，不代表当前 Xray 还有这项传输。
 
