@@ -34,9 +34,7 @@ TCP 和 UDP 两种传输都要有。加密算法是 XChaCha20-Poly1305。密钥�
 
 ## 客户端入口
 
-mieru 客户端不实现数据包平面。`connect` 不是这条协议的入口。
-
-客户端对本机提供 SOCKS5 和 HTTP 代理。SOCKS5 包含 `CONNECT` 和 `UDP ASSOCIATE`。HTTP 代理接受普通 HTTP 请求和 `CONNECT`。官方把这个入口叫做 HTTP / HTTPS 代理。两个监听端口不能相同。`socks5ListenLAN` 或 `httpProxyListenLAN` 为真时，绑定该机的局域网地址。否则只绑定环回。端口取值是 1025 到 65535。
+mieru 客户端不实现数据包平面。它导出 `CLIENT = ClientEntry::Proxy`，客户端叶子在它前面运行本机 SOCKS5 和 HTTP 代理，官方把这个入口叫做 HTTP / HTTPS 代理。命令行、文档语法、本机端口和 LAN 绑定，以及 SOCKS5 与 HTTP 的行为，见 `docs/reference/crates.md` 的「客户端叶子和本机入口」。
 
 `multiplexing`、`handshakeMode` 和 `mtu` 使用上面的名字和取值。服务端地址、传输、单个端口或 `portRange` 也在客户端的 `Settings` 里。
 
@@ -55,7 +53,7 @@ cargo build -p kerlico-client --no-default-features --features mieru
 cargo build -p kerlico-server --no-default-features --features mieru,landing-mieru
 ```
 
-启用 `mieru` feature 后，从客户端叶子启动代理：
+启用 `mieru` feature 后，从客户端叶子启动代理。文档写了 `"protocol": "mieru"` 时，`kerlico-client client.json` 走同一路径。
 
 ```text
 kerlico-client --mieru-proxy client.json
@@ -81,21 +79,19 @@ kerlico-client --mieru-proxy client.json
 }
 ```
 
-示例仅用合成账号。`protocol` 可以省略；提供时必须为 `mieru`。也可以省略 `peer`，改在 `settings` 写 `address`、`port`；同时提供时必须一致。`peer` 的 IPv6 使用 `[::1]:30000` 形式。未知键、错误类型、非法枚举、空账号或密码都拒绝，不输出原始配置。`portRange` 使用上文约束。`lowEntropyMode` 接受上文五个名字，也接受 0 到 4。两个本机端口默认分别为 1080、8080，不能相同。
+示例仅用合成账号。除叶子取走的四个本机入口键，`settings` 只接受 `username`、`password`、`transport`、`portRange`、`mtu`、`multiplexing`、`handshakeMode` 和 `lowEntropyMode`。未知键、非法枚举、空账号或密码都拒绝，不输出原始配置。`portRange` 使用上文约束。`lowEntropyMode` 接受上文五个名字，也接受 0 到 4。值按通用规则先转成文本，所以数字形式的 `username` 当作文本接受，不再按 JSON 类型拒绝。`protocol`、`peer` 与 `address`、`port` 的规则见 `crates.md`。
 
-本机默认只绑定 `127.0.0.1`。LAN 开关为真时，枚举实际接口上的 IPv4 私网/链路本地地址、IPv6 ULA/链路本地地址，逐一绑定；IPv6 设置 `IPV6_V6ONLY`，链路本地携带接口作用域。没有合适地址时拒绝，不扩大到公网 wildcard。所有端口成功绑定后才开始接入；失败释放先前绑定的端口。
-
-`kerlico-mieru-client::Client::new(host, port, settings)` 创建一个可克隆客户端。`open_stream(host, port)` 打开 TCP 目标，`associate()` 打开 UDP 关联。`close()` 幂等取消所有克隆共享的会话。
+`kerlico-mieru-client::Client::new(host, port, settings)` 创建一个可克隆客户端，它实现客户端叶子的 `Upstream`。`open_stream(host, port)` 打开 TCP 目标，`associate()` 打开 UDP 关联。`close()` 幂等取消所有克隆共享的会话。
 
 代理、`land` 和兼容的 `open_stream` 函数使用同一客户端实现。无状态落地按节点地址、账号和完整设置隔离缓存，最多 64 个配置。条目距上次调用超过 60 秒，且没有活跃会话或调用者时清退，每 5 秒检查一次。缓存满且全部活跃时返回 `Again`，不会合并不同账号的池。统一出口的 UDP 会话另外按节点和用户隔离。
 
-`Proxy::start(client, settings)` 绑定两个本机入口。返回句柄提供 `socks5_addrs()`、`http_addrs()`、`wait()` 和 `close()`，释放句柄会停止监听并等待受控任务。`run_proxy(document)` 解析 CLI 传入的配置。通用数据包接口 `connect` 返回 `OpenError::Settings`，mieru 使用代理或会话入口。现有生成菜单仍是协议名单的唯一来源。
+本机入口由客户端叶子的 `Proxy::start` 绑定。生成菜单仍是协议名单的唯一来源。
 
 四种复用级别的因子分别为 0、1、2、3。池有 N 条可调度底层连接时，新建概率为 `1/(N*因子+1)`；`OFF` 始终新建。服务端只接收会话，不选择级别。标准握手在打开会话前确认远端应答；`NO_WAIT` 返回惰性会话，首次应用写入发送请求及可用首批数据。读操作等待首次写入，不替调用者启动握手；关闭未写入会话不发送请求。UDP 关联使用标准握手。
 
 UDP 底层的会话建立确认独立于 SOCKS 应答。客户端后续的 DATA、ACK 和心跳等待按序的 `OPEN_RESPONSE`；期间 `OPEN_REQUEST` 按规则重传，关闭消息不受该等待约束。普通 ACK 不能替代这一确认。`NO_WAIT` 不取消该 UDP 传输要求。等待有握手期限，关闭客户端会唤醒等待中的写入。TCP 由底层保证顺序，不增加这次等待。
 
-SOCKS5 UDP 关联受 TCP 控制连接生命周期约束；验证请求声明及实际来源，端口为 0 时固定第一个合法 UDP 来源。拒绝分片注入，回复保留实际目标头。普通 HTTP 按每个请求的目标建会话，支持 Content-Length、chunked 和同一本机连接上的跨目标请求；CONNECT 保留预读隧道数据。头部、行长度和消息边界受限，冲突长度、非法地址和不支持的升级/期望控制明确拒绝。
+一条 SOCKS5 UDP 关联对应一个 `Assoc`，数据报按原样带目标发出，空包也发送。
 
 ## 资源和线协议边界
 
@@ -114,6 +110,8 @@ TCP 接收由每条底层连接的 64 KiB `BufReader` 保留预读字节，读�
 ## 当前实现与验证状态
 
 固定配置的一分钟服务端性能观测、基于 `df2e347` 的源码核验，以及首批缓冲与派发优化，见[性能记录与优化候选](mieru-performance.md)。各批实施和测量分别登记，下述表格保留首次功能互通验收的结果。
+
+2026-11-10：本机入口移到客户端叶子后，在 `perf-02` 用固定源码构建的官方对端重跑，`--full` 45/45，`--quick --node-host ::1` 17/17，命令行未改。
 
 2026-11-09：上述 mieru 范围已完成实现，并在 `perf-02` 的独立工作目录完成本轮验收。构建、格式、静态检查和测试全部在 worker 执行。本地只编辑、同步和管理 Git，VLESS 源码未改动。
 

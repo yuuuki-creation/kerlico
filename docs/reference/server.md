@@ -2,7 +2,7 @@
 
 这篇是服务端的决定。代码还没全部跟上的地方，单独标成「代码未跟上」。不要把决定改成去迁就未完成的函数。
 
-客户端的隧道不走这篇。客户端仍用 `DataPlane` 收发报文。
+客户端不走这篇。隧道协议用 `DataPlane` 收发报文，代理协议在本机 SOCKS5/HTTP 入口后面运行，见 `docs/reference/crates.md`。
 
 ## 一个进程里的节点
 
@@ -166,7 +166,7 @@ TCP 复制在 300 秒没有字节时结束。UDP 会话的键包含 `Handoff` �
 
 用户挂在一个节点上。稳定的键是 `UserEmail`。空字符串、空白和 `>` 不能做邮箱或节点名。同一个邮箱可以出现在两个节点上，计数按邮箱合并。`remove_user` 只从那个节点去掉用户，不把计数清零。
 
-账号的协议字段放在 `Settings` 里，由那个协议的 `add_user` 解释。叶子不解析 UUID 或密码。节点 `settings` 和用户对象里，除 `users` 与 `email` 以外的字符串、数字和布尔值都原样进入 `Settings`；数组和对象序列化为 JSON 后交给协议解释。`add_user` 和 `remove_user` 在 `Server` 上会找到节点并转给入站。mieru 的 `add_user` 读取 `username` 和 `password`。vless 的 `add_user` 读取 `id`、`flow` 和可选 `reverse`，详细组合与反向 API 见 `docs/reference/vless.md`。WireGuard 和 OpenVPN 的函数体仍是 `unimplemented!`。
+账号的协议字段放在 `Settings` 里，由那个协议的 `add_user` 解释。叶子不解析 UUID 或密码。节点 `settings` 和用户对象里，除 `users` 与 `email` 以外的字符串、数字和布尔值都原样进入 `Settings`；数组和对象序列化为 JSON 后交给协议解释，`null` 拒绝。这条规则是 `Settings::insert_json`，落地设置和客户端文档也用它。`add_user` 和 `remove_user` 在 `Server` 上会找到节点并转给入站。mieru 的 `add_user` 读取 `username` 和 `password`。vless 的 `add_user` 读取 `id`、`flow` 和可选 `reverse`，详细组合与反向 API 见 `docs/reference/vless.md`。WireGuard 和 OpenVPN 的函数体仍是 `unimplemented!`。
 
 计数的名字是这些形式。
 

@@ -65,7 +65,7 @@ Vision 只保留一条实现路径。END 结束填充；DIRECT 在最后一块�
 
 落地的 UDP 承载按 Xray 的 VLESS 出站选择。Xray 的 cone 默认开启（`core/xray.go` 只在环境变量 `xray.cone.disabled` 为 `true` 时关闭），Kerlico 不提供关闭开关。因此不走 Mux 连接池时，Vision UDP 和空 flow 发往 53、443 以外端口的 UDP 都用 Mux 命令下的单会话 XUDP（Xray 的 `v1.mux.cool:666`），会话结束即关闭这条连接；空 flow 发往 53 和 443 端口的 UDP 保持独立 UDP 命令。`land_udp` 返回 `UdpSession`：XUDP 或 Mux 会话里每个数据报可以指定不同目标，回复带来源地址；独立 UDP 命令只能到达第一个目标，发往其他目标会报错。
 
-落地 `mux` 写 `true`、`false` 或 Xray 的对象 `{"enabled", "concurrency", "xudpConcurrency", "xudpProxyUDP443"}`，`true` 等于 `{"enabled": true}`。启用后 `land` 把会话放进按对端和完整设置共享的 Mux 连接（Xray 的 `v1.mux.cool:9527`），会话 id 从 1 递增。`concurrency` 是每条连接同时承载的会话数，默认 8，负值让 TCP 不走连接池。`xudpConcurrency` 为 0 时 UDP 与 TCP 共用连接，为正时 UDP 使用自己的连接池和这个并发数，为负时 UDP 不进池。`xudpProxyUDP443` 默认 `reject`，拒绝 UDP/443；`allow` 让它进池；`skip` 让它绕过连接池，按上一段处理。每条连接累计分配 128 个会话后不再接新会话，这些会话全部结束即关闭；没有会话满 16 秒的连接关闭；已关闭的连接在下次打开会话时换新。连接组随运行时归属失效，最多保留最近使用的 32 组。TCP 会话 100 毫秒内没有首包时先发不带数据的 NEW，目标先发数据的协议也能建立连接。XDrive 总是使用 Mux，拒绝负的并发值和 `skip`。gRPC 流可共享底层连接。跨载体 GlobalID 见未完成项。HTTP/1 分块编码保存 wire 位置和待确认的应用长度，短写、WouldBlock、flush 和最后的零长度块共用这一份状态。
+落地 `mux` 写 `true`、`false` 或 Xray 的对象 `{"enabled", "concurrency", "xudpConcurrency", "xudpProxyUDP443"}`，`true` 等于 `{"enabled": true}`。启用后 `land` 把会话放进按对端和完整设置共享的 Mux 连接（Xray 的 `v1.mux.cool:9527`），会话 id 从 1 递增。`concurrency` 是每条连接同时承载的会话数，默认 8，负值让 TCP 不走连接池。`xudpConcurrency` 为 0 时 UDP 与 TCP 共用连接，为正时 UDP 使用自己的连接池和这个并发数，为负时 UDP 不进池。`xudpProxyUDP443` 默认 `reject`，拒绝 UDP/443；`allow` 让它进池；`skip` 让它绕过连接池，按上一段处理。每条连接累计分配 128 个会话后不再接新会话，这些会话全部结束即关闭；没有会话满 16 秒的连接关闭；已关闭的连接在下次打开会话时换新。连接组随运行时归属失效，最多保留最近使用的 32 组。TCP 会话 100 毫秒内没有首包时先发不带数据的 NEW，目标先发数据的协议也能建立连接。XDrive 总是使用 Mux，拒绝负的并发值和 `skip`。gRPC 流可共享底层连接。落地不发送 GlobalID，客户端入口发送，见「客户端入口」。HTTP/1 分块编码保存 wire 位置和待确认的应用长度，短写、WouldBlock、flush 和最后的零长度块共用这一份状态。
 
 ## 反向连接和回落
 
@@ -76,6 +76,50 @@ Vision 只保留一条实现路径。END 结束填充；DIRECT 在最后一块�
 `fallback` 为默认 `host:port`、`[IPv6]:port` 或本机端口。`fallbacks` 接受 Xray 的 JSON 数组，也接受分号分隔的 `name=...,alpn=...,path=...,dest=...,xver=...`。SNI 匹配最长子串，ALPN 和路径逐级使用默认值；h2 规则不能再带路径。`xver` 为 0、1、2。回落交出已读取的全部字节及可选 PROXY 头，正常出口选择仍生效。
 
 回落在解开载体后判定，允许 none、TLS 和已认证 REALITY；未知 UUID 或不是 VLESS 的首包可回落，已认证用户的错误 flow 直接关闭。Encryption 与 VLESS fallback 互斥；REALITY 未认证时的 target 是独立的外层处理。
+
+## 客户端入口
+
+`kerlico-client` 在 VLESS 前面运行本机 SOCKS5 和 HTTP 代理，对应 Xray 的 socks、http 入站加 vless 出站。命令行、文档语法和四个本机入口键见 `crates.md` 的「客户端叶子和本机入口」。`settings` 里其余的键就是落地的 VLESS 设置，写法与落地相同。
+
+```json
+{
+  "protocol": "vless",
+  "peer": "203.0.113.5:443",
+  "settings": {
+    "id": "5783a3e7-e373-51cd-8642-c83782b807c5",
+    "encryption": "none",
+    "flow": "xtls-rprx-vision",
+    "security": "reality",
+    "serverName": "www.example.com",
+    "publicKey": "<base64url 公钥>",
+    "shortId": "12ab34cd",
+    "socks5Port": 1080,
+    "httpProxyPort": 8080
+  }
+}
+```
+
+启动时检查 `id`、`encryption`、`flow` 和 `mux`，不合法时在绑定端口之前退出。传输和安全层的组合在第一条流拨号时检查，不合法时这条流失败，SOCKS 应答 5，HTTP 应答 502。
+
+每条 SOCKS `CONNECT` 和每个 HTTP 请求调用一次 `land`，与落地共用载体、Vision、Mux 连接池和全部传输。
+
+一条 SOCKS UDP 关联按每个数据报自己的目标选择承载。规则与 `land_udp` 相同：
+
+| 数据报 | 承载 |
+| --- | --- |
+| 启用 Mux 连接池，UDP/443 而 `xudpProxyUDP443` 为 `reject` | 丢弃 |
+| 进入 Mux 连接池 | 关联唯一的 Mux UDP 会话，每个数据报带目标 |
+| Vision 发往 443，flow 没有 `-udp443` | 丢弃 |
+| 其余 Vision 数据报，以及空 flow 发往 53 和 443 以外的端口 | 关联唯一的单会话 XUDP（`v1.mux.cool:666`），每个数据报带目标 |
+| 空 flow 发往 53 或 443 | 每个目标一条独立 UDP 命令连接，最多 64 条，空闲 60 秒关闭 |
+
+Xray 一条关联只有一条链接，命令和 UDP/443 规则都只看第一个目标。第一个目标走独立 UDP 时，发往其他目标的数据报也送到第一个目标。第一个目标走 XUDP 或 Mux 时，之后发往 443 的数据报不再受 UDP/443 规则限制。Kerlico 对每个数据报单独判断，所以不会把数据报送错目标，UDP/443 的拒绝对整条关联都生效。关联只有一个目标时，两者的承载相同。
+
+XUDP 和 Mux 会话的回复来源取自帧里的地址，独立 UDP 连接的回复来源是它的目标。空数据报丢弃，与 Xray 的 SOCKS 入站相同。承载打不开时丢弃这个数据报，下一个数据报重新打开，与 Xray 的 UDP 分发器相同。承载断开后，下一个数据报同样重新打开。
+
+本机 SOCKS 入口在 Xray 里属于 cone 入站，所以 XUDP 和 Mux UDP 会话的 NEW 帧带 GlobalID。它与 Xray 的 `xudp.GetGlobalID` 算法相同：用进程启动时生成的 32 字节随机密钥做带密钥的 BLAKE3，输入是 `udp:<来源 IP>:<端口>`，IPv6 加方括号，取前 8 字节。同一个本机 UDP 套接字在重开的承载上带同一个 GlobalID。服务端无论是 Xray 还是 Kerlico，都把原会话接到新承载上，源站看到的源端口不变。
+
+`tools/verify_vless_client.py` 在 worker 上运行真实的 `kerlico-client`，对官方 Xray 服务端覆盖 raw none、raw TLS、raw REALITY + Vision、ws TLS、gRPC REALITY、XHTTP TLS h2 和 Mux 七行。每行检查 SOCKS CONNECT 的载荷往返，一条关联内多个目标的 UDP 往返和回复来源，HTTP CONNECT，同一 HTTP 连接上两个目标的 keep-alive，以及错误 UUID 不能到达源站。明文行用分路器读出每个承载的 VLESS 命令字节。另有 GlobalID 续接检查：切断承载后再次发送，Xray 服务端和 Kerlico 服务端的源站都看到同一个源端口；不带 GlobalID 的独立 UDP 连接作为对照，源端口必须改变。每项都用 Xray 客户端再跑一遍作对照。2026-11-10 在 perf-02 上 18 项全部通过，其中 Xray 客户端的对照确认了上文两处承载差异。
 
 ## 验证和未完成项
 
