@@ -189,34 +189,35 @@ impl Pool {
 #[derive(Default)]
 struct Picker {
     carriers: Mutex<Vec<Arc<Carrier>>>,
-    /// Concurrent opens wait for one dial instead of each dialing a carrier.
-    dialing: Mutex<()>,
 }
 
 type Allocated = (Arc<Carrier>, u16, Arc<Inbox>);
 
 impl Picker {
+    /// Follows Xray's `IncrementalWorkerPicker`: a new carrier joins the pool before it dials,
+    /// so opens that arrive meanwhile take sessions on it and share that one dial's outcome.
     fn session(&self, concurrency: u16, udp: bool, dial: impl FnOnce() -> Result<(Link, Link), OpenError>) -> Result<Allocated, OpenError> {
-        if let Some(found) = self.pick(concurrency, udp) {
-            return Ok(found);
+        let ((carrier, id, inbox), fresh) = {
+            let mut carriers = self.carriers.lock().expect("mux pool");
+            carriers.retain(|carrier| !carrier.closed());
+            let found = carriers.iter().find_map(|carrier| {
+                carrier.allocate(concurrency, udp).map(|(id, inbox)| (Arc::clone(carrier), id, inbox))
+            });
+            match found {
+                Some(found) => (found, false),
+                None => {
+                    let carrier = Carrier::dialing(1..CARRIER_SESSIONS + 1);
+                    let (id, inbox) = carrier.allocate(concurrency, udp).ok_or(OpenError::Transport)?;
+                    carriers.push(Arc::clone(&carrier));
+                    ((carrier, id, inbox), true)
+                }
+            }
+        };
+        if fresh {
+            carrier.connect(dial());
         }
-        let _dialing = self.dialing.lock().expect("mux pool");
-        if let Some(found) = self.pick(concurrency, udp) {
-            return Ok(found);
-        }
-        let (read, write) = dial()?;
-        let carrier = Carrier::start(read, write, 1..CARRIER_SESSIONS + 1);
-        let (id, inbox) = carrier.allocate(concurrency, udp).ok_or(OpenError::Transport)?;
-        self.carriers.lock().expect("mux pool").push(Arc::clone(&carrier));
+        carrier.dialed()?;
         Ok((carrier, id, inbox))
-    }
-
-    fn pick(&self, concurrency: u16, udp: bool) -> Option<Allocated> {
-        let mut carriers = self.carriers.lock().expect("mux pool");
-        carriers.retain(|carrier| !carrier.closed());
-        carriers.iter().find_map(|carrier| {
-            carrier.allocate(concurrency, udp).map(|(id, inbox)| (Arc::clone(carrier), id, inbox))
-        })
     }
 }
 
@@ -224,6 +225,8 @@ impl Picker {
 struct Carrier {
     outbox: Mutex<Option<MuxOutbox>>,
     state: Mutex<CarrierState>,
+    /// Wakes the opens that wait for this carrier's dial.
+    connected: Condvar,
 }
 
 struct CarrierState {
@@ -231,20 +234,45 @@ struct CarrierState {
     /// Session ids not handed out yet. The carrier is retired once none are left.
     unused: Range<u16>,
     idle_since: Instant,
+    /// The outcome of the dial that opens this carrier, `None` while it runs.
+    dial: Option<Result<(), OpenError>>,
     closed: bool,
 }
 
 impl Carrier {
-    fn start(mut read: Link, mut write: Link, ids: Range<u16>) -> Arc<Self> {
-        read.set_timeout(POLL);
-        write.set_timeout(POLL);
-        let carrier = Arc::new(Self {
-            outbox: Mutex::new(Some(MuxOutbox::new(write))),
-            state: Mutex::new(CarrierState { sessions: HashMap::new(), unused: ids, idle_since: Instant::now(), closed: false }),
-        });
-        let reader = Arc::clone(&carrier);
-        std::thread::spawn(move || reader.run(read));
+    fn start(read: Link, write: Link, ids: Range<u16>) -> Arc<Self> {
+        let carrier = Self::dialing(ids);
+        carrier.connect(Ok((read, write)));
         carrier
+    }
+
+    fn dialing(ids: Range<u16>) -> Arc<Self> {
+        Arc::new(Self {
+            outbox: Mutex::new(None),
+            state: Mutex::new(CarrierState { sessions: HashMap::new(), unused: ids, idle_since: Instant::now(), dial: None, closed: false }),
+            connected: Condvar::new(),
+        })
+    }
+
+    /// A failed dial closes the carrier under the lock `allocate` takes, so no later open joins it.
+    fn connect(self: &Arc<Self>, dialed: Result<(Link, Link), OpenError>) {
+        let outcome = dialed.map(|(mut read, mut write)| {
+            read.set_timeout(POLL);
+            write.set_timeout(POLL);
+            *self.outbox.lock().expect("mux carrier") = Some(MuxOutbox::new(write));
+            let reader = Arc::clone(self);
+            std::thread::spawn(move || reader.run(read));
+        });
+        let mut state = self.state.lock().expect("mux carrier");
+        state.closed |= outcome.is_err();
+        state.dial = Some(outcome);
+        self.connected.notify_all();
+    }
+
+    fn dialed(&self) -> Result<(), OpenError> {
+        let state = self.state.lock().expect("mux carrier");
+        let state = self.connected.wait_while(state, |state| state.dial.is_none()).expect("mux carrier");
+        state.dial.clone().expect("finished dial")
     }
 
     fn closed(&self) -> bool {

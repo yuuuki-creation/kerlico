@@ -3400,6 +3400,40 @@ mod tests {
         assert_eq!(carriers.lock().unwrap().len(), 2);
     }
 
+    #[test]
+    fn concurrent_lands_share_one_stalled_dial() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = accepted.clone();
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(1));
+                    drop(socket);
+                });
+            }
+        });
+        let mut settings = mux_landing("true");
+        settings.insert_text("security", "tls");
+        settings.insert_text("serverName", "localhost");
+        let destination = Destination::new("example.com", 80, Transport::Tcp).unwrap();
+        let start = std::time::Instant::now();
+        let opens: Vec<_> = (0..3)
+            .map(|_| {
+                let (settings, destination) = (settings.clone(), destination.clone());
+                std::thread::spawn(move || (land("127.0.0.1", port, &settings, &destination).err(), start.elapsed()))
+            })
+            .collect();
+        for open in opens {
+            let (error, elapsed) = open.join().unwrap();
+            assert_eq!(error, Some(OpenError::Transport), "a TLS handshake the server cut fails the open");
+            assert!(elapsed < Duration::from_millis(1800), "an open waited behind another open's dial: {elapsed:?}");
+        }
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1, "concurrent opens share one carrier dial");
+    }
+
     type Frames = Arc<Mutex<Vec<Vec<MuxFrame>>>>;
 
     /// An XUDP server that echoes each datagram from the address it was sent to and records
