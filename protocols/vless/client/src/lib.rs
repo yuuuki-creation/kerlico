@@ -3434,6 +3434,81 @@ mod tests {
         assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1, "concurrent opens share one carrier dial");
     }
 
+    #[test]
+    fn cut_upload_frame_finishes_while_downloads_keep_the_reader_busy() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (resume, resumed) = std::sync::mpsc::channel::<()>();
+        let (progress, uploaded) = std::sync::mpsc::channel::<usize>();
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 16 * 1024];
+            loop {
+                if let Ok((_, used)) = decode_request(&buf) {
+                    buf.drain(..used);
+                    break;
+                }
+                let n = socket.read(&mut tmp).unwrap();
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            socket.write_all(&encode_response(&Response { flow: String::new(), seed: Vec::new() }).unwrap()).unwrap();
+            let mut downloads = socket.try_clone().unwrap();
+            std::thread::spawn(move || loop {
+                let frame = MuxFrame { id: 1, status: KEEP, option: DATA, network: 0, port: 0, address: None, payload: vec![1; 64], global_id: None };
+                if downloads.write_all(&encode_mux(&frame)).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            });
+            resumed.recv().unwrap();
+            let mut total = 0;
+            loop {
+                while let Ok((frame, used)) = kerlico_vless::decode_mux(&buf) {
+                    buf.drain(..used);
+                    if frame.id == 2 {
+                        total += frame.payload.len();
+                        if progress.send(total).is_err() {
+                            return;
+                        }
+                    }
+                }
+                match socket.read(&mut tmp) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                }
+            }
+        });
+        let settings = mux_landing("true");
+        let destination = Destination::new("example.com", 80, Transport::Tcp).unwrap();
+        let downloads = land("127.0.0.1", port, &settings, &destination).unwrap();
+        let upload = land("127.0.0.1", port, &settings, &destination).unwrap();
+        assert_eq!(downloads.write_to_user(b"open"), Ok(4));
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while matches!(downloads.read_from_user(&mut buf), Ok(_) | Err(PlaneFault::Again)) {}
+        });
+        let chunk = vec![2u8; usize::from(u16::MAX)];
+        let mut accepted = 0;
+        loop {
+            match upload.write_to_user(&chunk) {
+                Ok(n) => accepted += n,
+                Err(PlaneFault::Again) => break,
+                other => panic!("upload write: {other:?}"),
+            }
+            assert!(accepted < 512 << 20, "the carrier never filled");
+        }
+        resume.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut received = 0;
+        while received < accepted {
+            received = uploaded
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap_or_else(|_| panic!("the cut frame never finished: the server got {received} of {accepted} bytes"));
+        }
+        assert_eq!(received, accepted, "the server gets exactly what the session accepted");
+    }
+
     type Frames = Arc<Mutex<Vec<Vec<MuxFrame>>>>;
 
     /// An XUDP server that echoes each datagram from the address it was sent to and records
