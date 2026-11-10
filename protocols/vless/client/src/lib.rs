@@ -2098,7 +2098,7 @@ mod tests {
         drop(flow);
         assert_eq!(bridge.load(), BridgeLoad::Active(1), "a finished flow leaves the count");
         let drain = vec![0x08, 0x01, 0x9a, 0x06, 0x01, 0x00];
-        peer.write_all(&encode_mux(&MuxFrame { id: 1, status: KEEP, option: DATA, network: 0, port: 0, address: None, payload: drain })).unwrap();
+        peer.write_all(&encode_mux(&MuxFrame { id: 1, status: KEEP, option: DATA, payload: drain, ..MuxFrame::default() })).unwrap();
         settle(BridgeLoad::Draining);
         drop(peer);
         settle(BridgeLoad::Closed);
