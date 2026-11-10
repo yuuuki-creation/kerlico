@@ -68,13 +68,30 @@ pub enum Payload {
     TwoTcp,
     InnerTls,
     Udp,
+    Udp53,
     Udp443,
 }
 
 impl Payload {
     pub fn udp(self) -> bool {
-        matches!(self, Self::Udp | Self::Udp443)
+        matches!(self, Self::Udp | Self::Udp53 | Self::Udp443)
     }
+
+    pub fn origin_port(self) -> u16 {
+        match self {
+            Self::Udp53 => 53,
+            Self::Udp443 => 443,
+            _ => 0,
+        }
+    }
+}
+
+/// What a tap between the client and the server must see: how many carriers, and the VLESS
+/// command each one opens with when the carrier is plaintext.
+#[derive(Clone, Copy)]
+pub struct Carriers {
+    pub count: usize,
+    pub command: Option<u8>,
 }
 
 pub struct Case {
@@ -87,7 +104,12 @@ pub struct Case {
     cipher: Option<&'static str>,
     pub resume: bool,
     flow: &'static str,
-    mux: bool,
+    mux: Option<Value>,
+    /// Run Xray with its default cone UDP instead of `xray.cone.disabled`.
+    pub cone: bool,
+    pub carriers: Option<Carriers>,
+    /// Every client must refuse the flow before it opens a carrier.
+    pub rejected: bool,
     pin: bool,
     tls12: bool,
     mldsa: bool,
@@ -120,7 +142,10 @@ impl Case {
             cipher: None,
             resume: false,
             flow: "",
-            mux: false,
+            mux: None,
+            cone: false,
+            carriers: None,
+            rejected: false,
             pin: false,
             tls12: false,
             mldsa: false,
@@ -143,9 +168,35 @@ impl Case {
         self
     }
 
-    fn mux(mut self) -> Self {
-        self.mux = true;
+    fn mux(self) -> Self {
+        self.mux_with(json!({"enabled": true, "concurrency": 8,
+            "xudpConcurrency": 8, "xudpProxyUDP443": "allow"}))
+    }
+
+    /// Both clients get the same Xray `mux` object.
+    fn mux_with(mut self, mux: Value) -> Self {
+        self.mux = Some(mux);
         self
+    }
+
+    fn cone(mut self) -> Self {
+        self.cone = true;
+        self
+    }
+
+    fn carriers(mut self, count: usize, command: Option<u8>) -> Self {
+        self.carriers = Some(Carriers { count, command });
+        self
+    }
+
+    /// Concurrent flows that must share one carrier whatever its security.
+    fn single_carrier(self) -> Self {
+        self.carriers(1, None)
+    }
+
+    fn rejected(mut self) -> Self {
+        self.rejected = true;
+        self.carriers(0, None)
     }
 
     fn custom_upgrade(mut self) -> Self {
@@ -248,9 +299,8 @@ impl Case {
                 "encryption": keys.encryption, "flow": self.flow},
             "streamSettings": self.xray_stream(keys, false),
         });
-        if self.mux {
-            outbound["mux"] = json!({"enabled": true, "concurrency": 8,
-                "xudpConcurrency": 8, "xudpProxyUDP443": "allow"});
+        if let Some(mux) = &self.mux {
+            outbound["mux"] = mux.clone();
         }
         json!({"log": {"loglevel": "info"}, "inbounds": [{
             "protocol": "tunnel", "listen": "127.0.0.1", "port": front,
@@ -379,7 +429,7 @@ impl Case {
             settings["encryption"] = json!(keys.encryption);
             settings["id"] = json!(ID);
             settings["flow"] = json!(self.flow);
-            settings["mux"] = json!(self.mux);
+            settings["mux"] = self.mux.clone().unwrap_or(json!(false));
         }
         match self.security {
             Security::None => {}
@@ -679,6 +729,27 @@ pub fn cases() -> Vec<Case> {
     cases.push(pinned);
     cases.push(Case::new("raw-mux-tcp-interleaved", Raw, None, TwoTcp).mux());
     cases.push(Case::new("raw-mux-xudp", Raw, None, Udp).mux());
+    cases.push(Case::new("raw-udp-cone", Raw, None, Udp).cone().carriers(1, Some(3)));
+    cases.push(Case::new("raw-udp53-cone", Raw, None, Udp53).cone().carriers(1, Some(2)));
+    for (concurrency, carriers) in [(8, 1), (1, 2)] {
+        cases.push(
+            Case::new(format!("raw-mux-tcp-concurrency-{concurrency}"), Raw, None, TwoTcp)
+                .mux_with(json!({"enabled": true, "concurrency": concurrency}))
+                .carriers(carriers, Some(3)),
+        );
+    }
+    cases.push(
+        Case::new("raw-mux-udp443-allow", Raw, None, Udp443)
+            .cone()
+            .mux_with(json!({"enabled": true, "xudpProxyUDP443": "allow"}))
+            .carriers(1, Some(3)),
+    );
+    cases.push(
+        Case::new("raw-mux-udp443-skip", Raw, None, Udp443)
+            .cone()
+            .mux_with(json!({"enabled": true, "xudpProxyUDP443": "skip"}))
+            .carriers(1, Some(2)),
+    );
     cases.push(Case::new("raw-http-auth-default", RawHttp(false), None, Tcp));
     cases.push(Case::new("raw-http-auth-tls", RawHttp(true), Tls("http/1.1"), Tcp));
     cases.push(Case::new("raw-http-auth-reality", RawHttp(true), Reality, Tcp));
@@ -712,15 +783,15 @@ pub fn cases() -> Vec<Case> {
             Grpc(false),
             security,
             TwoTcp,
-        ));
+        ).single_carrier());
         cases.push(Case::new(
             format!("grpc-{name}-tunmulti"),
             Grpc(true),
             security,
             TwoTcp,
-        ));
+        ).single_carrier());
     }
-    cases.push(Case::new("grpc-tls-sudoku", Grpc(true), Tls("h2"), TwoTcp));
+    cases.push(Case::new("grpc-tls-sudoku", Grpc(true), Tls("h2"), TwoTcp).single_carrier());
     for mask in [
         "none",
         "original",
@@ -853,4 +924,22 @@ pub fn cases() -> Vec<Case> {
     cases.push(Case::new("raw-tls-vision-xudp", Raw, Tls(""), Udp).vision(false));
     cases.push(Case::new("raw-tls-vision-udp443", Raw, Tls(""), Udp443).vision(true));
     cases
+}
+
+/// Flows Xray's outbound refuses at dispatch although it accepts the config.
+pub fn rejected_cases() -> Vec<Case> {
+    use Network::Raw;
+    use Payload::Udp443;
+    use Security::None;
+
+    vec![
+        Case::new("reject-mux-udp443-default", Raw, None, Udp443)
+            .cone()
+            .mux_with(json!({"enabled": true}))
+            .rejected(),
+        Case::new("reject-mux-udp443-reject", Raw, None, Udp443)
+            .cone()
+            .mux_with(json!({"enabled": true, "xudpProxyUDP443": "reject"}))
+            .rejected(),
+    ]
 }

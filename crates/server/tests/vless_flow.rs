@@ -196,6 +196,33 @@ fn mux_udp_retains_large_datagrams() {
 }
 
 #[test]
+fn xudp_session_reaches_each_destination() {
+    let (server, client) = settings("raw", "none", "auto");
+    let (mut inbound, port) = inbound(&server);
+    let targets = [5301, 5302].map(|port| Destination::new("example.test", port, Transport::Udp).unwrap());
+    let session = landing_vless::land_udp("127.0.0.1", port, &client, &targets[0]).unwrap();
+    let mut streams = Vec::new();
+    let mut buf = [0; 64];
+    for target in &targets {
+        session.send_to(target, target.port().to_string().as_bytes()).unwrap();
+        let flow = wait_handoff(inbound.as_mut());
+        assert_eq!(flow.destination(), target, "one handoff per XUDP destination");
+        let stream = flow.stream();
+        receive(stream.as_ref(), target.port().to_string().as_bytes(), true);
+        send(stream.as_ref(), b"reply", true);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (n, source) = loop {
+            match session.recv_from(&mut buf) {
+                Err(PlaneFault::Again) if Instant::now() < deadline => {}
+                received => break received.unwrap(),
+            }
+        };
+        assert_eq!((&buf[..n], &source), (&b"reply"[..], target));
+        streams.push(stream);
+    }
+}
+
+#[test]
 fn mux_tcp_transfers_more_than_one_frame() {
     let (server, mut client) = settings("raw", "none", "auto");
     client.insert_text("mux", "true");

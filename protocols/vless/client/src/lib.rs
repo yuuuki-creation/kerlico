@@ -1,3 +1,5 @@
+mod mux;
+
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -32,27 +34,124 @@ pub fn land(
     settings: &Settings,
     destination: &Destination,
 ) -> Result<Box<dyn InboundStream>, OpenError> {
-    match open(host, port, settings, destination, false)? {
-        Opened::Forward(stream) => Ok(stream),
-        Opened::Reverse(bridge) => Ok(Box::new(Bridge::from_reverse(bridge))),
+    Ok(match open(host, port, settings, destination)? {
+        Opened::Relay(relay) => Box::new(relay),
+        Opened::Mux(session) => Box::new(session),
+        Opened::Reverse(bridge) => Box::new(Bridge::from_reverse(bridge)),
+    })
+}
+
+/// Opens a UDP flow whose datagrams may each go to a different destination, as Xray carries
+/// a SOCKS or TUN UDP association.
+pub fn land_udp(host: &str, port: u16, settings: &Settings, first: &Destination) -> Result<UdpSession, OpenError> {
+    if first.transport() != Transport::Udp {
+        return Err(OpenError::Settings);
+    }
+    let carrier = match open(host, port, settings, first)? {
+        Opened::Relay(relay) => UdpCarrier::Plain(relay),
+        Opened::Mux(session) => UdpCarrier::Mux(session),
+        Opened::Reverse(_) => return Err(OpenError::Settings),
+    };
+    Ok(UdpSession { first: first.clone(), carrier })
+}
+
+/// Datagrams to many destinations on one landing UDP flow. An XUDP or Mux session names the
+/// destination of every datagram. The plain UDP command, which Xray keeps for ports 53 and
+/// 443 without Vision or Mux, reaches only the first destination.
+pub struct UdpSession {
+    first: Destination,
+    carrier: UdpCarrier,
+}
+
+enum UdpCarrier {
+    Plain(Relay),
+    Mux(mux::Session),
+}
+
+impl UdpSession {
+    pub fn send_to(&self, destination: &Destination, datagram: &[u8]) -> Result<usize, PlaneFault> {
+        match &self.carrier {
+            UdpCarrier::Mux(session) => {
+                let target = mux::target(destination).map_err(|_| PlaneFault::Transport)?;
+                session.send_datagram(datagram, Some(&target))
+            }
+            UdpCarrier::Plain(relay) if destination.host() == self.first.host() && destination.port() == self.first.port() => {
+                relay.write_to_user(datagram)
+            }
+            UdpCarrier::Plain(_) => Err(PlaneFault::Transport),
+        }
+    }
+
+    /// The source is the first destination when the server names none.
+    pub fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, Destination), PlaneFault> {
+        match &self.carrier {
+            UdpCarrier::Mux(session) => {
+                let (n, source) = session.recv_datagram(buf)?;
+                let source = source.and_then(|(address, port)| reverse_destination(Some(&address), port, 2).ok());
+                Ok((n, source.unwrap_or_else(|| self.first.clone())))
+            }
+            UdpCarrier::Plain(relay) => Ok((relay.read_from_user(buf)?, self.first.clone())),
+        }
     }
 }
 
 /// Accepts reverse requests on the same VLESS carriers used by `land`.
 pub fn reverse_bridge(host: &str, port: u16, settings: &Settings) -> Result<ReverseBridge, OpenError> {
     let destination = Destination::new("v1.rvs.cool", 1, Transport::Tcp).map_err(|_| OpenError::Settings)?;
-    match open(host, port, settings, &destination, true)? {
-        Opened::Reverse(bridge) => Ok(bridge),
-        Opened::Forward(_) => unreachable!("reverse command"),
-    }
+    let (read, write) = dial(host, port, settings, Flow::parse(settings)?, Command::Reverse, &destination)?;
+    Ok(ReverseBridge::new(read, write, Vec::new()))
 }
 
 enum Opened {
-    Forward(Box<dyn InboundStream>),
+    Relay(Relay),
+    Mux(mux::Session),
     Reverse(ReverseBridge),
 }
 
-fn open(host: &str, port: u16, settings: &Settings, destination: &Destination, force_reverse: bool) -> Result<Opened, OpenError> {
+fn open(host: &str, port: u16, settings: &Settings, destination: &Destination) -> Result<Opened, OpenError> {
+    let flow = Flow::parse(settings)?;
+    let connect = |command| dial(host, port, settings, flow, command, destination);
+    if settings.text("reverse").is_ok_and(|text| !text.is_empty() && text != "false") {
+        let (read, write) = connect(Command::Reverse)?;
+        return Ok(Opened::Reverse(ReverseBridge::new(read, write, Vec::new())));
+    }
+    let policy = mux::Policy::parse(settings, settings.text("network").ok() == Some("xdrive"))?;
+    Ok(match mux::route(flow, policy, destination)? {
+        mux::Route::Direct(command) => {
+            let (read, write) = connect(command)?;
+            Opened::Relay(Relay::new(read, write, command == Command::Udp))
+        }
+        mux::Route::Xudp => Opened::Mux(mux::Session::xudp(connect(Command::Mux)?, destination)?),
+        mux::Route::Pooled(kind, concurrency) => Opened::Mux(
+            mux::pool(host, port, settings)?.session(kind, concurrency, destination, || connect(Command::Mux))?,
+        ),
+    })
+}
+
+/// The landing's VLESS flow. The `-udp443` suffix stays local: it only lets Vision send UDP/443.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flow {
+    Plain,
+    Vision { udp443: bool },
+}
+
+impl Flow {
+    fn parse(settings: &Settings) -> Result<Self, OpenError> {
+        match settings.text("flow") {
+            Err(_) | Ok("") => Ok(Self::Plain),
+            Ok("xtls-rprx-vision") => Ok(Self::Vision { udp443: false }),
+            Ok("xtls-rprx-vision-udp443") => Ok(Self::Vision { udp443: true }),
+            Ok(_) => Err(OpenError::Settings),
+        }
+    }
+
+    fn vision(self) -> bool {
+        matches!(self, Self::Vision { .. })
+    }
+}
+
+/// Dials one VLESS carrier and sends its request. Vision wraps the carrier when the flow asks.
+fn dial(host: &str, port: u16, settings: &Settings, flow: Flow, command: Command, destination: &Destination) -> Result<(Link, Link), OpenError> {
     let encryption = settings.text("encryption")?;
     let native = if encryption == "none" {
         None
@@ -103,54 +202,25 @@ fn open(host: &str, port: u16, settings: &Settings, destination: &Destination, f
         Ok("tls") => true,
         Ok(_) => return Err(OpenError::Settings),
     };
-    let configured_flow = match settings.text("flow") {
-        Err(_) => String::new(),
-        Ok(flow) => match flow {
-            "" | "xtls-rprx-vision" | "xtls-rprx-vision-udp443" => flow.to_string(),
-            _ => return Err(OpenError::Settings),
-        },
-    };
     let id = parse_id(settings.text("id")?).map_err(|_| OpenError::Settings)?;
     let address = parse_addr(destination.host())?;
-    let command = match destination.transport() {
-        Transport::Tcp => Command::Tcp,
-        Transport::Udp => Command::Udp,
-    };
-    let bridge = force_reverse || settings.text("reverse").is_ok_and(|text| !text.is_empty() && text != "false");
-    let vision = configured_flow.starts_with("xtls-rprx-vision");
+    let vision = flow.vision();
     if xdrive && (native.is_none() || vision) { return Err(OpenError::Settings); }
     if hysteria && (!security || settings.text("version").unwrap_or("2") != "2") { return Err(OpenError::Settings); }
-    let flow = if vision { "xtls-rprx-vision".to_string() } else { String::new() };
-    if vision && destination.transport() == Transport::Udp && destination.port() == 443 && configured_flow != "xtls-rprx-vision-udp443" {
-        return Err(OpenError::Settings);
-    }
     if vision && native.is_none() && !(security || reality.is_some()) {
         return Err(OpenError::Settings);
     }
     if vision && native.is_none() && (upgrade || grpc || http || xhttp || hysteria || raw_http.is_some()) {
         return Err(OpenError::Settings);
     }
-    let mux = !bridge && (xdrive || settings.text("mux").unwrap_or("false") == "true" || (vision && command == Command::Udp));
-    if mux && vision && command == Command::Tcp {
-        return Err(OpenError::Settings);
-    }
+    // Mux and Reverse requests end at the command, so the target below only reaches the wire for TCP and UDP.
     let request = encode_request(&Request {
         id,
-        flow: flow.clone(),
+        flow: if vision { "xtls-rprx-vision".to_string() } else { String::new() },
         seed: Vec::new(),
-        command: if bridge {
-            Command::Reverse
-        } else if mux {
-            Command::Mux
-        } else {
-            command
-        },
-        port: if bridge { 0 } else { destination.port() },
-        address: if bridge {
-            Addr::Domain("v1.rvs.cool".to_string())
-        } else {
-            address.clone()
-        },
+        command,
+        port: destination.port(),
+        address,
     })
     .map_err(|_| OpenError::Settings)?;
     let (mut read, mut write) = if xdrive {
@@ -284,15 +354,7 @@ fn open(host: &str, port: u16, settings: &Settings, destination: &Destination, f
         read = Link::Vision(Box::new(reader));
         write = Link::Vision(Box::new(writer));
     }
-    if bridge {
-        return Ok(Opened::Reverse(ReverseBridge::new(read, write, Vec::new())));
-    }
-    let (read, write) = wrap_mux(read, write, mux, destination.port(), address, if command == Command::Udp { 2 } else { 1 });
-    Ok(Opened::Forward(Box::new(Relay {
-        read: Mutex::new(read), write: Mutex::new(write),
-        udp: destination.transport() == Transport::Udp,
-        pending: Mutex::new(Vec::new()), staged: Mutex::new(Vec::new()), unsent: Mutex::new(Vec::new()),
-    })))
+    Ok((read, write))
 }
 
 struct GrpcChannel {
@@ -526,7 +588,6 @@ enum Link {
     Kcp(Arc<KcpIo>),
     Xhttp(Arc<XhttpClient>),
     Chunks(Arc<ChunkPair>),
-    Mux(Arc<ClientMux>),
     EncRead(Box<EncReader<Box<Link>>>),
     EncWrite(Box<EncWriter<Box<Link>>>),
     RealityRead(AppReader<Box<Link>>),
@@ -535,110 +596,6 @@ enum Link {
     Response(Box<kerlico_vless::ResponseReader<Link>>),
     Vision(Box<kerlico_vless::VisionIo<Link>>),
     H2(Arc<H2Stream<Link>>),
-}
-
-struct ClientMux {
-    read: Mutex<Link>,
-    write: Mutex<kerlico_vless::MuxWriter<Link>>,
-    opened: Mutex<bool>,
-    closed: std::sync::atomic::AtomicBool,
-    pending: Mutex<Vec<u8>>,
-    plain: Mutex<Vec<u8>>,
-    port: u16,
-    address: Addr,
-    network: u8,
-}
-
-fn wrap_mux(read: Link, write: Link, mux: bool, port: u16, address: Addr, network: u8) -> (Link, Link) {
-    if !mux {
-        return (read, write);
-    }
-    let shared = Arc::new(ClientMux {
-        read: Mutex::new(read),
-        write: Mutex::new(kerlico_vless::MuxWriter::new(write)),
-        opened: Mutex::new(false),
-        closed: std::sync::atomic::AtomicBool::new(false),
-        pending: Mutex::new(Vec::new()),
-        plain: Mutex::new(Vec::new()),
-        port,
-        address,
-        network,
-    });
-    (Link::Mux(shared.clone()), Link::Mux(shared))
-}
-
-impl ClientMux {
-    fn pull(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-        loop {
-            {
-                let mut plain = self.plain.lock().expect("mux");
-                if !plain.is_empty() {
-                    let n = plain.len().min(buf.len());
-                    buf[..n].copy_from_slice(&plain[..n]);
-                    plain.drain(..n);
-                    return Ok(n);
-                }
-            }
-            if self.closed.load(std::sync::atomic::Ordering::Relaxed) { return Ok(0); }
-            self.write.lock().expect("mux").flush()?;
-            let mut tmp = [0u8; 1024];
-            let n = self.read.lock().expect("mux").read(&mut tmp)?;
-            if n == 0 {
-                return Ok(0);
-            }
-            let mut pending = self.pending.lock().expect("mux");
-            pending.extend_from_slice(&tmp[..n]);
-            loop {
-                match decode_mux(&pending) {
-                    Ok((frame, used)) => {
-                        pending.drain(..used);
-                        if frame.id != if self.network == 2 { 0 } else { 1 } {
-                            continue;
-                        }
-                        if frame.status == kerlico_vless::END {
-                            self.closed.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        if !frame.payload.is_empty() {
-                            let payload = if self.network == 2 {
-                                encode_udp(&frame.payload).map_err(|_| std::io::Error::other("mux datagram"))?
-                            } else {
-                                frame.payload
-                            };
-                            self.plain.lock().expect("mux").extend(payload);
-                        }
-                    }
-                    Err(kerlico_vless::HeaderError::Short) => break,
-                    Err(kerlico_vless::HeaderError::Bad) => return Err(std::io::Error::other("mux")),
-                }
-            }
-        }
-    }
-
-    fn push(&self, buf: &[u8]) -> std::io::Result<usize> {
-        let payload = if self.network == 2 {
-            let (packet, used) = decode_udp(buf).map_err(|_| std::io::Error::other("mux datagram"))?;
-            if used != buf.len() {
-                return Err(std::io::Error::other("mux datagram"));
-            }
-            packet
-        } else {
-            &buf[..buf.len().min(u16::MAX as usize)]
-        };
-        let mut opened = self.opened.lock().expect("mux");
-        let frame = MuxFrame {
-            id: if self.network == 2 { 0 } else { 1 },
-            status: if *opened { KEEP } else { NEW },
-            option: DATA,
-            network: self.network,
-            port: self.port,
-            address: if *opened { None } else { Some(self.address.clone()) },
-            payload: payload.to_vec(),
-            global_id: None,
-        };
-        self.write.lock().expect("mux").send(&frame)?;
-        *opened = true;
-        Ok(if self.network == 2 { buf.len() } else { payload.len() })
-    }
 }
 
 struct HttpLink { read: Link, write: Link, h2: bool }
@@ -740,31 +697,43 @@ struct XhttpEndpoint {
     pool: kerlico_vless::xmux::XmuxPool<XhttpCarrier>,
 }
 
-struct XhttpPoolEntry {
+/// State that `land` calls with the same peer, settings and runtime owner share.
+struct Shared<T> {
     host: String,
     port: u16,
     settings: Settings,
     owner: Option<std::sync::Weak<kerlico_shared::runtime::RuntimeContext>>,
-    endpoint: Arc<XhttpEndpoint>,
+    value: Arc<T>,
+}
+
+/// Entries die with their runtime owner, and the least recently used beyond 32 are dropped.
+fn shared<T>(
+    cache: &OnceLock<Mutex<VecDeque<Shared<T>>>>,
+    host: &str,
+    port: u16,
+    settings: &Settings,
+    make: impl FnOnce() -> Result<T, OpenError>,
+) -> Result<Arc<T>, OpenError> {
+    let detached = settings.without_runtime();
+    let owner = settings.runtime().map(Arc::downgrade);
+    let mut entries = cache.get_or_init(Mutex::default).lock().expect("landing cache");
+    entries.retain(|entry| entry.owner.as_ref().is_none_or(|owner| owner.strong_count() != 0));
+    if let Some(index) = entries.iter().position(|entry| entry.host == host && entry.port == port && entry.settings == detached
+        && match (&entry.owner, &owner) { (None, None) => true, (Some(a), Some(b)) => a.ptr_eq(b), _ => false }) {
+        let entry = entries.remove(index).expect("landing cache");
+        let value = entry.value.clone();
+        entries.push_back(entry);
+        return Ok(value);
+    }
+    let value = Arc::new(make()?);
+    entries.push_back(Shared { host: host.into(), port, settings: detached, owner, value: value.clone() });
+    if entries.len() > 32 { entries.pop_front(); }
+    Ok(value)
 }
 
 fn xhttp_endpoint(host: &str, port: u16, settings: &Settings, reality: Option<([u8; 32], [u8; 8])>, tls: bool, allow_plain: bool) -> Result<Arc<XhttpEndpoint>, OpenError> {
-    static ENDPOINTS: OnceLock<Mutex<VecDeque<XhttpPoolEntry>>> = OnceLock::new();
-    let detached = settings.without_runtime();
-    let owner = settings.runtime().map(Arc::downgrade);
-    let mut endpoints = ENDPOINTS.get_or_init(Mutex::default).lock().expect("XHTTP pools");
-    endpoints.retain(|entry| entry.owner.as_ref().is_none_or(|owner| owner.strong_count() != 0));
-    if let Some(index) = endpoints.iter().position(|entry| entry.host == host && entry.port == port && entry.settings == detached
-        && match (&entry.owner, &owner) { (None, None) => true, (Some(a), Some(b)) => a.ptr_eq(b), _ => false }) {
-        let entry = endpoints.remove(index).expect("XHTTP pool");
-        let endpoint = entry.endpoint.clone();
-        endpoints.push_back(entry);
-        return Ok(endpoint);
-    }
-    let endpoint = Arc::new(XhttpEndpoint::new(host, port, settings, reality, tls, allow_plain)?);
-    endpoints.push_back(XhttpPoolEntry { host: host.into(), port, settings: detached, owner, endpoint: endpoint.clone() });
-    if endpoints.len() > 32 { endpoints.pop_front(); }
-    Ok(endpoint)
+    static ENDPOINTS: OnceLock<Mutex<VecDeque<Shared<XhttpEndpoint>>>> = OnceLock::new();
+    shared(&ENDPOINTS, host, port, settings, || XhttpEndpoint::new(host, port, settings, reality, tls, allow_plain))
 }
 
 impl XhttpEndpoint {
@@ -1283,7 +1252,6 @@ impl Link {
             Self::Kcp(kcp) => kcp.set_timeout(timeout),
             Self::Xhttp(_) => {}
             Self::Chunks(_) => {}
-            Self::Mux(mux) => mux.read.lock().expect("mux").set_timeout(timeout),
             Self::EncRead(enc) => enc.inner_mut().set_timeout(timeout),
             Self::EncWrite(enc) => enc.inner_mut().set_timeout(timeout),
             Self::RealityRead(link) => link.inner_mut().set_timeout(timeout),
@@ -1317,7 +1285,6 @@ impl Read for Link {
             Self::Kcp(kcp) => kcp.pull(buf),
             Self::Xhttp(http) => http.pull(buf),
             Self::Chunks(chunks) => chunks.pull(buf),
-            Self::Mux(mux) => mux.pull(buf),
             Self::EncRead(enc) => enc.read(buf),
             Self::EncWrite(_) => Err(std::io::Error::other("vlessenc")),
             Self::RealityRead(link) => link.read(buf),
@@ -1350,7 +1317,6 @@ impl Write for Link {
             Self::Kcp(kcp) => kcp.push(buf),
             Self::Xhttp(http) => http.push(buf),
             Self::Chunks(chunks) => chunks.push(buf),
-            Self::Mux(mux) => mux.push(buf),
             Self::EncRead(_) => Err(std::io::Error::other("vlessenc")),
             Self::EncWrite(enc) => enc.write(buf),
             Self::RealityRead(_) => Err(std::io::Error::other("reality")),
@@ -1381,7 +1347,6 @@ impl Write for Link {
             Self::Kcp(_) => Ok(()),
             Self::Xhttp(http) => http.flush(),
             Self::Chunks(chunks) => chunks.flush(),
-            Self::Mux(mux) => mux.write.lock().expect("mux").flush(),
             Self::EncRead(_) => Ok(()),
             Self::EncWrite(enc) => enc.flush(),
             Self::RealityRead(_) => Ok(()),
@@ -1474,7 +1439,7 @@ impl ReverseBridge {
         read.set_timeout(Duration::from_millis(200));
         write.set_timeout(Duration::from_millis(200));
         let shared = Arc::new(ReverseShared {
-            writer: Mutex::new(Some(ReverseWriter { mux: kerlico_vless::MuxWriter::new(write), ends: std::collections::VecDeque::new() })),
+            writer: Mutex::new(Some(MuxOutbox::new(write))),
             sessions: Mutex::new(std::collections::HashMap::new()),
             control: Mutex::new(PortalControl { sessions: std::collections::HashSet::new(), draining: false }),
             queued: std::sync::atomic::AtomicUsize::new(0),
@@ -1506,12 +1471,21 @@ impl Drop for ReverseBridge {
     fn drop(&mut self) { self.shared.close_all(); }
 }
 
-struct ReverseWriter {
+/// The write half of a Mux carrier. END frames wait here until the carrier can take them.
+struct MuxOutbox {
     mux: kerlico_vless::MuxWriter<Link>,
     ends: std::collections::VecDeque<MuxFrame>,
 }
 
-impl ReverseWriter {
+impl MuxOutbox {
+    fn new(write: Link) -> Self {
+        Self { mux: kerlico_vless::MuxWriter::new(write), ends: std::collections::VecDeque::new() }
+    }
+
+    fn send(&mut self, frame: &MuxFrame) -> std::io::Result<()> {
+        self.flush().and_then(|_| self.mux.send(frame))
+    }
+
     fn flush(&mut self) -> std::io::Result<()> {
         while let Some(frame) = self.ends.front() {
             self.mux.send(frame)?;
@@ -1522,7 +1496,7 @@ impl ReverseWriter {
 
     fn end(&mut self, id: u16, failed: bool) -> std::io::Result<()> {
         if !self.ends.iter().any(|frame| frame.id == id) {
-            if self.ends.len() >= REVERSE_SESSION_LIMIT { return Err(std::io::Error::other("reverse close queue full")); }
+            if self.ends.len() >= REVERSE_SESSION_LIMIT { return Err(std::io::Error::other("mux close queue full")); }
             self.ends.push_back(MuxFrame { id, status: kerlico_vless::END, option: if failed { 2 } else { 0 }, network: 0, port: 0, address: None, payload: Vec::new(), global_id: None });
         }
         self.flush()
@@ -1535,7 +1509,7 @@ struct ReverseSession {
 }
 
 struct ReverseShared {
-    writer: Mutex<Option<ReverseWriter>>,
+    writer: Mutex<Option<MuxOutbox>>,
     sessions: Mutex<std::collections::HashMap<u16, ReverseSession>>,
     control: Mutex<PortalControl>,
     queued: std::sync::atomic::AtomicUsize,
@@ -1561,7 +1535,7 @@ impl ReverseShared {
         let result = {
             let mut writer = self.writer.lock().expect("reverse");
             let writer = writer.as_mut().ok_or(std::io::ErrorKind::BrokenPipe)?;
-            writer.flush().and_then(|_| writer.mux.send(frame))
+            writer.send(frame)
         };
         if result.as_ref().is_err_and(|error| !retry_io(error)) { self.close_all(); }
         result
@@ -1886,6 +1860,13 @@ impl InboundStream for Relay {
 }
 
 impl Relay {
+    fn new(read: Link, write: Link, udp: bool) -> Self {
+        Self {
+            read: Mutex::new(read), write: Mutex::new(write), udp,
+            pending: Mutex::new(Vec::new()), staged: Mutex::new(Vec::new()), unsent: Mutex::new(Vec::new()),
+        }
+    }
+
     fn finish_unsent(&self) -> Result<bool, PlaneFault> {
         let mut unsent = self.unsent.lock().expect("unsent");
         if unsent.is_empty() {
@@ -3149,5 +3130,196 @@ mod tests {
         assert_eq!(stream.read_from_user(&mut buf).unwrap(), 2);
         assert_eq!(&buf, b"ok");
         server.join().unwrap();
+    }
+
+    fn mux_policy(text: &str, xdrive: bool) -> Result<Option<mux::Policy>, OpenError> {
+        let mut settings = Settings::default();
+        settings.insert_text("mux", text);
+        mux::Policy::parse(&settings, xdrive)
+    }
+
+    #[test]
+    fn routes_follow_the_xray_outbound() {
+        use mux::{PoolKind, Route::*};
+        let udp = |port| Destination::new("example.com", port, Transport::Udp).unwrap();
+        let tcp = Destination::new("example.com", 80, Transport::Tcp).unwrap();
+        let policy = |text| mux_policy(text, false).unwrap();
+        let plain = Flow::Plain;
+        let vision = Flow::Vision { udp443: false };
+        let cases = [
+            (plain, None, tcp.clone(), Ok(Direct(Command::Tcp))),
+            (plain, None, udp(8000), Ok(Xudp)),
+            (plain, None, udp(53), Ok(Direct(Command::Udp))),
+            (plain, None, udp(443), Ok(Direct(Command::Udp))),
+            (vision, None, udp(53), Ok(Xudp)),
+            (vision, None, udp(443), Err(OpenError::Settings)),
+            (Flow::Vision { udp443: true }, None, udp(443), Ok(Xudp)),
+            (plain, policy("false"), udp(8000), Ok(Xudp)),
+            (plain, policy("true"), tcp.clone(), Ok(Pooled(PoolKind::Mux, 8))),
+            (plain, policy("true"), udp(53), Ok(Pooled(PoolKind::Mux, 8))),
+            (plain, policy("true"), udp(443), Err(OpenError::Settings)),
+            (plain, policy(r#"{"enabled":true,"xudpProxyUDP443":"reject"}"#), udp(443), Err(OpenError::Settings)),
+            (plain, policy(r#"{"enabled":true,"xudpProxyUDP443":"allow"}"#), udp(443), Ok(Pooled(PoolKind::Mux, 8))),
+            (plain, policy(r#"{"enabled":true,"xudpProxyUDP443":"skip"}"#), udp(443), Ok(Direct(Command::Udp))),
+            (plain, policy(r#"{"enabled":true,"concurrency":3,"xudpConcurrency":5}"#), udp(80), Ok(Pooled(PoolKind::Xudp, 5))),
+            (plain, policy(r#"{"enabled":true,"concurrency":3,"xudpConcurrency":5}"#), tcp.clone(), Ok(Pooled(PoolKind::Mux, 3))),
+            (plain, policy(r#"{"enabled":true,"xudpConcurrency":-1}"#), udp(80), Ok(Xudp)),
+            (plain, policy(r#"{"enabled":true,"concurrency":-1}"#), tcp.clone(), Ok(Direct(Command::Tcp))),
+            (plain, policy(r#"{"enabled":true,"concurrency":-1}"#), udp(80), Ok(Xudp)),
+            (plain, policy(r#"{"enabled":true,"concurrency":-1}"#), udp(443), Err(OpenError::Settings)),
+            (plain, policy(r#"{"enabled":true,"concurrency":-1,"xudpConcurrency":2}"#), udp(80), Ok(Pooled(PoolKind::Xudp, 2))),
+            (vision, policy("true"), tcp.clone(), Err(OpenError::Settings)),
+            (vision, policy(r#"{"enabled":true,"concurrency":-1}"#), tcp.clone(), Ok(Direct(Command::Tcp))),
+            (vision, policy(r#"{"enabled":true,"xudpProxyUDP443":"allow"}"#), udp(443), Ok(Pooled(PoolKind::Mux, 8))),
+            (vision, policy(r#"{"enabled":true,"xudpProxyUDP443":"skip"}"#), udp(443), Err(OpenError::Settings)),
+        ];
+        for (index, (flow, policy, destination, expected)) in cases.into_iter().enumerate() {
+            assert_eq!(mux::route(flow, policy, &destination), expected, "route case {index}");
+        }
+    }
+
+    #[test]
+    fn mux_settings_follow_the_xray_config() {
+        assert_eq!(mux_policy("false", false), Ok(None));
+        assert_eq!(mux_policy(r#"{"concurrency":4}"#, false), Ok(None), "enabled defaults to false");
+        assert!(mux_policy(r#"{"enabled":true,"xudpProxyUDP443":"drop"}"#, false).is_err());
+        assert!(mux_policy(r#"{"enabled":true,"concurrency":40000}"#, false).is_err(), "concurrency is an int16");
+        assert!(mux_policy("yes", false).is_err());
+        assert!(mux_policy("false", true).unwrap().is_some(), "XDrive always uses Mux");
+        for bypass in [
+            r#"{"enabled":true,"concurrency":-1}"#,
+            r#"{"enabled":true,"xudpConcurrency":-1}"#,
+            r#"{"enabled":true,"xudpProxyUDP443":"skip"}"#,
+        ] {
+            assert!(mux_policy(bypass, true).is_err(), "XDrive refuses {bypass}");
+        }
+    }
+
+    type Carriers = Arc<Mutex<Vec<Vec<u16>>>>;
+
+    /// A VLESS Mux server that echoes every session and records the session ids each carrier
+    /// opens. A session that sends `close` takes its carrier down.
+    fn mux_echo_server() -> (u16, Carriers) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let carriers = Carriers::default();
+        let seen = carriers.clone();
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { return };
+                let index = {
+                    let mut carriers = seen.lock().unwrap();
+                    carriers.push(Vec::new());
+                    carriers.len() - 1
+                };
+                let seen = seen.clone();
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    loop {
+                        if let Ok((request, used)) = decode_request(&buf) {
+                            assert_eq!(request.command, Command::Mux);
+                            buf.drain(..used);
+                            break;
+                        }
+                        match socket.read(&mut tmp) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                    socket.write_all(&encode_response(&Response { flow: String::new(), seed: Vec::new() }).unwrap()).unwrap();
+                    loop {
+                        while let Ok((frame, used)) = kerlico_vless::decode_mux(&buf) {
+                            buf.drain(..used);
+                            if frame.status == NEW {
+                                seen.lock().unwrap()[index].push(frame.id);
+                            }
+                            if frame.payload == b"close" {
+                                return;
+                            }
+                            if frame.payload.is_empty() {
+                                continue;
+                            }
+                            let reply = MuxFrame { id: frame.id, status: KEEP, option: DATA, network: 0, port: 0, address: None, payload: frame.payload, global_id: None };
+                            if socket.write_all(&encode_mux(&reply)).is_err() {
+                                return;
+                            }
+                        }
+                        match socket.read(&mut tmp) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                });
+            }
+        });
+        (port, carriers)
+    }
+
+    fn mux_landing(mux: &str) -> Settings {
+        let mut settings = Settings::default();
+        settings.insert_text("encryption", "none");
+        settings.insert_text("id", "mux-pool");
+        settings.insert_text("mux", mux);
+        settings
+    }
+
+    fn echo(stream: &dyn InboundStream, payload: &[u8]) {
+        assert_eq!(stream.write_to_user(payload), Ok(payload.len()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut received = Vec::new();
+        let mut buf = [0u8; 1024];
+        while received.len() < payload.len() {
+            match stream.read_from_user(&mut buf) {
+                Ok(n) => received.extend_from_slice(&buf[..n]),
+                Err(PlaneFault::Again) if std::time::Instant::now() < deadline => {}
+                other => panic!("echo read: {other:?}"),
+            }
+        }
+        assert_eq!(received, payload);
+    }
+
+    #[test]
+    fn concurrent_lands_share_a_carrier_up_to_the_concurrency() {
+        let (port, carriers) = mux_echo_server();
+        let settings = mux_landing(r#"{"enabled":true,"concurrency":2}"#);
+        let destination = Destination::new("example.com", 80, Transport::Tcp).unwrap();
+        let flows: Vec<_> = (0..3).map(|_| land("127.0.0.1", port, &settings, &destination).unwrap()).collect();
+        for (index, flow) in flows.iter().enumerate() {
+            echo(flow.as_ref(), format!("flow {index}").as_bytes());
+        }
+        assert_eq!(*carriers.lock().unwrap(), vec![vec![1, 2], vec![1]]);
+    }
+
+    #[test]
+    fn carrier_retires_after_128_sessions() {
+        let (port, carriers) = mux_echo_server();
+        let settings = mux_landing("true");
+        let destination = Destination::new("example.com", 80, Transport::Tcp).unwrap();
+        for _ in 0..129 {
+            echo(land("127.0.0.1", port, &settings, &destination).unwrap().as_ref(), b"ping");
+        }
+        assert_eq!(*carriers.lock().unwrap(), vec![(1..=128).collect::<Vec<u16>>(), vec![1]]);
+    }
+
+    #[test]
+    fn closed_carrier_is_replaced_on_the_next_land() {
+        let (port, carriers) = mux_echo_server();
+        let settings = mux_landing("true");
+        let destination = Destination::new("example.com", 80, Transport::Tcp).unwrap();
+        let first = land("127.0.0.1", port, &settings, &destination).unwrap();
+        echo(first.as_ref(), b"before");
+        first.write_to_user(b"close").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut buf = [0u8; 16];
+        loop {
+            match first.read_from_user(&mut buf) {
+                Err(PlaneFault::Closed) => break,
+                Err(PlaneFault::Again) if std::time::Instant::now() < deadline => {}
+                other => panic!("session on a closed carrier: {other:?}"),
+            }
+        }
+        echo(land("127.0.0.1", port, &settings, &destination).unwrap().as_ref(), b"after");
+        assert_eq!(carriers.lock().unwrap().len(), 2);
     }
 }
