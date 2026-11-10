@@ -1,6 +1,9 @@
 use kerlico_shared::{
-    DataPlane, Destination, InboundStream, OpenError, Packet, PeerAddr, PlaneFault, Settings,
+    ClientEntry, DataPlane, Destination, InboundStream, OpenError, Packet, PeerAddr, PlaneFault,
+    Settings,
 };
+
+pub const CLIENT: ClientEntry = ClientEntry::Tunnel(connect);
 
 struct OpenvpnPlane;
 

@@ -1,44 +1,40 @@
+use kerlico_client::{Client, ClientConfig, Error, Running};
+
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let path = args.next();
-    if path.as_deref() == Some("--mieru-proxy") {
-        let Some(path) = args.next().filter(|_| args.next().is_none()) else {
-            eprintln!("用法：kerlico-client --mieru-proxy <配置文件>");
-            std::process::exit(1);
-        };
-        run_mieru(&path);
-        return;
-    }
-    if path.is_none() {
-        for id in kerlico_client::Client::compiled() {
-            println!("{id}");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (path, pinned) = match args.as_slice() {
+        [] => {
+            for id in Client::compiled() {
+                println!("{id}");
+            }
+            return;
         }
-        return;
-    }
-    let text = match path {
-        Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
-        None => String::new(),
+        // Kept so mieru documents and tools/verify_mieru.py keep their command line.
+        [flag, path] if flag == "--mieru-proxy" => (path, Some("mieru")),
+        [path] if !path.starts_with("--") => (path, None),
+        _ => fail("用法：kerlico-client [--mieru-proxy] <配置文件>"),
     };
-    let _ = kerlico_client::ClientConfig::parse(&text);
-    for id in kerlico_client::Client::compiled() {
-        println!("{id}");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        fail("无法读取配置文件");
+    };
+    let config = match ClientConfig::parse(&text, pinned) {
+        Ok(config) => config,
+        Err(Error::NotCompiled(id)) => fail(&format!("当前构建未包含 {id} 客户端")),
+        Err(_) => fail("配置无效"),
+    };
+    let id = config.id();
+    match Client::start(config) {
+        Ok(Running::Proxy(proxy)) => {
+            if proxy.wait().is_err() {
+                fail(&format!("{id} 本机入口运行失败"));
+            }
+        }
+        Ok(Running::Tunnel(_)) => fail(&format!("{id} 是隧道协议，命令行没有本机入口")),
+        Err(error) => fail(&format!("{id} 启动失败：{error:?}")),
     }
 }
 
-#[cfg(feature = "mieru")]
-fn run_mieru(path: &str) {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|_| {
-        eprintln!("无法读取 mieru 配置文件");
-        std::process::exit(1);
-    });
-    if let Err(error) = mieru::run_proxy(&text) {
-        eprintln!("mieru 启动或运行失败：{error:?}");
-        std::process::exit(1);
-    }
-}
-
-#[cfg(not(feature = "mieru"))]
-fn run_mieru(_path: &str) {
-    eprintln!("当前构建未包含 mieru 客户端");
+fn fail(message: &str) -> ! {
+    eprintln!("{message}");
     std::process::exit(1);
 }

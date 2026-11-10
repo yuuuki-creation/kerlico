@@ -1,8 +1,10 @@
+mod entry;
 mod mux;
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::num::NonZeroU64;
 use kerlico_shared::runtime::NetworkConnection;
 use kerlico_vless::runtime::CarrierNetwork;
 use kerlico_vless::socket::{AddressFamily, ResolutionSource, SocketKind, SocketOptions, SocketRole, TransportResolver};
@@ -10,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use kerlico_shared::{
-    DataPlane, Destination, InboundStream, OpenError, Packet, PeerAddr, PlaneFault, Settings, Transport,
+    ClientEntry, Destination, InboundStream, OpenError, PlaneFault, Settings, Transport,
 };
 use kerlico_vless::{
     client_config, client_key, client_keys, connect_native, connect_tls, decode_reality_key, decode_short_id, decode_udp, encode_request, encode_udp, encode_mux, decode_mux, reality_offer_hybrid, reality_reader, reality_writer, take_flight, AppReader, AppWriter, EncReader, EncWriter, RealityDuplex,
@@ -21,12 +23,8 @@ use kerlico_vless::{
     HttpPrefaceRead, RawHttpConfig, UpgradeConfig, UpgradeRead, UpgradeWrite, upgrade_pair,
 };
 
-pub fn connect(
-    _peer: &PeerAddr,
-    _settings: &Settings,
-) -> Result<Box<dyn DataPlane>, OpenError> {
-    Err(OpenError::Settings)
-}
+/// The client leaf runs its local SOCKS5 and HTTP entry in front of VLESS.
+pub const CLIENT: ClientEntry = ClientEntry::Proxy(entry::upstream);
 
 pub fn land(
     host: &str,
@@ -34,7 +32,7 @@ pub fn land(
     settings: &Settings,
     destination: &Destination,
 ) -> Result<Box<dyn InboundStream>, OpenError> {
-    Ok(match open(host, port, settings, destination)? {
+    Ok(match open(host, port, settings, destination, None)? {
         Opened::Relay(relay) => Box::new(relay),
         Opened::Mux(session) => Box::new(session),
         Opened::Reverse(bridge) => Box::new(Bridge::from_reverse(bridge)),
@@ -44,10 +42,16 @@ pub fn land(
 /// Opens a UDP flow whose datagrams may each go to a different destination, as Xray carries
 /// a SOCKS or TUN UDP association.
 pub fn land_udp(host: &str, port: u16, settings: &Settings, first: &Destination) -> Result<UdpSession, OpenError> {
+    udp_session(host, port, settings, first, None)
+}
+
+/// `global_id` is the XUDP GlobalID of a cone inbound's local UDP source. A server that still
+/// holds the session for it moves that session onto this carrier.
+fn udp_session(host: &str, port: u16, settings: &Settings, first: &Destination, global_id: Option<NonZeroU64>) -> Result<UdpSession, OpenError> {
     if first.transport() != Transport::Udp {
         return Err(OpenError::Settings);
     }
-    let carrier = match open(host, port, settings, first)? {
+    let carrier = match open(host, port, settings, first, global_id)? {
         Opened::Relay(relay) => UdpCarrier::Plain(relay),
         Opened::Mux(session) => UdpCarrier::Mux(session),
         Opened::Reverse(_) => return Err(OpenError::Settings),
@@ -108,7 +112,7 @@ enum Opened {
     Reverse(ReverseBridge),
 }
 
-fn open(host: &str, port: u16, settings: &Settings, destination: &Destination) -> Result<Opened, OpenError> {
+fn open(host: &str, port: u16, settings: &Settings, destination: &Destination, global_id: Option<NonZeroU64>) -> Result<Opened, OpenError> {
     let flow = Flow::parse(settings)?;
     let connect = |command| dial(host, port, settings, flow, command, destination);
     if settings.text("reverse").is_ok_and(|text| !text.is_empty() && text != "false") {
@@ -121,9 +125,9 @@ fn open(host: &str, port: u16, settings: &Settings, destination: &Destination) -
             let (read, write) = connect(command)?;
             Opened::Relay(Relay::new(read, write, command == Command::Udp))
         }
-        mux::Route::Xudp => Opened::Mux(mux::Session::xudp(connect(Command::Mux)?, destination)?),
+        mux::Route::Xudp => Opened::Mux(mux::Session::xudp(connect(Command::Mux)?, destination, global_id)?),
         mux::Route::Pooled(kind, concurrency) => Opened::Mux(
-            mux::pool(host, port, settings)?.session(kind, concurrency, destination, || connect(Command::Mux))?,
+            mux::pool(host, port, settings)?.session(kind, concurrency, destination, global_id, || connect(Command::Mux))?,
         ),
     })
 }
@@ -3390,5 +3394,104 @@ mod tests {
         }
         echo(land("127.0.0.1", port, &settings, &destination).unwrap().as_ref(), b"after");
         assert_eq!(carriers.lock().unwrap().len(), 2);
+    }
+
+    type Frames = Arc<Mutex<Vec<Vec<MuxFrame>>>>;
+
+    /// An XUDP server that echoes each datagram from the address it was sent to and records
+    /// every carrier's frames. It cuts the first carrier after one frame.
+    fn xudp_cutting_server() -> (u16, Frames) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let frames = Frames::default();
+        let seen = frames.clone();
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { return };
+                let index = {
+                    let mut frames = seen.lock().unwrap();
+                    frames.push(Vec::new());
+                    frames.len() - 1
+                };
+                let seen = seen.clone();
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    loop {
+                        if let Ok((request, used)) = decode_request(&buf) {
+                            assert_eq!(request.command, Command::Mux);
+                            buf.drain(..used);
+                            break;
+                        }
+                        match socket.read(&mut tmp) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                    socket.write_all(&encode_response(&Response { flow: String::new(), seed: Vec::new() }).unwrap()).unwrap();
+                    loop {
+                        while let Ok((frame, used)) = kerlico_vless::decode_mux(&buf) {
+                            buf.drain(..used);
+                            seen.lock().unwrap()[index].push(frame.clone());
+                            if index == 0 {
+                                return;
+                            }
+                            let reply = MuxFrame { id: frame.id, status: KEEP, option: DATA, network: 2, port: frame.port, address: frame.address, payload: frame.payload, global_id: None };
+                            if socket.write_all(&encode_mux(&reply)).is_err() {
+                                return;
+                            }
+                        }
+                        match socket.read(&mut tmp) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                });
+            }
+        });
+        (port, frames)
+    }
+
+    #[test]
+    fn association_reopens_xudp_with_the_same_global_id() {
+        use kerlico_shared::PeerAddr;
+        let (port, frames) = xudp_cutting_server();
+        let mut settings = Settings::default();
+        settings.insert_text("encryption", "none");
+        settings.insert_text("id", "entry-global-id");
+        let upstream = entry::upstream(&PeerAddr::parse(&format!("127.0.0.1:{port}")).unwrap(), &settings).unwrap();
+        let association = upstream.associate().unwrap();
+        let source: std::net::SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        association.send_to(source, "198.51.100.1", 5353, b"one").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while frames.lock().unwrap().len() < 2 {
+            assert!(std::time::Instant::now() < deadline, "the association never opened a second carrier");
+            std::thread::sleep(Duration::from_millis(100));
+            association.send_to(source, "198.51.100.2", 5353, b"two").unwrap();
+        }
+        let reply = loop {
+            match association.recv_for(Duration::from_millis(200)) {
+                Ok(reply) => break reply,
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut && std::time::Instant::now() < deadline => {}
+                Err(error) => panic!("XUDP reply: {error}"),
+            }
+        };
+        assert_eq!(reply, ("198.51.100.2".to_string(), 5353, b"two".to_vec()), "the reply keeps the source the server named");
+        association.send_to(source, "198.51.100.3", 5353, b"three").unwrap();
+        let third = Some(Addr::V4("198.51.100.3".parse().unwrap()));
+        let keep = loop {
+            if let Some(frame) = frames.lock().unwrap()[1].iter().find(|frame| frame.address == third) {
+                break frame.clone();
+            }
+            assert!(std::time::Instant::now() < deadline, "the third datagram never reached the server");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!((keep.status, keep.port, keep.global_id), (KEEP, 5353, None), "a later datagram is KEEP with its own destination");
+        let frames = frames.lock().unwrap();
+        let expected = kerlico_vless::xudp_global_id(source);
+        assert!(expected.is_some());
+        let (first, second) = (&frames[0][0], &frames[1][0]);
+        assert_eq!((first.status, first.id, first.global_id), (NEW, 0, expected), "the first carrier opens with the source's GlobalID");
+        assert_eq!((second.status, second.id, second.global_id), (NEW, 0, expected), "the reopened carrier sends the same GlobalID");
     }
 }

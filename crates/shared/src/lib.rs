@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 pub mod runtime;
 mod egress;
+mod proxy;
 pub use egress::{Exit, OutboundChoice};
+pub use proxy::{Association, ClientEntry, ProxyFn, Stream, TunnelFn, Upstream};
 
 /// Grammar-checked protocol id.
 /// The text is one or more `[a-z0-9]+` segments separated by single hyphens.
@@ -98,9 +100,22 @@ pub enum ListenAddr {
 pub struct AddrError;
 
 impl PeerAddr {
+    /// `host:port`, `ipv4:port` or `[ipv6]:port`. An IPv6 host is kept without brackets.
     pub fn parse(text: &str) -> Result<Self, AddrError> {
-        let _ = text;
-        unimplemented!("peer address parse")
+        let (host, port) = match text.parse::<SocketAddr>() {
+            Ok(address) => (address.ip().to_string(), address.port()),
+            Err(_) => {
+                let (host, port) = text.rsplit_once(':').ok_or(AddrError)?;
+                if host.is_empty() || host.contains([':', '[', ']']) {
+                    return Err(AddrError);
+                }
+                (host.to_string(), port.parse().map_err(|_| AddrError)?)
+            }
+        };
+        if port == 0 {
+            return Err(AddrError);
+        }
+        Ok(Self { host, port })
     }
 
     pub fn host(&self) -> &str {
@@ -191,7 +206,7 @@ impl PartialEq for Settings {
 }
 impl Eq for Settings {}
 
-/// One settings value. The TOML parser builds these values and stays private.
+/// One settings value. `Settings::insert_json` builds the text values from a JSON document.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Setting {
     Text(String),
@@ -236,6 +251,27 @@ impl Settings {
         self.entries.insert(key.into(), Setting::Text(value.into()));
     }
 
+    /// The one rule from a JSON value to a setting, for client and server documents. Strings
+    /// stay, numbers and booleans become their JSON text, and arrays and objects stay JSON text
+    /// for the protocol to read. `null` is rejected.
+    pub fn insert_json(&mut self, key: &str, value: &serde_json::Value) -> Result<(), DocError> {
+        let text = match value {
+            serde_json::Value::String(text) => text.clone(),
+            serde_json::Value::Null => return Err(DocError),
+            other => other.to_string(),
+        };
+        self.insert_text(key, text);
+        Ok(())
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<Setting> {
+        self.entries.remove(key)
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
+    }
+
     pub fn text(&self, key: &str) -> Result<&str, OpenError> {
         match self.entries.get(key) {
             Some(Setting::Text(value)) => Ok(value),
@@ -260,36 +296,71 @@ impl Settings {
     }
 }
 
-/// Parsed config document.
-/// `ClientConfig::parse` and `ServerConfig::parse` are what produce a session config.
+/// A client document, JSON `{"protocol", "peer", "settings"}`. The endpoint is `peer`, or
+/// `settings.address` with `settings.port`, which must agree with `peer` when both are given.
+/// `ClientConfig::parse` checks the protocol against the registry.
 #[derive(Clone, Debug)]
 pub struct Document {
-    protocol: String,
-    peer: Option<String>,
-    bind: Option<String>,
+    protocol: Option<String>,
+    peer: PeerAddr,
     settings: Settings,
 }
 
 impl Document {
     pub fn parse(text: &str) -> Result<Self, DocError> {
-        let _ = text;
-        unimplemented!("config document parse")
+        let value: serde_json::Value = serde_json::from_str(text).map_err(|_| DocError)?;
+        let object = value.as_object().ok_or(DocError)?;
+        if object.keys().any(|key| !matches!(key.as_str(), "protocol" | "peer" | "settings")) {
+            return Err(DocError);
+        }
+        let protocol = match object.get("protocol") {
+            None => None,
+            Some(protocol) => Some(protocol.as_str().ok_or(DocError)?.to_string()),
+        };
+        let mut settings = Settings::default();
+        for (key, value) in object.get("settings").and_then(serde_json::Value::as_object).ok_or(DocError)? {
+            settings.insert_json(key, value)?;
+        }
+        let address = match settings.remove("address") {
+            None => None,
+            Some(Setting::Text(address)) => Some(address),
+            Some(_) => return Err(DocError),
+        };
+        let port = match settings.remove("port") {
+            None => None,
+            Some(Setting::Text(port)) => Some(port.parse::<u16>().map_err(|_| DocError)?),
+            Some(_) => return Err(DocError),
+        };
+        let peer = match object.get("peer") {
+            Some(peer) => {
+                let peer = PeerAddr::parse(peer.as_str().ok_or(DocError)?).map_err(|_| DocError)?;
+                if address.is_some_and(|address| address != peer.host) || port.is_some_and(|port| port != peer.port) {
+                    return Err(DocError);
+                }
+                peer
+            }
+            None => {
+                let host = address.filter(|host| !host.is_empty()).ok_or(DocError)?;
+                PeerAddr { host, port: port.filter(|port| *port != 0).ok_or(DocError)? }
+            }
+        };
+        Ok(Self { protocol, peer, settings })
     }
 
-    pub fn protocol(&self) -> &str {
-        &self.protocol
+    pub fn protocol(&self) -> Option<&str> {
+        self.protocol.as_deref()
     }
 
-    pub fn peer(&self) -> Option<&str> {
-        self.peer.as_deref()
-    }
-
-    pub fn bind(&self) -> Option<&str> {
-        self.bind.as_deref()
+    pub fn peer(&self) -> &PeerAddr {
+        &self.peer
     }
 
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    pub fn into_parts(self) -> (Option<String>, PeerAddr, Settings) {
+        (self.protocol, self.peer, self.settings)
     }
 }
 
@@ -559,6 +630,42 @@ impl InboundStream for PrefixStream {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn document_takes_the_endpoint_from_peer_or_settings() {
+        let document = Document::parse(
+            r#"{"protocol":"vless","peer":"[::1]:2000","settings":{"address":"::1","port":2000,"mtu":1280,"lan":false,"alpn":["h2"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(document.protocol(), Some("vless"));
+        assert_eq!((document.peer().host(), document.peer().port()), ("::1", 2000));
+        let settings = document.settings();
+        assert_eq!(settings.text("mtu").unwrap(), "1280");
+        assert_eq!(settings.text("lan").unwrap(), "false");
+        assert_eq!(settings.text("alpn").unwrap(), r#"["h2"]"#);
+        assert!(settings.optional_text("address").unwrap().is_none(), "the endpoint leaves the protocol settings");
+        let document = Document::parse(r#"{"settings":{"address":"node.test","port":"2001"}}"#).unwrap();
+        assert_eq!(document.protocol(), None);
+        assert_eq!((document.peer().host(), document.peer().port()), ("node.test", 2001));
+    }
+
+    #[test]
+    fn document_rejects_ambiguous_and_malformed_input() {
+        for document in [
+            r#"{"peer":"127.0.0.1:2000","settings":{"address":"127.0.0.2"}}"#,
+            r#"{"peer":"127.0.0.1:2000","settings":{"port":2001}}"#,
+            r#"{"peer":"127.0.0.1:2000","settings":{"mtu":null}}"#,
+            r#"{"peer":"127.0.0.1:2000","settings":{},"extra":1}"#,
+            r#"{"peer":"127.0.0.1:2000"}"#,
+            r#"{"protocol":7,"peer":"127.0.0.1:2000","settings":{}}"#,
+            r#"{"settings":{"address":"127.0.0.1"}}"#,
+            r#"{"peer":"::1:2000","settings":{}}"#,
+            r#"{"peer":"127.0.0.1:0","settings":{}}"#,
+            r#"[]"#,
+        ] {
+            assert!(Document::parse(document).is_err(), "{document}");
+        }
+    }
 
     #[test]
     fn listen_addr_is_one_family() {

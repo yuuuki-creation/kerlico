@@ -1,6 +1,6 @@
 use super::socks;
 use super::{interrupted, invalid, timed_out, Client, State};
-use kerlico_mieru::Conn;
+use kerlico_shared::Stream;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ impl Read for LocalInput {
     }
 }
 struct RemoteInput<'a> {
-    conn: &'a Conn,
+    conn: &'a dyn Stream,
     state: &'a State,
     last: Instant,
 }
@@ -365,11 +365,11 @@ fn serve_inner(
             }
         }
         outgoing.push_str("Connection: close\r\n\r\n");
-        conn.write_user(outgoing.as_bytes())?;
+        conn.write_all(outgoing.as_bytes())?;
         *response_status = Some(400);
         let mut remote_write_failed = false;
         let result = pump(&mut input, parsed.body, |b| {
-            let result = conn.write_user(b);
+            let result = conn.write_all(b);
             if result.is_err() {
                 remote_write_failed = true;
             }
@@ -381,7 +381,7 @@ fn serve_inner(
         result?;
         *response_status = Some(502);
         let mut remote = Input::new(RemoteInput {
-            conn: &conn,
+            conn: &*conn,
             state: &state,
             last: Instant::now(),
         });

@@ -43,3 +43,7 @@ WARP 是一条用户态 WireGuard 隧道。它如果接管机器的默认路由�
 mieru 要和官方客户端、mihomo 互通，段和元数据就只能有一份。官方 `docs/protocol.md` 已经定义了这些字段。Kerlico 再写一份字段表，两边就会分叉。决定记在 `docs/reference/mieru.md`。
 
 官方 mita 自己的 DNS 和 RPC 不搬进来。解析、分流和拨号在服务端已经各有一条路径。客户端要的是官方的 SOCKS5 和 HTTP 入口。把 mieru 再做成数据包平面，会变成第二条客户端路径。
+
+## 本机入口在客户端叶子里
+
+mieru 和 VLESS 在客户端都只是本机 SOCKS5 和 HTTP 代理后面的上游，就像 Xray 在 vless 出站前面放 socks 和 http 入站。这个前端只写一份，放在客户端叶子里。放进协议 crate，每个代理协议就会各写一份，或者让一个协议去依赖另一个协议。放进共享的新 crate，协议客户端 crate 会依赖它，而这些 crate 也作为 `landing-<id>` 编进服务端，服务端就会带上一个用不到的 SOCKS 服务器。所以协议 crate 只实现 `kerlico-shared` 里的 `Upstream`，并用 `CLIENT` 声明自己是代理还是数据包隧道。两种声明在类型上互斥，一个协议不会同时有两条客户端路径。

@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
+use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -171,6 +172,7 @@ impl Pool {
         kind: PoolKind,
         concurrency: u16,
         destination: &Destination,
+        global_id: Option<NonZeroU64>,
         dial: impl FnOnce() -> Result<(Link, Link), OpenError>,
     ) -> Result<Session, OpenError> {
         let picker = match kind {
@@ -180,7 +182,7 @@ impl Pool {
         let udp = destination.transport() == Transport::Udp;
         let target = target(destination)?;
         let (carrier, id, inbox) = picker.session(concurrency, udp, dial)?;
-        Ok(Session::new(carrier, id, inbox, udp, target))
+        Ok(Session::new(carrier, id, inbox, udp, target, global_id))
     }
 }
 
@@ -492,21 +494,23 @@ pub(crate) struct Session {
     inbox: Arc<Inbox>,
     udp: bool,
     target: Target,
+    /// Sent on the NEW frame of a UDP session, as Xray's mux and XUDP writers do.
+    global_id: Option<NonZeroU64>,
     opened: Mutex<bool>,
     created: Instant,
 }
 
 impl Session {
-    fn new(carrier: Arc<Carrier>, id: u16, inbox: Arc<Inbox>, udp: bool, target: Target) -> Self {
-        Self { carrier, id, inbox, udp, target, opened: Mutex::new(false), created: Instant::now() }
+    fn new(carrier: Arc<Carrier>, id: u16, inbox: Arc<Inbox>, udp: bool, target: Target, global_id: Option<NonZeroU64>) -> Self {
+        Self { carrier, id, inbox, udp, target, global_id, opened: Mutex::new(false), created: Instant::now() }
     }
 
     /// The only session on a carrier of its own, which closes with it.
-    pub(crate) fn xudp((read, write): (Link, Link), destination: &Destination) -> Result<Self, OpenError> {
+    pub(crate) fn xudp((read, write): (Link, Link), destination: &Destination, global_id: Option<NonZeroU64>) -> Result<Self, OpenError> {
         let target = target(destination)?;
         let carrier = Carrier::start(read, write, 0..1);
         let (id, inbox) = carrier.allocate(1, true).ok_or(OpenError::Transport)?;
-        Ok(Self::new(carrier, id, inbox, true, target))
+        Ok(Self::new(carrier, id, inbox, true, target, global_id))
     }
 
     fn frame(&self, first: bool, payload: Option<&[u8]>, to: Option<&Target>) -> MuxFrame {
@@ -519,7 +523,7 @@ impl Session {
             port: address.map_or(0, |target| target.1),
             address: address.map(|target| target.0.clone()),
             payload: payload.unwrap_or_default().to_vec(),
-            global_id: None,
+            global_id: self.global_id.filter(|_| first && self.udp),
         }
     }
 

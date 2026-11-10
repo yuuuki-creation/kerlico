@@ -113,108 +113,6 @@ impl Plan {
     }
 }
 
-pub(crate) fn parse_document(document: &str) -> Result<(String, u16, Settings), OpenError> {
-    let value: serde_json::Value =
-        serde_json::from_str(document).map_err(|_| OpenError::Settings)?;
-    let object = value.as_object().ok_or(OpenError::Settings)?;
-    if object
-        .keys()
-        .any(|key| !matches!(key.as_str(), "protocol" | "peer" | "settings"))
-    {
-        return Err(OpenError::Settings);
-    }
-    if let Some(protocol) = object.get("protocol") {
-        if protocol.as_str() != Some("mieru") {
-            return Err(OpenError::Settings);
-        }
-    }
-    let values = object
-        .get("settings")
-        .and_then(serde_json::Value::as_object)
-        .ok_or(OpenError::Settings)?;
-    let mut settings = Settings::default();
-    for (key, value) in values {
-        if !matches!(
-            key.as_str(),
-            "address"
-                | "port"
-                | "username"
-                | "password"
-                | "transport"
-                | "portRange"
-                | "mtu"
-                | "multiplexing"
-                | "handshakeMode"
-                | "lowEntropyMode"
-                | "socks5Port"
-                | "httpProxyPort"
-                | "socks5ListenLAN"
-                | "httpProxyListenLAN"
-        ) {
-            return Err(OpenError::Settings);
-        }
-        if matches!(
-            key.as_str(),
-            "address"
-                | "username"
-                | "password"
-                | "transport"
-                | "portRange"
-                | "multiplexing"
-                | "handshakeMode"
-        ) && !value.is_string()
-        {
-            return Err(OpenError::Settings);
-        }
-        if matches!(key.as_str(), "socks5ListenLAN" | "httpProxyListenLAN") && !value.is_boolean() {
-            return Err(OpenError::Settings);
-        }
-        let text = match value {
-            serde_json::Value::String(text) => text.clone(),
-            serde_json::Value::Bool(value) => value.to_string(),
-            serde_json::Value::Number(value) if value.as_u64().is_some() => value.to_string(),
-            _ => return Err(OpenError::Settings),
-        };
-        settings.insert_text(key, text);
-    }
-    let endpoint = if let Some(peer) = object.get("peer") {
-        let peer = peer.as_str().ok_or(OpenError::Settings)?;
-        let (host, port) = split_peer(peer)?;
-        if settings
-            .optional_text("address")?
-            .is_some_and(|address| address != host)
-            || settings
-                .optional_text("port")?
-                .is_some_and(|value| value.parse::<u16>() != Ok(port))
-        {
-            return Err(OpenError::Settings);
-        }
-        (host, port)
-    } else {
-        (
-            settings.text("address")?.to_string(),
-            settings
-                .text("port")?
-                .parse::<u16>()
-                .map_err(|_| OpenError::Settings)?,
-        )
-    };
-    Ok((endpoint.0, endpoint.1, settings))
-}
-fn split_peer(text: &str) -> Result<(String, u16), OpenError> {
-    if let Ok(address) = text.parse::<SocketAddr>() {
-        return Ok((address.ip().to_string(), address.port()));
-    }
-    let (host, port) = text.rsplit_once(':').ok_or(OpenError::Settings)?;
-    if host.is_empty() || host.contains(':') || host.contains('[') || host.contains(']') {
-        return Err(OpenError::Settings);
-    }
-    Ok((
-        host.to_string(),
-        port.parse().map_err(|_| OpenError::Settings)?,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,18 +154,5 @@ mod tests {
                 "无效配置必须拒绝：{key}"
             );
         }
-    }
-    #[test]
-    fn rejects_ambiguous_and_non_scalar_configurations() {
-        for document in [
-            r#"{"peer":"127.0.0.1:2000","settings":{"address":"127.0.0.2"}}"#,
-            r#"{"peer":"127.0.0.1:2000","settings":{"mtu":[]}}"#,
-            r#"{"peer":"127.0.0.1:2000","settings":{"unknown":true}}"#,
-        ] {
-            assert!(parse_document(document).is_err());
-        }
-        let (_, port, s) = parse_document(r#"{"settings":{"address":"::1","port":2000,"username":"test-user","password":"test-password","mtu":1280,"socks5ListenLAN":false}}"#).unwrap();
-        assert_eq!(port, 2000);
-        assert_eq!(s.text("socks5ListenLAN").unwrap(), "false");
     }
 }

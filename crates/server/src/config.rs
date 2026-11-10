@@ -204,8 +204,7 @@ fn load_prepared(text: &str, dir: Option<&std::path::Path>) -> Result<Loaded, St
         let rules = parse_rules(inbound.rules)?;
         let mut node_settings = Settings::default();
         for (key, value) in &inbound.settings.fields {
-            let text = scalar(value).ok_or_else(|| format!("bad settings {key}"))?;
-            node_settings.insert_text(key, text);
+            node_settings.insert_json(key, value).map_err(|_| format!("bad settings {key}"))?;
         }
         server
             .listen_node(tag.clone(), protocol, listen, choice, &node_settings)
@@ -219,8 +218,7 @@ fn load_prepared(text: &str, dir: Option<&std::path::Path>) -> Result<Loaded, St
                 .map_err(|_| format!("bad email {}", user.email))?;
             let mut account = Settings::default();
             for (key, value) in &user.fields {
-                let text = scalar(value).ok_or_else(|| format!("bad user field {key}"))?;
-                account.insert_text(key, text);
+                account.insert_json(key, value).map_err(|_| format!("bad user field {key}"))?;
             }
             server
                 .add_user(&tag, email, &account)
@@ -353,20 +351,9 @@ fn sniff_kinds(sniff: Option<SniffFile>) -> Option<Vec<String>> {
 fn landing_settings(settings: &serde_json::Map<String, serde_json::Value>) -> Result<Settings, String> {
     let mut out = Settings::default();
     for (key, value) in settings {
-        let text = scalar(value).ok_or_else(|| format!("bad landing settings {key}"))?;
-        out.insert_text(key, text);
+        out.insert_json(key, value).map_err(|_| format!("bad landing settings {key}"))?;
     }
     Ok(out)
-}
-
-fn scalar(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(text) => Some(text.clone()),
-        serde_json::Value::Number(number) => Some(number.to_string()),
-        serde_json::Value::Bool(flag) => Some(flag.to_string()),
-        serde_json::Value::Object(_) | serde_json::Value::Array(_) => Some(value.to_string()),
-        _ => None,
-    }
 }
 
 fn parse_listen(host: &str, port: u16) -> Result<ListenAddr, String> {

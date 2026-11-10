@@ -1,8 +1,25 @@
-use kerlico_mieru_client::{Client, Proxy};
-use kerlico_shared::Settings;
-use std::io::{Read, Write};
+use kerlico_client::{LocalEntry, Proxy};
+use kerlico_shared::{Association, Stream, Upstream};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// The entry's lifecycle does not depend on the protocol behind it.
+struct Refusing;
+impl Upstream for Refusing {
+    fn open_stream(&self, _host: &str, _port: u16) -> io::Result<Box<dyn Stream>> {
+        Err(io::ErrorKind::ConnectionRefused.into())
+    }
+    fn associate(&self) -> io::Result<Box<dyn Association>> {
+        Err(io::ErrorKind::ConnectionRefused.into())
+    }
+    fn close(&self) {}
+}
+
+fn upstream() -> Arc<dyn Upstream> {
+    Arc::new(Refusing)
+}
 
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -14,8 +31,6 @@ fn free_port() -> u16 {
 
 #[test]
 fn repeated_close_releases_pending_local_handshakes_and_listeners() {
-    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
-    let remote_port = upstream.local_addr().unwrap().port();
     #[cfg(target_os = "linux")]
     let before = (
         std::fs::read_dir("/proc/self/fd").unwrap().count(),
@@ -29,13 +44,8 @@ fn repeated_close_releases_pending_local_handshakes_and_listeners() {
                 break port;
             }
         };
-        let mut settings = Settings::default();
-        settings.insert_text("username", "test-user");
-        settings.insert_text("password", "test-password");
-        settings.insert_text("socks5Port", socks.to_string());
-        settings.insert_text("httpProxyPort", http.to_string());
-        let client = Client::new("127.0.0.1", remote_port, &settings).unwrap();
-        let proxy = Proxy::start(client, &settings).unwrap();
+        let entry = LocalEntry::new(socks, http, false, false).unwrap();
+        let proxy = Proxy::start(upstream(), &entry).unwrap();
         let mut pending = TcpStream::connect(("127.0.0.1", socks)).unwrap();
         pending.write_all(&[5]).unwrap();
         std::thread::sleep(Duration::from_millis(60));
@@ -48,11 +58,7 @@ fn repeated_close_releases_pending_local_handshakes_and_listeners() {
         );
         drop(pending);
         drop(proxy);
-        let restarted = Proxy::start(
-            Client::new("127.0.0.1", remote_port, &settings).unwrap(),
-            &settings,
-        )
-        .unwrap();
+        let restarted = Proxy::start(upstream(), &entry).unwrap();
         restarted.close();
         drop(restarted);
     }
@@ -79,7 +85,6 @@ fn lan_listeners_bind_existing_private_interfaces_and_accept_socks() {
             std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
             std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
         });
-    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
     let socks = free_port();
     let http = loop {
         let p = free_port();
@@ -87,24 +92,8 @@ fn lan_listeners_bind_existing_private_interfaces_and_accept_socks() {
             break p;
         }
     };
-    let mut settings = Settings::default();
-    for (key, value) in [
-        ("username", "test-user"),
-        ("password", "test-password"),
-        ("socks5ListenLAN", "true"),
-        ("httpProxyListenLAN", "true"),
-    ] {
-        settings.insert_text(key, value);
-    }
-    settings.insert_text("socks5Port", socks.to_string());
-    settings.insert_text("httpProxyPort", http.to_string());
-    let client = Client::new(
-        "127.0.0.1",
-        upstream.local_addr().unwrap().port(),
-        &settings,
-    )
-    .unwrap();
-    let result = Proxy::start(client, &settings);
+    let entry = LocalEntry::new(socks, http, true, true).unwrap();
+    let result = Proxy::start(upstream(), &entry);
     if !has_lan {
         assert!(result.is_err());
         return;

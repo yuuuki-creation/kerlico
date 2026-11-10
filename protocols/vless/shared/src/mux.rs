@@ -1,9 +1,35 @@
 //! Xray mux frames carried inside a VLESS connection whose command is `mux`.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU64;
+use std::sync::OnceLock;
 
 use crate::{Addr, HeaderError};
+
+/// Xray's `xudp.GetGlobalID` for a cone UDP inbound: the first eight bytes of BLAKE3, keyed with
+/// a random per-process base key, over the source as Go prints it (`udp:1.2.3.4:5`,
+/// `udp:[::1]:5`). The same local socket therefore keeps one ID across carriers.
+pub fn xudp_global_id(source: SocketAddr) -> Option<NonZeroU64> {
+    static BASE_KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    let key = BASE_KEY.get_or_init(|| {
+        let mut key = [0; 32];
+        getrandom::getrandom(&mut key).expect("XUDP base key");
+        key
+    });
+    keyed_global_id(key, source)
+}
+
+fn keyed_global_id(key: &[u8; 32], source: SocketAddr) -> Option<NonZeroU64> {
+    let host = match source.ip().to_canonical() {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    let mut hasher = blake3::Hasher::new_keyed(key);
+    hasher.update(format!("udp:{host}:{}", source.port()).as_bytes());
+    let mut id = [0; 8];
+    hasher.finalize_xof().fill(&mut id);
+    NonZeroU64::new(u64::from_be_bytes(id))
+}
 
 pub const NEW: u8 = 0x01;
 pub const KEEP: u8 = 0x02;
@@ -343,6 +369,20 @@ mod tests {
         assert_eq!(frame.address, Some(Addr::V4(Ipv4Addr::LOCALHOST)));
         assert_eq!(frame.payload, b"dns");
         assert_eq!(encode_mux(&frame), bytes, "re-encoding writes the GlobalID where Xray does");
+    }
+
+    #[test]
+    fn xudp_global_id_matches_xray_derivation() {
+        // Values from lukechampine.com/blake3 v1.4.1 New(8, key) with key = 32 bytes of 7.
+        let key = [7; 32];
+        let v4: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        assert_eq!(keyed_global_id(&key, v4), NonZeroU64::new(0xf124c912440b2204));
+        let v6: SocketAddr = "[::1]:5000".parse().unwrap();
+        assert_eq!(keyed_global_id(&key, v6), NonZeroU64::new(0x2313437889b3ab72));
+        let mapped: SocketAddr = "[::ffff:127.0.0.1]:5000".parse().unwrap();
+        assert_eq!(keyed_global_id(&key, mapped), keyed_global_id(&key, v4), "Go prints a mapped address as IPv4");
+        assert_eq!(xudp_global_id(v4), xudp_global_id(v4), "one process keeps one base key");
+        assert_ne!(xudp_global_id(v4), xudp_global_id("127.0.0.1:5001".parse().unwrap()));
     }
 
     #[test]
