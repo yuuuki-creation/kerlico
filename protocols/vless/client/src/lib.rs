@@ -827,10 +827,10 @@ impl XhttpEndpoint {
         self.pool.acquire(|| self.connect().map(|conn| XhttpCarrier(Mutex::new(conn)))).map(Arc::new)
     }
 
-    fn count_request(&self, lease: &mut XhttpLease) -> std::io::Result<()> {
-        if !lease.request() {
+    /// A packet-up POST that finds the budget spent opens on another connection that the switch does not charge.
+    fn count_packet(&self, lease: &mut XhttpLease) -> std::io::Result<()> {
+        if lease.charge_spent() {
             *lease = self.acquire()?;
-            if !lease.request() { return Err(std::io::Error::other("XHTTP connection request budget exhausted")); }
         }
         Ok(())
     }
@@ -972,6 +972,7 @@ fn open_xhttp(
             .text("encryption")
             .ok()
             .is_some_and(|encryption| encryption != "none");
+    let encrypted = settings.text("encryption").ok().is_some_and(|encryption| encryption != "none");
     let upload = xhttp_endpoint(host, port, settings, reality, tls, allow_plain)?;
     let download = upload
         .config
@@ -1009,10 +1010,10 @@ fn open_xhttp(
         })
         .transpose()?;
     let open = || -> std::io::Result<(Link, Link)> {
-        let mut upload_connection = upload.acquire()?;
+        let upload_connection = upload.acquire()?;
         if mode == XhttpMode::StreamOne {
             let request = upload.request(XhttpRequestKind::StreamOne, &[])?;
-            upload.count_request(&mut upload_connection)?;
+            upload_connection.charge();
             let stream = upload.start_stream(&mut upload_connection.connection().0.lock().expect("XHTTP carrier"), &request)?;
             let (read, write) = match stream {
                     Link::Duplex(mut read, write) => {
@@ -1031,20 +1032,20 @@ fn open_xhttp(
         let session = upload.config.session_id()?;
         let (reader, download_connection) = match download {
             Some(download) => {
-                let mut lease = download.acquire()?;
-                download.count_request(&mut lease)?;
+                let lease = download.acquire()?;
+                lease.charge();
                 let reader = download.download(&mut lease.connection().0.lock().expect("XHTTP carrier"), &session)?;
                 (reader, lease)
             }
             None => {
-                upload.count_request(&mut upload_connection)?;
+                upload_connection.charge();
                 let reader = upload.download(&mut upload_connection.connection().0.lock().expect("XHTTP carrier"), &session)?;
                 (reader, upload_connection.clone())
             }
         };
         let writer = if mode == XhttpMode::StreamUp {
             let request = upload.request(XhttpRequestKind::StreamUp { session: &session }, &[])?;
-            upload.count_request(&mut upload_connection)?;
+            upload_connection.charge();
             let stream = upload.start_stream(&mut upload_connection.connection().0.lock().expect("XHTTP carrier"), &request)?;
             XhttpUpload::Stream(XhttpStreamUpload::new(stream))
         } else {
@@ -1056,6 +1057,9 @@ fn open_xhttp(
                 limit,
                 sequence: 0,
                 last_post: None,
+                held: Vec::new(),
+                held_first: encrypted,
+                failed: None,
             })
         };
         let client = Arc::new(XhttpClient {
@@ -1099,13 +1103,25 @@ impl XhttpClient {
         self.reader.lock().expect("XHTTP reader").pull(buf)
     }
 
-    fn push(&self, buf: &[u8]) -> std::io::Result<usize> {
+    fn push(self: &Arc<Self>, buf: &[u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
         match &mut *self.writer.lock().expect("XHTTP writer") {
             XhttpUpload::Stream(stream) => stream.push(buf),
-            XhttpUpload::Packets(packets) => packets.push(buf),
+            XhttpUpload::Packets(packets) => {
+                if packets.hold_first(buf) {
+                    let client = Arc::clone(self);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(FIRST_PAYLOAD_WAIT);
+                        if let XhttpUpload::Packets(packets) = &mut *client.writer.lock().expect("XHTTP writer") {
+                            packets.release();
+                        }
+                    });
+                    return Ok(buf.len());
+                }
+                packets.push(buf)
+            }
         }
     }
 
@@ -1163,6 +1179,9 @@ impl XhttpStreamUpload {
     }
 }
 
+/// Xray holds the VLESS request header for this long so it leaves in one request with the first payload.
+const FIRST_PAYLOAD_WAIT: Duration = Duration::from_millis(100);
+
 struct XhttpPacketUpload {
     endpoint: Arc<XhttpEndpoint>,
     connection: XhttpLease,
@@ -1170,11 +1189,54 @@ struct XhttpPacketUpload {
     limit: usize,
     sequence: u64,
     last_post: Option<std::time::Instant>,
+    held: Vec<u8>,
+    held_first: bool,
+    failed: Option<std::io::ErrorKind>,
 }
 
 impl XhttpPacketUpload {
+    /// The first plaintext write is the VLESS header. It waits for the first payload or the deadline.
+    fn hold_first(&mut self, bytes: &[u8]) -> bool {
+        if self.held_first {
+            return false;
+        }
+        self.held_first = true;
+        self.held = bytes.to_vec();
+        true
+    }
+
+    fn release(&mut self) {
+        let held = std::mem::take(&mut self.held);
+        for chunk in held.chunks(self.limit.max(1)) {
+            if let Err(error) = self.post(chunk) {
+                self.failed = Some(error.kind());
+                return;
+            }
+        }
+    }
+
     fn push(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Some(kind) = self.failed {
+            return Err(kind.into());
+        }
+        if !self.held.is_empty() {
+            if self.held.len() + bytes.len() <= self.limit {
+                let mut merged = std::mem::take(&mut self.held);
+                merged.extend_from_slice(bytes);
+                self.post(&merged)?;
+                return Ok(bytes.len());
+            }
+            self.release();
+            if let Some(kind) = self.failed {
+                return Err(kind.into());
+            }
+        }
         let packet = &bytes[..bytes.len().min(self.limit)];
+        self.post(packet)?;
+        Ok(packet.len())
+    }
+
+    fn post(&mut self, packet: &[u8]) -> std::io::Result<()> {
         let request = self.endpoint.request(
             XhttpRequestKind::PacketUp {
                 session: &self.session,
@@ -1193,7 +1255,7 @@ impl XhttpPacketUpload {
             }
         }
         self.last_post = Some(std::time::Instant::now());
-        self.endpoint.count_request(&mut self.connection)?;
+        self.endpoint.count_packet(&mut self.connection)?;
         let headers = request.header_pairs();
         let XhttpEndpoint {
             dial,
@@ -1242,7 +1304,7 @@ impl XhttpPacketUpload {
                 .finish(request.body)?,
         }
         self.sequence += 1;
-        Ok(packet.len())
+        Ok(())
     }
 }
 
