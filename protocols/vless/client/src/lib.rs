@@ -1516,13 +1516,18 @@ impl ReverseBridge {
         read.set_timeout(Duration::from_millis(200));
         write.set_timeout(Duration::from_millis(200));
         let shared = Arc::new(ReverseShared {
-            writer: Mutex::new(Some(MuxOutbox::new(write))),
+            uplink: kerlico_vless::MuxUplink::default(),
             sessions: Mutex::new(std::collections::HashMap::new()),
             control: Mutex::new(PortalControl { sessions: std::collections::HashSet::new(), draining: false }),
             queued: std::sync::atomic::AtomicUsize::new(0),
             closed: std::sync::atomic::AtomicBool::new(false),
         });
         let (sender, incoming) = std::sync::mpsc::sync_channel(64);
+        let writer = shared.clone();
+        std::thread::spawn(move || {
+            writer.uplink.run(write);
+            writer.close_all();
+        });
         let worker = shared.clone();
         std::thread::spawn(move || reverse_loop(read, prefix, worker, sender));
         Self { shared, incoming: Mutex::new(incoming) }
@@ -1548,45 +1553,13 @@ impl Drop for ReverseBridge {
     fn drop(&mut self) { self.shared.close_all(); }
 }
 
-/// The write half of a Mux carrier. END frames wait here until the carrier can take them.
-struct MuxOutbox {
-    mux: kerlico_vless::MuxWriter<Link>,
-    ends: std::collections::VecDeque<MuxFrame>,
-}
-
-impl MuxOutbox {
-    fn new(write: Link) -> Self {
-        Self { mux: kerlico_vless::MuxWriter::new(write), ends: std::collections::VecDeque::new() }
-    }
-
-    fn send(&mut self, frame: &MuxFrame) -> std::io::Result<()> {
-        self.flush().and_then(|_| self.mux.send(frame))
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        while let Some(frame) = self.ends.front() {
-            self.mux.send(frame)?;
-            self.ends.pop_front();
-        }
-        self.mux.flush()
-    }
-
-    fn end(&mut self, id: u16, failed: bool) -> std::io::Result<()> {
-        if !self.ends.iter().any(|frame| frame.id == id) {
-            if self.ends.len() >= REVERSE_SESSION_LIMIT { return Err(std::io::Error::other("mux close queue full")); }
-            self.ends.push_back(MuxFrame { id, status: kerlico_vless::END, option: if failed { 2 } else { 0 }, network: 0, port: 0, address: None, payload: Vec::new(), global_id: None });
-        }
-        self.flush()
-    }
-}
-
 struct ReverseSession {
     destination: Destination,
     lanes: std::collections::HashMap<(String, u16), std::sync::Weak<ReverseLane>>,
 }
 
 struct ReverseShared {
-    writer: Mutex<Option<MuxOutbox>>,
+    uplink: kerlico_vless::MuxUplink,
     sessions: Mutex<std::collections::HashMap<u16, ReverseSession>>,
     control: Mutex<PortalControl>,
     queued: std::sync::atomic::AtomicUsize,
@@ -1601,29 +1574,10 @@ struct PortalControl {
 impl ReverseShared {
     fn closed(&self) -> bool { self.closed.load(std::sync::atomic::Ordering::Acquire) }
 
-    fn flush(&self) -> std::io::Result<()> {
-        match self.writer.lock().expect("reverse").as_mut() {
-            Some(writer) => writer.flush(),
-            None => Err(std::io::ErrorKind::BrokenPipe.into()),
-        }
-    }
-
     fn send(&self, frame: &MuxFrame) -> std::io::Result<()> {
-        let result = {
-            let mut writer = self.writer.lock().expect("reverse");
-            let writer = writer.as_mut().ok_or(std::io::ErrorKind::BrokenPipe)?;
-            writer.send(frame)
-        };
+        let result = self.uplink.send(frame);
         if result.as_ref().is_err_and(|error| !retry_io(error)) { self.close_all(); }
         result
-    }
-
-    fn end(&self, id: u16, failed: bool) {
-        let result = {
-            let mut writer = self.writer.lock().expect("reverse");
-            match writer.as_mut() { Some(writer) => writer.end(id, failed), None => return }
-        };
-        if result.as_ref().is_err_and(|error| !retry_io(error)) { self.close_all(); }
     }
 
     fn close_session(&self, id: u16) {
@@ -1639,7 +1593,7 @@ impl ReverseShared {
         for session in sessions.into_values() {
             for lane in session.lanes.into_values().filter_map(|lane| lane.upgrade()) { lane.end(); }
         }
-        self.writer.lock().expect("reverse").take();
+        self.uplink.close();
     }
 
     fn route(self: &Arc<Self>, frame: MuxFrame, incoming: &std::sync::mpsc::SyncSender<ReverseFlow>) -> std::io::Result<()> {
@@ -1662,7 +1616,7 @@ impl ReverseShared {
                 if sessions.contains_key(&id) { return Err(std::io::Error::other("duplicate reverse session")); }
                 if sessions.len() >= REVERSE_SESSION_LIMIT {
                     drop(sessions);
-                    self.end(id, true);
+                    self.uplink.end(id, true);
                     return Ok(());
                 }
                 let destination = reverse_destination(frame.address.as_ref(), frame.port, frame.network)?;
@@ -1670,7 +1624,7 @@ impl ReverseShared {
             }
             let Some(session) = sessions.get_mut(&id) else {
                 drop(sessions);
-                self.end(id, true);
+                self.uplink.end(id, true);
                 return Ok(());
             };
             let destination = if frame.status == KEEP && frame.address.is_some() {
@@ -1685,7 +1639,7 @@ impl ReverseShared {
                     if session.lanes.len() >= 64 {
                         drop(sessions);
                         self.close_session(id);
-                        self.end(id, true);
+                        self.uplink.end(id, true);
                         return Ok(());
                     }
                     let lane = Arc::new(ReverseLane { id, destination, shared: self.clone(), cv: std::sync::Condvar::new(), queue: Mutex::new(ReverseQueue { bytes: std::collections::VecDeque::new(), packets: std::collections::VecDeque::new(), size: 0, closed: false }) });
@@ -1696,14 +1650,14 @@ impl ReverseShared {
         };
         if !lane.push_incoming(frame.payload) {
             self.close_session(id);
-            self.end(id, true);
+            self.uplink.end(id, true);
             return Ok(());
         }
         if fresh {
             let flow = ReverseFlow { destination: lane.destination.clone(), stream: Box::new(ReverseStream(lane)) };
             if let Err(error) = incoming.try_send(flow) {
                 self.close_session(id);
-                self.end(id, true);
+                self.uplink.end(id, true);
                 drop(error);
             }
         }
@@ -1728,7 +1682,6 @@ fn reverse_loop(mut read: Link, mut pending: Vec<u8>, shared: Arc<ReverseShared>
     let mut buf = [0; 8192];
     'connection: loop {
         if shared.closed() { break; }
-        if let Err(error) = shared.flush() { if !retry_io(&error) { break; } }
         loop {
             match decode_mux(&pending) {
                 Ok((frame, used)) => {
@@ -1853,7 +1806,7 @@ impl Drop for ReverseLane {
             session.lanes.remove(&key);
             if session.lanes.is_empty() { sessions.remove(&self.id); true } else { false }
         };
-        if end { self.shared.end(self.id, false); }
+        if end { self.shared.uplink.end(self.id, false); }
     }
 }
 

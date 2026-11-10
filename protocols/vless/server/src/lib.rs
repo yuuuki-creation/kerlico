@@ -15,7 +15,7 @@ use kerlico_vless::{
     decode_reality_key, decode_short_id, decode_udp, encode_response, encode_udp, grpc_path, host_matches, normalize_path, parse_id, read_client_finished, reality_reader, reality_writer, server_key, AppReader, AppWriter, EncReader, EncWriter, RealityDuplex,
     Command, Request, Response,
     GrpcConnection, GrpcStream, HttpIo, Session, XhttpBodyWriter, ChunkPair,
-    decode_mux, encode_mux, MuxFrame, DATA, END, KEEP, KEEPALIVE, NEW, HTTP2_PREFACE,
+    decode_mux, MuxFrame, MuxUplink, DATA, END, KEEP, KEEPALIVE, NEW, HTTP2_PREFACE,
     ChunkReader, HttpHead, XhttpConfig, XhttpRequestKind, read_http_head_with_limit, write_xhttp_response,
     HttpPrefaceRead, RawHttpConfig, RawHttpWrite, UpgradeConfig,
 };
@@ -1909,7 +1909,7 @@ impl Write for Link {
             Self::Kcp(_) => Ok(()),
             Self::Xhttp(lane) => lane.flush(),
             Self::Chunks(chunks) => chunks.flush(),
-            Self::Mux(lane) => lane.flush(),
+            Self::Mux(_) => Ok(()),
             Self::EncRead(_) => Ok(()),
             Self::EncWrite(enc) => enc.flush(),
             Self::RealityRead(_) => Ok(()),
@@ -1960,7 +1960,10 @@ fn alpn(settings: &Settings) -> Vec<String> {
     }
 }
 
-type MuxOut = Arc<Mutex<kerlico_vless::MuxWriter<Link>>>;
+type MuxOut = Arc<MuxUplink>;
+
+/// How long a Mux carrier's reader and writer wait before checking whether the carrier ended.
+const MUX_POLL: Duration = Duration::from_millis(200);
 
 /// How long Xray's `XUDPManager` keeps an XUDP session that lost its carrier.
 const XUDP_DETACHED: Duration = Duration::from_secs(60);
@@ -2051,7 +2054,7 @@ fn attach_xudp(xudp: &XudpSessions, key: XudpKey, destination: Destination, rout
     drop(found);
     drop(table);
     if let Route::Attached(id, writer) = previous {
-        writer.lock().expect("mux").send(&MuxFrame { id, status: END, ..MuxFrame::default() }).ok();
+        writer.end(id, false);
     }
     session
 }
@@ -2090,7 +2093,7 @@ fn release_mux_session(id: u16, session: &Mutex<MuxSession>, writer: &MuxOut) {
             }
         }
     }
-    writer.lock().expect("mux").send(&MuxFrame { id, status: END, ..MuxFrame::default() }).ok();
+    writer.end(id, false);
 }
 
 /// The user and client address every flow on one carrier is handed off with.
@@ -2108,15 +2111,19 @@ enum MuxScope {
     Xudp,
 }
 
-fn demux(mut read: Link, write: Link, owner: FlowOwner, mut pending: Vec<u8>, ready_tx: &Sender<Ready>, xudp: &XudpSessions, scope: MuxScope) {
+fn demux(mut read: Link, mut write: Link, owner: FlowOwner, mut pending: Vec<u8>, ready_tx: &Sender<Ready>, xudp: &XudpSessions, scope: MuxScope) {
     let FlowOwner { email, peer } = owner;
-    read.set_timeout(Duration::from_millis(200));
-    let writer: MuxOut = Arc::new(Mutex::new(kerlico_vless::MuxWriter::new(write)));
+    read.set_timeout(MUX_POLL);
+    write.set_timeout(MUX_POLL);
+    let writer: MuxOut = Arc::default();
+    let uplink = writer.clone();
+    thread::spawn(move || uplink.run(write));
     let mut sessions: HashMap<u16, Arc<Mutex<MuxSession>>> = HashMap::new();
     let mut tmp = [0u8; 2048];
     let mut last = Instant::now();
     (|| {
     loop {
+        if writer.closed() { return; }
         sessions.retain(|&id, session| {
             let ended = {
                 let session = session.lock().expect("mux");
@@ -2134,7 +2141,6 @@ fn demux(mut read: Link, write: Link, owner: FlowOwner, mut pending: Vec<u8>, re
                     let n = match read.read(&mut tmp) {
                         Ok(n) => n,
                         Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) && last.elapsed() < Duration::from_secs(300) => {
-                            writer.lock().expect("mux").flush().ok();
                             break MuxFrame { id: 0, status: KEEPALIVE, option: 0, network: 0, port: 0, address: None, payload: Vec::new(), global_id: None };
                         },
                         Err(_) => return,
@@ -2194,6 +2200,7 @@ fn demux(mut read: Link, write: Link, owner: FlowOwner, mut pending: Vec<u8>, re
     }
     })();
     for (&id, session) in &sessions { release_mux_session(id, session, &writer); }
+    writer.close();
 }
 
 struct MuxLane {
@@ -2303,17 +2310,10 @@ impl MuxLane {
             payload: buf.to_vec(),
             global_id: None,
         };
-        let sent = writer.lock().expect("mux").send(&frame);
-        match sent {
+        match writer.send(&frame) {
             Err(_) if self.resumable => Ok(buf.len()),
             sent => sent.map(|()| buf.len()),
         }
-    }
-
-    fn flush(&self) -> std::io::Result<()> {
-        let Some((_, writer)) = self.carrier() else { return Ok(()) };
-        let flushed = writer.lock().expect("mux").flush();
-        if self.resumable { Ok(()) } else { flushed }
     }
 }
 
@@ -2504,7 +2504,7 @@ fn validate_fallback(alpn: &str, path: &str) -> Result<(), OpenError> {
 
 struct Portal {
     active: Arc<std::sync::atomic::AtomicBool>,
-    write: Arc<Mutex<kerlico_vless::MuxWriter<Link>>>,
+    uplink: MuxOut,
     next: Mutex<u16>,
     sessions: Mutex<HashMap<u16, Weak<MuxLane>>>,
 }
@@ -2517,38 +2517,23 @@ fn portals() -> &'static Portals {
 }
 
 fn portal_loop(tag: (NodeTag, String), portal: Arc<Portal>, mut read: Link, mut pending: Vec<u8>) {
-    read.set_timeout(Duration::from_millis(200));
+    read.set_timeout(MUX_POLL);
     let mut counter = 0u32;
     let mut last = std::time::Instant::now();
     let mut buf = [0u8; 2048];
-    let mut ended = VecDeque::new();
     'connection: loop {
-        if !portal.active.load(std::sync::atomic::Ordering::Acquire) { break; }
-        let dropped = {
-            let sessions = portal.sessions.lock().expect("reverse");
-            sessions.iter().filter_map(|(&id, lane)| (lane.strong_count() == 0 && !ended.contains(&id)).then_some(id)).collect::<Vec<_>>()
-        };
-        ended.extend(dropped);
-        while let Some(&id) = ended.front() {
-            let frame = MuxFrame { id, status: END, option: 0, network: 0, port: 0, address: None, payload: Vec::new(), global_id: None };
-            match portal.write.lock().expect("reverse").send(&frame) {
-                Ok(()) => {
-                    ended.pop_front();
-                    portal.sessions.lock().expect("reverse").remove(&id);
-                }
-                Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
-                Err(_) => break 'connection,
-            }
-        }
+        if !portal.active.load(std::sync::atomic::Ordering::Acquire) || portal.uplink.closed() { break; }
+        portal.sessions.lock().expect("reverse").retain(|&id, lane| {
+            let open = lane.strong_count() > 0;
+            if !open { portal.uplink.end(id, false); }
+            open
+        });
         if last.elapsed() >= Duration::from_secs(2) {
             let (next, due) = kerlico_vless::heartbeat_due(counter);
             counter = next;
             last = std::time::Instant::now();
-            if due {
-                if let Err(error) = portal.write.lock().expect("reverse").send(&kerlico_vless::control_keep(1)) {
-                    if !matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) { break; }
-                }
-            }
+            // A full uplink skips this heartbeat; a closed one ends the loop above.
+            if due { portal.uplink.send(&kerlico_vless::control_keep(1)).ok(); }
         }
         loop {
             match decode_mux(&pending) {
@@ -2562,7 +2547,6 @@ fn portal_loop(tag: (NodeTag, String), portal: Arc<Portal>, mut read: Link, mut 
                         if frame.status == END {
                             *lane.closed.lock().expect("mux") = true;
                             portal.sessions.lock().expect("reverse").remove(&frame.id);
-                            ended.retain(|id| *id != frame.id);
                         }
                         lane.cv.notify_all();
                     }
@@ -2571,7 +2555,6 @@ fn portal_loop(tag: (NodeTag, String), portal: Arc<Portal>, mut read: Link, mut 
                 Err(kerlico_vless::HeaderError::Bad) => break 'connection,
             }
         }
-        portal.write.lock().expect("reverse").flush().ok();
         match read.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => pending.extend_from_slice(&buf[..n]),
@@ -2583,6 +2566,7 @@ fn portal_loop(tag: (NodeTag, String), portal: Arc<Portal>, mut read: Link, mut 
         *lane.closed.lock().expect("mux") = true;
         lane.cv.notify_all();
     }
+    portal.uplink.close();
     unregister_portal(&tag, &portal);
 }
 
@@ -2620,7 +2604,7 @@ fn open_reverse_portal(portal: Arc<Portal>, host: &str, port: u16, tcp: bool, pa
     let lane = Arc::new(MuxLane {
         plain: Mutex::new(VecDeque::new()), packets: Mutex::new(VecDeque::new()),
         datagram: !tcp, cv: Condvar::new(), closed: Mutex::new(false), reply_target: None,
-        route: Arc::new(Mutex::new(Route::Attached(id, portal.write.clone()))), resumable: false,
+        route: Arc::new(Mutex::new(Route::Attached(id, portal.uplink.clone()))), resumable: false,
     });
     sessions.insert(id, Arc::downgrade(&lane));
     drop(sessions);
@@ -2630,7 +2614,7 @@ fn open_reverse_portal(portal: Arc<Portal>, host: &str, port: u16, tcp: bool, pa
         frame.option = 0;
         frame.payload.clear();
     }
-    if portal.write.lock().expect("reverse").send(&frame).is_err() {
+    if portal.uplink.send(&frame).is_err() {
         portal.sessions.lock().expect("reverse").remove(&id);
         return Err(OpenError::Transport);
     }
@@ -2837,23 +2821,19 @@ fn handshake(
         Vec::new()
     } else { prefix };
     if request.command == Command::Reverse {
-        let portal = Arc::new(Portal { active, write: Arc::new(Mutex::new(kerlico_vless::MuxWriter::new(write))), next: Mutex::new(3), sessions: Mutex::new(HashMap::new()) });
+        let portal = Arc::new(Portal { active, uplink: MuxOut::default(), next: Mutex::new(3), sessions: Mutex::new(HashMap::new()) });
         let key = (accounts.node.clone(), reverse);
+        // The bridge takes the control frame as the portal being open. Queued first, it leads
+        // every session frame; the writer starts only once the portal is registered.
+        portal.uplink.send(&kerlico_vless::control_frame(1)).ok()?;
         {
-            // The bridge takes the control frame as the portal being open, so the portal is
-            // registered first. Holding its writer keeps every session frame behind that one.
-            let mut writer = portal.write.lock().expect("reverse");
-            {
-                let _accounts = accounts.lock().expect("accounts");
-                if !portal.active.load(std::sync::atomic::Ordering::Acquire) { return None; }
-                portals().lock().expect("reverse").insert(key.clone(), Arc::clone(&portal));
-            }
-            if writer.inner_mut().write_all(&encode_mux(&kerlico_vless::control_frame(1))).is_err() {
-                drop(writer);
-                unregister_portal(&key, &portal);
-                return None;
-            }
+            let _accounts = accounts.lock().expect("accounts");
+            if !portal.active.load(std::sync::atomic::Ordering::Acquire) { return None; }
+            portals().lock().expect("reverse").insert(key.clone(), Arc::clone(&portal));
         }
+        write.set_timeout(MUX_POLL);
+        let uplink = portal.uplink.clone();
+        thread::spawn(move || uplink.run(write));
         thread::spawn(move || portal_loop(key, portal, read, prefix));
         return None;
     }
@@ -5323,6 +5303,68 @@ mod tests {
         assert_eq!(read_datagram(&*stream), Ok(b"one".to_vec()));
         drop(carrier);
         assert_eq!(read_datagram(&*stream), Err(PlaneFault::Closed));
+    }
+
+    #[test]
+    fn cut_download_frame_finishes_while_uploads_keep_the_reader_busy() {
+        let (mut inbound, port) = xudp_inbound();
+        let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let request = Request { id: parse_id(ALICE).unwrap(), flow: String::new(), seed: Vec::new(), command: Command::Mux, port: 0, address: Addr::Domain(String::new()) };
+        socket.write_all(&encode_request(&request).unwrap()).unwrap();
+        let mut response = [0u8; 2];
+        socket.read_exact(&mut response).unwrap();
+        for (id, host) in [(1, "download.test"), (2, "upload.test")] {
+            socket.write_all(&kerlico_vless::encode_mux(&kerlico_vless::session_frame(id, true, 80, host, b"open"))).unwrap();
+        }
+        let downloads = wait_handoff(&mut *inbound);
+        assert_eq!(downloads.destination().host(), "download.test");
+        let uploads = wait_handoff(&mut *inbound);
+        assert_eq!(uploads.destination().host(), "upload.test");
+        let uploads = uploads.stream();
+        thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while matches!(uploads.read_from_user(&mut buf), Ok(_) | Err(PlaneFault::Again)) {}
+        });
+        let mut uploader = socket.try_clone().unwrap();
+        thread::spawn(move || loop {
+            let frame = MuxFrame { id: 2, status: KEEP, option: DATA, payload: vec![2; 64], ..MuxFrame::default() };
+            if uploader.write_all(&kerlico_vless::encode_mux(&frame)).is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        });
+        let downloads = downloads.stream();
+        let chunk = vec![1u8; usize::from(u16::MAX)];
+        let mut accepted = 0;
+        loop {
+            match downloads.write_to_user(&chunk) {
+                Ok(n) => accepted += n,
+                Err(PlaneFault::Again) => break,
+                other => panic!("download write: {other:?}"),
+            }
+            assert!(accepted < 512 << 20, "the carrier never filled");
+        }
+        socket.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut buf, mut tmp, mut received) = (Vec::new(), vec![0u8; 64 * 1024], 0);
+        while received < accepted {
+            assert!(Instant::now() < deadline, "the cut frame never finished: the client got {received} of {accepted} bytes");
+            match socket.read(&mut tmp) {
+                Ok(n) => {
+                    assert!(n > 0, "the server closed the carrier");
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                Err(error) => panic!("client read: {error}"),
+            }
+            while let Ok((frame, used)) = decode_mux(&buf) {
+                buf.drain(..used);
+                if frame.id == 1 {
+                    received += frame.payload.len();
+                }
+            }
+        }
+        assert_eq!(received, accepted, "the client gets exactly what the session accepted");
     }
 
     #[test]

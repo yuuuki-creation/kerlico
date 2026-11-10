@@ -2,14 +2,14 @@
 //! connections that `land` calls share, and the sessions on them.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use kerlico_shared::{Destination, InboundStream, OpenError, PlaneFault, Settings, Transport};
-use kerlico_vless::{decode_mux, encode_mux, Addr, Command, HeaderError, MuxFrame, UdpFraming, DATA, END, KEEP, KEEPALIVE, NEW};
+use kerlico_vless::{decode_mux, Addr, Command, HeaderError, MuxFrame, MuxUplink, UdpFraming, DATA, END, KEEP, KEEPALIVE, NEW};
 
 use super::{map_io, parse_addr, retry_io, shared, Flow, Link, Shared};
 
@@ -22,8 +22,6 @@ const FIRST_PAYLOAD: Duration = Duration::from_millis(100);
 const POLL: Duration = Duration::from_millis(200);
 const INBOX_BYTES: usize = 1024 * 1024;
 const INBOX_DATAGRAMS: usize = 256;
-/// Xray's Mux client writes into a 64 KiB pipe that the outbound copies to the carrier.
-const UPLINK_BYTES: usize = 64 * 1024;
 
 /// A UDP address on the wire.
 pub(crate) type Target = (Addr, u16);
@@ -232,9 +230,7 @@ impl Picker {
 
 /// One VLESS connection with the Mux command and the sessions on it.
 struct Carrier {
-    uplink: Mutex<Uplink>,
-    /// Wakes the writer for a queued frame and senders for room.
-    uplink_changed: Condvar,
+    uplink: MuxUplink,
     state: Mutex<CarrierState>,
     /// Wakes the opens that wait for this carrier's dial.
     connected: Condvar,
@@ -250,23 +246,6 @@ struct CarrierState {
     closed: bool,
 }
 
-/// Encoded frames a carrier's writer thread has yet to take. The writer finishes each frame
-/// on its own, so a frame the socket took only in part completes while nobody sends.
-#[derive(Default)]
-struct Uplink {
-    frames: VecDeque<Vec<u8>>,
-    bytes: usize,
-    /// Takes no more frames; the writer drains what is queued and stops.
-    closed: bool,
-}
-
-impl Uplink {
-    fn push(&mut self, frame: Vec<u8>) {
-        self.bytes += frame.len();
-        self.frames.push_back(frame);
-    }
-}
-
 impl Carrier {
     fn start(read: Link, write: Link, ids: Range<u16>) -> Arc<Self> {
         let carrier = Self::dialing(ids);
@@ -276,8 +255,7 @@ impl Carrier {
 
     fn dialing(ids: Range<u16>) -> Arc<Self> {
         Arc::new(Self {
-            uplink: Mutex::default(),
-            uplink_changed: Condvar::new(),
+            uplink: MuxUplink::default(),
             state: Mutex::new(CarrierState { sessions: HashMap::new(), unused: ids, idle_since: Instant::now(), dial: None, closed: false }),
             connected: Condvar::new(),
         })
@@ -290,7 +268,10 @@ impl Carrier {
             write.set_timeout(POLL);
             let (reader, writer) = (Arc::clone(self), Arc::clone(self));
             std::thread::spawn(move || reader.run(read));
-            std::thread::spawn(move || writer.write(write));
+            std::thread::spawn(move || {
+                writer.uplink.run(write);
+                writer.close();
+            });
         });
         let mut state = self.state.lock().expect("mux carrier");
         state.closed |= outcome.is_err();
@@ -319,78 +300,6 @@ impl Carrier {
         Some((id, inbox))
     }
 
-    /// Waits up to one poll for room, as a write into Xray's full pipe blocks.
-    fn send(&self, frame: &MuxFrame) -> std::io::Result<()> {
-        let frame = encode_mux(frame);
-        let deadline = Instant::now() + POLL;
-        let mut uplink = self.uplink.lock().expect("mux carrier");
-        while !uplink.closed && uplink.bytes > 0 && uplink.bytes + frame.len() > UPLINK_BYTES {
-            let wait = deadline.saturating_duration_since(Instant::now());
-            if wait.is_zero() {
-                return Err(std::io::ErrorKind::TimedOut.into());
-            }
-            uplink = self.uplink_changed.wait_timeout(uplink, wait).expect("mux carrier").0;
-        }
-        if uplink.closed {
-            return Err(std::io::ErrorKind::BrokenPipe.into());
-        }
-        uplink.push(frame);
-        self.uplink_changed.notify_all();
-        Ok(())
-    }
-
-    /// Never waits, so dropping a session never blocks. A carrier ends each of its at most
-    /// 128 session ids once, which bounds these frames.
-    fn end(&self, id: u16) {
-        let mut uplink = self.uplink.lock().expect("mux carrier");
-        if !uplink.closed {
-            uplink.push(encode_mux(&MuxFrame { id, status: END, ..MuxFrame::default() }));
-            self.uplink_changed.notify_all();
-        }
-    }
-
-    fn write(self: Arc<Self>, mut link: Link) {
-        while let Some(frame) = self.next_frame() {
-            if self.write_frame(&mut link, &frame).is_err() {
-                break;
-            }
-        }
-        self.close();
-    }
-
-    fn next_frame(&self) -> Option<Vec<u8>> {
-        let mut uplink = self.uplink.lock().expect("mux carrier");
-        loop {
-            if let Some(frame) = uplink.frames.pop_front() {
-                uplink.bytes -= frame.len();
-                self.uplink_changed.notify_all();
-                return Some(frame);
-            }
-            if uplink.closed {
-                return None;
-            }
-            uplink = self.uplink_changed.wait(uplink).expect("mux carrier");
-        }
-    }
-
-    /// A write timeout gives up only once the carrier is closed.
-    fn write_frame(&self, link: &mut Link, mut frame: &[u8]) -> std::io::Result<()> {
-        while !frame.is_empty() {
-            match link.write(frame) {
-                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-                Ok(n) => frame = &frame[n..],
-                Err(error) if retry_io(&error) && !self.closed() => {}
-                Err(error) => return Err(error),
-            }
-        }
-        loop {
-            match link.flush() {
-                Err(error) if retry_io(&error) && !self.closed() => {}
-                result => return result,
-            }
-        }
-    }
-
     fn finish(&self, id: u16, opened: bool) {
         {
             let mut state = self.state.lock().expect("mux carrier");
@@ -399,8 +308,9 @@ impl Carrier {
                 state.idle_since = Instant::now();
             }
         }
+        // A carrier hands out at most 128 session ids and ends each once.
         if opened {
-            self.end(id);
+            self.uplink.end(id, false);
         }
         self.close_if(|state| state.sessions.is_empty() && state.unused.is_empty());
     }
@@ -419,8 +329,7 @@ impl Carrier {
             state.closed = true;
             state.sessions.values().cloned().collect()
         };
-        self.uplink.lock().expect("mux carrier").closed = true;
-        self.uplink_changed.notify_all();
+        self.uplink.close();
         for inbox in inboxes {
             inbox.end();
         }
@@ -481,7 +390,7 @@ impl Carrier {
             // this END, and the session's next data asks again.
             (KEEP, None) => {
                 if frame.option & DATA != 0 {
-                    self.send(&MuxFrame { id: frame.id, status: END, ..MuxFrame::default() }).ok();
+                    self.uplink.send(&MuxFrame { id: frame.id, status: END, ..MuxFrame::default() }).ok();
                 }
             }
             _ => return false,
@@ -630,7 +539,7 @@ impl Session {
 
     fn send(&self, payload: &[u8], to: Option<&Target>) -> std::io::Result<()> {
         let mut opened = self.opened.lock().expect("mux session");
-        self.carrier.send(&self.frame(!*opened, Some(payload), to))?;
+        self.carrier.uplink.send(&self.frame(!*opened, Some(payload), to))?;
         *opened = true;
         Ok(())
     }
@@ -641,7 +550,7 @@ impl Session {
             return;
         }
         let Ok(mut opened) = self.opened.try_lock() else { return };
-        if !*opened && self.carrier.send(&self.frame(true, None, None)).is_ok() {
+        if !*opened && self.carrier.uplink.send(&self.frame(true, None, None)).is_ok() {
             *opened = true;
         }
     }
