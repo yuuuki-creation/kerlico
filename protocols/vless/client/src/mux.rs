@@ -216,7 +216,14 @@ impl Picker {
             }
         };
         if fresh {
-            carrier.connect(dial());
+            // A panicking dial still ends the wait of the opens that joined this carrier.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(dial)) {
+                Ok(dialed) => carrier.connect(dialed),
+                Err(panic) => {
+                    carrier.connect(Err(OpenError::Transport));
+                    std::panic::resume_unwind(panic);
+                }
+            }
         }
         carrier.dialed()?;
         Ok((carrier, id, inbox))
@@ -694,5 +701,48 @@ impl Drop for Session {
         self.inbox.detach();
         let opened = *self.opened.get_mut().expect("mux session");
         self.carrier.finish(self.id, opened);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_dial_fails_the_opens_waiting_on_it() {
+        let picker = Arc::new(Picker::default());
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let dialer = {
+            let picker = Arc::clone(&picker);
+            std::thread::spawn(move || {
+                picker.session(8, false, move || {
+                    released.recv().ok();
+                    panic!("dial bug")
+                }).map(drop)
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let joined = |count: usize| {
+            picker.carriers.lock().unwrap().first().is_some_and(|carrier| carrier.state.lock().unwrap().sessions.len() >= count)
+        };
+        while !joined(1) {
+            assert!(Instant::now() < deadline, "the first open never put its carrier in the pool");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (outcome, waited) = std::sync::mpsc::channel();
+        {
+            let picker = Arc::clone(&picker);
+            std::thread::spawn(move || outcome.send(picker.session(8, false, || unreachable!("joins the dial in flight")).map(drop)));
+        }
+        while !joined(2) {
+            assert!(Instant::now() < deadline, "the second open never joined the dial in flight");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        release.send(()).unwrap();
+        assert!(dialer.join().is_err(), "the dial's own panic still reaches its caller");
+        assert_eq!(
+            waited.recv_timeout(Duration::from_secs(5)).expect("the open that joined the dial waited forever"),
+            Err(OpenError::Transport)
+        );
     }
 }
