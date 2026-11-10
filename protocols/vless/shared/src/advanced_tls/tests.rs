@@ -141,6 +141,69 @@ fn negotiates_tls_10_11_12_13() {
     }
 }
 
+fn key_exchange(
+    server: &AdvancedTlsOptions,
+    client: Arc<AdvancedTlsClientConfig>,
+) -> io::Result<(Option<u16>, bool)> {
+    let server = advanced_server_config(server)?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let task = thread::spawn(move || -> io::Result<()> {
+        let (socket, _) = listener.accept()?;
+        socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+        accept_advanced_tls_over(socket.try_clone()?, socket, server).map(drop)
+    });
+    let socket = TcpStream::connect(address)?;
+    socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+    let result = connect_advanced_tls_over(socket.try_clone()?, socket, client, "localhost").map(
+        |(read, _)| {
+            let core = read.core.lock().unwrap();
+            (core.ssl().group_id(), core.ssl().used_hello_retry_request())
+        },
+    );
+    let server = task.join().unwrap();
+    result.and_then(|value| server.map(|()| value))
+}
+
+#[test]
+fn tls13_server_takes_an_offered_key_share_instead_of_retrying() {
+    let chrome = fingerprint::resolve("chrome").unwrap().unwrap();
+    let mut without_hybrid_share = chrome.clone();
+    for extension in &mut without_hybrid_share.extensions {
+        if extension.id == 51 {
+            extension.shares.retain(|&(group, _)| group != 0x11ec);
+        }
+    }
+    let client = |options: &AdvancedTlsOptions, profile: &fingerprint::Profile| {
+        super::config::advanced_client_config_with_profile(options, Some(profile.clone())).unwrap()
+    };
+    let options = options();
+    assert_eq!(
+        key_exchange(&options, client(&options, &without_hybrid_share)).unwrap(),
+        (Some(29), false),
+        "X25519MLKEM768 listed first without a key share, X25519 shared: X25519 without HelloRetryRequest"
+    );
+    assert_eq!(
+        key_exchange(&options, client(&options, &chrome)).unwrap(),
+        (Some(0x11ec), false),
+        "both shared: the server's first group, X25519MLKEM768"
+    );
+    let mut p256 = options.clone();
+    p256.curve_preferences = vec!["CurveP256".into()];
+    assert_eq!(
+        key_exchange(&p256, client(&options, &without_hybrid_share)).unwrap(),
+        (Some(23), true),
+        "no share for a configured group: retry with the configured P-256"
+    );
+    let mut p521 = options.clone();
+    p521.curve_preferences = vec!["curvep521".into()];
+    assert_eq!(
+        key_exchange(&options, advanced_client_config(&p521).unwrap()).unwrap(),
+        (Some(25), false),
+        "the default server groups include P-521, as Go's do"
+    );
+}
+
 #[test]
 fn separate_factory_calls_resume_tls_and_policy_changes_invalidate_sessions() {
     for version in ["1.2", "1.3"] {
