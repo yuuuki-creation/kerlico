@@ -5,9 +5,12 @@
 //! `VLESS_CASE` filters case/direction labels by comma-separated substrings.
 //! `VLESS_XRAY_CONTROL=1` adds an Xray-to-Xray run. `VLESS_RUN_DIR` holds logs and configs.
 //! The separate `vless_xray_rejections` test checks Xray's config rejection boundaries.
+//! `vless_xray_h2_params` compares raw HTTP/2 server behavior under the same `h2Params`.
 
 #[path = "vless_support/cases.rs"]
 mod cases;
+#[path = "vless_support/h2_probe.rs"]
+mod h2_probe;
 #[path = "vless_support/mod.rs"]
 mod support;
 #[path = "vless_support/xdrive_mock.rs"]
@@ -69,6 +72,7 @@ fn vless_xray_matrix() {
     let mut runs = 0;
     let mut failed = Vec::new();
     for case in cases::cases() {
+        let mut carriers = Vec::new();
         for &direction in &directions {
             let label = format!("{}/{}", case.name, direction.name());
             if !selected(&filter, &label) {
@@ -78,14 +82,38 @@ fn vless_xray_matrix() {
             let dir = root.join(&case.name).join(direction.name());
             let result = fs::create_dir_all(&dir)
                 .map_err(Into::into)
-                .and_then(|_| run_case(&xray, &dir, &case, direction));
+                .and_then(|_| run_case(&xray, &dir, &case, direction))
+                .map(|count| carriers.extend(count.map(|count| (direction, count))));
             report(&label, result, &dir, &mut failed);
         }
+        compare_carriers(&case.name, &carriers, &mut failed);
     }
     finish_report(runs, &failed, &root);
 }
 
-fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Result<()> {
+fn compare_carriers(case: &str, carriers: &[(Direction, usize)], failures: &mut Vec<String>) {
+    let summary: Vec<_> = carriers
+        .iter()
+        .map(|(direction, count)| format!("{}={count}", direction.name()))
+        .collect();
+    if !summary.is_empty() {
+        eprintln!("CARRIERS {case}: {}", summary.join(" "));
+    }
+    let Some(&(_, control)) = carriers
+        .iter()
+        .find(|(direction, _)| matches!(direction, Direction::XrayControl))
+    else {
+        return;
+    };
+    for (direction, count) in carriers {
+        if *count != control {
+            eprintln!("FAIL {case}/{}: {count} TCP carriers, Xray control opened {control}", direction.name());
+            failures.push(format!("{case}/{}/carriers", direction.name()));
+        }
+    }
+}
+
+fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Result<Option<usize>> {
     let mut keys = Keys::generate(dir, case)?;
     let storage = case.mock.map(|service| {
         xdrive_mock::Mock::start(service, case.security, &keys.cert_pem, &keys.key_pem)
@@ -138,7 +166,8 @@ fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Resul
         front = available_port()?;
     }
 
-    let carrier = if case.name.starts_with("grpc-") && case.payload == Payload::TwoTcp {
+    let shared_grpc = case.name.starts_with("grpc-") && case.payload == Payload::TwoTcp;
+    let carrier = if shared_grpc || case.counts_carriers() {
         Some(count_tcp_carriers(peer)?)
     } else {
         None
@@ -185,7 +214,7 @@ fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Resul
         let result = if case.payload.udp() {
             exercise_udp(front, origin.port, inject)
         } else {
-            exercise_tcp(front, origin.port, inject, case.payload, carrier.is_some())
+            exercise_tcp(front, origin.port, inject, case.payload, shared_grpc)
         };
         result.map_err(|error| format!("traffic round {}: {error}", round + 1))?;
     }
@@ -195,17 +224,31 @@ fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Resul
     if download.is_some_and(|used| !used.load(Ordering::Relaxed)) {
         return Err("XHTTP did not use the downloadSettings endpoint".into());
     }
+    if let Some(trusted) = case.forwarded().filter(|_| !matches!(direction, Direction::XrayToKerlico)) {
+        let log = fs::read_to_string(dir.join("xray-server.log"))?;
+        let source = format!("from {}:0 accepted", cases::FORWARDED);
+        if log.contains(&source) != trusted {
+            return Err(format!(
+                "Xray server {} X-Forwarded-For {}",
+                if trusted { "ignored" } else { "trusted" },
+                if trusted { "with the trusted marker" } else { "without the trusted marker" },
+            )
+            .into());
+        }
+    }
+    let mut carriers = None;
     if let Some((_, count)) = carrier {
         let count = count.load(Ordering::Acquire);
-        if count != 1 {
+        if shared_grpc && count != 1 {
             return Err(format!("two gRPC calls opened {count} TCP connections").into());
         }
+        carriers = Some(count);
     }
     drop(peers);
     if let Some(storage) = storage {
         storage.verify(!case.payload.udp())?;
     }
-    Ok(())
+    Ok(carriers)
 }
 
 fn exercise_hysteria_http(peer: u16, case: &str) -> Result<()> {
@@ -387,6 +430,9 @@ fn open_front(port: u16, origin: u16, inject: bool, udp: bool) -> Result<TcpStre
 
 fn exercise_tcp(front: u16, origin: u16, inject: bool, payload: Payload, shared_grpc: bool) -> Result<()> {
     let mut stream = open_front(front, origin, inject, false)?;
+    if let Payload::Rounds(rounds) = payload {
+        return (0..rounds).try_for_each(|round| tcp_exchange(&mut stream, 17, 33 + round));
+    }
     if payload == Payload::InnerTls {
         let tls = kerlico_vless::client_config(&[], true).map_err(|_| "make inner TLS client")?;
         let mut stream = kerlico_vless::connect_tls(stream, tls, TLS_NAME)
@@ -597,4 +643,64 @@ fn rejection_configs(dir: &Path) -> Result<Vec<(String, Value)>> {
     config["inbounds"][0]["settings"]["fallbacks"] = json!([{"dest": 20503}]);
     configs.push(("reject-encryption-with-fallback".into(), config));
     Ok(configs)
+}
+
+#[test]
+#[ignore = "requires XRAY pointing to Xray 26.10.31 a4a3dff"]
+fn vless_xray_h2_params() {
+    let root = run_dir("h2-params").expect("h2 params directory");
+    let xray = xray_binary(&root).expect("pinned Xray peer");
+    let mut runs = 0;
+    let mut failed = Vec::new();
+    for (name, security) in [("h2c", Security::None), ("tls", Security::Tls("h2"))] {
+        runs += 1;
+        let label = format!("h2-params-{name}");
+        let dir = root.join(&label);
+        let result = fs::create_dir(&dir)
+            .map_err(Into::into)
+            .and_then(|_| h2_params_case(&xray, &dir, security));
+        report(&label, result, &dir, &mut failed);
+    }
+    finish_report(runs, &failed, &root);
+}
+
+fn h2_params_case(xray: &Path, root: &Path, security: Security) -> Result<()> {
+    let tls = matches!(security, Security::Tls(_));
+    let mut hellos = Vec::new();
+    for (probe, params) in [("limits", h2_probe::LIMIT_PARAMS), ("pings", h2_probe::PING_PARAMS)] {
+        for server in ["kerlico", "xray"] {
+            let dir = root.join(format!("{probe}-{server}"));
+            fs::create_dir(&dir)?;
+            let case = Case::new("h2-probe", Network::Xhttp("packet-up"), security, Payload::Tcp)
+                .h2_params(params);
+            let keys = Keys::generate(&dir, &case)?;
+            let origin = Echo::tcp(None)?;
+            let peer = available_port()?;
+            let _server = if server == "kerlico" {
+                start_kerlico(&dir, &case.kerlico_server(&keys, peer))?
+            } else {
+                start_xray(xray, &dir, "xray-server", &case.xray_server(&keys, peer, origin.port))?
+            };
+            if probe == "pings" {
+                h2_probe::pings(peer, tls).map_err(|error| format!("{server} pings: {error}"))?;
+                continue;
+            }
+            let hello = h2_probe::handshake(&mut h2_probe::Wire::connect(peer, tls)?)
+                .map_err(|error| format!("{server} hello: {error}"))?;
+            eprintln!("H2 {server} {hello:?}");
+            h2_probe::expect_limits(&hello).map_err(|error| format!("{server}: {error}"))?;
+            h2_probe::frame_limit(peer, tls, h2_probe::LIMIT_FRAME)
+                .map_err(|error| format!("{server} frame limit: {error}"))?;
+            hellos.push(hello);
+        }
+    }
+    let [kerlico, xray] = &hellos[..] else {
+        return Err("missing a server hello".into());
+    };
+    for (id, value) in &kerlico.settings {
+        if xray.settings.get(id).is_some_and(|other| other != value) {
+            return Err(format!("SETTINGS {id}: Kerlico {value}, Xray {:?}", xray.settings.get(id)).into());
+        }
+    }
+    Ok(())
 }

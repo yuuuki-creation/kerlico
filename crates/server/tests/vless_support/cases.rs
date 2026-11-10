@@ -16,6 +16,7 @@ pub const TLS_NAME: &str = "localhost";
 const PATH: &str = "/matrix";
 const SHORT_ID: &str = "12ab34cd";
 pub const AUTH: &str = "matrix-hysteria-auth";
+pub const FORWARDED: &str = "203.0.113.8";
 
 #[derive(Clone, Copy)]
 pub enum Network {
@@ -66,6 +67,7 @@ impl Security {
 pub enum Payload {
     Tcp,
     TwoTcp,
+    Rounds(usize),
     InnerTls,
     Udp,
     Udp443,
@@ -92,6 +94,10 @@ pub struct Case {
     tls12: bool,
     mldsa: bool,
     xhttp: Option<XhttpOptions>,
+    h2_params: Option<&'static str>,
+    xmux: Option<&'static str>,
+    xff: Option<bool>,
+    sockopt: Option<&'static str>,
 }
 
 #[derive(Clone, Copy)]
@@ -125,7 +131,48 @@ impl Case {
             tls12: false,
             mldsa: false,
             xhttp: None,
+            h2_params: None,
+            xmux: None,
+            xff: None,
+            sockopt: None,
         }
+    }
+
+    pub fn sockopt(mut self, json: &'static str) -> Self {
+        self.sockopt = Some(json);
+        self
+    }
+
+    /// The client sends X-Forwarded-For. The server trusts it only when `marker` adds the trusted header.
+    pub fn xff(mut self, marker: bool) -> Self {
+        self.xff = Some(marker);
+        self
+    }
+
+    pub fn forwarded(&self) -> Option<bool> {
+        self.xff
+    }
+
+    fn xff_headers(&self) -> Value {
+        let mut headers = json!({"X-Forwarded-For": FORWARDED, "X-Test": "forwarded"});
+        if self.xff == Some(true) {
+            headers["X-Trusted-CDN"] = json!("1");
+        }
+        headers
+    }
+
+    pub fn h2_params(mut self, params: &'static str) -> Self {
+        self.h2_params = Some(params);
+        self
+    }
+
+    pub fn xmux(mut self, xmux: &'static str) -> Self {
+        self.xmux = Some(xmux);
+        self
+    }
+
+    pub fn counts_carriers(&self) -> bool {
+        self.xmux.is_some()
     }
 
     pub fn encryption(mut self, cipher: &'static str, resume: bool) -> Self {
@@ -155,7 +202,11 @@ impl Case {
 
     fn upgrade_settings(&self, early: bool, server: bool) -> Value {
         if !self.custom_upgrade {
-            return json!({"path": path(early), "host": TLS_NAME});
+            let mut settings = json!({"path": path(early), "host": TLS_NAME});
+            if self.xff.is_some() && !server {
+                settings["headers"] = self.xff_headers();
+            }
+            return settings;
         }
         let websocket = matches!(self.network, Network::WebSocket(_));
         let mut target = PATH.to_owned();
@@ -189,6 +240,14 @@ impl Case {
 
     fn xhttp_settings(&self, keys: &Keys, mode: &str, server: bool) -> Value {
         let mut settings = json!({"path": PATH, "host": TLS_NAME, "mode": mode});
+        if self.xff.is_some() && !server {
+            settings["headers"] = self.xff_headers();
+        }
+        for (key, text) in [("h2Params", self.h2_params), ("xmux", self.xmux)] {
+            if let Some(text) = text {
+                settings[key] = serde_json::from_str(text).expect("XHTTP fixture JSON");
+            }
+        }
         let extra = match self.xhttp {
             Some(XhttpOptions::Header) => json!({
                 "sessionIDPlacement": "query", "sessionIDKey": "session",
@@ -349,6 +408,12 @@ impl Case {
         if server && self.name == "hysteria-quic-masquerade-string" {
             stream["hysteriaSettings"]["masquerade"] = masquerade_string();
         }
+        if let Some(sockopt) = self.sockopt {
+            stream["sockopt"] = serde_json::from_str(sockopt).expect("sockopt fixture JSON");
+        }
+        if server && self.xff.is_some() {
+            stream["sockopt"] = json!({"trustedXForwardedFor": ["X-Trusted-CDN"]});
+        }
         stream
     }
 
@@ -463,6 +528,12 @@ impl Case {
         }
         if server && self.name == "hysteria-quic-masquerade-string" {
             settings["masquerade"] = masquerade_string();
+        }
+        if let Some(sockopt) = self.sockopt {
+            settings["sockopt"] = serde_json::from_str(sockopt).expect("sockopt fixture JSON");
+        }
+        if server && self.xff.is_some() {
+            settings["sockopt"] = json!({"trustedXForwardedFor": ["X-Trusted-CDN"]});
         }
         settings
     }
@@ -760,6 +831,33 @@ pub fn cases() -> Vec<Case> {
     cases.push(Case::new("xhttp-h3-query-get", Xhttp("packet-up"), Tls("h3"), Tcp).xhttp(XhttpOptions::Query));
     cases.push(Case::new("xhttp-h1-stream-patch", Xhttp("stream-up"), None, Tcp).xhttp(XhttpOptions::Stream));
     cases.push(Case::new("xhttp-reality-auto-separate-download", Xhttp("auto"), Reality, Tcp).xhttp(XhttpOptions::SeparateDownload));
+    cases.push(Case::new("xhttp-h2-tls-max-streams-1", Xhttp("packet-up"), Tls("h2"), TwoTcp).h2_params(r#"{"MaxConcurrentStreams":1}"#));
+    cases.push(Case::new("xhttp-h2-reality-max-streams-1", Xhttp("packet-up"), Reality, TwoTcp).h2_params(r#"{"MaxConcurrentStreams":1}"#));
+    for rounds in [1, 2, 3, 4, 5, 6, 7, 8] {
+        cases.push(Case::new(format!("xhttp-h2-xmux-requests-3-rounds-{rounds}"), Xhttp("packet-up"), Tls("h2"), Rounds(rounds)).xmux(r#"{"hMaxRequestTimes":3}"#));
+    }
+    cases.push(Case::new("xhttp-h2-xmux-requests-1-rounds-3", Xhttp("packet-up"), Tls("h2"), Rounds(3)).xmux(r#"{"hMaxRequestTimes":1}"#));
+    cases.push(Case::new("xhttp-h2-xmux-requests-2-rounds-4", Xhttp("packet-up"), Tls("h2"), Rounds(4)).xmux(r#"{"hMaxRequestTimes":2}"#));
+    cases.push(Case::new("xhttp-h2-xmux-stream-up-requests-1", Xhttp("stream-up"), Tls("h2"), TwoTcp).xmux(r#"{"hMaxRequestTimes":1}"#));
+    cases.push(Case::new("xhttp-h2-xmux-stream-up-requests-2", Xhttp("stream-up"), Tls("h2"), TwoTcp).xmux(r#"{"hMaxRequestTimes":2}"#));
+    cases.push(Case::new("xhttp-h2-xmux-stream-one-requests-1", Xhttp("stream-one"), Tls("h2"), TwoTcp).xmux(r#"{"hMaxRequestTimes":1}"#));
+    cases.push(Case::new("xhttp-h2-xmux-reuse-1", Xhttp("packet-up"), Tls("h2"), TwoTcp).xmux(r#"{"cMaxReuseTimes":1}"#));
+    cases.push(Case::new("xhttp-h2-xmux-connections-2", Xhttp("packet-up"), Tls("h2"), TwoTcp).xmux(r#"{"maxConnections":2}"#));
+    for (name, network, security) in [
+        ("ws-none", WebSocket(false), None),
+        ("httpupgrade-none", Upgrade(false), None),
+        ("xhttp-h1-packet-up", Xhttp("packet-up"), None),
+        ("xhttp-h2-tls-stream-up", Xhttp("stream-up"), Tls("h2")),
+    ] {
+        for marker in [true, false] {
+            let name = format!("{name}-forwarded-{}", if marker { "trusted" } else { "forged" });
+            cases.push(Case::new(name, network, security, Tcp).xff(marker));
+        }
+    }
+    const SOCKOPT: &str = r#"{"TCPKeepAliveIdle":30,"tcpKEEPALIVEInterval":10,"TcpUserTimeout":10000,"Penetrate":true,"TcpFastOpen":false,"DomainStrategy":"UseIPv4","UnknownOption":{"nested":[1]}}"#;
+    cases.push(Case::new("raw-tls-sockopt-mixed-case", Raw, Tls(""), Tcp).sockopt(SOCKOPT));
+    cases.push(Case::new("ws-none-sockopt-mixed-case", WebSocket(false), None, Tcp).sockopt(SOCKOPT));
+    cases.push(Case::new("xhttp-h2-tls-sockopt-mixed-case", Xhttp("packet-up"), Tls("h2"), Tcp).sockopt(SOCKOPT));
     cases.push(Case::new("hysteria-tls-tcp", Hysteria, Tls("h3"), Tcp));
     cases.push(Case::new("hysteria-tls-udp", Hysteria, Tls("h3"), Udp));
     for name in ["hysteria-quic-negotiated-brutal", "hysteria-quic-forced-brutal", "hysteria-quic-aggressive-bbr", "hysteria-quic-masquerade-string"] {
