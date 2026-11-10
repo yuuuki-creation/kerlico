@@ -34,8 +34,11 @@ Advanced phase (explicitly confirmed by user):
 Session 2026-11-10 (pickup, Claude):
 - [x] Session pickup: prior trail read; resume point is the unchecked Advanced-phase items and Phase C/D/E.
 - [x] Rebuild worker: perf-01 toolchain reinstalled after the 2026-11-10 worker wipe; pinned Xray 26.10.31 a4a3dff rebuilt from reference source.
-- [ ] Baseline on ce51460: lib, vless_flow, official matrix with control, leaf builds.
-- [ ] Client leaf: local SOCKS5/HTTP entry for VLESS sharing one front-end with mieru (architect pass running).
-- [ ] REALITY, XHTTP h2Params/XMUX, Mux reuse/GlobalID/UDP443/reverse bridge, sockopt: gap map running, then one unit at a time.
+- [x] Baseline on ce51460: lib, vless_flow, official matrix with control, leaf builds.
+- [x] Client leaf: local SOCKS5/HTTP entry for VLESS sharing one front-end with mieru (merged, 18/18 against Xray).
+- [x] REALITY target/Unix/xver/limits, XHTTP h2Params/XMUX, Mux reuse/GlobalID/UDP443/reverse bridge, sockopt, UDP size rules: merged unit by unit. REALITY camouflage (R2) stopped by a safety check; left to the user.
 - [ ] Final: full matrix on final snapshot, independent review, separate leaf builds, vless.md updated.
 Rule from user 2026-11-10: no compiling or testing on the local machine; all builds and tests run on the worker. Worker toolchains stay installed after use.
+- [x] Independent review of ce51460..114f21b; findings fixed in unit F2 (merged a6e3af8).
+- [ ] Unit F3: one Mux uplink for every Mux carrier (running).
+- [ ] Unit F4: TLS server group choice so Xray `randomized` fingerprints never get a HelloRetryRequest (running; found by running the ignored lib Xray tests the gate skipped).

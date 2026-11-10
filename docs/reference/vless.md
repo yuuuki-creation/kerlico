@@ -53,7 +53,9 @@ XHTTP 服务端的 `h2Params` 只作用于 H2 入口（h2c、TLS H2、REALITY H2
 
 XHTTP 客户端的 `hMaxRequestTimes` 与 Xray 同样记账：下载 GET、stream-up 上传和 stream-one 请求直接扣减，不换连接；packet-up 的 POST 扣减后预算已尽才换连接，换到的新连接不记这次 POST。packet-up 的 VLESS 请求头和第一笔数据最多等 100 毫秒后合并成一个 POST，启用 Encryption 时不合并。H1 的 XMUX 连接数不与 Xray 对齐，Go 的 H1 上传连接池会不确定地多开连接。
 
-mKCP 处理绝对接收窗口、累积确认、丢包重传、乱序、重复数据重新确认和关闭前的数据排空。空闲时每 3 秒发 PING，30 秒无对端活动才过期。`header` 支持 none、original、srtp、utp、wechat、dtls、wireguard、dns，`domain` 是 DNS 名，`seed` 启用 AES-GCM。旧 original 包装使用 FNV-1a 和错位异或。其他通用 finalmask 正在补齐。
+mKCP 处理绝对接收窗口、累积确认、丢包重传、乱序、重复数据重新确认和关闭前的数据排空。空闲时每 3 秒发 PING，30 秒无对端活动才过期。`header` 支持 none、original、srtp、utp、wechat、dtls、wireguard、dns，`domain` 是 DNS 名，`seed` 启用 AES-GCM。旧 original 包装使用 FNV-1a 和错位异或。
+
+通用 finalmask 的类型与 Xray 注册的类型相同（`infra/conf/transport_finalmask.go`）。TCP 有 `header-custom`、`filter`、`fragment`、`xmc`、`sudoku`；UDP 有 `header-custom`、`filter`、`mkcp-legacy`、`noise`、`realm`、`salamander`、`sudoku`、`udphop`、`xdns`、`xicmp`。其他类型名拒绝配置。
 
 `sockopt` 的键按 Go `encoding/json` 匹配，不区分大小写，未知键忽略，`null` 保持默认值，类型错误仍然拒绝配置。
 
