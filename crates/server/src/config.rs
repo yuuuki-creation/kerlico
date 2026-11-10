@@ -21,6 +21,8 @@ struct File {
     #[serde(default)]
     landing: Option<LandingFile>,
     #[serde(default)]
+    bridges: Vec<BridgeFile>,
+    #[serde(default)]
     api: Option<ApiFile>,
 }
 
@@ -38,6 +40,21 @@ struct InboundFile {
     sniffing: Option<SniffFile>,
     #[serde(default)]
     settings: SettingsFile,
+}
+
+#[derive(Deserialize)]
+struct BridgeFile {
+    tag: String,
+    address: String,
+    port: u16,
+    #[serde(default = "default_outbound")]
+    outbound: String,
+    #[serde(default)]
+    rules: Vec<RuleFile>,
+    #[serde(default)]
+    sniffing: Option<SniffFile>,
+    #[serde(default)]
+    settings: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -183,20 +200,8 @@ fn load_prepared(text: &str, dir: Option<&std::path::Path>) -> Result<Loaded, St
             .find(|id| id.as_str() == inbound.protocol)
             .ok_or_else(|| format!("bad protocol {}", inbound.protocol))?;
         let listen = parse_listen(&inbound.listen, inbound.port)?;
-        let choice = OutboundChoice::parse(&inbound.outbound)
-            .ok_or_else(|| format!("bad outbound {}", inbound.outbound))?;
-        let rules = inbound
-            .rules
-            .into_iter()
-            .map(|rule| {
-                let mut lines = rule.domain;
-                lines.extend(rule.geosite.into_iter().map(|item| format!("geosite:{item}")));
-                lines.extend(rule.geoip.into_iter().map(|item| format!("geoip:{item}")));
-                let choice = OutboundChoice::parse(&rule.outbound)
-                    .ok_or_else(|| format!("bad outbound {}", rule.outbound))?;
-                Ok(Rule { lines, choice })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let choice = parse_choice(&inbound.outbound)?;
+        let rules = parse_rules(inbound.rules)?;
         let mut node_settings = Settings::default();
         for (key, value) in &inbound.settings.fields {
             let text = scalar(value).ok_or_else(|| format!("bad settings {key}"))?;
@@ -206,12 +211,7 @@ fn load_prepared(text: &str, dir: Option<&std::path::Path>) -> Result<Loaded, St
             .listen_node(tag.clone(), protocol, listen, choice, &node_settings)
             .map_err(|_| format!("listen {}", inbound.tag))?;
         server.set_rules(&tag, rules);
-        if let Some(sniff) = inbound.sniffing.filter(|sniff| sniff.enabled) {
-            let kinds = if sniff.dest_override.is_empty() {
-                vec!["http".to_string(), "tls".to_string(), "quic".to_string()]
-            } else {
-                sniff.dest_override
-            };
+        if let Some(kinds) = sniff_kinds(inbound.sniffing) {
             server.set_sniff(&tag, kinds);
         }
         for user in inbound.settings.users {
@@ -225,6 +225,21 @@ fn load_prepared(text: &str, dir: Option<&std::path::Path>) -> Result<Loaded, St
             server
                 .add_user(&tag, email, &account)
                 .map_err(|_| format!("user {}", inbound.tag))?;
+        }
+    }
+    for bridge in file.bridges {
+        let tag = NodeTag::parse(&bridge.tag).map_err(|_| format!("bad tag {}", bridge.tag))?;
+        if bridge.port == 0 || bridge.address.is_empty() {
+            return Err(format!("bad bridge {}", bridge.tag));
+        }
+        let choice = parse_choice(&bridge.outbound)?;
+        let rules = parse_rules(bridge.rules)?;
+        server
+            .bridge_node(tag.clone(), bridge.address, bridge.port, choice, &landing_settings(&bridge.settings)?)
+            .map_err(|_| format!("bridge {}", bridge.tag))?;
+        server.set_rules(&tag, rules);
+        if let Some(kinds) = sniff_kinds(bridge.sniffing) {
+            server.set_sniff(&tag, kinds);
         }
     }
     if file.fakedns.as_ref().is_some_and(|item| item.enabled) {
@@ -307,6 +322,31 @@ fn parse_dns(file: Option<&DnsFile>) -> Result<crate::dns::Config, String> {
         upstreams,
         strategy,
         listen,
+    })
+}
+
+fn parse_choice(text: &str) -> Result<OutboundChoice, String> {
+    OutboundChoice::parse(text).ok_or_else(|| format!("bad outbound {text}"))
+}
+
+fn parse_rules(rules: Vec<RuleFile>) -> Result<Vec<Rule>, String> {
+    rules
+        .into_iter()
+        .map(|rule| -> Result<Rule, String> {
+            let mut lines = rule.domain;
+            lines.extend(rule.geosite.into_iter().map(|item| format!("geosite:{item}")));
+            lines.extend(rule.geoip.into_iter().map(|item| format!("geoip:{item}")));
+            Ok(Rule { lines, choice: parse_choice(&rule.outbound)? })
+        })
+        .collect()
+}
+
+fn sniff_kinds(sniff: Option<SniffFile>) -> Option<Vec<String>> {
+    let sniff = sniff.filter(|sniff| sniff.enabled)?;
+    Some(if sniff.dest_override.is_empty() {
+        vec!["http".to_string(), "tls".to_string(), "quic".to_string()]
+    } else {
+        sniff.dest_override
     })
 }
 

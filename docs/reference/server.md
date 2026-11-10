@@ -21,6 +21,8 @@
 
 节点另有一份有序的分流规则。规则只属于这个节点。没命中时使用节点自己的 `OutboundChoice`。
 
+反向桥也是节点，用 `bridge_node` 创建。它不监听，而是主动连到远端的 VLESS Portal。Portal 送来的每条流交成这个节点的 `Handoff`，同样按这个节点的规则和 `OutboundChoice` 选出口，由出站模块拨号。它没有账号，`add_user` 和 `remove_user` 返回错误。配置写法在「配置和运行时接口」的 `bridges`。
+
 ## 节点上的分流
 
 这里的网址指域名，不指带路径的链接。匹配只看目标主机名或目标 IP。端口、来源地址、协议名和用户不参与匹配。
@@ -211,6 +213,16 @@ UDP 的 `InboundStream` 一次读写表示一个完整数据报。`Ok(0)` 是有
     }
   ],
   "landing": { "protocol": "vless", "address": "203.0.113.10", "port": 443, "settings": {} },
+  "bridges": [
+    {
+      "tag": "home",
+      "address": "198.51.100.20",
+      "port": 443,
+      "outbound": "default",
+      "rules": [],
+      "settings": { "id": "...", "encryption": "none" }
+    }
+  ],
   "dns": {
     "listen": "127.0.0.1",
     "port": 53,
@@ -229,7 +241,11 @@ UDP 的 `InboundStream` 一次读写表示一个完整数据报。`Ok(0)` 是有
 
 `api` 可以不写。写了之后在 `listen` 和 `port` 上打开 gRPC。端口 0 拒绝。v6 套接字打开 `IPV6_V6ONLY`。`/kerlico.Users/Add` 和 `/kerlico.Users/Remove` 按节点名和邮箱添加或删除用户。添加时可以带一组文本设置，交给那个协议的 `add_user`。`/kerlico.Stats/Get` 按上一节的计数名字查询，回答是这个名字和当前值。节点、规则、DNS、WARP 和落地不在这个接口里改。改它们要重新加载配置。
 
-启动时会读 `inbounds`、`dns`、`warp`、`landing` 和 `api`。
+`bridges` 可以不写。每一项是一个 VLESS 反向桥节点，对应 Xray 带 `reverse.tag` 的 VLESS 出站。`tag` 是节点名，和 `inbounds` 共用一个名字空间；桥上的流在计数里也用它作用户名。`address` 和 `port` 是 Portal。`settings` 是 VLESS 客户端设置，写法和 VLESS 落地相同，例如 `id`、`encryption`、`flow` 以及传输和安全字段。`outbound`、`rules` 和 `sniffing` 的写法和入站节点相同。这一项需要服务端叶子的 `landing-vless` feature；没有它的构建拒绝含 `bridges` 的配置。
+
+桥对 Portal 的连接按 Xray 的方式维护。每 2 秒检查一次。没有活动连接，或活动连接平均承载的会话超过 16 个时，再开一条。会话数包括 Portal 的控制会话，平均值向下取整。Portal 的控制消息改成 DRAIN 后，这条连接不再计入，已有会话继续。断开的连接被移出，下一次检查按同样的条件补开。连 Portal 失败只打日志，2 秒后再试，不让配置加载失败。
+
+启动时会读 `inbounds`、`bridges`、`dns`、`warp`、`landing` 和 `api`。
 
 
 监听器创建前，服务端先安装 DNS 配置、共享的 GeoIP 目录、WARP 和普通落地；反向落地在节点和账号建立后安装。`Server::from_config_in` 使用配置所在目录准备这些服务，独立的 `from_config` 保持不注册外部 WARP 的嵌入式入口。

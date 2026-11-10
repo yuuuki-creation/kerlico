@@ -111,6 +111,42 @@ pub fn heartbeat_due(counter: u32) -> (u32, bool) {
     (counter, counter == 1)
 }
 
+/// `Control.state` from one control payload: 0 is ACTIVE, 1 is DRAIN. `None` when the
+/// protobuf is malformed, which makes an Xray bridge close that connection.
+pub fn control_state(mut bytes: &[u8]) -> Option<u64> {
+    fn varint(bytes: &mut &[u8]) -> Option<u64> {
+        let mut value = 0u64;
+        for shift in (0..64).step_by(7) {
+            let (&byte, rest) = bytes.split_first()?;
+            *bytes = rest;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
+    }
+    let mut state = 0;
+    while !bytes.is_empty() {
+        let key = varint(&mut bytes)?;
+        let skip = match key & 7 {
+            0 => {
+                let value = varint(&mut bytes)?;
+                if key >> 3 == 1 {
+                    state = value;
+                }
+                0
+            }
+            1 => 8,
+            2 => usize::try_from(varint(&mut bytes)?).ok()?,
+            5 => 4,
+            _ => return None,
+        };
+        bytes = bytes.get(skip..)?;
+    }
+    Some(state)
+}
+
 fn encode_control(state: u8, random: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     if state != 0 {
@@ -298,5 +334,15 @@ mod tests {
         assert_eq!(decoded.port, 0);
         assert_eq!(decoded.address, Some(Addr::Domain("reverse".to_string())));
         assert_eq!(&decoded.payload[..3], &[0x9a, 0x06, 16]);
+    }
+
+    #[test]
+    fn control_state_reads_active_and_drain_and_rejects_broken_protobuf() {
+        assert_eq!(control_state(&encode_control(0, &[7; 64])), Some(0));
+        assert_eq!(control_state(&encode_control(1, &[7; 3])), Some(1));
+        assert_eq!(control_state(&[]), Some(0));
+        assert_eq!(control_state(&[0x9a, 0x06, 5, 1, 2]), None, "random field longer than the payload");
+        assert_eq!(control_state(&[0x08]), None, "state without its varint");
+        assert_eq!(control_state(&[0x0b]), None, "group wire type");
     }
 }
