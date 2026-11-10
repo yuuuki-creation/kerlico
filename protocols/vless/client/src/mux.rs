@@ -2,16 +2,16 @@
 //! connections that `land` calls share, and the sessions on them.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use kerlico_shared::{Destination, InboundStream, OpenError, PlaneFault, Settings, Transport};
-use kerlico_vless::{decode_mux, Addr, Command, HeaderError, MuxFrame, UdpFraming, DATA, END, KEEP, KEEPALIVE, NEW};
+use kerlico_vless::{decode_mux, encode_mux, Addr, Command, HeaderError, MuxFrame, UdpFraming, DATA, END, KEEP, KEEPALIVE, NEW};
 
-use super::{map_io, parse_addr, retry_io, shared, Flow, Link, MuxOutbox, Shared};
+use super::{map_io, parse_addr, retry_io, shared, Flow, Link, Shared};
 
 /// Xray's `MaxConnection`: a carrier takes no new session after this many.
 const CARRIER_SESSIONS: u16 = 128;
@@ -22,6 +22,8 @@ const FIRST_PAYLOAD: Duration = Duration::from_millis(100);
 const POLL: Duration = Duration::from_millis(200);
 const INBOX_BYTES: usize = 1024 * 1024;
 const INBOX_DATAGRAMS: usize = 256;
+/// Xray's Mux client writes into a 64 KiB pipe that the outbound copies to the carrier.
+const UPLINK_BYTES: usize = 64 * 1024;
 
 /// A UDP address on the wire.
 pub(crate) type Target = (Addr, u16);
@@ -189,41 +191,53 @@ impl Pool {
 #[derive(Default)]
 struct Picker {
     carriers: Mutex<Vec<Arc<Carrier>>>,
-    /// Concurrent opens wait for one dial instead of each dialing a carrier.
-    dialing: Mutex<()>,
 }
 
 type Allocated = (Arc<Carrier>, u16, Arc<Inbox>);
 
 impl Picker {
+    /// Follows Xray's `IncrementalWorkerPicker`: a new carrier joins the pool before it dials,
+    /// so opens that arrive meanwhile take sessions on it and share that one dial's outcome.
     fn session(&self, concurrency: u16, udp: bool, dial: impl FnOnce() -> Result<(Link, Link), OpenError>) -> Result<Allocated, OpenError> {
-        if let Some(found) = self.pick(concurrency, udp) {
-            return Ok(found);
+        let ((carrier, id, inbox), fresh) = {
+            let mut carriers = self.carriers.lock().expect("mux pool");
+            carriers.retain(|carrier| !carrier.closed());
+            let found = carriers.iter().find_map(|carrier| {
+                carrier.allocate(concurrency, udp).map(|(id, inbox)| (Arc::clone(carrier), id, inbox))
+            });
+            match found {
+                Some(found) => (found, false),
+                None => {
+                    let carrier = Carrier::dialing(1..CARRIER_SESSIONS + 1);
+                    let (id, inbox) = carrier.allocate(concurrency, udp).ok_or(OpenError::Transport)?;
+                    carriers.push(Arc::clone(&carrier));
+                    ((carrier, id, inbox), true)
+                }
+            }
+        };
+        if fresh {
+            // A panicking dial still ends the wait of the opens that joined this carrier.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(dial)) {
+                Ok(dialed) => carrier.connect(dialed),
+                Err(panic) => {
+                    carrier.connect(Err(OpenError::Transport));
+                    std::panic::resume_unwind(panic);
+                }
+            }
         }
-        let _dialing = self.dialing.lock().expect("mux pool");
-        if let Some(found) = self.pick(concurrency, udp) {
-            return Ok(found);
-        }
-        let (read, write) = dial()?;
-        let carrier = Carrier::start(read, write, 1..CARRIER_SESSIONS + 1);
-        let (id, inbox) = carrier.allocate(concurrency, udp).ok_or(OpenError::Transport)?;
-        self.carriers.lock().expect("mux pool").push(Arc::clone(&carrier));
+        carrier.dialed()?;
         Ok((carrier, id, inbox))
-    }
-
-    fn pick(&self, concurrency: u16, udp: bool) -> Option<Allocated> {
-        let mut carriers = self.carriers.lock().expect("mux pool");
-        carriers.retain(|carrier| !carrier.closed());
-        carriers.iter().find_map(|carrier| {
-            carrier.allocate(concurrency, udp).map(|(id, inbox)| (Arc::clone(carrier), id, inbox))
-        })
     }
 }
 
 /// One VLESS connection with the Mux command and the sessions on it.
 struct Carrier {
-    outbox: Mutex<Option<MuxOutbox>>,
+    uplink: Mutex<Uplink>,
+    /// Wakes the writer for a queued frame and senders for room.
+    uplink_changed: Condvar,
     state: Mutex<CarrierState>,
+    /// Wakes the opens that wait for this carrier's dial.
+    connected: Condvar,
 }
 
 struct CarrierState {
@@ -231,20 +245,63 @@ struct CarrierState {
     /// Session ids not handed out yet. The carrier is retired once none are left.
     unused: Range<u16>,
     idle_since: Instant,
+    /// The outcome of the dial that opens this carrier, `None` while it runs.
+    dial: Option<Result<(), OpenError>>,
     closed: bool,
 }
 
+/// Encoded frames a carrier's writer thread has yet to take. The writer finishes each frame
+/// on its own, so a frame the socket took only in part completes while nobody sends.
+#[derive(Default)]
+struct Uplink {
+    frames: VecDeque<Vec<u8>>,
+    bytes: usize,
+    /// Takes no more frames; the writer drains what is queued and stops.
+    closed: bool,
+}
+
+impl Uplink {
+    fn push(&mut self, frame: Vec<u8>) {
+        self.bytes += frame.len();
+        self.frames.push_back(frame);
+    }
+}
+
 impl Carrier {
-    fn start(mut read: Link, mut write: Link, ids: Range<u16>) -> Arc<Self> {
-        read.set_timeout(POLL);
-        write.set_timeout(POLL);
-        let carrier = Arc::new(Self {
-            outbox: Mutex::new(Some(MuxOutbox::new(write))),
-            state: Mutex::new(CarrierState { sessions: HashMap::new(), unused: ids, idle_since: Instant::now(), closed: false }),
-        });
-        let reader = Arc::clone(&carrier);
-        std::thread::spawn(move || reader.run(read));
+    fn start(read: Link, write: Link, ids: Range<u16>) -> Arc<Self> {
+        let carrier = Self::dialing(ids);
+        carrier.connect(Ok((read, write)));
         carrier
+    }
+
+    fn dialing(ids: Range<u16>) -> Arc<Self> {
+        Arc::new(Self {
+            uplink: Mutex::default(),
+            uplink_changed: Condvar::new(),
+            state: Mutex::new(CarrierState { sessions: HashMap::new(), unused: ids, idle_since: Instant::now(), dial: None, closed: false }),
+            connected: Condvar::new(),
+        })
+    }
+
+    /// A failed dial closes the carrier under the lock `allocate` takes, so no later open joins it.
+    fn connect(self: &Arc<Self>, dialed: Result<(Link, Link), OpenError>) {
+        let outcome = dialed.map(|(mut read, mut write)| {
+            read.set_timeout(POLL);
+            write.set_timeout(POLL);
+            let (reader, writer) = (Arc::clone(self), Arc::clone(self));
+            std::thread::spawn(move || reader.run(read));
+            std::thread::spawn(move || writer.write(write));
+        });
+        let mut state = self.state.lock().expect("mux carrier");
+        state.closed |= outcome.is_err();
+        state.dial = Some(outcome);
+        self.connected.notify_all();
+    }
+
+    fn dialed(&self) -> Result<(), OpenError> {
+        let state = self.state.lock().expect("mux carrier");
+        let state = self.connected.wait_while(state, |state| state.dial.is_none()).expect("mux carrier");
+        state.dial.clone().expect("finished dial")
     }
 
     fn closed(&self) -> bool {
@@ -262,34 +319,75 @@ impl Carrier {
         Some((id, inbox))
     }
 
+    /// Waits up to one poll for room, as a write into Xray's full pipe blocks.
     fn send(&self, frame: &MuxFrame) -> std::io::Result<()> {
-        let result = match self.outbox.lock().expect("mux carrier").as_mut() {
-            Some(outbox) => outbox.send(frame),
-            None => Err(std::io::ErrorKind::BrokenPipe.into()),
-        };
-        if result.as_ref().is_err_and(|error| !retry_io(error)) {
-            self.close();
+        let frame = encode_mux(frame);
+        let deadline = Instant::now() + POLL;
+        let mut uplink = self.uplink.lock().expect("mux carrier");
+        while !uplink.closed && uplink.bytes > 0 && uplink.bytes + frame.len() > UPLINK_BYTES {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            if wait.is_zero() {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            uplink = self.uplink_changed.wait_timeout(uplink, wait).expect("mux carrier").0;
         }
-        result
+        if uplink.closed {
+            return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
+        uplink.push(frame);
+        self.uplink_changed.notify_all();
+        Ok(())
     }
 
+    /// Never waits, so dropping a session never blocks. A carrier ends each of its at most
+    /// 128 session ids once, which bounds these frames.
     fn end(&self, id: u16) {
-        let result = match self.outbox.lock().expect("mux carrier").as_mut() {
-            Some(outbox) => outbox.end(id, false),
-            None => return,
-        };
-        if result.is_err_and(|error| !retry_io(&error)) {
-            self.close();
+        let mut uplink = self.uplink.lock().expect("mux carrier");
+        if !uplink.closed {
+            uplink.push(encode_mux(&MuxFrame { id, status: END, ..MuxFrame::default() }));
+            self.uplink_changed.notify_all();
         }
     }
 
-    fn flush(&self) {
-        let result = match self.outbox.try_lock() {
-            Ok(mut outbox) => outbox.as_mut().map(MuxOutbox::flush),
-            Err(_) => None,
-        };
-        if result.is_some_and(|result| result.is_err_and(|error| !retry_io(&error))) {
-            self.close();
+    fn write(self: Arc<Self>, mut link: Link) {
+        while let Some(frame) = self.next_frame() {
+            if self.write_frame(&mut link, &frame).is_err() {
+                break;
+            }
+        }
+        self.close();
+    }
+
+    fn next_frame(&self) -> Option<Vec<u8>> {
+        let mut uplink = self.uplink.lock().expect("mux carrier");
+        loop {
+            if let Some(frame) = uplink.frames.pop_front() {
+                uplink.bytes -= frame.len();
+                self.uplink_changed.notify_all();
+                return Some(frame);
+            }
+            if uplink.closed {
+                return None;
+            }
+            uplink = self.uplink_changed.wait(uplink).expect("mux carrier");
+        }
+    }
+
+    /// A write timeout gives up only once the carrier is closed.
+    fn write_frame(&self, link: &mut Link, mut frame: &[u8]) -> std::io::Result<()> {
+        while !frame.is_empty() {
+            match link.write(frame) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(n) => frame = &frame[n..],
+                Err(error) if retry_io(&error) && !self.closed() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        loop {
+            match link.flush() {
+                Err(error) if retry_io(&error) && !self.closed() => {}
+                result => return result,
+            }
         }
     }
 
@@ -321,7 +419,8 @@ impl Carrier {
             state.closed = true;
             state.sessions.values().cloned().collect()
         };
-        self.outbox.lock().expect("mux carrier").take();
+        self.uplink.lock().expect("mux carrier").closed = true;
+        self.uplink_changed.notify_all();
         for inbox in inboxes {
             inbox.end();
         }
@@ -335,7 +434,6 @@ impl Carrier {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(error) if retry_io(&error) => {
-                    self.flush();
                     self.close_if(|state| {
                         state.sessions.is_empty() && (state.unused.is_empty() || state.idle_since.elapsed() >= CARRIER_IDLE)
                     });
@@ -379,10 +477,11 @@ impl Carrier {
                     inbox.push(frame.address.map(|address| (address, port)), frame.payload);
                 }
             }
-            // Xray asks the server to end a session this side no longer has.
+            // Xray asks the server to end a session this side no longer has. A full uplink drops
+            // this END, and the session's next data asks again.
             (KEEP, None) => {
                 if frame.option & DATA != 0 {
-                    self.end(frame.id);
+                    self.send(&MuxFrame { id: frame.id, status: END, ..MuxFrame::default() }).ok();
                 }
             }
             _ => return false,
@@ -602,5 +701,48 @@ impl Drop for Session {
         self.inbox.detach();
         let opened = *self.opened.get_mut().expect("mux session");
         self.carrier.finish(self.id, opened);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_dial_fails_the_opens_waiting_on_it() {
+        let picker = Arc::new(Picker::default());
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let dialer = {
+            let picker = Arc::clone(&picker);
+            std::thread::spawn(move || {
+                picker.session(8, false, move || {
+                    released.recv().ok();
+                    panic!("dial bug")
+                }).map(drop)
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let joined = |count: usize| {
+            picker.carriers.lock().unwrap().first().is_some_and(|carrier| carrier.state.lock().unwrap().sessions.len() >= count)
+        };
+        while !joined(1) {
+            assert!(Instant::now() < deadline, "the first open never put its carrier in the pool");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (outcome, waited) = std::sync::mpsc::channel();
+        {
+            let picker = Arc::clone(&picker);
+            std::thread::spawn(move || outcome.send(picker.session(8, false, || unreachable!("joins the dial in flight")).map(drop)));
+        }
+        while !joined(2) {
+            assert!(Instant::now() < deadline, "the second open never joined the dial in flight");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        release.send(()).unwrap();
+        assert!(dialer.join().is_err(), "the dial's own panic still reaches its caller");
+        assert_eq!(
+            waited.recv_timeout(Duration::from_secs(5)).expect("the open that joined the dial waited forever"),
+            Err(OpenError::Transport)
+        );
     }
 }

@@ -630,7 +630,7 @@ impl H3Stream {
         let result = block(self.limit(), write.stream.finish());
         write.finished = true;
         match result {
-            Err(error) if stopped_without_error(&error) => Ok(()),
+            Err(error) if peer_stopped(&error).is_some() => Ok(()),
             Err(error) => {
                 write.stream.reset();
                 Err(error)
@@ -640,10 +640,14 @@ impl H3Stream {
     }
 }
 
-fn stopped_without_error(error: &io::Error) -> bool {
-    let cause = error.get_ref().and_then(|cause| cause.downcast_ref::<h3::error::StreamError>());
-    matches!(cause, Some(h3::error::StreamError::RemoteTerminate { code, .. })
-        if *code == h3::error::Code::H3_NO_ERROR)
+/// The code of the peer's STOP_SENDING. A server may stop reading a request it has answered
+/// (RFC 9114 section 4.1), so the request counts as finished and the response, which the
+/// client must not discard, decides the exchange.
+fn peer_stopped(error: &io::Error) -> Option<h3::error::Code> {
+    match error.get_ref().and_then(|cause| cause.downcast_ref::<h3::error::StreamError>()) {
+        Some(h3::error::StreamError::RemoteTerminate { code, .. }) => Some(*code),
+        _ => None,
+    }
 }
 
 impl Read for H3Stream {

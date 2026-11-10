@@ -116,7 +116,12 @@ impl HysteriaMasquerade {
         stream: H3Request,
     ) -> io::Result<()> {
         let is_head = request.method() == Method::HEAD;
-        let (mut send, receive) = stream.split();
+        let (mut send, mut receive) = stream.split();
+        if !matches!(self.mode, Mode::Proxy(_)) {
+            // Only the proxy reads the request body; the other answers stop it before replying.
+            // No read has run since the headers, so h3-quinn still holds the stream.
+            receive.stop_sending(h3::error::Code::H3_NO_ERROR);
+        }
         let response = match &self.mode {
             Mode::NotFound => http_error(StatusCode::NOT_FOUND),
             Mode::String { status, headers, body } => {
@@ -345,6 +350,9 @@ pub(super) fn date() -> header::HeaderValue {
     httpdate::fmt_http_date(SystemTime::now()).parse().expect("HTTP date")
 }
 
+/// hyper drops the body once it has what the origin needs. h3 can hand back a frame while
+/// h3-quinn still has a read in flight, and stopping the stream then panics, so a body hyper
+/// leaves unread is stopped by quinn with code 0 rather than H3_NO_ERROR.
 fn receive_body(receive: H3Recv) -> Body {
     let frames = stream::try_unfold(Some(receive), |receive| async {
         let Some(mut receive) = receive else { return Ok(None); };

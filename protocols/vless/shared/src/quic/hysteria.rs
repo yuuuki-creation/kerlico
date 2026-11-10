@@ -55,6 +55,8 @@ pub(super) async fn serve(
                         .unwrap_or(0);
                     options.authenticate(&conn, rate);
                 });
+                // The answer needs nothing more of the request (RFC 9114 section 4.1).
+                stream.stop_sending(h3::error::Code::H3_NO_ERROR);
                 if let Ok(response) = auth_response(&options) {
                     if stream.send_response(response).await.is_ok() {
                         let _ = stream.finish().await;

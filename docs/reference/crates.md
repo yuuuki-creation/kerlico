@@ -92,7 +92,7 @@ landing-vless = { package = "kerlico-vless-client", path = "../../protocols/vles
 
 `Upstream`、`Stream` 和 `Association` 定义在 `kerlico-shared` 的 `proxy` 模块，因为协议的客户端 crate 也会作为 `landing-<id>` 编进服务端，不能依赖客户端叶子。`Upstream::open_stream(host, port)` 打开 TCP 流，`associate()` 打开一条 SOCKS5 UDP 关联，`close()` 幂等地取消它打开的全部流和关联。`Stream::read_for` 在等待期内没有数据时返回 `TimedOut`，结束时返回 `Ok(0)` 或 `UnexpectedEof`。`Association::send_to` 带本机应用的 UDP 来源，同一关联的来源不变。协议拒绝的单个数据报以 `Ok` 丢弃，只有关联已经结束才返回错误。`recv_for` 一次给出一个完整数据报及其来源。
 
-SOCKS5 和 HTTP 前端在 `crates/client/src/proxy/`。只有客户端叶子依赖 `socket2`、`if-addrs` 和 `httparse`，所以服务端的 `landing-<id>` 构建不编入本机代理。
+SOCKS5 和 HTTP 前端在 `crates/client/src/proxy/`，只属于客户端叶子，所以服务端的 `landing-<id>` 构建不编入本机代理。前端用到的依赖里只有 `httparse` 是客户端叶子独有的。服务端叶子也依赖 `if-addrs`。`kerlico-shared`、`kerlico-outbound` 和 `kerlico-vless` 直接依赖 `socket2` 0.6，服务端叶子和 `kerlico-mieru-server` 直接依赖 `socket2` 0.5。
 
 ```text
 kerlico-client                              # 列出本次构建的客户端协议
