@@ -85,7 +85,13 @@ fn vless_xray_matrix() {
     finish_report(runs, &failed, &root);
 }
 
+/// The matrix and rejection tests run in parallel in one process, and only one case at a
+/// time can hold a fixed origin port such as UDP 443.
+static FIXED_ORIGIN: Mutex<()> = Mutex::new(());
+
 fn run_case(xray: &Path, dir: &Path, case: &Case, direction: Direction) -> Result<()> {
+    let _fixed_origin = (case.payload.origin_port() != 0)
+        .then(|| FIXED_ORIGIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
     let mut keys = Keys::generate(dir, case)?;
     let storage = case.mock.map(|service| {
         xdrive_mock::Mock::start(service, case.security, &keys.cert_pem, &keys.key_pem)
