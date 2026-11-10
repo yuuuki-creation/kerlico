@@ -2583,8 +2583,13 @@ fn portal_loop(tag: (NodeTag, String), portal: Arc<Portal>, mut read: Link, mut 
         *lane.closed.lock().expect("mux") = true;
         lane.cv.notify_all();
     }
+    unregister_portal(&tag, &portal);
+}
+
+/// A newer portal under the same tag stays registered.
+fn unregister_portal(tag: &(NodeTag, String), portal: &Arc<Portal>) {
     let mut portals = portals().lock().expect("reverse");
-    if portals.get(&tag).is_some_and(|current| Arc::ptr_eq(current, &portal)) { portals.remove(&tag); }
+    if portals.get(tag).is_some_and(|current| Arc::ptr_eq(current, portal)) { portals.remove(tag); }
 }
 
 /// Opens a bidirectional mux session without dialing its destination here.
@@ -2832,14 +2837,22 @@ fn handshake(
         Vec::new()
     } else { prefix };
     if request.command == Command::Reverse {
-        if !active.load(std::sync::atomic::Ordering::Acquire) { return None; }
-        write.write_all(&encode_mux(&kerlico_vless::control_frame(1))).ok()?;
         let portal = Arc::new(Portal { active, write: Arc::new(Mutex::new(kerlico_vless::MuxWriter::new(write))), next: Mutex::new(3), sessions: Mutex::new(HashMap::new()) });
         let key = (accounts.node.clone(), reverse);
         {
-            let _accounts = accounts.lock().expect("accounts");
-            if !portal.active.load(std::sync::atomic::Ordering::Acquire) { return None; }
-            portals().lock().expect("reverse").insert(key.clone(), Arc::clone(&portal));
+            // The bridge takes the control frame as the portal being open, so the portal is
+            // registered first. Holding its writer keeps every session frame behind that one.
+            let mut writer = portal.write.lock().expect("reverse");
+            {
+                let _accounts = accounts.lock().expect("accounts");
+                if !portal.active.load(std::sync::atomic::Ordering::Acquire) { return None; }
+                portals().lock().expect("reverse").insert(key.clone(), Arc::clone(&portal));
+            }
+            if writer.inner_mut().write_all(&encode_mux(&kerlico_vless::control_frame(1))).is_err() {
+                drop(writer);
+                unregister_portal(&key, &portal);
+                return None;
+            }
         }
         thread::spawn(move || portal_loop(key, portal, read, prefix));
         return None;
@@ -3250,6 +3263,9 @@ mod tests {
         account.insert_text("reverse", "session");
         inbound.add_user(&UserEmail::parse("alice").unwrap(), &account).unwrap();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        // Holding the registry stalls the portal's registration, so the order of registration
+        // and control frame shows instead of racing.
+        let registry = portals().lock().unwrap();
         let client = thread::spawn(move || {
             let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
             socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -3301,6 +3317,9 @@ mod tests {
                 buf.extend_from_slice(&tmp[..n]);
             }
         });
+        let early = ready_rx.recv_timeout(Duration::from_millis(500));
+        drop(registry);
+        assert!(early.is_err(), "the bridge saw the control frame while the portal could not be registered");
         ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         open_reverse("session", "example.com", 80, true, b"ping").unwrap();
         client.join().unwrap();
