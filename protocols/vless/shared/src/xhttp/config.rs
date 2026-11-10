@@ -116,6 +116,7 @@ pub struct XhttpConfig {
     no_grpc: bool,
     no_sse: bool,
     download: Option<Value>,
+    h2_params: String,
     xmux: crate::xmux::XmuxConfig,
 }
 
@@ -299,6 +300,7 @@ impl XhttpConfig {
             no_grpc: parse_flag(&field("noGRPCHeader"), "noGRPCHeader")?,
             no_sse: parse_flag(&field("noSSEHeader"), "noSSEHeader")?,
             download,
+            h2_params: field("h2Params"),
             xmux: crate::xmux::XmuxConfig::xhttp(xmux.as_ref())?,
         })
     }
@@ -308,6 +310,11 @@ impl XhttpConfig {
     }
 
     pub fn xmux(&self) -> &crate::xmux::XmuxConfig { &self.xmux }
+
+    /// Raw `h2Params`; only an H2 server parses it, as Xray does.
+    pub fn h2_params(&self) -> &str {
+        &self.h2_params
+    }
 
     pub fn mode(&self, reality: bool, separate_download: bool) -> XhttpMode {
         self.mode.unwrap_or(match (reality, separate_download) {

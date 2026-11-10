@@ -240,6 +240,13 @@ impl<R> AdvancedTlsRead<R> {
     pub fn is_tls13(&self) -> bool {
         self.core.lock().expect("TLS state").ssl().version() == Some(SslVersion::TLS1_3)
     }
+    /// Whether the negotiated version is below TLS 1.2, and the negotiated cipher suite id.
+    pub fn h2_security(&self) -> (bool, u16) {
+        let core = self.core.lock().expect("TLS state");
+        let ssl = core.ssl();
+        let old = matches!(ssl.version(), Some(version) if version == SslVersion::TLS1 || version == SslVersion::TLS1_1);
+        (old, ssl.current_cipher().map_or(0, |cipher| cipher.protocol_id()))
+    }
     pub fn protocol_version(&self) -> String {
         self.core
             .lock()

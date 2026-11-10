@@ -461,13 +461,28 @@ fn listen_xhttp(
     };
     let accounts = Arc::new(Users::new(native, settings, tag)?);
     let (ready_tx, ready_rx) = mpsc::channel();
+    let h3 = tls.is_some() && alpn(settings) == ["h3"];
+    let h2 = if h3 {
+        H2Serve::default()
+    } else {
+        // Go's HTTP/1 limit becomes a header-list size with 32 bytes of overhead for ten typical fields.
+        let header_list = config.max_header_bytes() as u32 + 320;
+        match config.h2_params() {
+            "" => H2Serve { limits: kerlico_vless::H2Limits { header_list: Some(header_list), ..Default::default() }, permit_prohibited_ciphers: false },
+            text => {
+                let params = kerlico_vless::H2Params::parse(text).map_err(|_| OpenError::Settings)?;
+                H2Serve { limits: params.limits(header_list), permit_prohibited_ciphers: params.permit_prohibited_ciphers }
+            }
+        }
+    };
     let shared = Arc::new(XhttpListener {
         accounts: accounts.clone(),
         ready: ready_tx,
         config,
+        h2,
         sessions: Mutex::new(HashMap::new()),
     });
-    if tls.is_some() && alpn(settings) == ["h3"] {
+    if h3 {
         let listener = kerlico_vless::H3Listener::bind_crypto_masked(
             bind.socket_addr(),
             quic_tls_server_config(settings)?,
@@ -529,10 +544,13 @@ fn xhttp_connection(
     socket.set_nodelay(true)?;
     socket.set_read_timeout(Some(Duration::from_secs(10)))?;
     socket.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let timers = socket.try_clone()?;
     let local = socket.local_addr().ok();
     let (read, write) = tcp_pair(socket, &shared.accounts.masks, peer, local)?;
+    let mut tls_security = None;
     let mut socket = if let Some(config) = tls {
         let (read, write) = kerlico_vless::accept_advanced_tls_over(Box::new(read), Box::new(write), config)?;
+        tls_security = Some(read.h2_security());
         Xpipe { read: Link::TlsRead(Box::new(read)), write: Link::TlsWrite(Box::new(write)) }
     } else if let Some(config) = reality {
         let connection = open_reality(read, write, &config, &shared.ready, peer, local).ok_or_else(|| io::Error::other("XHTTP REALITY handshake"))?;
@@ -546,11 +564,23 @@ fn xhttp_connection(
         prefix.resize(HTTP2_PREFACE.len(), 0);
         socket.read_exact(&mut prefix[4..])?;
         if prefix == HTTP2_PREFACE {
+            let limits = shared.h2.limits;
+            if let Some((old, cipher)) = tls_security {
+                if let Some(reason) = kerlico_vless::h2_tls_rejection(old, cipher, shared.h2.permit_prohibited_ciphers) {
+                    socket.write_all(&kerlico_vless::goaway_frame(kerlico_vless::INADEQUATE_SECURITY, &reason))?;
+                    socket.flush()?;
+                    return Err(io::Error::other(reason));
+                }
+            }
+            if let Some(after) = limits.ping_after {
+                let tick = after.min(limits.ping_timeout) / 4;
+                timers.set_read_timeout(Some(tick.clamp(Duration::from_millis(5), Duration::from_secs(10))))?;
+            }
+            if let Some(timeout) = limits.write_timeout {
+                timers.set_write_timeout(Some(timeout))?;
+            }
             let (read, write) = socket.split()?;
-            // Go's HTTP/2 server adds the 32-byte overhead for ten typical
-            // fields when converting its HTTP/1 limit to a header-list size.
-            let header_limit = shared.config.max_header_bytes() as u32 + 320;
-            let conn = kerlico_vless::H2Conn::serve_with_header_limit(read, write, header_limit)?;
+            let conn = kerlico_vless::H2Conn::serve_with_limits(read, write, limits)?;
             loop {
                 match conn.accept() {
                     Ok(stream) => {
@@ -630,8 +660,15 @@ fn open_reality(mut read: Link, mut write: Link, config: &RealityConfig, ready: 
     Some(RealityDuplex::new(reality_reader(Box::new(read), client_app), reality_writer(Box::new(write), server_app)))
 }
 
+#[derive(Default)]
+struct H2Serve {
+    limits: kerlico_vless::H2Limits,
+    permit_prohibited_ciphers: bool,
+}
+
 struct XhttpListener {
     config: Arc<XhttpConfig>,
+    h2: H2Serve,
     accounts: Arc<Users>,
     ready: Sender<Ready>,
     sessions: Mutex<HashMap<String, XhttpSession>>,

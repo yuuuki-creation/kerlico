@@ -713,7 +713,8 @@ impl HttpDial {
 
 enum XhttpConnection {
     H1(Option<HttpLink>),
-    H2(H2Conn<Link>),
+    // Go's HTTP/2 transport dials another connection when the peer's stream limit is reached.
+    H2(Vec<H2Conn<Link>>),
     H3(kerlico_vless::H3Conn),
 }
 
@@ -723,7 +724,7 @@ impl kerlico_vless::xmux::XmuxConnection for XhttpCarrier {
     fn is_closed(&self) -> bool {
         match &*self.0.lock().expect("XHTTP carrier") {
             XhttpConnection::H1(_) => false,
-            XhttpConnection::H2(conn) => !conn.is_open(),
+            XhttpConnection::H2(conns) => conns.first().is_none_or(|conn| !conn.is_open()),
             XhttpConnection::H3(conn) => conn.is_closed(),
         }
     }
@@ -844,11 +845,42 @@ impl XhttpEndpoint {
         }
         let socket = self.dial.connect()?;
         if socket.h2() {
-            let (mut read, write) = socket.split()?;
-            read.set_timeout(Duration::from_millis(200));
-            return H2Conn::connect_with_keepalive(read, write, self.config.xmux().keepalive_seconds).map(XhttpConnection::H2);
+            return self.h2(socket).map(|conn| XhttpConnection::H2(vec![conn]));
         }
         Ok(XhttpConnection::H1(Some(socket)))
+    }
+
+    fn h2(&self, socket: HttpLink) -> std::io::Result<H2Conn<Link>> {
+        let (mut read, write) = socket.split()?;
+        read.set_timeout(Duration::from_millis(200));
+        H2Conn::connect_with_keepalive(read, write, self.config.xmux().keepalive_seconds)
+    }
+
+    fn h2_stream(
+        &self,
+        conns: &mut Vec<H2Conn<Link>>,
+        request: &XhttpRequest<'_>,
+        end: bool,
+        wait: bool,
+    ) -> std::io::Result<H2Stream<Link>> {
+        let headers = request.header_pairs();
+        let open = |conn: &H2Conn<Link>| {
+            conn.try_request(&request.method, &request.target, &self.authority, self.scheme, &headers, end, wait)
+        };
+        conns.retain(H2Conn::is_open);
+        for conn in conns.iter() {
+            if let Some(stream) = open(conn)? {
+                return Ok(stream);
+            }
+        }
+        let socket = self.dial.connect()?;
+        if !socket.h2() {
+            return Err(std::io::Error::other("XHTTP peer changed HTTP versions"));
+        }
+        let conn = self.h2(socket)?;
+        let stream = open(&conn)?.ok_or_else(|| std::io::Error::other("XHTTP peer allows no concurrent streams"))?;
+        conns.push(conn);
+        Ok(stream)
     }
 
     fn request<'a>(
@@ -886,18 +918,7 @@ impl XhttpEndpoint {
                 let (read, write) = socket.split()?;
                 Ok(Link::Duplex(Box::new(read), Box::new(write)))
             }
-            XhttpConnection::H2(conn) => {
-                let stream = conn.request(
-                    &request.method,
-                    &request.target,
-                    &self.authority,
-                    self.scheme,
-                    &headers,
-                    false,
-                    false,
-                )?;
-                Ok(Link::H2(Arc::new(stream)))
-            }
+            XhttpConnection::H2(conns) => Ok(Link::H2(Arc::new(self.h2_stream(conns, request, false, false)?))),
             XhttpConnection::H3(conn) => {
                 let stream = conn.request(
                     &request.method,
@@ -922,15 +943,8 @@ impl XhttpEndpoint {
                 let rest = read_response_head(&mut socket)?;
                 Ok(Xdown::H1(ChunkReader::new(socket, rest)))
             }
-            XhttpConnection::H2(conn) => conn
-                .open(
-                    &request.method,
-                    &request.target,
-                    &self.authority,
-                    self.scheme,
-                    &headers,
-                    true,
-                )
+            XhttpConnection::H2(conns) => self
+                .h2_stream(conns, &request, request.method == "GET", true)
                 .map(Xdown::H2),
             XhttpConnection::H3(conn) => conn
                 .open(
@@ -1209,17 +1223,9 @@ impl XhttpPacketUpload {
                     *slot = Some(socket);
                 }
             }
-            XhttpConnection::H2(conn) => {
+            XhttpConnection::H2(conns) => {
                 let empty = request.body.is_empty();
-                let stream = conn.request(
-                    &request.method,
-                    &request.target,
-                    authority,
-                    scheme,
-                    &headers,
-                    empty,
-                    empty,
-                )?;
+                let stream = self.endpoint.h2_stream(conns, &request, empty, empty)?;
                 if !empty {
                     stream.finish(request.body)?;
                 }
