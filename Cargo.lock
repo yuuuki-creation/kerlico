@@ -1627,6 +1627,7 @@ dependencies = [
  "kerlico-shared",
  "kerlico-vless",
  "rcgen",
+ "serde_json",
 ]
 
 [[package]]

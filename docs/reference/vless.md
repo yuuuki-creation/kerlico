@@ -33,7 +33,7 @@ Xray 26 已删除独立 `http` / `h2` / `h3` / `quic` 和 `security: xtls`，禁
 
 VLESS Encryption 可以叠在上述任一合法载体上，不限于 RAW/none。Vision 要求它紧邻的安全层为 TLS 1.3、REALITY 或 VLESS Encryption；普通 TLS 外再包 WS、gRPC、XHTTP 或 Hysteria 时，需要内层 Encryption 才能用 Vision。mKCP + TLS 1.3 可直接用 Vision。XDrive 禁止 Vision，包括单独用户指定非空 flow。
 
-入站 flow 只允许空值和 `xtls-rprx-vision`。落地另外接受 `xtls-rprx-vision-udp443`，线上仍写前一个字符串，只改变 UDP/443 的许可。Vision UDP 自动改用 XUDP，不能发送带 Vision flow 的独立 UDP 命令。Vision 用户可接收空 flow 的独立 UDP 和 id-0 XUDP，不能借空 flow 发普通 TCP；该账号的 Mux 始终只承载 UDP。
+入站 flow 只允许空值和 `xtls-rprx-vision`。落地另外接受 `xtls-rprx-vision-udp443`，线上仍写前一个字符串，只改变 UDP/443 的许可：不进 Mux 连接池的 Vision UDP/443 没有这个后缀就拒绝，进池的 UDP/443 只看 `xudpProxyUDP443`，与 Xray 一致。Vision UDP 自动改用 XUDP，不能发送带 Vision flow 的独立 UDP 命令。启用 Mux 连接池时 Vision 的 TCP 落地直接拒绝，因为 Xray 服务端会断开承载 TCP 的 Vision Mux 连接。Vision 用户可接收空 flow 的独立 UDP 和 id-0 XUDP，不能借空 flow 发普通 TCP；该账号的 Mux 始终只承载 UDP。
 
 ## 传输设置
 
@@ -63,7 +63,9 @@ Vision 只保留一条实现路径。END 结束填充；DIRECT 在最后一块�
 
 独立 UDP 使用两字节大端长度，Mux UDP 载荷本身就是一份数据报，不再重复套长度。XUDP 使用 id 0，KEEP 帧携带的不同目标分别产生 Handoff，回复保留目标元数据。TCP 大写入拆成最多 65535 字节的 Mux 帧。队列有界，关闭发送 END，已收数据先于 EOF 交给调用方。
 
-落地 `mux: true` 使用 Mux。每次 `land` 开一个传输流，gRPC 流可共享底层连接。通用 Mux 连接池、跨载体 GlobalID 和调度参数见未完成项。HTTP/1 分块编码保存 wire 位置和待确认的应用长度，短写、WouldBlock、flush 和最后的零长度块共用这一份状态。
+落地的 UDP 承载按 Xray 的 VLESS 出站选择。Xray 的 cone 默认开启（`core/xray.go` 只在环境变量 `xray.cone.disabled` 为 `true` 时关闭），Kerlico 不提供关闭开关。因此不走 Mux 连接池时，Vision UDP 和空 flow 发往 53、443 以外端口的 UDP 都用 Mux 命令下的单会话 XUDP（Xray 的 `v1.mux.cool:666`），会话结束即关闭这条连接；空 flow 发往 53 和 443 端口的 UDP 保持独立 UDP 命令。`land_udp` 返回 `UdpSession`：XUDP 或 Mux 会话里每个数据报可以指定不同目标，回复带来源地址；独立 UDP 命令只能到达第一个目标，发往其他目标会报错。
+
+落地 `mux` 写 `true`、`false` 或 Xray 的对象 `{"enabled", "concurrency", "xudpConcurrency", "xudpProxyUDP443"}`，`true` 等于 `{"enabled": true}`。启用后 `land` 把会话放进按对端和完整设置共享的 Mux 连接（Xray 的 `v1.mux.cool:9527`），会话 id 从 1 递增。`concurrency` 是每条连接同时承载的会话数，默认 8，负值让 TCP 不走连接池。`xudpConcurrency` 为 0 时 UDP 与 TCP 共用连接，为正时 UDP 使用自己的连接池和这个并发数，为负时 UDP 不进池。`xudpProxyUDP443` 默认 `reject`，拒绝 UDP/443；`allow` 让它进池；`skip` 让它绕过连接池，按上一段处理。每条连接累计分配 128 个会话后不再接新会话，这些会话全部结束即关闭；没有会话满 16 秒的连接关闭；已关闭的连接在下次打开会话时换新。连接组随运行时归属失效，最多保留最近使用的 32 组。TCP 会话 100 毫秒内没有首包时先发不带数据的 NEW，目标先发数据的协议也能建立连接。XDrive 总是使用 Mux，拒绝负的并发值和 `skip`。gRPC 流可共享底层连接。跨载体 GlobalID 见未完成项。HTTP/1 分块编码保存 wire 位置和待确认的应用长度，短写、WouldBlock、flush 和最后的零长度块共用这一份状态。
 
 ## 反向连接和回落
 

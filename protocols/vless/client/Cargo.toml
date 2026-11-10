@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 kerlico-shared = { path = "../../../crates/shared" }
 kerlico-vless = { path = "../shared" }
+serde_json = "1"
 
 [dev-dependencies]
 rcgen = "0.13"

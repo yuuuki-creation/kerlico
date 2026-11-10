@@ -652,3 +652,43 @@ fn rejection_configs(dir: &Path) -> Result<Vec<(String, Value)>> {
     configs.push(("reject-encryption-with-fallback".into(), config));
     Ok(configs)
 }
+
+#[test]
+#[ignore = "requires XRAY pointing to Xray 26.10.31 a4a3dff"]
+fn vless_xray_xudp_destinations() {
+    use kerlico_shared::{Destination, PlaneFault, Settings, Transport};
+
+    let root = run_dir("xudp-destinations").expect("XUDP directory");
+    let xray = xray_binary(&root).expect("pinned Xray peer");
+    let case = Case::new("xudp-destinations", Network::Raw, Security::None, Payload::Udp);
+    let keys = Keys::generate(&root, &case).expect("keys");
+    let origins = [Echo::udp(0).expect("first origin"), Echo::udp(0).expect("second origin")];
+    let peer = available_port().expect("peer port");
+    let mut config = case.xray_server(&keys, peer, origins[0].port);
+    config["outbounds"][0]["settings"]["finalRules"][0]["port"] =
+        json!(format!("{},{}", origins[0].port, origins[1].port));
+    let _server = start_xray(&xray, &root, "xray-server", &config, true).expect("Xray server");
+
+    let mut settings = Settings::default();
+    for (key, value) in [("network", "raw"), ("security", "none"), ("encryption", "none"), ("id", cases::ID)] {
+        settings.insert_text(key, value);
+    }
+    let targets = origins
+        .each_ref()
+        .map(|origin| Destination::new("127.0.0.1", origin.port, Transport::Udp).expect("origin destination"));
+    let session = landing_vless::land_udp("127.0.0.1", peer, &settings, &targets[0]).expect("XUDP session");
+    let mut buf = [0; 65536];
+    for (index, target) in [&targets[0], &targets[1], &targets[0], &targets[1]].into_iter().enumerate() {
+        let datagram = pattern(1000 + index, index);
+        assert_eq!(session.send_to(target, &datagram), Ok(datagram.len()), "send datagram {index}");
+        let deadline = Instant::now() + TIMEOUT;
+        let (n, source) = loop {
+            match session.recv_from(&mut buf) {
+                Err(PlaneFault::Again) if Instant::now() < deadline => {}
+                received => break received.unwrap_or_else(|error| panic!("reply {index}: {error:?}")),
+            }
+        };
+        assert_eq!(&buf[..n], datagram.as_slice(), "reply {index} payload");
+        assert_eq!(&source, target, "reply {index} source");
+    }
+}
