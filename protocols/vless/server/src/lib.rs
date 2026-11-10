@@ -97,17 +97,28 @@ impl RealityTarget {
         head
     }
 
-    fn connect(&self) -> io::Result<kerlico_shared::runtime::NetworkConnection> {
+    /// `timeout` bounds a TCP connect; a Unix connect is local.
+    fn connect(&self, timeout: Duration) -> io::Result<kerlico_shared::runtime::NetworkConnection> {
         let network = self.network.clone().ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
         match &self.origin {
-            RealityOrigin::Tcp { host, port } => kerlico_vless::runtime::CarrierNetwork::new(network, Default::default()).tcp(host, *port),
+            RealityOrigin::Tcp { host, port } => {
+                let mut request = kerlico_vless::runtime::CarrierNetwork::new(network.clone(), Default::default()).request(host, *port, Transport::Tcp)?;
+                request.timeout = timeout;
+                network.connect(&request)
+            }
             RealityOrigin::Unix(path) => network.connect_unix(path),
         }
     }
 
     fn shape(&self, record: &[u8], head: &[u8]) -> Option<kerlico_vless::RealityTargetShape> {
-        let mut target = self.connect().ok()?;
-        target.set_timeout(REALITY_PROBE_TIMEOUT).ok()?;
+        self.probe(record, head, Instant::now() + REALITY_PROBE_TIMEOUT)
+    }
+
+    /// The connect and every read and write share one deadline, so a target that answers
+    /// slowly cannot hold the handshake past it.
+    fn probe(&self, record: &[u8], head: &[u8], deadline: Instant) -> Option<kerlico_vless::RealityTargetShape> {
+        let target = self.connect(deadline.saturating_duration_since(Instant::now())).ok()?;
+        let mut target = Deadline { target, deadline };
         target.write_all(head).ok()?;
         kerlico_vless::RealityTargetShape::read_from(&mut target, record, &mut Vec::new()).ok()
     }
@@ -126,10 +137,44 @@ impl RealityTarget {
                 prefix: head,
             }),
             RealityOrigin::Unix(_) => {
-                relay(self.connect().ok()?, read, write, &head);
+                relay(self.connect(REALITY_PROBE_TIMEOUT).ok()?, read, write, &head, TCP_IDLE);
                 None
             }
         }
+    }
+}
+
+/// Gives each I/O on the probe only the time left before the deadline.
+struct Deadline {
+    target: kerlico_shared::runtime::NetworkConnection,
+    deadline: Instant,
+}
+
+impl Deadline {
+    fn arm(&mut self) -> io::Result<()> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.target.set_timeout(left)
+    }
+}
+
+impl Read for Deadline {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.arm()?;
+        self.target.read(buf)
+    }
+}
+
+impl Write for Deadline {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.arm()?;
+        self.target.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.target.flush()
     }
 }
 
@@ -160,23 +205,41 @@ fn proxyproto_pair(peer: SocketAddr, local: Option<SocketAddr>) -> (SocketAddr, 
     (six(peer), Some(six(local)))
 }
 
+/// `server.md` ends TCP copying after this long without a byte in either direction.
+const TCP_IDLE: Duration = Duration::from_secs(300);
+
 /// Copies each direction until EOF, then half-closes the other side, like Xray's REALITY fallback.
-fn relay(target: kerlico_shared::runtime::NetworkConnection, mut read: Link, mut write: Link, head: &[u8]) {
+/// Both directions stop once neither moved a byte for `idle`.
+fn relay(target: kerlico_shared::runtime::NetworkConnection, mut read: Link, mut write: Link, head: &[u8], idle: Duration) {
     let Ok((mut from_target, mut to_target)) = target.split() else { return };
+    let poll = (idle / 4).min(Duration::from_secs(10));
+    if [from_target.set_timeout(poll), to_target.set_timeout(poll)].into_iter().any(|set| set.is_err()) {
+        return;
+    }
+    read.set_timeout(poll);
+    write.set_timeout(poll);
     if to_target.write_all(head).is_err() {
         return;
     }
-    let upload = thread::spawn(move || {
-        let _ = pump(&mut read, &mut to_target);
-        let _ = to_target.shutdown();
-    });
-    let _ = pump(&mut from_target, &mut write);
+    let last = Arc::new(Mutex::new(Instant::now()));
+    let upload = {
+        let last = last.clone();
+        thread::spawn(move || {
+            let _ = pump(&mut read, &mut to_target, &last, idle);
+            let _ = to_target.shutdown();
+        })
+    };
+    let _ = pump(&mut from_target, &mut write, &last, idle);
     write.close_write();
     let _ = upload.join();
 }
 
-fn pump(from: &mut impl Read, to: &mut impl Write) -> io::Result<()> {
-    let retryable = |error: &io::Error| matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted);
+/// `last` is when either direction last moved a byte.
+fn pump(from: &mut impl Read, to: &mut impl Write, last: &Mutex<Instant>, idle: Duration) -> io::Result<()> {
+    let retryable = |error: &io::Error| {
+        matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted)
+            && last.lock().expect("relay").elapsed() < idle
+    };
     let mut buffer = vec![0; 32 * 1024];
     loop {
         let count = match from.read(&mut buffer) {
@@ -185,11 +248,15 @@ fn pump(from: &mut impl Read, to: &mut impl Write) -> io::Result<()> {
             Err(error) if retryable(&error) => continue,
             Err(error) => return Err(error),
         };
+        *last.lock().expect("relay") = Instant::now();
         let mut rest = &buffer[..count];
         while !rest.is_empty() {
             match to.write(rest) {
                 Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
-                Ok(written) => rest = &rest[written..],
+                Ok(written) => {
+                    rest = &rest[written..];
+                    *last.lock().expect("relay") = Instant::now();
+                }
                 Err(error) if retryable(&error) => {}
                 Err(error) => return Err(error),
             }
@@ -5035,6 +5102,76 @@ mod tests {
         let (peer, local) = proxyproto_pair(v4, Some(v6));
         assert_eq!(proxy_header(1, peer, local), b"PROXY TCP6 ::ffff:192.0.2.1 2001:db8::1 1000 443\r\n");
         assert_eq!(&proxy_header(2, peer, local)[12..16], [0x21, 0x21, 0, 36]);
+    }
+
+    #[derive(Debug)]
+    struct Loopback;
+
+    impl kerlico_shared::runtime::Network for Loopback {
+        fn lookup_ip(&self, _: &str, port: u16, _: Option<kerlico_shared::runtime::AddressFamily>, _: kerlico_shared::runtime::ResolutionSource) -> io::Result<Vec<SocketAddr>> {
+            Ok(vec![(Ipv4Addr::LOCALHOST, port).into()])
+        }
+
+        fn connect(&self, request: &kerlico_shared::runtime::NetworkDial) -> io::Result<kerlico_shared::runtime::NetworkConnection> {
+            let address = SocketAddr::from((Ipv4Addr::LOCALHOST, request.port));
+            TcpStream::connect_timeout(&address, request.timeout).map(kerlico_shared::runtime::NetworkConnection::Tcp)
+        }
+    }
+
+    #[test]
+    fn reality_probe_gives_up_at_one_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut hello = [0u8; 128];
+            let _ = socket.read(&mut hello);
+            let started = Instant::now();
+            if socket.write_all(&[22, 3, 3, 0x40, 0]).is_err() {
+                return;
+            }
+            while started.elapsed() < Duration::from_secs(4) && socket.write_all(&[0]).is_ok() {
+                thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let target = RealityTarget {
+            origin: RealityOrigin::Tcp { host: "127.0.0.1".into(), port },
+            xver: 0,
+            upload: Default::default(),
+            download: Default::default(),
+            network: Some(Arc::new(Loopback)),
+        };
+        let record = [0u8; 128];
+        let started = Instant::now();
+        assert!(target.probe(&record, &record, started + Duration::from_secs(1)).is_none(), "a target that never finishes its flight gives no shape");
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_millis(1600), "a target answering one byte at a time held the probe for {elapsed:?}");
+    }
+
+    #[test]
+    fn relay_ends_once_both_directions_idle() {
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_addr = target.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut socket, _) = target.accept().unwrap();
+            let mut head = [0u8; 4];
+            socket.read_exact(&mut head).unwrap();
+        });
+        let front = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client = TcpStream::connect(front.local_addr().unwrap()).unwrap();
+        let (accepted, _) = front.accept().unwrap();
+        let read = Link::Tcp(accepted.try_clone().unwrap());
+        let write = Link::Tcp(accepted);
+        let to_target = kerlico_shared::runtime::NetworkConnection::Tcp(TcpStream::connect(target_addr).unwrap());
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            relay(to_target, read, write, b"head", Duration::from_secs(1));
+            done.send(()).unwrap();
+        });
+        assert!(
+            finished.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "a silent client kept the relay's threads after the target hung up"
+        );
     }
 
     #[test]
