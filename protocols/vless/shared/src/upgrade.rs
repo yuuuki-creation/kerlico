@@ -389,6 +389,7 @@ struct Pending<R, W> {
     write: W,
     config: UpgradeConfig,
     ready: mpsc::Sender<ReadSide<R, W>>,
+    sent: bool,
 }
 
 pub struct UpgradeWrite<R, W> {
@@ -414,10 +415,27 @@ pub fn upgrade_pair<R, W>(
                 write,
                 config,
                 ready: tx,
+                sent: false,
             }),
             open: None,
         },
     )
+}
+
+impl<R, W: Write> UpgradeWrite<R, W> {
+    /// Sends a raw HTTPUpgrade request now, as Xray's dialer does before any payload exists.
+    /// Xray's server drops payload bytes that arrive in the same read as the request head, so
+    /// writing both back to back on the first payload loses data against it. A WebSocket
+    /// request waits for the first write because its early data rides in a header.
+    pub fn start(&mut self) -> io::Result<()> {
+        if let Some(pending) = self.pending.as_mut().filter(|pending| !pending.config.websocket && !pending.sent) {
+            let (request, _) = pending.config.request(&[])?;
+            pending.write.write_all(&request)?;
+            pending.write.flush()?;
+            pending.sent = true;
+        }
+        Ok(())
+    }
 }
 
 impl<R, W> UpgradeRead<R, W> {
@@ -481,14 +499,19 @@ impl<R: Read, W: Write> Write for UpgradeWrite<R, W> {
                 mut write,
                 config,
                 ready,
+                sent,
             } = self
                 .pending
                 .take()
                 .ok_or_else(|| io::Error::from(ErrorKind::BrokenPipe))?;
             let websocket_early = config.websocket && buf.len() <= config.early;
             let raw_early = !config.websocket && config.early != 0;
-            let (request, key) = config.request(if websocket_early { buf } else { &[] })?;
-            write.write_all(&request)?;
+            let mut key = String::new();
+            if !sent {
+                let request;
+                (request, key) = config.request(if websocket_early { buf } else { &[] })?;
+                write.write_all(&request)?;
+            }
             if raw_early {
                 // Xray's HTTPUpgrade ed sends the first raw write before reading 101.
                 write.write_all(buf)?;
@@ -814,6 +837,30 @@ mod tests {
             } else {
                 assert_eq!(&wire[end..], expected);
             }
+        }
+    }
+
+    #[test]
+    fn raw_start_sends_the_request_before_any_payload() {
+        for (websocket, ed) in [(false, 2048), (false, 0), (true, 2048)] {
+            let headers = r#"{"x-custom":"fixture","User-Agent":"fixture-agent","Sec-WebSocket-Key":"custom-upgrade-key"}"#;
+            let config = UpgradeConfig::new(websocket, &format!("/carrier?ed={ed}&q=1"), "", "cover.example", Some(headers).filter(|_| !websocket)).unwrap();
+            let wire = Rc::new(RefCell::new(Vec::new()));
+            let peer = Peer { request: wire.clone(), response: None, websocket, early: ed != 0 };
+            let (mut read, mut write) = upgrade_pair(peer, Capture(wire.clone()), config);
+            write.start().unwrap();
+            let sent = wire.borrow().len();
+            if websocket {
+                assert_eq!(sent, 0, "a WebSocket request waits for its early data");
+                continue;
+            }
+            let (_, _, end) = take_upgrade_request(&wire.borrow()).unwrap();
+            assert_eq!(end, sent, "start writes exactly the request head");
+            write.write_all(b"first").unwrap();
+            let mut reply = [0; 5];
+            read.read_exact(&mut reply).unwrap();
+            assert_eq!(&reply, b"reply");
+            assert_eq!(&wire.borrow()[end..], b"first", "ed={ed}: payload follows a single request");
         }
     }
 

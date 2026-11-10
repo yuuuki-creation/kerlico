@@ -295,7 +295,8 @@ fn dial(host: &str, port: u16, settings: &Settings, flow: Flow, command: Command
             }
             read.set_timeout(Duration::from_secs(10));
             if let Some(config) = upgrade_config {
-                let (reader, writer) = upgrade_pair(Box::new(read), Box::new(write), config);
+                let (reader, mut writer) = upgrade_pair(Box::new(read), Box::new(write), config);
+                writer.start().map_err(|_| OpenError::Transport)?;
                 read = Link::UpgradeRead(Box::new(reader));
                 write = Link::UpgradeWrite(Box::new(writer));
             }
