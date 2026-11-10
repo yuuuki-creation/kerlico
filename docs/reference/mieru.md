@@ -159,6 +159,8 @@ IPv6 节点 smoke 的 8 行由 `tools/verify_mieru.py --quick --node-host ::1` �
 
 初轮失败及修订证据继续保留在私有日志中。UDP 回显夹具的 8192 字节截断由独立直连反例确认，修订后 32000 字节完整返回。过短的 2 秒回显期限由目标 `TimeoutError` 和逐流字节记录确认，现与有效流预算统一为 25 秒。Go 对端改为并发关闭已拥有的连接后，再停止 API；3 秒退出上限和字节断言均保留。IPv4 与 IPv6 的活跃 LISTEN 负面对照仍会拒绝重绑，关闭后重绑通过。
 
+UDP 连发检查要求三个包按发送顺序回来，这是 mieru 应有的语义：UDP 关联经 `PacketOverStreamTunnel` 走一条会话，UDP 底层按序号重排后才交付（官方 `pkg/protocol/session.go` 的 `moveRecvBufToRecvQueue`），两端每个方向只有一个复制循环（客户端 `pkg/socks5/copy.go` 的 `BidiCopyUDP`，服务端 `pkg/socks5/udp.go` 的 `RunUDPAssociateLoop`）。2026-11-10 偶发的 `02-rust-to-official` 顺序失败出在回显夹具：原来的 `ThreadingUDPServer` 每包一个线程，按序收到后由线程调度决定回包先后。perf-02 上对失败行（UDP、MIDDLE、STANDARD、低熵 2、MTU 1400）只重复连发：不经代理直连原夹具 20000 次失败 16 次；同一夹具下官方客户端到官方服务端 2000 次失败 4 次，Kerlico 客户端到官方服务端 2000 次失败 6 次。插桩记录显示每次都是夹具按 a、b、c 收到、回包乱序，三个包都到达。夹具改为收包线程内逐包回发后，直连 20000 次、官方对官方 2000 次、Kerlico 对官方 2000 次都没有失败；四个忙循环占满 CPU 时，Kerlico 对官方与官方对官方各 1000 次也没有失败。
+
 为通过当前路径的严格检查，共享出站和路由函数改用具名上下文，DNS 辅助函数移到测试模块之前，WARP 依赖仅调整两处错误构造写法。`kerlico-server::Server` 和既有 `land` 接口的签名保持兼容。
 
 官方源码固定为 [`1367cf2d2dd81c5f27d455be7cea691d7948c420`](https://github.com/enfein/mieru/tree/1367cf2d2dd81c5f27d455be7cea691d7948c420)。协议字段以该版本 [`docs/protocol.md`](https://github.com/enfein/mieru/blob/1367cf2d2dd81c5f27d455be7cea691d7948c420/docs/protocol.md) 为准；复用概率见 `pkg/protocol/mux.go` 和 `pkg/appctl/appctlcommon/client.go`，懒握手见 `apis/internal/early_conn.go`。验收工具见 [worker 使用说明](../../tools/mieru_peer/README.md)。原有指向外部探针的忽略测试不代替本轮官方双向验收。
