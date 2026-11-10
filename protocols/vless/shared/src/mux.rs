@@ -1,6 +1,7 @@
 //! Xray mux frames carried inside a VLESS connection whose command is `mux`.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::num::NonZeroU64;
 
 use crate::{Addr, HeaderError};
 
@@ -39,7 +40,7 @@ impl<T: std::io::Write> MuxWriter<T> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MuxFrame {
     pub id: u16,
     pub status: u8,
@@ -48,6 +49,8 @@ pub struct MuxFrame {
     pub port: u16,
     pub address: Option<Addr>,
     pub payload: Vec<u8>,
+    /// XUDP GlobalID, the eight bytes after the address of a NEW UDP frame. Xray reads eight zero bytes as no ID.
+    pub global_id: Option<NonZeroU64>,
 }
 
 /// First frame a VLESS reverse portal writes: UDP to the domain `reverse`, port 0.
@@ -61,6 +64,7 @@ pub fn control_frame(id: u16) -> MuxFrame {
         port: 0,
         address: Some(Addr::Domain("reverse".to_string())),
         payload: control_payload(0),
+        global_id: None,
     }
 }
 
@@ -74,6 +78,7 @@ pub fn control_keep(id: u16) -> MuxFrame {
         port: 0,
         address: None,
         payload: control_payload(0),
+        global_id: None,
     }
 }
 
@@ -86,6 +91,7 @@ pub fn session_frame(id: u16, tcp: bool, port: u16, host: &str, payload: &[u8]) 
         port,
         address: Some(host_addr(host)),
         payload: payload.to_vec(),
+        global_id: None,
     }
 }
 
@@ -132,6 +138,9 @@ pub fn encode_mux(frame: &MuxFrame) -> Vec<u8> {
     if frame.status == NEW || (frame.status == KEEP && frame.network == 2 && frame.address.is_some()) {
         meta.push(frame.network);
         write_port_addr(&mut meta, frame.port, frame.address.as_ref());
+        if let (NEW, 2, Some(global_id)) = (frame.status, frame.network, frame.global_id) {
+            meta.extend_from_slice(&global_id.get().to_be_bytes());
+        }
     }
     let mut out = Vec::new();
     out.extend_from_slice(&(meta.len() as u16).to_be_bytes());
@@ -164,6 +173,7 @@ pub fn decode_mux(buf: &[u8]) -> Result<(MuxFrame, usize), HeaderError> {
     let mut network = 0u8;
     let mut port = 0u16;
     let mut address = None;
+    let mut global_id = None;
     if status == NEW || (status == KEEP && meta.len() > 4) {
         if meta.len() < 5 {
             return Err(HeaderError::Bad);
@@ -176,7 +186,9 @@ pub fn decode_mux(buf: &[u8]) -> Result<(MuxFrame, usize), HeaderError> {
         let (parsed_port, parsed_addr, used) = read_port_addr(&meta[5..])?;
         port = parsed_port;
         address = Some(parsed_addr);
-        let _ = used;
+        if status == NEW && option & DATA != 0 && network == 2 {
+            global_id = meta[5 + used..].first_chunk::<8>().and_then(|id| NonZeroU64::new(u64::from_be_bytes(*id)));
+        }
     }
     let mut consumed = 2 + meta_len;
     let mut payload = Vec::new();
@@ -193,7 +205,7 @@ pub fn decode_mux(buf: &[u8]) -> Result<(MuxFrame, usize), HeaderError> {
         consumed += len;
     }
     Ok((
-        MuxFrame { id, status, option, network, port, address, payload },
+        MuxFrame { id, status, option, network, port, address, payload, global_id },
         consumed,
     ))
 }
@@ -267,11 +279,58 @@ mod tests {
             port: 80,
             address: Some(Addr::Domain("example.com".to_string())),
             payload: b"ping".to_vec(),
+            global_id: None,
         };
         let bytes = encode_mux(&frame);
         let (decoded, used) = decode_mux(&bytes).unwrap();
         assert_eq!(used, bytes.len());
         assert_eq!(decoded, frame);
+    }
+
+    /// A NEW UDP frame as Xray's `xudp.PacketWriter` writes it, to 127.0.0.1:53 with payload "dns".
+    fn xray_xudp_new(global_id: &[u8]) -> Vec<u8> {
+        let mut meta = vec![0, 9, NEW, DATA, 2, 0, 53, 1, 127, 0, 0, 1];
+        meta.extend_from_slice(global_id);
+        let mut bytes = (meta.len() as u16).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&meta);
+        bytes.extend_from_slice(&[0, 3]);
+        bytes.extend_from_slice(b"dns");
+        bytes
+    }
+
+    #[test]
+    fn xudp_global_id_follows_the_address() {
+        let bytes = xray_xudp_new(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let (frame, used) = decode_mux(&bytes).unwrap();
+        assert_eq!(used, bytes.len());
+        assert_eq!(frame.global_id, NonZeroU64::new(0x0102030405060708));
+        assert_eq!(frame.address, Some(Addr::V4(Ipv4Addr::LOCALHOST)));
+        assert_eq!(frame.payload, b"dns");
+        assert_eq!(encode_mux(&frame), bytes, "re-encoding writes the GlobalID where Xray does");
+    }
+
+    #[test]
+    fn xudp_frames_without_global_id() {
+        let bare = xray_xudp_new(&[]);
+        let (frame, _) = decode_mux(&bare).unwrap();
+        assert_eq!(frame.global_id, None);
+        assert_eq!(encode_mux(&frame), bare, "no GlobalID adds no bytes");
+        let (frame, _) = decode_mux(&xray_xudp_new(&[0; 8])).unwrap();
+        assert_eq!(frame.global_id, None, "a non-cone Xray client sends eight zero bytes");
+        let (frame, _) = decode_mux(&xray_xudp_new(&[1, 2, 3])).unwrap();
+        assert_eq!(frame.global_id, None, "fewer than eight trailing bytes are padding");
+    }
+
+    #[test]
+    fn global_id_is_read_only_from_new_udp_frames_with_data() {
+        let mut tcp = xray_xudp_new(&[1; 8]);
+        tcp[6] = 1;
+        assert_eq!(decode_mux(&tcp).unwrap().0.global_id, None, "TCP frame");
+        let mut empty = xray_xudp_new(&[1; 8]);
+        empty[5] = 0;
+        assert_eq!(decode_mux(&empty).unwrap().0.global_id, None, "frame without data");
+        let keep = MuxFrame { status: KEEP, global_id: NonZeroU64::new(7), ..decode_mux(&xray_xudp_new(&[])).unwrap().0 };
+        assert_eq!(decode_mux(&encode_mux(&keep)).unwrap().0.global_id, None, "KEEP frame");
     }
 
     #[test]

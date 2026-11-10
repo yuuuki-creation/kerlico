@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::num::NonZeroU64;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
@@ -69,6 +70,7 @@ struct Users {
     allow_plain: bool,
     allow_vision: bool,
     fallback: FallbackSet,
+    xudp: XudpSessions,
 }
 
 impl Users {
@@ -76,7 +78,7 @@ impl Users {
         let allow_plain = encryption.is_some() || settings.text("security").unwrap_or("none") != "none" || settings.text("trusted").ok() == Some("true");
         let masks = final_masks(settings)?;
         masks.validate(kerlico_vless::finalmask::Side::Server).map_err(|_| OpenError::Settings)?;
-        Ok(Self { masks, node: node.clone(), entries: Mutex::new(BTreeMap::new()), encryption, allow_plain, allow_vision: settings.text("network").ok() != Some("xdrive"), fallback: load_fallbacks(settings)? })
+        Ok(Self { masks, node: node.clone(), entries: Mutex::new(BTreeMap::new()), encryption, allow_plain, allow_vision: settings.text("network").ok() != Some("xdrive"), fallback: load_fallbacks(settings)?, xudp: XudpSessions::default() })
     }
 
     fn allows(&self, peer: SocketAddr) -> bool { self.allow_plain || kerlico_vless::private_peer(peer.ip()) }
@@ -1605,7 +1607,7 @@ impl Write for Link {
             Self::Kcp(_) => Ok(()),
             Self::Xhttp(lane) => lane.flush(),
             Self::Chunks(chunks) => chunks.flush(),
-            Self::Mux(lane) => lane.writer.lock().expect("mux").flush(),
+            Self::Mux(lane) => lane.flush(),
             Self::EncRead(_) => Ok(()),
             Self::EncWrite(enc) => enc.flush(),
             Self::RealityRead(_) => Ok(()),
@@ -1666,10 +1668,74 @@ fn alpn(settings: &Settings) -> Vec<String> {
     }
 }
 
+type MuxOut = Arc<Mutex<kerlico_vless::MuxWriter<Link>>>;
+
+/// How long Xray's `XUDPManager` keeps an XUDP session that lost its carrier.
+const XUDP_DETACHED: Duration = Duration::from_secs(60);
+
+/// Where a mux session's replies go. Only an XUDP session detaches; it waits for a NEW frame
+/// with its GlobalID on another carrier.
+enum Route {
+    Attached(u16, MuxOut),
+    Detached(Instant),
+}
+
+impl Route {
+    fn is(&self, id: u16, writer: &MuxOut) -> bool {
+        matches!(self, Self::Attached(own, out) if *own == id && Arc::ptr_eq(out, writer))
+    }
+
+    fn expired(&self) -> bool {
+        matches!(self, Self::Detached(since) if since.elapsed() >= XUDP_DETACHED)
+    }
+}
+
 struct MuxSession {
     destination: Destination,
-    lanes: HashMap<(String, u16), std::sync::Weak<MuxLane>>,
-    last: std::time::Instant,
+    lanes: HashMap<(String, u16), Weak<MuxLane>>,
+    last: Instant,
+    route: Arc<Mutex<Route>>,
+    global_id: Option<NonZeroU64>,
+}
+
+impl MuxSession {
+    fn new(destination: Destination, route: Route, global_id: Option<NonZeroU64>) -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self { destination, lanes: HashMap::new(), last: Instant::now(), route: Arc::new(Mutex::new(route)), global_id }))
+    }
+
+    /// Whether a NEW frame with this session's GlobalID can still take it over.
+    fn reusable(&self) -> bool {
+        match &*self.route.lock().expect("mux") {
+            Route::Attached(..) => true,
+            Route::Detached(since) => since.elapsed() < XUDP_DETACHED && self.lanes.values().any(|lane| lane.strong_count() > 0),
+        }
+    }
+}
+
+/// One node's XUDP sessions by user and GlobalID. Xray keys its process-wide map by GlobalID
+/// alone. The user in the key keeps one user from taking over another user's session.
+type XudpSessions = Mutex<HashMap<(UserEmail, NonZeroU64), Arc<Mutex<MuxSession>>>>;
+
+/// Returns the XUDP session for `key`, bound to `route` on this carrier. A known session
+/// leaves its earlier carrier and keeps its lanes and the outbound flows behind them.
+fn attach_xudp(xudp: &XudpSessions, key: (UserEmail, NonZeroU64), destination: Destination, route: Route) -> Arc<Mutex<MuxSession>> {
+    let mut sessions = xudp.lock().expect("xudp");
+    sessions.retain(|_, session| session.lock().expect("mux").reusable());
+    let Some(session) = sessions.get(&key).cloned() else {
+        let session = MuxSession::new(destination, route, Some(key.1));
+        sessions.insert(key, session.clone());
+        return session;
+    };
+    let mut found = session.lock().expect("mux");
+    found.destination = destination;
+    found.last = Instant::now();
+    let previous = std::mem::replace(&mut *found.route.lock().expect("mux"), route);
+    drop(found);
+    drop(sessions);
+    if let Route::Attached(id, writer) = previous {
+        writer.lock().expect("mux").send(&MuxFrame { id, status: END, ..MuxFrame::default() }).ok();
+    }
+    session
 }
 
 fn mux_destination(address: Option<kerlico_vless::Addr>, port: u16, udp: bool) -> Option<Destination> {
@@ -1689,27 +1755,43 @@ fn mux_address(destination: &Destination) -> kerlico_vless::Addr {
     }
 }
 
-fn close_mux_session(id: u16, session: &MuxSession, writer: &Mutex<kerlico_vless::MuxWriter<Link>>) {
-    for lane in session.lanes.values().filter_map(std::sync::Weak::upgrade) {
-        *lane.closed.lock().expect("mux") = true;
-        lane.cv.notify_all();
+/// Ends session `id` on this carrier and sends END. An XUDP session detaches and keeps its
+/// lanes. A session that already moved to another carrier is left alone.
+fn release_mux_session(id: u16, session: &Mutex<MuxSession>, writer: &MuxOut) {
+    {
+        let session = session.lock().expect("mux");
+        let mut route = session.route.lock().expect("mux");
+        if !route.is(id, writer) { return; }
+        if session.global_id.is_some() {
+            *route = Route::Detached(Instant::now());
+        } else {
+            drop(route);
+            for lane in session.lanes.values().filter_map(Weak::upgrade) {
+                *lane.closed.lock().expect("mux") = true;
+                lane.cv.notify_all();
+            }
+        }
     }
-    writer.lock().expect("mux").send(&MuxFrame { id, status: END, option: 0, network: 0, port: 0, address: None, payload: Vec::new() }).ok();
+    writer.lock().expect("mux").send(&MuxFrame { id, status: END, ..MuxFrame::default() }).ok();
 }
 
-fn demux(mut read: Link, write: Link, peer: SocketAddr, email: UserEmail, mut pending: Vec<u8>, ready_tx: &Sender<Ready>, udp_only: bool, xudp_only: bool) {
+fn demux(mut read: Link, write: Link, peer: SocketAddr, email: UserEmail, mut pending: Vec<u8>, ready_tx: &Sender<Ready>, xudp: &XudpSessions, udp_only: bool, xudp_only: bool) {
     read.set_timeout(Duration::from_millis(200));
-    let writer = Arc::new(Mutex::new(kerlico_vless::MuxWriter::new(write)));
-    let mut sessions: HashMap<u16, MuxSession> = HashMap::new();
+    let writer: MuxOut = Arc::new(Mutex::new(kerlico_vless::MuxWriter::new(write)));
+    let mut sessions: HashMap<u16, Arc<Mutex<MuxSession>>> = HashMap::new();
     let mut tmp = [0u8; 2048];
-    let mut last = std::time::Instant::now();
+    let mut last = Instant::now();
     (|| {
     loop {
         sessions.retain(|&id, session| {
-            let active = session.lanes.values().any(|lane| lane.strong_count() > 0);
-            let expired = !active && (session.destination.transport() == Transport::Tcp || session.last.elapsed() >= Duration::from_secs(300));
-            if expired { close_mux_session(id, session, &writer); }
-            !expired
+            let ended = {
+                let session = session.lock().expect("mux");
+                if !session.route.lock().expect("mux").is(id, &writer) { return false; }
+                let active = session.lanes.values().any(|lane| lane.strong_count() > 0);
+                !active && (session.destination.transport() == Transport::Tcp || session.last.elapsed() >= Duration::from_secs(300))
+            };
+            if ended { release_mux_session(id, session, &writer); }
+            !ended
         });
         let frame = loop {
             match decode_mux(&pending) {
@@ -1719,20 +1801,20 @@ fn demux(mut read: Link, write: Link, peer: SocketAddr, email: UserEmail, mut pe
                         Ok(n) => n,
                         Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) && last.elapsed() < Duration::from_secs(300) => {
                             writer.lock().expect("mux").flush().ok();
-                            break MuxFrame { id: 0, status: KEEPALIVE, option: 0, network: 0, port: 0, address: None, payload: Vec::new() };
+                            break MuxFrame { id: 0, status: KEEPALIVE, option: 0, network: 0, port: 0, address: None, payload: Vec::new(), global_id: None };
                         },
                         Err(_) => return,
                     };
                     if n == 0 { return; }
                     pending.extend_from_slice(&tmp[..n]);
-                    last = std::time::Instant::now();
+                    last = Instant::now();
                 }
                 Err(kerlico_vless::HeaderError::Bad) => return,
             }
         };
         if frame.status == KEEPALIVE { continue; }
         if frame.status == END {
-            if let Some(session) = sessions.remove(&frame.id) { close_mux_session(frame.id, &session, &writer); }
+            if let Some(session) = sessions.remove(&frame.id) { release_mux_session(frame.id, &session, &writer); }
             continue;
         }
         if frame.status == NEW {
@@ -1740,10 +1822,16 @@ fn demux(mut read: Link, write: Link, peer: SocketAddr, email: UserEmail, mut pe
             let udp = frame.network == 2;
             if udp_only && !udp { return; }
             let Some(destination) = mux_destination(frame.address.clone(), frame.port, udp) else { return; };
-            sessions.insert(frame.id, MuxSession { destination, lanes: HashMap::new(), last: std::time::Instant::now() });
+            let route = Route::Attached(frame.id, writer.clone());
+            let session = match frame.global_id {
+                Some(global_id) => attach_xudp(xudp, (email.clone(), global_id), destination, route),
+                None => MuxSession::new(destination, route, None),
+            };
+            sessions.insert(frame.id, session);
         } else if frame.status != KEEP { return; }
-        let Some(session) = sessions.get_mut(&frame.id) else { continue; };
-        session.last = std::time::Instant::now();
+        let Some(session) = sessions.get(&frame.id) else { continue; };
+        let mut session = session.lock().expect("mux");
+        session.last = Instant::now();
         let udp = session.destination.transport() == Transport::Udp;
         let destination = if frame.status == KEEP && frame.address.is_some() {
             if !udp || frame.network != 2 { return; }
@@ -1751,7 +1839,8 @@ fn demux(mut read: Link, write: Link, peer: SocketAddr, email: UserEmail, mut pe
             destination
         } else { session.destination.clone() };
         let key = (destination.host().to_string(), destination.port());
-        if let Some(lane) = session.lanes.get(&key).and_then(std::sync::Weak::upgrade) {
+        if let Some(lane) = session.lanes.get(&key).and_then(Weak::upgrade) {
+            drop(session);
             if !frame.payload.is_empty() { lane.enqueue(frame.payload); }
             continue;
         }
@@ -1759,16 +1848,18 @@ fn demux(mut read: Link, write: Link, peer: SocketAddr, email: UserEmail, mut pe
         let lane = Arc::new(MuxLane {
             plain: Mutex::new(if udp { VecDeque::new() } else { frame.payload.clone().into() }),
             packets: Mutex::new(if udp && !frame.payload.is_empty() { VecDeque::from([frame.payload]) } else { VecDeque::new() }),
-            datagram: udp, cv: Condvar::new(), closed: Mutex::new(false), id: frame.id,
+            datagram: udp, cv: Condvar::new(), closed: Mutex::new(false),
             reply_target: udp.then(|| (mux_address(&destination), destination.port())),
-            writer: writer.clone(),
+            route: session.route.clone(),
+            resumable: session.global_id.is_some(),
         });
         session.lanes.insert(key, Arc::downgrade(&lane));
         session.lanes.retain(|_, lane| lane.strong_count() > 0);
+        drop(session);
         if ready_tx.send(Ready { email: email.clone(), destination, peer, read: Link::Mux(lane.clone()), write: Link::Mux(lane), udp: false, prefix: Vec::new() }).is_err() { return; }
     }
     })();
-    for (&id, session) in &sessions { close_mux_session(id, session, &writer); }
+    for (&id, session) in &sessions { release_mux_session(id, session, &writer); }
 }
 
 struct MuxLane {
@@ -1777,24 +1868,41 @@ struct MuxLane {
     datagram: bool,
     cv: Condvar,
     closed: Mutex<bool>,
-    id: u16,
     reply_target: Option<(kerlico_vless::Addr, u16)>,
-    writer: Arc<Mutex<kerlico_vless::MuxWriter<Link>>>,
+    route: Arc<Mutex<Route>>,
+    /// An XUDP lane outlives its carrier, so a failed carrier write loses one datagram
+    /// instead of ending the flow.
+    resumable: bool,
 }
 
 impl MuxLane {
+    /// Closed, or an XUDP session that waited too long for a carrier.
+    fn ended(&self) -> bool {
+        let closed = *self.closed.lock().expect("mux");
+        closed || self.route.lock().expect("mux").expired()
+    }
+
+    /// The session id and carrier for replies. `None` while an XUDP session waits for a
+    /// carrier; replies in that gap are dropped like any lost datagram.
+    fn carrier(&self) -> Option<(u16, MuxOut)> {
+        match &*self.route.lock().expect("mux") {
+            Route::Attached(id, writer) => Some((*id, writer.clone())),
+            Route::Detached(_) => None,
+        }
+    }
+
     fn enqueue(self: &Arc<Self>, payload: Vec<u8>) {
         if self.datagram {
             let mut packets = self.packets.lock().expect("mux");
             while packets.len() >= 256 || packets.iter().map(Vec::len).sum::<usize>() + payload.len() > 1024 * 1024 {
-                if Arc::strong_count(self) == 1 || *self.closed.lock().expect("mux") { return; }
+                if Arc::strong_count(self) == 1 || self.ended() { return; }
                 packets = self.cv.wait_timeout(packets, Duration::from_millis(200)).expect("mux").0;
             }
             packets.push_back(payload);
         } else {
             let mut plain = self.plain.lock().expect("mux");
             while plain.len() + payload.len() > 1024 * 1024 {
-                if Arc::strong_count(self) == 1 || *self.closed.lock().expect("mux") { return; }
+                if Arc::strong_count(self) == 1 || self.ended() { return; }
                 plain = self.cv.wait_timeout(plain, Duration::from_millis(200)).expect("mux").0;
             }
             plain.extend(payload);
@@ -1815,7 +1923,7 @@ impl MuxLane {
                     self.cv.notify_all();
                     return Ok(n);
                 }
-                if *self.closed.lock().expect("mux") {
+                if self.ended() {
                     return Ok(0);
                 }
                 let (guard, timeout) = self.cv.wait_timeout(packets, Duration::from_millis(200)).expect("mux");
@@ -1833,7 +1941,7 @@ impl MuxLane {
                 self.cv.notify_all();
                 return Ok(n);
             }
-            if *self.closed.lock().expect("mux") {
+            if self.ended() {
                 return Ok(0);
             }
             let (guard, timeout) = self.cv.wait_timeout(plain, Duration::from_millis(200)).expect("mux");
@@ -1843,24 +1951,35 @@ impl MuxLane {
     }
 
     fn push(&self, buf: &[u8]) -> std::io::Result<usize> {
-        if *self.closed.lock().expect("mux") {
+        if self.ended() {
             return Err(std::io::ErrorKind::BrokenPipe.into());
         }
         if self.datagram && buf.len() > u16::MAX as usize {
             return Err(std::io::Error::other("mux datagram too large"));
         }
         let buf = &buf[..buf.len().min(u16::MAX as usize)];
+        let Some((id, writer)) = self.carrier() else { return Ok(buf.len()) };
         let frame = MuxFrame {
-            id: self.id,
+            id,
             status: KEEP,
             option: DATA,
             network: if self.datagram { 2 } else { 0 },
             port: self.reply_target.as_ref().map_or(0, |(_, port)| *port),
             address: self.reply_target.as_ref().map(|(address, _)| address.clone()),
             payload: buf.to_vec(),
+            global_id: None,
         };
-        self.writer.lock().expect("mux").send(&frame)?;
-        Ok(buf.len())
+        let sent = writer.lock().expect("mux").send(&frame);
+        match sent {
+            Err(_) if self.resumable => Ok(buf.len()),
+            sent => sent.map(|()| buf.len()),
+        }
+    }
+
+    fn flush(&self) -> std::io::Result<()> {
+        let Some((_, writer)) = self.carrier() else { return Ok(()) };
+        let flushed = writer.lock().expect("mux").flush();
+        if self.resumable { Ok(()) } else { flushed }
     }
 }
 
@@ -2079,7 +2198,7 @@ fn portal_loop(tag: (NodeTag, String), portal: Arc<Portal>, mut read: Link, mut 
         };
         ended.extend(dropped);
         while let Some(&id) = ended.front() {
-            let frame = MuxFrame { id, status: END, option: 0, network: 0, port: 0, address: None, payload: Vec::new() };
+            let frame = MuxFrame { id, status: END, option: 0, network: 0, port: 0, address: None, payload: Vec::new(), global_id: None };
             match portal.write.lock().expect("reverse").send(&frame) {
                 Ok(()) => {
                     ended.pop_front();
@@ -2164,8 +2283,8 @@ fn open_reverse_portal(portal: Arc<Portal>, host: &str, port: u16, tcp: bool, pa
     };
     let lane = Arc::new(MuxLane {
         plain: Mutex::new(VecDeque::new()), packets: Mutex::new(VecDeque::new()),
-        datagram: !tcp, cv: Condvar::new(), closed: Mutex::new(false), id, reply_target: None,
-        writer: portal.write.clone(),
+        datagram: !tcp, cv: Condvar::new(), closed: Mutex::new(false), reply_target: None,
+        route: Arc::new(Mutex::new(Route::Attached(id, portal.write.clone()))), resumable: false,
     });
     sessions.insert(id, Arc::downgrade(&lane));
     drop(sessions);
@@ -2385,7 +2504,7 @@ fn handshake(
         return None;
     }
     if request.command == Command::Mux {
-        demux(read, write, peer, email, prefix, ready_tx, account_vision, account_vision && !vision);
+        demux(read, write, peer, email, prefix, ready_tx, &accounts.xudp, account_vision, account_vision && !vision);
         return None;
     }
     let host = match request.address {
@@ -4378,6 +4497,7 @@ mod tests {
                 port: 80,
                 address: Some(Addr::Domain("example.com".to_string())),
                 payload: b"ping".to_vec(),
+                global_id: None,
             });
             socket.write_all(&frame).unwrap();
             let mut buf = Vec::new();
@@ -4448,6 +4568,7 @@ mod tests {
                     port: 20091,
                     address: Some(Addr::V4(Ipv4Addr::new(127, 0, 0, 1))),
                     payload: b"ping".to_vec(),
+                    global_id: None,
                 }))
                 .unwrap();
             let mut buf = Vec::new();
@@ -4523,6 +4644,7 @@ mod tests {
                 port: 20091,
                 address: Some(Addr::V4(Ipv4Addr::new(127, 0, 0, 1))),
                 payload: b"ping".to_vec(),
+                global_id: None,
             });
             let meta_len = u16::from_be_bytes([frame[0], frame[1]]) as usize;
             let mut raw = Vec::new();
@@ -4637,6 +4759,114 @@ mod tests {
         assert_eq!(rules.pick("www.example.com", "", b"").unwrap().host, "named");
         assert_eq!(rules.pick("www.example.com", "h2", b"GET /ws HTTP/1.1\r\n\r\n").unwrap().host, "both");
         assert_eq!(rules.pick("other.test", "h2", b"GET /ws HTTP/1.1\r\n\r\n").unwrap().host, "default");
+    }
+
+    const ALICE: &str = "11111111-1111-1111-1111-111111111111";
+    const BOB: &str = "22222222-2222-2222-2222-222222222222";
+
+    fn xudp_inbound() -> (Box<dyn Accept>, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut settings = Settings::default();
+        settings.insert_text("decryption", "none");
+        let mut inbound = listen(&NodeTag::parse("v").unwrap(), &ListenAddr::v4(Ipv4Addr::LOCALHOST, port).unwrap(), &settings).unwrap();
+        for (email, id) in [("alice", ALICE), ("bob", BOB)] {
+            let mut account = Settings::default();
+            account.insert_text("id", id);
+            inbound.add_user(&UserEmail::parse(email).unwrap(), &account).unwrap();
+        }
+        (inbound, port)
+    }
+
+    /// Opens a Mux carrier as user `id` and sends one datagram as XUDP session `session`.
+    fn xudp_carrier(port: u16, id: &str, session: u16, global_id: Option<u64>, payload: &[u8]) -> TcpStream {
+        let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let request = Request { id: parse_id(id).unwrap(), flow: String::new(), seed: Vec::new(), command: Command::Mux, port: 0, address: Addr::Domain(String::new()) };
+        socket.write_all(&encode_request(&request).unwrap()).unwrap();
+        let mut response = [0u8; 2];
+        socket.read_exact(&mut response).unwrap();
+        socket.write_all(&kerlico_vless::encode_mux(&kerlico_vless::MuxFrame {
+            id: session, status: NEW, option: DATA, network: 2, port: 20091,
+            address: Some(Addr::V4(Ipv4Addr::LOCALHOST)), payload: payload.to_vec(),
+            global_id: global_id.and_then(NonZeroU64::new),
+        })).unwrap();
+        socket
+    }
+
+    fn read_datagram(stream: &dyn InboundStream) -> Result<Vec<u8>, PlaneFault> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut buf = [0u8; 64];
+        while Instant::now() < deadline {
+            match stream.read_from_user(&mut buf) {
+                Ok(n) => return Ok(buf[..n].to_vec()),
+                Err(PlaneFault::Again) => thread::sleep(Duration::from_millis(10)),
+                Err(fault) => return Err(fault),
+            }
+        }
+        Err(PlaneFault::Again)
+    }
+
+    fn read_frame(socket: &mut TcpStream) -> kerlico_vless::MuxFrame {
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 256];
+        loop {
+            if let Ok((frame, _)) = decode_mux(&buf) { return frame; }
+            let n = socket.read(&mut tmp).unwrap();
+            assert!(n > 0, "carrier closed before a frame arrived");
+            buf.extend_from_slice(&tmp[..n]);
+        }
+    }
+
+    #[test]
+    fn xudp_global_id_moves_the_session_to_a_new_carrier() {
+        let (mut inbound, port) = xudp_inbound();
+        let mut first = xudp_carrier(port, ALICE, 3, Some(0x5eed), b"one");
+        let stream = wait_handoff(&mut *inbound).stream();
+        assert_eq!(read_datagram(&*stream), Ok(b"one".to_vec()));
+
+        let mut second = xudp_carrier(port, ALICE, 9, Some(0x5eed), b"two");
+        assert_eq!(read_datagram(&*stream), Ok(b"two".to_vec()), "the open flow receives the datagram from the new carrier");
+        assert!(matches!(inbound.accept(), Err(OpenError::Again)), "taking over the session opens no second flow");
+        let end = read_frame(&mut first);
+        assert_eq!((end.id, end.status), (3, END), "the earlier carrier learns its session left");
+        assert_eq!(stream.write_to_user(b"back").unwrap(), 4);
+        let reply = read_frame(&mut second);
+        assert_eq!((reply.id, reply.payload), (9, b"back".to_vec()), "replies follow the new carrier and session id");
+
+        drop(second);
+        // Let the server see the carrier close, so the session detaches rather than moves.
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(stream.write_to_user(b"lost").unwrap(), 4, "a detached flow drops replies and stays open");
+        let mut third = xudp_carrier(port, ALICE, 4, Some(0x5eed), b"three");
+        assert_eq!(read_datagram(&*stream), Ok(b"three".to_vec()), "a closed carrier's session reattaches");
+        assert!(matches!(inbound.accept(), Err(OpenError::Again)), "reattaching opens no second flow");
+        assert_eq!(stream.write_to_user(b"again").unwrap(), 5);
+        let reply = read_frame(&mut third);
+        assert_eq!((reply.id, reply.payload), (4, b"again".to_vec()));
+    }
+
+    #[test]
+    fn mux_udp_without_global_id_closes_with_its_carrier() {
+        let (mut inbound, port) = xudp_inbound();
+        let carrier = xudp_carrier(port, ALICE, 3, None, b"one");
+        let stream = wait_handoff(&mut *inbound).stream();
+        assert_eq!(read_datagram(&*stream), Ok(b"one".to_vec()));
+        drop(carrier);
+        assert_eq!(read_datagram(&*stream), Err(PlaneFault::Closed));
+    }
+
+    #[test]
+    fn xudp_global_id_belongs_to_one_user() {
+        let (mut inbound, port) = xudp_inbound();
+        let _alice = xudp_carrier(port, ALICE, 3, Some(0x5eed), b"alice");
+        let alice = wait_handoff(&mut *inbound);
+        let _bob = xudp_carrier(port, BOB, 3, Some(0x5eed), b"bob");
+        let bob = wait_handoff(&mut *inbound);
+        assert_eq!(bob.user().as_str(), "bob", "the same GlobalID from another user opens its own flow");
+        assert_eq!(read_datagram(&*bob.stream()), Ok(b"bob".to_vec()));
+        assert_eq!(read_datagram(&*alice.stream()), Ok(b"alice".to_vec()));
     }
 
     fn wait_handoff(inbound: &mut dyn Accept) -> Handoff {

@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -184,6 +184,15 @@ impl Echo {
     }
 
     pub fn udp(port: u16) -> Result<Self> {
+        Self::udp_with(port, |_, bytes| bytes.to_vec())
+    }
+
+    /// Replies with the sender's port, two bytes big-endian, followed by the datagram.
+    pub fn udp_source_port() -> Result<Self> {
+        Self::udp_with(0, |peer, bytes| [&peer.port().to_be_bytes()[..], bytes].concat())
+    }
+
+    fn udp_with(port: u16, reply: fn(SocketAddr, &[u8]) -> Vec<u8>) -> Result<Self> {
         let socket = UdpSocket::bind(localhost(port))?;
         let port = socket.local_addr()?.port();
         socket.set_read_timeout(Some(Duration::from_millis(25)))?;
@@ -192,7 +201,7 @@ impl Echo {
             while !stop.load(Ordering::Relaxed) {
                 match socket.recv_from(&mut bytes) {
                     Ok((len, peer)) => {
-                        let _ = socket.send_to(&bytes[..len], peer);
+                        let _ = socket.send_to(&reply(peer, &bytes[..len]), peer);
                     }
                     Err(error)
                         if matches!(

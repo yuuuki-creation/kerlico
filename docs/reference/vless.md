@@ -61,7 +61,7 @@ Encryption 的模式是 `mlkem768x25519plus.native`、`xorpub`、`random`。服�
 
 Vision 只保留一条实现路径。END 结束填充；DIRECT 在最后一块填充和对应安全记录排空后移除紧邻的安全层，不跳过外层传输。内层真实 TLS 的大记录不能提前切换。分开的读写半边共享 Vision 状态，阻塞读取不占用写侧。
 
-独立 UDP 使用两字节大端长度，Mux UDP 载荷本身就是一份数据报，不再重复套长度。XUDP 使用 id 0，KEEP 帧携带的不同目标分别产生 Handoff，回复保留目标元数据。TCP 大写入拆成最多 65535 字节的 Mux 帧。队列有界，关闭发送 END，已收数据先于 EOF 交给调用方。
+独立 UDP 使用两字节大端长度，Mux UDP 载荷本身就是一份数据报，不再重复套长度。XUDP 使用 id 0，KEEP 帧携带的不同目标分别产生 Handoff，回复保留目标元数据。XUDP 的 NEW 帧在地址后可带 8 字节 GlobalID，全零等于没有。服务端节点按用户和 GlobalID 记录会话。另一个载体送来同一用户、同一 GlobalID 的 NEW 帧时，原会话的各个目标改用新载体和新会话 id，不产生新的 Handoff，出站 UDP 流和套接字继续使用，远端看到的源端口不变。原载体若还开着，会先收到该会话的 END。带 GlobalID 的会话在载体关闭或收到 END 后脱离载体，这段时间的回复直接丢弃，60 秒内没有载体接回就结束。Xray 的表只按 GlobalID 查找，范围是整个进程。同一客户端重连时用户不变，所以多按用户区分不影响互通。没有 GlobalID 的会话随载体关闭。TCP 大写入拆成最多 65535 字节的 Mux 帧。队列有界，关闭发送 END，已收数据先于 EOF 交给调用方。
 
 落地 `mux: true` 使用 Mux。每次 `land` 开一个传输流，gRPC 流可共享底层连接。通用 Mux 连接池、跨载体 GlobalID 和调度参数见未完成项。HTTP/1 分块编码保存 wire 位置和待确认的应用长度，短写、WouldBlock、flush 和最后的零长度块共用这一份状态。
 

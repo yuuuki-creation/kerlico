@@ -462,7 +462,7 @@ fn xudp_keep_routes_each_datagram_to_its_own_target() {
     assert_eq!(response, [0, 0]);
     socket.write_all(&kerlico_vless::encode_mux(&MuxFrame {
         id: 0, status: NEW, option: DATA, network: 2, port: 80,
-        address: Some(Addr::V4(Ipv4Addr::LOCALHOST)), payload: b"A".to_vec(),
+        address: Some(Addr::V4(Ipv4Addr::LOCALHOST)), payload: b"A".to_vec(), global_id: None,
     })).unwrap();
     let first = wait_handoff(&mut *inbound);
     assert_eq!(first.destination().host(), "127.0.0.1");

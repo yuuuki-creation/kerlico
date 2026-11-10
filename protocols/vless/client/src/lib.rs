@@ -633,6 +633,7 @@ impl ClientMux {
             port: self.port,
             address: if *opened { None } else { Some(self.address.clone()) },
             payload: payload.to_vec(),
+            global_id: None,
         };
         self.write.lock().expect("mux").send(&frame)?;
         *opened = true;
@@ -1504,7 +1505,7 @@ impl ReverseWriter {
     fn end(&mut self, id: u16, failed: bool) -> std::io::Result<()> {
         if !self.ends.iter().any(|frame| frame.id == id) {
             if self.ends.len() >= REVERSE_SESSION_LIMIT { return Err(std::io::Error::other("reverse close queue full")); }
-            self.ends.push_back(MuxFrame { id, status: kerlico_vless::END, option: if failed { 2 } else { 0 }, network: 0, port: 0, address: None, payload: Vec::new() });
+            self.ends.push_back(MuxFrame { id, status: kerlico_vless::END, option: if failed { 2 } else { 0 }, network: 0, port: 0, address: None, payload: Vec::new(), global_id: None });
         }
         self.flush()
     }
@@ -1753,6 +1754,7 @@ impl ReverseLane {
             port: if udp { self.destination.port() } else { 0 },
             address: if udp { Some(parse_addr(self.destination.host()).map_err(|_| PlaneFault::Transport)?) } else { None },
             payload: buf[..len].to_vec(),
+            global_id: None,
         };
         self.shared.send(&frame).map_err(map_io)?;
         Ok(len)
@@ -2006,8 +2008,8 @@ mod tests {
         frames.extend(encode_mux(&kerlico_vless::session_frame(3, true, 80, "first.test", b"first")));
         frames.extend(encode_mux(&kerlico_vless::session_frame(5, true, 443, "second.test", b"second")));
         frames.extend(encode_mux(&kerlico_vless::session_frame(7, false, 53, "dns-a.test", b"aaaa")));
-        frames.extend(encode_mux(&MuxFrame { id: 7, status: KEEP, option: DATA, network: 2, port: 5353, address: Some(Addr::Domain("dns-b.test".into())), payload: b"bbbb".to_vec() }));
-        frames.extend(encode_mux(&MuxFrame { id: 3, status: kerlico_vless::END, option: 0, network: 0, port: 0, address: None, payload: Vec::new() }));
+        frames.extend(encode_mux(&MuxFrame { id: 7, status: KEEP, option: DATA, network: 2, port: 5353, address: Some(Addr::Domain("dns-b.test".into())), payload: b"bbbb".to_vec(), global_id: None }));
+        frames.extend(encode_mux(&MuxFrame { id: 3, status: kerlico_vless::END, option: 0, network: 0, port: 0, address: None, payload: Vec::new(), global_id: None }));
         peer.write_all(&frames).unwrap();
         let first = accept_reverse(&bridge);
         let second = accept_reverse(&bridge);
@@ -2081,7 +2083,7 @@ mod tests {
         let (bridge, mut peer) = reverse_fixture();
         peer.write_all(&encode_mux(&kerlico_vless::session_frame(3, true, 80, "slow.test", b"x"))).unwrap();
         let _slow = accept_reverse(&bridge);
-        let frame = encode_mux(&MuxFrame { id: 3, status: KEEP, option: DATA, network: 0, port: 0, address: None, payload: vec![7; 65535] });
+        let frame = encode_mux(&MuxFrame { id: 3, status: KEEP, option: DATA, network: 0, port: 0, address: None, payload: vec![7; 65535], global_id: None });
         for _ in 0..17 { peer.write_all(&frame).unwrap(); }
         let mut pending = Vec::new();
         let end = reverse_frame(&mut peer, &mut pending);
@@ -2273,6 +2275,7 @@ mod tests {
                     port: 80,
                     address: Some(Addr::Domain("example.com".to_string())),
                     payload: b"ok".to_vec(),
+                    global_id: None,
                 }))
                 .unwrap();
         });
@@ -3076,6 +3079,7 @@ mod tests {
                 port: 0,
                 address: None,
                 payload: b"ok".to_vec(),
+                global_id: None,
             });
             socket.write_all(&reply).unwrap();
         });

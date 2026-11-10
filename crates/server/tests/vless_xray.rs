@@ -15,10 +15,10 @@ mod xdrive_mock;
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -331,11 +331,14 @@ fn xray_binary(dir: &Path) -> Result<PathBuf> {
 }
 
 fn start_xray(xray: &Path, dir: &Path, name: &str, config: &Value) -> Result<Process> {
+    // Keep un-muxed UDP cases on VLESS command 2. Vision and explicit mux still use XUDP.
+    launch_xray(xray, dir, name, config, &[("xray.cone.disabled", "true")])
+}
+
+fn launch_xray(xray: &Path, dir: &Path, name: &str, config: &Value, env: &[(&str, &str)]) -> Result<Process> {
     let path = write_json(dir, &format!("{name}.json"), config)?;
     let mut command = Command::new(xray);
-    command.args(["run", "-c"]).arg(path);
-    // Keep un-muxed UDP cases on VLESS command 2. Vision and explicit mux still use XUDP.
-    command.env("xray.cone.disabled", "true");
+    command.args(["run", "-c"]).arg(path).envs(env.iter().copied());
     let mut process = Process::spawn(command, dir, name)?;
     process.wait_for_log(&format!("Xray {XRAY_VERSION} started"))?;
     Ok(process)
@@ -558,6 +561,209 @@ fn vless_xray_rejections() {
         report(&name, result, &dir, &mut failed);
     }
     finish_report(runs, &failed, &root);
+}
+
+#[test]
+#[ignore = "requires XRAY pointing to Xray 26.10.31 a4a3dff"]
+fn vless_xray_xudp_reattach() {
+    let root = run_dir("xudp").expect("xudp directory");
+    let xray = xray_binary(&root).expect("pinned Xray peer");
+    let directions = [Direction::XrayControl, Direction::XrayToKerlico];
+    let results = thread::scope(|scope| {
+        let runs = directions.map(|direction| {
+            let (xray, dir) = (&xray, root.join(direction.name()));
+            scope.spawn(move || {
+                let result = fs::create_dir(&dir).map_err(Into::into).and_then(|_| xudp_reattach(xray, &dir, direction));
+                result.map_err(|error| error.to_string())
+            })
+        });
+        runs.map(|run| run.join().expect("XUDP run thread"))
+    });
+    let mut failed = Vec::new();
+    for (direction, result) in directions.into_iter().zip(results) {
+        let label = format!("xudp-reattach/{}", direction.name());
+        report(&label, result.map_err(Into::into), &root.join(direction.name()), &mut failed);
+    }
+    eprintln!("XUDP reattach: {}/{} passed. Artifacts: {}", directions.len() - failed.len(), directions.len(), root.display());
+    assert!(failed.is_empty(), "failed cases: {}", failed.join(", "));
+}
+
+/// An Xray client with a cone SOCKS inbound and Mux/XUDP sends one GlobalID per UDP source.
+/// The server keeps the same outbound socket when the carrier changes, and drops it once the
+/// session has waited more than a minute without a carrier.
+fn xudp_reattach(xray: &Path, dir: &Path, direction: Direction) -> Result<()> {
+    let case = Case::new("xudp-reattach", Network::Raw, Security::None, Payload::Udp);
+    let keys = Keys::generate(dir, &case)?;
+    let origin = Echo::udp_source_port()?;
+    let peer = available_port()?;
+    let tap = Tap::start(peer)?;
+    let front = available_port()?;
+    let (_server, detached) = match direction {
+        Direction::XrayToKerlico => (start_kerlico(dir, &case.kerlico_server(&keys, peer))?, Duration::from_secs(62)),
+        // Xray sweeps its XUDP map once a minute, so an entry can outlive its 60 s deadline by up to a minute.
+        _ => (start_xray(xray, dir, "xray-server", &case.xray_server(&keys, peer, origin.port))?, Duration::from_secs(122)),
+    };
+    let mut client = case.xray_client(&keys, front, tap.port, origin.port);
+    client["inbounds"] = json!([{"protocol": "socks", "listen": "127.0.0.1", "port": front,
+        "settings": {"udp": true, "ip": "127.0.0.1"}}]);
+    client["outbounds"][0]["mux"] = json!({"enabled": true, "concurrency": 8,
+        "xudpConcurrency": 8, "xudpProxyUDP443": "allow"});
+    let _client = launch_xray(xray, dir, "xray-client", &client, &[])?;
+    let socks = SocksUdp::associate(front)?;
+
+    let first = socks.origin_port(origin.port, 1)?;
+    let carriers = tap.accepted();
+    tap.drop_clients();
+    let stolen = socks.origin_port(origin.port, 2)?;
+    if tap.accepted() == carriers {
+        return Err("the client reused its carrier after the tap closed it".into());
+    }
+    if stolen != first {
+        return Err(format!("origin saw port {first}, then {stolen} after the client end of the carrier closed and the server end stayed open").into());
+    }
+    let carriers = tap.accepted();
+    tap.cut();
+    let resumed = socks.origin_port(origin.port, 3)?;
+    if tap.accepted() == carriers {
+        return Err("the client reused its carrier after the tap cut it".into());
+    }
+    if resumed != first {
+        return Err(format!("origin saw port {first}, then {resumed} after the carrier closed on both ends").into());
+    }
+    tap.cut();
+    thread::sleep(detached);
+    let expired = socks.origin_port(origin.port, 4)?;
+    if expired == first {
+        return Err(format!("origin still saw port {first} after the session waited {detached:?} without a carrier").into());
+    }
+    Ok(())
+}
+
+/// A TCP relay between the client and the server that drops carriers on demand.
+struct Tap {
+    port: u16,
+    links: Arc<Mutex<Vec<(TcpStream, TcpStream)>>>,
+    accepted: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Tap {
+    fn start(peer: u16) -> Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        listener.set_nonblocking(true)?;
+        let tap = Self {
+            port: listener.local_addr()?.port(),
+            links: Arc::default(),
+            accepted: Arc::default(),
+            stop: Arc::default(),
+        };
+        let (links, accepted, stop) = (tap.links.clone(), tap.accepted.clone(), tap.stop.clone());
+        thread::spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                let client = match listener.accept() {
+                    Ok((socket, _)) => socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(_) => return,
+                };
+                accepted.fetch_add(1, Ordering::AcqRel);
+                let Ok(server) = TcpStream::connect(("127.0.0.1", peer)) else { continue };
+                let (Ok(up_in), Ok(up_out), Ok(down_in), Ok(down_out), Ok(client_end), Ok(server_end)) =
+                    (client.try_clone(), server.try_clone(), server.try_clone(), client.try_clone(), client.try_clone(), server.try_clone())
+                else { continue };
+                links.lock().expect("tap links").push((client_end, server_end));
+                // A finished copy leaves the other end open, so a dropped client leaves a silent server end.
+                for (mut from, mut to) in [(up_in, up_out), (down_in, down_out)] {
+                    thread::spawn(move || { let _ = std::io::copy(&mut from, &mut to); });
+                }
+            }
+        });
+        Ok(tap)
+    }
+
+    fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::Acquire)
+    }
+
+    /// Closes the client end of every carrier. The server end stays open and receives nothing.
+    fn drop_clients(&self) {
+        for (client, _) in self.links.lock().expect("tap links").iter() {
+            let _ = client.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// Closes both ends of every carrier.
+    fn cut(&self) {
+        for (client, server) in self.links.lock().expect("tap links").drain(..) {
+            let _ = client.shutdown(Shutdown::Both);
+            let _ = server.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+impl Drop for Tap {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.cut();
+    }
+}
+
+/// A SOCKS5 UDP association whose datagrams all leave from one local socket.
+struct SocksUdp {
+    _control: TcpStream,
+    socket: UdpSocket,
+    relay: SocketAddr,
+}
+
+impl SocksUdp {
+    fn associate(front: u16) -> Result<Self> {
+        let mut control = tcp_connect(front)?;
+        control.write_all(&[5, 1, 0])?;
+        let mut method = [0; 2];
+        control.read_exact(&mut method)?;
+        if method != [5, 0] {
+            return Err(format!("SOCKS method reply {method:?}").into());
+        }
+        control.write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0])?;
+        let mut reply = [0; 10];
+        control.read_exact(&mut reply)?;
+        if reply[..4] != [5, 0, 0, 1] {
+            return Err(format!("SOCKS UDP ASSOCIATE reply {reply:?}").into());
+        }
+        let relay = SocketAddr::from(([reply[4], reply[5], reply[6], reply[7]], u16::from_be_bytes([reply[8], reply[9]])));
+        let socket = UdpSocket::bind(localhost(0))?;
+        socket.set_read_timeout(Some(Duration::from_millis(500)))?;
+        Ok(Self { _control: control, socket, relay })
+    }
+
+    /// Sends datagrams tagged with `round` to the origin until one comes back, and returns the
+    /// source port the origin saw. The first datagram after a carrier drop may be lost.
+    fn origin_port(&self, origin: u16, round: u8) -> Result<u16> {
+        let deadline = Instant::now() + TIMEOUT * 2;
+        let mut bytes = [0; 512];
+        for attempt in 0u8.. {
+            let mut packet = vec![0, 0, 0, 1, 127, 0, 0, 1];
+            packet.extend_from_slice(&origin.to_be_bytes());
+            packet.extend_from_slice(&[round, attempt]);
+            self.socket.send_to(&packet, self.relay)?;
+            let sent = Instant::now();
+            while sent.elapsed() < Duration::from_millis(500) {
+                match self.socket.recv(&mut bytes) {
+                    // A 10-byte SOCKS header, the port the origin saw, then our round and attempt.
+                    Ok(14) if bytes[12] == round => return Ok(u16::from_be_bytes([bytes[10], bytes[11]])),
+                    Ok(_) => {}
+                    Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("no UDP reply in round {round} after {} datagrams", attempt + 1).into());
+            }
+        }
+        unreachable!("the deadline ends the attempts")
+    }
 }
 
 fn rejection_configs(dir: &Path) -> Result<Vec<(String, Value)>> {
