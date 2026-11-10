@@ -1567,6 +1567,17 @@ fn vless_xray_reality_target() {
 fn reality_target(xray: &Path, dir: &Path, server: RealityServer, address: DecoyAddress, xver: u8) -> Result<()> {
     let case = Case::new("reality-target", Network::Raw, Security::Reality, Payload::Tcp);
     let keys = Keys::generate(dir, &case)?;
+    // Both servers probe the decoy with a TLS client that verifies its certificate and learn nothing
+    // from a decoy they do not trust. Go and Kerlico read their root certificates from SSL_CERT_FILE.
+    // The peers inherit it; this test runs alone.
+    struct Trusted;
+    impl Drop for Trusted {
+        fn drop(&mut self) {
+            std::env::remove_var("SSL_CERT_FILE");
+        }
+    }
+    std::env::set_var("SSL_CERT_FILE", &keys.cert);
+    let _trusted = Trusted;
     let decoy = Decoy::start(address, &keys)?;
     let origin = Echo::tcp(None)?;
     let port = available_port()?;
@@ -1673,6 +1684,28 @@ fn authenticated_flight(xray: &Path, dir: &Path, case: &Case, keys: &Keys, decoy
     eprintln!("decoy flight records {sent:?}; server flight records {mirrored:?}");
     if sent.len() < 3 || mirrored.get(..sent.len()) != Some(&sent[..]) {
         return Err(format!("server flight records {mirrored:?}, decoy sent {sent:?}").into());
+    }
+    // Behind the flight come records as long as the ones the decoy sends a real client after its
+    // Finished: its tickets. The decoy saw those in the server's own probes and in the prober's TLS
+    // session. The ECDSA signature makes the encrypted flight a few bytes longer or shorter from
+    // session to session, so only the ServerHello and the ChangeCipherSpec identify a flight.
+    let tickets = decoy
+        .recordings
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.lock().unwrap().clone())
+        .filter(|session| !session.input.windows(32).any(|window| window == random))
+        .map(|session| record_lengths(&session.output))
+        .filter(|lengths| lengths.len() > sent.len() && lengths[..2] == sent[..2])
+        .map(|lengths| lengths[sent.len()..].to_vec())
+        .collect::<Vec<_>>();
+    eprintln!("decoy ticket records {tickets:?}; records behind the server flight {:?}", &mirrored[sent.len()..mirrored.len().min(sent.len() + 6)]);
+    if tickets.is_empty() {
+        return Err("the decoy never completed a handshake with a prober, so there are no tickets to compare".into());
+    }
+    if !tickets.iter().any(|tail| mirrored[sent.len()..].starts_with(tail)) {
+        return Err(format!("records behind the server flight {:?} do not start with the decoy's ticket records {tickets:?}", &mirrored[sent.len()..]).into());
     }
     Ok(())
 }

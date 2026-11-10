@@ -45,3 +45,4 @@ Rule from user 2026-11-10: no compiling or testing on the local machine; all bui
 - [x] Unit F5: VLESS response header leaves with the first downlink bytes, as Xray's SetFlushNext (merged d631f25).
 - [x] User decisions 2026-11-11: REALITY key_share and the Unix-target exception aligned with Xray; TLS group choice stays more lenient than Go. REALITY camouflage (R2) stays undone: a safety check stopped it.
 - [x] Follow-up outside VLESS: intermittent mieru 02-rust-to-official UDP order failure was the test fixture; fixed and merged (539b8c3).
+- [x] User request 2026-11-10: REALITY camouflage (R2) done: ticket-length record, probed post-handshake records and CCS limit, target-failure handling as xtls/reality; independent review fixed the 17 KiB counter and the early target close.

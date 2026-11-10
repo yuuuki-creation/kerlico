@@ -24,7 +24,13 @@ use crate::reality::{
 
 #[path = "reality_target.rs"]
 mod target;
-pub use target::RealityTargetShape;
+pub use target::{RealityTargetFailure, RealityTargetShape};
+#[path = "reality_probe.rs"]
+mod probe;
+pub use probe::{
+    probe_post_handshake_lengths, probe_useless_record_limit, RealityAlpn, RealityProbeStream,
+    ALERT_WINDOW, POST_HANDSHAKE_WINDOW,
+};
 #[path = "reality_decoy.rs"]
 mod decoy;
 pub use decoy::RealityDecoyVerifier;
@@ -160,27 +166,63 @@ pub struct ServerHello {
     transcript: Transcript,
     suite: Suite,
     alpn: Option<Vec<u8>>,
+    sequence: u64,
 }
 
 impl ServerHello {
     pub fn application_keys(&self) -> (Traffic, Traffic) {
-        let hash = self.transcript.hash();
-        let master = master_secret(self.suite, &self.secret);
-        (
-            traffic_keys(
-                self.suite,
-                &traffic_secret(self.suite, &master, "c ap traffic", &hash),
-            ),
-            traffic_keys(
-                self.suite,
-                &traffic_secret(self.suite, &master, "s ap traffic", &hash),
-            ),
-        )
+        application_traffic(self.suite, &self.secret, &self.transcript)
+    }
+
+    /// The sequence number of the next record sealed with the server's application key.
+    /// The flight already used one when it ends with a record that stands in for the target's
+    /// NewSessionTicket.
+    pub fn server_sequence(&self) -> u64 {
+        self.sequence
     }
 
     pub fn alpn(&self) -> Option<&[u8]> {
         self.alpn.as_deref()
     }
+}
+
+fn application_traffic(suite: Suite, secret: &[u8], transcript: &Transcript) -> (Traffic, Traffic) {
+    let hash = transcript.hash();
+    let master = master_secret(suite, secret);
+    (
+        traffic_keys(suite, &traffic_secret(suite, &master, "c ap traffic", &hash)),
+        traffic_keys(suite, &traffic_secret(suite, &master, "s ap traffic", &hash)),
+    )
+}
+
+/// How many consecutive records that carry nothing a TLS 1.3 peer accepts, such as a
+/// ChangeCipherSpec while it waits for the client's Finished or an empty application record,
+/// the server tolerates before it ends the connection: `maxUselessRecords` in xtls/reality,
+/// which matches OpenSSL. REALITY lowers it to what the target was seen to tolerate.
+pub const DEFAULT_MAX_USELESS_RECORDS: usize = 32;
+
+/// Raised when more consecutive useless records arrive than the peer tolerates.
+#[derive(Debug)]
+pub struct TooManyUselessRecords;
+
+impl std::fmt::Display for TooManyUselessRecords {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("tls: too many ignored records")
+    }
+}
+
+impl std::error::Error for TooManyUselessRecords {}
+
+fn too_many_useless_records() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, TooManyUselessRecords)
+}
+
+/// Whether `error` says the peer sent more useless records than the server tolerates, which
+/// xtls/reality answers with an unexpected_message alert before it closes.
+pub fn is_too_many_useless_records(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<TooManyUselessRecords>())
 }
 
 pub struct AppReader<S> {
@@ -191,6 +233,8 @@ pub struct AppReader<S> {
     wire: Vec<u8>,
     direct: bool,
     closed: bool,
+    useless: usize,
+    max_useless: usize,
 }
 
 pub struct AppWriter<S> {
@@ -365,6 +409,14 @@ fn server_flight_impl<P: AsRef<str>>(
     } else {
         flight.extend(seal_record(&traffic, 0, 22, &body));
     }
+    // xtls/reality writes a record of the target's NewSessionTicket length right behind the
+    // Finished. It is sealed with the server's application key, as that ticket would be.
+    let mut sequence = 0;
+    if let Some(length) = target.and_then(RealityTargetShape::ticket_length) {
+        let (_, server_application) = application_traffic(suite, &handshake_secret, &transcript);
+        flight.extend(padded_empty_record(&server_application, sequence, length, 23)?);
+        sequence += 1;
+    }
     Ok(ServerHello {
         flight,
         handshake: traffic_keys(suite, &client_hs),
@@ -373,15 +425,73 @@ fn server_flight_impl<P: AsRef<str>>(
         transcript,
         suite,
         alpn: alpn.map(<[u8]>::to_vec),
+        sequence,
     })
 }
+
+/// A record of exactly `length` bytes that carries empty application data: the inner type,
+/// then zero padding. xtls/reality sends these in place of the target's tickets. `least` is the
+/// shortest total length it accepts.
+fn padded_empty_record(
+    traffic: &Traffic,
+    seq: u64,
+    length: usize,
+    least: usize,
+) -> io::Result<Vec<u8>> {
+    // Record header 5, inner type 1, padding, tag 16.
+    let padding = length
+        .checked_sub(22)
+        .filter(|_| length >= least)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "REALITY target record is too small to imitate",
+            )
+        })?;
+    Ok(seal_record_padded(traffic, seq, 23, &[], padding))
+}
+
+/// The records REALITY writes right after the client's Finished, one per length the target
+/// was seen to send there, sealed from sequence `first`. Returns them and the next sequence.
+/// A length too small for a record is skipped.
+pub fn post_handshake_records(traffic: &Traffic, first: u64, lengths: &[usize]) -> (Vec<u8>, u64) {
+    let mut bytes = Vec::new();
+    let mut sequence = first;
+    for &length in lengths {
+        if let Ok(record) = padded_empty_record(traffic, sequence, length, 22) {
+            bytes.extend(record);
+            sequence += 1;
+        }
+    }
+    (bytes, sequence)
+}
+
+/// A fatal alert sealed with `traffic`, as xtls/reality's `sendAlert` writes it.
+pub fn alert_record(traffic: &Traffic, seq: u64, description: u8) -> Vec<u8> {
+    seal_record(traffic, seq, 21, &[2, description])
+}
+
+/// The unexpected_message alert description.
+pub const ALERT_UNEXPECTED_MESSAGE: u8 = 10;
 
 pub fn read_client_finished<R: Read>(
     reader: &mut R,
     handshake: &Traffic,
     expect: &[u8],
 ) -> std::io::Result<Vec<u8>> {
+    read_client_finished_limited(reader, handshake, expect, DEFAULT_MAX_USELESS_RECORDS)
+}
+
+/// Reads the client's Finished. Up to `max_useless` ChangeCipherSpec records may come before
+/// it; one more fails with [`TooManyUselessRecords`].
+pub fn read_client_finished_limited<R: Read>(
+    reader: &mut R,
+    handshake: &Traffic,
+    expect: &[u8],
+    max_useless: usize,
+) -> std::io::Result<Vec<u8>> {
     let mut records = HandshakeRecords::new(reader, handshake);
+    records.max_ccs = max_useless;
     let finished = records.next(0x14)?;
     if !equal_finished(expect, &finished[4..]) || !records.pending.is_empty() {
         return Err(invalid_record());
@@ -672,17 +782,21 @@ struct HandshakeRecords<'a, R> {
     traffic: &'a Traffic,
     seq: u64,
     pending: Vec<u8>,
-    saw_ccs: bool,
+    /// ChangeCipherSpec records seen so far, and how many are tolerated.
+    ccs: usize,
+    max_ccs: usize,
 }
 
 impl<'a, R: Read> HandshakeRecords<'a, R> {
+    /// Tolerates the one compatibility ChangeCipherSpec a TLS 1.3 peer sends.
     fn new(reader: &'a mut R, traffic: &'a Traffic) -> Self {
         Self {
             reader,
             traffic,
             seq: 0,
             pending: Vec::new(),
-            saw_ccs: false,
+            ccs: 0,
+            max_ccs: 1,
         }
     }
 
@@ -705,8 +819,11 @@ impl<'a, R: Read> HandshakeRecords<'a, R> {
                 }
             }
             let record = read_outer(self.reader)?;
-            if record == [20, 3, 3, 0, 1, 1] && !self.saw_ccs {
-                self.saw_ccs = true;
+            if record == [20, 3, 3, 0, 1, 1] {
+                self.ccs += 1;
+                if self.ccs > self.max_ccs {
+                    return Err(too_many_useless_records());
+                }
                 continue;
             }
             let plain = open_record(self.traffic, self.seq, &record).ok_or_else(invalid_record)?;
@@ -741,7 +858,17 @@ impl<S: Read> Read for AppReader<S> {
             self.seq += 1;
             let (kind, body) = split_inner(&plain).ok_or_else(invalid_record)?;
             match (kind, body) {
-                (23, _) => self.pending.extend_from_slice(body),
+                (23, []) => {
+                    // An empty record advances nothing. xtls/reality counts these in a row.
+                    self.useless += 1;
+                    if self.useless > self.max_useless {
+                        return Err(too_many_useless_records());
+                    }
+                }
+                (23, _) => {
+                    self.useless = 0;
+                    self.pending.extend_from_slice(body);
+                }
                 (21, [_, 0]) => self.closed = true,
                 (22, [4, ..]) if body.len() >= 4 && u24(&body[1..4]) + 4 == body.len() => {}
                 _ => return Err(invalid_record()),
@@ -782,6 +909,12 @@ impl<S: Write> Write for AppWriter<S> {
 impl<S> AppReader<S> {
     pub fn inner_mut(&mut self) -> &mut S {
         &mut self.inner
+    }
+
+    /// Ends the stream once more than `max` empty application records arrive in a row. A reader
+    /// has no limit until this is called.
+    pub fn set_max_useless(&mut self, max: usize) {
+        self.max_useless = max;
     }
 
     pub fn start_direct(&mut self) -> io::Result<()> {
@@ -828,14 +961,22 @@ pub fn reader<S>(inner: S, traffic: Traffic) -> AppReader<S> {
         wire: Vec::new(),
         direct: false,
         closed: false,
+        useless: 0,
+        max_useless: usize::MAX,
     }
 }
 
 pub fn writer<S>(inner: S, traffic: Traffic) -> AppWriter<S> {
+    writer_at(inner, traffic, 0)
+}
+
+/// A writer whose first record uses sequence number `seq`, for a key that already sealed
+/// `seq` records.
+pub fn writer_at<S>(inner: S, traffic: Traffic, seq: u64) -> AppWriter<S> {
     AppWriter {
         inner,
         traffic,
-        seq: 0,
+        seq,
         wire: Vec::new(),
         sent: 0,
         accepted: 0,
@@ -1781,5 +1922,99 @@ mod tests {
         decoded.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"ping");
         let _ = write_key;
+    }
+
+    fn finished_after_flight() -> (ServerHello, Vec<u8>) {
+        let (private, public) = reality_pair();
+        let short_id = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let (hello, secret, kem) =
+            reality_offer_hybrid(&public, &short_id, "www.example.com").unwrap();
+        let accepted = server_flight(&hello, &private, &short_id).unwrap();
+        let (_, _, finished) =
+            client_keys(&hello, &accepted.flight, &secret, Some(&kem), &public).unwrap();
+        (accepted, finished)
+    }
+
+    #[test]
+    fn client_finished_tolerates_change_cipher_specs_up_to_the_limit() {
+        let (accepted, finished) = finished_after_flight();
+        let ccs = [20u8, 3, 3, 0, 1, 1];
+        for (count, limit, within) in [(0, 1, true), (1, 1, true), (2, 1, false), (3, 3, true), (4, 3, false)] {
+            let mut wire = ccs.repeat(count);
+            wire.extend_from_slice(&finished);
+            let result = read_client_finished_limited(
+                &mut std::io::Cursor::new(wire),
+                &accepted.handshake,
+                &accepted.expect,
+                limit,
+            );
+            match (within, result) {
+                (true, Ok(_)) => {}
+                (false, Err(error)) => assert!(is_too_many_useless_records(&error), "{error}"),
+                (within, result) => panic!(
+                    "{count} ChangeCipherSpec records with limit {limit}: expected within {within}, got {:?}",
+                    result.map(drop)
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn empty_records_in_a_row_end_the_reader_and_data_resets_the_count() {
+        let (accepted, _) = finished_after_flight();
+        let (_, writing) = accepted.application_keys();
+        let empties = |first: u64, count: u64| -> Vec<u8> {
+            (first..first + count)
+                .flat_map(|seq| seal_record(&writing, seq, 23, b""))
+                .collect()
+        };
+        let mut wire = empties(0, 3);
+        wire.extend(seal_record(&writing, 3, 23, b"hi"));
+        wire.extend(empties(4, 3));
+        let (_, reading) = accepted.application_keys();
+        let mut app = reader(std::io::Cursor::new(wire), reading);
+        app.set_max_useless(3);
+        let mut buf = Vec::new();
+        app.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"hi", "data between the empty records resets the count");
+        let (_, reading) = accepted.application_keys();
+        let mut app = reader(std::io::Cursor::new(empties(0, 4)), reading);
+        app.set_max_useless(3);
+        let error = app.read(&mut [0; 8]).unwrap_err();
+        assert!(is_too_many_useless_records(&error), "{error}");
+    }
+
+    #[test]
+    fn post_handshake_records_match_the_requested_lengths_and_continue_the_sequence() {
+        let (accepted, _) = finished_after_flight();
+        let (_, writing) = accepted.application_keys();
+        let (mut bytes, next) = post_handshake_records(&writing, 1, &[251, 300, 10]);
+        assert_eq!(next, 3, "a length too small for a record is skipped");
+        let mut lengths = Vec::new();
+        let mut rest = bytes.as_slice();
+        while !rest.is_empty() {
+            let length = 5 + u16::from_be_bytes([rest[3], rest[4]]) as usize;
+            lengths.push(length);
+            rest = &rest[length..];
+        }
+        assert_eq!(lengths, [251, 300]);
+        bytes.extend(seal_record(&writing, next, 23, b"ok"));
+        let (_, reading) = accepted.application_keys();
+        let mut app = reader(std::io::Cursor::new(bytes), reading);
+        app.seq = 1;
+        let mut buf = [0u8; 2];
+        app.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"ok", "the empty records carry no data and the next record follows them");
+    }
+
+    #[test]
+    fn the_alert_is_a_fatal_record_under_the_application_key() {
+        let (accepted, _) = finished_after_flight();
+        let (_, writing) = accepted.application_keys();
+        let record = alert_record(&writing, 4, ALERT_UNEXPECTED_MESSAGE);
+        assert_eq!(record.len(), 5 + 2 + 1 + 16);
+        let (_, reading) = accepted.application_keys();
+        let plain = open_record(&reading, 4, &record).unwrap();
+        assert_eq!(split_inner(&plain), Some((21, &[2, ALERT_UNEXPECTED_MESSAGE][..])));
     }
 }

@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::num::NonZeroU64;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use kerlico_shared::{
     Transport, UserEmail,
 };
 use kerlico_vless::{
-    decode_reality_key, decode_short_id, decode_udp, encode_response, encode_udp, grpc_path, host_matches, normalize_path, parse_id, read_client_finished, reality_reader, reality_writer, server_key, AppReader, AppWriter, EncReader, EncWriter, RealityDuplex,
+    decode_reality_key, decode_short_id, decode_udp, encode_response, encode_udp, grpc_path, host_matches, normalize_path, parse_id, reality_reader, reality_writer_at, server_key, AppReader, AppWriter, EncReader, EncWriter, RealityDuplex,
     Command, Request, Response,
     GrpcConnection, GrpcStream, HttpIo, Session, XhttpBodyWriter, ChunkPair,
     decode_mux, MuxFrame, MuxUplink, DATA, END, KEEP, KEEPALIVE, NEW, HTTP2_PREFACE,
@@ -29,15 +29,43 @@ struct RealityConfig {
     target: Option<RealityTarget>,
 }
 
+/// What an authenticated connection gets once the target has been asked, as in xtls/reality.
+enum Flight {
+    /// The flight to send, and the connection to the target that is held until the handshake ends.
+    Accepted(Box<kerlico_vless::ServerHello>, Option<kerlico_shared::runtime::NetworkConnection>),
+    /// The target's answer was not a usable ServerHello. The bytes read so far go to the client,
+    /// then both directions are relayed to the target.
+    Forward { target: kerlico_shared::runtime::NetworkConnection, captured: Vec<u8> },
+    /// The connection ends: the target did not answer, or the answer could not be imitated.
+    Close,
+}
+
 impl RealityConfig {
-    /// Xray builds every authenticated flight from the target's answer to the
-    /// same ClientHello. Without that answer the flight stays synthetic.
-    fn flight(&self, record: &[u8], head: &[u8]) -> Option<kerlico_vless::ServerHello> {
-        let shape = self.target.as_ref().and_then(|target| target.shape(record, head));
-        shape
-            .and_then(|shape| kerlico_vless::server_flight_with_target(record, &self.private, &self.policy, &self.alpn, self.proof.as_ref(), &shape).ok())
-            .or_else(|| kerlico_vless::server_flight_with_auth(record, &self.private, &self.policy, &self.alpn, self.proof.as_ref()).ok())
+    /// Xray builds every authenticated flight from the target's answer to the same ClientHello,
+    /// and ends the connection when there is no usable answer. Only a server without a target, or
+    /// without a runtime to dial it, has nothing to imitate and sends a synthetic flight.
+    fn flight(&self, record: &[u8], head: &[u8]) -> Flight {
+        let synthetic = || match kerlico_vless::server_flight_with_auth(record, &self.private, &self.policy, &self.alpn, self.proof.as_ref()) {
+            Ok(accepted) => Flight::Accepted(Box::new(accepted), None),
+            Err(_) => Flight::Close,
+        };
+        let Some(target) = self.target.as_ref().filter(|target| target.network.is_some()) else { return synthetic() };
+        match target.probe(record, head, Instant::now() + REALITY_PROBE_TIMEOUT) {
+            Answer::Shape(shape, held) => match kerlico_vless::server_flight_with_target(record, &self.private, &self.policy, &self.alpn, self.proof.as_ref(), &shape) {
+                Ok(accepted) => Flight::Accepted(Box::new(accepted), Some(held)),
+                Err(_) => Flight::Close,
+            },
+            Answer::Forward { target, captured } => Flight::Forward { target, captured },
+            Answer::Close => Flight::Close,
+        }
     }
+}
+
+/// The target's answer to an authenticated client's ClientHello.
+enum Answer {
+    Shape(kerlico_vless::RealityTargetShape, kerlico_shared::runtime::NetworkConnection),
+    Forward { target: kerlico_shared::runtime::NetworkConnection, captured: Vec<u8> },
+    Close,
 }
 
 #[derive(Clone)]
@@ -47,6 +75,89 @@ struct RealityTarget {
     upload: kerlico_vless::RealityRateLimit,
     download: kerlico_vless::RealityRateLimit,
     network: Option<Arc<dyn kerlico_shared::runtime::Network>>,
+    detector: Arc<Detector>,
+}
+
+/// What the target was seen to do after a client's Finished, per server name and ALPN class: the
+/// records it sends and how many ChangeCipherSpec records it takes. xtls/reality keeps these in
+/// `GlobalPostHandshakeRecordsLens` and `GlobalMaxCSSMsgCount` and starts the probes with its listener.
+#[derive(Default)]
+struct Detector {
+    slots: Mutex<HashMap<(String, kerlico_vless::RealityAlpn), Arc<DetectSlot>>>,
+}
+
+#[derive(Default)]
+struct DetectSlot {
+    state: Mutex<Detected>,
+    changed: Condvar,
+}
+
+#[derive(Clone, Default)]
+struct Detected {
+    /// `None` until the probe of the records behind the client's Finished is over.
+    lengths: Option<Vec<usize>>,
+    /// `None` while the ChangeCipherSpec probe has no answer.
+    max_useless: Option<usize>,
+}
+
+/// Bounds the connect, every read and the post-handshake window of one probe.
+const REALITY_DETECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What a connection waits for a probe that has not finished.
+const REALITY_DETECT_WAIT: Duration = Duration::from_secs(35);
+
+/// How many server names get their own probes. xtls/reality probes the configured `serverNames`
+/// only; a server without any would otherwise probe every name a client sends.
+const REALITY_DETECT_SLOTS: usize = 192;
+
+impl Detector {
+    /// The slot for `name` and `alpn`, and whether this call created it. Past the limit a name
+    /// gets an empty answer and no probes.
+    fn slot(&self, name: &str, alpn: kerlico_vless::RealityAlpn) -> (Arc<DetectSlot>, bool) {
+        let mut slots = self.slots.lock().expect("REALITY detection");
+        let key = (name.to_ascii_lowercase(), alpn);
+        if slots.len() >= REALITY_DETECT_SLOTS && !slots.contains_key(&key) {
+            let unprobed = DetectSlot::default();
+            unprobed.state.lock().expect("REALITY detection").lengths = Some(Vec::new());
+            return (Arc::new(unprobed), false);
+        }
+        match slots.entry(key) {
+            std::collections::hash_map::Entry::Occupied(slot) => (slot.get().clone(), false),
+            std::collections::hash_map::Entry::Vacant(slot) => (slot.insert(Arc::default()).clone(), true),
+        }
+    }
+}
+
+/// The roots the probes check the target's certificate against, loaded once. They come from the
+/// platform, or from `SSL_CERT_FILE` and `SSL_CERT_DIR` like Go's.
+fn system_roots() -> Option<&'static kerlico_vless::RealityDecoyVerifier> {
+    static ROOTS: OnceLock<Option<kerlico_vless::RealityDecoyVerifier>> = OnceLock::new();
+    ROOTS.get_or_init(|| kerlico_vless::RealityDecoyVerifier::system_roots().ok()).as_ref()
+}
+
+impl DetectSlot {
+    fn peek(&self) -> Detected {
+        self.state.lock().expect("REALITY detection").clone()
+    }
+
+    /// Waits for the probe of the records, as Xray's first handshakes do, for at most `limit`.
+    fn wait(&self, limit: Duration) -> Detected {
+        let end = Instant::now() + limit;
+        let mut state = self.state.lock().expect("REALITY detection");
+        while state.lengths.is_none() {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            state = self.changed.wait_timeout(state, left).expect("REALITY detection").0;
+        }
+        state.clone()
+    }
+
+    fn record(&self, change: impl FnOnce(&mut Detected)) {
+        change(&mut self.state.lock().expect("REALITY detection"));
+        self.changed.notify_all();
+    }
 }
 
 #[derive(Clone)]
@@ -80,7 +191,73 @@ impl RealityTarget {
         if matches!(origin, RealityOrigin::Unix(_)) && network.is_none() {
             return Err(OpenError::Settings);
         }
-        Ok(Some(Self { origin, xver, upload: limit("limitFallbackUpload")?, download: limit("limitFallbackDownload")?, network }))
+        Ok(Some(Self { origin, xver, upload: limit("limitFallbackUpload")?, download: limit("limitFallbackDownload")?, network, detector: Arc::default() }))
+    }
+
+    /// Starts the probes xtls/reality starts with its listener, one set for every server name and
+    /// ALPN class. Nothing is probed without a runtime to dial the target.
+    fn detect(&self, names: &[String]) {
+        if self.network.is_some() {
+            for name in names {
+                for alpn in kerlico_vless::RealityAlpn::ALL {
+                    self.detect_slot(name, alpn);
+                }
+            }
+        }
+    }
+
+    /// What was learned for `name` and `alpn`. With `wait`, a probe still running is awaited.
+    /// A name that no probe covers yet gets its probes now.
+    fn detected(&self, name: &str, alpn: kerlico_vless::RealityAlpn, wait: bool) -> Detected {
+        if self.network.is_none() {
+            return Detected::default();
+        }
+        let slot = self.detect_slot(name, alpn);
+        if wait { slot.wait(REALITY_DETECT_WAIT) } else { slot.peek() }
+    }
+
+    fn detect_slot(&self, name: &str, alpn: kerlico_vless::RealityAlpn) -> Arc<DetectSlot> {
+        let (slot, created) = self.detector.slot(name, alpn);
+        if created {
+            // Two connections, like xtls/reality: the first reads what follows the client's
+            // Finished, the second floods ChangeCipherSpec records and may be closed by the target.
+            for records in [true, false] {
+                let (target, name, own) = (self.clone(), name.to_owned(), slot.clone());
+                thread::spawn(move || {
+                    // The target's certificate has to verify against the system roots, as it does for
+                    // xtls/reality's TLS client; a probe that fails leaves no records.
+                    let roots = system_roots().ok_or_else(|| io::Error::from(io::ErrorKind::NotFound));
+                    let stream = roots.and_then(|roots| target.probe_stream().map(|stream| (roots, stream)));
+                    if records {
+                        let lengths = stream.and_then(|(roots, mut stream)| kerlico_vless::probe_post_handshake_lengths(&mut stream, &name, alpn, kerlico_vless::POST_HANDSHAKE_WINDOW, Some(roots))).unwrap_or_default();
+                        own.record(|detected| detected.lengths = Some(lengths));
+                    } else if let Ok(limit) = stream.and_then(|(roots, mut stream)| kerlico_vless::probe_useless_record_limit(&mut stream, &name, alpn, kerlico_vless::ALERT_WINDOW, Some(roots))) {
+                        own.record(|detected| detected.max_useless = Some(limit));
+                    }
+                });
+            }
+        }
+        slot
+    }
+
+    /// A connection of its own to the target, with the PROXY header `xver` asks for. xtls/reality
+    /// writes it from the probe's own addresses.
+    fn probe_stream(&self) -> io::Result<Deadline> {
+        let mut probe = Deadline { target: self.connect(REALITY_PROBE_TIMEOUT)?, deadline: Instant::now() + REALITY_DETECT_TIMEOUT };
+        if self.xver != 0 {
+            let header = match &probe.target {
+                kerlico_shared::runtime::NetworkConnection::Tcp(socket) => match (socket.local_addr(), socket.peer_addr()) {
+                    (Ok(local), Ok(remote)) => {
+                        let (source, destination) = proxyproto_pair(local, Some(remote));
+                        proxy_header(self.xver, source, destination)
+                    }
+                    _ => proxy_header(self.xver, SocketAddr::from(([0, 0, 0, 0], 0)), None),
+                },
+                _ => proxy_header(self.xver, SocketAddr::from(([0, 0, 0, 0], 0)), None),
+            };
+            probe.write_all(&header)?;
+        }
+        Ok(probe)
     }
 
     /// The bytes the target receives first: the PROXY header `xver` asks for, then the client's own bytes.
@@ -108,22 +285,33 @@ impl RealityTarget {
         }
     }
 
-    fn shape(&self, record: &[u8], head: &[u8]) -> Option<kerlico_vless::RealityTargetShape> {
-        self.probe(record, head, Instant::now() + REALITY_PROBE_TIMEOUT)
+    /// The connect and every read and write share one deadline, so a target that answers
+    /// slowly cannot hold the handshake past it. Like xtls/reality, a target that cannot be
+    /// reached, or goes quiet, ends the connection; one whose first bytes are no ServerHello
+    /// has them relayed.
+    fn probe(&self, record: &[u8], head: &[u8], deadline: Instant) -> Answer {
+        let Ok(target) = self.connect(deadline.saturating_duration_since(Instant::now())) else { return Answer::Close };
+        let mut target = Deadline { target, deadline };
+        if target.write_all(head).is_err() {
+            return Answer::Close;
+        }
+        let mut captured = Vec::new();
+        match kerlico_vless::RealityTargetShape::read_from(&mut target, record, &mut captured) {
+            Ok(shape) => Answer::Shape(shape, target.target),
+            Err(kerlico_vless::RealityTargetFailure::Forward) => Answer::Forward { target: target.target, captured },
+            Err(kerlico_vless::RealityTargetFailure::Close) => Answer::Close,
+        }
     }
 
-    /// The connect and every read and write share one deadline, so a target that answers
-    /// slowly cannot hold the handshake past it.
-    fn probe(&self, record: &[u8], head: &[u8], deadline: Instant) -> Option<kerlico_vless::RealityTargetShape> {
-        let target = self.connect(deadline.saturating_duration_since(Instant::now())).ok()?;
-        let mut target = Deadline { target, deadline };
-        target.write_all(head).ok()?;
-        kerlico_vless::RealityTargetShape::read_from(&mut target, record, &mut Vec::new()).ok()
+    /// Applies `limitFallbackUpload` to what the prober sends and `limitFallbackDownload` to what the target returns.
+    fn limit(&self, read: Link, write: Link) -> (Link, Link) {
+        let read = if self.upload.is_limited() { Link::LimitedRead(Box::new(kerlico_vless::RealityRateLimitedRead::new(read, self.upload))) } else { read };
+        let write = if self.download.is_limited() { Link::LimitedWrite(Box::new(kerlico_vless::RealityRateLimitedWrite::new(write, self.download))) } else { write };
+        (read, write)
     }
 
     fn fall_back(&self, read: Link, write: Link, peer: SocketAddr, head: Vec<u8>) -> Option<Ready> {
-        let read = if self.upload.is_limited() { Link::LimitedRead(Box::new(kerlico_vless::RealityRateLimitedRead::new(read, self.upload))) } else { read };
-        let write = if self.download.is_limited() { Link::LimitedWrite(Box::new(kerlico_vless::RealityRateLimitedWrite::new(write, self.download))) } else { write };
+        let (read, write) = self.limit(read, write);
         match &self.origin {
             RealityOrigin::Tcp { host, port } => Some(Ready {
                 email: UserEmail::parse("fallback").ok()?,
@@ -173,6 +361,17 @@ impl Write for Deadline {
 
     fn flush(&mut self) -> io::Result<()> {
         self.target.flush()
+    }
+}
+
+impl kerlico_vless::RealityProbeStream for Deadline {
+    fn read_within(&mut self, buf: &mut [u8], wait: Duration) -> io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now()).min(wait);
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.target.set_timeout(left)?;
+        self.target.read(buf)
     }
 }
 
@@ -284,13 +483,43 @@ fn accept_reality(mut read: Link, mut write: Link, config: &RealityConfig, fallb
         }.map(Box::new));
     };
     let head = config.target.as_ref().map(|target| target.head(peer, local, &wire)).unwrap_or_default();
-    let Some(accepted) = config.flight(&record, &head) else { return Err(None) };
-    if write.write_all(&accepted.flight).is_err() || read_client_finished(&mut read, &accepted.handshake, &accepted.expect).is_err() {
+    let class = kerlico_vless::RealityAlpn::of_first_offer(&alpn);
+    // Xray keeps its connection to the target open until the handshake is over.
+    let (accepted, _held) = match config.flight(&record, &head) {
+        Flight::Accepted(accepted, held) => (accepted, held),
+        Flight::Forward { target: connection, captured } => {
+            if let (Some(target), Ok(())) = (&config.target, write.write_all(&captured)) {
+                let (read, write) = target.limit(read, write);
+                relay(connection, read, write, &[], TCP_IDLE);
+            }
+            return Err(None);
+        }
+        Flight::Close => return Err(None),
+    };
+    let (client_app, server_app) = accepted.application_keys();
+    let mut sequence = accepted.server_sequence();
+    // Until the target's probe has an answer, a ChangeCipherSpec flood meets Xray's own limit.
+    let tolerated = config.target.as_ref().and_then(|target| target.detected(&name, class, false).max_useless);
+    if write.write_all(&accepted.flight).is_err() {
         return Err(None);
     }
+    if let Err(error) = kerlico_vless::read_client_finished_limited(&mut read, &accepted.handshake, &accepted.expect, tolerated.unwrap_or(kerlico_vless::DEFAULT_MAX_USELESS_RECORDS)) {
+        if kerlico_vless::is_too_many_useless_records(&error) {
+            let _ = write.write_all(&kerlico_vless::alert_record(&server_app, sequence, kerlico_vless::ALERT_UNEXPECTED_MESSAGE));
+        }
+        return Err(None);
+    }
+    // Xray answers a finished handshake with records as long as the ones the target sends there.
+    let detected = config.target.as_ref().map(|target| target.detected(&name, class, true)).unwrap_or_default();
+    let (records, next) = kerlico_vless::post_handshake_records(&server_app, sequence, detected.lengths.as_deref().unwrap_or_default());
+    if write.write_all(&records).is_err() {
+        return Err(None);
+    }
+    sequence = next;
     let alpn = String::from_utf8_lossy(accepted.alpn().unwrap_or_default()).into_owned();
-    let (client_app, server_app) = accepted.application_keys();
-    Ok(RealityApp { read: reality_reader(Box::new(read), client_app), write: reality_writer(Box::new(write), server_app), name, alpn })
+    let mut reader = reality_reader(Box::new(read), client_app);
+    reader.set_max_useless(detected.max_useless.unwrap_or(kerlico_vless::DEFAULT_MAX_USELESS_RECORDS));
+    Ok(RealityApp { read: reader, write: reality_writer_at(Box::new(write), server_app, sequence), name, alpn })
 }
 
 struct Recorded<'a, R> {
@@ -328,7 +557,11 @@ fn reality_config(settings: &Settings) -> Result<RealityConfig, OpenError> {
     };
     let mut names = alpn(settings);
     if names.is_empty() { names = vec!["h2".into(), "http/1.1".into()]; }
-    Ok(RealityConfig { private, policy: kerlico_vless::RealityPolicy { server_names, short_ids, min_client_ver: version("minClientVer")?, max_client_ver: version("maxClientVer")?, max_time_diff }, alpn: names, proof, target: RealityTarget::parse(settings)? })
+    let (min_client_ver, max_client_ver) = (version("minClientVer")?, version("maxClientVer")?);
+    let target = RealityTarget::parse(settings)?;
+    // Xray starts probing its target with the listener, so the first clients do not wait for it.
+    if let Some(target) = &target { target.detect(&server_names); }
+    Ok(RealityConfig { private, policy: kerlico_vless::RealityPolicy { server_names, short_ids, min_client_ver, max_client_ver, max_time_diff }, alpn: names, proof, target })
 }
 
 type Decryption = (Vec<kerlico_vless::NfsKey>, u8, u64, u64, kerlico_vless::Pad);
@@ -3137,6 +3370,7 @@ fn bind_tcp(addr: SocketAddr, settings: &Settings) -> std::io::Result<TcpListene
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kerlico_vless::reality_writer;
     use kerlico_shared::ListenAddr;
     use std::fs;
     use kerlico_vless::{decode_mux, decode_udp, encode_request, encode_udp, Addr, Command, Request, Vision, NEW};
@@ -5238,7 +5472,8 @@ mod tests {
             let mut hello = [0u8; 128];
             let _ = socket.read(&mut hello);
             let started = Instant::now();
-            if socket.write_all(&[22, 3, 3, 0x40, 0]).is_err() {
+            // A ServerHello record header and its first byte, then one byte at a time.
+            if socket.write_all(&[22, 3, 3, 0x40, 0, 2]).is_err() {
                 return;
             }
             while started.elapsed() < Duration::from_secs(4) && socket.write_all(&[0]).is_ok() {
@@ -5251,10 +5486,11 @@ mod tests {
             upload: Default::default(),
             download: Default::default(),
             network: Some(Arc::new(Loopback)),
+            detector: Default::default(),
         };
         let record = [0u8; 128];
         let started = Instant::now();
-        assert!(target.probe(&record, &record, started + Duration::from_secs(1)).is_none(), "a target that never finishes its flight gives no shape");
+        assert!(matches!(target.probe(&record, &record, started + Duration::from_secs(1)), Answer::Close), "a target that never finishes its flight ends the connection");
         let elapsed = started.elapsed();
         assert!(elapsed < Duration::from_millis(1600), "a target answering one byte at a time held the probe for {elapsed:?}");
     }
