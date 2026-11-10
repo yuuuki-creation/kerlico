@@ -34,6 +34,15 @@ const XRAY_VERSION: &str = "26.10.31";
 const XRAY_BUILD: &str = "a4a3dff";
 const KERLICO_CHILD: &str = "KERLICO_VLESS_XRAY_PEER_CONFIG";
 
+/// The matrix and the paced REALITY target checks run one at a time. Run together,
+/// the cleartext HTTPUpgrade early-data row loses bytes against the pinned Xray
+/// although it passes alone, and the pacing bounds would measure the extra load.
+static PEER_RUNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn exclusive_peer_run() -> std::sync::MutexGuard<'static, ()> {
+    PEER_RUNS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[derive(Clone, Copy)]
 enum Direction {
     XrayControl,
@@ -58,6 +67,7 @@ fn vless_xray_matrix() {
         serve_kerlico(Path::new(&config)).expect("Kerlico peer");
         return;
     }
+    let _exclusive = exclusive_peer_run();
     let root = run_dir("matrix").expect("matrix directory");
     let xray = xray_binary(&root).expect("pinned Xray peer");
     let filter = std::env::var("VLESS_CASE").unwrap_or_default();
@@ -627,6 +637,7 @@ enum DecoyAddress {
 #[test]
 #[ignore = "requires XRAY pointing to Xray 26.10.31 a4a3dff"]
 fn vless_xray_reality_target() {
+    let _exclusive = exclusive_peer_run();
     let root = run_dir("reality-target").expect("reality target directory");
     let xray = xray_binary(&root).expect("pinned Xray peer");
     let filter = std::env::var("VLESS_CASE").unwrap_or_default();
