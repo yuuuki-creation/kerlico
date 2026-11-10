@@ -123,6 +123,35 @@ pub fn decode_response(input: &[u8]) -> Result<(Response, usize), HeaderError> {
     Ok((Response { flow, seed }, 2 + addon_len))
 }
 
+/// Xray's `buf.Size`. Xray reads each UDP datagram into one buffer this large, and its Mux
+/// reader ends the whole Mux connection on a packet frame longer than one buffer.
+const XRAY_BUFFER: usize = 8192;
+
+/// How a datagram rides the VLESS wire. Xray skips a datagram larger than its framing allows
+/// without an error, and the flow goes on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UdpFraming {
+    /// The UDP command's two-byte length. `MultiLengthPacketWriter` skips `length+2 > buf.Size`.
+    Plain,
+    /// The only session on a client's XUDP carrier, `v1.mux.cool:666`. `xudp.PacketWriter`
+    /// skips `length+666 > buf.Size`.
+    Xudp,
+    /// Every other Mux packet frame. `mux.Writer` has no check because each datagram it writes
+    /// came out of one buffer.
+    Mux,
+}
+
+impl UdpFraming {
+    pub const fn carries(self, datagram: &[u8]) -> bool {
+        datagram.len()
+            <= match self {
+                Self::Plain => XRAY_BUFFER - 2,
+                Self::Xudp => XRAY_BUFFER - 666,
+                Self::Mux => XRAY_BUFFER,
+            }
+    }
+}
+
 pub fn encode_udp(payload: &[u8]) -> Result<Vec<u8>, HeaderError> {
     if payload.len() > u16::MAX as usize {
         return Err(HeaderError::Bad);

@@ -2210,8 +2210,8 @@ impl MuxLane {
         if self.ended() {
             return Err(std::io::ErrorKind::BrokenPipe.into());
         }
-        if self.datagram && buf.len() > u16::MAX as usize {
-            return Err(std::io::Error::other("mux datagram too large"));
+        if self.datagram && !kerlico_vless::UdpFraming::Mux.carries(buf) {
+            return Ok(buf.len());
         }
         let buf = &buf[..buf.len().min(u16::MAX as usize)];
         let Some((id, writer)) = self.carrier() else { return Ok(buf.len()) };
@@ -2544,7 +2544,12 @@ fn open_reverse_portal(portal: Arc<Portal>, host: &str, port: u16, tcp: bool, pa
     });
     sessions.insert(id, Arc::downgrade(&lane));
     drop(sessions);
-    let frame = kerlico_vless::session_frame(id, tcp, port, host, payload);
+    let mut frame = kerlico_vless::session_frame(id, tcp, port, host, payload);
+    // A first datagram Xray would skip leaves NEW without data, as Xray's writer sends it.
+    if !tcp && !kerlico_vless::UdpFraming::Mux.carries(payload) {
+        frame.option = 0;
+        frame.payload.clear();
+    }
     if portal.write.lock().expect("reverse").send(&frame).is_err() {
         portal.sessions.lock().expect("reverse").remove(&id);
         return Err(OpenError::Transport);
@@ -2842,11 +2847,15 @@ impl InboundStream for Stream {
         }
         if !self.udp {
             let mut socket = self.write.lock().expect("write");
+            // A Mux UDP lane writes an empty datagram as zero bytes.
             return match socket.write(buf) {
-                Ok(0) => Err(PlaneFault::Closed),
+                Ok(0) if !buf.is_empty() => Err(PlaneFault::Closed),
                 Ok(n) => Ok(n),
                 Err(error) => Err(map_io(error)),
             };
+        }
+        if !kerlico_vless::UdpFraming::Plain.carries(buf) {
+            return Ok(buf.len());
         }
         let payload = encode_udp(buf).map_err(|_| PlaneFault::Transport)?;
         let mut rest = payload;

@@ -1829,7 +1829,7 @@ impl ReverseLane {
         if buf.is_empty() { return Ok(0); }
         if self.queue.lock().expect("reverse").closed || self.shared.closed() { return Err(PlaneFault::Closed); }
         let udp = self.destination.transport() == Transport::Udp;
-        if udp && buf.len() > u16::MAX as usize { return Err(PlaneFault::Transport); }
+        if udp && !kerlico_vless::UdpFraming::Mux.carries(buf) { return Ok(buf.len()); }
         let len = buf.len().min(u16::MAX as usize);
         let frame = MuxFrame { id: self.id, status: KEEP, option: DATA, network: if udp { 2 } else { 0 },
             port: if udp { self.destination.port() } else { 0 },
@@ -1918,7 +1918,7 @@ impl InboundStream for Relay {
     }
 
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
-        if self.finish_unsent()? {
+        if self.finish_unsent()? || (self.udp && !kerlico_vless::UdpFraming::Plain.carries(buf)) {
             return Ok(buf.len());
         }
         let payload = if self.udp {

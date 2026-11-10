@@ -98,7 +98,7 @@ fn exchange_host(server: Settings, client: Settings, udp: bool, host: &str) {
     let (mut inbound, port) = inbound(&server);
     let transport = if udp { Transport::Udp } else { Transport::Tcp };
     let payloads: Vec<Vec<u8>> = if udp {
-        [1, 511, 8193, 32769, 65507].into_iter().map(|len| (0..len).map(|i| (i % 251) as u8).collect()).collect()
+        [1, 511, 7526].into_iter().map(|len| (0..len).map(|i| (i % 251) as u8).collect()).collect()
     } else {
         [19, 196613].into_iter().map(|len| (0..len).map(|i| (i % 251) as u8).collect()).collect()
     };
@@ -182,17 +182,81 @@ fn every_native_carrier_uses_the_owned_resolver_and_socket_settings() {
     assert!(network.lookups.load(Ordering::Relaxed) >= 7);
 }
 
-#[test]
-fn raw_udp_retains_large_datagrams() {
-    let (server, client) = settings("raw", "none", "auto");
-    exchange(server, client, true);
+/// Each side sends a datagram at its size limit, one a byte over it, then a short one. The
+/// short one is the next datagram the other side reads. The server also writes an empty one.
+fn datagram_limits(client: Settings, port: u16, client_limit: usize, server_limit: usize) {
+    let (server, _) = settings("raw", "none", "auto");
+    let (mut inbound, peer) = inbound(&server);
+    let datagram = |len: usize| -> Vec<u8> { (0..len).map(|i| (i % 251) as u8).collect() };
+    let destination = Destination::new("example.test", port, Transport::Udp).unwrap();
+    let client = landing_vless::land("127.0.0.1", peer, &client, &destination).unwrap();
+    send(client.as_ref(), &datagram(client_limit), true);
+    let flow = wait_handoff(&mut *inbound);
+    let server = flow.stream();
+    receive(server.as_ref(), &datagram(client_limit), true);
+    send(client.as_ref(), &datagram(client_limit + 1), true);
+    send(client.as_ref(), b"after", true);
+    receive(server.as_ref(), b"after", true);
+    send(server.as_ref(), &datagram(server_limit), true);
+    receive(client.as_ref(), &datagram(server_limit), true);
+    send(server.as_ref(), &datagram(server_limit + 1), true);
+    assert_eq!(server.write_to_user(&[]), Ok(0), "an empty datagram keeps the flow open");
+    send(server.as_ref(), b"after", true);
+    receive(client.as_ref(), b"after", true);
 }
 
 #[test]
-fn mux_udp_retains_large_datagrams() {
-    let (server, mut client) = settings("raw", "none", "auto");
+fn xudp_drops_datagrams_xray_would_skip() {
+    let (_, client) = settings("raw", "none", "auto");
+    datagram_limits(client, 80, 8192 - 666, 8192);
+}
+
+#[test]
+fn mux_udp_drops_datagrams_xray_would_skip() {
+    let (_, mut client) = settings("raw", "none", "auto");
     client.insert_text("mux", "true");
-    exchange(server, client, true);
+    datagram_limits(client, 80, 8192, 8192);
+}
+
+#[test]
+fn plain_udp_drops_datagrams_xray_would_skip() {
+    let (_, client) = settings("raw", "none", "auto");
+    datagram_limits(client, 53, 8192 - 2, 8192 - 2);
+}
+
+#[test]
+fn reverse_udp_drops_datagrams_xray_would_skip() {
+    let (server, client) = settings("raw", "none", "auto");
+    let (mut inbound, port) = inbound(&server);
+    let tag = format!("sizes-{port}");
+    let mut account = Settings::default();
+    account.insert_text("id", "test-user");
+    account.insert_text("reverse", &tag);
+    inbound.add_user(&UserEmail::parse("test-user").unwrap(), &account).unwrap();
+    let bridge = landing_vless::reverse_bridge("127.0.0.1", port, &client).unwrap();
+    let datagram = |len: usize| -> Vec<u8> { (0..len).map(|i| (i % 251) as u8).collect() };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let portal = loop {
+        match vless::open_reverse(&tag, "example.test", 53, false, &datagram(8193)) {
+            Ok(stream) => break stream,
+            Err(OpenError::Again) if Instant::now() < deadline => thread::sleep(Duration::from_millis(2)),
+            error => panic!("reverse registration: {:?}", error.err()),
+        }
+    };
+    let flow = loop {
+        match bridge.accept() {
+            Ok(flow) => break flow,
+            Err(OpenError::Again) if Instant::now() < deadline => thread::sleep(Duration::from_millis(2)),
+            error => panic!("reverse flow: {:?}", error.err()),
+        }
+    };
+    for (from, to) in [(portal.as_ref(), flow.stream()), (flow.stream(), portal.as_ref())] {
+        send(from, &datagram(8192), true);
+        receive(to, &datagram(8192), true);
+        send(from, &datagram(8193), true);
+        send(from, b"after", true);
+        receive(to, b"after", true);
+    }
 }
 
 #[test]
