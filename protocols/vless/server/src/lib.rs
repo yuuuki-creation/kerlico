@@ -1684,6 +1684,10 @@ enum Link {
     Vision(Box<kerlico_vless::VisionIo<Link>>),
     Duplex(Box<Link>, Box<Link>),
     Prefix(Box<Link>, VecDeque<u8>),
+    /// The VLESS response not yet sent. Xray's inbound buffers it and flushes it only with the
+    /// first downlink bytes; the Xray HTTPUpgrade client with early data drops bytes that arrive
+    /// together with the 101, so a response sent right after the request desynchronises it.
+    Response(Box<Link>, Vec<u8>),
     LimitedRead(Box<kerlico_vless::RealityRateLimitedRead<Link>>),
     LimitedWrite(Box<kerlico_vless::RealityRateLimitedWrite<Link>>),
 }
@@ -1759,15 +1763,29 @@ impl Link {
         }
     }
 
-    fn clone_tcp(&self) -> Option<TcpStream> {
+    /// A response still pending goes out first, since a raw copy would skip it.
+    fn clone_tcp(&mut self) -> Option<TcpStream> {
         match self {
             Self::Tcp(tcp) => tcp.try_clone().ok(),
+            Self::Response(inner, response) => {
+                while !response.is_empty() {
+                    match inner.write(response) {
+                        Ok(0) | Err(_) => return None,
+                        Ok(n) => { response.drain(..n); }
+                    }
+                }
+                inner.clone_tcp()
+            }
             _ => None,
         }
     }
 
     fn is_tcp(&self) -> bool {
-        matches!(self, Self::Tcp(_))
+        match self {
+            Self::Tcp(_) => true,
+            Self::Response(inner, _) => inner.is_tcp(),
+            _ => false,
+        }
     }
 
     fn close_write(&mut self) {
@@ -1810,6 +1828,7 @@ impl Link {
             Self::Vision(link) => link.inner_mut().set_timeout(timeout),
             Self::Duplex(read, write) => { read.set_timeout(timeout); write.set_timeout(timeout); },
             Self::Prefix(inner, _) => inner.set_timeout(timeout),
+            Self::Response(inner, _) => inner.set_timeout(timeout),
             Self::LimitedRead(link) => link.inner_mut().set_timeout(timeout),
             Self::LimitedWrite(link) => link.inner_mut().set_timeout(timeout),
         }
@@ -1850,6 +1869,7 @@ impl Read for Link {
                 for (slot, byte) in buf.iter_mut().zip(prefix.drain(..n)) { *slot = byte; }
                 Ok(n)
             },
+            Self::Response(inner, _) => inner.read(buf),
             Self::LimitedRead(link) => link.read(buf),
             Self::LimitedWrite(_) => Err(std::io::Error::other("write half")),
         }
@@ -1885,6 +1905,7 @@ impl Write for Link {
             Self::Vision(link) => link.write(buf),
             Self::Duplex(_, write) => write.write(buf),
             Self::Prefix(inner, _) => inner.write(buf),
+            Self::Response(inner, response) => write_after(inner, response, buf),
             Self::LimitedWrite(link) => link.write(buf),
             Self::LimitedRead(_) => Err(std::io::Error::other("read half")),
         }
@@ -1918,10 +1939,37 @@ impl Write for Link {
             Self::Vision(link) => link.flush(),
             Self::Duplex(_, write) => write.flush(),
             Self::Prefix(inner, _) => inner.flush(),
+            Self::Response(inner, _) => inner.flush(),
             Self::LimitedWrite(link) => link.flush(),
             Self::LimitedRead(_) => Ok(()),
         }
     }
+}
+
+/// Writes what is left of `response` and the start of `buf` in one write. An empty write sends
+/// nothing, as Xray's buffered writer ignores an empty buffer.
+fn write_after(inner: &mut Link, response: &mut Vec<u8>, buf: &[u8]) -> io::Result<usize> {
+    if response.is_empty() || buf.is_empty() {
+        return inner.write(buf);
+    }
+    let owed = response.len();
+    response.extend_from_slice(buf);
+    let mut sent = 0;
+    let result = loop {
+        match inner.write(&response[sent..]) {
+            Ok(0) => break Ok(0),
+            Ok(n) => {
+                sent += n;
+                if sent > owed {
+                    break Ok(sent - owed);
+                }
+            }
+            Err(error) => break Err(error),
+        }
+    };
+    response.truncate(owed);
+    response.drain(..sent.min(owed));
+    result
 }
 
 fn split_duplex(link: Link) -> (Link, Link) {
@@ -1944,6 +1992,7 @@ impl kerlico_vless::VisionTransport for Link {
             Self::TlsWrite(tls) => tls.start_direct(),
             Self::EncWrite(enc) => enc.start_direct(),
             Self::RealityWrite(reality) => reality.start_direct(),
+            Self::Response(inner, _) => inner.write_direct(),
             _ => Err(std::io::Error::other("Vision requires a security record layer")),
         }
     }
@@ -2813,7 +2862,7 @@ fn handshake(
         return fall_back(read, write, full, &fallback, &arrival);
     }
     let response = encode_response(&Response { flow: String::new(), seed: Vec::new() }).ok()?;
-    write.write_all(&response).ok()?;
+    write = Link::Response(Box::new(write), response);
     let prefix = if vision {
         let (reader, writer) = kerlico_vless::vision_pair(read, write, request.id, &prefix).ok()?;
         read = Link::Vision(Box::new(reader));
@@ -3145,10 +3194,10 @@ mod tests {
                 address: Addr::Domain("example.com".to_string()),
             };
             socket.write_all(&encode_request(&request).unwrap()).unwrap();
+            socket.write_all(b"ping").unwrap();
             let mut response = [0u8; 2];
             socket.read_exact(&mut response).unwrap();
             assert_eq!(response, [0, 0]);
-            socket.write_all(b"ping").unwrap();
             let mut got = [0u8; 4];
             socket.read_exact(&mut got).unwrap();
             assert_eq!(&got, b"pong");
@@ -3171,6 +3220,70 @@ mod tests {
         assert_eq!(&buf, b"ping");
         assert_eq!(stream.write_to_user(b"pong").unwrap(), 4);
         client.join().unwrap();
+    }
+
+    #[test]
+    fn response_leaves_with_the_first_downlink_bytes() {
+        for command in [Command::Tcp, Command::Mux] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            let mut settings = Settings::default();
+            settings.insert_text("decryption", "none");
+            let mut inbound = listen(
+                &NodeTag::parse("v").unwrap(),
+                &ListenAddr::v4(Ipv4Addr::LOCALHOST, port).unwrap(),
+                &settings,
+            )
+            .unwrap();
+            let mut account = Settings::default();
+            account.insert_text("id", "5783a3e7-e373-51cd-8642-c83782b807c5");
+            inbound.add_user(&UserEmail::parse("alice").unwrap(), &account).unwrap();
+            let address = Addr::Domain("example.com".to_string());
+            let mut wire = encode_request(&Request {
+                id: parse_id("5783a3e7-e373-51cd-8642-c83782b807c5").unwrap(),
+                flow: String::new(),
+                seed: Vec::new(),
+                command,
+                port: 80,
+                address: address.clone(),
+            })
+            .unwrap();
+            if command == Command::Mux {
+                wire.extend(kerlico_vless::encode_mux(&kerlico_vless::MuxFrame {
+                    id: 1,
+                    status: NEW,
+                    option: kerlico_vless::DATA,
+                    network: 1,
+                    port: 80,
+                    address: Some(address),
+                    payload: b"ping".to_vec(),
+                    global_id: None,
+                }));
+            }
+            let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            socket.write_all(&wire).unwrap();
+            let stream = wait_handoff(&mut *inbound).stream();
+            socket.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+            let mut buf = [0u8; 64];
+            let early = socket.read(&mut buf);
+            assert!(
+                matches!(&early, Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
+                "{command:?}: the response left before any downlink byte: {early:?}"
+            );
+            assert_eq!(stream.write_to_user(b"pong").unwrap(), 4);
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let n = socket.read(&mut buf).unwrap();
+            assert!(n > 2, "{command:?}: one read returns the response and the payload, got {:?}", &buf[..n]);
+            assert_eq!(&buf[..2], &[0, 0], "{command:?}: the first downlink read starts with the response");
+            let downlink = &buf[2..n];
+            if command == Command::Mux {
+                let (frame, used) = decode_mux(downlink).expect("the first Mux frame left in the same write as the response");
+                assert_eq!((frame.id, frame.payload.as_slice(), used), (1, &b"pong"[..], downlink.len()));
+            } else {
+                assert_eq!(downlink, b"pong", "the payload left in the same write as the response");
+            }
+        }
     }
 
     #[test]
@@ -3449,12 +3562,14 @@ mod tests {
                 address: Addr::Domain("example.com".to_string()),
             };
             writer.write_all(&encode_request(&request).unwrap()).unwrap();
-            let mut response = [0u8; 2];
+            let mut response = [0u8; 6];
             reader.read_exact(&mut response).unwrap();
-            assert_eq!(response, [0, 0]);
+            assert_eq!(&response, b"\0\0pong");
         });
         let handoff = wait_handoff(&mut *inbound);
         assert_eq!(handoff.destination().host(), "example.com");
+        let stream = handoff.stream();
+        assert_eq!(stream.write_to_user(b"pong").unwrap(), 4);
         client.join().unwrap();
     }
 
@@ -3499,12 +3614,14 @@ mod tests {
                 address: Addr::Domain("example.com".to_string()),
             };
             writer.write_all(&encode_request(&request).unwrap()).unwrap();
-            let mut response = [0u8; 2];
+            let mut response = [0u8; 6];
             reader.read_exact(&mut response).unwrap();
-            assert_eq!(response, [0, 0]);
+            assert_eq!(&response, b"\0\0pong");
         });
         let handoff = wait_handoff(&mut *inbound);
         assert_eq!(handoff.destination().host(), "example.com");
+        let stream = handoff.stream();
+        assert_eq!(stream.write_to_user(b"pong").unwrap(), 4);
         client.join().unwrap();
     }
 
@@ -3537,9 +3654,9 @@ mod tests {
                 address: Addr::V4(Ipv4Addr::new(1, 2, 3, 4)),
             };
             socket.write_all(&encode_request(&request).unwrap()).unwrap();
+            socket.write_all(&encode_udp(b"hi").unwrap()).unwrap();
             let mut response = [0u8; 2];
             socket.read_exact(&mut response).unwrap();
-            socket.write_all(&encode_udp(b"hi").unwrap()).unwrap();
             let mut got = [0u8; 4];
             socket.read_exact(&mut got).unwrap();
             assert_eq!(decode_udp(&got).unwrap().0, b"yo");
@@ -3613,11 +3730,11 @@ mod tests {
                 address: Addr::Domain("example.com".to_string()),
             };
             link.write_all(&encode_request(&request).unwrap()).unwrap();
+            let mut writer = Vision::new(id);
+            link.write_all(&writer.seal(b"ping")).unwrap();
             let mut response = [0u8; 2];
             link.read_exact(&mut response).unwrap();
             assert_eq!(response, [0, 0]);
-            let mut writer = Vision::new(id);
-            link.write_all(&writer.seal(b"ping")).unwrap();
             let mut reader = Vision::new(id);
             let mut tmp = [0u8; 2048];
             let mut plain = Vec::new();
@@ -3689,10 +3806,10 @@ mod tests {
                 address: Addr::Domain("example.com".to_string()),
             };
             socket.write_all(&encode_request(&request).unwrap()).unwrap();
-            let mut response = [0u8; 2];
-            socket.read_exact(&mut response).unwrap();
             let mut writer = Vision::new(id);
             socket.write_all(&writer.seal(b"ping")).unwrap();
+            let mut response = [0u8; 2];
+            socket.read_exact(&mut response).unwrap();
             let mut reader = Vision::new(id);
             let mut tmp = [0u8; 2048];
             let mut plain = Vec::new();
@@ -3772,9 +3889,9 @@ mod tests {
                 address: Addr::Domain("example.com".to_string()),
             };
             socket.write_all(&encode_request(&request).unwrap()).unwrap();
+            socket.write_all(b"ping").unwrap();
             let mut response = [0u8; 2];
             socket.read_exact(&mut response).unwrap();
-            socket.write_all(b"ping").unwrap();
             let mut got = [0u8; 4];
             socket.read_exact(&mut got).unwrap();
             assert_eq!(&got, b"pong");
@@ -4035,12 +4152,14 @@ mod tests {
                 address: Addr::Domain("example.com".to_string()),
             };
             io.write_all(&encode_request(&request).unwrap()).unwrap();
-            let mut response = [0u8; 2];
+            let mut response = [0u8; 6];
             io.read_exact(&mut response).unwrap();
-            assert_eq!(response, [0, 0]);
+            assert_eq!(&response, b"\0\0pong");
         });
         let handoff = wait_handoff(&mut *inbound);
         assert_eq!(handoff.destination().host(), "example.com");
+        let stream = handoff.stream();
+        assert_eq!(stream.write_to_user(b"pong").unwrap(), 4);
         client.join().unwrap();
     }
 
@@ -4417,10 +4536,10 @@ mod tests {
                 address: Addr::Domain("example.com".to_string()),
             };
             io.write_all(&encode_request(&request).unwrap()).unwrap();
+            io.write_all(b"ping").unwrap();
             let mut response = [0u8; 2];
             io.read_exact(&mut response).unwrap();
             assert_eq!(response, [0, 0]);
-            io.write_all(b"ping").unwrap();
             let mut got = [0u8; 4];
             io.read_exact(&mut got).unwrap();
             assert_eq!(&got, b"pong");
@@ -4499,10 +4618,10 @@ mod tests {
                 address: Addr::Domain("example.com".to_string()),
             };
             up.write_all(&encode_request(&request).unwrap()).unwrap();
+            up.write_all(b"ping").unwrap();
             let mut response = [0u8; 2];
             down.read_exact(&mut response).unwrap();
             assert_eq!(response, [0, 0]);
-            up.write_all(b"ping").unwrap();
             let mut got = [0u8; 4];
             down.read_exact(&mut got).unwrap();
             assert_eq!(&got, b"pong");
@@ -4575,10 +4694,10 @@ mod tests {
                 address: Addr::Domain("example.com".to_string()),
             };
             up.write_all(&encode_request(&request).unwrap()).unwrap();
+            up.write_all(b"ping").unwrap();
             let mut response = [0u8; 2];
             down.read_exact(&mut response).unwrap();
             assert_eq!(response, [0, 0]);
-            up.write_all(b"ping").unwrap();
             let mut got = [0u8; 4];
             down.read_exact(&mut got).unwrap();
             assert_eq!(&got, b"pong");
@@ -4652,13 +4771,13 @@ mod tests {
                 address: Addr::Domain("example.com".to_string()),
             };
             up.finish(&encode_request(&request).unwrap()).unwrap();
-            let mut response = [0u8; 2];
-            down.read_exact(&mut response).unwrap();
-            assert_eq!(response, [0, 0]);
             let up = conn
                 .open("POST", "/xh/abc/1", "example.com", "https", &[("referer", up_referer.as_str())], false)
                 .unwrap();
             up.finish(b"ping").unwrap();
+            let mut response = [0u8; 2];
+            down.read_exact(&mut response).unwrap();
+            assert_eq!(response, [0, 0]);
             let mut got = [0u8; 4];
             down.read_exact(&mut got).unwrap();
             assert_eq!(&got, b"pong");
@@ -4837,8 +4956,6 @@ mod tests {
                 address: Addr::V4(Ipv4Addr::new(1, 2, 3, 4)),
             };
             socket.write_all(&encode_request(&request).unwrap()).unwrap();
-            let mut response = [0u8; 2];
-            socket.read_exact(&mut response).unwrap();
             let frame = kerlico_vless::encode_mux(&kerlico_vless::MuxFrame {
                 id: 1,
                 status: kerlico_vless::NEW,
@@ -4850,6 +4967,8 @@ mod tests {
                 global_id: None,
             });
             socket.write_all(&frame).unwrap();
+            let mut response = [0u8; 2];
+            socket.read_exact(&mut response).unwrap();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 128];
             let payload = loop {
@@ -4907,8 +5026,6 @@ mod tests {
                     address: Addr::Domain(String::new()),
                 }).unwrap())
                 .unwrap();
-            let mut response = [0u8; 2];
-            socket.read_exact(&mut response).unwrap();
             socket
                 .write_all(&kerlico_vless::encode_mux(&kerlico_vless::MuxFrame {
                     id: 0,
@@ -4921,6 +5038,8 @@ mod tests {
                     global_id: None,
                 }))
                 .unwrap();
+            let mut response = [0u8; 2];
+            socket.read_exact(&mut response).unwrap();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 128];
             let payload = loop {
@@ -4984,8 +5103,6 @@ mod tests {
                     address: Addr::Domain(String::new()),
                 }).unwrap())
                 .unwrap();
-            let mut response = [0u8; 2];
-            socket.read_exact(&mut response).unwrap();
             let frame = kerlico_vless::encode_mux(&kerlico_vless::MuxFrame {
                 id: 0,
                 status: NEW,
@@ -5004,6 +5121,8 @@ mod tests {
             raw.extend_from_slice(&frame[2 + meta_len..]);
             let mut outbound = Vision::new(id);
             socket.write_all(&outbound.seal(&raw)).unwrap();
+            let mut response = [0u8; 2];
+            socket.read_exact(&mut response).unwrap();
             let mut inbound_pad = Vision::new(id);
             let mut buf = Vec::new();
             let mut tmp = [0u8; 512];
@@ -5227,19 +5346,19 @@ mod tests {
         (inbound, port)
     }
 
-    /// Opens a Mux carrier as user `id` and sends one datagram as XUDP session `session`.
-    fn xudp_carrier(port: u16, id: &str, session: u16, global_id: Option<u64>, payload: &[u8]) -> TcpStream {
+    /// Opens a Mux carrier as user `id` and sends one datagram as XUDP session `session`. The
+    /// VLESS response arrives ahead of the carrier's first frame.
+    fn xudp_carrier(port: u16, id: &str, session: u16, global_id: Option<u64>, payload: &[u8]) -> kerlico_vless::ResponseReader<TcpStream> {
         let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let request = Request { id: parse_id(id).unwrap(), flow: String::new(), seed: Vec::new(), command: Command::Mux, port: 0, address: Addr::Domain(String::new()) };
         socket.write_all(&encode_request(&request).unwrap()).unwrap();
-        let mut response = [0u8; 2];
-        socket.read_exact(&mut response).unwrap();
         socket.write_all(&kerlico_vless::encode_mux(&kerlico_vless::MuxFrame {
             id: session, status: NEW, option: DATA, network: 2, port: 20091,
             address: Some(Addr::V4(Ipv4Addr::LOCALHOST)), payload: payload.to_vec(),
             global_id: global_id.and_then(NonZeroU64::new),
         })).unwrap();
-        socket
+        kerlico_vless::ResponseReader::new(socket)
     }
 
     fn read_datagram(stream: &dyn InboundStream) -> Result<Vec<u8>, PlaneFault> {
@@ -5255,8 +5374,7 @@ mod tests {
         Err(PlaneFault::Again)
     }
 
-    fn read_frame(socket: &mut TcpStream) -> kerlico_vless::MuxFrame {
-        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    fn read_frame(socket: &mut impl Read) -> kerlico_vless::MuxFrame {
         let mut buf = Vec::new();
         let mut tmp = [0u8; 256];
         loop {
@@ -5311,8 +5429,6 @@ mod tests {
         let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let request = Request { id: parse_id(ALICE).unwrap(), flow: String::new(), seed: Vec::new(), command: Command::Mux, port: 0, address: Addr::Domain(String::new()) };
         socket.write_all(&encode_request(&request).unwrap()).unwrap();
-        let mut response = [0u8; 2];
-        socket.read_exact(&mut response).unwrap();
         for (id, host) in [(1, "download.test"), (2, "upload.test")] {
             socket.write_all(&kerlico_vless::encode_mux(&kerlico_vless::session_frame(id, true, 80, host, b"open"))).unwrap();
         }
@@ -5344,6 +5460,8 @@ mod tests {
             }
             assert!(accepted < 512 << 20, "the carrier never filled");
         }
+        let mut response = [0u8; 2];
+        socket.read_exact(&mut response).unwrap();
         socket.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let (mut buf, mut tmp, mut received) = (Vec::new(), vec![0u8; 64 * 1024], 0);
