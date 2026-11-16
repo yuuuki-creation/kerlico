@@ -164,7 +164,11 @@ impl S3Storage {
         let hash = sha256(data);
         let mut latest = None;
         for attempt in 0..ATTEMPTS {
-            let headers = self.sign(method, &path, &query, &hash, OffsetDateTime::now_utc());
+            let mut headers = self.sign(method, &path, &query, &hash, OffsetDateTime::now_utc());
+            if method == "PUT" {
+                // HTTP/1 omits the inferred length for an empty body. PutObject still requires it.
+                headers.insert("content-length".into(), data.len().to_string());
+            }
             let hint = match self.http.call(method, &target, &headers, data) {
                 Ok(reply) if matches!(reply.status, 429 | 500 | 502 | 503 | 504) => {
                     latest = Some(reply.error("S3"));

@@ -2,7 +2,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, ErrorKind, Read, Write};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::host_matches;
@@ -26,6 +27,8 @@ const END_HEADERS: u8 = 4;
 const PADDED: u8 = 8;
 const HAS_PRIORITY: u8 = 0x20;
 
+const SETTINGS_NO_RFC7540_PRIORITIES: u16 = 9;
+
 const PROTOCOL_ERROR: u32 = 1;
 const FLOW_CONTROL_ERROR: u32 = 3;
 const STREAM_CLOSED: u32 = 5;
@@ -36,6 +39,23 @@ const DEFAULT_WINDOW: u32 = 65_535;
 const MAX_WINDOW: u32 = 0x7fff_ffff;
 const RECEIVE_WINDOW: u32 = 16 * 1024 * 1024;
 const FRAME_SIZE: usize = 16_384;
+/// The DATA one write call frames at most, on a wire that takes it quickly. A write the size of
+/// a gRPC message then leaves in one flush. A slow wire gets less, see `H2State::write_budget`.
+const WRITE_BATCH: usize = 8 * FRAME_SIZE;
+/// What one read from the wire takes at most: several frames reach their streams under one lock.
+const READ_BUFFER: usize = 4 * FRAME_SIZE;
+/// How long a write holds out for a good part of the window it needs before it takes whatever
+/// the peer returned.
+const WINDOW_GRACE: Duration = Duration::from_millis(1);
+
+/// The two sides of a stream that can wait: its reader and its writer.
+const READER: u8 = 1;
+const WRITER: u8 = 2;
+
+/// Where a stream's reader and its writer wait.
+type StreamWake = Arc<[Condvar; 2]>;
+/// The stream sides to wake once the state is released.
+type Wakers = Vec<(StreamWake, u8)>;
 const HEADER_LIMIT: usize = 64 * 1024;
 const HEADER_TABLE_SIZE: usize = 4096;
 const STREAM_LIMIT: usize = 128;
@@ -51,6 +71,7 @@ pub struct H2Limits {
     pub stream_window: u32,
     pub connection_window: u32,
     pub header_list: Option<u32>,
+    pub xhttp_server_settings: bool,
     pub ping_after: Option<Duration>,
     pub ping_timeout: Duration,
     pub write_timeout: Option<Duration>,
@@ -65,6 +86,7 @@ impl Default for H2Limits {
             stream_window: RECEIVE_WINDOW,
             connection_window: RECEIVE_WINDOW,
             header_list: None,
+            xhttp_server_settings: false,
             ping_after: None,
             ping_timeout: Duration::from_secs(15),
             write_timeout: None,
@@ -86,6 +108,7 @@ pub const INADEQUATE_SECURITY: u32 = 12;
 struct ReceiveWindow {
     available: u32,
     consumed: u32,
+    limit: u32,
 }
 
 impl ReceiveWindow {
@@ -93,6 +116,7 @@ impl ReceiveWindow {
         Self {
             available,
             consumed: 0,
+            limit: available,
         }
     }
 
@@ -104,10 +128,12 @@ impl ReceiveWindow {
         true
     }
 
+    /// The peer gets its window back once a quarter of it was consumed, as grpc-go does, or at
+    /// once when little of it is left.
     fn release(&mut self, len: u32) -> Option<u32> {
         self.consumed += len;
         if self.consumed == 0
-            || (self.consumed < FRAME_SIZE as u32 && self.available >= DEFAULT_WINDOW)
+            || (self.consumed < self.limit / 4 && self.available >= DEFAULT_WINDOW)
         {
             return None;
         }
@@ -128,6 +154,18 @@ struct Stream {
     received_end: bool,
     any_status: bool,
     reset: Option<u32>,
+    /// Where this stream's reader and writer wait, and how many threads wait on each side.
+    wake: StreamWake,
+    waiting: [u32; 2],
+    /// The sides queued for a wake-up since the last time the waiters were collected.
+    due: u8,
+    /// A write waits for send window: how much it holds out for, since when, and whether it
+    /// takes whatever comes by now. `queued` is set while the stream is listed in `starving`.
+    starved: bool,
+    wanted: usize,
+    starved_at: Option<Instant>,
+    eager: bool,
+    queued: bool,
 }
 
 impl Stream {
@@ -143,7 +181,35 @@ impl Stream {
             received_end: false,
             any_status: false,
             reset: None,
+            wake: Arc::new([Condvar::new(), Condvar::new()]),
+            waiting: [0; 2],
+            due: 0,
+            starved: false,
+            wanted: 0,
+            starved_at: None,
+            eager: false,
+            queued: false,
         }
+    }
+
+    /// The sides a thread waits on.
+    fn waiting_sides(&self) -> u8 {
+        let mut sides = 0;
+        if self.waiting[0] != 0 {
+            sides |= READER;
+        }
+        if self.waiting[1] != 0 {
+            sides |= WRITER;
+        }
+        sides
+    }
+
+    /// How long a writer that holds out for window waits before it looks again.
+    fn patience(&self) -> Option<Duration> {
+        if self.eager {
+            return None;
+        }
+        self.starved_at.map(|since| WINDOW_GRACE.saturating_sub(since.elapsed()))
     }
 
     fn check_reset(&self) -> io::Result<()> {
@@ -188,6 +254,42 @@ struct H2State {
     decoder: hpack::Decoder<'static>,
     failure: Option<(ErrorKind, String)>,
     reading: bool,
+    /// Streams whose waiters must look again. Only streams with a waiter are listed.
+    touched: Vec<u32>,
+    /// Waiters that are not tied to one stream must look again: a new request, a freed stream.
+    wake_connection: bool,
+    /// Every waiter must look again.
+    wake_all: bool,
+    connection_waiting: u32,
+    /// One thread at a time writes the queue to the wire. `taken` counts the bytes it took from
+    /// the queue so far and `flushed` the bytes the wire accepted; both only grow, so a writer
+    /// knows its bytes left once `flushed` reaches where they ended.
+    flushing: bool,
+    taken: u64,
+    flushed: u64,
+    flush_waiters: u32,
+    /// How long the wire took for 1024 bytes lately, in nanoseconds; zero before the first
+    /// measure. The time per byte is averaged, not the rate, so that one slow write counts at
+    /// once and the budget of a wire that slowed down shrinks within a write or two.
+    wire_pace: u64,
+    /// A reader thread and a writer thread serve this connection. A stream that writes sends
+    /// what is queued itself when the wire is free and leaves the queue to the writer thread
+    /// otherwise; a stream that reads, and the reader thread, never write to the wire. A writer
+    /// may also wait with a deadline for send window instead of taking every bit of it at once.
+    threaded: bool,
+    /// Streams whose writer waits for send window, in the order they ran out.
+    starving: VecDeque<u32>,
+}
+
+/// Queues a wake-up for the given sides of `slot`, as far as a thread waits there.
+fn touch(slot: &mut Stream, touched: &mut Vec<u32>, id: u32, sides: u8) {
+    let sides = sides & slot.waiting_sides() & !slot.due;
+    if sides != 0 {
+        if slot.due == 0 {
+            touched.push(id);
+        }
+        slot.due |= sides;
+    }
 }
 
 impl H2State {
@@ -201,20 +303,33 @@ impl H2State {
             outbound.extend_from_slice(HTTP2_PREFACE);
         }
         let mut settings = Vec::new();
-        if !server {
-            setting(&mut settings, 2, 0);
-        } else {
-            setting(&mut settings, 3, limits.streams);
-        }
-        setting(&mut settings, 4, limits.stream_window);
-        if let Some(limit) = limits.header_list {
-            setting(&mut settings, 6, limit);
-        }
-        if limits.frame_size != FRAME_SIZE as u32 {
+        if server && limits.xhttp_server_settings {
             setting(&mut settings, 5, limits.frame_size);
-        }
-        if limits.decoder_table != HEADER_TABLE_SIZE as u32 {
+            setting(&mut settings, 3, limits.streams);
+            if let Some(limit) = limits.header_list {
+                setting(&mut settings, 6, limit);
+            }
             setting(&mut settings, 1, limits.decoder_table);
+            setting(&mut settings, 4, limits.stream_window);
+        } else {
+            if !server {
+                setting(&mut settings, 2, 0);
+            } else {
+                setting(&mut settings, 3, limits.streams);
+            }
+            setting(&mut settings, 4, limits.stream_window);
+            if let Some(limit) = limits.header_list {
+                setting(&mut settings, 6, limit);
+            }
+            if limits.frame_size != FRAME_SIZE as u32 {
+                setting(&mut settings, 5, limits.frame_size);
+            }
+            if limits.decoder_table != HEADER_TABLE_SIZE as u32 {
+                setting(&mut settings, 1, limits.decoder_table);
+            }
+        }
+        if server {
+            setting(&mut settings, SETTINGS_NO_RFC7540_PRIORITIES, 1);
         }
         queue_frame(&mut outbound, SETTINGS, 0, 0, &settings);
         if limits.connection_window > DEFAULT_WINDOW {
@@ -253,7 +368,104 @@ impl H2State {
             decoder,
             failure: None,
             reading: false,
+            touched: Vec::new(),
+            wake_connection: false,
+            wake_all: false,
+            connection_waiting: 0,
+            flushing: false,
+            taken: 0,
+            flushed: 0,
+            flush_waiters: 0,
+            wire_pace: 0,
+            threaded: false,
+            starving: VecDeque::new(),
         }
+    }
+
+    /// Hands the connection's send window to the streams that wait for it, in the order they ran
+    /// out and as far as it goes, so one update does not wake them all.
+    fn feed_starving(&mut self) {
+        let mut budget = self.send_window;
+        let mut index = 0;
+        while index < self.starving.len() {
+            let id = self.starving[index];
+            let Some(slot) = self.streams.get_mut(&id).filter(|slot| slot.starved && slot.waiting[1] != 0) else {
+                if let Some(slot) = self.streams.get_mut(&id) {
+                    slot.queued = false;
+                }
+                self.starving.remove(index);
+                continue;
+            };
+            let wanted = slot.wanted as i64;
+            if slot.send_window < wanted {
+                // Its own window holds this one back; the next may still go.
+                index += 1;
+            } else if budget >= wanted {
+                budget -= wanted;
+                slot.queued = false;
+                touch(slot, &mut self.touched, id, WRITER);
+                self.starving.remove(index);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Takes note of how long the wire needed for `bytes`.
+    fn note_write(&mut self, bytes: usize, elapsed: Duration) {
+        if bytes < 4096 {
+            // A small write says little about the wire.
+            return;
+        }
+        let sample = (elapsed.as_nanos() * 1024 / bytes as u128).clamp(1, u64::MAX as u128 / 4) as u64;
+        self.wire_pace = if self.wire_pace == 0 {
+            sample
+        } else {
+            (self.wire_pace / 4).saturating_mul(3).saturating_add(sample / 4).max(1)
+        };
+    }
+
+    /// How much data one write frames, and how much may wait for the wire before a stream holds
+    /// back: what the wire takes in about a sixteenth of a second, between one frame and
+    /// `WRITE_BATCH`, and one frame until the wire was measured. Streams that share a slow wire
+    /// then wait for each other's frames, not for each other's megabytes.
+    fn write_budget(&self) -> usize {
+        match self.wire_pace {
+            0 => FRAME_SIZE,
+            pace => usize::try_from(62_500_000u64 * 1024 / pace).unwrap_or(WRITE_BATCH).clamp(FRAME_SIZE, WRITE_BATCH),
+        }
+    }
+
+    /// Where the bytes queued so far end, counted from the first byte ever queued.
+    fn queued_end(&self) -> u64 {
+        self.taken + self.outbound.len() as u64
+    }
+
+    fn has_wakeups(&self) -> bool {
+        self.wake_all || self.wake_connection || !self.touched.is_empty()
+    }
+
+    /// Moves the queued wake-ups to `streams`. Returns whether the connection's own waiters are due.
+    fn take_wakeups(&mut self, streams: &mut Wakers) -> bool {
+        let all = std::mem::take(&mut self.wake_all);
+        let connection = std::mem::take(&mut self.wake_connection) || all;
+        if all {
+            self.touched.clear();
+            for slot in self.streams.values_mut() {
+                slot.due = 0;
+                let sides = slot.waiting_sides();
+                if sides != 0 {
+                    streams.push((Arc::clone(&slot.wake), sides));
+                }
+            }
+        } else {
+            for id in self.touched.drain(..) {
+                if let Some(slot) = self.streams.get_mut(&id) {
+                    streams.push((Arc::clone(&slot.wake), std::mem::take(&mut slot.due)));
+                }
+            }
+        }
+        connection && self.connection_waiting != 0
     }
 
     /// Go's server pings after `SendPingTimeout` without a received frame and closes after `PingTimeout` without the ACK.
@@ -290,6 +502,7 @@ impl H2State {
         if self.failure.is_none() {
             self.failure = Some((error.kind(), error.to_string()));
         }
+        self.wake_all = true;
     }
 
     fn check_goaway(&self) -> io::Result<()> {
@@ -420,6 +633,22 @@ impl H2State {
     }
 
     fn write_data(&mut self, id: u32, buf: &[u8], end: bool) -> io::Result<Option<usize>> {
+        self.write_parts(id, buf, &[], end)
+    }
+
+    /// Frames `head` and then `body` as the stream's data, as far as the send window goes. The
+    /// two are framed as one run of bytes, so a caller's prefix needs no buffer of its own.
+    fn write_parts(&mut self, id: u32, head: &[u8], body: &[u8], end: bool) -> io::Result<Option<usize>> {
+        let Some((len, last)) = self.reserve(id, head.len() + body.len(), end)? else {
+            return Ok(None);
+        };
+        frame_data(&mut self.outbound, id, head, body, len, last);
+        Ok(Some(len))
+    }
+
+    /// Takes send window for `total` bytes of the stream's data. Returns how many of them may
+    /// go now and whether they end the stream; the caller frames exactly those.
+    fn reserve(&mut self, id: u32, total: usize, end: bool) -> io::Result<Option<(usize, bool)>> {
         self.check_connection()?;
         let slot = self.stream(id)?;
         slot.check_reset()?;
@@ -432,27 +661,46 @@ impl H2State {
         if !self.server {
             self.status(id)?;
         }
-        if !self.settings_received && !buf.is_empty() {
+        if !self.settings_received && total != 0 {
             return Ok(None);
         }
         let window = self.send_window.min(slot.send_window).max(0) as usize;
-        let len = buf.len().min(window).min(FRAME_SIZE);
-        if len == 0 && !buf.is_empty() {
-            return Ok(None);
+        let want = total.min(self.write_budget());
+        if want != 0 {
+            // Streams that share a small window would wake for every bit the peer returns. A
+            // writer holds out for a good part of what it has to send, and takes whatever there
+            // is once that did not come in time. Every peer returns at least half its window.
+            let half = (self.initial_send_window.min(i64::from(DEFAULT_WINDOW)) / 2).max(1) as usize;
+            let patient = self.threaded;
+            let slot = self.streams.get_mut(&id).expect("open stream");
+            if slot.starved_at.is_some_and(|since| since.elapsed() >= WINDOW_GRACE) {
+                slot.eager = true;
+            }
+            let enough = if patient && !slot.eager { want.min(half) } else { 1 };
+            if window < enough {
+                slot.starved = true;
+                slot.wanted = enough;
+                if patient {
+                    slot.starved_at.get_or_insert_with(Instant::now);
+                }
+                if !slot.queued {
+                    slot.queued = true;
+                    self.starving.push_back(id);
+                }
+                return Ok(None);
+            }
         }
-        let end = end && len == buf.len();
+        let len = want.min(window);
+        let end = end && len == total;
         let slot = self.streams.get_mut(&id).expect("open stream");
+        slot.starved = false;
+        slot.eager = false;
+        slot.starved_at = None;
         slot.send_window -= len as i64;
         slot.sent_end = end;
         self.send_window -= len as i64;
-        queue_frame(
-            &mut self.outbound,
-            DATA,
-            if end { END_STREAM } else { 0 },
-            id,
-            &buf[..len],
-        );
-        Ok(Some(len))
+        self.wake_connection |= end;
+        Ok(Some((len, end)))
     }
 
     fn release(&mut self, id: u32, len: u32) {
@@ -483,6 +731,8 @@ impl H2State {
     fn reset(&mut self, id: u32, code: u32, send: bool) {
         if let Some(slot) = self.streams.get_mut(&id) {
             slot.reset = Some(code);
+            touch(slot, &mut self.touched, id, READER | WRITER);
+            self.wake_connection = true;
             let discarded = slot.body.len() as u32;
             slot.body.clear();
             self.release(id, discarded);
@@ -500,6 +750,11 @@ impl H2State {
         let Some(slot) = self.streams.remove(&id) else {
             return;
         };
+        // A request that waited for a free stream can go on.
+        self.wake_connection = true;
+        if slot.queued {
+            self.starving.retain(|queued| *queued != id);
+        }
         self.release(id, slot.body.len() as u32);
         if self.failure.is_some() || slot.reset.is_some() || (slot.sent_end && slot.received_end) {
             return;
@@ -541,45 +796,74 @@ impl H2State {
         Err(error)
     }
 
-    fn receive(&mut self, bytes: &[u8]) -> io::Result<bool> {
+    /// Takes bytes from the wire. Frames are parsed where they were read; only a frame that is
+    /// split across reads is put together in `inbound`.
+    fn receive(&mut self, mut bytes: &[u8]) -> io::Result<bool> {
         if self.limits.ping_after.is_some() {
             self.last_frame = Instant::now();
         }
-        self.inbound.extend_from_slice(bytes);
-        let mut offset = 0;
         if !self.preface {
+            let take = (HTTP2_PREFACE.len() - self.inbound.len()).min(bytes.len());
+            self.inbound.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
             if self.inbound.len() < HTTP2_PREFACE.len() {
                 return Ok(false);
             }
-            if !self.inbound.starts_with(HTTP2_PREFACE) {
+            if self.inbound != HTTP2_PREFACE {
                 return Err(protocol_error("HTTP/2 preface"));
             }
-            offset = HTTP2_PREFACE.len();
+            self.inbound.clear();
             self.preface = true;
         }
-        let frames_start = offset;
-        while self.inbound.len() - offset >= 9 {
-            let head = &self.inbound[offset..offset + 9];
+        let mut frames = false;
+        loop {
+            let split = !self.inbound.is_empty();
+            if split && self.inbound.len() < 9 {
+                let take = (9 - self.inbound.len()).min(bytes.len());
+                self.inbound.extend_from_slice(&bytes[..take]);
+                bytes = &bytes[take..];
+            }
+            let head = if split { self.inbound.as_slice() } else { bytes };
+            if head.len() < 9 {
+                if !split {
+                    self.inbound.extend_from_slice(bytes);
+                }
+                break;
+            }
             let len = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
             if len > self.limits.frame_size as usize {
                 return Err(protocol_error("HTTP/2 frame too large"));
             }
-            let end = offset + 9 + len;
-            if end > self.inbound.len() {
-                break;
-            }
             let kind = head[3];
             let flags = head[4];
             let stream = u32::from_be_bytes(head[5..9].try_into().unwrap()) & MAX_WINDOW;
-            let payload = self.inbound[offset + 9..end].to_vec();
-            self.frame(kind, flags, stream, &payload)?;
+            if split {
+                let take = (9 + len - self.inbound.len()).min(bytes.len());
+                self.inbound.extend_from_slice(&bytes[..take]);
+                bytes = &bytes[take..];
+                if self.inbound.len() < 9 + len {
+                    break;
+                }
+                let mut whole = std::mem::take(&mut self.inbound);
+                let result = self.frame(kind, flags, stream, &whole[9..]);
+                whole.clear();
+                self.inbound = whole;
+                result?;
+            } else {
+                if bytes.len() < 9 + len {
+                    self.inbound.extend_from_slice(bytes);
+                    break;
+                }
+                let (whole, rest) = bytes.split_at(9 + len);
+                bytes = rest;
+                self.frame(kind, flags, stream, &whole[9..])?;
+            }
+            frames = true;
             if self.outbound.len() > RECEIVE_WINDOW as usize {
                 return Err(protocol_error("HTTP/2 output backlog"));
             }
-            offset = end;
         }
-        self.inbound.drain(..offset);
-        Ok(offset != frames_start)
+        Ok(frames)
     }
 
     fn frame(&mut self, kind: u8, flags: u8, stream: u32, payload: &[u8]) -> io::Result<()> {
@@ -628,6 +912,7 @@ impl H2State {
                     if slot.received_end && (slot.sent_end || (!self.server && code == 0)) {
                         // A server can ask the client to stop sending after completing its response.
                         slot.sent_end = true;
+                        touch(slot, &mut self.touched, stream, WRITER);
                     } else {
                         self.reset(stream, code, false);
                     }
@@ -647,6 +932,7 @@ impl H2State {
                 let last = u32::from_be_bytes(payload[..4].try_into().unwrap()) & MAX_WINDOW;
                 let last = self.peer_goaway.map_or(last, |old| old.min(last));
                 self.peer_goaway = Some(last);
+                self.wake_all = true;
                 if !self.server {
                     let refused: Vec<_> = self
                         .streams
@@ -699,6 +985,8 @@ impl H2State {
         }
         slot.body.extend(bytes);
         slot.received_end = flags & END_STREAM != 0;
+        touch(slot, &mut self.touched, id, READER);
+        self.wake_connection |= flags & END_STREAM != 0;
         self.release(id, len - bytes.len() as u32);
         Ok(())
     }
@@ -728,6 +1016,7 @@ impl H2State {
             slot.received_end = block.end_stream;
             self.streams.insert(id, slot);
             self.accepted.push_back(id);
+            self.wake_connection = true;
             return Ok(());
         }
         let Some(slot) = self.streams.get_mut(&id) else {
@@ -757,6 +1046,8 @@ impl H2State {
             return Ok(());
         }
         slot.received_end = block.end_stream;
+        touch(slot, &mut self.touched, id, READER);
+        self.wake_connection |= block.end_stream;
         Ok(())
     }
 
@@ -804,6 +1095,7 @@ impl H2State {
             }
         }
         self.settings_received = true;
+        self.wake_all = true;
         queue_frame(&mut self.outbound, SETTINGS, ACK, 0, &[]);
         Ok(())
     }
@@ -814,6 +1106,7 @@ impl H2State {
             if increment == 0 || self.send_window > i64::from(MAX_WINDOW) {
                 return Err(protocol_error("HTTP/2 invalid connection window update"));
             }
+            self.feed_starving();
         } else if !self.closed_stream(id) {
             return Err(protocol_error("HTTP/2 WINDOW_UPDATE on idle stream"));
         } else if let Some(slot) = self.streams.get_mut(&id) {
@@ -821,6 +1114,9 @@ impl H2State {
                 return Ok(());
             }
             slot.send_window += i64::from(increment);
+            if slot.starved && self.send_window.min(slot.send_window) >= slot.wanted as i64 {
+                touch(slot, &mut self.touched, id, WRITER);
+            }
             if increment == 0 {
                 self.reset(id, PROTOCOL_ERROR, true);
             } else if slot.send_window > i64::from(MAX_WINDOW) {
@@ -870,6 +1166,32 @@ impl<'a> H2Request<'a> {
 fn setting(settings: &mut Vec<u8>, id: u16, value: u32) {
     settings.extend_from_slice(&id.to_be_bytes());
     settings.extend_from_slice(&value.to_be_bytes());
+}
+
+/// Appends the first `len` bytes of `head` followed by `body` to `out` as DATA frames of stream
+/// `id`. `last` ends the stream with the final frame.
+fn frame_data(out: &mut Vec<u8>, id: u32, head: &[u8], body: &[u8], len: usize, last: bool) {
+    if len == 0 {
+        queue_frame(out, DATA, if last { END_STREAM } else { 0 }, id, &[]);
+    }
+    let mut sent = 0;
+    while sent < len {
+        let frame = (len - sent).min(FRAME_SIZE);
+        let flags = if last && sent + frame == len { END_STREAM } else { 0 };
+        out.extend_from_slice(&(frame as u32).to_be_bytes()[1..]);
+        out.extend_from_slice(&[DATA, flags]);
+        out.extend_from_slice(&id.to_be_bytes());
+        let from_head = head.len().saturating_sub(sent).min(frame);
+        out.extend_from_slice(&head[head.len() - head.len().saturating_sub(sent)..][..from_head]);
+        let start = (sent + from_head).saturating_sub(head.len());
+        out.extend_from_slice(&body[start..start + frame - from_head]);
+        sent += frame;
+    }
+}
+
+/// How many bytes `frame_data` appends for `len` bytes of data.
+fn framed_len(len: usize) -> usize {
+    len + 9 * len.div_ceil(FRAME_SIZE).max(1)
 }
 
 fn queue_frame(out: &mut Vec<u8>, kind: u8, flags: u8, stream: u32, payload: &[u8]) {
@@ -1048,6 +1370,8 @@ pub struct HttpIo<T> {
     inner: T,
     state: H2State,
     id: u32,
+    /// What the next read from the wire goes into.
+    bytes: Vec<u8>,
 }
 
 impl<T: Read + Write> HttpIo<T> {
@@ -1093,6 +1417,7 @@ impl<T: Read + Write> HttpIo<T> {
             inner,
             state: H2State::new(true, preface, 1),
             id: 0,
+            bytes: Vec::new(),
         };
         io.flush_out()?;
         io.id = io.drive(H2State::accept)?;
@@ -1112,7 +1437,7 @@ impl<T: Read + Write> HttpIo<T> {
         let id = state
             .open(&H2Request { method, path, authority, scheme, extra }.header_list(), false)?
             .expect("initial stream");
-        let mut io = Self { inner, state, id };
+        let mut io = Self { inner, state, id, bytes: Vec::new() };
         io.flush_out()?;
         Ok(io)
     }
@@ -1202,14 +1527,16 @@ impl<T: Read + Write> HttpIo<T> {
         &mut self,
         mut operation: impl FnMut(&mut H2State) -> io::Result<Option<V>>,
     ) -> io::Result<V> {
-        let mut bytes = [0; FRAME_SIZE];
         loop {
             if let Some(value) = operation(&mut self.state)? {
                 return Ok(value);
             }
             self.flush_out()?;
-            let result = read_retry(&mut self.inner, &mut bytes);
-            let received = self.state.read_result(result, &bytes);
+            if self.bytes.is_empty() {
+                self.bytes.resize(READ_BUFFER, 0);
+            }
+            let result = read_retry(&mut self.inner, &mut self.bytes);
+            let received = self.state.read_result(result, &self.bytes);
             let _ = self.flush_out();
             received?;
         }
@@ -1248,15 +1575,70 @@ impl<T: Read + Write> Write for HttpIo<T> {
 }
 
 struct SharedConnection<R, W> {
-    reader: Option<Mutex<R>>,
+    /// The read half and the buffer it reads into, for a connection its own streams drive.
+    reader: Option<Mutex<(R, Vec<u8>)>>,
     writer: Mutex<WireWriter<W>>,
     state: Mutex<H2State>,
+    /// Where waiters that are not tied to one stream wait. A stream's waiters use its own condvar.
     wake: Condvar,
+    /// Where writers wait for the thread that is writing the queue to the wire.
+    written: Condvar,
+    signal: Arc<WriteSignal>,
+    /// A flush stopped on a full wire, so the next one runs even with nothing queued.
+    retry_flush: AtomicBool,
+    /// Unblocks the receiving half when a configured write deadline ends the connection.
+    on_write_timeout: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 struct WireWriter<W> {
     io: Option<W>,
-    pending_flush: bool,
+    /// The frames being written. Empty between flushes; it trades places with the queue.
+    bytes: Vec<u8>,
+}
+
+/// Who sends the frames a stream just queued.
+enum Turn {
+    /// The stream itself: the wire was free on a connection with a writer thread. The frames
+    /// are not queued; the stream writes them, this many bytes of data, behind what is queued.
+    Own(usize, bool),
+    /// Whoever holds the wire of such a connection. On a wire that falls behind the stream
+    /// waits until its bytes, ending here, left: each stream then has one write queued and the
+    /// streams take turns in the order they queued.
+    Queued(Option<u64>),
+    /// The stream that is flushing, which this one waits for until its bytes, ending here, left.
+    Wait(u64),
+}
+
+/// Tells the writer thread that the queue is its to send. It outlives the connection, so the
+/// thread can wait on it without keeping the connection alive.
+#[derive(Default)]
+struct WriteSignal {
+    due: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl WriteSignal {
+    fn notify(&self) {
+        *self.due.lock().expect("HTTP/2 writer signal") = true;
+        self.wake.notify_one();
+    }
+
+    fn wait(&self) {
+        let mut due = self.due.lock().expect("HTTP/2 writer signal");
+        while !*due {
+            due = self.wake.wait(due).expect("HTTP/2 writer signal");
+        }
+        *due = false;
+    }
+}
+
+/// What a thread waits for: something about the connection, data or headers of a stream, or room
+/// to send on a stream.
+#[derive(Clone, Copy)]
+enum Waiter {
+    Connection,
+    Reader(u32),
+    Writer(u32),
 }
 
 impl<R, W> SharedConnection<R, W> {
@@ -1266,61 +1648,297 @@ impl<R, W> SharedConnection<R, W> {
 
     fn with_reader(read: Option<R>, write: W, state: H2State) -> Self {
         Self {
-            reader: read.map(Mutex::new),
+            reader: read.map(|read| Mutex::new((read, Vec::new()))),
             writer: Mutex::new(WireWriter {
                 io: Some(write),
-                pending_flush: false,
+                bytes: Vec::new(),
             }),
             state: Mutex::new(state),
             wake: Condvar::new(),
+            written: Condvar::new(),
+            signal: Arc::default(),
+            retry_flush: AtomicBool::new(false),
+            on_write_timeout: None,
+        }
+    }
+
+    /// Releases the state and wakes the waiters it queued. `streams` is scratch space.
+    fn notify(&self, mut state: MutexGuard<'_, H2State>, streams: &mut Wakers) {
+        let connection = state.take_wakeups(streams);
+        drop(state);
+        for (wake, sides) in streams.drain(..) {
+            if sides & READER != 0 {
+                wake[0].notify_all();
+            }
+            if sides & WRITER != 0 {
+                wake[1].notify_all();
+            }
+        }
+        if connection {
+            self.wake.notify_all();
         }
     }
 }
 
+impl<R, W> Drop for SharedConnection<R, W> {
+    fn drop(&mut self) {
+        // The writer thread wakes, finds the connection gone and ends.
+        self.signal.notify();
+    }
+}
+
 impl<R, W: Write> SharedConnection<R, W> {
+    /// Writes the queue to the wire. `wait` returns once everything queued by now has left;
+    /// without it the call only makes sure the queue is being written.
     fn flush(&self, wait: bool) -> io::Result<()> {
-        let mut writer = if wait {
-            self.writer.lock().expect("HTTP/2 writer")
-        } else if let Ok(writer) = self.writer.try_lock() {
-            writer
-        } else {
+        let mut state = self.state.lock().expect("HTTP/2 state");
+        let until = wait.then(|| state.queued_end());
+        if !state.threaded {
+            return self.flush_to(state, until);
+        }
+        if !state.flushing && !state.outbound.is_empty() {
+            state.flushing = true;
+            self.signal.notify();
+        }
+        let Some(until) = until else {
             return Ok(());
         };
-        loop {
-            let mut state = self.state.lock().expect("HTTP/2 state");
-            if writer.io.is_none() {
-                state.check_connection()?;
-                return Err(io::Error::new(ErrorKind::BrokenPipe, "HTTP/2 writer closed"));
+        while state.flushed < until {
+            state.check_connection()?;
+            state.flush_waiters += 1;
+            state = self.written.wait(state).expect("HTTP/2 state");
+            state.flush_waiters -= 1;
+        }
+        Ok(())
+    }
+
+    /// Waits until the queued bytes up to `until` have left through the stream or thread that
+    /// holds the wire. After `timeout` the bytes stay queued and the call returns.
+    fn wait_written(&self, until: u64, timeout: Option<Duration>) -> io::Result<()> {
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let mut state = self.state.lock().expect("HTTP/2 state");
+        while state.flushed < until {
+            state.check_connection()?;
+            state.flush_waiters += 1;
+            state = match deadline {
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        state.flush_waiters -= 1;
+                        return Ok(());
+                    }
+                    self.written.wait_timeout(state, remaining).expect("HTTP/2 state").0
+                }
+                None => self.written.wait(state).expect("HTTP/2 state"),
+            };
+            state.flush_waiters -= 1;
+        }
+        Ok(())
+    }
+
+    /// Sends what is queued and then the caller's own data on the calling thread, which took the
+    /// wire while it was free, and leaves whatever is queued meanwhile to the writer thread. The
+    /// caller is a stream that writes, so it is never held by more than the queue it found. Its
+    /// data is framed straight into the bytes for the wire: `len` bytes of `head` and `body`.
+    fn send_batch(&self, id: u32, head: &[u8], body: &[u8], len: usize, last: bool) -> io::Result<()> {
+        let mut writer = self.writer.lock().expect("HTTP/2 writer");
+        let mut state = self.state.lock().expect("HTTP/2 state");
+        let WireWriter { io, bytes } = &mut *writer;
+        let mut result = state.check_connection();
+        match io {
+            Some(io) if result.is_ok() => {
+                std::mem::swap(&mut state.outbound, bytes);
+                state.taken += (bytes.len() + framed_len(len)) as u64;
+                drop(state);
+                frame_data(bytes, id, head, body, len, last);
+                let (started, queued) = (Instant::now(), bytes.len());
+                let sent = flush_bytes(io, bytes);
+                state = self.state.lock().expect("HTTP/2 state");
+                state.note_write(queued - bytes.len(), started.elapsed());
+                state.flushed = state.taken - bytes.len() as u64;
+                match sent {
+                    Ok(()) => {}
+                    // The wire is full: the writer thread goes on with the rest.
+                    Err(error) if retryable(&error) && state.limits.write_timeout.is_none() => {}
+                    Err(error) => {
+                        bytes.clear();
+                        state.fail(&error);
+                        state.outbound.clear();
+                        result = Err(error);
+                    }
+                }
             }
-            if state.outbound.is_empty() && !writer.pending_flush {
-                // Release the writer while holding state so a new control frame can always get a flush.
-                drop(writer);
-                return Ok(());
+            Some(_) => {}
+            None => result = result.and(Err(io::Error::new(ErrorKind::BrokenPipe, "HTTP/2 writer closed"))),
+        }
+        if result.is_ok() && (!bytes.is_empty() || !state.outbound.is_empty()) {
+            self.signal.notify();
+        } else {
+            state.flushing = false;
+        }
+        drop(writer);
+        if state.flush_waiters != 0 {
+            self.written.notify_all();
+        }
+        self.notify(state, &mut Vec::new());
+        result
+    }
+
+    /// The writer thread's turn: sends the queue until it is empty. A full wire is tried again
+    /// for as long as a stream holds the connection. Returns whether the wire is still usable.
+    fn send_queue(self: &Arc<Self>) -> bool {
+        let mut writer = self.writer.lock().expect("HTTP/2 writer");
+        let mut state = self.state.lock().expect("HTTP/2 state");
+        let alive = loop {
+            let WireWriter { io, bytes } = &mut *writer;
+            let Some(io) = io else {
+                break false;
+            };
+            if state.failure.is_some() {
+                break false;
             }
-            let mut bytes = std::mem::take(&mut state.outbound);
+            if bytes.is_empty() {
+                if state.outbound.is_empty() {
+                    break true;
+                }
+                std::mem::swap(&mut state.outbound, bytes);
+                state.taken += bytes.len() as u64;
+            }
             drop(state);
-            if let Err(error) = flush_bytes(writer.io.as_mut().expect("HTTP/2 writer"), &mut bytes) {
-                let mut state = self.state.lock().expect("HTTP/2 state");
-                if retryable(&error) && state.limits.write_timeout.is_none() {
-                    writer.pending_flush = true;
-                    bytes.append(&mut state.outbound);
-                    state.outbound = bytes;
-                } else {
-                    writer.pending_flush = false;
+            let (started, queued) = (Instant::now(), bytes.len());
+            let sent = flush_bytes(io, bytes);
+            state = self.state.lock().expect("HTTP/2 state");
+            state.note_write(queued - bytes.len(), started.elapsed());
+            state.flushed = state.taken - bytes.len() as u64;
+            match sent {
+                Ok(()) => {}
+                Err(error) if retryable(&error) && state.limits.write_timeout.is_none() => {
+                    if Arc::strong_count(self) == 1 {
+                        // Only this thread still holds the connection.
+                        break false;
+                    }
+                    if started.elapsed() < Duration::from_millis(1) {
+                        drop(state);
+                        std::thread::sleep(Duration::from_millis(1));
+                        state = self.state.lock().expect("HTTP/2 state");
+                    }
+                }
+                Err(error) => {
+                    bytes.clear();
                     state.fail(&error);
                     state.outbound.clear();
-                    self.wake.notify_all();
+                    break false;
                 }
-                drop(writer);
-                return Err(error);
             }
-            writer.pending_flush = false;
+            if state.flush_waiters != 0 {
+                self.written.notify_all();
+            }
+        };
+        state.flushing = false;
+        drop(writer);
+        if state.flush_waiters != 0 {
+            self.written.notify_all();
         }
+        self.notify(state, &mut Vec::new());
+        alive
+    }
+
+    /// Returns once the queued bytes up to `until` have left. One thread at a time writes the
+    /// queue, in the order the bytes were queued, until it is empty. A writer waits for it until
+    /// its own bytes have left, and writes what is still queued when it finds nobody writing,
+    /// which is also how a write that gave up on a full wire is taken up again. A caller without
+    /// bytes of its own (`None`) writes only while no writer waits, so a reader is never held by
+    /// other streams' data.
+    fn flush_to<'a>(&'a self, mut state: MutexGuard<'a, H2State>, until: Option<u64>) -> io::Result<()> {
+        while state.flushing {
+            let Some(until) = until else {
+                return Ok(());
+            };
+            if state.flushed >= until {
+                return Ok(());
+            }
+            state.check_connection()?;
+            state.flush_waiters += 1;
+            state = self.written.wait(state).expect("HTTP/2 state");
+            state.flush_waiters -= 1;
+        }
+        if state.outbound.is_empty() && !self.retry_flush.load(Ordering::Relaxed) {
+            return match until {
+                Some(until) if state.flushed < until => state.check_connection(),
+                _ => Ok(()),
+            };
+        }
+        state.flushing = true;
+        // Only the flushing thread takes the writer, so this never waits for another flush.
+        let mut writer = self.writer.lock().expect("HTTP/2 writer");
+        let result = loop {
+            let WireWriter { io, bytes } = &mut *writer;
+            let Some(io) = io else {
+                break state
+                    .check_connection()
+                    .and(Err(io::Error::new(ErrorKind::BrokenPipe, "HTTP/2 writer closed")));
+            };
+            if state.outbound.is_empty() && !self.retry_flush.load(Ordering::Relaxed) {
+                break Ok(());
+            }
+            if until.is_none() && state.flush_waiters != 0 {
+                // A writer waits, and writes what is queued as soon as this call lets go.
+                break Ok(());
+            }
+            std::mem::swap(&mut state.outbound, bytes);
+            state.taken += bytes.len() as u64;
+            drop(state);
+            let (started, queued) = (Instant::now(), bytes.len());
+            let result = flush_bytes(io, bytes);
+            state = self.state.lock().expect("HTTP/2 state");
+            state.note_write(queued - bytes.len(), started.elapsed());
+            match result {
+                Ok(()) => {
+                    self.retry_flush.store(false, Ordering::Relaxed);
+                    state.flushed = state.taken;
+                    if state.flush_waiters != 0 {
+                        self.written.notify_all();
+                    }
+                }
+                Err(error) if retryable(&error) && state.limits.write_timeout.is_none() => {
+                    // The wire is full. What it did not take goes back to the front of the queue.
+                    self.retry_flush.store(true, Ordering::Relaxed);
+                    state.taken -= bytes.len() as u64;
+                    state.flushed = state.taken;
+                    bytes.append(&mut state.outbound);
+                    std::mem::swap(&mut state.outbound, bytes);
+                    break Err(error);
+                }
+                Err(error) => {
+                    self.retry_flush.store(false, Ordering::Relaxed);
+                    bytes.clear();
+                    let error = if retryable(&error) {
+                        if let Some(stop) = &self.on_write_timeout { stop(); }
+                        io::Error::new(ErrorKind::ConnectionAborted, "HTTP/2 write made no progress before its deadline")
+                    } else {
+                        error
+                    };
+                    state.fail(&error);
+                    state.outbound.clear();
+                    break Err(error);
+                }
+            }
+        };
+        // The writer is released while the state is held, so a frame queued from now on finds
+        // nobody flushing and gets a flush of its own.
+        drop(writer);
+        state.flushing = false;
+        if state.flush_waiters != 0 {
+            self.written.notify_all();
+        }
+        self.notify(state, &mut Vec::new());
+        result
     }
 
     fn close(&self, id: u32, grpc: bool) {
-        self.state.lock().expect("HTTP/2 state").close(id, grpc);
-        self.wake.notify_all();
+        let mut state = self.state.lock().expect("HTTP/2 state");
+        state.close(id, grpc);
+        self.notify(state, &mut Vec::new());
         let _ = self.flush(false);
     }
 }
@@ -1328,39 +1946,81 @@ impl<R, W: Write> SharedConnection<R, W> {
 impl<R: Read, W: Write> SharedConnection<R, W> {
     fn drive<V>(
         &self,
+        waiter: Waiter,
         operation: impl FnMut(&mut H2State) -> io::Result<Option<V>>,
     ) -> io::Result<V> {
-        self.drive_for(None, operation)
+        self.drive_for(waiter, None, operation)
     }
 
     fn drive_for<V>(
         &self,
+        waiter: Waiter,
         timeout: Option<Duration>,
         mut operation: impl FnMut(&mut H2State) -> io::Result<Option<V>>,
     ) -> io::Result<V> {
-        let mut bytes = [0; FRAME_SIZE];
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let mut wakers = Vec::new();
         let mut state = self.state.lock().expect("HTTP/2 state");
         loop {
             if let Some(value) = operation(&mut state)? {
+                if state.has_wakeups() {
+                    self.notify(state, &mut wakers);
+                }
                 return Ok(value);
             }
             let Some(reader) = self.reader.as_ref().filter(|_| !state.reading) else {
-                state = if let Some(deadline) = deadline {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Err(io::Error::new(ErrorKind::TimedOut, "HTTP/2 stream I/O"));
+                // The reader thread, or the stream that is reading, wakes this one.
+                let remaining = match deadline {
+                    Some(deadline) => {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            return Err(io::Error::new(ErrorKind::TimedOut, "HTTP/2 stream I/O"));
+                        }
+                        Some(remaining)
                     }
-                    self.wake.wait_timeout(state, remaining).expect("HTTP/2 state").0
-                } else {
-                    self.wake.wait(state).expect("HTTP/2 state")
+                    None => None,
                 };
+                let side = match waiter {
+                    Waiter::Reader(id) => Some((id, 0)),
+                    Waiter::Writer(id) => Some((id, 1)),
+                    Waiter::Connection => None,
+                };
+                let patience = match waiter {
+                    Waiter::Writer(id) => state.streams.get(&id).and_then(Stream::patience),
+                    _ => None,
+                };
+                let remaining = match (remaining, patience) {
+                    (Some(remaining), Some(patience)) => Some(remaining.min(patience)),
+                    (remaining, patience) => remaining.or(patience),
+                };
+                let own = side.and_then(|(id, side)| {
+                    let slot = state.streams.get_mut(&id)?;
+                    slot.waiting[side] += 1;
+                    Some((id, side, Arc::clone(&slot.wake)))
+                });
+                if own.is_none() {
+                    state.connection_waiting += 1;
+                }
+                let condvar = own.as_ref().map_or(&self.wake, |(_, side, wake)| &wake[*side]);
+                state = match remaining {
+                    Some(remaining) => condvar.wait_timeout(state, remaining).expect("HTTP/2 state").0,
+                    None => condvar.wait(state).expect("HTTP/2 state"),
+                };
+                match own {
+                    Some((id, side, _)) => {
+                        if let Some(slot) = state.streams.get_mut(&id) {
+                            slot.waiting[side] -= 1;
+                        }
+                    }
+                    None => state.connection_waiting -= 1,
+                }
                 continue;
             };
             // Any waiting direction may read control frames. Socket reads never hold the state or writer lock.
             let now = Instant::now();
             if state.tick(now) {
-                self.wake.notify_all();
+                self.notify(state, &mut wakers);
+                state = self.state.lock().expect("HTTP/2 state");
                 continue;
             }
             state.reading = true;
@@ -1369,13 +2029,23 @@ impl<R: Read, W: Write> SharedConnection<R, W> {
             if pinging {
                 let _ = self.flush(false);
             }
-            let received = read_retry(&mut *reader.lock().expect("HTTP/2 reader"), &mut bytes);
+            let mut reader = reader.lock().expect("HTTP/2 reader");
+            let (io, bytes) = &mut *reader;
+            if bytes.is_empty() {
+                bytes.resize(READ_BUFFER, 0);
+            }
+            let received = read_retry(io, bytes);
             state = self.state.lock().expect("HTTP/2 state");
             state.reading = false;
-            let received = state.read_result(received, &bytes);
-            self.wake.notify_all();
-            drop(state);
-            let _ = self.flush(false);
+            let received = state.read_result(received, bytes);
+            drop(reader);
+            // Whoever waits may have to take over the reading.
+            state.wake_all = true;
+            let unsent = !state.outbound.is_empty();
+            self.notify(state, &mut wakers);
+            if unsent {
+                let _ = self.flush(false);
+            }
             received?;
             state = self.state.lock().expect("HTTP/2 state");
         }
@@ -1385,19 +2055,60 @@ impl<R: Read, W: Write> SharedConnection<R, W> {
         if buf.is_empty() {
             return Ok(0);
         }
-        let _ = self.flush(false);
-        let len = self.drive_for(timeout, |state| state.read_data(id, buf))?;
-        let _ = self.flush(false);
+        if self.retry_flush.load(Ordering::Relaxed) {
+            let _ = self.flush(false);
+        }
+        let (len, unsent) = self.drive_for(Waiter::Reader(id), timeout, |state| {
+            Ok(state.read_data(id, buf)?.map(|len| (len, !state.outbound.is_empty())))
+        })?;
+        // Reading returns flow-control window to the peer now and then.
+        if unsent {
+            let _ = self.flush(false);
+        }
         Ok(len)
     }
 
     fn write(&self, id: u32, buf: &[u8], end: bool, timeout: Option<Duration>) -> io::Result<usize> {
-        if buf.is_empty() && !end {
+        self.write_parts(id, buf, &[], end, timeout)
+    }
+
+    fn write_parts(&self, id: u32, head: &[u8], body: &[u8], end: bool, timeout: Option<Duration>) -> io::Result<usize> {
+        if head.is_empty() && body.is_empty() && !end {
             return Ok(0);
         }
-        self.flush(true)?;
-        let len = self.drive_for(timeout, |state| state.write_data(id, buf, end))?;
-        match self.flush(true) {
+        if self.retry_flush.load(Ordering::Relaxed) {
+            self.flush(true)?;
+        }
+        let (len, turn) = self.drive_for(Waiter::Writer(id), timeout, |state| {
+            if state.threaded && state.outbound.len() > 4 * state.write_budget() {
+                // Writes that ran into their deadline left this much queued: nothing is added.
+                return Err(io::Error::new(ErrorKind::WouldBlock, "HTTP/2 wire is behind"));
+            }
+            let Some((len, last)) = state.reserve(id, head.len() + body.len(), end)? else {
+                return Ok(None);
+            };
+            if state.threaded && !state.flushing {
+                state.flushing = true;
+                return Ok(Some((len, Turn::Own(len, last))));
+            }
+            frame_data(&mut state.outbound, id, head, body, len, last);
+            let turn = if !state.threaded {
+                Turn::Wait(state.queued_end())
+            } else {
+                let behind = state.outbound.len() > state.write_budget();
+                Turn::Queued(behind.then(|| state.queued_end()))
+            };
+            Ok(Some((len, turn)))
+        })?;
+        let result = match turn {
+            Turn::Own(len, last) => self.send_batch(id, head, body, len, last),
+            // The stream or thread that holds the wire sends this too.
+            Turn::Queued(None) => Ok(()),
+            Turn::Queued(Some(end)) => self.wait_written(end, timeout),
+            // The call returns once its frames have left, whoever wrote them.
+            Turn::Wait(end) => self.flush_to(self.state.lock().expect("HTTP/2 state"), Some(end)),
+        };
+        match result {
             Err(error) if !retryable(&error) => Err(error),
             _ => Ok(len),
         }
@@ -1438,7 +2149,7 @@ impl<R: Read, W: Write> SharedHttp<R, W> {
         // The caller configures the available halves without interrupting I/O on the other half.
         if let Some(reader) = &self.shared.reader {
             if let Ok(mut reader) = reader.try_lock() {
-                read(&mut *reader);
+                read(&mut reader.0);
             }
         }
         if let Ok(mut writer) = self.shared.writer.try_lock() {
@@ -1475,12 +2186,12 @@ impl<W: Write + Send + 'static> H2Conn<W> {
     ) -> io::Result<H2Stream<W>> {
         let stream = self.request(&H2Request { method, path, authority, scheme, extra }, end, false)?;
         self.shared.state.lock().expect("HTTP/2 state").streams.get_mut(&stream.id).expect("open stream").any_status = true;
-        self.shared.drive(|state| state.status(stream.id))?;
+        self.shared.drive(Waiter::Reader(stream.id), |state| state.status(stream.id))?;
         Ok(stream)
     }
 
     pub fn wait_closed(&self) -> io::Result<()> {
-        self.shared.drive(|state| {
+        self.shared.drive(Waiter::Connection, |state| {
             if state.peer_goaway.is_some() { return Ok(Some(())); }
             state.check_connection()?;
             Ok(None)
@@ -1491,8 +2202,10 @@ impl<W: Write + Send + 'static> H2Conn<W> {
         Self::start(read, write, true, H2Limits::default())
     }
 
-    pub fn serve_with_limits<R: Read + Send + 'static>(read: R, write: W, limits: H2Limits) -> io::Result<Self> {
-        Self::start(read, write, true, limits)
+    pub fn serve_with_limits<R: Read + Send + 'static>(
+        read: R, write: W, limits: H2Limits, on_write_timeout: impl Fn() + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        Self::start_with_timeout(read, write, true, limits, Some(Box::new(on_write_timeout)))
     }
 
     pub fn connect<R: Read + Send + 'static>(read: R, write: W) -> io::Result<Self> {
@@ -1507,12 +2220,20 @@ impl<W: Write + Send + 'static> H2Conn<W> {
     }
 
     fn start<R: Read + Send + 'static>(read: R, write: W, server: bool, limits: H2Limits) -> io::Result<Self> {
+        Self::start_with_timeout(read, write, server, limits, None)
+    }
+
+    fn start_with_timeout<R: Read + Send + 'static>(
+        read: R, write: W, server: bool, limits: H2Limits, on_write_timeout: Option<Box<dyn Fn() + Send + Sync>>,
+    ) -> io::Result<Self> {
         let read: Box<dyn Read + Send> = Box::new(read);
-        let shared = Arc::new(SharedConnection::new(
+        let mut connection = SharedConnection::new(
             read,
             write,
             H2State::with_limits(server, true, limits),
-        ));
+        );
+        connection.on_write_timeout = on_write_timeout;
+        let shared = Arc::new(connection);
         shared.flush(true)?;
         Ok(Self { shared })
     }
@@ -1524,20 +2245,20 @@ impl<W: Write + Send + 'static> H2Conn<W> {
         receive_window: Option<u32>,
         keepalive: Option<H2Keepalive>,
     ) -> io::Result<Self> {
-        let shared: Arc<Multiplexed<W>> = Arc::new(SharedConnection::with_reader(
-            None,
-            write,
-            H2State::with_limits(server, !server, receive_window.map_or_else(H2Limits::default, |window| H2Limits {
-                // An explicit gRPC stream window disables automatic connection-window expansion.
-                stream_window: window,
-                connection_window: DEFAULT_WINDOW,
-                ..H2Limits::default()
-            })),
-        ));
+        let state = H2State::with_limits(server, !server, receive_window.map_or_else(H2Limits::default, |window| H2Limits {
+            // An explicit gRPC stream window disables automatic connection-window expansion.
+            stream_window: window,
+            connection_window: DEFAULT_WINDOW,
+            ..H2Limits::default()
+        }));
+        let shared: Arc<Multiplexed<W>> = Arc::new(SharedConnection::with_reader(None, write, state));
         shared.flush(true)?;
+        // From here on the two threads below serve the connection.
+        shared.state.lock().expect("HTTP/2 state").threaded = true;
         let connection = Arc::downgrade(&shared);
         std::thread::Builder::new().spawn(move || {
-            let mut bytes = [0; FRAME_SIZE];
+            let mut bytes = vec![0; READ_BUFFER];
+            let mut wakers = Vec::new();
             let mut last_read = Instant::now();
             let handshake = last_read + Duration::from_secs(10);
             let mut ping = None;
@@ -1565,14 +2286,26 @@ impl<W: Write + Send + 'static> H2Conn<W> {
                     }
                 }
                 let failed = state.failure.is_some();
-                shared.wake.notify_all();
-                drop(state);
-                let _ = shared.flush(false);
+                let unsent = !state.outbound.is_empty();
+                // Only the streams these frames were for wake up.
+                shared.notify(state, &mut wakers);
+                if unsent || shared.retry_flush.load(Ordering::Relaxed) {
+                    let _ = shared.flush(false);
+                }
                 if failed {
                     // A pooled connection can still have references after the wire is dead.
                     shared.writer.lock().expect("HTTP/2 writer").io.take();
+                    shared.signal.notify();
                     return;
                 }
+            }
+        })?;
+        let (connection, signal) = (Arc::downgrade(&shared), Arc::clone(&shared.signal));
+        std::thread::Builder::new().spawn(move || loop {
+            signal.wait();
+            let Some(shared) = connection.upgrade() else { return };
+            if !shared.send_queue() {
+                return;
             }
         })?;
         Ok(Self { shared })
@@ -1601,7 +2334,7 @@ impl<W: Write + Send + 'static> H2Conn<W> {
     /// Like `request`, but a peer at its concurrent-stream limit gives `None` at once instead of a wait.
     pub fn try_request(&self, request: &H2Request<'_>, end: bool, wait: bool) -> io::Result<Option<H2Stream<W>>> {
         let headers = request.header_list();
-        let opened = self.shared.drive(|state| {
+        let opened = self.shared.drive(Waiter::Connection, |state| {
             state.check_goaway()?;
             if !state.settings_received {
                 return Ok(None);
@@ -1618,7 +2351,7 @@ impl<W: Write + Send + 'static> H2Conn<W> {
         };
         self.shared.flush(true)?;
         if wait {
-            self.shared.drive(|state| state.status(id))?;
+            self.shared.drive(Waiter::Reader(id), |state| state.status(id))?;
         }
         Ok(Some(stream))
     }
@@ -1630,7 +2363,7 @@ impl<W: Write + Send + 'static> H2Conn<W> {
         wait: bool,
         timeout: Option<Duration>,
     ) -> io::Result<H2Stream<W>> {
-        let id = self.shared.drive_for(timeout, |state| {
+        let id = self.shared.drive_for(Waiter::Connection, timeout, |state| {
             state.check_goaway()?;
             if state.settings_received {
                 state.open(headers, end)
@@ -1645,13 +2378,13 @@ impl<W: Write + Send + 'static> H2Conn<W> {
         };
         self.shared.flush(true)?;
         if wait {
-            self.shared.drive_for(timeout, |state| state.status(id))?;
+            self.shared.drive_for(Waiter::Reader(id), timeout, |state| state.status(id))?;
         }
         Ok(stream)
     }
 
     pub fn accept(&self) -> io::Result<H2Stream<W>> {
-        let id = self.shared.drive(H2State::accept)?;
+        let id = self.shared.drive(Waiter::Connection, H2State::accept)?;
         Ok(H2Stream {
             id,
             shared: Arc::clone(&self.shared),
@@ -1666,13 +2399,19 @@ impl<W: Write + Send + 'static> H2Stream<W> {
     }
 
     pub(crate) fn cancel(&self) {
-        self.shared.state.lock().expect("HTTP/2 state").reset(self.id, CANCEL, true);
-        self.shared.wake.notify_all();
+        let mut state = self.shared.state.lock().expect("HTTP/2 state");
+        state.reset(self.id, CANCEL, true);
+        self.shared.notify(state, &mut Vec::new());
         let _ = self.shared.flush(false);
     }
 
     pub(crate) fn read_for(&self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
         self.shared.read(self.id, buf, Some(timeout))
+    }
+
+    /// Writes `head` and then `body` as one run of bytes; returns how many of them were taken.
+    pub(crate) fn write_parts_for(&self, head: &[u8], body: &[u8], timeout: Duration) -> io::Result<usize> {
+        self.shared.write_parts(self.id, head, body, false, Some(timeout))
     }
 
     pub(crate) fn write_for(&self, buf: &[u8], timeout: Duration) -> io::Result<usize> {
@@ -1731,7 +2470,7 @@ impl<W: Write + Send + 'static> H2Stream<W> {
             buf = &buf[len..];
         }
         self.shared.flush(true)?;
-        self.shared.drive(|state| {
+        self.shared.drive(Waiter::Reader(self.id), |state| {
             if state.server { state.check_connection()?; Ok(Some(())) }
             else { state.status(self.id) }
         })
@@ -2092,7 +2831,7 @@ mod tests {
             .map(|pair| (u16::from_be_bytes([pair[0], pair[1]]), u32::from_be_bytes(pair[2..].try_into().unwrap())))
             .collect();
         settings.sort_unstable();
-        assert_eq!(settings, [(1, 8192), (3, 7), (4, 524_288), (5, 32_768), (6, 8512)]);
+        assert_eq!(settings, [(1, 8192), (3, 7), (4, 524_288), (5, 32_768), (6, 8512), (9, 1)]);
         let (kind, _, id, payload) = next_frame(&mut wire);
         assert_eq!((kind, id), (WINDOW_UPDATE, 0));
         assert_eq!(u32::from_be_bytes(payload.try_into().unwrap()), 2_097_152 - DEFAULT_WINDOW);
@@ -2100,10 +2839,10 @@ mod tests {
     }
 
     #[test]
-    fn default_limits_keep_the_settings_frame_unchanged() {
+    fn default_server_settings_include_the_limits_and_disable_legacy_priorities() {
         let state = H2State::new(true, true, 128);
         let (_, _, _, payload) = next_frame(&state.outbound[..]);
-        assert_eq!(payload.len(), 12);
+        assert_eq!(payload, [0, 3, 0, 0, 0, 128, 0, 4, 1, 0, 0, 0, 0, 9, 0, 0, 0, 1]);
     }
 
     #[test]

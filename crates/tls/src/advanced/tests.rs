@@ -94,8 +94,21 @@ fn certificate_files_reload_atomically_and_one_time_loading_stays_fixed() {
     let key = path.join("key.pem");
     let first = identity("localhost");
     let second = identity("localhost");
-    std::fs::write(&certificate, &first.certificate).unwrap();
-    std::fs::write(&key, &first.key).unwrap();
+    let cert_len = first.certificate.len().max(second.certificate.len());
+    let key_len = first.key.len().max(second.key.len());
+    let modified = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let write = |path: &std::path::Path, pem: &str, len: usize| {
+        let mut bytes = pem.as_bytes().to_vec();
+        bytes.resize(len, b'\n');
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(&bytes).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+        let metadata = file.metadata().unwrap();
+        assert_eq!(metadata.len(), len as u64);
+        assert_eq!(metadata.modified().unwrap(), modified);
+    };
+    write(&certificate, &first.certificate, cert_len);
+    write(&key, &first.key, key_len);
     let mut options = options();
     options.certificates = vec![TlsCertificate {
         certificate_file: certificate.to_str().unwrap().into(),
@@ -106,23 +119,22 @@ fn certificate_files_reload_atomically_and_one_time_loading_stays_fixed() {
     options.certificates[0].one_time_loading = true;
     let fixed = advanced_server_config(&options).unwrap();
     let first_der = peer_identity(server.clone()).0;
-    std::fs::write(&certificate, &second.certificate).unwrap();
+    write(&certificate, &second.certificate, cert_len);
     assert_eq!(
         peer_identity(server.clone()).0,
         first_der,
         "a partial rotation must retain the validated pair"
     );
-    std::fs::write(&key, &second.key).unwrap();
-    assert_ne!(peer_identity(server.clone()).0, first_der);
+    write(&key, &second.key, key_len);
+    let second_der = boring2::x509::X509::from_pem(second.certificate.as_bytes())
+        .unwrap()
+        .to_der()
+        .unwrap();
+    assert_ne!(first_der, second_der);
+    assert_eq!(peer_identity(server.clone()).0, second_der);
     assert_eq!(peer_identity(fixed).0, first_der);
     std::fs::write(&certificate, "invalid PEM").unwrap();
-    assert_eq!(
-        peer_identity(server).0,
-        boring2::x509::X509::from_pem(second.certificate.as_bytes())
-            .unwrap()
-            .to_der()
-            .unwrap()
-    );
+    assert_eq!(peer_identity(server).0, second_der);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -643,9 +655,6 @@ fn browser_hello_fields_match_pinned_xray_captures() {
     }
 }
 
-mod interop {
-    include!("interop.rs");
-}
 
 #[test]
 fn read_only_tls_flushes_key_update_after_writer_remap_and_partial_write() {

@@ -21,6 +21,8 @@ pub trait Upstream: Send + Sync {
 pub trait Stream: Send + Sync {
     fn read_for(&self, buf: &mut [u8], wait: Duration) -> io::Result<usize>;
     fn write_all(&self, buf: &[u8]) -> io::Result<()>;
+    fn finish_write(&self) -> io::Result<()> { Ok(()) }
+    fn supports_half_close(&self) -> bool { false }
     fn close(&self);
 }
 

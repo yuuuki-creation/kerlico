@@ -1,0 +1,144 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 0a3828e..21d20ec 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -4640,6 +4640,21 @@ typedef int (*RAMA_SSL_CLIENT_HELLO_MUTATOR)(SSL *ssl, const uint8_t *hello,
+ OPENSSL_EXPORT int RAMA_SSL_set_client_hello_mutator(
+     SSL *ssl, RAMA_SSL_CLIENT_HELLO_MUTATOR mutator);
+ 
++#if defined(BORINGSSL_PREFIX)
++#if defined(__PRAGMA_REDEFINE_EXTNAME) && !defined(__ASSEMBLER__)
++#pragma redefine_extname RAMA_SSL_prepare_tls12_shares BORINGSSL_ADD_USER_LABEL_AND_PREFIX(RAMA_SSL_prepare_tls12_shares)
++#else
++#define RAMA_SSL_prepare_tls12_shares BORINGSSL_ADD_PREFIX(RAMA_SSL_prepare_tls12_shares)
++#endif
++#endif
++
++// Prepares one TLS 1.2 ECDHE key per group before the ClientHello. The output
++// concatenates each uncompressed public key preceded by its 16-bit length.
++// The selected private key stays in the SSL object through ClientKeyExchange.
++OPENSSL_EXPORT int RAMA_SSL_prepare_tls12_shares(
++    SSL *ssl, const uint16_t *groups, size_t count, uint8_t *out,
++    size_t capacity, size_t *out_len);
++
+ // SSL_set_reject_unusable_ech_config configures whether the client will fail
+ // the handshake if a valid, supported ECHConfig cannot be selected to offer
+ // ECH.
+diff --git a/ssl/handshake_client.cc b/ssl/handshake_client.cc
+index 8bd994b..3fbdd1b 100644
+--- a/ssl/handshake_client.cc
++++ b/ssl/handshake_client.cc
+@@ -262,7 +262,9 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
+     constexpr size_t kRandomOffset = 6;
+     constexpr size_t kSessionOffset = kRandomOffset + SSL3_RANDOM_SIZE + 1;
+     const size_t id_len = hs->session_id.size();
+-    if (hs->selected_ech_config || ssl->session ||
++    const bool tls13_psk = ssl->session &&
++        ssl_session_protocol_version(ssl->session.get()) >= TLS1_3_VERSION;
++    if (hs->selected_ech_config || tls13_psk ||
+         msg.size() < kSessionOffset + id_len ||
+         msg[kSessionOffset - 1] != id_len) {
+       OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
+@@ -478,7 +480,8 @@ static enum ssl_hs_wait_t do_start_connect(SSL_HANDSHAKE *hs) {
+   if (session_type == SSLSessionType::kID) {
+     hs->session_id = ssl->session->session_id;
+   } else if (session_type == SSLSessionType::kTicket ||
+-             enable_compatibility_mode) {
++             enable_compatibility_mode ||
++             !ssl->config->eager_tls12_shares.empty()) {
+     // TLS 1.2 session tickets require a placeholder value to signal resumption.
+     hs->session_id.ResizeForOverwrite(SSL_MAX_SSL_SESSION_ID_LENGTH);
+     if (!RAND_bytes(hs->session_id.data(), hs->session_id.size())) {
+@@ -1534,11 +1537,23 @@ static enum ssl_hs_wait_t do_send_client_key_exchange(SSL_HANDSHAKE *hs) {
+       return ssl_hs_error;
+     }
+ 
+-    // Generate a premaster secret and encapsulate it.
+-    bssl::UniquePtr<SSLKeyShare> kem =
+-        SSLKeyShare::Create(hs->new_session->group_id);
+     uint8_t alert = SSL_AD_DECODE_ERROR;
+-    if (!kem || !kem->Encap(&child, &pms, &alert, hs->peer_key)) {
++    bool exchanged = false;
++    if (ssl->config->eager_tls12_shares.empty()) {
++      auto kem = SSLKeyShare::Create(hs->new_session->group_id);
++      exchanged = kem && kem->Encap(&child, &pms, &alert, hs->peer_key);
++    } else {
++      for (auto &share : ssl->config->eager_tls12_shares) {
++        if (share.key->GroupID() == hs->new_session->group_id) {
++          exchanged = CBB_add_bytes(&child, share.public_key.data(),
++                                    share.public_key.size()) &&
++                      share.key->Decap(&pms, &alert, hs->peer_key);
++          break;
++        }
++      }
++      ssl->config->eager_tls12_shares.clear();
++    }
++    if (!exchanged) {
+       ssl_send_alert(ssl, SSL3_AL_FATAL, alert);
+       return ssl_hs_error;
+     }
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 6320dbe..78b4640 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -3550,6 +3550,11 @@ RamaConnectionConfig *rama_connection_config(SSL_CONFIG *config);
+ 
+ struct SSL_CONFIG {
+   RAMA_SSL_CLIENT_HELLO_MUTATOR client_hello_mutator = nullptr;
++  struct Tls12Share {
++    UniquePtr<SSLKeyShare> key;
++    Array<uint8_t> public_key;
++  };
++  InplaceVector<Tls12Share, 3> eager_tls12_shares;
+   static constexpr bool kAllowUniquePtr = true;
+ 
+   explicit SSL_CONFIG(SSLImpl *ssl_arg);
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index 8b9a7ef..5c52e5e 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -3717,6 +3717,44 @@ int RAMA_SSL_set_client_hello_mutator(
+   return 1;
+ }
+ 
++int RAMA_SSL_prepare_tls12_shares(SSL *ssl, const uint16_t *groups, size_t count,
++                                 uint8_t *out, size_t capacity,
++                                 size_t *out_len) {
++  SSLImpl *impl = FromOpaque(ssl);
++  if (!impl->config || impl->server || SSL_is_quic(ssl) || SSL_is_dtls(ssl) ||
++      impl->s3->initial_handshake_complete || count == 0 || count > 3 ||
++      !impl->config->eager_tls12_shares.empty()) {
++    return 0;
++  }
++  SSL_CONFIG *config = impl->config.get();
++  size_t size = 0;
++  for (size_t i = 0; i < count; i++) {
++    uint16_t group = groups[i];
++    if (group != SSL_GROUP_X25519 && group != SSL_GROUP_SECP256R1 &&
++        group != SSL_GROUP_SECP384R1) {
++      config->eager_tls12_shares.clear();
++      return 0;
++    }
++    auto key = SSLKeyShare::Create(group);
++    ScopedCBB cbb;
++    Array<uint8_t> public_key;
++    if (!key || !CBB_init(cbb.get(), 128) || !key->Generate(cbb.get()) ||
++        !CBBFinishArray(cbb.get(), &public_key) ||
++        public_key.size() + 2 > capacity - size) {
++      config->eager_tls12_shares.clear();
++      return 0;
++    }
++    out[size++] = public_key.size() >> 8;
++    out[size++] = public_key.size() & 255;
++    OPENSSL_memcpy(out + size, public_key.data(), public_key.size());
++    size += public_key.size();
++    config->eager_tls12_shares.PushBack(
++        {std::move(key), std::move(public_key)});
++  }
++  *out_len = size;
++  return 1;
++}
++
+ void SSL_set_permute_extensions(SSL *ssl, int enabled) {
+   auto *ssl_impl = FromOpaque(ssl);
+   if (!ssl_impl->config) {

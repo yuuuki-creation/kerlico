@@ -3,9 +3,6 @@
 use std::io::{self, Read, Write};
 use std::sync::Arc;
 
-use aes_gcm::aead::{Aead, Payload};
-use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit, Nonce};
-use chacha20poly1305::ChaCha20Poly1305;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
@@ -14,6 +11,7 @@ use ml_dsa::{
     Signer as _, SigningKey as DsaSigningKey, Verifier as _, VerifyingKey as DsaVerifyingKey,
 };
 use rcgen::{CertificateParams, CustomExtension, KeyPair, RemoteKeyPair};
+use ring::aead::{self, Aad, LessSafeKey, UnboundKey};
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
 use crate::encrypt::checked_x25519;
@@ -147,14 +145,9 @@ impl Transcript {
     }
 }
 
-enum RecordCipher {
-    Aes128(Box<Aes128Gcm>),
-    Aes256(Box<Aes256Gcm>),
-    ChaCha(ChaCha20Poly1305),
-}
-
 pub struct Traffic {
-    cipher: RecordCipher,
+    /// Boxed: the key schedule is large and a `Traffic` is held inline by the link types.
+    key: Box<LessSafeKey>,
     iv: [u8; 12],
 }
 
@@ -260,12 +253,24 @@ const ALERT_PROTOCOL_VERSION: u8 = 70;
 const ALERT_INTERNAL_ERROR: u8 = 80;
 const ALERT_USER_CANCELED: u8 = 90;
 
+/// The most a record takes on the wire: its header and 2^14 + 256 bytes of ciphertext.
+const MAX_RECORD: usize = 5 + 16640;
+/// The wire bytes a reader holds at most. Several full records fit, so one read from the socket
+/// brings every record that already arrived.
+const READ_AHEAD: usize = 4 * MAX_RECORD;
+/// The plaintext one write seals at most. Its records leave in one write to the socket.
+const WRITE_BATCH: usize = 4 * 16384;
+
 pub struct AppReader<S> {
     inner: S,
     traffic: Traffic,
     seq: u64,
-    pending: Vec<u8>,
+    /// `wire[head..tail]` arrived and is not opened yet. It grows with the traffic up to `READ_AHEAD`.
     wire: Vec<u8>,
+    head: usize,
+    tail: usize,
+    /// The part of `wire`, before `head`, that holds an opened record's data still to deliver.
+    plain: std::ops::Range<usize>,
     direct: bool,
     closed: bool,
     useless: usize,
@@ -908,46 +913,173 @@ impl<'a, R: Read> HandshakeRecords<'a, R> {
 }
 
 impl<S: Read> Read for AppReader<S> {
+    /// Returns the data of every record that already arrived, as far as `buf` has room. It reads
+    /// from the inner stream only when it has nothing to return.
+    ///
+    /// Only the first record of a read is judged. What follows it counts when it opens as
+    /// application data and otherwise stays as it arrived for the next read. After a Vision
+    /// switch the bytes behind the last record are not a record, and the caller learns of the
+    /// switch only from the data this read returns.
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
-        while self.pending.is_empty() {
+        let mut done = 0;
+        loop {
+            if !self.plain.is_empty() {
+                let len = self.plain.len().min(buf.len() - done);
+                let from = self.plain.start;
+                buf[done..done + len].copy_from_slice(&self.wire[from..from + len]);
+                self.plain.start += len;
+                done += len;
+                if done == buf.len() {
+                    return Ok(done);
+                }
+            }
             if self.closed {
-                return Ok(0);
+                return Ok(done);
             }
             if self.direct {
-                return self.inner.read(buf);
+                // Bytes read ahead of the last record are the start of the direct stream.
+                let len = (self.tail - self.head).min(buf.len() - done);
+                buf[done..done + len].copy_from_slice(&self.wire[self.head..self.head + len]);
+                self.head += len;
+                done += len;
+                return if done == 0 {
+                    self.inner.read(buf)
+                } else {
+                    Ok(done)
+                };
             }
-            if !read_outer_into(&mut self.inner, &mut self.wire)? {
+            if done > 0 {
+                match self.open_more(&mut buf[done..]) {
+                    Some(len) => done += len,
+                    None => return Ok(done),
+                }
+                if done == buf.len() {
+                    return Ok(done);
+                }
+            } else if !self.open_next()? && !self.fill()? {
                 return Ok(0);
             }
-            let plain =
-                open_record(&self.traffic, self.seq, &self.wire).ok_or_else(invalid_record)?;
-            self.wire.clear();
-            self.seq += 1;
-            let (kind, body) = split_inner(&plain).ok_or_else(invalid_record)?;
-            match (kind, body) {
-                (23, []) => {
-                    // An empty record advances nothing. xtls/reality counts these in a row.
-                    self.useless += 1;
-                    if self.useless > self.max_useless {
-                        return Err(too_many_useless_records());
-                    }
+        }
+    }
+}
+
+impl<S: Read> AppReader<S> {
+    /// Opens the record behind data this read already has, straight into `out`. It counts only
+    /// when all of it arrived, `out` has room for it and it carries application data. Anything
+    /// else is left on the wire untouched: `open_next` judges it on the next read, unless the
+    /// record layer ended before that.
+    fn open_more(&mut self, out: &mut [u8]) -> Option<usize> {
+        let have = self.tail - self.head;
+        if have < 5 {
+            return None;
+        }
+        let header: [u8; 5] = self.wire[self.head..self.head + 5].try_into().unwrap();
+        let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        if header[..3] != [23, 3, 3] || len > 16640 || have < 5 + len || out.len() < len {
+            return None;
+        }
+        let start = self.head + 5;
+        // A failed open clears the bytes it worked on, so it works on a copy.
+        let out = &mut out[..len];
+        out.copy_from_slice(&self.wire[start..start + len]);
+        let opened = open_in_place(&self.traffic, self.seq, &header, out)?;
+        let end = out[..opened].iter().rposition(|byte| *byte != 0)?;
+        if out[end] != 23 || end == 0 {
+            return None;
+        }
+        self.head = start + len;
+        self.seq += 1;
+        self.useless = 0;
+        Some(end)
+    }
+
+    /// Opens the next record in place once all of it arrived. `Ok(false)` asks for more bytes.
+    fn open_next(&mut self) -> io::Result<bool> {
+        let have = self.tail - self.head;
+        if have < 5 {
+            return Ok(false);
+        }
+        let header: [u8; 5] = self.wire[self.head..self.head + 5].try_into().unwrap();
+        let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        // The checks and their alerts follow xtls/reality's `readRecordOrCCS`.
+        if header[0] == 0x80 || header[1..3] != [3, 3] {
+            return Err(alert_error(ALERT_PROTOCOL_VERSION));
+        }
+        if len > 16640 {
+            return Err(alert_error(ALERT_RECORD_OVERFLOW));
+        }
+        if len == 0 {
+            // An empty ChangeCipherSpec is malformed, anything else fails to authenticate.
+            return Err(alert_error(if header[0] == 20 {
+                ALERT_DECODE_ERROR
+            } else {
+                ALERT_BAD_RECORD_MAC
+            }));
+        }
+        if have < 5 + len {
+            return Ok(false);
+        }
+        let start = self.head + 5;
+        if header[0] != 23 {
+            return Err(invalid_record());
+        }
+        let opened = open_in_place(&self.traffic, self.seq, &header, &mut self.wire[start..start + len])
+            .ok_or_else(invalid_record)?;
+        self.head = start + len;
+        self.seq += 1;
+        let text = &self.wire[start..start + opened];
+        let end = text.iter().rposition(|byte| *byte != 0).ok_or_else(invalid_record)?;
+        let (kind, body) = (text[end], &text[..end]);
+        match (kind, body) {
+            (23, []) => {
+                // An empty record advances nothing. xtls/reality counts these in a row.
+                self.useless += 1;
+                if self.useless > self.max_useless {
+                    return Err(too_many_useless_records());
                 }
-                (23, _) => {
-                    self.useless = 0;
-                    self.pending.extend_from_slice(body);
+            }
+            (23, _) => {
+                self.useless = 0;
+                self.plain = start..start + end;
+            }
+            (21, [_, 0]) => self.closed = true,
+            (22, [4, ..]) if body.len() >= 4 && u24(&body[1..4]) + 4 == body.len() => {}
+            _ => return Err(invalid_record()),
+        }
+        Ok(true)
+    }
+
+    /// Reads more of the wire behind what is not opened yet. `Ok(false)` is the end of the stream
+    /// between two records.
+    fn fill(&mut self) -> io::Result<bool> {
+        if self.head == self.tail {
+            self.head = 0;
+            self.tail = 0;
+        } else if self.head > 0 {
+            self.wire.copy_within(self.head..self.tail, 0);
+            self.tail -= self.head;
+            self.head = 0;
+        }
+        if self.tail == self.wire.len() {
+            // A reader that fills its buffer gets a larger one, so bulk traffic comes in few reads.
+            let len = (self.wire.len() * 2).clamp(4096, READ_AHEAD);
+            self.wire.resize(len, 0);
+        }
+        loop {
+            match self.inner.read(&mut self.wire[self.tail..]) {
+                Ok(0) if self.tail == 0 => return Ok(false),
+                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(len) => {
+                    self.tail += len;
+                    return Ok(true);
                 }
-                (21, [_, 0]) => self.closed = true,
-                (22, [4, ..]) if body.len() >= 4 && u24(&body[1..4]) + 4 == body.len() => {}
-                _ => return Err(invalid_record()),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
             }
         }
-        let n = self.pending.len().min(buf.len());
-        buf[..n].copy_from_slice(&self.pending[..n]);
-        self.pending.drain(..n);
-        Ok(n)
     }
 }
 
@@ -960,9 +1092,16 @@ impl<S: Write> Write for AppWriter<S> {
             return self.inner.write(buf);
         }
         if self.wire.is_empty() {
-            self.accepted = buf.len().min(16384);
-            self.wire = seal_record(&self.traffic, self.seq, 23, &buf[..self.accepted]);
-            self.seq += 1;
+            // A tail shorter than a record leaves with the batch, not in a write of its own.
+            self.accepted = if buf.len() < WRITE_BATCH + 16384 {
+                buf.len()
+            } else {
+                WRITE_BATCH
+            };
+            for chunk in buf[..self.accepted].chunks(16384) {
+                seal_record_into(&self.traffic, self.seq, 23, chunk, 0, &mut self.wire);
+                self.seq += 1;
+            }
             self.sent = 0;
         }
         self.flush_record()?;
@@ -987,8 +1126,10 @@ impl<S> AppReader<S> {
         self.max_useless = max;
     }
 
+    /// Ends the record layer. What the reader took from the wire past the last record is
+    /// returned as it arrived.
     pub fn start_direct(&mut self) -> io::Result<()> {
-        if !self.wire.is_empty() || self.closed {
+        if self.closed {
             return Err(invalid_record());
         }
         self.direct = true;
@@ -1003,6 +1144,21 @@ impl<S> AppWriter<S> {
 }
 
 impl<S: Write> AppWriter<S> {
+    pub fn send_fatal_alert(&mut self, description: u8) -> io::Result<()> {
+        if self.direct {
+            return Err(invalid_record());
+        }
+        self.flush_record()?;
+        self.wire.clear();
+        self.sent = 0;
+        seal_record_into(&self.traffic, self.seq, 21, &[2, description], 0, &mut self.wire);
+        self.seq += 1;
+        let result = self.flush_record();
+        self.wire.clear();
+        self.sent = 0;
+        result
+    }
+
     pub fn start_direct(&mut self) -> io::Result<()> {
         self.flush()?;
         self.direct = true;
@@ -1027,8 +1183,10 @@ pub fn reader<S>(inner: S, traffic: Traffic) -> AppReader<S> {
         inner,
         traffic,
         seq: 0,
-        pending: Vec::new(),
         wire: Vec::new(),
+        head: 0,
+        tail: 0,
+        plain: 0..0,
         direct: false,
         closed: false,
         useless: 0,
@@ -1554,13 +1712,13 @@ fn traffic_keys(suite: Suite, secret: &[u8]) -> Traffic {
     };
     let key = expand_label(suite, secret, "key", &[], key_len);
     let iv = expand_label(suite, secret, "iv", &[], 12);
-    let cipher = match suite {
-        Suite::Aes128 => RecordCipher::Aes128(Box::new(Aes128Gcm::new_from_slice(&key).expect("key"))),
-        Suite::Aes256 => RecordCipher::Aes256(Box::new(Aes256Gcm::new_from_slice(&key).expect("key"))),
-        Suite::ChaCha => RecordCipher::ChaCha(ChaCha20Poly1305::new_from_slice(&key).expect("key")),
+    let algorithm = match suite {
+        Suite::Aes128 => &aead::AES_128_GCM,
+        Suite::Aes256 => &aead::AES_256_GCM,
+        Suite::ChaCha => &aead::CHACHA20_POLY1305,
     };
     Traffic {
-        cipher,
+        key: Box::new(LessSafeKey::new(UnboundKey::new(algorithm, &key).expect("key"))),
         iv: iv.try_into().unwrap(),
     }
 }
@@ -1576,30 +1734,34 @@ fn seal_record_padded(
     plain: &[u8],
     padding: usize,
 ) -> Vec<u8> {
-    let mut body = plain.to_vec();
-    body.push(inner);
-    body.resize(body.len() + padding, 0);
-    let aad = header(body.len() + 16);
-    let nonce = nonce(&traffic.iv, seq);
-    let payload = Payload {
-        msg: &body,
-        aad: &aad,
-    };
-    let sealed = match &traffic.cipher {
-        RecordCipher::Aes128(cipher) => cipher.encrypt(Nonce::from_slice(&nonce), payload),
-        RecordCipher::Aes256(cipher) => cipher.encrypt(Nonce::from_slice(&nonce), payload),
-        RecordCipher::ChaCha(cipher) => cipher.encrypt(Nonce::from_slice(&nonce), payload),
-    }
-    .expect("seal");
-    let mut out = aad;
-    out.extend(sealed);
+    let mut out = Vec::with_capacity(plain.len() + padding + 22);
+    seal_record_into(traffic, seq, inner, plain, padding, &mut out);
     out
 }
 
-fn header(len: usize) -> Vec<u8> {
-    let mut out = vec![23, 3, 3];
-    out.extend_from_slice(&(len as u16).to_be_bytes());
-    out
+/// Appends one record to `out`: the header, then `plain`, the inner type and the padding sealed
+/// where they lie, then the tag.
+fn seal_record_into(
+    traffic: &Traffic,
+    seq: u64,
+    inner: u8,
+    plain: &[u8],
+    padding: usize,
+    out: &mut Vec<u8>,
+) {
+    let start = out.len();
+    let body = plain.len() + 1 + padding;
+    out.extend_from_slice(&[23, 3, 3]);
+    out.extend_from_slice(&((body + 16) as u16).to_be_bytes());
+    out.extend_from_slice(plain);
+    out.push(inner);
+    out.resize(start + 5 + body, 0);
+    let (header, text) = out[start..].split_at_mut(5);
+    let tag = traffic
+        .key
+        .seal_in_place_separate_tag(nonce(&traffic.iv, seq), Aad::from(&header[..]), text)
+        .expect("seal");
+    out.extend_from_slice(tag.as_ref());
 }
 
 fn split_inner(plain: &[u8]) -> Option<(u8, &[u8])> {
@@ -1614,26 +1776,29 @@ fn open_record(traffic: &Traffic, seq: u64, record: &[u8]) -> Option<Vec<u8>> {
     {
         return None;
     }
-    let nonce = nonce(&traffic.iv, seq);
-    let payload = Payload {
-        msg: &record[5..],
-        aad: &record[..5],
-    };
-    match &traffic.cipher {
-        RecordCipher::Aes128(cipher) => cipher.decrypt(Nonce::from_slice(&nonce), payload),
-        RecordCipher::Aes256(cipher) => cipher.decrypt(Nonce::from_slice(&nonce), payload),
-        RecordCipher::ChaCha(cipher) => cipher.decrypt(Nonce::from_slice(&nonce), payload),
-    }
-    .ok()
+    let mut body = record[5..].to_vec();
+    let len = open_in_place(traffic, seq, &record[..5], &mut body)?;
+    body.truncate(len);
+    Some(body)
 }
 
-fn nonce(iv: &[u8; 12], seq: u64) -> [u8; 12] {
+/// Opens a record's ciphertext and tag where they lie. The plaintext is the first bytes of
+/// `body`, as many as returned.
+fn open_in_place(traffic: &Traffic, seq: u64, header: &[u8], body: &mut [u8]) -> Option<usize> {
+    traffic
+        .key
+        .open_in_place(nonce(&traffic.iv, seq), Aad::from(header), body)
+        .ok()
+        .map(|plain| plain.len())
+}
+
+fn nonce(iv: &[u8; 12], seq: u64) -> aead::Nonce {
     let mut nonce = *iv;
     let bytes = seq.to_be_bytes();
     for index in 0..8 {
         nonce[4 + index] ^= bytes[index];
     }
-    nonce
+    aead::Nonce::assume_unique_for_key(nonce)
 }
 
 fn read_outer<R: Read>(reader: &mut R) -> std::io::Result<Vec<u8>> {
@@ -2067,6 +2232,81 @@ mod tests {
     }
 
     #[test]
+    fn one_read_returns_the_records_that_arrived_as_far_as_they_fit() {
+        let (accepted, _) = finished_after_flight();
+        let (_, writing) = accepted.application_keys();
+        let wire: Vec<u8> = (0..3u64)
+            .flat_map(|seq| seal_record(&writing, seq, 23, &[seq as u8 + 1; 1000]))
+            .collect();
+        let expect: Vec<u8> = (1..=3u8).flat_map(|byte| [byte; 1000]).collect();
+        let (_, reading) = accepted.application_keys();
+        let mut app = reader(std::io::Cursor::new(wire.clone()), reading);
+        let mut buf = [0u8; 8192];
+        assert_eq!(app.read(&mut buf).unwrap(), 3000);
+        assert_eq!(buf[..3000], expect[..]);
+        assert_eq!(app.read(&mut buf).unwrap(), 0);
+
+        // The third record has no room behind the first two and comes with the next read.
+        let (_, reading) = accepted.application_keys();
+        let mut app = reader(std::io::Cursor::new(wire), reading);
+        let mut buf = [0u8; 2500];
+        assert_eq!(app.read(&mut buf).unwrap(), 2000);
+        assert_eq!(buf[..2000], expect[..2000]);
+        assert_eq!(app.read(&mut buf).unwrap(), 1000);
+        assert_eq!(buf[..1000], expect[2000..]);
+        assert_eq!(app.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn what_follows_the_last_record_leaves_as_it_arrived_after_the_switch() {
+        let (accepted, _) = finished_after_flight();
+        let (_, writing) = accepted.application_keys();
+        // The direct stream starts with what looks like a whole record, as inner TLS data does.
+        let mut raw = vec![23, 3, 3, 0, 40];
+        raw.extend(1..=40u8);
+        raw.extend_from_slice(b"tail");
+        let mut wire = seal_record(&writing, 0, 23, b"last");
+        wire.extend_from_slice(&raw);
+
+        let (_, reading) = accepted.application_keys();
+        let mut app = reader(std::io::Cursor::new(wire.clone()), reading);
+        let mut buf = [0u8; 8192];
+        assert_eq!(app.read(&mut buf).unwrap(), 4, "the read stops at what does not open");
+        assert_eq!(&buf[..4], b"last");
+        app.start_direct().unwrap();
+        let mut rest = Vec::new();
+        app.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, raw);
+
+        // Without the switch the same bytes are a record that fails, and the next read says so.
+        let (_, reading) = accepted.application_keys();
+        let mut app = reader(std::io::Cursor::new(wire), reading);
+        assert_eq!(app.read(&mut buf).unwrap(), 4);
+        let error = app.read(&mut buf).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+    }
+
+    #[test]
+    fn records_behind_data_that_carry_no_data_are_judged_by_the_next_read() {
+        let (accepted, _) = finished_after_flight();
+        let (_, writing) = accepted.application_keys();
+        let mut wire = seal_record(&writing, 0, 23, b"one");
+        wire.extend(seal_record(&writing, 1, 23, b""));
+        wire.extend(seal_record(&writing, 2, 23, b"two"));
+        wire.extend(seal_record(&writing, 3, 21, &[1, 0]));
+        wire.extend(seal_record(&writing, 4, 23, b"never"));
+        let (_, reading) = accepted.application_keys();
+        let mut app = reader(std::io::Cursor::new(wire), reading);
+        let mut buf = [0u8; 8192];
+        assert_eq!(app.read(&mut buf).unwrap(), 3);
+        assert_eq!(&buf[..3], b"one");
+        assert_eq!(app.read(&mut buf).unwrap(), 3, "the empty record is skipped with its sequence number");
+        assert_eq!(&buf[..3], b"two");
+        assert_eq!(app.read(&mut buf).unwrap(), 0, "close_notify ends the stream");
+        assert_eq!(app.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
     fn post_handshake_records_match_the_requested_lengths_and_continue_the_sequence() {
         let (accepted, _) = finished_after_flight();
         let (_, writing) = accepted.application_keys();
@@ -2098,6 +2338,22 @@ mod tests {
         let (_, reading) = accepted.application_keys();
         let plain = open_record(&reading, 4, &record).unwrap();
         assert_eq!(split_inner(&plain), Some((21, &[2, ALERT_UNEXPECTED_MESSAGE][..])));
+    }
+
+    #[test]
+    fn writer_fatal_alert_uses_the_sequence_after_its_previous_records() {
+        let (accepted, _) = finished_after_flight();
+        let (_, key) = accepted.application_keys();
+        let (_, verify) = accepted.application_keys();
+        let mut writer = writer_at(Vec::new(), key, 7);
+        writer.write_all(b"prior application bytes").unwrap();
+        let before = writer.inner_mut().len();
+        writer.send_fatal_alert(ALERT_UNEXPECTED_MESSAGE).unwrap();
+        let wire = &mut writer.inner_mut()[before..];
+        assert_eq!(wire.len(), 24);
+        let header: [u8; 5] = wire[..5].try_into().unwrap();
+        let n = open_in_place(&verify, 8, &header, &mut wire[5..]).unwrap();
+        assert_eq!(&wire[5..5 + n], &[2, ALERT_UNEXPECTED_MESSAGE, 21]);
     }
 
     /// The alert xtls/reality's record layer sends when the client's answer to the server flight is `wire`.

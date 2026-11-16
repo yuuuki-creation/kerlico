@@ -6,6 +6,7 @@ members = [
     "crates/server",
     "crates/outbound",
     "crates/manifest",
+    "crates/tls",
     "crates/wg",
 ]
 default-members = ["crates/client", "crates/server"]

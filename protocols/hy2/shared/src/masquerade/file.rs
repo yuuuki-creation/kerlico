@@ -1,10 +1,10 @@
-use super::{Body, empty, full, http_error};
+use super::{empty, full, http_error, Body};
 use bytes::Bytes;
 use futures_util::stream;
-use http::{Method, Request, Response, StatusCode, header};
+use http::{header, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -36,10 +36,14 @@ async fn open(root: &Path, request: &Request<()>) -> io::Result<Response<Body>> 
     for component in raw_path.split('/') {
         match component {
             "" | "." => {}
-            ".." => { relative.pop(); }
+            ".." => {
+                relative.pop();
+            }
             name => {
                 let mut components = Path::new(name).components();
-                if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+                if !matches!(components.next(), Some(Component::Normal(_)))
+                    || components.next().is_some()
+                {
                     return Err(io::ErrorKind::NotFound.into());
                 }
                 relative.push(name);
@@ -48,14 +52,20 @@ async fn open(root: &Path, request: &Request<()>) -> io::Result<Response<Body>> 
     }
     let path = root.join(relative);
     let metadata = fs::metadata(&path).await?;
-    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let basename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
     let basename = utf8_percent_encode(basename, NON_ALPHANUMERIC);
     let path = if metadata.is_dir() {
         if !raw_path.ends_with('/') {
             return Ok(redirect(&format!("{basename}/"), uri.query()));
         }
         let index = path.join("index.html");
-        if fs::metadata(&index).await.is_ok_and(|metadata| metadata.is_file()) {
+        if fs::metadata(&index)
+            .await
+            .is_ok_and(|metadata| metadata.is_file())
+        {
             index
         } else {
             return directory(&path, metadata.modified().ok(), request).await;
@@ -70,7 +80,14 @@ async fn open(root: &Path, request: &Request<()>) -> io::Result<Response<Body>> 
     if !metadata.is_file() {
         return Err(io::ErrorKind::NotFound.into());
     }
-    content(file, &path, metadata.len(), metadata.modified().ok(), request).await
+    content(
+        file,
+        &path,
+        metadata.len(),
+        metadata.modified().ok(),
+        request,
+    )
+    .await
 }
 
 fn redirect(location: &str, query: Option<&str>) -> Response<Body> {
@@ -79,11 +96,18 @@ fn redirect(location: &str, query: Option<&str>) -> Response<Body> {
     } else {
         location.to_owned()
     };
-    Response::builder().status(StatusCode::MOVED_PERMANENTLY)
-        .header(header::LOCATION, location).body(empty()).unwrap()
+    Response::builder()
+        .status(StatusCode::MOVED_PERMANENTLY)
+        .header(header::LOCATION, location)
+        .body(empty())
+        .unwrap()
 }
 
-async fn directory(path: &Path, modified: Option<SystemTime>, request: &Request<()>) -> io::Result<Response<Body>> {
+async fn directory(
+    path: &Path,
+    modified: Option<SystemTime>,
+    request: &Request<()>,
+) -> io::Result<Response<Body>> {
     let mut response = with_modified(modified);
     if let Some(status) = precondition(request, modified) {
         return Ok(response.status(status).body(empty()).unwrap());
@@ -91,19 +115,31 @@ async fn directory(path: &Path, modified: Option<SystemTime>, request: &Request<
     let mut entries = fs::read_dir(path).await?;
     let mut names = Vec::new();
     while let Some(entry) = entries.next_entry().await? {
-        names.push((entry.file_name().to_string_lossy().into_owned(), entry.file_type().await?.is_dir()));
+        names.push((
+            entry.file_name().to_string_lossy().into_owned(),
+            entry.file_type().await?.is_dir(),
+        ));
     }
     names.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    let mut html = String::from("<!doctype html>\n<meta name=\"viewport\" content=\"width=device-width\">\n<pre>\n");
+    let mut html = String::from(
+        "<!doctype html>\n<meta name=\"viewport\" content=\"width=device-width\">\n<pre>\n",
+    );
     for (name, is_dir) in names {
         let suffix = if is_dir { "/" } else { "" };
         let href = utf8_percent_encode(&name, NON_ALPHANUMERIC);
-        let escaped = name.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-            .replace('"', "&#34;").replace('\'', "&#39;");
-        html.push_str(&format!("<a href=\"{href}{suffix}\">{escaped}{suffix}</a>\n"));
+        let escaped = name
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&#34;")
+            .replace('\'', "&#39;");
+        html.push_str(&format!(
+            "<a href=\"{href}{suffix}\">{escaped}{suffix}</a>\n"
+        ));
     }
     html.push_str("</pre>\n");
-    response = response.header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+    response = response
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CONTENT_LENGTH, html.len());
     Ok(response.body(full(Bytes::from(html))).unwrap())
 }
@@ -120,12 +156,19 @@ async fn content(
         return Ok(response.status(status).body(empty()).unwrap());
     }
     let mime = media_type(&mut file, path).await?;
-    let ranges = match request.headers().get(header::RANGE).and_then(|value| value.to_str().ok()) {
+    let ranges = match request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
         Some(value) if range_allowed(request, modified) => match parse_ranges(value, len) {
             Ok(ranges) => ranges,
             Err(()) => {
                 let mut response = http_error(StatusCode::RANGE_NOT_SATISFIABLE);
-                response.headers_mut().insert(header::CONTENT_RANGE, format!("bytes */{len}").parse().unwrap());
+                response.headers_mut().insert(
+                    header::CONTENT_RANGE,
+                    format!("bytes */{len}").parse().unwrap(),
+                );
                 return Ok(response);
             }
         },
@@ -135,19 +178,24 @@ async fn content(
     let mut pieces = VecDeque::new();
     let (content_type, content_len) = match ranges.as_slice() {
         [] => {
-            pieces.push_back(Piece::Range { start: 0, length: len });
+            pieces.push_back(Piece::Range {
+                start: 0,
+                length: len,
+            });
             (mime, len)
         }
         &[(start, end)] => {
             let length = end - start + 1;
             pieces.push_back(Piece::Range { start, length });
-            response = response.status(StatusCode::PARTIAL_CONTENT)
+            response = response
+                .status(StatusCode::PARTIAL_CONTENT)
                 .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"));
             (mime, length)
         }
         ranges => {
             let mut boundary = [0; 30];
-            getrandom::getrandom(&mut boundary).map_err(|error| io::Error::other(error.to_string()))?;
+            getrandom::getrandom(&mut boundary)
+                .map_err(|error| io::Error::other(error.to_string()))?;
             let boundary: String = boundary.iter().map(|byte| format!("{byte:02x}")).collect();
             let mut size: u64 = 0;
             for (i, &(start, end)) in ranges.iter().enumerate() {
@@ -165,9 +213,11 @@ async fn content(
             (format!("multipart/byteranges; boundary={boundary}"), size)
         }
     };
-    Ok(response.header(header::CONTENT_TYPE, content_type)
+    Ok(response
+        .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_LENGTH, content_len)
-        .body(file_body(file, pieces)).unwrap())
+        .body(file_body(file, pieces))
+        .unwrap())
 }
 
 fn with_modified(modified: Option<SystemTime>) -> http::response::Builder {
@@ -183,7 +233,12 @@ fn with_modified(modified: Option<SystemTime>) -> http::response::Builder {
 fn precondition(request: &Request<()>, modified: Option<SystemTime>) -> Option<StatusCode> {
     let headers = request.headers();
     let time = modified.and_then(seconds);
-    let date = |name| headers.get(name).and_then(|value| httpdate::parse_http_date(value.to_str().ok()?).ok()).and_then(seconds);
+    let date = |name| {
+        headers
+            .get(name)
+            .and_then(|value| httpdate::parse_http_date(value.to_str().ok()?).ok())
+            .and_then(seconds)
+    };
     if let Some(matching) = headers.get(header::IF_MATCH) {
         if matching != "*" {
             return Some(StatusCode::PRECONDITION_FAILED);
@@ -196,7 +251,11 @@ fn precondition(request: &Request<()>, modified: Option<SystemTime>) -> Option<S
     let cacheable = matches!(*request.method(), Method::GET | Method::HEAD);
     if let Some(none) = headers.get(header::IF_NONE_MATCH) {
         if none == "*" {
-            return Some(if cacheable { StatusCode::NOT_MODIFIED } else { StatusCode::PRECONDITION_FAILED });
+            return Some(if cacheable {
+                StatusCode::NOT_MODIFIED
+            } else {
+                StatusCode::PRECONDITION_FAILED
+            });
         }
     } else if cacheable {
         if let (Some(time), Some(limit)) = (time, date(header::IF_MODIFIED_SINCE)) {
@@ -209,16 +268,24 @@ fn precondition(request: &Request<()>, modified: Option<SystemTime>) -> Option<S
 }
 
 fn range_allowed(request: &Request<()>, modified: Option<SystemTime>) -> bool {
-    let Some(range) = request.headers().get(header::IF_RANGE) else { return true };
+    let Some(range) = request.headers().get(header::IF_RANGE) else {
+        return true;
+    };
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
         return false;
     }
-    let date = range.to_str().ok().and_then(|value| httpdate::parse_http_date(value).ok()).and_then(seconds);
+    let date = range
+        .to_str()
+        .ok()
+        .and_then(|value| httpdate::parse_http_date(value).ok())
+        .and_then(seconds);
     date.is_some() && date == modified.and_then(seconds)
 }
 
 fn seconds(time: SystemTime) -> Option<u64> {
-    time.duration_since(UNIX_EPOCH).ok().map(|duration| duration.as_secs())
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 fn parse_ranges(value: &str, len: u64) -> Result<Vec<(u64, u64)>, ()> {
@@ -226,7 +293,11 @@ fn parse_ranges(value: &str, len: u64) -> Result<Vec<(u64, u64)>, ()> {
     let mut ranges = Vec::new();
     let mut requested = 0u64;
     let mut nonoverlap = false;
-    for value in values.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+    for value in values
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         let (start, end) = value.split_once('-').ok_or(())?;
         let (start, end) = if start.trim().is_empty() {
             let last = end.trim().parse::<u64>().map_err(|_| ())?;
@@ -241,7 +312,11 @@ fn parse_ranges(value: &str, len: u64) -> Result<Vec<(u64, u64)>, ()> {
                 nonoverlap = true;
                 continue;
             }
-            let end = if end.trim().is_empty() { len - 1 } else { end.trim().parse::<u64>().map_err(|_| ())?.min(len - 1) };
+            let end = if end.trim().is_empty() {
+                len - 1
+            } else {
+                end.trim().parse::<u64>().map_err(|_| ())?.min(len - 1)
+            };
             if start > end {
                 return Err(());
             }
@@ -261,11 +336,12 @@ fn parse_ranges(value: &str, len: u64) -> Result<Vec<(u64, u64)>, ()> {
 
 async fn media_type(file: &mut File, path: &Path) -> io::Result<String> {
     if let Some(mime) = mime_guess::from_path(path).first() {
-        let suffix = if mime.type_() == mime_guess::mime::TEXT && mime.get_param("charset").is_none() {
-            "; charset=utf-8"
-        } else {
-            ""
-        };
+        let suffix =
+            if mime.type_() == mime_guess::mime::TEXT && mime.get_param("charset").is_none() {
+                "; charset=utf-8"
+            } else {
+                ""
+            };
         return Ok(format!("{mime}{suffix}"));
     }
     let mut bytes = [0; 512];
@@ -285,8 +361,13 @@ pub(super) fn sniff(bytes: &[u8]) -> &'static str {
         "image/gif"
     } else if bytes.starts_with(b"PK\x03\x04") {
         "application/zip"
-    } else if bytes.iter().all(|&byte| !matches!(byte, 0..=8 | 11 | 14..=26 | 28..=31)) {
-        let text = String::from_utf8_lossy(bytes).trim_start().to_ascii_lowercase();
+    } else if bytes
+        .iter()
+        .all(|&byte| !matches!(byte, 0..=8 | 11 | 14..=26 | 28..=31))
+    {
+        let text = String::from_utf8_lossy(bytes)
+            .trim_start()
+            .to_ascii_lowercase();
         if text.starts_with("<!doctype html") || text.starts_with("<html") {
             "text/html; charset=utf-8"
         } else {
@@ -303,27 +384,35 @@ enum Piece {
 }
 
 fn file_body(file: File, pieces: VecDeque<Piece>) -> Body {
-    let chunks = stream::try_unfold((file, pieces, 0u64), |(mut file, mut pieces, mut remaining)| async move {
-        loop {
-            if remaining != 0 {
-                let mut data = vec![0; remaining.min(32 * 1024) as usize];
-                let count = file.read(&mut data).await?;
-                if count == 0 {
-                    return Err(io::ErrorKind::UnexpectedEof.into());
+    let chunks = stream::try_unfold(
+        (file, pieces, 0u64),
+        |(mut file, mut pieces, mut remaining)| async move {
+            loop {
+                if remaining != 0 {
+                    let mut data = vec![0; remaining.min(32 * 1024) as usize];
+                    let count = file.read(&mut data).await?;
+                    if count == 0 {
+                        return Err(io::ErrorKind::UnexpectedEof.into());
+                    }
+                    remaining -= count as u64;
+                    data.truncate(count);
+                    return Ok(Some((
+                        Frame::data(Bytes::from(data)),
+                        (file, pieces, remaining),
+                    )));
                 }
-                remaining -= count as u64;
-                data.truncate(count);
-                return Ok(Some((Frame::data(Bytes::from(data)), (file, pieces, remaining))));
-            }
-            match pieces.pop_front() {
-                Some(Piece::Bytes(bytes)) => return Ok(Some((Frame::data(bytes), (file, pieces, remaining)))),
-                Some(Piece::Range { start, length }) => {
-                    file.seek(io::SeekFrom::Start(start)).await?;
-                    remaining = length;
+                match pieces.pop_front() {
+                    Some(Piece::Bytes(bytes)) => {
+                        return Ok(Some((Frame::data(bytes), (file, pieces, remaining))))
+                    }
+                    Some(Piece::Range { start, length }) => {
+                        file.seek(io::SeekFrom::Start(start)).await?;
+                        remaining = length;
+                    }
+                    None => return Ok(None),
                 }
-                None => return Ok(None),
             }
-        }
-    });
+        },
+    );
     StreamBody::new(chunks).boxed_unsync()
 }

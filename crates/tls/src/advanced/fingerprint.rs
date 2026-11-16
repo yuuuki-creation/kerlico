@@ -15,16 +15,16 @@ static PROFILES: LazyLock<HashMap<String, Profile>> = LazyLock::new(|| {
 });
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
-pub(crate) struct Profile {
+pub struct Profile {
     pub session_id_length: usize,
     pub ciphers: Vec<u16>,
     pub extensions: Vec<Extension>,
     #[serde(default)]
-    pub(super) shuffle: bool,
+    pub shuffle: bool,
 }
 
 #[derive(Clone, Default, serde::Deserialize, serde::Serialize)]
-pub(crate) struct Extension {
+pub struct Extension {
     pub id: u16,
     #[serde(default)]
     data: String,
@@ -42,6 +42,7 @@ pub(crate) struct Extension {
     payload_length: usize,
 }
 
+#[cfg(feature = "quic")]
 pub(super) fn chrome_quic(alpn: &[String]) -> Profile {
     // apernet/quic-go 184d081eef3e chromeQUICClientHelloSpec, not a TCP preset.
     let mut protocols = vec![0, 0];
@@ -118,7 +119,7 @@ pub(super) fn chrome_quic(alpn: &[String]) -> Profile {
     }
 }
 
-pub(crate) fn resolve(name: &str) -> io::Result<Option<Profile>> {
+pub fn resolve(name: &str) -> io::Result<Option<Profile>> {
     let name = if name.is_empty() { "chrome" } else { name };
     if name == "unsafe" {
         return Ok(None);
@@ -251,7 +252,7 @@ pub(super) fn configure_profile(
     Ok(())
 }
 
-pub(crate) fn reality_hello(
+pub fn reality_hello(
     profile: &Profile,
     random_bytes: &[u8; 32],
     name: &str,

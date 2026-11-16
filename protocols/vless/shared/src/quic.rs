@@ -1,15 +1,11 @@
 //! HTTP/3 streams and the Hysteria 2 stream transport over QUIC.
 
-mod congestion;
 mod hysteria;
-mod masked;
-mod masquerade;
-mod options;
 #[cfg(test)]
 mod option_tests;
 
-pub use masquerade::{HysteriaMasquerade, MasqueradeDialer, MasqueradeSocket, MasqueradeTarget};
-pub use options::{QuicCarrier, QuicOptions};
+pub use kerlico_hy2::masquerade::{HysteriaMasquerade, MasqueradeDialer, MasqueradeSocket, MasqueradeTarget};
+pub use kerlico_hy2::quic::{QuicCarrier, QuicOptions};
 
 use crate::finalmask::FinalMask;
 use std::future::Future;
@@ -20,6 +16,8 @@ use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use http::{HeaderMap, Request, Response, Uri};
+use kerlico_hy2::auth as hy2_auth;
+use kerlico_hy2::quic::MaskedSocket;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{Connection, Endpoint, TokioRuntime, VarInt};
 use rustls::{ClientConfig, ServerConfig};
@@ -28,14 +26,6 @@ use tokio::{runtime::Runtime, sync::mpsc, time::timeout};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
-const HYSTERIA_STREAM: u64 = 0x401;
-const HYSTERIA_PREFIX: [u8; 2] = (HYSTERIA_STREAM as u16 | (1 << 14)).to_be_bytes();
-const HYSTERIA_AUTH_OK: u16 = 233;
-const HYSTERIA_HOST: &str = "hysteria";
-const HYSTERIA_PATH: &str = "/auth";
-const HYSTERIA_AUTH: &str = "hysteria-auth";
-const HYSTERIA_PADDING: &str = "hysteria-padding";
-const HYSTERIA_RATE: &str = "hysteria-cc-rx";
 
 fn runtime() -> io::Result<&'static Runtime> {
     static RUNTIME: OnceLock<io::Result<Runtime>> = OnceLock::new();
@@ -81,7 +71,7 @@ fn endpoint(addr: SocketAddr, server: Option<quinn::ServerConfig>, masks: &Final
             let _guard = runtime()?.enter();
             return match connection {
                 kerlico_shared::runtime::NetworkConnection::Udp(socket) => Endpoint::new(config, server, socket, Arc::new(TokioRuntime)),
-                connection => Endpoint::new_with_abstract_socket(config, server, masked::MaskedSocket::new(crate::runtime::packet_connection(connection, peer, Duration::from_millis(50))?)?, Arc::new(TokioRuntime)),
+                connection => Endpoint::new_with_abstract_socket(config, server, MaskedSocket::new(crate::runtime::packet_connection(connection, peer, Duration::from_millis(50))?)?, Arc::new(TokioRuntime)),
             };
         }
     }
@@ -105,7 +95,7 @@ fn endpoint(addr: SocketAddr, server: Option<quinn::ServerConfig>, masks: &Final
             })?
         } else { masks.udp_server(addr, listener)? };
         let _guard = runtime()?.enter();
-        Endpoint::new_with_abstract_socket(config, server, masked::MaskedSocket::new(packets)?, Arc::new(TokioRuntime))
+        Endpoint::new_with_abstract_socket(config, server, MaskedSocket::new(packets)?, Arc::new(TokioRuntime))
     } else {
         let socket = if let Some(carrier) = carrier {
             let socket = carrier.options.open(crate::socket::SocketKind::Udp, crate::socket::SocketRole::Listener, addr)?;
@@ -721,17 +711,6 @@ impl HysteriaListener {
     }
 }
 
-fn hysteria_padding() -> io::Result<String> {
-    const CHARACTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut random = [0; 2048];
-    getrandom::getrandom(&mut random).map_err(|err| io::Error::other(err.to_string()))?;
-    let len = 256 + usize::from(u16::from_be_bytes([random[0], random[1]])) % 1792;
-    Ok(random[..len]
-        .iter()
-        .map(|&byte| CHARACTERS[usize::from(byte) % CHARACTERS.len()] as char)
-        .collect())
-}
-
 pub fn connect_hysteria(
     remote: SocketAddr,
     config: Arc<ClientConfig>,
@@ -756,33 +735,33 @@ pub fn connect_hysteria_crypto_masked(remote: SocketAddr, config: Arc<dyn quinn:
 }
 
 fn hysteria_stream(conn: H3Conn, auth: &str, options: &QuicOptions) -> io::Result<(HysteriaRead, HysteriaWrite)> {
-    let padding = hysteria_padding()?;
+    let padding = hy2_auth::padding()?;
     let rate = options.receive_rate().to_string();
     let request = conn.open(
         "POST",
-        HYSTERIA_PATH,
-        HYSTERIA_HOST,
+        hy2_auth::PATH,
+        hy2_auth::HOST,
         "https",
         &[
-            (HYSTERIA_AUTH, auth),
-            (HYSTERIA_RATE, &rate),
-            (HYSTERIA_PADDING, &padding),
+            (hy2_auth::AUTH, auth),
+            (hy2_auth::RATE, &rate),
+            (hy2_auth::PADDING, &padding),
         ],
         false,
     )?;
     request.set_timeout(HANDSHAKE_TIMEOUT);
     request.finish_write()?;
-    if request.response_status()? != HYSTERIA_AUTH_OK {
+    if request.response_status()? != hy2_auth::STATUS {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Hysteria authentication failed",
         ));
     }
-    let peer_rate = request.header(HYSTERIA_RATE).and_then(|value| value.parse().ok()).unwrap_or(0);
+    let peer_rate = request.header(hy2_auth::RATE).and_then(|value| value.parse().ok()).unwrap_or(0);
     options.authenticate(&conn.0.conn, peer_rate);
     let (write, read) = block(HANDSHAKE_TIMEOUT, async {
         let (mut write, read) = conn.0.conn.open_bi().await?;
-        write.write_all(&HYSTERIA_PREFIX).await?;
+        write.write_all(&kerlico_hy2::tcp::FRAME_PREFIX).await?;
         Ok((write, read))
     })?;
     Ok(hysteria_pair(read, write, Some(conn)))

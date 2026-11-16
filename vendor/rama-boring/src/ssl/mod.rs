@@ -833,6 +833,10 @@ impl SslCurve {
 
     pub const X25519_MLKEM768: SslCurve = SslCurve(ffi::SSL_GROUP_X25519_MLKEM768 as _);
 
+    pub const SECP256R1_MLKEM768: SslCurve = SslCurve(ffi::SSL_GROUP_SECP256R1_MLKEM768 as _);
+
+    pub const SECP384R1_MLKEM1024: SslCurve = SslCurve(ffi::SSL_GROUP_SECP384R1_MLKEM1024 as _);
+
     pub const X25519_KYBER768_DRAFT00: SslCurve =
         SslCurve(ffi::SSL_GROUP_X25519_KYBER768_DRAFT00 as _);
 
@@ -4066,6 +4070,54 @@ impl SslRef {
     #[must_use]
     pub fn is_server(&self) -> bool {
         unsafe { SSL_is_server(self.as_ptr()) != 0 }
+    }
+
+    /// Edits the random and legacy session ID in the first serialized TCP
+    /// ClientHello before the TLS transcript is built. Returning false stops the handshake.
+    /// Do not use with ECH, resumption, QUIC or DTLS.
+    pub fn set_client_hello_mutator(
+        &mut self,
+        callback: impl Fn(&[u8], &mut [u8; 32], &mut [u8]) -> bool + Send + Sync + 'static,
+    ) -> Result<(), ErrorStack> {
+        type Mutator = Box<dyn Fn(&[u8], &mut [u8; 32], &mut [u8]) -> bool + Send + Sync>;
+        unsafe extern "C" fn invoke(
+            ssl: *mut ffi::SSL, hello: *const u8, hello_len: usize,
+            random: *mut u8, session: *mut u8, session_len: usize,
+        ) -> std::ffi::c_int {
+            // The shim provides distinct live buffers and invokes this only on the same SSL
+            // object that holds the callback. Never unwind through the C ABI.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                let ssl = SslRef::from_ptr(ssl);
+                let Some(callback) = ssl.ex_data(Ssl::cached_ex_index::<Mutator>()) else { return false };
+                callback(std::slice::from_raw_parts(hello, hello_len), &mut *random.cast::<[u8; 32]>(),
+                    std::slice::from_raw_parts_mut(session, session_len))
+            })).unwrap_or(false).into()
+        }
+        let callback: Mutator = Box::new(callback);
+        unsafe { cvt(ffi::RAMA_SSL_set_client_hello_mutator(self.as_ptr(), Some(invoke)))?; }
+        self.set_ex_data(Ssl::cached_ex_index::<Mutator>(), callback);
+        Ok(())
+    }
+
+    /// Generates TLS 1.2 ephemeral shares before sending the ClientHello.
+    /// The private keys remain in this connection; only the public keys are returned.
+    pub fn prepare_tls12_shares(&mut self, groups: &[u16]) -> Result<Vec<Vec<u8>>, ErrorStack> {
+        let mut buffer = [0u8; 3 * (2 + 97)];
+        let mut size = 0;
+        unsafe {
+            cvt(ffi::RAMA_SSL_prepare_tls12_shares(
+                self.as_ptr(), groups.as_ptr(), groups.len(), buffer.as_mut_ptr(), buffer.len(), &mut size,
+            ))?;
+        }
+        let mut encoded = &buffer[..size];
+        let mut public = Vec::with_capacity(groups.len());
+        while !encoded.is_empty() {
+            let (length, remaining) = encoded.split_first_chunk::<2>().expect("native share length");
+            let (point, rest) = remaining.split_at(u16::from_be_bytes(*length) as usize);
+            public.push(point.to_vec());
+            encoded = rest;
+        }
+        Ok(public)
     }
 
     /// Sets the extra data at the specified index.

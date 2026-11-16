@@ -68,14 +68,29 @@ impl Config {
 
     fn record_query(&self, name: &str, kind: u16, native: Native, outbound: &Outbound) -> std::io::Result<Vec<u8>> {
         let message = message(name, kind);
+        self.exchange_configured(&message, native, outbound)
+    }
+
+    pub(super) fn exchange_configured(&self, message: &[u8], native: Native, outbound: &Outbound) -> std::io::Result<Vec<u8>> {
+        if message.len() < 12 || message[2] & 0x80 != 0 {
+            return Err(bad_dns("invalid DNS query"));
+        }
         let fallback = Upstream { address: "1.1.1.1".parse().expect("literal DNS"), port: 53, tcp: false, choice: OutboundChoice::Default };
         let upstreams = if self.upstreams.is_empty() { std::slice::from_ref(&fallback) } else { self.upstreams.as_slice() };
         let mut error = bad_dns("no DNS upstream answered");
         for upstream in upstreams {
             let reach = if upstream.address.is_ipv4() { Reachability::HasV4 } else { Reachability::V6Only };
             let exit = select_exit(upstream.choice, reach, native).map_err(|_| bad_dns("DNS upstream has no address"))?;
-            match outbound.exchange(exit, SocketAddr::new(upstream.address, upstream.port), upstream.tcp, &message) {
-                Ok(response) if response.len() >= 12 && response[..2] == message[..2] && response[2] & 0x80 != 0 && response[3] & 0xf == 0 => return Ok(response),
+            let peer = SocketAddr::new(upstream.address, upstream.port);
+            let response = outbound.exchange(exit, peer, upstream.tcp, message).and_then(|response| {
+                if !upstream.tcp && response.len() >= 12 && response[..2] == message[..2]
+                    && response[2] & 0x82 == 0x82
+                {
+                    outbound.exchange(exit, peer, true, message)
+                } else { Ok(response) }
+            });
+            match response {
+                Ok(response) if response.len() >= 12 && response[..2] == message[..2] && response[2] & 0x82 == 0x80 && response[3] & 0xf == 0 => return Ok(response),
                 Ok(_) => error = bad_dns("invalid DNS response"),
                 Err(_) => error = std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "DNS upstream exchange failed"),
             }

@@ -59,6 +59,15 @@ class UpstreamNoticeTests(unittest.TestCase):
             with self.assertRaisesRegex(self.privacy.Rejected, 'upstream-crate-file-changed-needs-review'):
                 self.privacy.check_entry(b'100644', b'1' * 40, name)
 
+    def test_reviewed_local_patches_allow_only_pinned_bytes(self):
+        root = Path(__file__).resolve().parents[1]
+        for name, digest in self.privacy.REVIEWED_VENDOR_PATCHES.items():
+            data = (root / name.decode()).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
+            self.assertTrue(self.privacy.approved_cargo_blob(name, data))
+            with self.assertRaisesRegex(self.privacy.Rejected, 'upstream-crate-file-changed-needs-review'):
+                self.privacy.approved_cargo_blob(name, data + b'\n')
+
 
 if __name__ == '__main__':
     unittest.main()

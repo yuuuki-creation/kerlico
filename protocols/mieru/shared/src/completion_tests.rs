@@ -341,10 +341,12 @@ fn slow_tcp_payload_can_arrive_after_the_socket_poll_timeout() {
         tcp.set_read_timeout(Some(Duration::from_millis(20)))
             .unwrap();
         ready.recv().unwrap();
-        let mut tcp = BufReader::with_capacity(8, tcp);
-        assert_eq!(take(&mut tcp, 3, allow_idle).unwrap(), b"abc");
-        skip_padding(&mut tcp, 2).unwrap();
-        assert_eq!(take(&mut tcp, 3, false).unwrap(), b"fgh");
+        let mut input = TcpInput::new(tcp);
+        input.fill(3, allow_idle).unwrap();
+        assert_eq!(input.take(3), b"abc");
+        input.skip(2).unwrap();
+        input.fill(3, false).unwrap();
+        assert_eq!(input.take(3), b"fgh");
         writer.join().unwrap();
     }
 }
@@ -593,5 +595,40 @@ fn close_after_data_preserves_buffered_bytes_and_a_pending_socks_reply() {
                 .kind(),
             io::ErrorKind::UnexpectedEof
         );
+    }
+}
+
+/// Reads that take the whole queue carry the same bytes, in order, across segment, PDU and
+/// batch boundaries, with and without low entropy, on both underlays.
+#[test]
+fn queue_reads_keep_the_bytes() {
+    for (transport, low) in [
+        (Transport::Tcp, 0),
+        (Transport::Tcp, 1),
+        (Transport::Udp, 0),
+    ] {
+        let server = Server::new(transport, 1400);
+        let client = server.client(ClientOptions {
+            transport,
+            low_entropy: low,
+            ..ClientOptions::default()
+        });
+        let conn = client.open(&target()).unwrap();
+        let remote = server.next();
+        let pattern: Vec<u8> = (0..200_000u32).map(|i| (i * 7 + i / 251) as u8).collect();
+        conn.write_user(&pattern).unwrap();
+        let mut got: Vec<u8> = Vec::new();
+        let mut spare = VecDeque::new();
+        while got.len() < pattern.len() {
+            let n = remote
+                .conn
+                .read_queued_for(&mut spare, Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            assert_eq!(n, spare.len());
+            got.extend(spare.iter());
+        }
+        assert_eq!(got, pattern, "{transport:?} low {low}");
+        conn.close();
     }
 }

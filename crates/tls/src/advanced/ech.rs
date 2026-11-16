@@ -33,6 +33,9 @@ pub struct TlsNetworkResponse {
 /// The caller owns network selection and dialing. DNS responses omit TCP framing.
 pub trait TlsNetwork: fmt::Debug + Send + Sync {
     fn exchange(&self, request: &TlsNetworkRequest) -> io::Result<TlsNetworkResponse>;
+    fn exchange_configured_dns(&self, _query: &[u8]) -> io::Result<Vec<u8>> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "configured TLS DNS is unavailable"))
+    }
 }
 
 pub(super) enum EchSource {
@@ -41,7 +44,7 @@ pub(super) enum EchSource {
 }
 pub(super) struct Remote {
     name: Option<String>,
-    server: url::Url,
+    server: Option<url::Url>,
     provider: Arc<dyn TlsNetwork>,
     socket_settings: Option<serde_json::Value>,
     cache: Mutex<HashMap<String, Arc<Mutex<Option<Cached>>>>>,
@@ -76,11 +79,17 @@ impl EchSource {
             provider.ok_or_else(|| invalid("ECH DNS source requires a TLS network provider"))?;
         Ok(Self::Remote(Remote {
             name,
-            server,
+            server: Some(server),
             provider,
             socket_settings,
             cache: Mutex::default(),
         }))
+    }
+
+    pub(super) fn discovered(name: &str, provider: Option<Arc<dyn TlsNetwork>>) -> io::Result<Self> {
+        let name = if name.is_empty() { None } else { Some(domain(name)?) };
+        let provider = provider.ok_or_else(|| invalid("ECH discovery requires a DNS provider"))?;
+        Ok(Self::Remote(Remote { name, server: None, provider, socket_settings: None, cache: Mutex::default() }))
     }
     pub(super) fn resolve(&self, name: &str) -> io::Result<Vec<u8>> {
         match self {
@@ -129,14 +138,18 @@ impl Remote {
         Err(invalid("ECH DNS alias limit"))
     }
     fn query(&self, name: &str) -> io::Result<Answer> {
-        let http = matches!(self.server.scheme(), "https" | "h2c");
+        let http = self.server.as_ref().is_some_and(|server| matches!(server.scheme(), "https" | "h2c"));
         let mut id = [0; 2];
         if !http {
             getrandom::getrandom(&mut id).map_err(|e| io::Error::other(e.to_string()))?;
         }
         let message = query(name, u16::from_be_bytes(id), http)?;
+        let Some(server) = &self.server else {
+            let response = self.provider.exchange_configured_dns(&message)?;
+            return response_ech(&response, u16::from_be_bytes(id), name);
+        };
         let request = if http {
-            let mut url = self.server.clone();
+            let mut url = server.clone();
             if url.scheme() == "h2c" {
                 url = url::Url::parse(&url.as_str().replacen("h2c:", "http:", 1))
                     .map_err(io::Error::other)?;
@@ -153,7 +166,7 @@ impl Remote {
                 socket_settings: self.socket_settings.clone(),
             }
         } else {
-            let host = self.server.host_str().unwrap();
+            let host = server.host_str().unwrap();
             let host = host.trim_start_matches('[').trim_end_matches(']');
             let host = if host.contains(':') {
                 format!("[{host}]")
@@ -161,8 +174,8 @@ impl Remote {
                 host.to_string()
             };
             TlsNetworkRequest::Dns {
-                server: format!("{host}:{}", self.server.port().unwrap_or(53)),
-                tcp: self.server.scheme() == "tcp",
+                server: format!("{host}:{}", server.port().unwrap_or(53)),
+                tcp: server.scheme() == "tcp",
                 message: message.clone(),
                 socket_settings: self.socket_settings.clone(),
             }
@@ -472,6 +485,26 @@ mod tests {
                 body: response,
             })
         }
+
+        fn exchange_configured_dns(&self, message: &[u8]) -> io::Result<Vec<u8>> {
+            let answer = self.exchange(&TlsNetworkRequest::Dns {
+                server: String::new(), tcp: false, message: message.to_vec(), socket_settings: None,
+            })?;
+            // The TLS name is intentionally an IP. The configured DNS lookup name is a domain.
+            let mut offset = 12;
+            assert_eq!(read_name(message, &mut offset)?, "service.example");
+            Ok(answer.body)
+        }
+    }
+    #[test]
+    fn configured_discovery_honors_the_name_and_caches_the_record() {
+        let network = Arc::new(Network {
+            requests: AtomicUsize::new(0), truncate: false, config: vec![1, 2, 3],
+        });
+        let source = EchSource::discovered("service.example", Some(network.clone())).unwrap();
+        assert_eq!(source.resolve("127.0.0.1").unwrap(), network.config);
+        assert_eq!(source.resolve("127.0.0.1").unwrap(), network.config);
+        assert_eq!(network.requests.load(Ordering::Relaxed), 1);
     }
     #[test]
     fn dns_tcp_doh_and_cache_preserve_ech_configuration() {

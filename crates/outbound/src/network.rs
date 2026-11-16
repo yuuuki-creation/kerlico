@@ -1,15 +1,19 @@
 //! Protocol carriers and metadata requests use the same owned exit boundary.
 
 mod http;
+#[cfg(feature = "system-dns")]
+mod system_dns;
+#[cfg(feature = "system-dns")]
+pub use system_dns::exchange_system_dns;
 
 use std::cell::Cell;
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kerlico_shared::runtime::{
-    HttpRequest, HttpResponse, NetworkConnection, NetworkDial, NetworkRoute,
+    FallbackRate, HttpRequest, HttpResponse, NetworkConnection, NetworkDial, NetworkRoute,
 };
 use kerlico_shared::{Destination, InboundStream, OpenError, PlaneFault, Transport};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -19,17 +23,63 @@ use crate::{select_exit, BytePipe, Exit, Native, Outbound, Reachability};
 thread_local! { static IN_LANDING: Cell<bool> = const { Cell::new(false) }; }
 
 impl Outbound {
+    pub fn relay_connected_tcp(&self, client: &TcpStream, target: &TcpStream, rate_bits: u64) -> io::Result<()> {
+        const IDLE: Duration = Duration::from_secs(300);
+        fn copy(mut source: &TcpStream, mut sink: &TcpStream, seen: &std::sync::Mutex<Instant>, rate_bits: u64) -> io::Result<()> {
+            let pace = FallbackRate::new(rate_bits);
+            let mut buffer = vec![0; pace.limit(64 * 1024)];
+            let result = (|| loop {
+                match source.read(&mut buffer) {
+                    Ok(0) => return Ok(()),
+                    Ok(n) => {
+                        *seen.lock().expect("TCP relay activity") = Instant::now();
+                        pace.wait(n);
+                        sink.write_all(&buffer[..n])?;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+                        && seen.lock().expect("TCP relay activity").elapsed() < IDLE => continue,
+                    Err(error) => return Err(error),
+                }
+            })();
+            match result {
+                Ok(_) => { let _ = sink.shutdown(std::net::Shutdown::Write); Ok(()) }
+                Err(error) => {
+                    let _ = source.shutdown(std::net::Shutdown::Both);
+                    let _ = sink.shutdown(std::net::Shutdown::Both);
+                    Err(error)
+                }
+            }
+        }
+        for socket in [client, target] {
+            socket.set_read_timeout(Some(Duration::from_secs(1)))?;
+            socket.set_write_timeout(Some(Duration::from_secs(30)))?;
+        }
+        let seen = std::sync::Mutex::new(Instant::now());
+        std::thread::scope(|scope| {
+            let down = scope.spawn(|| copy(target, client, &seen, rate_bits));
+            let up = copy(client, target, &seen, rate_bits);
+            let down = down.join().map_err(|_| io::Error::other("TCP relay thread failed"))?;
+            up.and(down)
+        })
+    }
+
     /// A path starting with `@` names a Linux abstract socket, as in Go.
     pub fn connect_unix_transport(&self, path: &std::path::Path) -> io::Result<NetworkConnection> {
+        #[cfg(unix)]
+        { Ok(NetworkConnection::Stream(Box::new(UnixStream(self.connect_unix_socket(path)?)))) }
+        #[cfg(not(unix))]
+        { let _ = path; Err(io::Error::new(io::ErrorKind::Unsupported, "Unix origin sockets are unavailable on this platform")) }
+    }
+
+    #[cfg(unix)]
+    pub fn connect_unix_socket(&self, path: &std::path::Path) -> io::Result<std::os::unix::net::UnixStream> {
         #[cfg(target_os = "linux")]
         if let Some(name) = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()).strip_prefix(b"@") {
             let address = <std::os::unix::net::SocketAddr as std::os::linux::net::SocketAddrExt>::from_abstract_name(name)?;
-            return Ok(NetworkConnection::Stream(Box::new(UnixStream(std::os::unix::net::UnixStream::connect_addr(&address)?))));
+            return std::os::unix::net::UnixStream::connect_addr(&address);
         }
-        #[cfg(unix)]
-        { Ok(NetworkConnection::Stream(Box::new(UnixStream(std::os::unix::net::UnixStream::connect(path)?)))) }
-        #[cfg(not(unix))]
-        { let _ = path; Err(io::Error::new(io::ErrorKind::Unsupported, "Unix origin sockets are unavailable on this platform")) }
+        std::os::unix::net::UnixStream::connect(path)
     }
     pub fn open_datagram_transport(&self, request: &NetworkDial, native: Native) -> io::Result<NetworkConnection> {
         if request.transport != Transport::Udp { return Err(io::Error::new(io::ErrorKind::InvalidInput, "datagram socket requires UDP")); }
@@ -133,30 +183,7 @@ impl Outbound {
         message: &[u8],
         native: Native,
     ) -> io::Result<Vec<u8>> {
-        if message.len() > u16::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "DNS message exceeds 65535 bytes",
-            ));
-        }
-        let mut stream = self.connect_transport(request, native)?;
-        if request.transport == Transport::Tcp {
-            stream.write_all(&(message.len() as u16).to_be_bytes())?;
-        }
-        stream.write_all(message)?;
-        stream.flush()?;
-        if request.transport == Transport::Tcp {
-            let mut length = [0; 2];
-            stream.read_exact(&mut length)?;
-            let mut body = vec![0; u16::from_be_bytes(length) as usize];
-            stream.read_exact(&mut body)?;
-            Ok(body)
-        } else {
-            let mut body = vec![0; u16::MAX as usize];
-            let length = stream.read(&mut body)?;
-            body.truncate(length);
-            Ok(body)
-        }
+        exchange_dns(request.transport, message, || self.connect_transport(request, native))
     }
 
     pub fn exchange_http_transport(
@@ -175,6 +202,66 @@ impl Outbound {
     }
 }
 
+/// A standalone client can use the OS resolver and connect without server exit selection.
+pub fn connect_system_tcp(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
+    let bare = host.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')).unwrap_or(host);
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no address for the server");
+    for peer in (bare, port).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&peer, timeout) {
+            Ok(tcp) => return Ok(tcp),
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
+}
+
+pub fn lookup_system_addresses(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+    (host.trim_matches(['[', ']']), port).to_socket_addrs().map(Iterator::collect)
+}
+
+/// An unconnected socket lets the QUIC transport address its peer directly.
+pub fn open_system_datagram(peer: SocketAddr, timeout: Duration) -> io::Result<UdpSocket> {
+    let request = NetworkDial {
+        host: peer.ip().to_string(), port: peer.port(), transport: Transport::Udp, addresses: vec![peer],
+        route: NetworkRoute::Direct, timeout, socket_factory: None, race: None,
+    };
+    match open_native_udp(&request, peer, false)? {
+        NetworkConnection::Udp(socket) => Ok(socket),
+        _ => unreachable!("UDP requested"),
+    }
+}
+
+fn exchange_dns(
+    transport: Transport,
+    message: &[u8],
+    connect: impl FnOnce() -> io::Result<NetworkConnection>,
+) -> io::Result<Vec<u8>> {
+    if message.len() > u16::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "DNS message exceeds 65535 bytes",
+        ));
+    }
+    let mut stream = connect()?;
+    if transport == Transport::Tcp {
+        stream.write_all(&(message.len() as u16).to_be_bytes())?;
+    }
+    stream.write_all(message)?;
+    stream.flush()?;
+    if transport == Transport::Tcp {
+        let mut length = [0; 2];
+        stream.read_exact(&mut length)?;
+        let mut body = vec![0; u16::from_be_bytes(length) as usize];
+        stream.read_exact(&mut body)?;
+        Ok(body)
+    } else {
+        let mut body = vec![0; u16::MAX as usize];
+        let length = stream.read(&mut body)?;
+        body.truncate(length);
+        Ok(body)
+    }
+}
+
 #[cfg(unix)]
 struct UnixStream(std::os::unix::net::UnixStream);
 #[cfg(unix)]
@@ -187,6 +274,7 @@ impl Write for UnixStream {
 #[cfg(unix)]
 impl kerlico_shared::runtime::NetworkStream for UnixStream {
     fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> { self.0.set_read_timeout(Some(timeout))?; self.0.set_write_timeout(Some(timeout)) }
+    fn set_nonblocking(&self, enabled: bool) -> io::Result<()> { self.0.set_nonblocking(enabled) }
     fn split(self: Box<Self>) -> io::Result<kerlico_shared::runtime::NetworkPair> { Ok((Box::new(Self(self.0.try_clone()?)), self)) }
 }
 #[cfg(unix)]

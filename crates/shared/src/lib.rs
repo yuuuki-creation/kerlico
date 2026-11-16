@@ -397,6 +397,24 @@ pub enum Transport {
 pub trait InboundStream: Send + Sync {
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault>;
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault>;
+    /// Lets protocols acknowledge or reject a request only once the exit has been dialed.
+    fn report_connect(&self, _result: Result<(), OpenError>) -> Result<(), PlaneFault> { Ok(()) }
+    /// Says whether uplink can remain open after gracefully ending the downlink.
+    fn finish_to_user(&self) -> Result<bool, PlaneFault> { Ok(false) }
+
+    /// Reads like `read_from_user` and gives the bytes to `sink`, in one or more slices in
+    /// order. A stream that already holds the bytes can give them where they lie instead of
+    /// copying them into `buf`, and may give more than `buf` holds. Returns how many bytes `sink`
+    /// got. The default reads into `buf` and calls `sink` once, also with zero bytes.
+    fn read_from_user_to(
+        &self,
+        buf: &mut [u8],
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<usize, PlaneFault> {
+        let n = self.read_from_user(buf)?;
+        sink(&buf[..n]);
+        Ok(n)
+    }
 
     /// Raw user socket once this direction has no protocol bytes left to transform.
     fn raw_read(&self) -> Option<std::net::TcpStream> {
@@ -541,6 +559,10 @@ impl Handoff {
         self.peer
     }
 
+    pub fn report_connect(&self, result: Result<(), OpenError>) -> Result<(), PlaneFault> {
+        self.stream.report_connect(result)
+    }
+
     /// FakeDNS replaces the dial target and the name later rules see.
     pub fn retarget(&mut self, host: impl Into<String>) {
         self.destination.host = host.into();
@@ -586,6 +608,12 @@ struct PrefixStream {
 }
 
 impl InboundStream for PrefixStream {
+    fn report_connect(&self, result: Result<(), OpenError>) -> Result<(), PlaneFault> {
+        self.inner.report_connect(result)
+    }
+
+    fn finish_to_user(&self) -> Result<bool, PlaneFault> { self.inner.finish_to_user() }
+
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
         let mut pending = self.pending.lock().expect("prefix");
         let Some(bytes) = pending.as_ref() else {
@@ -607,6 +635,19 @@ impl InboundStream for PrefixStream {
         if bytes.is_empty() {
             *pending = None;
         }
+        Ok(n)
+    }
+
+    fn read_from_user_to(
+        &self,
+        buf: &mut [u8],
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<usize, PlaneFault> {
+        if self.pending.lock().expect("prefix").is_none() {
+            return self.inner.read_from_user_to(buf, sink);
+        }
+        let n = self.read_from_user(buf)?;
+        sink(&buf[..n]);
         Ok(n)
     }
 

@@ -39,19 +39,19 @@ VLESS Encryption 可以叠在上述任一合法载体上，不限于 RAW/none。
 
 节点、用户和落地的 `Settings` 接受字符串、数字、布尔值、数组及对象；结构值序列化为 JSON 后由协议解释。协议设置不等于直接加载整份 Xray 配置。
 
-TLS 的 `certificate` / `key` 接受 PEM，也可用 `certificateFile` / `keyFile`。客户端 `serverName` 用于 SNI 和名称验证，`pinnedPeerCertSha256` 是 DER 证书 SHA-256，支持逗号分隔和十六进制冒号分隔。叶证书 pin 精确验证；CA pin 还验证链和名称。`allowInsecure` 只关闭证书信任校验，不关闭握手签名校验。`alpn` 接受 JSON 数组或逗号分隔值。`minVersion` / `maxVersion` 的 1.0、1.1、1.2、1.3 在两个方向都与 Xray 互通，由 `xray_advanced_tls_bidirectional` 证明。TLS 1.3 服务端在客户端已为服务端接受的组发了 key share 时，取其中服务端顺序最靠前的一个，不发 HelloRetryRequest；服务端接受的组是 `curvePreferences`（Xray 和 BoringSSL 的组名，不分大小写），不写时按 Go 的默认取 X25519MLKEM768、X25519、P-256、P-384、P-521。Go 1.27 遇到客户端列出却没给 key share 的后量子组时仍会为它重试，而 Xray 的 uTLS 客户端（如 `randomized` 指纹）无法为 X25519MLKEM768 重试，所以这里不跟 Go。
+TLS 的 `certificate` / `key` 接受 PEM，也可用 `certificateFile` / `keyFile`。文件证书在新握手时按内容检测变化，即使大小和修改时间相同也能重载。只有证书和私钥能解析且相互匹配，才替换上一份有效身份；`oneTimeLoading` 只在配置创建时读取文件。客户端 `serverName` 用于 SNI 和名称验证，`pinnedPeerCertSha256` 是 DER 证书 SHA-256，支持逗号分隔和十六进制冒号分隔。叶证书 pin 精确验证；CA pin 还验证链和名称。`allowInsecure` 只关闭证书信任校验，不关闭握手签名校验。`alpn` 接受 JSON 数组或逗号分隔值。`minVersion` / `maxVersion` 的 1.0、1.1、1.2、1.3 在两个方向都与 Xray 互通，由 `xray_advanced_tls_bidirectional` 证明。TLS 1.3 服务端在客户端已为服务端接受的组发了 key share 时，取其中服务端顺序最靠前的一个，不发 HelloRetryRequest；服务端接受的组是 `curvePreferences`（Xray 和 BoringSSL 的组名，不分大小写），不写时按 Go 的默认取 X25519MLKEM768、X25519、P-256、P-384、P-521。Go 1.27 遇到客户端列出却没给 key share 的后量子组时仍会为它重试，而 Xray 的 uTLS 客户端（如 `randomized` 指纹）无法为 X25519MLKEM768 重试，所以这里不跟 Go。
 
 REALITY 使用服务端 `privateKey`、客户端 `publicKey`，客户端 `shortId`，服务端 `shortIds` 数组或单个 `shortId`。服务端按 Xray 的 `xtls/reality` 选认证用的密钥：ClientHello 的 key_share 里必须先有一个 X25519MLKEM768 share，之后的第一个 X25519 share 用于认证，没有就用混合 share 里的 X25519 那一半；只有 X25519 share、X25519 在混合 share 之前或有两个混合 share 的 ClientHello 不算 REALITY 连接，按未认证交给 target。客户端照指纹原样发送 key_share，不替旧指纹补混合 share。服务端 `serverNames`、`minClientVer`、`maxClientVer`、毫秒单位的 `maxTimeDiff` 限制认证。`mldsa65Seed` / `mldsa65Verify` 增加 ML-DSA-65 验证。支持 X25519 和 X25519MLKEM768，严格验证证书结构、CertificateVerify、Finished 和协商套件。H2 载体接受 Xray REALITY 未发送 ALPN 的握手，明确协商其他协议则拒绝。`target`（旧名 `dest`）写 `host:port`、`[IPv6]:port` 或本机端口；裸端口按 `127.0.0.1:端口` 处理，不经服务端 DNS 解析 `localhost`。以 `/` 开头是 Unix 套接字路径，以 `@` 开头是 Linux 抽象套接字，`@@` 开头按 Xray 用零补满 `sun_path`。未认证的连接，包括读不出 ClientHello 的字节，按原样交给 target：TCP target 仍通过 `Handoff` 交出，节点规则和出口照常生效；Unix target 没有出口可选，协议经运行时上下文的 `connect_unix` 连接并在协议内双向转发（Xray 的 REALITY 层同样用 `net.Dialer` 直接连 target 并转发，这是 `AGENTS.md` 拨号规则的唯一例外），一侧 EOF 后对另一侧半关闭；两个方向都 300 秒没有字节时转发结束，与 `server.md` 的 TCP 空闲规则相同。`xver` 为 0、1、2，按 Xray 使用的 go-proxyproto 写 PROXY 头：两端都是 IPv4 才写 IPv4，否则两端都写 IPv6。`limitFallbackUpload` / `limitFallbackDownload` 是 `{afterBytes, bytesPerSec, burstBytesPerSec}`，键名不区分大小写，只限未认证回落：上传计探测方发往 target 的字节，下载计 target 发回的字节，target 第一次读到的数据不计量；`bytesPerSec` 为 0 或不写即不限。认证成功的握手也像 Xray 一样先连 target：经运行时上下文直连（TCP 用原生套接字，Unix 用 `connect_unix`），发送 PROXY 头和客户端的原始 ClientHello，读取 target 的 ServerHello、CCS 和加密握手记录，沿用它的套件、密钥组、ServerHello 和各记录长度。握手记录之后已经到达的一条记录（target 的 NewSessionTicket）也记下总长度，服务端在 Finished 之后发一条同样长度的记录，内容是空应用数据，用服务端应用密钥封装，序号从 0 起。target 的握手只有一条加密记录时（超过 512 字节，Xray 同样合并），没有这条记录。连接 target 和读完这些记录共用一个 10 秒期限。结果的处理与 xtls/reality 相同：连不上 target、target 中途断开或超过期限、ServerHello 之后的记录不合规，或无法按它的套件和密钥组套用时，直接关闭连接；target 的头几个字节不是合规的 ServerHello 时，把已读到的字节写给客户端，之后双向转发，上下行按 `limitFallback*` 限速，已读到的字节不计量。只有没有 `target`，或没有可拨号的运行时上下文时没有可模仿的对象，服务端才发合成的握手记录。
 
 服务端在打开节点时就探测 target，与 Xray 随监听器启动一致。对每个 `serverNames` 和三种 ALPN 类别（不带 ALPN、`http/1.1`、`h2` 在前）各做两次真实的 TLS 1.3 握手，并像 Xray 的 TLS 客户端一样用系统根证书（或 `SSL_CERT_FILE`、`SSL_CERT_DIR` 指向的证书）验证 target 的证书链和服务器名，验证不过就什么也学不到：没有记录，也没有 ChangeCipherSpec 数目，认证连接不会为探测等待。一次在客户端 Finished 之后读 5 秒，记下 target 发来的应用数据记录的长度（OpenSSL 的 NewSessionTicket、HTTP/2 的 SETTINGS 等）；另一次在客户端 Finished 之前连发 ChangeCipherSpec，看 target 在 2、17、33 条之后是否 alert 或断开，得到它容忍的连续无效记录数 1、16、32 或不限。认证连接读完客户端 Finished 后，按记录长度逐条写空应用数据记录，序号接在上面那条之后；探测还没结束时最多等 35 秒，与 Xray 的第一批握手一样，探测失败就一条也不写。服务端到握手结束才断开与 target 的连接。读客户端 Finished 时容忍这个数目的 ChangeCipherSpec，多一条就发 unexpected_message alert 后关闭。读这一步的其他错误也按 xtls/reality 的记录层先发 alert 再关闭，alert 是致命级，用服务端应用密钥封装，序号接在已发的记录之后，整条 24 字节：无法认证的记录是 bad_record_mac，版本不对或 SSLv2 样的首字节是 protocol_version，记录超过 16640 字节是 record_overflow，畸形的 ChangeCipherSpec 是 decode_error，解密出来的内容类型不对、握手消息不是 Finished、握手消息把 ChangeCipherSpec 隔开是 unexpected_message，握手消息体超过 65536 字节是 internal_error，Finished 不符是 decrypt_error。读不到数据、对方 close_notify 不回 alert。握手完成后连续的空应用记录超过这个数目只关闭连接，不发 alert。探测还没有结果时这个数目取 32，与 OpenSSL 和 xtls/reality 的默认相同。
 
-WS 和 HTTPUpgrade 的 `path` 默认 `/`、`host` 可选，路径比较排除查询串。WS 服务端按帧方向检查掩码，处理 Ping/Pong/Close 和分片，保留 HTTP 升级后的预读字节。`?ed=N` 的 WebSocket 早期数据通过 `Sec-WebSocket-Protocol` 携带。RAW HTTP 用 `header: {"type":"http","request":{...},"response":{...}}` 指定首个请求/响应伪装。WS/HTTPUpgrade 用 `headers` 对象指定自定义头。WebSocket 客户端在第一笔真实写入时发送升级请求，早期数据放进请求头。HTTPUpgrade 客户端与 Xray 的拨号器一样在建连时发送请求；`ed` 大于 0 时不等 101 就写首批数据，否则读到 101 后再写。两种情况下 Encryption 握手都走同一条路径。WS、HTTPUpgrade、XHTTP、gRPC 服务端共用同一条 `sockopt.trustedXForwardedFor` 规则：请求同时带 `X-Forwarded-For` 和列表中任一标记头时，才以前者的第一个 IP（端口 0）作为 `Handoff` 来源；缺少标记头、第一个值不是 IP 或列表为空时保留 TCP 对端。
+WS 和 HTTPUpgrade 的 `path` 默认 `/`、`host` 可选，路径比较排除查询串。WS 服务端按帧方向检查掩码，处理 Ping/Pong/Close 和分片，保留 HTTP 升级后的预读字节。`?ed=N` 的 WebSocket 早期数据通过 `Sec-WebSocket-Protocol` 携带。RAW HTTP 用 `header: {"type":"http","request":{...},"response":{...}}` 指定首个请求/响应伪装。WS/HTTPUpgrade 用 `headers` 对象指定自定义头。WebSocket 客户端在第一笔真实写入时发送升级请求，早期数据放进请求头。HTTPUpgrade 客户端在建连时发送请求。明文 HTTPUpgrade 总是等到 101 后再写首批数据，避免旧对端丢掉同一次读取中的首包；有 TLS 且 `ed` 大于 0 时仍提前写，升级请求和首包分别写入 TLS 记录。两种情况下 Encryption 握手都走同一条路径。WS、HTTPUpgrade、XHTTP、gRPC 服务端共用同一条 `sockopt.trustedXForwardedFor` 规则：请求同时带 `X-Forwarded-For` 和列表中任一标记头时，才以前者的第一个 IP（端口 0）作为 `Handoff` 来源；缺少标记头、第一个值不是 IP 或列表为空时保留 TCP 对端。
 
 gRPC 同一条 HTTP/2 连接可以并发承载 Tun 和 TunMulti。每个 RPC 独立完成 VLESS 握手并交出 Handoff。`serviceName` 支持 Xray 的 `/service/method|multi-method` 写法和转义。H2 保留 HPACK 状态，按连接和流分别处理窗口、END_STREAM、RST 和 GOAWAY。收到响应头之前允许先写应用数据。RPC 结束时先交付已接收的数据，服务端发送 gRPC trailers 和 END_STREAM，连接继续处理控制帧和其他 RPC。落地按对端和配置复用连接，GOAWAY 或断开后在下一次开流时重连。 客户端可用 `authority` 覆盖 HTTP/2 authority，用 `user_agent` 选择 chrome、edge、firefox、golang 或自定义值。`initial_windows_size` 指定接收流窗口。`idle_timeout` 和 `health_check_timeout` 以秒为单位控制 PING 探测与超时，`permit_without_stream` 允许客户端在没有 RPC 时探测。服务端按 `sockopt.trustedXForwardedFor` 恢复会话来源，规则见 WS 与 HTTPUpgrade 段。
 
 XHTTP 的 `auto` 通常选择 packet-up；REALITY 下选择 stream-one，有独立 `downloadSettings` 时选择 stream-up。`downloadSettings` 可单独指定地址、端口、安全、路径及 HTTP 版本。支持配置上传方法、headers、padding 位置、会话 ID/序号的 path/query/header/cookie 位置、header/cookie 上传载荷、上传分块限额及间隔、缓冲包数量、stream-up 保活。上传必须消费响应；packet-up 要求 HTTP 200。H1 流式请求使用 `Connection: close` 以启用 Xray 的全双工处理。
 
-XHTTP 服务端的 `h2Params` 只作用于 H2 入口（h2c、TLS H2、REALITY H2），不作用于 H3。客户端配置里的 h2Params 既不生效也不校验。键名按 Go `http.HTTP2Config` 字段匹配，不区分大小写，未知键忽略，重复键后者生效，类型错误、小数、字符串数字或非空 `CountError` 会拒绝配置。`MaxConcurrentStreams`、`MaxReadFrameSize`、`MaxDecoderHeaderTableSize`、`MaxReceiveBufferPerStream` 写入 SETTINGS 并被强制执行，`MaxReceiveBufferPerConnection` 决定连接窗口和首个 WINDOW_UPDATE；`SendPingTimeout`、`PingTimeout`、`WriteByteTimeout` 以纳秒计，分别控制空闲探测、探测应答期限和写停滞断开；`PermitProhibitedCipherSuites` 为假时，协商到 RFC 7540 禁用套件的 TLS 1.2 连接以 INADEQUATE_SECURITY 拒绝，低于 TLS 1.2 无论如何都拒绝。零值或越界值取 Kerlico 默认值（128 流、16 MiB 窗口、16 KiB 帧、4096 字节 HPACK 表），Go 的默认值是 250 流和 1 MiB 窗口。`MaxEncoderHeaderTableSize` 只校验类型，Kerlico 的 HPACK 编码器不使用动态表。H2 客户端遇到对端流数已满时在同一份 XMUX 连接下另开 TCP 连接，不等待。
+XHTTP 服务端的 `h2Params` 只作用于 H2 入口（h2c、TLS H2、REALITY H2），不作用于 H3。客户端配置里的 h2Params 既不生效也不校验。键名按 Go `http.HTTP2Config` 字段匹配，不区分大小写，未知键忽略，重复键后者生效，类型错误、小数、字符串数字或非空 `CountError` 会拒绝配置。`MaxConcurrentStreams`、`MaxReadFrameSize`、`MaxDecoderHeaderTableSize`、`MaxReceiveBufferPerStream` 写入 SETTINGS 并被强制执行，`MaxReceiveBufferPerConnection` 决定连接窗口和首个 WINDOW_UPDATE；`SendPingTimeout`、`PingTimeout`、`WriteByteTimeout` 以纳秒计，分别控制空闲探测、探测应答期限和写停滞断开；`PermitProhibitedCipherSuites` 为假时，协商到 RFC 7540 禁用套件的 TLS 1.2 连接以 INADEQUATE_SECURITY 拒绝，低于 TLS 1.2 无论如何都拒绝。零值或越界值取 Xray 的默认值：250 条并发流、1 MiB 的流窗口和连接窗口、1 MiB 的最大读帧、4096 字节 HPACK 表。SETTINGS 的发送顺序与固定版本 Xray 相同。`MaxEncoderHeaderTableSize` 只校验类型，Kerlico 的 HPACK 编码器不使用动态表。H2 客户端遇到对端流数已满时在同一份 XMUX 连接下另开 TCP 连接，不等待。
 
 XHTTP 客户端的 `hMaxRequestTimes` 与 Xray 同样记账：下载 GET、stream-up 上传和 stream-one 请求直接扣减，不换连接；packet-up 的 POST 扣减后预算已尽才换连接，换到的新连接不记这次 POST。packet-up 的 VLESS 请求头和第一笔数据最多等 100 毫秒后合并成一个 POST，启用 Encryption 时不合并。H1 的 XMUX 连接数不与 Xray 对齐，Go 的 H1 上传连接池会不确定地多开连接。
 
@@ -65,9 +65,25 @@ mKCP 处理绝对接收窗口、累积确认、丢包重传、乱序、重复数
 
 XDrive 使用 `xdriveSettings` 对象；local 也接受 `service: local` 和 `remoteFolder`。HTTP 后端支持 OAuth、模板预签名 PUT、S3 SigV4/会话令牌/path-style/virtual-host，以及 Google Drive 的 multipart、分段对象和环形槽位。`storageAddress` / `storagePort` 是显式存储连接覆盖；不会用 VLESS 逻辑监听地址替代云服务地址。
 
+真云往返用例 `cloud_storage_round_trips` 只手动执行。将 `xdriveSettings` 对象保存在 Linux worker 上的私有文件中，用专用的测试前缀或文件夹，令 `XDRIVE_LIVE_SETTINGS` 指向该文件，执行 `cargo test -p kerlico-vless --lib cloud_storage_round_trips -- --ignored`。S3 的 `secrets` 依次为 access key、secret key、可选会话令牌；Drive 的三个值依次为 OAuth client ID、client secret、refresh token。`remoteFolder` 必须是测试专用，因为 XDrive 会写入和清理会话对象。
+
+## 数据路径
+
+REALITY 和 TLS 的记录层一次读取取回线路上已到达的全部字节，到齐的记录逐条解开；一次写入最多把四条满记录和不足一条的尾部封好后一并写出。记录的大小和内容不变。REALITY 的记录用 `ring` 就地加解密。TLS 状态每次只收一条完整记录，一次读取只交付一条记录的数据。REALITY 一次读取可以交付多条记录的数据，但只判定第一条：它后面的记录在调用方的缓冲里试着解开，解得开且是应用数据才算数，否则线路上的字节原样留到下一次读取再判定。这是因为 Vision 切换直连由上层在读到数据之后才决定，切换之后最后一条记录后面的字节不是记录。切换时，最后一条记录之后预读到的字节原样交付。
+
+VLESS Encryption 的记录层用 `ring` 就地加解密，密钥在会话建立时展开一次。读取同样一次取回已到达的全部字节，但和 Xray 一样每次只解开一条记录，交付完再解下一条，所以 Vision 在任何一条记录之后切换直连，后面预读到的字节都去掉头部掩码后原样交付；一次写入最多把八条 8 KiB 的满记录和不足一条的尾部封好后一并写出，记录的切分与逐条写出时相同。
+
+HTTP/2 的接收窗口在消耗满四分之一时归还，与 grpc-go 相同。一条流等数据和等发送窗口各有自己的等待点，一帧只唤醒它所属的流。等发送窗口的流按用尽的先后取连接窗口，攒到要发的数据或半个窗口再发，1 毫秒内攒不到就有多少发多少；对端每次至少归还半个窗口，否则靠这 1 毫秒的期限继续前进。
+
+gRPC 的每条 HTTP/2 连接有一个读线程和一个写线程。写数据的流在线路空闲时自己发出已排队的帧和自己的数据，线路忙时只把帧入队，由写线程按入队顺序发出。读数据的流和读线程只入队，不向线路写，所以不会被别的流的数据拖住。一次写入成帧的数据量，以及排队多少字节之后流要先等，取线路最近约十六分之一秒发出的量，范围是 16 KiB 到 128 KiB：线路慢时，共用连接的流只互相等几帧。HTTP 和 XHTTP 的 H2 连接没有这两个线程，同一时刻只有一条流在写，其他流等到自己的帧发出；只为控制帧而写的流在有流等待时让出。
+
+gRPC 的一条消息到齐并校验之后才交付，载荷在原处解码。发送时消息前缀和数据直接成帧，不先拼成消息。落地的字节流读写直接用调用方的缓冲。
+
+这些做法的测量在 [VLESS 性能记录](vless-performance.md)。
+
 ## VLESS Encryption、Vision 和复用
 
-Encryption 的模式是 `mlkem768x25519plus.native`、`xorpub`、`random`。服务端后接票据有效期和私钥，客户端后接 `1rtt` 或 `0rtt` 及公钥。按 Xray 语法支持有效期区间、长度/间隔 padding，以及 X25519 和 ML-KEM 密钥链。拒绝低阶公钥，0-RTT 校验票据和重放，冷启动仍做 1-RTT。random 在取消内层 AEAD 后保留记录头掩码。
+Encryption 的模式是 `mlkem768x25519plus.native`、`xorpub`、`random`。服务端后接票据有效期和私钥，客户端后接 `1rtt` 或 `0rtt` 及公钥。按 Xray 语法支持有效期区间、长度/间隔 padding，以及 X25519 和 ML-KEM 密钥链。拒绝低阶公钥，0-RTT 校验票据和重放，冷启动仍做 1-RTT。客户端在本机有 AES-GCM 硬件支持时整个会话用 AES-256-GCM，否则用 ChaCha20-Poly1305；判断条件在 x86-64 和 ARM64 上与 Xray 的 `HasAESGCMHardwareSupport` 相同，其他架构用 ChaCha20-Poly1305。服务端不看本机硬件，用能解开第一条记录的那一种。random 在取消内层 AEAD 后保留记录头掩码。
 
 Vision 只保留一条实现路径。END 结束填充；DIRECT 在最后一块填充和对应安全记录排空后移除紧邻的安全层，不跳过外层传输。内层真实 TLS 的大记录不能提前切换。分开的读写半边共享 Vision 状态，阻塞读取不占用写侧。
 
@@ -139,11 +155,11 @@ XUDP 和 Mux 会话的回复来源取自帧里的地址，独立 UDP 连接的�
 
 ## 验证和未完成项
 
-真实流程回归在 `crates/server/tests/vless_flow.rs`，官方双向矩阵在 `vless_xray.rs` 和 `vless_support`。每个外部用例都比较实际载荷，并可先跑 Xray 到 Xray 对照。`XRAY` 必须指向固定版本；没有二进制时测试明确 ignored，不伪报通过。云端 API 用本地存储模拟验证协议，不能推断真实账号权限、配额和服务可用性。
+真实流程回归在 `crates/server/tests/vless_flow.rs`，官方双向矩阵在 `vless_xray.rs` 和 `vless_support`。每个外部用例都比较实际载荷，并可先跑 Xray 到 Xray 对照。`XRAY` 必须指向固定版本；没有二进制时测试明确 ignored，不伪报通过。XDrive 的日常回归使用本地模拟器，另有独立 S3 兼容实现和真云的手动测试。
 
 ```text
 cargo test -p kerlico-vless -p kerlico-vless-client -p kerlico-vless-server --lib
-XRAY=/path/to/xray XRAY_BIN=/path/to/xray cargo test -p kerlico-vless -p kerlico-vless-client -p kerlico-vless-server --lib -- --ignored --test-threads=1
+XRAY=/path/to/xray XRAY_BIN=/path/to/xray cargo test -p kerlico-vless -p kerlico-vless-client -p kerlico-vless-server --lib -- --ignored --test-threads=1 --skip cloud_storage_round_trips
 cargo test -p kerlico-server --no-default-features --features vless,landing-vless --test vless_flow
 XRAY=/path/to/xray VLESS_XRAY_CONTROL=1 cargo test -p kerlico-server --no-default-features --features vless,landing-vless --test vless_xray -- --ignored --nocapture
 python3 tools/verify_vless_client.py --xray-bin /path/to/xray --client-bin <kerlico-client> --server-bin <kerlico-server>
@@ -157,15 +173,20 @@ python3 tools/verify_vless_client.py --xray-bin /path/to/xray --client-bin <kerl
 
 REALITY 认证之后的伪装（NewSessionTicket 同长记录、探测 target 得到的记录长度和 ChangeCipherSpec 数目、target 探测失败时的处理）补上之后，在 Linux worker 上对 90e7fd8 之上的改动验证：库测试 208、31、44 项通过，四个 ignored 的 Xray 对照通过，三个 crate 的 clippy 没有告警，`vless_flow` 19 项通过，四条叶子构建和依赖检查通过，REALITY target 10/10，其中两个服务端在 TCP 和三种 Unix target 上发出的握手后记录都与 decoy 的 NewSessionTicket 同长（184 字节）。官方矩阵两遍：一遍 456/456，一遍 455/456，失败的是 `httpupgrade-early-data/xray-control`，即上面说的 Xray 服务端缺陷，不涉及 Kerlico。读客户端 Finished 出错时先发 alert 补上之后再验证一遍：库测试 209、31、44 项通过，四个 ignored 的 Xray 对照通过，clippy 没有告警，`vless_flow` 19 项通过，叶子隔离通过，官方矩阵 456/456，拒绝用例 15/15，REALITY target 10/10；其中重放 ClientHello 后发无法认证的记录，Xray 和 Kerlico 两个服务端都只回一条 24 字节的 alert（`17 03 03 00 13`）再关闭。客户端入口没有重跑。
 
+2026-11-12 数据路径的改动之后（REALITY、TLS 和 VLESS Encryption 记录层的成批读写，HTTP/2 的等待点、写线程和排队规则，gRPC 原处解码，Encryption 客户端按硬件选算法），在 Linux worker 上对 `a08c02c` 之上的工作区验证：库测试 218、31、44 项通过，四个 ignored 的 Xray 对照通过，三个 crate 的 clippy 没有告警，`vless_flow` 19 项通过，四条叶子构建和依赖检查通过。官方矩阵 455/456，失败的是 `httpupgrade-early-data/kerlico-to-xray`，Xray 服务端日志是 `invalid request version`，即下面说的 Xray 服务端缺陷；这一组另外重复 16 次全部通过。对写入排队最敏感的 `grpc-tls-sudoku` 重复 24 次全部通过。同一工作区还带着 mieru 对 `crates/shared` 和复制循环的改动。测量见 [VLESS 性能记录](vless-performance.md)。
+
 已知差异和未完成项：
 
-- REALITY 认证之后的伪装与 xtls/reality 的差异：探测得到的 ChangeCipherSpec 数目对探测结束之后的每个连接生效，Xray 只在连接等过探测时才设置，其余连接用 32；握手完成后连续空记录超限只关闭连接，Xray 先发 alert，这一步需要密钥，探测方做不到。target 在客户端 Finished 之前断开连接时，Xray 会关闭客户端，Kerlico 不监视 target。探测遇到要求客户端证书的 target 时不会回送证书，Go 的客户端会回送空证书，两者读到的记录可能不同。与 target 的 NewSessionTicket 同长的记录只在它已随握手记录到达时记下，到达是否赶得上取决于读取，Xray 也一样。这一组功能在 2026-11-11 的验收之后补上，验证过程见 `.audit/vless-completion.tsv` 的最新记录。
+- REALITY 在等待目标探测完成的连接上应用探测得到的空记录上限，其余连接沿用 32。探测客户端在目标请求证书时回空证书。在等客户端 Finished 时，原生 TCP 和 Unix target 提前断开会中止握手。握手完成后连续空记录超限时，发送 TLS fatal alert，然后关闭。与 target 的 NewSessionTicket 同长的记录只在它已随握手记录到达时记下，到达是否赶得上取决于读取，Xray 也一样。
 - Xray 客户端用 ios、edge、qq 和部分 `randomized` 指纹发出的 ClientHello 只有 X25519 share，连 Xray 和 Kerlico 的 REALITY 服务端都会失败；android 和 360 指纹只有 TLS 1.2，也不能用于 REALITY。这是 Xray 的规则，Kerlico 保持一致。
-- TLS 1.3 服务端的组选择有意与 Go 不同，见上文 TLS 段。`curvePreferences` 中 Xray 接受的 `SecP256r1MLKEM768`、`SecP384r1MLKEM1024` 因 BoringSSL 没有实现而拒绝；不认识的组名报错，Xray 忽略它们。
-- XHTTP 服务端没有配置 h2Params 时使用 Kerlico 的默认值，见上文 h2Params 段；Xray 的 H2 服务端还发送 SETTINGS 9（`SETTINGS_NO_RFC7540_PRIORITIES`），Kerlico 不发。`WriteByteTimeout` 和 `PermitProhibitedCipherSuites` 只有单元测试，没有对照 Xray 的字节级证明。
-- XHTTP H1 的 XMUX 连接数没有与 Xray 比较，因为 Xray 对照自己的 H1 连接数每次不同。
-- 门户的第一个数据报超限时，会话用不带数据的 NEW 帧打开；这个分支没有对照 Xray 测试。
-- XDrive 云服务只用本地协议模拟器验证，不推断实际账号、权限或配额。
-- 明文 HTTPUpgrade 早期数据下，Kerlico 客户端连 Xray 服务端仍会偶发失败，原因是 Xray 服务端的缺陷，见下一段。
+- TLS 1.3 服务端的组选择有意与 Go 不同，见上文 TLS 段。`curvePreferences` 支持 `SecP256r1MLKEM768` 和 `SecP384r1MLKEM1024`，两组均已与 Xray 双向验证。未识别的组名按 Xray 的方式忽略。
+- XHTTP H1 已与 Xray 双向验证请求预算耗尽和限制复用后的载荷传输。物理 TCP 连接数取决于 HTTP 上传连接池，固定版本 Xray 自对照也会变化；因此只对 H2 做精确载体计数比较。
+- 门户的第一个数据报超限时，会话用不带数据的 NEW 帧打开。已用 Xray 桥验证超限首包被跳过、后续数据报和回包照常传输。
+- XDrive 在独立的 RustFS 1.0.0-alpha.89 上通过 S3 载荷往返；S3 上传为空时也发送 `Content-Length: 0`。没有 AWS S3 和 Google Drive 测试账号，两家的真云往返尚未验证。
+- 固定版本 Xray 自对照仍可能在明文 HTTPUpgrade 早期数据下失败：它读完请求头后弃用缓冲，预读的 VLESS 字节被一起丢弃（`transport/internet/httpupgrade/hub.go`）。Kerlico 客户端等 101 后再发首包。Kerlico 服务端仍接收 Xray 客户端提前发送的数据，并把 VLESS 响应随第一批下行一起写，避开 Xray 客户端会丢掉和 101 一起到达的响应字节的问题。旧实现对 Xray 自对照的已知缺陷无法在 Kerlico 一侧更改。
 
-固定版本 Xray 的 HTTPUpgrade 服务端用带缓冲的读取解析请求头后返回原始连接，与请求头同一次读到的 VLESS 字节随之丢失（`transport/internet/httpupgrade/hub.go`）。明文早期数据下，请求之后越早写出数据越容易触发。Kerlico 客户端因此像 Xray 的拨号器那样在建连时发出请求，不再在首批数据时与请求连续写出。同一快照各重复 20 次：修正前 kerlico 到 Xray 失败 11 次，修正后 2 次；Xray 自对照两轮均为 0 次，此前完整矩阵中也出现过 1 次失败。TLS 记录把请求和数据分开，TLS 组合不受影响。剩余失败属于对端缺陷，不能把偶然通过计作已消除，也不使用 sleep 或补齐字节掩盖它。Xray 客户端连 Kerlico 服务端时的失败来自 Xray 客户端的缺陷：`ed` 大于 0 时，拨号器到第一次读取才解析 101，VLESS 响应解码的第一次读取只有 1 字节，随后清空缓冲，与 101 同时到达的响应字节随之丢失（`transport/internet/httpupgrade/dialer.go`、`proxy/vless/encoding/addons.go`）。Xray 服务端的响应随第一批下行数据写出，不会触发它；Kerlico 服务端改用同样的时机后，perf-01 上该行重复 200 次为 0 次失败，同一测试改回立即写响应时失败 21 次。
+2026-11-15 在 perf-01 上验证：证书文件的大小和修改时间固定不变时，重载回归在旧实现的 release 构建下失败，切换到按内容判断后通过；同一用例还检查了部分轮换、坏 PEM 和 `oneTimeLoading`。明文 HTTPUpgrade 的回归确认 `ed>0` 时也不在 101 前发送首包，且 Kerlico 客户端对固定 Xray 的明文和 TLS 两项用例通过。H2 服务端现在也会发送 SETTINGS 9（`SETTINGS_NO_RFC7540_PRIORITIES`，值为 1）；两组 `h2Params` 对照直接读取 h2c 和 TLS 的 SETTINGS，结果均与 Xray 一致。共享 TLS 拆分后以及加入 SETTINGS 9 后各重跑了一次 Xray 完整矩阵，都是 456/456。
+
+2026-11-16 在 perf-01 验证：Xray 矩阵 456/456，REALITY target 10/10，h2c 和 TLS 的 `h2Params` 2/2，`vless_flow` 19/19，四项额外的库内 Xray 对照全部通过。`h2Params` 对照比较了默认与显式配置的 SETTINGS 值、发送顺序和首个连接窗口增量。
+
+扩展后的 `h2Params` 字节级对照 6/6：还验证了禁用套件时的 `GOAWAY INADEQUATE_SECURITY`、显式允许时的 SETTINGS，以及原生 TCP 写停滞后启用 `WriteByteTimeout` 的断连、关闭此选项后的完整 8 MiB 传输。原矩阵复跑 456/456，新增两组 H1 XMUX 也分别通过官方自对照和两个互通方向，共 6/6。

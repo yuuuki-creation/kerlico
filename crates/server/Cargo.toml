@@ -13,6 +13,10 @@ mieru = { package = "kerlico-mieru-server", path = "../../protocols/mieru/server
 landing-mieru = { package = "kerlico-mieru-client", path = "../../protocols/mieru/client", optional = true }
 vless = { package = "kerlico-vless-server", path = "../../protocols/vless/server", optional = true }
 landing-vless = { package = "kerlico-vless-client", path = "../../protocols/vless/client", optional = true }
+anytls = { package = "kerlico-anytls-server", path = "../../protocols/anytls/server", optional = true }
+landing-anytls = { package = "kerlico-anytls-client", path = "../../protocols/anytls/client", optional = true }
+hy2 = { package = "kerlico-hy2-server", path = "../../protocols/hy2/server", optional = true }
+landing-hy2 = { package = "kerlico-hy2-client", path = "../../protocols/hy2/client", optional = true }
 aes = "0.8"
 aes-gcm = "0.10"
 hkdf = "0.12"
@@ -30,6 +34,7 @@ hyper = { version = "1", features = ["server", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 kerlico-mieru = { path = "../../protocols/mieru/shared" }
 kerlico-vless = { path = "../../protocols/vless/shared" }
+kerlico-anytls = { path = "../../protocols/anytls/shared" }
 rcgen = "0.13"
 tokio = { version = "1", features = ["rt", "net", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

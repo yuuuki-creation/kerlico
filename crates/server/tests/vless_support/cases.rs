@@ -197,7 +197,8 @@ impl Case {
     }
 
     pub fn counts_carriers(&self) -> bool {
-        self.xmux.is_some()
+        // Go's HTTP/1 upload pool can open spare TCP sockets independently of the XMUX lease.
+        self.xmux.is_some() && !matches!((self.network, self.security), (Network::Xhttp(_), Security::None | Security::Tls("http/1.1")))
     }
 
     pub fn encryption(mut self, cipher: &'static str, resume: bool) -> Self {
@@ -914,6 +915,8 @@ pub fn cases() -> Vec<Case> {
     cases.push(Case::new("xhttp-h2-xmux-stream-one-requests-1", Xhttp("stream-one"), Tls("h2"), TwoTcp).xmux(r#"{"hMaxRequestTimes":1}"#));
     cases.push(Case::new("xhttp-h2-xmux-reuse-1", Xhttp("packet-up"), Tls("h2"), TwoTcp).xmux(r#"{"cMaxReuseTimes":1}"#));
     cases.push(Case::new("xhttp-h2-xmux-connections-2", Xhttp("packet-up"), Tls("h2"), TwoTcp).xmux(r#"{"maxConnections":2}"#));
+    cases.push(Case::new("xhttp-h1-xmux-requests-2", Xhttp("packet-up"), None, Rounds(4)).xmux(r#"{"hMaxRequestTimes":2}"#));
+    cases.push(Case::new("xhttp-h1-xmux-reuse-1", Xhttp("packet-up"), Tls("http/1.1"), TwoTcp).xmux(r#"{"cMaxReuseTimes":1}"#));
     for (name, network, security) in [
         ("ws-none", WebSocket(false), None),
         ("httpupgrade-none", Upgrade(false), None),

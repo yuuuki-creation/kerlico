@@ -298,6 +298,9 @@ fn dial(host: &str, port: u16, settings: &Settings, flow: Flow, command: Command
             }
             read.set_timeout(Duration::from_secs(10));
             if let Some(config) = upgrade_config {
+                // A raw TCP write and the upgrade request can reach the peer in the same read.
+                // Wait for 101 without TLS so peers that discard their header buffer lose no data.
+                let config = if security { config } else { config.wait_for_switch() };
                 let (reader, mut writer) = upgrade_pair(Box::new(read), Box::new(write), config);
                 writer.start().map_err(|_| OpenError::Transport)?;
                 read = Link::UpgradeRead(Box::new(reader));
@@ -1859,6 +1862,17 @@ impl InboundStream for Relay {
         if self.udp {
             return self.read_packet(buf);
         }
+        let held = !self.pending.lock().expect("pending").is_empty() || !self.staged.lock().expect("staged").is_empty();
+        if !held {
+            // Nothing is held back, so the bytes go straight to the caller, as many as it has room for.
+            let mut socket = self.read.lock().expect("read");
+            socket.set_timeout(Duration::from_millis(200));
+            return match socket.read(buf) {
+                Ok(0) => Err(PlaneFault::Closed),
+                Ok(n) => Ok(n),
+                Err(error) => Err(map_io(error)),
+            };
+        }
         self.fill_pending()?;
         let mut pending = self.pending.lock().expect("pending");
         if pending.is_empty() {
@@ -1874,12 +1888,21 @@ impl InboundStream for Relay {
         if self.finish_unsent()? || (self.udp && !kerlico_vless::UdpFraming::Plain.carries(buf)) {
             return Ok(buf.len());
         }
-        let payload = if self.udp {
-            encode_udp(buf).map_err(|_| PlaneFault::Transport)?
-        } else {
-            buf.to_vec()
-        };
-        let mut rest = payload;
+        if !self.udp {
+            // A byte stream needs no copy of its own: the link takes what it can and the caller
+            // comes back with the rest.
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let mut socket = self.write.lock().expect("write");
+            socket.set_timeout(Duration::from_millis(200));
+            return match socket.write(buf) {
+                Ok(0) => Err(PlaneFault::Closed),
+                Ok(n) => Ok(n),
+                Err(error) => Err(map_io(error)),
+            };
+        }
+        let mut rest = encode_udp(buf).map_err(|_| PlaneFault::Transport)?;
         self.write_vec(&mut rest)?;
         if !rest.is_empty() {
             *self.unsent.lock().expect("unsent") = rest;
@@ -2484,11 +2507,12 @@ mod tests {
     }
 
     #[test]
-    fn land_upgrades_before_the_header() {
+    fn plaintext_httpupgrade_waits_for_101_even_with_early_data_configured() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 512];
             let used = loop {
@@ -2504,10 +2528,16 @@ mod tests {
                     Err(kerlico_vless::UpgradeError::Bad) => panic!("bad upgrade"),
                 }
             };
+            assert_eq!(used, buf.len(), "payload coalesced with the upgrade request");
+            socket.set_read_timeout(Some(Duration::from_millis(150))).unwrap();
+            let probe = socket.read(&mut tmp).unwrap_err();
+            assert!(matches!(probe.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock));
             socket.write_all(kerlico_vless::upgrade_response()).unwrap();
-            let mut rest = buf[used..].to_vec();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut rest = Vec::new();
             while decode_request(&rest).is_err() {
                 let n = socket.read(&mut tmp).unwrap();
+                assert!(n > 0);
                 rest.extend_from_slice(&tmp[..n]);
             }
             socket
@@ -2524,7 +2554,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.insert_text("encryption", "none");
         settings.insert_text("network", "httpupgrade");
-        settings.insert_text("path", "/vless");
+        settings.insert_text("path", "/vless?ed=1024");
         settings.insert_text("host", "localhost");
         settings.insert_text("id", "我爱🍉老师1314");
         let destination = Destination::new("example.com", 80, Transport::Tcp).unwrap();

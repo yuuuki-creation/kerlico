@@ -578,10 +578,14 @@ impl Server {
                 )
             },
         )
-        .map_err(|_| fail(session.as_ref()))?;
+        .map_err(|_| {
+            let _ = handoff.report_connect(Err(OpenError::Transport));
+            fail(session.as_ref())
+        })?;
         let mut addresses = family_addresses(&resolved.addresses, exit);
         if addresses.is_empty() && !matches!(exit, Exit::Landing) {
             if route::literal(&destination).is_some() {
+                let _ = handoff.report_connect(Err(OpenError::Transport));
                 return Err(fail(session.as_ref()));
             }
             let looked = dns.lookup(destination.host(), native, outbound);
@@ -590,6 +594,7 @@ impl Server {
                 exit,
             );
             if addresses.is_empty() {
+                let _ = handoff.report_connect(Err(OpenError::Transport));
                 return Err(fail(session.as_ref()));
             }
         }

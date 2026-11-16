@@ -3,8 +3,12 @@ name = "kerlico-outbound"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+system-dns = ["dep:hickory-resolver"]
+
 [dependencies]
 kerlico-shared = { path = "../shared" }
+hickory-resolver = { version = "0.25", default-features = false, features = ["system-config"], optional = true }
 socket2 = { version = "0.6", features = ["all"] }
 bytes = "1"
 http-body-util = "0.1"

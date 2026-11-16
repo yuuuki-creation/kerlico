@@ -1,0 +1,136 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 21d20ec..6cfd594 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -4634,7 +4634,7 @@ OPENSSL_EXPORT void SSL_set_enable_ech_grease(SSL *ssl, int enable);
+ 
+ // RAMA_SSL_set_client_hello_mutator supplies the first serialized ClientHello
+ // and mutable copies of its random and session ID before TLS transcripts it.
+-// This is only available on an initial TCP handshake without ECH or resumption.
++// This is only available on the first ClientHello of a TCP handshake without ECH.
+ typedef int (*RAMA_SSL_CLIENT_HELLO_MUTATOR)(SSL *ssl, const uint8_t *hello,
+     size_t hello_len, uint8_t *random, uint8_t *session_id, size_t session_id_len);
+ OPENSSL_EXPORT int RAMA_SSL_set_client_hello_mutator(
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index 31f177d..089625a 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -2069,7 +2069,7 @@ static size_t ext_pre_shared_key_clienthello_length(
+ // This function differs from other `CBB` functions because it needs to
+ // accommodate PSK binders. It must write the PSK extension, flush the `CBB` to
+ // write out a length prefix, and then finally sample the whole ClientHello.
+-static bool ext_pre_shared_key_add_clienthello(const SSL_HANDSHAKE *hs,
++static bool ext_pre_shared_key_add_clienthello(SSL_HANDSHAKE *hs,
+                                                CBB *out_client_hello,
+                                                CBB *out_extensions,
+                                                size_t *out_psk_len,
+@@ -2148,6 +2148,11 @@ static bool ext_pre_shared_key_add_clienthello(const SSL_HANDSHAKE *hs,
+ 
+   // Fill in binders.
+   const auto client_hello = CBBAsSpan(out_client_hello);
++  if (ssl->config->client_hello_mutator &&
++      (type != ssl_client_hello_unencrypted ||
++       !ssl_mutate_client_hello(hs, client_hello))) {
++    return false;
++  }
+   auto remaining_binders_out = client_hello.last(binders_len);
+   const auto &transcript =
+       type == ssl_client_hello_inner ? hs->inner_transcript : hs->transcript;
+diff --git a/ssl/handshake_client.cc b/ssl/handshake_client.cc
+index 3fbdd1b..bb55869 100644
+--- a/ssl/handshake_client.cc
++++ b/ssl/handshake_client.cc
+@@ -242,6 +242,44 @@ bool ssl_write_client_hello_without_extensions(const SSL_HANDSHAKE *hs,
+   return true;
+ }
+ 
++bool ssl_mutate_client_hello(SSL_HANDSHAKE *hs, Span<uint8_t> body) {
++  auto *ssl = hs->ssl;
++  auto mutate = ssl->config->client_hello_mutator;
++  if (!mutate) {
++    return true;
++  }
++  constexpr size_t kRandomOffset = 2;
++  constexpr size_t kSessionOffset = kRandomOffset + SSL3_RANDOM_SIZE + 1;
++  const size_t id_len = hs->session_id.size();
++  if (hs->selected_ech_config || body.size() < kSessionOffset + id_len ||
++      body[kSessionOffset - 1] != id_len || body.size() > 0xffffff) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++    return false;
++  }
++  Array<uint8_t> message;
++  if (!message.InitForOverwrite(4 + body.size())) {
++    return false;
++  }
++  message[0] = SSL3_MT_CLIENT_HELLO;
++  message[1] = body.size() >> 16;
++  message[2] = (body.size() >> 8) & 255;
++  message[3] = body.size() & 255;
++  OPENSSL_memcpy(message.data() + 4, body.data(), body.size());
++  uint8_t random[SSL3_RANDOM_SIZE], id[SSL_MAX_SSL_SESSION_ID_LENGTH];
++  OPENSSL_memcpy(random, body.data() + kRandomOffset, sizeof(random));
++  OPENSSL_memcpy(id, body.data() + kSessionOffset, id_len);
++  if (!mutate(ssl, message.data(), message.size(), random, id, id_len)) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++    return false;
++  }
++  OPENSSL_memcpy(body.data() + kRandomOffset, random, sizeof(random));
++  OPENSSL_memcpy(ssl->s3->client_random, random, sizeof(random));
++  OPENSSL_memcpy(body.data() + kSessionOffset, id, id_len);
++  OPENSSL_memcpy(hs->session_id.data(), id, id_len);
++  ssl->config->client_hello_mutator = nullptr;
++  return true;
++}
++
+ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
+   SSLImpl *const ssl = hs->ssl;
+   ScopedCBB cbb;
+@@ -258,30 +296,9 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
+     return false;
+   }
+ 
+-  if (auto mutate = ssl->config->client_hello_mutator) {
+-    constexpr size_t kRandomOffset = 6;
+-    constexpr size_t kSessionOffset = kRandomOffset + SSL3_RANDOM_SIZE + 1;
+-    const size_t id_len = hs->session_id.size();
+-    const bool tls13_psk = ssl->session &&
+-        ssl_session_protocol_version(ssl->session.get()) >= TLS1_3_VERSION;
+-    if (hs->selected_ech_config || tls13_psk ||
+-        msg.size() < kSessionOffset + id_len ||
+-        msg[kSessionOffset - 1] != id_len) {
+-      OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
+-      return false;
+-    }
+-    uint8_t random[SSL3_RANDOM_SIZE], id[SSL_MAX_SSL_SESSION_ID_LENGTH];
+-    OPENSSL_memcpy(random, msg.data() + kRandomOffset, sizeof(random));
+-    OPENSSL_memcpy(id, msg.data() + kSessionOffset, id_len);
+-    if (!mutate(ssl, msg.data(), msg.size(), random, id, id_len)) {
+-      OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
+-      return false;
+-    }
+-    OPENSSL_memcpy(msg.data() + kRandomOffset, random, sizeof(random));
+-    OPENSSL_memcpy(ssl->s3->client_random, random, sizeof(random));
+-    OPENSSL_memcpy(msg.data() + kSessionOffset, id, id_len);
+-    OPENSSL_memcpy(hs->session_id.data(), id, id_len);
+-    ssl->config->client_hello_mutator = nullptr;
++  if (ssl->config->client_hello_mutator &&
++      !ssl_mutate_client_hello(hs, Span(msg).subspan(4))) {
++    return false;
+   }
+ 
+   return ssl->method->add_message(ssl, std::move(msg));
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 78b4640..5940fd2 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -2345,6 +2345,10 @@ bool ssl_write_client_hello_without_extensions(const SSL_HANDSHAKE *hs,
+ // flight. It returns true on success and false on error.
+ bool ssl_add_client_hello(SSL_HANDSHAKE *hs);
+ 
++// Applies the transport hook to a serialized ClientHello body. If a PSK is
++// offered this must run before the binder covers that body.
++bool ssl_mutate_client_hello(SSL_HANDSHAKE *hs, Span<uint8_t> body);
++
+ struct ParsedServerHello {
+   CBS raw;
+   uint16_t legacy_version = 0;

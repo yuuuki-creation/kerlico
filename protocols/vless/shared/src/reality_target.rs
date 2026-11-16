@@ -130,6 +130,13 @@ impl RealityTargetShape {
         &self.lengths
     }
 
+    /// Bytes from the last identified record still on the target socket when its
+    /// flight shape was complete. Finish reading them before watching for a close.
+    pub fn remaining_flight(&self) -> usize {
+        (self.lengths.iter().sum::<usize>() + self.ticket.unwrap_or_default())
+            .saturating_sub(self.original.len())
+    }
+
     /// Total length of the record behind the target's Finished, when the target's handshake used
     /// separate records and that record had already arrived.
     pub fn ticket_length(&self) -> Option<usize> {

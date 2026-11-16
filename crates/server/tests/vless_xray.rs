@@ -1461,18 +1461,96 @@ fn vless_xray_h2_params() {
             .and_then(|_| h2_params_case(&xray, &dir, security));
         report(&label, result, &dir, &mut failed);
     }
+    for permit in [false, true] {
+        runs += 1;
+        let label = format!("h2-prohibited-cipher-permit-{permit}");
+        let dir = root.join(&label);
+        let result = fs::create_dir(&dir).map_err(Into::into)
+            .and_then(|_| h2_prohibited_cipher_case(&xray, &dir, permit));
+        report(&label, result, &dir, &mut failed);
+    }
+    for enabled in [false, true] {
+        runs += 1;
+        let label = format!("h2-stalled-write-timeout-{enabled}");
+        let dir = root.join(&label);
+        let result = fs::create_dir(&dir).map_err(Into::into)
+            .and_then(|_| h2_write_timeout_case(&xray, &dir, enabled));
+        report(&label, result, &dir, &mut failed);
+    }
     finish_report("VLESS h2Params", runs, &failed, &root);
+}
+
+fn h2_write_timeout_case(xray: &Path, dir: &Path, enabled: bool) -> Result<()> {
+    for server in ["kerlico", "xray"] {
+        let dir = dir.join(server);
+        fs::create_dir(&dir)?;
+        let listener = TcpListener::bind(localhost(0))?;
+        let origin = listener.local_addr()?.port();
+        let params = if enabled { r#"{"WriteByteTimeout":200000000}"# } else { r#"{"WriteByteTimeout":0}"# };
+        let case = Case::new("h2-write-timeout", Network::Xhttp("stream-one"), Security::None, Payload::Tcp)
+            .h2_params(params);
+        let keys = Keys::generate(&dir, &case)?;
+        let port = available_port()?;
+        let _server = if server == "kerlico" {
+            start_kerlico(&dir, &case.kerlico_server(&keys, port))?
+        } else {
+            start_xray(xray, &dir, "xray-server", &case.xray_server(&keys, port, origin), false)?
+        };
+        thread::spawn(move || -> std::io::Result<()> {
+            let (mut tcp, _) = listener.accept()?;
+            tcp.set_read_timeout(Some(Duration::from_secs(5)))?;
+            tcp.set_write_timeout(Some(Duration::from_secs(5)))?;
+            let mut signal = [0];
+            tcp.read_exact(&mut signal)?;
+            if signal != [0x31] { return Err(std::io::ErrorKind::InvalidData.into()); }
+            let chunk = [0x42; 64 * 1024];
+            for _ in 0..h2_probe::WRITE_PROBE_BYTES / chunk.len() { tcp.write_all(&chunk)?; }
+            tcp.shutdown(Shutdown::Write)
+        });
+        h2_probe::write_timeout(port, origin, enabled).map_err(|err| format!("{server}: {err}"))?;
+    }
+    Ok(())
+}
+
+fn h2_prohibited_cipher_case(xray: &Path, dir: &Path, permit: bool) -> Result<()> {
+    for server in ["kerlico", "xray"] {
+        let dir = dir.join(server);
+        fs::create_dir(&dir)?;
+        let params = if permit { r#"{"PermitProhibitedCipherSuites":true}"# } else { r#"{"PermitProhibitedCipherSuites":false}"# };
+        let case = Case::new("h2-cipher-probe", Network::Xhttp("packet-up"), Security::Tls("h2"), Payload::Tcp)
+            .h2_params(params);
+        let keys = Keys::generate(&dir, &case)?;
+        let origin = Echo::tcp(None)?;
+        let port = available_port()?;
+        let _server = if server == "kerlico" {
+            let mut config = case.kerlico_server(&keys, port);
+            let settings = &mut config["inbounds"][0]["settings"];
+            settings["cipherSuites"] = json!(h2_probe::PROHIBITED_CIPHER);
+            settings["minVersion"] = json!("1.2");
+            settings["maxVersion"] = json!("1.2");
+            start_kerlico(&dir, &config)?
+        } else {
+            let mut config = case.xray_server(&keys, port, origin.port);
+            let settings = &mut config["inbounds"][0]["streamSettings"]["tlsSettings"];
+            settings["cipherSuites"] = json!(h2_probe::PROHIBITED_CIPHER);
+            settings["minVersion"] = json!("1.2");
+            settings["maxVersion"] = json!("1.2");
+            start_xray(xray, &dir, "xray-server", &config, false)?
+        };
+        h2_probe::prohibited_cipher(port, permit).map_err(|err| format!("{server}: {err}"))?;
+    }
+    Ok(())
 }
 
 fn h2_params_case(xray: &Path, root: &Path, security: Security) -> Result<()> {
     let tls = matches!(security, Security::Tls(_));
-    let mut hellos = Vec::new();
-    for (probe, params) in [("limits", h2_probe::LIMIT_PARAMS), ("pings", h2_probe::PING_PARAMS)] {
+    for (probe, params) in [("defaults", ""), ("limits", h2_probe::LIMIT_PARAMS), ("pings", h2_probe::PING_PARAMS)] {
+        let mut hellos = Vec::new();
         for server in ["kerlico", "xray"] {
             let dir = root.join(format!("{probe}-{server}"));
             fs::create_dir(&dir)?;
-            let case = Case::new("h2-probe", Network::Xhttp("packet-up"), security, Payload::Tcp)
-                .h2_params(params);
+            let case = Case::new("h2-probe", Network::Xhttp("packet-up"), security, Payload::Tcp);
+            let case = if params.is_empty() { case } else { case.h2_params(params) };
             let keys = Keys::generate(&dir, &case)?;
             let origin = Echo::tcp(None)?;
             let peer = available_port()?;
@@ -1487,19 +1565,19 @@ fn h2_params_case(xray: &Path, root: &Path, security: Security) -> Result<()> {
             }
             let hello = h2_probe::handshake(&mut h2_probe::Wire::connect(peer, tls)?)
                 .map_err(|error| format!("{server} hello: {error}"))?;
-            eprintln!("H2 {server} {hello:?}");
-            h2_probe::expect_limits(&hello).map_err(|error| format!("{server}: {error}"))?;
-            h2_probe::frame_limit(peer, tls, h2_probe::LIMIT_FRAME)
-                .map_err(|error| format!("{server} frame limit: {error}"))?;
+            eprintln!("H2 {probe} {server} {hello:?}");
+            if probe == "limits" {
+                h2_probe::expect_limits(&hello).map_err(|error| format!("{server}: {error}"))?;
+                h2_probe::frame_limit(peer, tls, h2_probe::LIMIT_FRAME)
+                    .map_err(|error| format!("{server} frame limit: {error}"))?;
+            }
             hellos.push(hello);
         }
-    }
-    let [kerlico, xray] = &hellos[..] else {
-        return Err("missing a server hello".into());
-    };
-    for (id, value) in &kerlico.settings {
-        if xray.settings.get(id).is_some_and(|other| other != value) {
-            return Err(format!("SETTINGS {id}: Kerlico {value}, Xray {:?}", xray.settings.get(id)).into());
+        if probe != "pings" {
+            let [kerlico, xray] = &hellos[..] else { return Err("missing a server hello".into()) };
+            if kerlico.settings != xray.settings || kerlico.settings_order != xray.settings_order || kerlico.window != xray.window {
+                return Err(format!("{probe} differs: Kerlico {kerlico:?}, Xray {xray:?}").into());
+            }
         }
     }
     Ok(())

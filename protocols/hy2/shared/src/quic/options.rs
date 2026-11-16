@@ -1,6 +1,8 @@
-use super::congestion::{BbrProfile, BrutalConfig, bbr};
+use super::congestion::{bbr, BbrProfile, BrutalConfig};
 use quinn::congestion::{ControllerFactory, NewRenoConfig};
-use quinn::{ClientConfig, Connection, EndpointConfig, MtuDiscoveryConfig, TransportConfig, VarInt};
+use quinn::{
+    ClientConfig, Connection, EndpointConfig, MtuDiscoveryConfig, TransportConfig, VarInt,
+};
 use quinn_proto::{ConnectionIdGenerator, RandomConnectionIdGenerator};
 use serde::Deserialize;
 use serde_json::Value;
@@ -70,7 +72,10 @@ impl QuicOptions {
         let Some(value) = value else {
             return Ok(Self::default());
         };
-        let mut fields = value.as_object().cloned().ok_or_else(|| invalid("quicParams must be an object"))?;
+        let mut fields = value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| invalid("quicParams must be an object"))?;
         fields.retain(|_, value| !value.is_null());
         let raw: RawOptions = serde_json::from_value(Value::Object(fields)).map_err(invalid)?;
         let congestion = match raw.congestion.to_ascii_lowercase().as_str() {
@@ -90,8 +95,14 @@ impl QuicOptions {
         for (name, window) in [
             ("initStreamReceiveWindow", raw.init_stream_receive_window),
             ("maxStreamReceiveWindow", raw.max_stream_receive_window),
-            ("initConnectionReceiveWindow", raw.init_connection_receive_window),
-            ("maxConnectionReceiveWindow", raw.max_connection_receive_window),
+            (
+                "initConnectionReceiveWindow",
+                raw.init_connection_receive_window,
+            ),
+            (
+                "maxConnectionReceiveWindow",
+                raw.max_connection_receive_window,
+            ),
         ] {
             if window != 0 && window < 16_384 {
                 return Err(invalid(format!("{name} must be at least 16384")));
@@ -106,7 +117,13 @@ impl QuicOptions {
         if raw.max_incoming_streams != 0 && raw.max_incoming_streams < 8 {
             return Err(invalid("maxIncomingStreams must be at least 8"));
         }
-        Ok(Self { raw, congestion, bbr_profile, brutal_up, brutal_down })
+        Ok(Self {
+            raw,
+            congestion,
+            bbr_profile,
+            brutal_up,
+            brutal_down,
+        })
     }
 
     pub fn chrome_parrot(&self, client: bool) -> bool {
@@ -117,14 +134,28 @@ impl QuicOptions {
         self.brutal_down
     }
 
+    pub fn hy2_transport(&self, client: bool) -> io::Result<Arc<TransportConfig>> {
+        let mut config = self.transport(QuicCarrier::Hysteria, client, 0)?;
+        if client && self.raw.keep_alive_period == 0 {
+            Arc::get_mut(&mut config)
+                .expect("new QUIC transport")
+                .keep_alive_interval(Some(Duration::from_secs(10)));
+        }
+        Ok(config)
+    }
+
     pub fn endpoint(&self, client: bool) -> EndpointConfig {
         let mut config = EndpointConfig::default();
         let chrome = self.chrome_parrot(client);
-        config.send_stateless_reset(!client && !self.raw.disable_stateless_reset)
+        config
+            .send_stateless_reset(!client && !self.raw.disable_stateless_reset)
             .grease_quic_bit(false);
-        config.max_udp_payload_size(if chrome { 1472 } else { 1452 }).expect("QUIC payload size");
+        config
+            .max_udp_payload_size(if chrome { 1472 } else { 1452 })
+            .expect("QUIC payload size");
         if chrome {
-            config.cid_generator(|| Box::new(RandomConnectionIdGenerator::new(0)))
+            config
+                .cid_generator(|| Box::new(RandomConnectionIdGenerator::new(0)))
                 .supported_versions(vec![1]);
         }
         config
@@ -133,7 +164,9 @@ impl QuicOptions {
     pub fn configure_client(&self, config: &mut ClientConfig) {
         if self.chrome_parrot(true) {
             config
-                .initial_dst_cid_provider(Arc::new(|| RandomConnectionIdGenerator::new(8).generate_cid()))
+                .initial_dst_cid_provider(Arc::new(|| {
+                    RandomConnectionIdGenerator::new(8).generate_cid()
+                }))
                 .token_store(Arc::new(quinn_proto::NoneTokenStore));
         }
     }
@@ -151,16 +184,31 @@ impl QuicOptions {
         } else {
             (2 * MIB, 6 * MIB, 3 * MIB, 15 * MIB)
         };
-        let initial_stream = if chrome { 6 * MIB } else {
+        let initial_stream = if chrome {
+            6 * MIB
+        } else {
             configured(self.raw.init_stream_receive_window, initial_stream)
         };
-        let initial_connection = if chrome { 15 * MIB } else {
+        let initial_connection = if chrome {
+            15 * MIB
+        } else {
             configured(self.raw.init_connection_receive_window, initial_connection)
         };
-        let maximum_stream = configured(self.raw.max_stream_receive_window, maximum_stream).max(initial_stream);
-        let maximum_connection = configured(self.raw.max_connection_receive_window, maximum_connection).max(initial_connection);
-        let default_idle = if carrier == QuicCarrier::Xhttp && client { 300 } else { 30 };
-        let idle = if chrome { 30 } else { configured(self.raw.max_idle_timeout, default_idle) };
+        let maximum_stream =
+            configured(self.raw.max_stream_receive_window, maximum_stream).max(initial_stream);
+        let maximum_connection =
+            configured(self.raw.max_connection_receive_window, maximum_connection)
+                .max(initial_connection);
+        let default_idle = if carrier == QuicCarrier::Xhttp && client {
+            300
+        } else {
+            30
+        };
+        let idle = if chrome {
+            30
+        } else {
+            configured(self.raw.max_idle_timeout, default_idle)
+        };
         let default_bidi = match (carrier, client) {
             (QuicCarrier::Hysteria, false) => 1024,
             (QuicCarrier::Xhttp, true) => 0,
@@ -201,31 +249,49 @@ impl QuicOptions {
             .max_concurrent_uni_streams(VarInt::from_u32(uni))
             .stream_receive_window(VarInt::from_u64(initial_stream).map_err(invalid)?)
             .receive_window(VarInt::from_u64(initial_connection).map_err(invalid)?)
-            .receive_window_limits(clamp_varint(maximum_stream), clamp_varint(maximum_connection))
+            .receive_window_limits(
+                clamp_varint(maximum_stream),
+                clamp_varint(maximum_connection),
+            )
             .allow_spin(false)
             .datagram_receive_buffer_size((chrome || hy).then_some(1024 * 1024))
-            .datagram_parameters(datagram, (hy && !client).then_some(HYSTERIA_DATAGRAM.into()))
+            .datagram_parameters(
+                datagram,
+                (hy && !client).then_some(HYSTERIA_DATAGRAM.into()),
+            )
             .enable_segmentation_offload(!self.raw.disable_gso)
             .congestion_controller_factory(self.controller(carrier)?);
-        let mtud = cfg!(any(target_os = "linux", target_os = "windows", target_os = "macos"))
-            && !self.raw.disable_path_mtu_discovery;
+        let mtud = cfg!(any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "macos"
+        )) && !self.raw.disable_path_mtu_discovery;
         let mut discovery = MtuDiscoveryConfig::default();
         discovery.upper_bound(1452);
         config.mtu_discovery_config(mtud.then_some(discovery));
         Ok(Arc::new(config))
     }
 
-    fn controller(&self, carrier: QuicCarrier) -> io::Result<Arc<dyn ControllerFactory + Send + Sync>> {
+    fn controller(
+        &self,
+        carrier: QuicCarrier,
+    ) -> io::Result<Arc<dyn ControllerFactory + Send + Sync>> {
         if carrier == QuicCarrier::Hysteria {
             // Hysteria selects its application congestion controller after authentication.
             return Ok(Arc::new(NewRenoConfig::default()));
         }
         match self.congestion {
             Congestion::Reno => Ok(Arc::new(NewRenoConfig::default())),
-            Congestion::Default if carrier == QuicCarrier::Dns => Ok(Arc::new(NewRenoConfig::default())),
+            Congestion::Default if carrier == QuicCarrier::Dns => {
+                Ok(Arc::new(NewRenoConfig::default()))
+            }
             Congestion::Default | Congestion::Bbr => Ok(bbr(self.bbr_profile, self.raw.debug)),
-            Congestion::ForceBrutal if carrier != QuicCarrier::Xdrive => Ok(self.brutal(self.brutal_up)),
-            Congestion::ForceBrutal | Congestion::Brutal => Err(invalid("unsupported congestion control on this HTTP/3 carrier")),
+            Congestion::ForceBrutal if carrier != QuicCarrier::Xdrive => {
+                Ok(self.brutal(self.brutal_up))
+            }
+            Congestion::ForceBrutal | Congestion::Brutal => Err(invalid(
+                "unsupported congestion control on this HTTP/3 carrier",
+            )),
         }
     }
 
@@ -233,7 +299,9 @@ impl QuicOptions {
         let factory = match self.congestion {
             Congestion::Reno => return,
             Congestion::ForceBrutal => self.brutal(self.brutal_up),
-            Congestion::Default | Congestion::Brutal if self.brutal_up != 0 && peer_receive_rate != 0 => {
+            Congestion::Default | Congestion::Brutal
+                if self.brutal_up != 0 && peer_receive_rate != 0 =>
+            {
                 self.brutal(self.brutal_up.min(peer_receive_rate))
             }
             _ => bbr(self.bbr_profile, self.raw.debug),
@@ -241,13 +309,61 @@ impl QuicOptions {
         conn.set_congestion_controller(factory);
     }
 
+    /// Bandwidth behavior of the official standalone Hy2 client and server.
+    pub fn hy2_authenticate(
+        &self,
+        conn: &Connection,
+        peer: crate::auth::ReceiveRate,
+        send_limit: u64,
+        client: bool,
+    ) {
+        let own = if send_limit != 0 {
+            send_limit
+        } else {
+            self.brutal_up
+        };
+        let rate = match peer {
+            crate::auth::ReceiveRate::Auto => 0,
+            crate::auth::ReceiveRate::BytesPerSecond(peer) if client => {
+                if peer == 0 || peer > own {
+                    own
+                } else {
+                    peer
+                }
+            }
+            crate::auth::ReceiveRate::BytesPerSecond(peer) => {
+                if own == 0 {
+                    peer
+                } else {
+                    peer.min(own)
+                }
+            }
+        };
+        let factory = if rate != 0 {
+            self.brutal(rate)
+        } else if self.congestion == Congestion::Reno {
+            Arc::new(NewRenoConfig::default())
+        } else {
+            bbr(self.bbr_profile, self.raw.debug)
+        };
+        conn.set_congestion_controller(factory);
+    }
+
     fn brutal(&self, rate: u64) -> Arc<dyn ControllerFactory + Send + Sync> {
-        Arc::new(BrutalConfig::new(rate, !self.raw.brutal_disable_loss_compensation, self.raw.debug))
+        Arc::new(BrutalConfig::new(
+            rate,
+            !self.raw.brutal_disable_loss_compensation,
+            self.raw.debug,
+        ))
     }
 }
 
 fn configured(value: u64, default: u64) -> u64 {
-    if value == 0 { default } else { value }
+    if value == 0 {
+        default
+    } else {
+        value
+    }
 }
 
 fn clamp_varint(value: u64) -> VarInt {
@@ -259,7 +375,9 @@ fn bandwidth(value: &str) -> io::Result<u64> {
     if value.is_empty() {
         return Ok(0);
     }
-    let index = value.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(value.len());
+    let index = value
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(value.len());
     let bits = value[..index].parse::<f64>().map_err(invalid)?;
     let multiplier = match value[index..].trim().to_ascii_lowercase().as_str() {
         "" | "b" | "bps" => 1u64,
@@ -275,7 +393,9 @@ fn bandwidth(value: &str) -> io::Result<u64> {
     }
     let bytes = bits as u64 / 8;
     if bytes != 0 && bytes < 65_536 {
-        return Err(invalid("Brutal bandwidth must be at least 65536 bytes per second"));
+        return Err(invalid(
+            "Brutal bandwidth must be at least 65536 bytes per second",
+        ));
     }
     Ok(bytes)
 }

@@ -204,16 +204,16 @@ fn masquerade_and_rate_negotiation_share_a_quic_connection() {
     let (listener, client) = hysteria_server(masq, &server_masks);
     let addr = listener.local_addr().unwrap();
     let conn = H3Conn::connect(addr, client, "localhost").unwrap();
-    let mut hidden = request(&conn, "POST", HYSTERIA_PATH, HYSTERIA_HOST, &[(HYSTERIA_AUTH, "wrong")], b"");
+    let mut hidden = request(&conn, "POST", hy2_auth::PATH, hy2_auth::HOST, &[(hy2_auth::AUTH, "wrong")], b"");
     assert_eq!(hidden.response_status().unwrap(), 418);
     assert_eq!(hidden.header("x-cover").as_deref(), Some("ok"));
     let mut body = String::new();
     hidden.read_to_string(&mut body).unwrap();
     assert_eq!(body, "front page");
 
-    let authenticated = request(&conn, "POST", HYSTERIA_PATH, HYSTERIA_HOST, &[(HYSTERIA_AUTH, "secret"), (HYSTERIA_RATE, "262144")], b"");
-    assert_eq!(authenticated.response_status().unwrap(), HYSTERIA_AUTH_OK);
-    assert_eq!(authenticated.header(HYSTERIA_RATE).as_deref(), Some("131072"));
+    let authenticated = request(&conn, "POST", hy2_auth::PATH, hy2_auth::HOST, &[(hy2_auth::AUTH, "secret"), (hy2_auth::RATE, "262144")], b"");
+    assert_eq!(authenticated.response_status().unwrap(), hy2_auth::STATUS);
+    assert_eq!(authenticated.header(hy2_auth::RATE).as_deref(), Some("131072"));
 
     let client_options = QuicOptions::parse(Some(&json!({"brutalUp":"4 Mbps","brutalDown":"1 Mbps"}))).unwrap();
     let (mut read, mut write) = hysteria_stream(conn.clone(), "already authenticated", &client_options).unwrap();

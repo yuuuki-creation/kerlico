@@ -13,7 +13,61 @@ use super::ring::{Ring, Writer};
 use super::s3::S3Storage;
 use super::service_http::Headers;
 use super::template::TemplateStorage;
-use super::{Config, ObjectKind, Storage, XdriveHttpOptions};
+use super::{Config, ObjectKind, Storage, Xdrive, XdriveHttpOptions};
+
+/// The specified settings must point at a disposable test prefix or dedicated Drive folder.
+/// Settings stay in the worker's private file; do not print the file or provider responses.
+#[test]
+#[ignore = "requires XDRIVE_LIVE_SETTINGS pointing to private settings for a disposable cloud folder"]
+fn cloud_storage_round_trips() {
+    let path = std::env::var_os("XDRIVE_LIVE_SETTINGS").expect("set XDRIVE_LIVE_SETTINGS to a private file");
+    let settings = std::fs::read_to_string(path).expect("read private XDrive test settings");
+    let config: Config = serde_json::from_str(&settings).unwrap_or_else(|_| panic!("invalid XDrive settings"));
+    assert!(matches!(config.service.as_str(), "template" | "s3" | "google-drive" | "Google Drive"));
+    assert!(!config.remote_folder.as_os_str().is_empty(), "a dedicated test folder is required");
+    let drive = Xdrive::new(&settings, XdriveHttpOptions::default())
+        .unwrap_or_else(|_| panic!("build the cloud XDrive transport"));
+    let mut listener = drive.listen().unwrap_or_else(|_| panic!("create a cloud listener"));
+    let (ready, finished) = std::sync::mpsc::sync_channel(1);
+    let pattern = |len: usize, salt: u8| -> Vec<u8> {
+        (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(salt)).collect()
+    };
+    thread::spawn(move || {
+        let result = (|| -> io::Result<()> {
+            let (mut rx, mut tx) = listener.accept()?;
+            rx.set_timeout(Some(Duration::from_secs(40)));
+            tx.set_timeout(Some(Duration::from_secs(40)));
+            let mut reply = vec![0; 64 * 1024 + 5];
+            rx.read_exact(&mut reply)?;
+            if reply != pattern(reply.len(), 23) {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            tx.write_all(&pattern(96 * 1024 + 7, 11))?;
+            tx.flush()
+        })();
+        let _ = ready.send(result.is_ok());
+    });
+    let (mut rx, mut tx) = drive.dial().unwrap_or_else(|error| panic!("announce a session on the cloud provider: {}", cloud_error(&error)));
+    rx.set_timeout(Some(Duration::from_secs(40)));
+    tx.set_timeout(Some(Duration::from_secs(40)));
+    tx.write_all(&pattern(64 * 1024 + 5, 23)).unwrap_or_else(|_| panic!("upload payload"));
+    tx.flush().unwrap_or_else(|_| panic!("finish upload"));
+    let expected = pattern(96 * 1024 + 7, 11);
+    let mut back = vec![0; expected.len()];
+    rx.read_exact(&mut back).unwrap_or_else(|_| panic!("download response"));
+    assert!(back == expected, "XDrive cloud payload differs");
+    assert_eq!(finished.recv_timeout(Duration::from_secs(5)).ok(), Some(true));
+}
+
+fn cloud_error(error: &io::Error) -> String {
+    let status = error.to_string().rsplit_once(" answered HTTP ")
+        .and_then(|(_, status)| status.parse::<u16>().ok());
+    if let Some(status) = status {
+        format!("HTTP {status}")
+    } else {
+        format!("{:?}", error.kind())
+    }
+}
 
 struct Mock {
     addr: SocketAddr,
@@ -347,6 +401,11 @@ fn s3_upload_signs_exact_path_and_lists_continuations() {
         );
         assert_eq!(request.headers["x-amz-security-token"], "mock-token");
         if request.method == "PUT" {
+            if request.target.ends_with("/sessions/announce") {
+                assert_eq!(request.headers["content-length"], "0");
+                assert!(request.body.is_empty());
+                return (200, Vec::new());
+            }
             assert_eq!(
                 request.target,
                 "/prefix%2Fescape/bucket/folder%20name/sessions/hello"
@@ -375,6 +434,7 @@ fn s3_upload_signs_exact_path_and_lists_continuations() {
         "s3":{"endpoint":format!("http://{}/prefix%2Fescape", server.addr),"bucket":"bucket","region":"test"}
     })).unwrap();
     let storage = S3Storage::new(&config, XdriveHttpOptions::default()).unwrap();
+    storage.put("sessions/announce", b"").unwrap();
     storage.put("sessions/hello", b"hello").unwrap();
     let names: Vec<_> = storage
         .list("sessions")

@@ -162,3 +162,46 @@ fn dns_srv_and_txt_follow_the_configured_upstream() {
     );
     server.join().unwrap();
 }
+
+#[test]
+fn configured_https_query_retries_a_truncated_udp_reply_over_tcp() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let peer = listener.local_addr().unwrap();
+    let udp = std::net::UdpSocket::bind(peer).unwrap();
+    udp.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+    let query = [0x21, 0x43, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 65, 0, 1];
+    let server = std::thread::spawn(move || {
+        let mut packet = [0; 512];
+        let (n, origin) = udp.recv_from(&mut packet).unwrap();
+        assert_eq!(&packet[..n], &query);
+        packet[2] = 0x83;
+        udp.send_to(&packet[..n], origin).unwrap();
+
+        let (mut tcp, _) = listener.accept().unwrap();
+        tcp.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        let mut size = [0; 2];
+        tcp.read_exact(&mut size).unwrap();
+        let n = u16::from_be_bytes(size) as usize;
+        assert_eq!(n, query.len());
+        tcp.read_exact(&mut packet[..n]).unwrap();
+        assert_eq!(&packet[..n], &query);
+        packet[2] = 0x81;
+        tcp.write_all(&size).unwrap();
+        tcp.write_all(&packet[..n]).unwrap();
+    });
+    let outbound = Outbound::new();
+    let config = dns::Config {
+        upstreams: vec![dns::Upstream {
+            address: peer.ip(),
+            port: peer.port(),
+            tcp: false,
+            choice: OutboundChoice::Manual(Exit::NativeV4),
+        }],
+        ..dns::Config::default()
+    };
+    let runtime = context(&outbound, Arc::new(RwLock::new(config)), geodata::Catalog::empty(), false);
+    let mut expected = query;
+    expected[2] = 0x81;
+    assert_eq!(runtime.network.exchange_configured_dns(&query).unwrap(), expected);
+    server.join().unwrap();
+}

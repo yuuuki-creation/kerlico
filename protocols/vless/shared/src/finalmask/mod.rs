@@ -15,7 +15,7 @@ mod xdns;
 mod xicmp;
 
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,25 +39,7 @@ pub type TcpPair = (Box<dyn Read + Send>, Box<dyn Write + Send>);
 
 /// The listener and dialer supply unconnected sockets. Carriers may use an
 /// address other than the transport peer for their underlying datagrams.
-pub trait PacketIo: Send + Sync {
-    fn local_addr(&self) -> io::Result<SocketAddr>;
-    fn recv_from(&self, out: &mut [u8]) -> io::Result<(usize, SocketAddr)>;
-    fn send_to(&self, packet: &[u8], peer: SocketAddr) -> io::Result<usize>;
-}
-
-impl PacketIo for UdpSocket {
-    fn local_addr(&self) -> io::Result<SocketAddr> {
-        UdpSocket::local_addr(self)
-    }
-
-    fn recv_from(&self, out: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        UdpSocket::recv_from(self, out)
-    }
-
-    fn send_to(&self, packet: &[u8], peer: SocketAddr) -> io::Result<usize> {
-        UdpSocket::send_to(self, packet, peer)
-    }
-}
+pub use kerlico_shared::runtime::PacketIo;
 
 pub use filter::GeoIpMatcher;
 
@@ -178,7 +160,7 @@ impl FinalMask {
                 "mkcp-legacy" => UdpMask::Kcp(settings::<LegacyKcp>(mask.settings)?.build()?),
                 "noise" => UdpMask::Noise(noise::Noise::parse(mask.settings)?),
                 "realm" => UdpMask::Realm(realm::Realm::parse(mask.settings, tls_network.clone(), tls_cache.clone())?),
-                "salamander" => UdpMask::Salamander(salamander::Salamander::parse(mask.settings)?),
+                "salamander" => UdpMask::Salamander(salamander::parse(mask.settings)?),
                 "sudoku" => UdpMask::Sudoku(sudoku::Sudoku::parse(mask.settings)?),
                 "udphop" => UdpMask::Hop(udphop::Hop::parse(mask.settings)?),
                 "xdns" => UdpMask::Xdns(xdns::Xdns::parse(mask.settings, tls_network.clone(), tls_cache.clone())?),

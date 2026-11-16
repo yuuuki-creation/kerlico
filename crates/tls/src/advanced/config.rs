@@ -59,6 +59,9 @@ pub struct AdvancedTlsOptions {
     pub curve_preferences: Vec<String>,
     pub fingerprint: String,
     pub certificates: Vec<TlsCertificate>,
+    pub client_identity: Option<TlsCertificate>,
+    pub client_auth_type: String,
+    pub client_auth_ca: String,
     pub allow_insecure: bool,
     pub pinned_peer_cert_sha256: String,
     pub verify_peer_cert_by_name: Vec<String>,
@@ -68,6 +71,7 @@ pub struct AdvancedTlsOptions {
     pub enable_session_resumption: bool,
     pub master_key_log: String,
     pub ech_config_list: String,
+    pub ech_dns_name: Option<String>,
     pub ech_server_keys: String,
     pub ech_socket_settings: Option<serde_json::Value>,
     #[serde(skip)]
@@ -145,6 +149,9 @@ impl AdvancedTlsOptions {
         Ok(Self {
             alpn,
             certificates,
+            client_identity: None,
+            client_auth_type: String::new(),
+            client_auth_ca: String::new(),
             min_version: text("minVersion"),
             max_version: text("maxVersion"),
             cipher_suites: text("cipherSuites"),
@@ -161,6 +168,7 @@ impl AdvancedTlsOptions {
             enable_session_resumption: flag("enableSessionResumption")?,
             master_key_log: text("masterKeyLog"),
             ech_config_list: text("echConfigList"),
+            ech_dns_name: None,
             ech_server_keys: text("echServerKeys"),
             ech_socket_settings: get("echSockopt")
                 .map(serde_json::from_str)
@@ -265,7 +273,7 @@ pub(super) fn advanced_client_config_with_profile(
     for entry in &mut effective.certificates {
         *entry = load_certificate_files(entry)?;
     }
-    if !effective.ech_config_list.is_empty() {
+    if !effective.ech_config_list.is_empty() || effective.ech_dns_name.is_some() {
         if !matches!(effective.min_version.as_str(), "" | "1.3")
             || !matches!(effective.max_version.as_str(), "" | "1.3")
         {
@@ -277,6 +285,10 @@ pub(super) fn advanced_client_config_with_profile(
     let mut builder =
         SslConnector::no_default_verify_builder(SslMethod::tls()).map_err(io::Error::other)?;
     common(&mut builder, options)?;
+    if let Some(entry) = &options.client_identity {
+        let entry = load_certificate_files(entry)?;
+        set_identity(&mut builder, &certificates(&entry.certificate)?, &private_key(&entry.key)?)?;
+    }
     if let Some(profile) = &profile {
         super::fingerprint::configure_profile(&mut builder, options, profile)?;
     }
@@ -324,15 +336,15 @@ pub(super) fn advanced_client_config_with_profile(
     }
     let pins =
         crate::tls::parse_pins(&options.pinned_peer_cert_sha256).map_err(|_| invalid("TLS pin"))?;
-    let ech = if options.ech_config_list.is_empty() {
-        None
-    } else {
+    let ech = if !options.ech_config_list.is_empty() {
         Some(super::ech::EchSource::new(
             &options.ech_config_list,
             options.network_provider.clone(),
             options.ech_socket_settings.clone(),
         )?)
-    };
+    } else if let Some(name) = &options.ech_dns_name {
+        Some(super::ech::EchSource::discovered(name, options.network_provider.clone())?)
+    } else { None };
     Ok(Arc::new(AdvancedTlsClientConfig {
         connector: builder.build(),
         options: options.clone(),
@@ -448,49 +460,58 @@ struct Identity {
 }
 
 #[derive(PartialEq, Eq)]
-struct FileVersion(Vec<(u64, Option<std::time::SystemTime>)>);
+struct IdentityVersion {
+    certificate: [u8; 32],
+    key: [u8; 32],
+}
 
-impl FileVersion {
-    fn read(entry: &TlsCertificate) -> io::Result<Self> {
-        [&entry.certificate_file, &entry.key_file]
-            .into_iter()
-            .filter(|path| !path.is_empty())
-            .map(|path| std::fs::metadata(path).map(|meta| (meta.len(), meta.modified().ok())))
-            .collect::<io::Result<Vec<_>>>()
-            .map(Self)
+impl IdentityVersion {
+    fn from_loaded(entry: &TlsCertificate) -> Self {
+        Self {
+            certificate: Sha256::digest(entry.certificate.as_bytes()).into(),
+            key: Sha256::digest(entry.key.as_bytes()).into(),
+        }
     }
 }
 
-struct IdentitySource {
-    entry: TlsCertificate,
-    current: Mutex<(FileVersion, Identity)>,
+enum IdentitySource {
+    Fixed(Identity),
+    Files {
+        entry: Box<TlsCertificate>,
+        current: Mutex<(IdentityVersion, Identity)>,
+    },
 }
 
 impl IdentitySource {
     fn new(options: &AdvancedTlsOptions, entry: &TlsCertificate) -> io::Result<Self> {
-        let version = FileVersion::read(entry)?;
-        let entry = load_certificate_files(entry)?;
-        let identity = server_identity(options, &entry)?;
-        Ok(Self {
-            entry,
-            current: Mutex::new((version, identity)),
+        let loaded = load_certificate_files(entry)?;
+        let identity = server_identity(options, &loaded)?;
+        if entry.one_time_loading || (entry.certificate_file.is_empty() && entry.key_file.is_empty()) {
+            return Ok(Self::Fixed(identity));
+        }
+        Ok(Self::Files {
+            entry: Box::new(entry.clone()),
+            current: Mutex::new((IdentityVersion::from_loaded(&loaded), identity)),
         })
     }
 
     fn snapshot(&self, options: &AdvancedTlsOptions) -> Identity {
-        let mut current = self.current.lock().expect("TLS certificate cache");
-        if !self.entry.one_time_loading {
-            if let Ok(version) = FileVersion::read(&self.entry) {
-                if version != current.0 {
-                    if let Ok(identity) = load_certificate_files(&self.entry)
-                        .and_then(|entry| server_identity(options, &entry))
-                    {
-                        *current = (version, identity);
+        match self {
+            Self::Fixed(identity) => identity.clone(),
+            Self::Files { entry, current } => {
+                let mut current = current.lock().expect("TLS certificate cache");
+                // Inspect the bytes that will be parsed, even if size and mtime were preserved.
+                if let Ok(loaded) = load_certificate_files(entry) {
+                    let version = IdentityVersion::from_loaded(&loaded);
+                    if version != current.0 {
+                        if let Ok(identity) = server_identity(options, &loaded) {
+                            *current = (version, identity);
+                        }
                     }
                 }
+                current.1.clone()
             }
         }
-        current.1.clone()
     }
 }
 
@@ -528,11 +549,7 @@ fn server_identity(options: &AdvancedTlsOptions, entry: &TlsCertificate) -> io::
     let key = private_key(&entry.key)?;
     let mut context = SslContextBuilder::new(SslMethod::tls()).map_err(io::Error::other)?;
     common(&mut context, options)?;
-    context
-        .set_certificate(&chain[0])
-        .map_err(io::Error::other)?;
-    context.set_private_key(&key).map_err(io::Error::other)?;
-    context.check_private_key().map_err(io::Error::other)?;
+    set_identity(&mut context, &chain, &key)?;
     super::ocsp::configure(&mut context, options, entry, &chain)?;
     let names = chain[0]
         .subject_alt_names()
@@ -540,16 +557,21 @@ fn server_identity(options: &AdvancedTlsOptions, entry: &TlsCertificate) -> io::
         .flatten()
         .filter_map(|name| name.dnsname().map(str::to_ascii_lowercase))
         .collect();
-    for cert in chain.into_iter().skip(1) {
-        context
-            .add_extra_chain_cert(cert)
-            .map_err(io::Error::other)?;
-    }
     configure_server(&mut context, options)?;
     Ok(Identity {
         context: context.build(),
         names,
     })
+}
+
+fn set_identity(context: &mut SslContextBuilder, chain: &[X509], key: &PKey<Private>) -> io::Result<()> {
+    context.set_certificate(&chain[0]).map_err(io::Error::other)?;
+    context.set_private_key(key).map_err(io::Error::other)?;
+    context.check_private_key().map_err(io::Error::other)?;
+    for cert in chain.iter().skip(1) {
+        context.add_extra_chain_cert(cert.clone()).map_err(io::Error::other)?;
+    }
+    Ok(())
 }
 
 pub fn advanced_server_config(
@@ -577,14 +599,15 @@ pub fn advanced_server_config(
     let mut context = SslContextBuilder::new(SslMethod::tls()).map_err(io::Error::other)?;
     common(&mut context, options)?;
     configure_server(&mut context, options)?;
-    let groups = if options.curve_preferences.is_empty() {
+    let preferences = curve_preferences(&options.curve_preferences);
+    let groups = if preferences.is_empty() {
         GROUPS
             .iter()
-            .filter(|&&(id, ..)| id != MLKEM1024)
+            .filter(|&&(id, ..)| !(MLKEM1024 == id || matches!(id, 0x11eb | 0x11ed)))
             .map(|&(id, curve, _)| (id, curve))
             .collect()
     } else {
-        curve_preferences(&options.curve_preferences)?
+        preferences
     };
     context
         .set_curves(&groups.iter().map(|&(_, curve)| curve).collect::<Vec<_>>())
@@ -781,6 +804,24 @@ fn configure_server(
     context: &mut SslContextBuilder,
     options: &AdvancedTlsOptions,
 ) -> io::Result<()> {
+    let auth = options.client_auth_type.as_str();
+    let ca = options.client_auth_ca.as_str();
+    match (auth, ca) {
+        ("", "") => {}
+        ("request" | "require-any", _) => {
+            let required = if auth == "require-any" { SslVerifyMode::FAIL_IF_NO_PEER_CERT } else { SslVerifyMode::NONE };
+            context.set_verify_callback(SslVerifyMode::PEER | required, |_, _| true);
+        }
+        ("" | "verify-if-given" | "require-and-verify", ca) if !ca.is_empty() => {
+            let required = if auth == "verify-if-given" { SslVerifyMode::NONE } else { SslVerifyMode::FAIL_IF_NO_PEER_CERT };
+            context.set_verify(SslVerifyMode::PEER | required);
+            for cert in certificates(ca)? {
+                context.add_client_ca(&cert).map_err(io::Error::other)?;
+                context.cert_store_mut().add_cert(cert).map_err(io::Error::other)?;
+            }
+        }
+        _ => return Err(invalid("TLS client authentication configuration")),
+    }
     let alpn = wire_alpn(&options.alpn)?;
     if !alpn.is_empty() {
         context.set_alpn_select_callback(move |_ssl, mut client| {
@@ -853,11 +894,8 @@ fn common(builder: &mut SslContextBuilder, options: &AdvancedTlsOptions) -> io::
             .set_cipher_list(&cipher_names(&options.cipher_suites)?)
             .map_err(io::Error::other)?;
     }
-    if !options.curve_preferences.is_empty() {
-        let curves: Vec<_> = curve_preferences(&options.curve_preferences)?
-            .into_iter()
-            .map(|(_, curve)| curve)
-            .collect();
+    let curves: Vec<_> = curve_preferences(&options.curve_preferences).into_iter().map(|(_, curve)| curve).collect();
+    if !curves.is_empty() {
         builder.set_curves(&curves).map_err(io::Error::other)?;
     }
     builder
@@ -882,11 +920,12 @@ type Group = (u16, SslCurve);
 
 const MLKEM1024: u16 = 0x0202;
 
-/// The groups BoringSSL implements, in Go's fixed preference order, with the
-/// `curvePreferences` names Xray and BoringSSL give them. Go enables all but
-/// MLKEM1024 by default.
-const GROUPS: [(u16, SslCurve, &[&str]); 6] = [
+/// The groups and configuration aliases. The NIST hybrids and the standalone
+/// ML-KEM group need explicit configuration.
+const GROUPS: [(u16, SslCurve, &[&str]); 8] = [
     (0x11ec, SslCurve::X25519_MLKEM768, &["X25519MLKEM768"]),
+    (0x11eb, SslCurve::SECP256R1_MLKEM768, &["SecP256r1MLKEM768"]),
+    (0x11ed, SslCurve::SECP384R1_MLKEM1024, &["SecP384r1MLKEM1024"]),
     (MLKEM1024, SslCurve::MLKEM1024, &["MLKEM1024"]),
     (29, SslCurve::X25519, &["X25519"]),
     (
@@ -906,17 +945,16 @@ const GROUPS: [(u16, SslCurve, &[&str]); 6] = [
     ),
 ];
 
-fn curve_preferences(names: &[String]) -> io::Result<Vec<Group>> {
-    names
-        .iter()
-        .map(|name| {
-            GROUPS
-                .iter()
-                .find(|(_, _, names)| names.iter().any(|known| known.eq_ignore_ascii_case(name)))
-                .map(|&(id, curve, _)| (id, curve))
-                .ok_or_else(|| invalid("unknown TLS curve"))
-        })
-        .collect()
+fn curve_preferences(names: &[String]) -> Vec<Group> {
+    let mut groups = Vec::new();
+    for name in names {
+        if let Some(&(id, curve, _)) = GROUPS.iter()
+            .find(|(_, _, names)| names.iter().any(|known| known.eq_ignore_ascii_case(name)))
+        {
+            if !groups.iter().any(|&(known, _)| known == id) { groups.push((id, curve)); }
+        }
+    }
+    groups
 }
 
 /// The first of `groups` that the ClientHello both lists and sent a key share for.

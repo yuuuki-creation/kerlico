@@ -97,11 +97,13 @@ pub fn dial_native(
     exit: Exit,
     traffic: &dyn Traffic,
 ) -> Result<(), OpenError> {
-    let addr = pick(target, exit)?;
+    let addr = pick(target, exit).inspect_err(|_| {
+        let _ = stream.report_connect(Err(OpenError::Transport));
+    })?;
     match target.transport {
         Transport::Tcp => {
-            let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
-                .map_err(|_| OpenError::Transport)?;
+            let tcp = copy::report_connect(stream, TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+                .map_err(|_| OpenError::Transport))?;
             tcp.set_nodelay(true).ok();
             tcp.set_read_timeout(Some(Duration::from_millis(200)))
                 .map_err(|_| OpenError::Transport)?;
@@ -156,12 +158,14 @@ pub fn dial_warp(
     exit: Exit,
     traffic: &dyn Traffic,
 ) -> Result<(), OpenError> {
-    let device = slot.get()?;
-    let addr = pick(target, exit)?;
-    let pipe = match target.transport {
-        Transport::Tcp => device.connect_tcp(addr)?,
-        Transport::Udp => device.connect_udp(addr)?,
-    };
+    let pipe = copy::report_connect(stream, (|| {
+        let device = slot.get()?;
+        let addr = pick(target, exit)?;
+        match target.transport {
+            Transport::Tcp => device.connect_tcp(addr),
+            Transport::Udp => device.connect_udp(addr),
+        }
+    })())?;
     let (read, write) = split_pipe(pipe, target.transport);
     copy::bridge(
         stream,

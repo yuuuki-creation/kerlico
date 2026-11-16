@@ -19,7 +19,10 @@ impl BbrProfile {
             "" | "standard" => Ok(Self::Standard),
             "conservative" => Ok(Self::Conservative),
             "aggressive" => Ok(Self::Aggressive),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unknown QUIC BBR profile")),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unknown QUIC BBR profile",
+            )),
         }
     }
 }
@@ -45,7 +48,11 @@ pub(super) struct BrutalConfig {
 
 impl BrutalConfig {
     pub(super) fn new(bytes_per_second: u64, compensate_loss: bool, debug: bool) -> Self {
-        Self { bytes_per_second, compensate_loss, debug }
+        Self {
+            bytes_per_second,
+            compensate_loss,
+            debug,
+        }
     }
 }
 
@@ -93,7 +100,10 @@ impl Brutal {
         let second = self.second(now);
         let slot = &mut self.slots[(second % 5) as usize];
         if slot.second != second {
-            *slot = Slot { second, ..Slot::default() };
+            *slot = Slot {
+                second,
+                ..Slot::default()
+            };
         }
         slot.acknowledged = slot.acknowledged.saturating_add(acknowledged);
         slot.lost = slot.lost.saturating_add(lost);
@@ -108,8 +118,16 @@ impl Brutal {
             lost = lost.saturating_add(slot.lost);
         }
         let total = acknowledged.saturating_add(lost);
-        self.ack_fraction = if total < 50 { 1.0 } else { (acknowledged as f64 / total as f64).max(0.8) };
-        if self.config.debug && self.last_log.is_none_or(|last| now.saturating_duration_since(last).as_secs() >= 2) {
+        self.ack_fraction = if total < 50 {
+            1.0
+        } else {
+            (acknowledged as f64 / total as f64).max(0.8)
+        };
+        if self.config.debug
+            && self
+                .last_log
+                .is_none_or(|last| now.saturating_duration_since(last).as_secs() >= 2)
+        {
             self.last_log = Some(now);
             eprintln!(
                 "[BrutalSender] ACK rate {:.2} (ACK {acknowledged}, lost {lost}, RTT {} ms, {} bytes/s)",

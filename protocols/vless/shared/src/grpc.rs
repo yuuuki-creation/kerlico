@@ -11,6 +11,9 @@ use crate::http::{H2Conn, H2Keepalive, H2Stream};
 
 const MAX_MESSAGE: usize = 4 * 1024 * 1024;
 const WRITE_CHUNK: usize = 64 * 1024;
+/// The buffer a stream reads messages into starts small and grows with the traffic up to this,
+/// or to the size of one message when that is larger.
+const READ_AHEAD: usize = 64 * 1024;
 
 pub fn grpc_path(service: &str, multi: bool) -> String {
     if let Some(path) = service.strip_prefix('/') {
@@ -291,7 +294,7 @@ impl<W: Write + Send + 'static> GrpcStream<W> {
         self.writer
             .lock()
             .expect("gRPC writer")
-            .write(|bytes| self.http.write_for(bytes, timeout), buf)
+            .write(|head, body| self.http.write_parts_for(head, body, timeout), buf)
     }
 
     pub fn flush(&self) -> io::Result<()> {
@@ -334,59 +337,122 @@ impl<W: Write + Send + 'static> Write for GrpcStream<W> {
     }
 }
 
+/// Reads gRPC messages from the HTTP/2 stream and returns the bytes their Hunk carries. A message
+/// is checked whole before any of its bytes are returned, and decoded where it lies.
 #[derive(Default)]
 struct HunkReader {
-    prefix: [u8; 5],
-    prefix_len: usize,
-    message: Vec<u8>,
-    plain: Vec<u8>,
-    read: usize,
+    /// `raw[head..tail]` came from the stream and is not decoded yet.
+    raw: Vec<u8>,
+    head: usize,
+    tail: usize,
+    /// The decoded bytes still to return: a part of `raw` before `head`, or of `joined` for a
+    /// message that carried them in several fields.
+    data: std::ops::Range<usize>,
+    joined: Vec<u8>,
+    in_joined: bool,
 }
 
 impl HunkReader {
+    /// Returns the bytes of every message that already arrived, as far as `buf` has room. It
+    /// asks the stream for more only when it has nothing to return.
     fn read(
         &mut self,
         mut receive: impl FnMut(&mut [u8]) -> io::Result<usize>,
         buf: &mut [u8],
     ) -> io::Result<usize> {
-        let mut chunk = [0; 8192];
-        while self.read == self.plain.len() {
-            while self.prefix_len < self.prefix.len() {
-                let len = receive(&mut self.prefix[self.prefix_len..])?;
-                if len == 0 {
-                    return if self.prefix_len == 0 {
-                        Ok(0)
-                    } else {
-                        Err(truncated())
-                    };
+        let mut done = 0;
+        loop {
+            if !self.data.is_empty() {
+                let source = if self.in_joined { &self.joined } else { &self.raw };
+                let len = self.data.len().min(buf.len() - done);
+                buf[done..done + len].copy_from_slice(&source[self.data.start..self.data.start + len]);
+                self.data.start += len;
+                done += len;
+                if done == buf.len() {
+                    return Ok(done);
                 }
-                self.prefix_len += len;
             }
-            let len = u32::from_be_bytes(self.prefix[1..].try_into().unwrap()) as usize;
-            if self.prefix[0] != 0 || len > MAX_MESSAGE {
-                return Err(invalid("gRPC message flags or length"));
+            match self.next_message() {
+                Ok(true) => continue,
+                Ok(false) if done > 0 => return Ok(done),
+                Ok(false) => {}
+                // The message stays where it is, so the next read meets the same failure.
+                Err(_) if done > 0 => return Ok(done),
+                Err(error) => return Err(error),
             }
-            while self.message.len() < len {
-                let remaining = (len - self.message.len()).min(chunk.len());
-                let received = receive(&mut chunk[..remaining])?;
-                if received == 0 {
-                    return Err(truncated());
-                }
-                self.message.extend_from_slice(&chunk[..received]);
+            self.make_room();
+            let len = receive(&mut self.raw[self.tail..])?;
+            if len == 0 {
+                return if self.tail == 0 { Ok(0) } else { Err(truncated()) };
             }
-            self.plain.clear();
-            self.read = 0;
-            if let Err(error) = decode_hunk(&self.message, &mut self.plain) {
-                self.plain.clear();
-                return Err(error);
-            }
-            self.prefix_len = 0;
-            self.message.clear();
+            self.tail += len;
         }
-        let len = buf.len().min(self.plain.len() - self.read);
-        buf[..len].copy_from_slice(&self.plain[self.read..self.read + len]);
-        self.read += len;
-        Ok(len)
+    }
+
+    /// Decodes the next message once all of it arrived. `Ok(false)` asks for more bytes.
+    fn next_message(&mut self) -> io::Result<bool> {
+        let have = self.tail - self.head;
+        if have < 5 {
+            return Ok(false);
+        }
+        let prefix = &self.raw[self.head..self.head + 5];
+        let len = u32::from_be_bytes(prefix[1..].try_into().unwrap()) as usize;
+        if prefix[0] != 0 || len > MAX_MESSAGE {
+            return Err(invalid("gRPC message flags or length"));
+        }
+        if have < 5 + len {
+            return Ok(false);
+        }
+        let start = self.head + 5;
+        let message = &self.raw[start..start + len];
+        let joined = &mut self.joined;
+        joined.clear();
+        // Xray's Hunk has one data field, which is returned from where it lies. A MultiHunk's
+        // fields are joined first.
+        let mut first: Option<std::ops::Range<usize>> = None;
+        let mut several = false;
+        hunk_fields(message, |field| {
+            match first.clone() {
+                None => first = Some(field),
+                Some(one) => {
+                    if !several {
+                        joined.extend_from_slice(&message[one]);
+                        several = true;
+                    }
+                    joined.extend_from_slice(&message[field]);
+                }
+            }
+        })?;
+        self.head = start + len;
+        self.in_joined = several;
+        self.data = if several {
+            0..self.joined.len()
+        } else {
+            let field = first.unwrap_or(0..0);
+            start + field.start..start + field.end
+        };
+        Ok(true)
+    }
+
+    /// Moves what is not decoded yet to the front and makes sure the message it starts fits.
+    fn make_room(&mut self) {
+        if self.head == self.tail {
+            self.head = 0;
+            self.tail = 0;
+        } else if self.head > 0 {
+            self.raw.copy_within(self.head..self.tail, 0);
+            self.tail -= self.head;
+            self.head = 0;
+        }
+        let need = if self.tail >= 5 {
+            5 + u32::from_be_bytes(self.raw[1..5].try_into().unwrap()) as usize
+        } else {
+            5
+        };
+        if self.raw.len() < need || self.tail == self.raw.len() {
+            let len = (self.raw.len() * 2).clamp(8192, READ_AHEAD).max(need);
+            self.raw.resize(len, 0);
+        }
     }
 }
 
@@ -411,29 +477,46 @@ impl HunkWriter {
         Ok(())
     }
 
+    /// Sends one message that carries the first bytes of `buf`. `write` takes the message's
+    /// prefix and the caller's bytes as one run, so the bytes are not copied into a message
+    /// first. Only what is left of a message that the stream stopped taking is kept.
     fn write(
         &mut self,
-        mut write: impl FnMut(&[u8]) -> io::Result<usize>,
+        mut write: impl FnMut(&[u8], &[u8]) -> io::Result<usize>,
         buf: &[u8],
     ) -> io::Result<usize> {
-        self.send(&mut write)?;
-        let len = buf.len().min(WRITE_CHUNK);
-        if len == 0 {
+        self.send(|bytes| write(bytes, &[]))?;
+        let data = &buf[..buf.len().min(WRITE_CHUNK)];
+        if data.is_empty() {
             return Ok(0);
         }
-        encode_hunk(&buf[..len], &mut self.message);
-        match self.send(write) {
-            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                if self.sent == 0 {
-                    self.message.clear();
-                    Err(error)
-                } else {
-                    Ok(len)
+        let (head, head_len) = hunk_head(data.len());
+        let head = &head[..head_len];
+        let mut sent = 0;
+        while sent < head.len() + data.len() {
+            let (first, second) = if sent < head.len() {
+                (&head[sent..], data)
+            } else {
+                (&data[sent - head.len()..], &[][..])
+            };
+            match write(first, second) {
+                Ok(0) => return Err(io::Error::new(ErrorKind::WriteZero, "gRPC message")),
+                Ok(len) => sent += len,
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) if sent == 0 => return Err(error),
+                Err(error) => {
+                    // The message has started: the rest goes out with the next write or flush.
+                    self.message.extend_from_slice(first);
+                    self.message.extend_from_slice(second);
+                    return if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+                        Ok(data.len())
+                    } else {
+                        Err(error)
+                    };
                 }
             }
-            Err(error) => Err(error),
-            Ok(()) => Ok(len),
         }
+        Ok(data.len())
     }
 }
 
@@ -445,31 +528,34 @@ fn truncated() -> io::Error {
     io::Error::new(ErrorKind::UnexpectedEof, "gRPC message truncated")
 }
 
-fn decode_hunk(mut body: &[u8], plain: &mut Vec<u8>) -> io::Result<()> {
-    while !body.is_empty() {
-        let tag = read_varint(&mut body)?;
+/// Walks the fields of a Hunk or MultiHunk and reports where in `body` each data field's bytes are.
+fn hunk_fields(body: &[u8], mut data: impl FnMut(std::ops::Range<usize>)) -> io::Result<()> {
+    let mut rest = body;
+    while !rest.is_empty() {
+        let tag = read_varint(&mut rest)?;
         let field = tag >> 3;
         if field == 0 || field >= 1 << 29 {
             return Err(invalid("gRPC protobuf field"));
         }
         let len = match tag & 7 {
             0 => {
-                read_varint(&mut body)?;
+                read_varint(&mut rest)?;
                 continue;
             }
             1 => 8,
-            2 => usize::try_from(read_varint(&mut body)?)
+            2 => usize::try_from(read_varint(&mut rest)?)
                 .map_err(|_| invalid("gRPC protobuf length"))?,
             5 => 4,
             _ => return Err(invalid("gRPC protobuf wire type")),
         };
-        let (value, rest) = body
+        let (_, after) = rest
             .split_at_checked(len)
             .ok_or_else(|| invalid("gRPC protobuf length"))?;
         if field == 1 && tag & 7 == 2 {
-            plain.extend_from_slice(value);
+            let start = body.len() - rest.len();
+            data(start..start + len);
         }
-        body = rest;
+        rest = after;
     }
     Ok(())
 }
@@ -492,17 +578,30 @@ fn read_varint(bytes: &mut &[u8]) -> io::Result<u64> {
     Err(invalid("gRPC protobuf varint"))
 }
 
-fn encode_hunk(data: &[u8], out: &mut Vec<u8>) {
-    out.extend_from_slice(&[0, 0, 0, 0, 0, 0x0a]);
-    let mut len = data.len();
+/// What precedes the bytes of a Hunk on the wire: the gRPC message prefix, the data field's tag
+/// and its length. Returns the bytes and how many of them count.
+fn hunk_head(data: usize) -> ([u8; 11], usize) {
+    let mut head = [0; 11];
+    head[5] = 0x0a;
+    let mut used = 6;
+    let mut len = data;
     while len >= 0x80 {
-        out.push(len as u8 | 0x80);
+        head[used] = len as u8 | 0x80;
+        used += 1;
         len >>= 7;
     }
-    out.push(len as u8);
+    head[used] = len as u8;
+    used += 1;
+    let message = (used - 5 + data) as u32;
+    head[1..5].copy_from_slice(&message.to_be_bytes());
+    (head, used)
+}
+
+#[cfg(test)]
+fn encode_hunk(data: &[u8], out: &mut Vec<u8>) {
+    let (head, used) = hunk_head(data.len());
+    out.extend_from_slice(&head[..used]);
     out.extend_from_slice(data);
-    let message_len = (out.len() - 5) as u32;
-    out[1..5].copy_from_slice(&message_len.to_be_bytes());
 }
 
 #[cfg(test)]

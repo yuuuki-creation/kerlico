@@ -1,4 +1,56 @@
 use super::*;
+use base64::{engine::general_purpose::STANDARD, Engine};
+use sha2::{Digest, Sha256};
+use std::io::{self, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+fn identity(name: &str) -> TlsCertificate {
+    let cert = rcgen::generate_simple_self_signed(vec![name.to_string()]).unwrap();
+    TlsCertificate {
+        certificate: cert.cert.pem(),
+        key: cert.key_pair.serialize_pem(),
+        ..Default::default()
+    }
+}
+
+fn options() -> AdvancedTlsOptions {
+    AdvancedTlsOptions {
+        certificates: vec![identity("localhost")],
+        alpn: vec!["h2".into()],
+        allow_insecure: true,
+        fingerprint: "unsafe".into(),
+        ..Default::default()
+    }
+}
+
+fn ech_options() -> AdvancedTlsOptions {
+    let private = x25519_dalek::StaticSecret::from([7; 32]);
+    let public = x25519_dalek::PublicKey::from(&private);
+    let name = b"outer.example";
+    let mut content = vec![7, 0, 0x20, 0, 32];
+    content.extend_from_slice(public.as_bytes());
+    content.extend_from_slice(&[0, 8, 0, 1, 0, 1, 0, 1, 0, 3, 0, name.len() as u8]);
+    content.extend_from_slice(name);
+    content.extend_from_slice(&[0, 0]);
+    let mut config = vec![0xfe, 0x0d];
+    config.extend_from_slice(&(content.len() as u16).to_be_bytes());
+    config.extend(content);
+    let mut list = (config.len() as u16).to_be_bytes().to_vec();
+    list.extend_from_slice(&config);
+    let mut keys = vec![0, 32];
+    keys.extend_from_slice(&private.to_bytes());
+    keys.extend_from_slice(&(config.len() as u16).to_be_bytes());
+    keys.extend(config);
+    let mut options = options();
+    options.min_version = "1.3".into();
+    options.ech_config_list = STANDARD.encode(list);
+    options.ech_server_keys = STANDARD.encode(keys);
+    options
+}
+
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -82,6 +134,9 @@ fn port() -> u16 {
 }
 fn xray_tls(options: &AdvancedTlsOptions, server: bool) -> Value {
     let mut tls = json!({"serverName":"localhost","minVersion":options.min_version,"maxVersion":options.max_version,"alpn":options.alpn});
+    if !options.curve_preferences.is_empty() {
+        tls["curvePreferences"] = json!(options.curve_preferences);
+    }
     if server {
         tls["certificates"] = json!([{"certificate":options.certificates[0].certificate.lines().collect::<Vec<_>>(),"key":options.certificates[0].key.lines().collect::<Vec<_>>() }]);
         if !options.ech_server_keys.is_empty() {
@@ -198,6 +253,21 @@ fn from_xray(options: AdvancedTlsOptions) {
     socket.read_exact(&mut pong).unwrap();
     assert_eq!(&pong, b"pong");
     server.join().unwrap();
+}
+
+#[test]
+#[ignore = "requires pinned XRAY_BIN"]
+fn xray_nist_hybrid_key_shares_bidirectional() {
+    for group in ["SecP256r1MLKEM768", "SecP384r1MLKEM1024"] {
+        let mut options = options();
+        options.fingerprint = "unsafe".into();
+        options.min_version = "1.3".into();
+        options.max_version = "1.3".into();
+        // Neither side may fall back to an ordinary ECDHE group.
+        options.curve_preferences = vec!["unknown-name".into(), group.into()];
+        to_xray(options.clone());
+        from_xray(options);
+    }
 }
 
 #[test]
@@ -344,7 +414,7 @@ fn xray_reality_browser_fingerprints() {
         socket.write_all(&offer.record).unwrap();
         let flight =
             crate::read_server_flight_for_offer(&mut socket, &offer, &public, proof.as_ref());
-        let profile = super::super::fingerprint::resolve(fingerprint)
+        let profile = fingerprint::resolve(fingerprint)
             .unwrap()
             .unwrap();
         let hybrid = profile

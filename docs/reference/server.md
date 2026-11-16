@@ -19,6 +19,8 @@
 
 报文类入站把一条流收成同一个 `Handoff`。目标一开始是 IP。嗅探或 FakeDNS 可以再补上主机名。
 
+[Hy2](hy2.md) 每条 TCP 流和每个有目标的 UDP 会话各交出一个 `Handoff`。需要向客户端报告连接结果的入站用 `InboundStream::report_connect`。出站在目标拨号完成后、开始复制载荷前调用；分流或 DNS 无法得到拨号目标时也报告失败。支持 TCP 半关闭的流可以保留另一方向继续传输。握手目标如果已经打开（如 ShadowTLS v2/v3 或 RestLS 回落），运行时让出站在原套接字上接续复制，不重新拨号。
+
 节点另有一份有序的分流规则。规则只属于这个节点。没命中时使用节点自己的 `OutboundChoice`。
 
 反向桥也是节点，用 `bridge_node` 创建。它不监听，而是主动连到远端的 VLESS Portal。Portal 送来的每条流交成这个节点的 `Handoff`，同样按这个节点的规则和 `OutboundChoice` 选出口，由出站模块拨号。它没有账号，`add_user` 和 `remove_user` 返回错误。配置写法在「配置和运行时接口」的 `bridges`。
@@ -132,6 +134,9 @@ DNS 是服务端的一个模块。协议 crate 不解析域名。
 反向落地也占用这一个 `Landing` 出口，配置为 `"landing": {"node":"入口节点名","reverse":"该节点账号的反向标签"}`。它通过该节点提供的反向拨号函数开一个 Mux 会话，目标的连接和复制仍由出站模块驱动；不增加 Exit、全局路由或 outboundTag。该写法与普通落地的 protocol/address/port/settings 互斥。删除或替换反向账号后，旧 Portal 不再接受新会话。
 
 
+AnyTLS 落地的 `settings` 见 [AnyTLS](anytls.md#客户端)。它与目标之间的流量走 AnyTLS；本机到落地服务器的 TCP 载体由出站模块以原生方式打开。
+AnyTLS 落地启用 ECH 的 DNS 发现时，由服务端 DNS 模块查询 HTTPS 记录。查询遵循 DNS upstream 的出口设置；UDP 回答被截断时，在同一 upstream 和出口用 TCP 重查。
+
 没有配置落地时，`Manual(Landing)` 使这条流失败。
 
 整条流交给远端，目标保持原样。远端自己解析域名。本地的 DNS 模块不参与这次拨号。
@@ -166,7 +171,7 @@ TCP 复制在 300 秒没有字节时结束。UDP 会话的键包含 `Handoff` �
 
 用户挂在一个节点上。稳定的键是 `UserEmail`。空字符串、空白和 `>` 不能做邮箱或节点名。同一个邮箱可以出现在两个节点上，计数按邮箱合并。`remove_user` 只从那个节点去掉用户，不把计数清零。
 
-账号的协议字段放在 `Settings` 里，由那个协议的 `add_user` 解释。叶子不解析 UUID 或密码。节点 `settings` 和用户对象里，除 `users` 与 `email` 以外的字符串、数字和布尔值都原样进入 `Settings`；数组和对象序列化为 JSON 后交给协议解释，`null` 拒绝。这条规则是 `Settings::insert_json`，落地设置和客户端文档也用它。`add_user` 和 `remove_user` 在 `Server` 上会找到节点并转给入站。mieru 的 `add_user` 读取 `username` 和 `password`。vless 的 `add_user` 读取 `id`、`flow` 和可选 `reverse`，详细组合与反向 API 见 `docs/reference/vless.md`。WireGuard 和 OpenVPN 的函数体仍是 `unimplemented!`。
+账号的协议字段放在 `Settings` 里，由那个协议的 `add_user` 解释。叶子不解析 UUID 或密码。节点 `settings` 和用户对象里，除 `users` 与 `email` 以外的字符串、数字和布尔值都原样进入 `Settings`；数组和对象序列化为 JSON 后交给协议解释，`null` 拒绝。这条规则是 `Settings::insert_json`，落地设置和客户端文档也用它。`add_user` 和 `remove_user` 在 `Server` 上会找到节点并转给入站。mieru 的 `add_user` 读取 `username` 和 `password`。vless 的 `add_user` 读取 `id`、`flow` 和可选 `reverse`，详细组合与反向 API 见 `docs/reference/vless.md`。[AnyTLS](anytls.md#服务端) 的 `add_user` 只读取 `password`。WireGuard 和 OpenVPN 的函数体仍是 `unimplemented!`。
 
 计数的名字是这些形式。
 
@@ -188,6 +193,8 @@ outbound>>>出口>>>traffic>>>downlink
 复制开始时，`Traffic::bind` 取得该用户、节点和出口的六个原子计数句柄。随后每个成功复制块直接累加句柄，名称格式化和注册表锁不进入数据路径。API 仍按上述名称查询同一批计数，活跃连接的更新立即可见，不等连接结束才汇总。`Stats` 原有的按名称组成计数的更新方法仍保留。
 
 原生 TCP 的 200 ms 读取轮询超时在建连时设置一次，不随每次读取重复设置。300 秒连接空闲期限以及前述阻塞写的实现缺口不因此改变。
+
+复制循环通过 `InboundStream::read_from_user_to` 读入站：流可以把自己已经持有的字节按顺序分一段或几段直接交给出口写入，不先复制进复制循环的缓冲，一次可以多于该缓冲。默认实现读进缓冲后交出一次，空读也交出，因此 UDP 空包照常发送；TCP 的空读仍是 EOF，不写出口。计数、空闲和关闭规则与原来的读取相同。目前只有 mieru 服务端的 TCP 会话覆盖这个方法。
 
 UDP 的 `InboundStream` 一次读写表示一个完整数据报。`Ok(0)` 是有效空包，`PlaneFault::Closed` 才表示关闭；缓冲区容纳不下时返回错误，不拆分。出口内部读事件区分数据与 EOF，UDP 单次写入必须完整；TCP 仍是字节流。嗅探预读保存完整 UDP 包，空包也要交还复制循环。`Settings::optional_text` 区分缺少可选项与已有键类型错误，不把类型错误作为默认值处理。
 

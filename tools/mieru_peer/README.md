@@ -44,4 +44,6 @@ TCP 退出检查采用与生产监听相同的 `SO_REUSEADDR=true` 后 `bind+lis
 
 本机代理覆盖 SOCKS CONNECT 和 UDP ASSOCIATE、HTTP GET/POST/chunked/CONNECT、IPv4/IPv6/域名、同 HTTP keepalive 切换目标、CONNECT 预读字节、UDP 连发边界、控制连接关闭撤销关联。首行额外验证错误账号、UDP FRAG 和外来来源、非法 HTTP；独立 case 验证非法设置、重复/占用端口和第二次绑定失败的回滚。每次退出均清理所有子进程组，并检查端口可重绑；失败退出码为 1，JSON 和相对日志路径保留具体失败 case。中断也通过 finally 关闭所管理进程。
 
+验证 UDP 承载的长跑时可加 `--case-index 2 --udp-soak-seconds 90 --case-timeout 140`。两个方向各复用同一条 UDP 关联，逐包检查内容和来源；该模式不跑 TCP 和 HTTP 阶段。结果分别在 `official-probe.log` 和 `udp-flows.json`。用 `tc netem` 模拟链路时，在独立网络命名空间内只匹配承载节点的 UDP 流量，本机入口和回显流量不进此规则。
+
 这套黑盒结果不能替代引擎内部的概率穷举、nonce 顺序、超时/取消、重放/乱序和 Arc/FD 资源验收。wire 成功只能证明这一矩阵的真实通信成功，不能证明四级复用的概率分布或进程内资源已完全回收。

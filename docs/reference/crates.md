@@ -8,23 +8,28 @@
 crates/shared          包 kerlico-shared。两端的领域类型。没有角色 feature。
 crates/client          包 kerlico-client。客户端叶子。
 crates/server          包 kerlico-server。服务端叶子。依赖 kerlico-outbound。
-crates/outbound        包 kerlico-outbound。服务端唯一的拨号模块。
+crates/outbound        包 kerlico-outbound。服务端以及 AnyTLS 独立客户端的拨号模块。
 crates/manifest        包 kerlico-manifest。构建时核对协议目录和叶子依赖。
+crates/tls             包 kerlico-tls。双方共用的传输 TLS、证书与 ClientHello 配置。
 crates/wg              包 kerlico-wg。用户态 WireGuard，只给出站的 WARP 用。不安装本机默认路由。
 protocols/<id>/shared  包 kerlico-<id>。这个协议两端共用的帧。
 protocols/<id>/client  包 kerlico-<id>-client。只有客户端叶子可以依赖。
 protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依赖。
 ```
 
-工作区成员是 `crates/shared`、`crates/client`、`crates/server`、`crates/outbound`、`crates/manifest` 和 `crates/wg`。协议目录不是工作区成员。
+工作区显式成员是 `crates/shared`、`crates/client`、`crates/server`、`crates/outbound`、`crates/manifest`、`crates/tls` 和 `crates/wg`。协议目录不显式列入成员。
 
 代码未跟上：2026-11-09 的 `cargo metadata --format-version 1 --no-deps` 显示协议的 path 依赖也被 Cargo 自动纳入工作区，共 15 个成员。本轮没有改变工作区划分；功能裁剪分别检查叶子的运行时依赖图，不用工作区包数推断角色隔离。
 
-现在的协议目录是 `wireguard`、`openvpn`、`mieru` 和 `vless`。WireGuard 和 OpenVPN 的协议体是 `unimplemented!`。mieru 的决定在 `docs/reference/mieru.md`。vless 的决定在 `docs/reference/vless.md`。
+现在的协议目录是 `wireguard`、`openvpn`、`mieru`、`vless`、`anytls` 和 `hy2`。WireGuard 和 OpenVPN 的协议体是 `unimplemented!`。代理协议的配置见各自的参考文档。
 
 本机 SOCKS5/HTTP 入口只在客户端叶子里有一份，见下文「客户端叶子和本机入口」。
 
 mieru 共享 crate 的运行时加密依赖是 `chacha20` 和 `ring`，组合实现既有 XChaCha20-Poly1305；原 `chacha20poly1305` 留作测试对照依赖。该变化没有增加协议或角色 feature。`kerlico-shared::Traffic` 在建流时返回 `TrafficCounters`，注册和查询仍由服务端拥有，出站持有计数句柄。
+
+VLESS、AnyTLS 和 Hy2 都依赖 `kerlico-tls`。VLESS 和 Hy2 会开启这个引擎的 `quic` feature。AnyTLS 在普通连接上保留 rustls 取密钥和按方向处理记录的路径，浏览器指纹、ECH 以及需要修改首个 ClientHello 的载体使用共享引擎。JLS 的默认握手使用 rustls-jls，见 [AnyTLS](anytls.md#tls)。
+
+`protocols/hy2/shared` 持有 Hysteria 2 的认证和帧格式。VLESS 的 `hysteria` 载体复用认证与流类型；VLESS 命令仍由 VLESS 解析。独立 Hy2 的当前范围见 [Hysteria 2](hy2.md)。
 
 ## 一次构建选一端和一组协议
 
@@ -86,13 +91,15 @@ landing-vless = { package = "kerlico-vless-client", path = "../../protocols/vles
 
 服务端叶子上的 `landing-<id>` 依赖指向该协议的客户端 crate，并且不进入入站菜单。出站模块调用该 crate 的 `land`。`landing-vless` 还让服务端叶子用该 crate 的 `reverse_bridge` 运行配置里的 `bridges` 节点，桥上的流仍由出站模块拨号。见 `docs/reference/server.md`。
 
+AnyTLS 客户端 crate 用 `kerlico-outbound` 建立独立客户端的 TCP 连接并访问系统 DNS，作为落地时走服务端运行时的出口和 DNS。只有引入 AnyTLS 客户端 crate 的构建才为出站模块打开 `system-dns`。
+
 ## 客户端叶子和本机入口
 
-客户端叶子的注册表把协议 id 对到该协议的 `CLIENT`。`ClientEntry::Tunnel` 是数据包平面（`DataPlane`），`ClientEntry::Proxy` 返回 `Arc<dyn Upstream>`。WireGuard 和 OpenVPN 是 `Tunnel`，mieru 和 vless 是 `Proxy`。一个协议只能是其中一种。
+客户端叶子的注册表把协议 id 对到该协议的 `CLIENT`。`ClientEntry::Tunnel` 是数据包平面（`DataPlane`），`ClientEntry::Proxy` 返回 `Arc<dyn Upstream>`。WireGuard 和 OpenVPN 是 `Tunnel`，mieru、vless、anytls 和 hy2 是 `Proxy`。一个协议只能是其中一种。
 
 `Upstream`、`Stream` 和 `Association` 定义在 `kerlico-shared` 的 `proxy` 模块，因为协议的客户端 crate 也会作为 `landing-<id>` 编进服务端，不能依赖客户端叶子。`Upstream::open_stream(host, port)` 打开 TCP 流，`associate()` 打开一条 SOCKS5 UDP 关联，`close()` 幂等地取消它打开的全部流和关联。`Stream::read_for` 在等待期内没有数据时返回 `TimedOut`，结束时返回 `Ok(0)` 或 `UnexpectedEof`。`Association::send_to` 带本机应用的 UDP 来源，同一关联的来源不变。协议拒绝的单个数据报以 `Ok` 丢弃，只有关联已经结束才返回错误。`recv_for` 一次给出一个完整数据报及其来源。
 
-SOCKS5 和 HTTP 前端在 `crates/client/src/proxy/`，只属于客户端叶子，所以服务端的 `landing-<id>` 构建不编入本机代理。前端用到的依赖里只有 `httparse` 是客户端叶子独有的。服务端叶子也依赖 `if-addrs`。`kerlico-shared`、`kerlico-outbound` 和 `kerlico-vless` 直接依赖 `socket2` 0.6，服务端叶子和 `kerlico-mieru-server` 直接依赖 `socket2` 0.5。
+SOCKS5 和 HTTP 前端在 `crates/client/src/proxy/`，只属于客户端叶子，所以服务端的 `landing-<id>` 构建不编入本机代理。前端用到的依赖里只有 `httparse` 是客户端叶子独有的。服务端叶子也依赖 `if-addrs`。`kerlico-shared`、`kerlico-outbound` 和 `kerlico-vless` 直接依赖 `socket2` 0.6，服务端叶子、`kerlico-mieru-server` 和 `kerlico-anytls-server` 直接依赖 `socket2` 0.5。
 
 ```text
 kerlico-client                              # 列出本次构建的客户端协议
@@ -106,7 +113,7 @@ kerlico-client --mieru-proxy client.json    # 同一路径，protocol 固定为 
 
 LAN 开关为真时，枚举实际接口上的 IPv4 私网和链路本地地址，以及 IPv6 ULA 和链路本地地址，逐一绑定。IPv6 设置 `IPV6_V6ONLY`，链路本地地址携带接口作用域。没有合适地址时拒绝，不扩大到公网 wildcard。所有端口成功绑定后才开始接入，失败时释放先前绑定的端口。`Proxy::start(upstream, &LocalEntry)` 返回的句柄提供 `socks5_addrs()`、`http_addrs()`、`wait()` 和 `close()`；释放句柄会停止监听并等待受控任务。
 
-SOCKS5 包含 `CONNECT` 和 `UDP ASSOCIATE`，只接受无认证方法。UDP 关联受 TCP 控制连接的生命周期约束，验证请求声明的地址和实际来源，端口为 0 时固定第一个合法 UDP 来源。拒绝分片注入，回复写出协议给的来源地址。HTTP 代理接受普通请求和 `CONNECT`。普通 HTTP 按每个请求的目标打开一条流，支持 Content-Length、chunked 和同一本机连接上的跨目标请求。CONNECT 保留预读的隧道数据。头部、行长度和消息边界有上限，冲突的长度、非法地址和不支持的升级或期望明确拒绝。本机 TCP 读到 EOF 后保留反向响应，直到对端关闭、取消或 300 秒空闲。
+SOCKS5 包含 `CONNECT` 和 `UDP ASSOCIATE`，只接受无认证方法。UDP 关联受 TCP 控制连接的生命周期约束，验证请求声明的地址和实际来源，端口为 0 时固定第一个合法 UDP 来源。拒绝分片注入，回复写出协议给的来源地址。HTTP 代理接受普通请求和 `CONNECT`。普通 HTTP 按每个请求的目标打开一条流，支持 Content-Length、chunked 和同一本机连接上的跨目标请求。CONNECT 保留预读的隧道数据。头部、行长度和消息边界有上限，冲突的长度、非法地址和不支持的升级或期望明确拒绝。本机 TCP 读到 EOF 后保留反向响应，直到对端关闭、取消或 300 秒空闲。接入的本机连接设置 `TCP_NODELAY`，否则分两次写回应用的数据要等应用的延迟确认。SOCKS5 和 HTTP CONNECT 的 TCP 转发每个方向一次复制最多 64 KiB：从本机一次读到的数据整段交给协议写一次，协议一次交出的数据整段写回本机。
 
 ## 引擎和协议是两个 crate
 

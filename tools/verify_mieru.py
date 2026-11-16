@@ -491,7 +491,7 @@ def unpack_udp(packet):
     return source, packet[cursor:]
 
 
-def udp_check(socks, fixtures, negatives=False):
+def udp_check(socks, fixtures, negatives=False, soak_seconds=0):
     control, bound = socks_connect(socks, "0.0.0.0", 0, 3)
     if bound[0] in ("0.0.0.0", "::"):
         bound = ("127.0.0.1", bound[1])
@@ -500,9 +500,13 @@ def udp_check(socks, fixtures, negatives=False):
         udp.settimeout(IO_BUDGET)
         targets = fixtures.udp_targets()
         lengths = [0, 1, 1279, 1400, 8192, 32000, 3, 0]
-        for index, length in enumerate(lengths):
+        started = time.monotonic()
+        for index in itertools.count():
+            if index >= len(lengths) and time.monotonic() - started >= soak_seconds:
+                break
+            length = lengths[index % len(lengths)]
             host, port = targets[index % len(targets)]
-            payload = bytes([index + 1]) * length
+            payload = bytes([index % 255 + 1]) * length
             evidence = {"index": index, "expected_length": length, "actual_length": None,
                         "target": authority(host, port), "source": None, "relay": list(bound), "error": None}
             try:
@@ -517,6 +521,7 @@ def udp_check(socks, fixtures, negatives=False):
                 raise PacketFailure("UDP 收发或解码失败", evidence) from error
             if sender[1] != bound[1] or source[1] != port or got != payload:
                 raise PacketFailure("UDP 内容、来源或边界不符", evidence)
+        stats = {"udp_packets": index, "udp_seconds": time.monotonic() - started}
         # 连发多个不同包后才读取，不能让字节流适配器仅靠一问一答通过。
         host, port = targets[0]
         pending = [b"order-a", b"order-b" * 19, b"order-c" * 300]
@@ -563,6 +568,7 @@ def udp_check(socks, fixtures, negatives=False):
         else:
             raise Failure("控制连接 EOF 后 UDP 关联仍然存活")
         require(fixtures.udp_count() == before, "已关闭的 UDP 关联仍在转发")
+        return stats
 
 
 def read_http_response(conn):
@@ -642,10 +648,15 @@ def official_to_rust(args, folder, row, fixtures, negative=False):
     write_json(folder / "warp.json", {"secretKey": "invalid"})
     with managed([args.server_bin, str(config_path)], folder, "rust-server") as server:
         wait_for(server, lambda: "mieru" in server.text().splitlines())
+        probe_timeout = IO_BUDGET + args.udp_soak_seconds
         command = [args.peer_bin, "probe"] + peer_options(row, port, args.node_host) + [
             "--tcp-targets", ",".join(authority(*x) for x in fixtures.tcp_targets()),
-            "--udp-targets", ",".join(authority(*x) for x in fixtures.udp_targets()), "--timeout", "25s"]
-        result = subprocess.run(command, cwd=folder, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+            "--udp-targets", ",".join(authority(*x) for x in fixtures.udp_targets())]
+        if args.udp_soak_seconds:
+            command += ["--udp-soak", f"{args.udp_soak_seconds}s"]
+        command += ["--timeout", f"{probe_timeout}s"]
+        result = subprocess.run(command, cwd=folder, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=probe_timeout + 5)
         (folder / "official-probe.log").write_bytes(result.stdout)
         records = [json.loads(line) for line in result.stdout.decode().splitlines() if line.startswith("{")]
         if result.returncode != 0:
@@ -671,14 +682,20 @@ def rust_to_official(args, folder, row, fixtures, negative=False):
     config = {"protocol": "mieru", "peer": authority(args.node_host, upstream), "settings": settings}
     path = folder / "client.json"
     write_json(path, config)
-    with managed([args.peer_bin, "server"] + peer_options(row, upstream, args.node_host), folder, "official-server") as official:
+    server_timeout = IO_BUDGET + args.udp_soak_seconds
+    command = [args.peer_bin, "server"] + peer_options(row, upstream, args.node_host) + ["--timeout", f"{server_timeout}s"]
+    with managed(command, folder, "official-server") as official:
         wait_for(official, lambda: '"status":"ready"' in official.text())
         with managed([args.client_bin, "--mieru-proxy", str(path)], folder, "rust-client") as client:
             wait_for(client, lambda: ports_ready([socks, http]))
-            tcp_result = run_phase("tcp", lambda: tcp_check(socks, fixtures.tcp_targets()))
-            write_json(folder / "tcp-flows.json", tcp_result)
-            run_phase("udp", lambda: udp_check(socks, fixtures, negatives=negative))
-            run_phase("http", lambda: http_check(http, fixtures, negatives=negative))
+            if not args.udp_soak_seconds:
+                tcp_result = run_phase("tcp", lambda: tcp_check(socks, fixtures.tcp_targets()))
+                write_json(folder / "tcp-flows.json", tcp_result)
+            udp_result = run_phase("udp", lambda: udp_check(socks, fixtures, negatives=negative,
+                                                           soak_seconds=args.udp_soak_seconds))
+            write_json(folder / "udp-flows.json", udp_result)
+            if not args.udp_soak_seconds:
+                run_phase("http", lambda: http_check(http, fixtures, negatives=negative))
             official.ensure_alive()
             client.ensure_alive()
         require(not client.forced_kill, "Rust 客户端未按时退出")
@@ -743,6 +760,8 @@ def main():
     modes.add_argument("--quick", action="store_true", help="八行 smoke 覆盖，结果明确标注 smoke")
     modes.add_argument("--full", action="store_true", help="所有因素的两两覆盖，默认启用")
     parser.add_argument("--case-index", type=int, help="仅复现指定矩阵行，coverage 标为 partial")
+    parser.add_argument("--udp-soak-seconds", type=int, default=0,
+                        help="指定 UDP 底层的一行，在同一个 UDP 关联上持续校验回显")
     parser.add_argument("--case-timeout", type=float, default=90)
     parser.add_argument("--suite-timeout", type=float, default=2400)
     args = parser.parse_args()
@@ -755,6 +774,10 @@ def main():
         if not 0 <= args.case_index < len(rows):
             parser.error("case-index 超出所选矩阵范围")
         rows = [rows[args.case_index]]
+    if args.udp_soak_seconds < 0 or (args.udp_soak_seconds and (
+            args.case_index is None or rows[0][0] == 0 or rows[0][1][0] != "UDP"
+            or args.case_timeout <= args.udp_soak_seconds + IO_BUDGET)):
+        parser.error("UDP 长跑需要选择一行非首行的 UDP 配置，并预留额外 case 期限")
     for name in ("server_bin", "client_bin", "peer_bin"):
         value = Path(getattr(args, name)).resolve()
         if not value.is_file() or not os.access(value, os.X_OK):
@@ -768,6 +791,7 @@ def main():
               "coverage": "partial" if args.case_index is not None else ("smoke" if args.quick else "pairwise"), "cases": [],
               "case_index": args.case_index,
               "node_host": args.node_host,
+              "udp_soak_seconds": args.udp_soak_seconds,
               "limitations": ["黑盒进程清理不能证明进程内 Arc 或 FD 已全部回收",
                               "线协议互通成功不能证明官方复用概率分布",
                               "只验证原生回环出口；显式非法配置使 WARP 在解析阶段停止"]}

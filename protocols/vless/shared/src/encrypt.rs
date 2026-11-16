@@ -8,22 +8,31 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use ml_kem::EncodedSizeUser;
-use aes_gcm::aead::{Aead, Payload};
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use chacha20poly1305::ChaCha20Poly1305;
+use ring::aead::{self, Aad, LessSafeKey, UnboundKey};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const MAX_PLAIN: usize = 8192;
+/// The most a record takes on the wire: its header and the largest body a reader accepts.
+const MAX_RECORD: usize = 5 + 16640;
+/// The wire bytes a reader holds at most. Several records fit, so one read from the socket
+/// brings every record that already arrived.
+const READ_AHEAD: usize = 4 * MAX_RECORD;
+/// The plaintext one write seals at most. It is a whole number of records, so the records are
+/// the ones that writing `MAX_PLAIN` at a time makes, and they leave in one write to the socket.
+const WRITE_BATCH: usize = 8 * MAX_PLAIN;
 
 pub struct Record {
-    key: [u8; 32],
+    /// Boxed: the key schedule is large and a `Record` is held inline by the read and write states.
+    key: Box<LessSafeKey>,
     nonce: [u8; 12],
     aes: bool,
 }
 
 impl Record {
     pub fn new(context: &[u8], key: &[u8], aes: bool) -> Self {
-        Self { key: derive(context, key), nonce: [0; 12], aes }
+        let algorithm = if aes { &aead::AES_256_GCM } else { &aead::CHACHA20_POLY1305 };
+        let key = UnboundKey::new(algorithm, &derive(context, key)).expect("aead key");
+        Self { key: Box::new(LessSafeKey::new(key)), nonce: [0; 12], aes }
     }
 
     pub fn seal(&mut self, plain: &[u8], extra_nonce: Option<[u8; 12]>) -> Vec<u8> {
@@ -43,25 +52,38 @@ impl Record {
     }
 
     fn seal_with(&self, plain: &[u8], nonce: &[u8; 12], aad: &[u8]) -> Vec<u8> {
-        let payload = Payload { msg: plain, aad };
-        if self.aes {
-            let cipher = Aes256Gcm::new_from_slice(&self.key).expect("aes key");
-            cipher.encrypt(Nonce::from_slice(nonce), payload).expect("seal")
-        } else {
-            let cipher = ChaCha20Poly1305::new_from_slice(&self.key).expect("chacha key");
-            cipher.encrypt(Nonce::from_slice(nonce), payload).expect("seal")
-        }
+        let mut out = Vec::with_capacity(plain.len() + 16);
+        out.extend_from_slice(plain);
+        self.key
+            .seal_in_place_append_tag(aead::Nonce::assume_unique_for_key(*nonce), Aad::from(aad), &mut out)
+            .expect("seal");
+        out
     }
 
     fn open_with(&self, cipher_text: &[u8], nonce: &[u8; 12], aad: &[u8]) -> Option<Vec<u8>> {
-        let payload = Payload { msg: cipher_text, aad };
-        if self.aes {
-            let cipher = Aes256Gcm::new_from_slice(&self.key).ok()?;
-            cipher.decrypt(Nonce::from_slice(nonce), payload).ok()
-        } else {
-            let cipher = ChaCha20Poly1305::new_from_slice(&self.key).ok()?;
-            cipher.decrypt(Nonce::from_slice(nonce), payload).ok()
-        }
+        let mut body = cipher_text.to_vec();
+        let len = self.key.open_in_place(aead::Nonce::assume_unique_for_key(*nonce), Aad::from(aad), &mut body).ok()?.len();
+        body.truncate(len);
+        Some(body)
+    }
+
+    /// Appends one data record to `out`: the header, then `plain` sealed where it lies, then the tag.
+    fn seal_into(&mut self, plain: &[u8], out: &mut Vec<u8>) {
+        let start = out.len();
+        out.extend_from_slice(&[23, 3, 3]);
+        out.extend_from_slice(&((plain.len() + 16) as u16).to_be_bytes());
+        out.extend_from_slice(plain);
+        let nonce = aead::Nonce::assume_unique_for_key(bump(&mut self.nonce));
+        let (header, text) = out[start..].split_at_mut(5);
+        let tag = self.key.seal_in_place_separate_tag(nonce, Aad::from(&header[..]), text).expect("seal");
+        out.extend_from_slice(tag.as_ref());
+    }
+
+    /// Opens a data record's ciphertext and tag where they lie. The plaintext is the first bytes
+    /// of `body`, as many as returned.
+    fn open_in_place(&mut self, header: &[u8; 5], body: &mut [u8]) -> Option<usize> {
+        let nonce = aead::Nonce::assume_unique_for_key(bump(&mut self.nonce));
+        self.key.open_in_place(nonce, Aad::from(header), body).ok().map(|plain| plain.len())
     }
 }
 
@@ -127,28 +149,6 @@ fn bump(nonce: &mut [u8; 12]) -> [u8; 12] {
         }
     }
     *nonce
-}
-
-pub fn seal_record(record: &mut Record, plain: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8; 5 + plain.len() + 16];
-    out[0] = 23;
-    out[1] = 3;
-    out[2] = 3;
-    let len = (plain.len() + 16) as u16;
-    out[3] = (len >> 8) as u8;
-    out[4] = len as u8;
-    let nonce = bump(&mut record.nonce);
-    let sealed = record.seal_with(plain, &nonce, &out[..5]);
-    out[5..].copy_from_slice(&sealed);
-    out
-}
-
-pub fn open_record(record: &mut Record, header: &[u8; 5], body: &[u8]) -> Option<Vec<u8>> {
-    let len = header_length(header)?;
-    if len != body.len() || !(17..=16640).contains(&len) {
-        return None;
-    }
-    record.open(body, None, header)
 }
 
 fn header_length(header: &[u8; 5]) -> Option<usize> {
@@ -223,13 +223,37 @@ impl<S: Write> Write for Encrypted<S> {
 
 const MAX_NONCE: [u8; 12] = [0xff; 12];
 
-fn client_handshake<S: Read + Write>(mut socket: S, server_public: &[NfsKey], mode: u8, reuse: bool, pad: &Pad) -> std::io::Result<Encrypted<S>> {
+/// Whether this machine runs AES-GCM in hardware. The client picks its cipher by it, with the
+/// conditions of Xray's `protocol.HasAESGCMHardwareSupport` on x86-64 and ARM64. Other
+/// architectures use ChaCha20-Poly1305.
+fn aes_hardware() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("aes")
+            && std::arch::is_x86_feature_detected!("pclmulqdq")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("ssse3")
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        cfg!(target_os = "macos")
+            || (std::arch::is_aarch64_feature_detected!("aes") && std::arch::is_aarch64_feature_detected!("pmull"))
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        false
+    }
+}
+
+/// `aes` picks AES-256-GCM over ChaCha20-Poly1305 for every key of the session. The server takes
+/// whichever opens the first record.
+fn client_handshake<S: Read + Write>(mut socket: S, server_public: &[NfsKey], mode: u8, reuse: bool, pad: &Pad, aes: bool) -> std::io::Result<Encrypted<S>> {
     if server_public.is_empty() {
         return Err(std::io::Error::other("vlessenc"));
     }
     let iv = random_bytes::<16>();
     let (relay, nfs) = client_relays(server_public, &iv, mode)?;
-    let mut nfs_aead = Record::new(&iv, &nfs, false);
+    let mut nfs_aead = Record::new(&iv, &nfs, aes);
     let cache_key = ticket_id(server_public, mode);
     let mut hello = Vec::new();
     hello.extend(iv);
@@ -240,9 +264,9 @@ fn client_handshake<S: Read + Write>(mut socket: S, server_public: &[NfsKey], mo
             let ticket_cipher = nfs_aead.seal(&ticket, None);
             hello.extend(&ticket_cipher);
             let united = unite_pfs(&pfs, &nfs);
-            let write = Record::new(&ticket_cipher, &united, false);
+            let write = Record::new(&ticket_cipher, &united, aes);
             let mask = (mode == 2).then(|| HeaderMask::new(&united, &iv));
-            let resume = ClientResume { united, random_mask: mode == 2, cache_key, ticket };
+            let resume = ClientResume { united, random_mask: mode == 2, cache_key, ticket, aes };
             return Ok(Encrypted {
                 inner: socket,
                 read: ReadState { resume: Some(resume), ..ReadState::new(None, None) },
@@ -264,8 +288,8 @@ fn client_handshake<S: Read + Write>(mut socket: S, server_public: &[NfsKey], mo
     let server_x = PublicKey::from(copy32(&server_pfs[1088..1120])?);
     let x = checked_x25519(&pfs_secret, &server_x).ok_or_else(invalid_encryption)?;
     let united = unite(&mlkem, &x, &nfs);
-    let mut read = Record::new(&server_pfs, &united, false);
-    let write = Record::new(&pfs_plain, &united, false);
+    let mut read = Record::new(&server_pfs, &united, aes);
+    let write = Record::new(&pfs_plain, &united, aes);
     let ticket = read_exact(&mut socket, 32)?;
     let ticket = read.open(&ticket, None, &[]).ok_or_else(|| std::io::Error::other("vlessenc"))?;
     open_padding(&mut read, &mut socket)?;
@@ -487,12 +511,20 @@ struct ClientResume {
     random_mask: bool,
     cache_key: [u8; 32],
     ticket: [u8; 16],
+    aes: bool,
 }
 
 struct ReadState {
     record: Option<Record>,
-    pending: Vec<u8>,
-    cipher: Vec<u8>,
+    /// `wire[head..tail]` arrived, with the header mask already removed, and is not opened yet.
+    /// It grows with the traffic up to `READ_AHEAD`.
+    wire: Vec<u8>,
+    head: usize,
+    tail: usize,
+    /// The last read from the wire filled `wire` to its end, so more may be waiting.
+    full: bool,
+    /// The part of `wire`, before `head`, that holds an opened record's data still to deliver.
+    plain: std::ops::Range<usize>,
     mask: Option<HeaderMask>,
     resume: Option<ClientResume>,
     direct: bool,
@@ -500,15 +532,26 @@ struct ReadState {
 
 impl ReadState {
     fn new(record: Option<Record>, mask: Option<HeaderMask>) -> Self {
-        Self { record, pending: Vec::new(), cipher: Vec::new(), mask, resume: None, direct: false }
+        Self { record, wire: Vec::new(), head: 0, tail: 0, full: false, plain: 0..0, mask, resume: None, direct: false }
     }
 
+    /// Returns the data of one record, as far as `buf` has room. Like Xray, it opens a record only
+    /// when the last one is delivered, so Vision can end the record layer after any record and
+    /// get the bytes behind it as they arrived. It reads from the inner stream only when no
+    /// whole record is buffered.
     fn read(&mut self, reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
-        if self.pending.is_empty() {
+        if self.plain.is_empty() {
             if self.direct {
+                if self.head < self.tail {
+                    // Bytes read ahead of the last record are the start of the direct stream.
+                    let n = (self.tail - self.head).min(buf.len());
+                    buf[..n].copy_from_slice(&self.wire[self.head..self.head + n]);
+                    self.head += n;
+                    return Ok(n);
+                }
                 let read = reader.read(buf)?;
                 if let Some(mask) = &mut self.mask {
                     mask.apply(&mut buf[..read], false);
@@ -527,64 +570,84 @@ impl ReadState {
                 return Ok(0);
             }
         }
-        let n = self.pending.len().min(buf.len());
-        buf[..n].copy_from_slice(&self.pending[..n]);
-        self.pending.drain(..n);
+        let n = self.plain.len().min(buf.len());
+        buf[..n].copy_from_slice(&self.wire[self.plain.start..self.plain.start + n]);
+        self.plain.start += n;
         Ok(n)
     }
 
+    /// Opens the next record where it lies in `wire`. `Ok(false)` is the end of the stream
+    /// between two records.
     fn next_record(&mut self, reader: &mut impl Read) -> std::io::Result<bool> {
         if self.record.is_none() {
-            let resume = self.resume.as_ref().ok_or_else(invalid_encryption)?;
-            if !fill_cipher(reader, &mut self.cipher, 16, None)? {
+            if self.resume.is_none() {
+                return Err(invalid_encryption());
+            }
+            if !self.fill(reader, 16)? {
                 return Ok(false);
             }
-            let random: [u8; 16] = self.cipher.as_slice().try_into().unwrap();
-            self.record = Some(Record::new(&random, &resume.united, false));
+            let random: [u8; 16] = self.wire[self.head..self.head + 16].try_into().unwrap();
+            self.head += 16;
+            let resume = self.resume.as_ref().expect("resumed session");
+            self.record = Some(Record::new(&random, &resume.united, resume.aes));
             self.mask = resume.random_mask.then(|| HeaderMask::new(&resume.united, &random));
-            self.cipher.clear();
+            // What arrived behind the server's random is masked like the rest of the stream.
+            if let Some(mask) = &mut self.mask {
+                mask.apply(&mut self.wire[self.head..self.tail], false);
+            }
         }
-        if !fill_cipher(reader, &mut self.cipher, 5, self.mask.as_mut())? {
+        if !self.fill(reader, 5)? {
             return Ok(false);
         }
-        let header: [u8; 5] = self.cipher[..5].try_into().unwrap();
+        let header: [u8; 5] = self.wire[self.head..self.head + 5].try_into().unwrap();
         let len = header_length(&header).filter(|len| (17..=16640).contains(len)).ok_or_else(invalid_encryption)?;
-        fill_cipher(reader, &mut self.cipher, 5 + len, self.mask.as_mut())?;
+        self.fill(reader, 5 + len)?;
+        let start = self.head + 5;
         let record = self.record.as_mut().expect("initialized record");
-        self.pending = open_record(record, &header, &self.cipher[5..]).ok_or_else(invalid_encryption)?;
-        self.cipher.clear();
+        let opened = record.open_in_place(&header, &mut self.wire[start..start + len]).ok_or_else(invalid_encryption)?;
+        self.head = start + len;
+        self.plain = start..start + opened;
         self.resume = None;
         Ok(true)
     }
-}
 
-fn fill_cipher(reader: &mut impl Read, bytes: &mut Vec<u8>, end: usize, mut mask: Option<&mut HeaderMask>) -> std::io::Result<bool> {
-    use std::io::ErrorKind;
-    let mut offset = bytes.len();
-    if offset >= end {
-        return Ok(true);
-    }
-    bytes.resize(end, 0);
-    while offset < end {
-        match reader.read(&mut bytes[offset..]) {
-            Ok(0) => {
-                bytes.truncate(offset);
-                return if offset == 0 { Ok(false) } else { Err(ErrorKind::UnexpectedEof.into()) };
+    /// Reads until `need` bytes are buffered behind `head`, taking whatever else already arrived.
+    /// `Ok(false)` is the end of the stream with nothing buffered; the end of the stream inside
+    /// those bytes is `UnexpectedEof`. A failed read keeps what was buffered, so the next call
+    /// resumes.
+    fn fill(&mut self, reader: &mut impl Read, need: usize) -> std::io::Result<bool> {
+        use std::io::ErrorKind;
+        while self.tail - self.head < need {
+            if self.head == self.tail {
+                self.head = 0;
+                self.tail = 0;
+            } else if self.head > 0 {
+                self.wire.copy_within(self.head..self.tail, 0);
+                self.tail -= self.head;
+                self.head = 0;
             }
-            Ok(n) => {
-                if let Some(mask) = mask.as_deref_mut() {
-                    mask.apply(&mut bytes[offset..offset + n], false);
+            if self.full || self.wire.len() < need {
+                // A read that filled the buffer gets a larger one, so bulk traffic comes in few reads.
+                let len = (self.wire.len() * 2).clamp(4096, READ_AHEAD).max(need);
+                self.wire.resize(len, 0);
+                self.full = false;
+            }
+            match reader.read(&mut self.wire[self.tail..]) {
+                Ok(0) if self.tail == 0 => return Ok(false),
+                Ok(0) => return Err(ErrorKind::UnexpectedEof.into()),
+                Ok(n) => {
+                    if let Some(mask) = &mut self.mask {
+                        mask.apply(&mut self.wire[self.tail..self.tail + n], false);
+                    }
+                    self.tail += n;
+                    self.full = self.tail == self.wire.len();
                 }
-                offset += n;
-            }
-            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
-            Err(err) => {
-                bytes.truncate(offset);
-                return Err(err);
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
             }
         }
+        Ok(true)
     }
-    Ok(true)
 }
 
 struct WriteState {
@@ -610,14 +673,22 @@ impl WriteState {
             return writer.write(buf);
         }
         if self.queued.is_empty() {
-            self.accepted = buf.len().min(MAX_PLAIN);
+            // Up to `WRITE_BATCH` leaves in one write; a tail shorter than a record goes with it.
+            self.accepted = if buf.len() < WRITE_BATCH + MAX_PLAIN { buf.len() } else { WRITE_BATCH };
             let bytes = &buf[..self.accepted];
-            let mut record = if self.direct { bytes.to_vec() } else { seal_record(&mut self.record, bytes) };
-            if let Some(mask) = &mut self.mask {
-                mask.apply(&mut record, true);
+            self.queued.extend_from_slice(&self.prefix);
+            self.prefix = Vec::new();
+            let start = self.queued.len();
+            if self.direct {
+                self.queued.extend_from_slice(bytes);
+            } else {
+                for chunk in bytes.chunks(MAX_PLAIN) {
+                    self.record.seal_into(chunk, &mut self.queued);
+                }
             }
-            self.queued = std::mem::take(&mut self.prefix);
-            self.queued.extend_from_slice(&record);
+            if let Some(mask) = &mut self.mask {
+                mask.apply(&mut self.queued[start..], true);
+            }
             self.sent = 0;
         }
         self.flush_queue(writer)?;
@@ -654,8 +725,10 @@ impl<S> EncReader<S> {
         &mut self.inner
     }
 
+    /// Ends the record layer. Data left of the last record is delivered first, then what the
+    /// reader took from the wire past that record, as it arrived.
     pub fn start_direct(&mut self) -> std::io::Result<()> {
-        if !self.state.cipher.is_empty() || self.state.resume.is_some() {
+        if self.state.resume.is_some() {
             return Err(invalid_encryption());
         }
         self.state.direct = true;
@@ -721,7 +794,7 @@ pub fn accept_encrypted<R: Read, W: Write>(reader: R, writer: W, secret: &[NfsKe
 
 pub fn connect_encrypted<R: Read, W: Write>(reader: R, writer: W, public: &[NfsKey], mode: u8, reuse: bool, pad: &Pad) -> std::io::Result<(EncReader<R>, EncWriter<W>)> {
     use crate::reality_tls::RealityDuplex;
-    let session = client_handshake(RealityDuplex::new(reader, writer), public, mode, reuse, pad)?;
+    let session = client_handshake(RealityDuplex::new(reader, writer), public, mode, reuse, pad, aes_hardware())?;
     Ok(session.into_halves(RealityDuplex::into_halves))
 }
 
@@ -1308,8 +1381,8 @@ mod tests {
         assert_eq!(after, [b"nal".as_slice(), &inner].concat());
     }
 
-    #[test]
-    fn native_1rtt_carries_a_record() {
+    /// One record each way after a 1-RTT handshake in `mode`, with the client's choice of cipher.
+    fn carries_a_record(mode: u8, aes: bool) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -1318,73 +1391,43 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (socket, _) = listener.accept().unwrap();
-            let mut session = server_handshake(socket, &[NfsKey::X25519(secret.to_bytes())], 0, (0, 0), &Pad::empty()).unwrap();
+            let mut session = server_handshake(socket, &[NfsKey::X25519(secret.to_bytes())], mode, (0, 0), &Pad::empty()).unwrap();
             let mut buf = [0u8; 4];
             session.read_exact(&mut buf).unwrap();
             assert_eq!(&buf, b"ping");
             session.write_all(b"pong").unwrap();
         });
         let socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let mut session = client_handshake(socket, &[NfsKey::X25519(public.to_bytes())], 0, false, &Pad::empty()).unwrap();
+        let mut session = client_handshake(socket, &[NfsKey::X25519(public.to_bytes())], mode, false, &Pad::empty(), aes).unwrap();
         session.write_all(b"ping").unwrap();
         let mut buf = [0u8; 4];
         session.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"pong");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn native_1rtt_carries_a_record() {
+        carries_a_record(0, false);
+        carries_a_record(0, true);
     }
 
     #[test]
     fn xorpub_1rtt_carries_a_record() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::thread;
-        let (secret, public) = random_x25519();
+        let (secret, _) = random_x25519();
         let encoded = encode_key("mlkem768x25519plus.xorpub.0s.", &secret.to_bytes());
         assert_eq!(server_key(&encoded), Some((vec![NfsKey::X25519(secret.to_bytes())], 1, 0, 0, Pad::empty())));
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            let mut session = server_handshake(socket, &[NfsKey::X25519(secret.to_bytes())], 1, (0, 0), &Pad::empty()).unwrap();
-            let mut buf = [0u8; 4];
-            session.read_exact(&mut buf).unwrap();
-            assert_eq!(&buf, b"ping");
-            session.write_all(b"pong").unwrap();
-        });
-        let socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let mut session = client_handshake(socket, &[NfsKey::X25519(public.to_bytes())], 1, false, &Pad::empty()).unwrap();
-        session.write_all(b"ping").unwrap();
-        let mut buf = [0u8; 4];
-        session.read_exact(&mut buf).unwrap();
-        assert_eq!(&buf, b"pong");
-        server.join().unwrap();
+        carries_a_record(1, false);
+        carries_a_record(1, true);
     }
 
     #[test]
     fn random_1rtt_carries_a_record() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::thread;
-        let (secret, public) = random_x25519();
+        let (secret, _) = random_x25519();
         let encoded = encode_key("mlkem768x25519plus.random.0s.", &secret.to_bytes());
         assert_eq!(server_key(&encoded), Some((vec![NfsKey::X25519(secret.to_bytes())], 2, 0, 0, Pad::empty())));
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            let mut session = server_handshake(socket, &[NfsKey::X25519(secret.to_bytes())], 2, (0, 0), &Pad::empty()).unwrap();
-            let mut buf = [0u8; 4];
-            session.read_exact(&mut buf).unwrap();
-            assert_eq!(&buf, b"ping");
-            session.write_all(b"pong").unwrap();
-        });
-        let socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let mut session = client_handshake(socket, &[NfsKey::X25519(public.to_bytes())], 2, false, &Pad::empty()).unwrap();
-        session.write_all(b"ping").unwrap();
-        let mut buf = [0u8; 4];
-        session.read_exact(&mut buf).unwrap();
-        assert_eq!(&buf, b"pong");
-        server.join().unwrap();
+        carries_a_record(2, false);
+        carries_a_record(2, true);
     }
 
     #[test]
@@ -1413,48 +1456,51 @@ mod tests {
                 self.inner.flush()
             }
         }
-        let (secret, public) = random_x25519();
-        let encoded = encode_key("mlkem768x25519plus.native.0rtt.", &public.to_bytes());
-        assert_eq!(client_key(&encoded).map(|(_, mode, reuse, _)| (mode, reuse)), Some((0, 1)));
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let first_secret = secret.to_bytes();
-        let server = thread::spawn(move || {
-            let secret_2 = StaticSecret::from(first_secret);
-            let (socket, _) = listener.accept().unwrap();
-            let mut session = server_handshake(socket, &[NfsKey::X25519(secret_2.to_bytes())], 0, (60, 60), &Pad::empty()).unwrap();
+        // The ticket and the 0-RTT keys follow the client's cipher, so both are run.
+        for aes in [false, true] {
+            let (secret, public) = random_x25519();
+            let encoded = encode_key("mlkem768x25519plus.native.0rtt.", &public.to_bytes());
+            assert_eq!(client_key(&encoded).map(|(_, mode, reuse, _)| (mode, reuse)), Some((0, 1)));
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let first_secret = secret.to_bytes();
+            let server = thread::spawn(move || {
+                let secret_2 = StaticSecret::from(first_secret);
+                let (socket, _) = listener.accept().unwrap();
+                let mut session = server_handshake(socket, &[NfsKey::X25519(secret_2.to_bytes())], 0, (60, 60), &Pad::empty()).unwrap();
+                let mut buf = [0u8; 4];
+                session.read_exact(&mut buf).unwrap();
+                session.write_all(b"pong").unwrap();
+            });
+            let socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let mut session = client_handshake(socket, &[NfsKey::X25519(public.to_bytes())], 0, true, &Pad::empty(), aes).unwrap();
+            session.write_all(b"ping").unwrap();
             let mut buf = [0u8; 4];
             session.read_exact(&mut buf).unwrap();
-            session.write_all(b"pong").unwrap();
-        });
-        let socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let mut session = client_handshake(socket, &[NfsKey::X25519(public.to_bytes())], 0, true, &Pad::empty()).unwrap();
-        session.write_all(b"ping").unwrap();
-        let mut buf = [0u8; 4];
-        session.read_exact(&mut buf).unwrap();
-        server.join().unwrap();
+            server.join().unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let read = Arc::new(AtomicUsize::new(0));
-        let read_2 = Arc::clone(&read);
-        let server = thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            let socket = Counted { inner: socket, read: read_2 };
-            let mut session = server_handshake(socket, &[NfsKey::X25519(secret.to_bytes())], 0, (60, 60), &Pad::empty()).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let read = Arc::new(AtomicUsize::new(0));
+            let read_2 = Arc::clone(&read);
+            let server = thread::spawn(move || {
+                let (socket, _) = listener.accept().unwrap();
+                let socket = Counted { inner: socket, read: read_2 };
+                let mut session = server_handshake(socket, &[NfsKey::X25519(secret.to_bytes())], 0, (60, 60), &Pad::empty()).unwrap();
+                let mut buf = [0u8; 4];
+                session.read_exact(&mut buf).unwrap();
+                assert_eq!(&buf, b"ping");
+                session.write_all(b"pong").unwrap();
+            });
+            let socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let mut session = client_handshake(socket, &[NfsKey::X25519(public.to_bytes())], 0, true, &Pad::empty(), aes).unwrap();
+            session.write_all(b"ping").unwrap();
             let mut buf = [0u8; 4];
             session.read_exact(&mut buf).unwrap();
-            assert_eq!(&buf, b"ping");
-            session.write_all(b"pong").unwrap();
-        });
-        let socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let mut session = client_handshake(socket, &[NfsKey::X25519(public.to_bytes())], 0, true, &Pad::empty()).unwrap();
-        session.write_all(b"ping").unwrap();
-        let mut buf = [0u8; 4];
-        session.read_exact(&mut buf).unwrap();
-        assert_eq!(&buf, b"pong");
-        server.join().unwrap();
-        assert!(read.load(Ordering::Relaxed) < 400);
+            assert_eq!(&buf, b"pong");
+            server.join().unwrap();
+            assert!(read.load(Ordering::Relaxed) < 400);
+        }
     }
 
     #[test]
@@ -1493,7 +1539,7 @@ mod tests {
             session.write_all(b"pong").unwrap();
         });
         let socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let mut session = client_handshake(socket, &publics, 0, false, &Pad::empty()).unwrap();
+        let mut session = client_handshake(socket, &publics, 0, false, &Pad::empty(), aes_hardware()).unwrap();
         session.write_all(b"ping").unwrap();
         let mut buf = [0u8; 4];
         session.read_exact(&mut buf).unwrap();
@@ -1524,7 +1570,7 @@ mod tests {
             session.write_all(b"pong").unwrap();
         });
         let socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let mut session = client_handshake(socket, &publics, 0, false, &Pad::empty()).unwrap();
+        let mut session = client_handshake(socket, &publics, 0, false, &Pad::empty(), aes_hardware()).unwrap();
         session.write_all(b"ping").unwrap();
         let mut buf = [0u8; 4];
         session.read_exact(&mut buf).unwrap();
@@ -1548,13 +1594,228 @@ mod tests {
 
     #[test]
     fn record_roundtrip() {
-        let mut writer = Record::new(b"context", b"material", false);
-        let mut reader = Record::new(b"context", b"material", false);
-        let sealed = seal_record(&mut writer, b"ping");
-        assert_eq!(&sealed[..3], &[23, 3, 3]);
-        let mut header = [0u8; 5];
-        header.copy_from_slice(&sealed[..5]);
-        let opened = open_record(&mut reader, &header, &sealed[5..]).unwrap();
-        assert_eq!(opened, b"ping");
+        for aes in [true, false] {
+            let mut writer = Record::new(b"context", b"material", aes);
+            let mut reader = Record::new(b"context", b"material", aes);
+            let mut sealed = Vec::new();
+            writer.seal_into(b"ping", &mut sealed);
+            assert_eq!(&sealed[..5], &[23, 3, 3, 0, 20]);
+            // The in-place record is the one the handshake's sealing makes with the header as AAD.
+            let reference = Record::new(b"context", b"material", aes);
+            let mut nonce = [0; 12];
+            assert_eq!(&sealed[5..], reference.seal_with(b"ping", &bump(&mut nonce), &sealed[..5]));
+            let header: [u8; 5] = sealed[..5].try_into().unwrap();
+            let opened = reader.open_in_place(&header, &mut sealed[5..]).unwrap();
+            assert_eq!(&sealed[5..5 + opened], b"ping");
+        }
+    }
+
+    /// A reader and a writer with the same keys, over streams of the caller's types. `mode` 2
+    /// masks the record headers.
+    fn session<R, W>(mode: u8, read: R, write: W) -> (EncReader<R>, EncWriter<W>) {
+        let united = [17; 96];
+        let iv = [7; 16];
+        let traffic = || Record::new(b"context", &united, true);
+        finish(RealityDuplex::new(read, write), traffic(), traffic(), mode, &united, &iv, &iv).into_halves(RealityDuplex::into_halves)
+    }
+
+    fn sealed(mode: u8, writes: &[&[u8]]) -> Vec<u8> {
+        let (_, mut write) = session(mode, std::io::empty(), Vec::new());
+        for bytes in writes {
+            write.write_all(bytes).unwrap();
+        }
+        std::mem::take(write.inner_mut())
+    }
+
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|index| (index * 31 + index / 251) as u8).collect()
+    }
+
+    /// Hands out its bytes in the given steps: `Some(n)` returns up to `n` bytes, `None` fails
+    /// with `WouldBlock`. After the steps it returns whatever is left.
+    struct Scripted {
+        bytes: Vec<u8>,
+        at: usize,
+        steps: std::collections::VecDeque<Option<usize>>,
+        reads: usize,
+    }
+
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            let limit = match self.steps.pop_front() {
+                Some(None) => return Err(std::io::ErrorKind::WouldBlock.into()),
+                Some(Some(limit)) => limit,
+                None => usize::MAX,
+            };
+            let n = buf.len().min(limit).min(self.bytes.len() - self.at);
+            buf[..n].copy_from_slice(&self.bytes[self.at..self.at + n]);
+            self.at += n;
+            Ok(n)
+        }
+    }
+
+    fn scripted(bytes: Vec<u8>, steps: &[Option<usize>]) -> Scripted {
+        Scripted { bytes, at: 0, steps: steps.iter().copied().collect(), reads: 0 }
+    }
+
+    /// Takes at most `limit` bytes per write and fails with `WouldBlock` on the writes listed.
+    struct Choked {
+        bytes: Vec<u8>,
+        limit: usize,
+        writes: usize,
+        fail: Vec<usize>,
+    }
+
+    impl Write for Choked {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            if self.fail.contains(&self.writes) {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let n = buf.len().min(self.limit);
+            self.bytes.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_large_write_keeps_the_record_sizes_and_leaves_in_one_write() {
+        let data = pattern(3 * WRITE_BATCH + MAX_PLAIN / 2);
+        let (_, mut write) = session(0, std::io::empty(), Choked { bytes: Vec::new(), limit: usize::MAX, writes: 0, fail: Vec::new() });
+        assert_eq!(write.write(&data).unwrap(), WRITE_BATCH);
+        assert_eq!(write.inner_mut().writes, 1);
+        write.write_all(&data[WRITE_BATCH..]).unwrap();
+        // The second batch carries the tail shorter than a record.
+        assert_eq!(write.inner_mut().writes, 3);
+        let wire = std::mem::take(&mut write.inner_mut().bytes);
+        // The records are the ones that writing `MAX_PLAIN` at a time makes.
+        let pieces: Vec<&[u8]> = data.chunks(MAX_PLAIN).collect();
+        assert_eq!(wire, sealed(0, &pieces));
+        let mut at = 0;
+        let mut sizes = Vec::new();
+        while at < wire.len() {
+            let len = u16::from_be_bytes([wire[at + 3], wire[at + 4]]) as usize;
+            sizes.push(len - 16);
+            at += 5 + len;
+        }
+        assert_eq!(sizes, pieces.iter().map(|piece| piece.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_write_that_failed_part_way_resumes_with_the_same_bytes() {
+        for mode in [0, 2] {
+            let data = pattern(2 * WRITE_BATCH + 100);
+            let (_, mut write) = session(mode, std::io::empty(), Choked { bytes: Vec::new(), limit: 10000, writes: 0, fail: vec![3, 4, 9] });
+            let mut written = 0;
+            let mut failures = 0;
+            while written < data.len() {
+                match write.write(&data[written..]) {
+                    Ok(n) => written += n,
+                    Err(error) => {
+                        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+                        failures += 1;
+                    }
+                }
+            }
+            assert_eq!(failures, 3);
+            let wire = std::mem::take(&mut write.inner_mut().bytes);
+            assert_eq!(wire, sealed(mode, &[data.as_slice()]));
+            let (mut read, _) = session(mode, std::io::Cursor::new(wire), std::io::sink());
+            let mut back = Vec::new();
+            read.read_to_end(&mut back).unwrap();
+            assert_eq!(back, data);
+        }
+    }
+
+    #[test]
+    fn records_split_and_joined_by_the_reads_arrive_whole() {
+        for mode in [0, 2] {
+            let data = pattern(5 * MAX_PLAIN + 777);
+            let wire = sealed(mode, &[&data[..1], &data[1..3000], &data[3000..]]);
+            // Reads that end inside a header, inside a body, and fail in between.
+            let steps = [Some(3), None, Some(4), Some(9000), None, Some(1), Some(100000), Some(2)];
+            let (mut read, _) = session(mode, scripted(wire, &steps), std::io::sink());
+            let mut back = Vec::new();
+            let mut buf = [0; 5000];
+            loop {
+                match read.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => back.extend_from_slice(&buf[..n]),
+                    Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
+                }
+            }
+            assert_eq!(back, data);
+        }
+    }
+
+    #[test]
+    fn one_read_from_the_wire_serves_every_buffered_record() {
+        let data = pattern(6 * MAX_PLAIN);
+        let pieces: Vec<&[u8]> = data.chunks(MAX_PLAIN).collect();
+        let wire = sealed(0, &pieces);
+        let (mut read, _) = session(0, scripted(wire, &[]), std::io::sink());
+        let mut buf = vec![0; 4 * MAX_PLAIN];
+        // One record per read, so Vision can switch after any of them.
+        for piece in &pieces {
+            let n = read.read(&mut buf).unwrap();
+            assert_eq!(&buf[..n], *piece);
+        }
+        assert_eq!(read.read(&mut buf).unwrap(), 0);
+        // Growing to the read-ahead size, then taking every record that arrived.
+        assert!(read.inner_mut().reads <= 6, "{} reads", read.inner_mut().reads);
+    }
+
+    #[test]
+    fn bytes_read_ahead_of_the_last_record_start_the_direct_stream() {
+        for mode in [0, 2] {
+            // The direct stream starts with what looks like a whole record. It must not be opened.
+            let mut inner = vec![23, 3, 3, 0, 17];
+            inner.extend_from_slice(&[9; 17]);
+            inner.extend_from_slice(b"tail");
+            let (_, mut write) = session(mode, std::io::empty(), Vec::new());
+            write.write_all(b"first").unwrap();
+            write.write_all(b"final").unwrap();
+            write.start_direct().unwrap();
+            write.write_all(&inner).unwrap();
+            let wire = std::mem::take(write.inner_mut());
+
+            let (mut read, _) = session(mode, scripted(wire, &[]), std::io::sink());
+            let mut buf = [0; 64];
+            assert_eq!(read.read(&mut buf).unwrap(), 5);
+            assert_eq!(&buf[..5], b"first");
+            let n = read.read(&mut buf[..3]).unwrap();
+            assert_eq!(&buf[..n], b"fin");
+            // One read from the wire took the records and the direct bytes behind them.
+            assert_eq!(read.inner_mut().reads, 1);
+            read.start_direct().unwrap();
+            let mut after = Vec::new();
+            read.read_to_end(&mut after).unwrap();
+            assert_eq!(after, [b"al".as_slice(), &inner].concat());
+        }
+    }
+
+    #[test]
+    fn a_damaged_record_or_a_cut_stream_is_an_error() {
+        let wire = sealed(0, &[b"one".as_slice(), b"two".as_slice()]);
+        let mut damaged = wire.clone();
+        *damaged.last_mut().unwrap() ^= 1;
+        let (mut read, _) = session(0, std::io::Cursor::new(damaged), std::io::sink());
+        let mut buf = [0; 16];
+        assert_eq!(read.read(&mut buf).unwrap(), 3);
+        assert_eq!(read.read(&mut buf).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+
+        let (mut read, _) = session(0, std::io::Cursor::new(wire[..wire.len() - 1].to_vec()), std::io::sink());
+        assert_eq!(read.read(&mut buf).unwrap(), 3);
+        assert_eq!(read.read(&mut buf).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+
+        let mut bad = wire.clone();
+        bad[0] = 22;
+        let (mut read, _) = session(0, std::io::Cursor::new(bad), std::io::sink());
+        assert_eq!(read.read(&mut buf).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     }
 }

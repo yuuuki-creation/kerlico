@@ -143,6 +143,15 @@ impl UpgradeConfig {
         })
     }
 
+    /// Require the switch response before sending a raw HTTPUpgrade payload.
+    /// WebSocket early data is part of the HTTP headers and is unaffected.
+    pub fn wait_for_switch(mut self) -> Self {
+        if !self.websocket {
+            self.early = 0;
+        }
+        self
+    }
+
     pub fn websocket(&self) -> bool {
         self.websocket
     }
@@ -425,10 +434,8 @@ pub fn upgrade_pair<R, W>(
 }
 
 impl<R, W: Write> UpgradeWrite<R, W> {
-    /// Sends a raw HTTPUpgrade request now, as Xray's dialer does before any payload exists.
-    /// Xray's server drops payload bytes that arrive in the same read as the request head, so
-    /// writing both back to back on the first payload loses data against it. A WebSocket
-    /// request waits for the first write because its early data rides in a header.
+    /// Sends a raw HTTPUpgrade request now, before any payload exists. A WebSocket request
+    /// waits for the first write because its early data rides in a header.
     pub fn start(&mut self) -> io::Result<()> {
         if let Some(pending) = self.pending.as_mut().filter(|pending| !pending.config.websocket && !pending.sent) {
             let (request, _) = pending.config.request(&[])?;

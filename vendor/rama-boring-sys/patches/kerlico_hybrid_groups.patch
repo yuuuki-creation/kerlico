@@ -1,0 +1,254 @@
+diff --git a/crypto/obj/obj_dat.h b/crypto/obj/obj_dat.h
+index cedd338..e98f2fc 100644
+--- a/crypto/obj/obj_dat.h
++++ b/crypto/obj/obj_dat.h
+@@ -16,7 +16,7 @@
+ 
+ 
+ BSSL_NAMESPACE_BEGIN
+-#define NUM_NID 975
++#define NUM_NID 977
+ 
+ static const uint8_t kObjectData[] = {
+     /* NID_rsadsi */
+@@ -8807,6 +8807,10 @@ static const ASN1_OBJECT kObjects[NUM_NID] = {
+      NULL, 0},
+     {"X25519Kyber768Draft00Old", "X25519Kyber768Draft00Old",
+      NID_X25519Kyber768Draft00Old, 0, NULL, 0},
++    {"SecP256r1MLKEM768", "SecP256r1MLKEM768", NID_SecP256r1MLKEM768, 0, NULL,
++     0},
++    {"SecP384r1MLKEM1024", "SecP384r1MLKEM1024", NID_SecP384r1MLKEM1024, 0,
++     NULL, 0},
+ };
+ 
+ static const uint16_t kNIDsInShortNameOrder[] = {
+@@ -9003,6 +9007,8 @@ static const uint16_t kNIDsInShortNameOrder[] = {
+     100 /* SN */,
+     16 /* ST */,
+     143 /* SXNetID */,
++    975 /* SecP256r1MLKEM768 */,
++    976 /* SecP384r1MLKEM1024 */,
+     458 /* UID */,
+     972 /* X-Wing */,
+     948 /* X25519 */,
+@@ -9881,6 +9887,8 @@ static const uint16_t kNIDsInLongNameOrder[] = {
+     188 /* S/MIME */,
+     167 /* S/MIME Capabilities */,
+     387 /* SNMPv2 */,
++    975 /* SecP256r1MLKEM768 */,
++    976 /* SecP384r1MLKEM1024 */,
+     512 /* Secure Electronic Transactions */,
+     386 /* Security */,
+     394 /* Selected Attribute Types */,
+diff --git a/crypto/obj/obj_mac.num b/crypto/obj/obj_mac.num
+index 04960ee..8419bc4 100644
+--- a/crypto/obj/obj_mac.num
++++ b/crypto/obj/obj_mac.num
+@@ -962,3 +962,5 @@ X25519Kyber512Draft00		971
+ X_Wing		972
+ P256Kyber768Draft00		973
+ X25519Kyber768Draft00Old		974
++SecP256r1MLKEM768		975
++SecP384r1MLKEM1024		976
+diff --git a/crypto/obj/objects.txt b/crypto/obj/objects.txt
+index bd3f0a5..2bed0c4 100644
+--- a/crypto/obj/objects.txt
++++ b/crypto/obj/objects.txt
+@@ -1344,6 +1344,8 @@ secg-scheme 14 3 : dhSinglePass-cofactorDH-sha512kdf-scheme
+  : P256Kyber768Draft00
+  : X25519Kyber768Draft00Old
+  : X25519MLKEM768
++ : SecP256r1MLKEM768
++ : SecP384r1MLKEM1024
+ 
+ # NIDs for PQ/T hybrid KEMs (no corresponding OIDs).
+ # See draft-irtf-cfrg-concrete-hybrid-kems.
+diff --git a/include/openssl/nid.h b/include/openssl/nid.h
+index e7672d1..958c9d7 100644
+--- a/include/openssl/nid.h
++++ b/include/openssl/nid.h
+@@ -5520,6 +5520,11 @@ extern "C" {
+ #define SN_X25519Kyber768Draft00Old "X25519Kyber768Draft00Old"
+ #define NID_X25519Kyber768Draft00Old 974
+ 
++#define SN_SecP256r1MLKEM768 "SecP256r1MLKEM768"
++#define NID_SecP256r1MLKEM768 975
++#define SN_SecP384r1MLKEM1024 "SecP384r1MLKEM1024"
++#define NID_SecP384r1MLKEM1024 976
++
+ 
+ #if defined(__cplusplus)
+ } /* extern C */
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 21271db..0a3828e 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -2626,7 +2626,9 @@ OPENSSL_EXPORT size_t SSL_CTX_get_num_tickets(const SSL_CTX *ctx);
+ #define SSL_GROUP_SECP384R1 24
+ #define SSL_GROUP_SECP521R1 25
+ #define SSL_GROUP_X25519 29
++#define SSL_GROUP_SECP256R1_MLKEM768 0x11eb
+ #define SSL_GROUP_X25519_MLKEM768 0x11ec
++#define SSL_GROUP_SECP384R1_MLKEM1024 0x11ed
+ #define SSL_GROUP_X25519_KYBER768_DRAFT00 0x6399
+ #define SSL_GROUP_X25519_KYBER512_DRAFT00 0xfe30
+ #define SSL_GROUP_X25519_KYBER768_DRAFT00_OLD 0xfe31
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index 1424bbf..31f177d 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -113,7 +113,9 @@ static bool is_post_quantum_group(uint16_t id) {
+     case SSL_GROUP_X25519_KYBER768_DRAFT00_OLD:
+     case SSL_GROUP_X25519_KYBER512_DRAFT00:
+     case SSL_GROUP_P256_KYBER768_DRAFT00:
++    case SSL_GROUP_SECP256R1_MLKEM768:
+     case SSL_GROUP_X25519_MLKEM768:
++    case SSL_GROUP_SECP384R1_MLKEM1024:
+     case SSL_GROUP_MLKEM1024:
+       return true;
+     default:
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 4e37182..6320dbe 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -930,7 +930,7 @@ struct NamedGroup {
+ Span<const NamedGroup> NamedGroups();
+ 
+ // kNumNamedGroups is the number of supported groups.
+-constexpr size_t kNumNamedGroups = 10u;
++constexpr size_t kNumNamedGroups = 12u;
+ 
+ // DefaultSupportedGroupIds returns the list of IDs for the default groups that
+ // are supported when the caller hasn't explicitly configured supported groups.
+diff --git a/ssl/ssl_key_share.cc b/ssl/ssl_key_share.cc
+index e406192..e195561 100644
+--- a/ssl/ssl_key_share.cc
++++ b/ssl/ssl_key_share.cc
+@@ -779,6 +779,103 @@ class MLKEM1024KeyShare : public SSLKeyShare {
+   MLKEM1024_private_key private_key_;
+ };
+ 
++// The NIST-curve hybrids put the ECDHE share and secret first, unlike
++// X25519MLKEM768. Reuse the ordinary ECDHE and ML-KEM primitives.
++template <typename Private, typename Public, size_t PublicBytes,
++          size_t CiphertextBytes, auto GenerateKem, auto ParseKem,
++          auto EncapKem, auto DecapKem>
++class EcdheMlKemKeyShare : public SSLKeyShare {
++ public:
++  EcdheMlKemKeyShare(const EC_GROUP *group, uint16_t ec_id, uint16_t id)
++      : ec_(group, ec_id), id_(id),
++        point_size_(1 + 2 * ((EC_GROUP_get_degree(group) + 7) / 8)) {}
++
++  uint16_t GroupID() const override { return id_; }
++
++  bool Generate(CBB *out) override {
++    if (!ec_.Generate(out)) {
++      return false;
++    }
++    uint8_t public_key[PublicBytes];
++    GenerateKem(public_key, /*optional_out_seed=*/nullptr, &private_key_);
++    return CBB_add_bytes(out, public_key, sizeof(public_key));
++  }
++
++  bool Encap(CBB *out, Array<uint8_t> *secret, uint8_t *alert,
++             Span<const uint8_t> peer) override {
++    if (peer.size() != point_size_ + PublicBytes) {
++      return Invalid(alert);
++    }
++    Public key;
++    CBS kem;
++    CBS_init(&kem, peer.data() + point_size_, PublicBytes);
++    if (!ParseKem(&key, &kem) || CBS_len(&kem) != 0) {
++      return Invalid(alert);
++    }
++    Array<uint8_t> ec_secret;
++    if (!ec_.Encap(out, &ec_secret, alert, peer.first(point_size_))) {
++      return false;
++    }
++    if (!Combine(secret, ec_secret)) {
++      return false;
++    }
++    uint8_t ciphertext[CiphertextBytes];
++    EncapKem(ciphertext, secret->data() + ec_secret.size(), &key);
++    return CBB_add_bytes(out, ciphertext, sizeof(ciphertext));
++  }
++
++  bool Decap(Array<uint8_t> *secret, uint8_t *alert,
++             Span<const uint8_t> ciphertext) override {
++    if (ciphertext.size() != point_size_ + CiphertextBytes) {
++      return Invalid(alert);
++    }
++    Array<uint8_t> ec_secret;
++    if (!ec_.Decap(&ec_secret, alert, ciphertext.first(point_size_)) ||
++        !Combine(secret, ec_secret)) {
++      return false;
++    }
++    if (!DecapKem(secret->data() + ec_secret.size(),
++                  ciphertext.data() + point_size_, CiphertextBytes,
++                  &private_key_)) {
++      return Invalid(alert);
++    }
++    return true;
++  }
++
++ private:
++  static bool Invalid(uint8_t *alert) {
++    *alert = SSL_AD_ILLEGAL_PARAMETER;
++    OPENSSL_PUT_ERROR(SSL, SSL_R_BAD_ECPOINT);
++    return false;
++  }
++
++  static bool Combine(Array<uint8_t> *out, Array<uint8_t> &ec_secret) {
++    const bool ok =
++        out->InitForOverwrite(ec_secret.size() + MLKEM_SHARED_SECRET_BYTES);
++    if (ok) {
++      OPENSSL_memcpy(out->data(), ec_secret.data(), ec_secret.size());
++    }
++    OPENSSL_cleanse(ec_secret.data(), ec_secret.size());
++    return ok;
++  }
++
++  ECKeyShare ec_;
++  uint16_t id_;
++  size_t point_size_;
++  Private private_key_;
++};
++
++using P256MlKem768KeyShare =
++    EcdheMlKemKeyShare<MLKEM768_private_key, MLKEM768_public_key,
++                     MLKEM768_PUBLIC_KEY_BYTES, MLKEM768_CIPHERTEXT_BYTES,
++                     MLKEM768_generate_key, MLKEM768_parse_public_key,
++                     MLKEM768_encap, MLKEM768_decap>;
++using P384MlKem1024KeyShare =
++    EcdheMlKemKeyShare<MLKEM1024_private_key, MLKEM1024_public_key,
++                     MLKEM1024_PUBLIC_KEY_BYTES, MLKEM1024_CIPHERTEXT_BYTES,
++                     MLKEM1024_generate_key, MLKEM1024_parse_public_key,
++                     MLKEM1024_encap, MLKEM1024_decap>;
++
+ constexpr NamedGroup kNamedGroups[] = {
+     {NID_X9_62_prime256v1, SSL_GROUP_SECP256R1, "P-256", "prime256v1"},
+     {NID_secp384r1, SSL_GROUP_SECP384R1, "P-384", "secp384r1"},
+@@ -792,6 +889,10 @@ constexpr NamedGroup kNamedGroups[] = {
+         "X25519Kyber768Draft00Old", "Xyber768D00Old"},
+     {NID_P256Kyber768Draft00, SSL_GROUP_P256_KYBER768_DRAFT00,
+         "P256Kyber768Draft00", "P256Kyber768D00"},
++    {NID_SecP256r1MLKEM768, SSL_GROUP_SECP256R1_MLKEM768,
++        "SecP256r1MLKEM768", ""},
++    {NID_SecP384r1MLKEM1024, SSL_GROUP_SECP384R1_MLKEM1024,
++        "SecP384r1MLKEM1024", ""},
+     {NID_X25519MLKEM768, SSL_GROUP_X25519_MLKEM768,
+         "X25519MLKEM768", "X25519MLKEM768"},
+     {NID_ML_KEM_1024, SSL_GROUP_MLKEM1024, "MLKEM1024", ""}
+@@ -838,6 +939,12 @@ UniquePtr<SSLKeyShare> SSLKeyShare::Create(uint16_t group_id) {
+       return UniquePtr<SSLKeyShare>(New<P256Kyber768Draft00KeyShare>());
+     case SSL_GROUP_X25519_MLKEM768:
+       return UniquePtr<SSLKeyShare>(New<X25519MLKEM768KeyShare>());
++    case SSL_GROUP_SECP256R1_MLKEM768:
++      return MakeUnique<P256MlKem768KeyShare>(
++          EC_group_p256(), SSL_GROUP_SECP256R1, group_id);
++    case SSL_GROUP_SECP384R1_MLKEM1024:
++      return MakeUnique<P384MlKem1024KeyShare>(
++          EC_group_p384(), SSL_GROUP_SECP384R1, group_id);
+     case SSL_GROUP_MLKEM1024:
+       return MakeUnique<MLKEM1024KeyShare>();
+     default:

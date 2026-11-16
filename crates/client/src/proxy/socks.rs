@@ -8,6 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const POLL: Duration = Duration::from_millis(200);
+/// One copy step in each direction. 64 KiB takes a whole burst from the local socket in one read
+/// and hands the protocol one write for it; 16 KiB split a 32 KiB burst into two protocol writes.
+const COPY_BUF: usize = 64 * 1024;
 const IDLE: Duration = Duration::from_secs(300);
 
 fn address(stream: &mut TcpStream, state: &State, atyp: u8) -> io::Result<(String, u16)> {
@@ -134,14 +137,17 @@ pub(super) fn relay(
         let done2 = done.clone();
         let state2 = state.clone();
         let activity2 = activity.clone();
-        scope.spawn(move || {
-            let mut buf = [0u8; 16384];
+        let uplink = scope.spawn(move || {
+            let mut buf = vec![0u8; COPY_BUF];
             while !state2.stopped()
                 && !done2.load(Ordering::Acquire)
                 && activity2.lock().unwrap().elapsed() < IDLE
             {
                 match local.read(&mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        if conn2.finish_write().is_err() { done2.store(true, Ordering::Release); }
+                        break;
+                    }
                     Ok(n) => {
                         *activity2.lock().unwrap() = Instant::now();
                         if conn2.write_all(&buf[..n]).is_err() {
@@ -156,15 +162,15 @@ pub(super) fn relay(
                     }
                 }
             }
-            // 底层协议没有半关闭消息；等待对端响应或空闲超时。
         });
-        let mut buf = [0u8; 16384];
+        let mut buf = vec![0u8; COPY_BUF];
+        let mut finished = false;
         while !state.stopped()
             && !done.load(Ordering::Acquire)
             && activity.lock().unwrap().elapsed() < IDLE
         {
             match conn.read_for(&mut buf, POLL) {
-                Ok(0) => break,
+                Ok(0) => { finished = true; break; },
                 Ok(n) => {
                     *activity.lock().unwrap() = Instant::now();
                     if writer.write_all(&buf[..n]).is_err() {
@@ -174,6 +180,10 @@ pub(super) fn relay(
                 Err(e) if timed_out(&e) => continue,
                 Err(_) => break,
             }
+        }
+        if finished && conn.supports_half_close() {
+            let _ = writer.shutdown(std::net::Shutdown::Write);
+            let _ = uplink.join();
         }
         done.store(true, Ordering::Release);
         conn.close();

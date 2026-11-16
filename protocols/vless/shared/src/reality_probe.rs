@@ -192,6 +192,7 @@ fn finish_server_flight<S: RealityProbeStream>(
     let hash = transcript.hash();
     let server_keys = traffic_keys(suite, &traffic_secret(suite, &handshake, "s hs traffic", &hash));
     let client_secret = traffic_secret(suite, &handshake, "c hs traffic", &hash);
+    let mut certificate_context = None;
     {
         let mut records = HandshakeRecords::new(&mut *stream, &server_keys);
         loop {
@@ -201,20 +202,33 @@ fn finish_server_flight<S: RealityProbeStream>(
             if let (Some(roots), 11) = (roots, message[0]) {
                 roots.verify(&message[4..], name)?;
             }
+            if message[0] == 13 {
+                // TLS 1.3 peers request an empty Certificate when no client identity applies.
+                let len = *message.get(4).ok_or_else(invalid_record)? as usize;
+                certificate_context = Some(message.get(5..5 + len).ok_or_else(invalid_record)?.to_vec());
+            }
             transcript.update(&message);
             if message[0] == 20 {
                 break;
             }
         }
     }
-    let finished = handshake_msg(0x14, &finished_verify(suite, &client_secret, &transcript.hash()));
     let mut flight = vec![20, 3, 3, 0, 1, 1];
-    flight.extend(seal_record(
-        &traffic_keys(suite, &client_secret),
-        0,
-        22,
-        &finished,
-    ));
+    let client_keys = traffic_keys(suite, &client_secret);
+    let sequence = if let Some(context) = certificate_context {
+        let mut body = Vec::with_capacity(4 + context.len());
+        body.push(context.len() as u8);
+        body.extend_from_slice(&context);
+        body.extend_from_slice(&[0; 3]);
+        let certificate = handshake_msg(11, &body);
+        transcript.update(&certificate);
+        flight.extend(seal_record(&client_keys, 0, 22, &certificate));
+        1
+    } else {
+        0
+    };
+    let finished = handshake_msg(0x14, &finished_verify(suite, &client_secret, &transcript.hash()));
+    flight.extend(seal_record(&client_keys, sequence, 22, &finished));
 
     let mut ahead = Vec::new();
     let mut buffer = vec![0; 16 * 1024];
@@ -330,14 +344,33 @@ mod tests {
 
     /// A TLS 1.3 server that sends `tickets` NewSessionTickets once it has the client's Finished.
     fn target(tickets: usize, alpn: &[&str]) -> std::net::SocketAddr {
+        target_with_client_auth(tickets, alpn, false)
+    }
+
+    fn target_with_client_auth(tickets: usize, alpn: &[&str], request: bool) -> std::net::SocketAddr {
         let key = rcgen::KeyPair::generate().unwrap();
         let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
             .unwrap()
             .self_signed(&key)
             .unwrap();
         let protocols: Vec<String> = alpn.iter().map(|name| name.to_string()).collect();
-        let config = crate::server_config(&cert.pem(), &key.serialize_pem(), &protocols).unwrap();
-        let mut config = (*config).clone();
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13]).unwrap();
+        let mut config = if request {
+            let mut ca = rcgen::CertificateParams::new(Vec::new()).unwrap();
+            ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let ca = ca.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(ca.der().clone()).unwrap();
+            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                std::sync::Arc::new(roots), provider,
+            ).allow_unauthenticated().build().unwrap();
+            builder.with_client_cert_verifier(verifier)
+        } else {
+            builder.with_no_client_auth()
+        }.with_single_cert(vec![cert.der().clone()], key.serialize_der().try_into().unwrap()).unwrap();
+        config.alpn_protocols = protocols.iter().map(|name| name.as_bytes().to_vec()).collect();
         config.send_tls13_tickets = tickets;
         let config = std::sync::Arc::new(config);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -353,6 +386,16 @@ mod tests {
             }
         });
         address
+    }
+
+    #[test]
+    fn probe_responds_to_certificate_request_with_an_empty_certificate() {
+        let address = target_with_client_auth(1, &[], true);
+        let mut stream = Tcp(TcpStream::connect(address).unwrap());
+        let lengths = probe_post_handshake_lengths(
+            &mut stream, "localhost", RealityAlpn::None, Duration::from_millis(500), None,
+        ).unwrap();
+        assert_eq!(lengths.len(), 1, "the target sends a ticket only after the full client flight");
     }
 
     #[test]

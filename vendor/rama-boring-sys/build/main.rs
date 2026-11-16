@@ -608,6 +608,10 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
     apply_patch(config, "rama_config_query.patch")?;
     apply_patch(config, "kerlico_legacy_extensions.patch")?;
     apply_patch(config, "kerlico_profile_wire.patch")?;
+    apply_patch(config, "kerlico_hello_mutator.patch")?;
+    apply_patch(config, "kerlico_hybrid_groups.patch")?;
+    apply_patch(config, "kerlico_tls12_eager_share.patch")?;
+    apply_patch(config, "kerlico_hello_psk.patch")?;
 
     Ok(())
 }

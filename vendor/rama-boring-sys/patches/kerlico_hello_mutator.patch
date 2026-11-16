@@ -1,0 +1,84 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -4603,4 +4603,20 @@
+ // ECH extension when no supported ECHConfig is available.
+ OPENSSL_EXPORT void SSL_set_enable_ech_grease(SSL *ssl, int enable);
++
++#if defined(BORINGSSL_PREFIX)
++#if defined(__PRAGMA_REDEFINE_EXTNAME) && !defined(__ASSEMBLER__)
++#pragma redefine_extname RAMA_SSL_set_client_hello_mutator BORINGSSL_ADD_USER_LABEL_AND_PREFIX(RAMA_SSL_set_client_hello_mutator)
++#else
++#define RAMA_SSL_set_client_hello_mutator BORINGSSL_ADD_PREFIX(RAMA_SSL_set_client_hello_mutator)
++#endif
++#endif
++
++// RAMA_SSL_set_client_hello_mutator supplies the first serialized ClientHello
++// and mutable copies of its random and session ID before TLS transcripts it.
++// This is only available on an initial TCP handshake without ECH or resumption.
++typedef int (*RAMA_SSL_CLIENT_HELLO_MUTATOR)(SSL *ssl, const uint8_t *hello,
++    size_t hello_len, uint8_t *random, uint8_t *session_id, size_t session_id_len);
++OPENSSL_EXPORT int RAMA_SSL_set_client_hello_mutator(
++    SSL *ssl, RAMA_SSL_CLIENT_HELLO_MUTATOR mutator);
+ 
+ // SSL_set_reject_unusable_ech_config configures whether the client will fail
+diff --git a/ssl/internal.h b/ssl/internal.h
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -3551,3 +3551,4 @@
+ struct SSL_CONFIG {
++  RAMA_SSL_CLIENT_HELLO_MUTATOR client_hello_mutator = nullptr;
+   static constexpr bool kAllowUniquePtr = true;
+ 
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -3285,4 +3285,16 @@
+ }
+ 
++int RAMA_SSL_set_client_hello_mutator(
++    SSL *ssl, RAMA_SSL_CLIENT_HELLO_MUTATOR mutator) {
++  SSLImpl *impl = FromOpaque(ssl);
++  if (!impl->config || impl->server || SSL_is_quic(ssl) ||
++      SSL_is_dtls(ssl) || impl->s3->initial_handshake_complete) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++    return 0;
++  }
++  impl->config->client_hello_mutator = mutator;
++  return 1;
++}
++
+ void SSL_set_permute_extensions(SSL *ssl, int enabled) {
+   auto *ssl_impl = FromOpaque(ssl);
+diff --git a/ssl/handshake_client.cc b/ssl/handshake_client.cc
+--- a/ssl/handshake_client.cc
++++ b/ssl/handshake_client.cc
+@@ -231,4 +231,28 @@
+       !ssl->method->finish_message(ssl, cbb.get(), &msg)) {
+     return false;
++  }
++
++  if (auto mutate = ssl->config->client_hello_mutator) {
++    constexpr size_t kRandomOffset = 6;
++    constexpr size_t kSessionOffset = kRandomOffset + SSL3_RANDOM_SIZE + 1;
++    const size_t id_len = hs->session_id.size();
++    if (hs->selected_ech_config || ssl->session ||
++        msg.size() < kSessionOffset + id_len ||
++        msg[kSessionOffset - 1] != id_len) {
++      OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++      return false;
++    }
++    uint8_t random[SSL3_RANDOM_SIZE], id[SSL_MAX_SSL_SESSION_ID_LENGTH];
++    OPENSSL_memcpy(random, msg.data() + kRandomOffset, sizeof(random));
++    OPENSSL_memcpy(id, msg.data() + kSessionOffset, id_len);
++    if (!mutate(ssl, msg.data(), msg.size(), random, id, id_len)) {
++      OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++      return false;
++    }
++    OPENSSL_memcpy(msg.data() + kRandomOffset, random, sizeof(random));
++    OPENSSL_memcpy(ssl->s3->client_random, random, sizeof(random));
++    OPENSSL_memcpy(msg.data() + kSessionOffset, id, id_len);
++    OPENSSL_memcpy(hs->session_id.data(), id, id_len);
++    ssl->config->client_hello_mutator = nullptr;
+   }
+ 

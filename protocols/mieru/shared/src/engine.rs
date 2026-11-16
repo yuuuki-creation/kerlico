@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
@@ -21,6 +21,12 @@ const INITIAL_WINDOW: u32 = 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const LINK_IDLE: Duration = Duration::from_secs(60);
 const DATA_IDLE: Duration = Duration::from_secs(300);
+/// What one read from a TCP underlay takes at most. The longest payload fits twice, so segments
+/// that arrive together come in with one read.
+const TCP_INPUT: usize = 128 * 1024;
+/// How many sealed bytes one write to a TCP underlay carries at most. A write that makes several
+/// segments sends them together.
+const TCP_BATCH: usize = 128 * 1024;
 
 #[derive(Clone)]
 pub struct Account {
@@ -115,7 +121,10 @@ struct Link {
     ready: Mutex<Option<Sender<Ready>>>,
     alive: AtomicBool,
     last_activity: Mutex<Instant>,
-    wire_lock: Mutex<()>,
+    /// The order of segments on the wire, and the buffer they are sealed into.
+    wire: Mutex<Vec<u8>>,
+    /// The last large write to a TCP underlay had to wait for the peer.
+    slow: AtomicBool,
     low_entropy: AtomicU32,
     reusable: AtomicBool,
     retired: Mutex<HashMap<(SocketAddr, u32), Instant>>,
@@ -147,6 +156,8 @@ struct Sess {
 struct Pipe {
     bytes: VecDeque<u8>,
     closed: bool,
+    /// Threads that wait on the session's condvar. Bytes that arrive or leave wake nobody else.
+    waiting: u32,
 }
 
 struct Reorder {
@@ -162,6 +173,15 @@ struct Flight {
     timeout: Duration,
     tx: u8,
     fragment: u8,
+}
+
+/// What goes around a segment's payload.
+struct Envelope {
+    plain: [u8; 32],
+    prefix: Vec<u8>,
+    suffix: Vec<u8>,
+    mode: u8,
+    mask: u32,
 }
 
 struct Leg {
@@ -515,7 +535,8 @@ impl Link {
             ready: Mutex::new(ready),
             alive: AtomicBool::new(true),
             last_activity: Mutex::new(Instant::now()),
-            wire_lock: Mutex::new(()),
+            wire: Mutex::new(Vec::new()),
+            slow: AtomicBool::new(false),
             low_entropy: AtomicU32::new(0),
             reusable: AtomicBool::new(true),
             retired: Mutex::new(HashMap::new()),
@@ -639,6 +660,7 @@ impl Sess {
             pipe: Mutex::new(Pipe {
                 bytes: VecDeque::new(),
                 closed: false,
+                waiting: 0,
             }),
             cv: Condvar::new(),
             send_cv: Condvar::new(),
@@ -675,48 +697,45 @@ impl Sess {
             return;
         }
         pipe.bytes.extend(bytes);
-        self.cv.notify_all();
-    }
-
-    fn read_some(&self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let mut pipe = self.pipe.lock().expect("pipe");
-        loop {
-            if !pipe.bytes.is_empty() {
-                let n = copy_deque(buf, &mut pipe.bytes);
-                self.cv.notify_all();
-                return Ok(n);
-            }
-            if pipe.closed {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "closed"));
-            }
-            pipe = self.cv.wait(pipe).expect("cv");
+        if pipe.waiting != 0 {
+            self.cv.notify_all();
         }
     }
 
-    fn read_for(&self, buf: &mut [u8], wait: Duration) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
+    /// Waits until the pipe holds bytes, for at most `wait` when given, and lets `take` take
+    /// some of them.
+    fn read_with(
+        &self,
+        wait: Option<Duration>,
+        take: &mut dyn FnMut(&mut VecDeque<u8>) -> usize,
+    ) -> io::Result<usize> {
         let mut pipe = self.pipe.lock().expect("pipe");
         let start = Instant::now();
         loop {
             if !pipe.bytes.is_empty() {
-                let n = copy_deque(buf, &mut pipe.bytes);
-                self.cv.notify_all();
+                let n = take(&mut pipe.bytes);
+                if pipe.waiting != 0 {
+                    self.cv.notify_all();
+                }
                 return Ok(n);
             }
             if pipe.closed {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "closed"));
             }
+            let Some(wait) = wait else {
+                pipe.waiting += 1;
+                pipe = self.cv.wait(pipe).expect("cv");
+                pipe.waiting -= 1;
+                continue;
+            };
             let left = wait.saturating_sub(start.elapsed());
             if left.is_zero() {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "idle"));
             }
+            pipe.waiting += 1;
             let (next, status) = self.cv.wait_timeout(pipe, left).expect("cv");
             pipe = next;
+            pipe.waiting -= 1;
             if status.timed_out() && pipe.bytes.is_empty() {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "idle"));
             }
@@ -767,6 +786,17 @@ impl Sess {
             reorder.next = next.wrapping_add(1);
         }
         out
+    }
+
+    /// Takes the next segment in order when nothing is held back. The caller then delivers the
+    /// payload from where it lies.
+    fn accept_next(&self, seq: u32) -> bool {
+        let mut reorder = self.reorder.lock().expect("reorder");
+        if seq != reorder.next || !reorder.held.is_empty() {
+            return false;
+        }
+        reorder.next = reorder.next.wrapping_add(1);
+        true
     }
 
     fn on_ack(&self, unack: u32, window: u16) {
@@ -829,6 +859,16 @@ impl Sess {
         self.wait_open_response()?;
         let mode = self.link.low_entropy.load(Ordering::Relaxed) as u8;
         let max = fragment_size(self.link.tcp, self.link.mtu, mode);
+        let kind = if mode == 0 {
+            data_kind(self.link.role)
+        } else if self.link.role == Role::Client {
+            DATA_C2S_LOW
+        } else {
+            DATA_S2C_LOW
+        };
+        if self.link.tcp {
+            return self.write_app_tcp(buf, kind, max);
+        }
         for pdu in buf.chunks(meta::MAX_PDU) {
             let count = pdu.len().div_ceil(max);
             for (index, chunk) in pdu.chunks(max).enumerate() {
@@ -837,17 +877,60 @@ impl Sess {
                 }
                 self.wait_slot()?;
                 let seq = self.next_send.fetch_add(1, Ordering::Relaxed);
-                let kind = if mode == 0 {
-                    data_kind(self.link.role)
-                } else if self.link.role == Role::Client {
-                    DATA_C2S_LOW
-                } else {
-                    DATA_S2C_LOW
-                };
                 self.emit_fragment(kind, seq, chunk, true, (count - index - 1) as u8)?;
             }
         }
         Ok(())
+    }
+
+    /// Seals the segments of one write into the underlay's buffer and sends them together, up to
+    /// `TCP_BATCH` at a time, or one by one while the underlay is slow. The wire is let go
+    /// between sends, so sessions that share the underlay take turns. A segment that was sealed
+    /// is always sent: its nonce is spent, and the next segment would not open without it.
+    fn write_app_tcp(&self, buf: &[u8], kind: u8, max: usize) -> io::Result<()> {
+        let mut wire = self.link.wire.lock().expect("wire order");
+        wire.clear();
+        let mut result = Ok(());
+        'segments: for pdu in buf.chunks(meta::MAX_PDU) {
+            let count = pdu.len().div_ceil(max);
+            for (index, chunk) in pdu.chunks(max).enumerate() {
+                if self.closed.load(Ordering::SeqCst) {
+                    result = Err(closed());
+                    break 'segments;
+                }
+                if !self.link.alive.load(Ordering::Acquire) {
+                    result = Err(closed());
+                    break 'segments;
+                }
+                let seq = self.next_send.fetch_add(1, Ordering::Relaxed);
+                let sealed = self
+                    .envelope(kind, seq, chunk.len(), (count - index - 1) as u8)
+                    .and_then(|envelope| self.seal_tcp(&mut wire, &envelope, chunk));
+                if let Err(error) = sealed {
+                    result = Err(error);
+                    break 'segments;
+                }
+                let limit = if self.link.slow.load(Ordering::Relaxed) {
+                    0
+                } else {
+                    TCP_BATCH
+                };
+                if wire.len() >= limit {
+                    let sent = self.send_wire(&wire);
+                    wire.clear();
+                    sent?;
+                    drop(wire);
+                    wire = self.link.wire.lock().expect("wire order");
+                    wire.clear();
+                }
+            }
+        }
+        if !wire.is_empty() {
+            let sent = self.send_wire(&wire);
+            wire.clear();
+            sent?;
+        }
+        result
     }
 
     fn waiting_for_open_response(&self) -> bool {
@@ -873,7 +956,9 @@ impl Sess {
             if left.is_zero() {
                 return Err(timed_out());
             }
+            pipe.waiting += 1;
             pipe = self.cv.wait_timeout(pipe, left).expect("cv").0;
+            pipe.waiting -= 1;
         }
     }
 
@@ -889,43 +974,7 @@ impl Sess {
         remember: bool,
         fragment: u8,
     ) -> io::Result<()> {
-        let mode = if meta::is_low(kind) {
-            self.link.low_entropy.load(Ordering::Relaxed) as u8
-        } else {
-            0
-        };
-        let encoded_len = if mode == 0 {
-            payload.len() as u16
-        } else {
-            crate::entropy::encoded_len(payload.len(), mode)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "低熵载荷长度无效"))?
-        };
-        let mask = low_mask(mode);
-        let (prefix, suffix) = choose_padding(
-            self.link.tcp,
-            self.link.mtu,
-            usize::from(encoded_len),
-            meta::is_session(kind),
-        );
-        let plain = if meta::is_session(kind) {
-            meta::session(kind, self.id, seq, payload.len() as u16, suffix.len() as u8)
-        } else {
-            meta::data(&Meta {
-                kind,
-                session: self.id,
-                seq,
-                unack: self.unack(),
-                window: self.window(),
-                fragment,
-                prefix: prefix.len() as u8,
-                payload_len: encoded_len,
-                suffix: suffix.len() as u8,
-                low_mode: mode,
-                low_mask: mask,
-                extracted: if mode == 0 { 0 } else { payload.len() as u16 },
-                rotation: 0,
-            })
-        };
+        let envelope = self.envelope(kind, seq, payload.len(), fragment)?;
         if remember && !self.link.tcp {
             self.inflight.lock().expect("inflight").insert(
                 seq,
@@ -939,11 +988,65 @@ impl Sess {
                 },
             );
         }
-        let result = self.write_wire(&plain, payload, &prefix, &suffix, mode, mask);
+        let result = self.write_wire(&envelope, payload);
         if result.is_err() && remember {
             self.inflight.lock().expect("inflight").remove(&seq);
         }
         result
+    }
+
+    /// What goes around a payload of `payload_len` bytes: the metadata and the padding.
+    fn envelope(
+        &self,
+        kind: u8,
+        seq: u32,
+        payload_len: usize,
+        fragment: u8,
+    ) -> io::Result<Envelope> {
+        let mode = if meta::is_low(kind) {
+            self.link.low_entropy.load(Ordering::Relaxed) as u8
+        } else {
+            0
+        };
+        let encoded_len = if mode == 0 {
+            payload_len as u16
+        } else {
+            crate::entropy::encoded_len(payload_len, mode)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "低熵载荷长度无效"))?
+        };
+        let mask = low_mask(mode);
+        let (prefix, suffix) = choose_padding(
+            self.link.tcp,
+            self.link.mtu,
+            usize::from(encoded_len),
+            meta::is_session(kind),
+        );
+        let plain = if meta::is_session(kind) {
+            meta::session(kind, self.id, seq, payload_len as u16, suffix.len() as u8)
+        } else {
+            meta::data(&Meta {
+                kind,
+                session: self.id,
+                seq,
+                unack: self.unack(),
+                window: self.window(),
+                fragment,
+                prefix: prefix.len() as u8,
+                payload_len: encoded_len,
+                suffix: suffix.len() as u8,
+                low_mode: mode,
+                low_mask: mask,
+                extracted: if mode == 0 { 0 } else { payload_len as u16 },
+                rotation: 0,
+            })
+        };
+        Ok(Envelope {
+            plain,
+            prefix,
+            suffix,
+            mode,
+            mask,
+        })
     }
 
     fn send_ack(&self) -> io::Result<()> {
@@ -1060,6 +1163,15 @@ impl Sess {
         if buf.is_empty() {
             return Ok(0);
         }
+        self.read_client_with(wait, &mut |bytes| copy_deque(buf, bytes))
+    }
+
+    /// Like `read_client`, but `take` takes the bytes from the pipe.
+    fn read_client_with(
+        &self,
+        wait: Option<Duration>,
+        take: &mut dyn FnMut(&mut VecDeque<u8>) -> usize,
+    ) -> io::Result<usize> {
         let _read = self.read_lock.lock().expect("read");
         let deadline = wait.map(|duration| Instant::now() + duration);
         loop {
@@ -1087,22 +1199,20 @@ impl Sess {
                 ClientPhase::Lazy(_) => {
                     drop(phase);
                     let left = remaining(deadline)?.unwrap_or(Duration::from_millis(200));
-                    let pipe = self.pipe.lock().expect("pipe");
+                    let mut pipe = self.pipe.lock().expect("pipe");
                     if pipe.closed {
                         return Err(closed());
                     }
-                    drop(
-                        self.cv
-                            .wait_timeout(pipe, left.min(Duration::from_millis(200)))
-                            .expect("cv"),
-                    );
+                    pipe.waiting += 1;
+                    let (mut pipe, _) = self
+                        .cv
+                        .wait_timeout(pipe, left.min(Duration::from_millis(200)))
+                        .expect("cv");
+                    pipe.waiting -= 1;
                 }
             }
         }
-        match remaining(deadline)? {
-            Some(wait) => self.read_for(buf, wait),
-            None => self.read_some(buf),
-        }
+        self.read_with(remaining(deadline)?, take)
     }
 
     #[cfg(test)]
@@ -1120,7 +1230,14 @@ impl Sess {
                 .expect("tcp")
                 .clone()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "tcp"))?;
+            let started = Instant::now();
             write_all_timeout(tcp.as_ref(), wire)?;
+            if wire.len() >= 16 * 1024 {
+                // A write that waited for the peer marks the underlay as slow. Its next segments
+                // go out one by one, so sessions that share it wait for a segment, not a batch.
+                let waited = started.elapsed() > Duration::from_millis(5);
+                self.link.slow.store(waited, Ordering::Relaxed);
+            }
         } else {
             let udp = self.link.write_udp.lock().expect("udp");
             let udp = udp
@@ -1133,71 +1250,60 @@ impl Sess {
         Ok(())
     }
 
-    fn write_wire(
-        &self,
-        meta_plain: &[u8],
-        payload: &[u8],
-        prefix: &[u8],
-        suffix: &[u8],
-        mode: u8,
-        mask: u32,
-    ) -> io::Result<()> {
-        let _order = self.link.wire_lock.lock().expect("wire order");
+    fn write_wire(&self, envelope: &Envelope, payload: &[u8]) -> io::Result<()> {
+        let mut wire = self.link.wire.lock().expect("wire order");
         if !self.link.alive.load(Ordering::Acquire) {
             return Err(closed());
         }
-        let body = |mut sealed: Vec<u8>| -> io::Result<Vec<u8>> {
-            if mode == 0 {
-                return Ok(sealed);
-            }
-            let tag = sealed.split_off(sealed.len() - 16);
-            let mut encoded = crate::entropy::encode(&sealed, mode, mask, 0, 0)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "低熵编码参数无效"))?;
-            encoded.extend(tag);
-            Ok(encoded)
-        };
-        let body_len = if mode == 0 {
-            payload.len()
-        } else {
-            usize::from(
-                crate::entropy::encoded_len(payload.len(), mode).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "低熵载荷长度无效")
-                })?,
-            )
-        };
-        let mut wire = Vec::with_capacity(
-            24 + meta_plain.len() + 16 + prefix.len() + body_len + 16 + suffix.len(),
-        );
+        wire.clear();
         if self.link.tcp {
-            let mut guard = self.link.send_dir.lock().expect("send");
-            let dir = guard
-                .as_mut()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "发送密钥未就绪"))?;
-            dir.seal_into(&self.username, meta_plain, &mut wire);
-            wire.extend_from_slice(prefix);
-            if !payload.is_empty() {
-                if mode == 0 {
-                    dir.seal_into(&self.username, payload, &mut wire);
-                } else {
-                    wire.extend(body(dir.seal(&self.username, payload))?);
-                }
-            }
+            self.seal_tcp(&mut wire, envelope, payload)?;
         } else {
             let nonce = crypto::nonce_with_hint(&self.username);
             let mut dir = Direction::from_key(self.key);
             wire.extend_from_slice(&nonce);
-            dir.seal_at_into(&nonce, meta_plain, &mut wire);
-            wire.extend_from_slice(prefix);
+            dir.seal_at_into(&nonce, &envelope.plain, &mut wire);
+            wire.extend_from_slice(&envelope.prefix);
             if !payload.is_empty() {
-                if mode == 0 {
+                if envelope.mode == 0 {
                     dir.seal_at_into(&nonce, payload, &mut wire);
                 } else {
-                    wire.extend(body(dir.seal_at(&nonce, payload))?);
+                    wire.extend(low_body(
+                        dir.seal_at(&nonce, payload),
+                        envelope.mode,
+                        envelope.mask,
+                    )?);
                 }
             }
+            wire.extend_from_slice(&envelope.suffix);
         }
-        wire.extend_from_slice(suffix);
-        self.send_wire(&wire)
+        let sent = self.send_wire(&wire);
+        wire.clear();
+        sent
+    }
+
+    /// Seals one TCP segment after what `wire` already holds. The caller holds the wire, so the
+    /// order of the nonces is the order on the underlay.
+    fn seal_tcp(&self, wire: &mut Vec<u8>, envelope: &Envelope, payload: &[u8]) -> io::Result<()> {
+        let mut guard = self.link.send_dir.lock().expect("send");
+        let dir = guard
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "发送密钥未就绪"))?;
+        dir.seal_into(&self.username, &envelope.plain, wire);
+        wire.extend_from_slice(&envelope.prefix);
+        if !payload.is_empty() {
+            if envelope.mode == 0 {
+                dir.seal_into(&self.username, payload, wire);
+            } else {
+                wire.extend(low_body(
+                    dir.seal(&self.username, payload),
+                    envelope.mode,
+                    envelope.mask,
+                )?);
+            }
+        }
+        wire.extend_from_slice(&envelope.suffix);
+        Ok(())
     }
 
     fn tick(&self) {
@@ -1262,6 +1368,25 @@ impl Conn {
             ConnKind::Stream(sess) => sess.read_client(buf, Some(wait)),
             ConnKind::Leg(leg) => leg.read_for(buf, wait),
         }
+    }
+
+    /// Waits like `read_for` and hands over everything a stream session has queued by swapping
+    /// the queue with `spare`, which comes back holding the bytes. The caller clears it before
+    /// the next call; the two queues keep their capacity. `None` for a UDP leg, whose reads keep
+    /// datagram boundaries.
+    pub fn read_queued_for(
+        &self,
+        spare: &mut VecDeque<u8>,
+        wait: Duration,
+    ) -> Option<io::Result<usize>> {
+        let ConnKind::Stream(sess) = &self.kind else {
+            return None;
+        };
+        spare.clear();
+        Some(sess.read_client_with(Some(wait), &mut |bytes| {
+            std::mem::swap(spare, bytes);
+            spare.len()
+        }))
     }
 
     pub fn write_user(&self, buf: &[u8]) -> io::Result<()> {
@@ -1375,20 +1500,93 @@ impl Leg {
 }
 
 fn reader_tcp(tcp: TcpStream, link: Arc<Link>, peer: SocketAddr) {
-    let mut tcp = BufReader::with_capacity(64 * 1024, tcp);
+    let mut input = TcpInput::new(tcp);
     let mut recv: Option<Direction> = None;
     loop {
         if !link.alive.load(Ordering::SeqCst) {
             break;
         }
-        match read_tcp_segment(&mut tcp, &mut recv, &link, peer) {
-            Ok(Some(incoming)) => dispatch(&link, incoming),
-            Ok(None) => link.tick(),
+        match read_tcp_segment(&mut input, &mut recv, &link, peer) {
+            Ok(true) => {}
+            Ok(false) => link.tick(),
             Err(_) => {
                 link.close();
                 break;
             }
         }
+    }
+}
+
+/// Bytes read from a TCP underlay and not consumed yet. A segment is opened where it lies, so
+/// its payload is copied once, into the session it belongs to.
+struct TcpInput {
+    tcp: TcpStream,
+    buf: Vec<u8>,
+    head: usize,
+    tail: usize,
+}
+
+impl TcpInput {
+    fn new(tcp: TcpStream) -> Self {
+        Self {
+            tcp,
+            buf: Vec::new(),
+            head: 0,
+            tail: 0,
+        }
+    }
+
+    /// Waits until the next `n` bytes are there. With `allow_idle`, a read that times out before
+    /// the first of them reports `WouldBlock`; once some arrived the rest may take 20 seconds.
+    fn fill(&mut self, n: usize, allow_idle: bool) -> io::Result<()> {
+        if self.tail - self.head >= n {
+            return Ok(());
+        }
+        if self.buf.is_empty() {
+            self.buf.resize(TCP_INPUT, 0);
+        }
+        if self.head == self.tail {
+            self.head = 0;
+            self.tail = 0;
+        } else if self.buf.len() - self.head < n {
+            self.buf.copy_within(self.head..self.tail, 0);
+            self.tail -= self.head;
+            self.head = 0;
+        }
+        let start = Instant::now();
+        while self.tail - self.head < n {
+            match self.tcp.read(&mut self.buf[self.tail..]) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "tcp")),
+                Ok(read) => self.tail += read,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        || error.kind() == io::ErrorKind::TimedOut =>
+                {
+                    if allow_idle && self.tail == self.head {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "idle"));
+                    }
+                    if start.elapsed() > Duration::from_secs(20) {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "接收完整段超时"));
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    /// The next `n` bytes, which `fill` made sure are there.
+    fn take(&mut self, n: usize) -> &mut [u8] {
+        let start = self.head;
+        self.head += n;
+        &mut self.buf[start..start + n]
+    }
+
+    fn skip(&mut self, n: u8) -> io::Result<()> {
+        let n = usize::from(n);
+        self.fill(n, false)?;
+        self.take(n);
+        Ok(())
     }
 }
 
@@ -1658,31 +1856,30 @@ fn open_raw(link: &Arc<Link>) -> io::Result<Arc<Sess>> {
     Ok(sess)
 }
 
+/// Reads one segment from a TCP underlay and hands it to its session. `Ok(false)` means the
+/// underlay was idle.
 fn read_tcp_segment(
-    tcp: &mut BufReader<TcpStream>,
+    input: &mut TcpInput,
     recv: &mut Option<Direction>,
     link: &Arc<Link>,
     peer: SocketAddr,
-) -> io::Result<Option<Incoming>> {
+) -> io::Result<bool> {
     let first = recv.is_none();
     let header_len = if first { 24 + 32 + 16 } else { 32 + 16 };
-    let header = match take(tcp, header_len, true) {
-        Ok(header) => header,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-            return Ok(None);
-        }
+    match input.fill(header_len, true) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
         Err(error) => return Err(error),
-    };
+    }
+    let header = input.take(header_len);
     if first && crate::replay::reject(&header[..16], None) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "replay"));
     }
-    let (plain, key, username) = if let Some(direction) = recv.as_mut() {
-        let plain = direction
-            .open_next(header)
+    let meta = if let Some(direction) = recv.as_mut() {
+        let len = direction
+            .open_next_in_place(header)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "decrypt"))?;
-        let key = direction.key_bytes();
-        let username = link.bound_user.lock().expect("user").clone();
-        (plain, key, username)
+        meta::parse(&header[..len])?
     } else {
         let accounts = link.accounts.lock().expect("accounts").clone();
         let mut opened = None;
@@ -1690,7 +1887,7 @@ fn read_tcp_segment(
             if let Some(found) = crypto::open_first(
                 &account.username,
                 &account.password,
-                &header,
+                header,
                 meta::unix_now(),
             ) {
                 opened = Some(found);
@@ -1702,56 +1899,74 @@ fn read_tcp_segment(
         if link.role == Role::Server {
             *link.send_dir.lock().expect("send") = Some(opened.direction.fork_send());
         }
-        let key = opened.direction.key_bytes();
-        let username = opened.username;
-        *link.bound_user.lock().expect("user") = username.clone();
+        *link.bound_user.lock().expect("user") = opened.username;
         *recv = Some(opened.direction);
-        (opened.plain, key, username)
+        meta::parse(&opened.plain)?
     };
-    let meta = meta::parse(&plain)?;
-    let payload = read_tcp_payload(tcp, recv.as_mut().unwrap(), &meta)?;
-    Ok(Some(Incoming {
-        peer,
-        meta,
-        payload,
-        key,
-        username,
-    }))
-}
-
-fn read_tcp_payload(
-    tcp: &mut BufReader<TcpStream>,
-    direction: &mut Direction,
-    meta: &Meta,
-) -> io::Result<Vec<u8>> {
-    if meta.prefix > 0 {
-        skip_padding(tcp, meta.prefix)?;
-    }
-    let payload = if meta.payload_len == 0 {
-        Vec::new()
+    let direction = recv.as_mut().expect("receive key");
+    input.skip(meta.prefix)?;
+    let len = meta.payload_len as usize;
+    let low;
+    let payload: &[u8] = if len == 0 {
+        &[]
     } else {
-        let mut wire = take(tcp, meta.payload_len as usize + 16, false)?;
+        input.fill(len + 16, false)?;
+        let wire = input.take(len + 16);
         if meta::is_low(meta.kind) {
-            let body = crate::entropy::decode(
-                &wire[..meta.payload_len as usize],
+            let mut body = crate::entropy::decode(
+                &wire[..len],
                 meta.extracted as usize,
                 meta.low_mode,
                 meta.low_mask,
                 meta.rotation,
             )
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "low entropy"))?;
-            let tag: [u8; 16] = wire[meta.payload_len as usize..].try_into().unwrap();
-            wire = body;
-            wire.extend(tag);
+            body.extend_from_slice(&wire[len..]);
+            low = direction
+                .open_next(body)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "payload"))?;
+            &low
+        } else {
+            let plain = direction
+                .open_next_in_place(wire)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "payload"))?;
+            &wire[..plain]
         }
-        direction
-            .open_next(wire)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "payload"))?
     };
-    if meta.suffix > 0 {
-        skip_padding(tcp, meta.suffix)?;
+    let suffix = meta.suffix;
+    deliver_tcp(link, peer, meta, payload, direction.key_bytes());
+    input.skip(suffix)?;
+    Ok(true)
+}
+
+/// Hands a TCP segment to its session. Data in order goes from the read buffer straight into the
+/// session; every other segment takes the common path.
+fn deliver_tcp(link: &Arc<Link>, peer: SocketAddr, meta: Meta, payload: &[u8], key: [u8; 32]) {
+    if meta::is_data(meta.kind) && from_peer(link.role, meta.kind) {
+        if let Some(sess) = link.get(peer, meta.session) {
+            let now = Instant::now();
+            *link.last_activity.lock().expect("activity") = now;
+            *sess.last_rx.lock().expect("rx") = now;
+            if sess.accept_next(meta.seq) {
+                sess.append(payload);
+            } else {
+                let delivered = sess.push_in(meta.seq, payload.to_vec());
+                sess.append(&delivered);
+            }
+            return;
+        }
     }
-    Ok(payload)
+    let username = link.bound_user.lock().expect("user").clone();
+    dispatch(
+        link,
+        Incoming {
+            peer,
+            meta,
+            payload: payload.to_vec(),
+            key,
+            username,
+        },
+    );
 }
 
 fn parse_udp_packet(packet: &[u8], peer: SocketAddr, link: &Arc<Link>) -> Option<Incoming> {
@@ -1879,45 +2094,6 @@ fn udp_body(meta: &Meta, nonce: &[u8; 24], mut rest: &[u8], key: [u8; 32]) -> Op
     Some(sealed)
 }
 
-fn take(tcp: &mut BufReader<TcpStream>, n: usize, allow_idle: bool) -> io::Result<Vec<u8>> {
-    let mut bytes = vec![0; n];
-    read_tcp_exact(tcp, &mut bytes, allow_idle)?;
-    Ok(bytes)
-}
-
-fn skip_padding(tcp: &mut BufReader<TcpStream>, len: u8) -> io::Result<()> {
-    let mut padding = [0; u8::MAX as usize];
-    read_tcp_exact(tcp, &mut padding[..usize::from(len)], false)
-}
-
-fn read_tcp_exact(
-    tcp: &mut BufReader<TcpStream>,
-    bytes: &mut [u8],
-    allow_idle: bool,
-) -> io::Result<()> {
-    let start = Instant::now();
-    let mut offset = 0;
-    while offset < bytes.len() {
-        match tcp.read(&mut bytes[offset..]) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "tcp")),
-            Ok(read) => offset += read,
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.kind() == io::ErrorKind::TimedOut =>
-            {
-                if allow_idle && offset == 0 {
-                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "idle"));
-                }
-                if start.elapsed() > Duration::from_secs(20) {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "接收完整段超时"));
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
 fn write_all_timeout(mut tcp: &TcpStream, bytes: &[u8]) -> io::Result<()> {
     let mut rest = bytes;
     let start = Instant::now();
@@ -2016,7 +2192,9 @@ fn read_record(
         if let Some(n) = length(&pipe.bytes)? {
             if pipe.bytes.len() >= n {
                 let out = pipe.bytes.drain(..n).collect();
-                sess.cv.notify_all();
+                if pipe.waiting != 0 {
+                    sess.cv.notify_all();
+                }
                 return Ok(out);
             }
         }
@@ -2024,8 +2202,10 @@ fn read_record(
             return Err(closed());
         }
         let left = remaining(deadline)?.unwrap_or(DATA_IDLE);
+        pipe.waiting += 1;
         let (next, _) = sess.cv.wait_timeout(pipe, left).expect("pipe");
         pipe = next;
+        pipe.waiting -= 1;
     }
 }
 
@@ -2246,6 +2426,15 @@ fn fragment_size(tcp: bool, mtu: u16, mode: u8) -> usize {
     } else {
         (budget / 8) * width
     }
+}
+
+/// The low-entropy form of a sealed payload: the ciphertext encoded, the tag as it is.
+fn low_body(mut sealed: Vec<u8>, mode: u8, mask: u32) -> io::Result<Vec<u8>> {
+    let tag = sealed.split_off(sealed.len() - 16);
+    let mut encoded = crate::entropy::encode(&sealed, mode, mask, 0, 0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "低熵编码参数无效"))?;
+    encoded.extend(tag);
+    Ok(encoded)
 }
 
 fn low_mask(mode: u8) -> u32 {

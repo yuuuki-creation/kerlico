@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -143,7 +143,7 @@ impl MieruInbound {
             self.tag.clone(),
             email,
             destination,
-            Box::new(Stream(ready.conn)),
+            Box::new(Stream(ready.conn, Mutex::new(VecDeque::new()))),
         );
         if ready.udp {
             handoff.set_peer(ready.peer);
@@ -152,13 +152,37 @@ impl MieruInbound {
     }
 }
 
-struct Stream(Conn);
+struct Stream(Conn, Mutex<VecDeque<u8>>);
+
+const READ_WAIT: Duration = Duration::from_millis(200);
 
 impl InboundStream for Stream {
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
-        self.0
-            .read_for(buf, std::time::Duration::from_millis(200))
-            .map_err(map_io)
+        self.0.read_for(buf, READ_WAIT).map_err(map_io)
+    }
+
+    /// A stream session gives the copy loop its whole queue, so the bytes reach the exit
+    /// without a copy into the loop's buffer.
+    fn read_from_user_to(
+        &self,
+        buf: &mut [u8],
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<usize, PlaneFault> {
+        let mut spare = self.1.lock().expect("spare");
+        let Some(read) = self.0.read_queued_for(&mut spare, READ_WAIT) else {
+            drop(spare);
+            let n = self.read_from_user(buf)?;
+            sink(&buf[..n]);
+            return Ok(n);
+        };
+        let n = read.map_err(map_io)?;
+        let (front, back) = spare.as_slices();
+        sink(front);
+        if !back.is_empty() {
+            sink(back);
+        }
+        spare.clear();
+        Ok(n)
     }
 
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {

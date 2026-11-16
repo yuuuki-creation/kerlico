@@ -17,12 +17,4 @@ pub fn reverse_tag(text: &str) -> io::Result<String> {
     } else { Ok(text.to_string()) }
 }
 
-pub fn string_list(text: &str) -> io::Result<Vec<String>> {
-    if text.trim_start().starts_with('[') {
-        serde_json::from_str(text).map_err(io::Error::other)
-    } else if text.is_empty() {
-        Ok(Vec::new())
-    } else {
-        Ok(text.split(',').map(|part| part.trim().to_string()).collect())
-    }
-}
+pub use kerlico_tls::string_list;

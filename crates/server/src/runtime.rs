@@ -145,12 +145,23 @@ impl Network for ServerNetwork {
     fn connect_unix(&self, path: &std::path::Path) -> io::Result<NetworkConnection> {
         self.outbound()?.connect_unix_transport(path)
     }
+    #[cfg(unix)]
+    fn connect_unix_socket(&self, path: &std::path::Path) -> io::Result<std::os::unix::net::UnixStream> {
+        self.outbound()?.connect_unix_socket(path)
+    }
+    fn relay_connected_tcp(&self, client: &std::net::TcpStream, target: &std::net::TcpStream, rate_bits: u64) -> io::Result<()> {
+        self.outbound()?.relay_connected_tcp(client, target, rate_bits)
+    }
     fn exchange_dns(&self, request: &NetworkDial, message: &[u8]) -> io::Result<Vec<u8>> {
         self.outbound()?.exchange_dns_transport(
             &self.resolve_dial(request)?,
             message,
             Native::detect(),
         )
+    }
+    fn exchange_configured_dns(&self, message: &[u8]) -> io::Result<Vec<u8>> {
+        let config = self.dns.read().expect("DNS runtime").clone();
+        config.exchange_configured(message, Native::detect(), &self.outbound()?)
     }
     fn exchange_http(&self, request: &HttpRequest) -> io::Result<HttpResponse> {
         let mut request = request.clone();

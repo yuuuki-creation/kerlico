@@ -145,11 +145,19 @@ impl CarrierNetwork {
     pub fn masquerade_dialer(self: &Arc<Self>) -> crate::MasqueradeDialer {
         let carrier = self.clone();
         Arc::new(move |target| {
+            let local = "0.0.0.0:0".parse().expect("logical origin local");
             let connection = match target {
                 crate::MasqueradeTarget::Tcp { host, port } => carrier.tcp(host, *port)?,
                 crate::MasqueradeTarget::Unix(path) => carrier.network.connect_unix(path)?,
             };
-            Ok(crate::MasqueradeSocket::Network(connection))
+            let peer = match target {
+                crate::MasqueradeTarget::Tcp { host, port } => SocketAddr::new(host.parse().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into()), *port),
+                crate::MasqueradeTarget::Unix(_) => local,
+            };
+            Ok(crate::MasqueradeSocket::Async(Box::pin(async move {
+                let stream = crate::tls_async::connect_async_network(connection, None, "localhost", &crate::finalmask::FinalMask::default(), local, peer).await?;
+                Ok(Box::new(stream) as Box<dyn kerlico_hy2::masquerade::AsyncIo>)
+            })))
         })
     }
 

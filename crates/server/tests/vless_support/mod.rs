@@ -81,6 +81,10 @@ impl Process {
         })
     }
 
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn wait_ready(&mut self, ready: impl Fn() -> bool) -> Result<()> {
         let deadline = Instant::now() + TIMEOUT;
         loop {

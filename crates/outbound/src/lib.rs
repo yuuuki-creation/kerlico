@@ -14,6 +14,9 @@ use kerlico_shared::{
 };
 
 pub use native::{BytePipe, Native, PacketDevice};
+pub use network::{connect_system_tcp, lookup_system_addresses, open_system_datagram};
+#[cfg(feature = "system-dns")]
+pub use network::exchange_system_dns;
 
 pub use kerlico_shared::{Exit, OutboundChoice};
 
@@ -169,8 +172,8 @@ impl Outbound {
             .lock()
             .expect("landing")
             .clone()
-            .ok_or(OpenError::Transport)?;
-        let remote = installed(destination)?;
+            .ok_or(OpenError::Transport);
+        let remote = copy::report_connect(stream, installed.and_then(|installed| installed(destination)))?;
         let remote: Arc<dyn InboundStream> = Arc::from(remote);
         copy::bridge(
             stream,
@@ -239,6 +242,13 @@ struct RemoteWrite {
 }
 
 impl copy::PipeWrite for RemoteWrite {
+    fn finish(&mut self) -> Result<(), OpenError> {
+        if self.transport == Transport::Tcp {
+            self.stream.finish_to_user().map_err(|_| OpenError::Transport)?;
+        }
+        Ok(())
+    }
+
     fn write_pipe(&mut self, buf: &[u8]) -> Result<(), OpenError> {
         if self.transport == Transport::Udp {
             return if self

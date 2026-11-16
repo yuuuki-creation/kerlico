@@ -259,6 +259,9 @@ fn accept_loop(listener: TcpListener, client: Client, state: Arc<State>, is_sock
                 let task = thread::spawn(move || {
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+                    // Without it, a reply written in two pieces waits for the application's
+                    // delayed ACK (40 ms on Linux) before its second piece leaves.
+                    let _ = stream.set_nodelay(true);
                     if is_socks {
                         let _ = socks::serve(stream, client, state2.clone());
                     } else {

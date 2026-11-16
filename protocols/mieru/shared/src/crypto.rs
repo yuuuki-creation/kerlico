@@ -141,6 +141,18 @@ impl Direction {
         self.seal_at_into(&nonce, plain, out);
     }
 
+    /// Opens the next packet where it lies. The plaintext is the first bytes of `packet`, as
+    /// many as returned.
+    pub(crate) fn open_next_in_place(&mut self, packet: &mut [u8]) -> Option<usize> {
+        let nonce = self.nonce.as_mut()?;
+        bump(nonce);
+        let nonce = *nonce;
+        let (key, nonce) = self.cipher_at(&nonce);
+        key.open_in_place(nonce, aead::Aad::empty(), packet)
+            .ok()
+            .map(|plain| plain.len())
+    }
+
     pub fn open_next(&mut self, mut packet: Vec<u8>) -> Option<Vec<u8>> {
         let nonce = self.nonce.as_mut()?;
         bump(nonce);

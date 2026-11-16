@@ -79,32 +79,22 @@ impl H2Params {
         Ok(params)
     }
 
-    /// Go's `http2setConfigDefaults` with Kerlico's own defaults where the value is zero or out of range.
+    /// Go's server limits when a setting is zero or outside its valid range.
     pub fn limits(&self, header_list: u32) -> H2Limits {
+        fn with_default(value: i64, min: i64, max: i64, default: u32) -> u32 {
+            if (min..=max).contains(&value) { value as u32 } else { default }
+        }
+        let max = i64::from(i32::MAX);
         let mut limits = H2Limits {
             header_list: Some(header_list),
+            xhttp_server_settings: true,
+            streams: with_default(self.max_streams, 1, max, 250),
+            frame_size: with_default(self.max_frame, 16_384, 16_777_215, 1 << 20),
+            decoder_table: with_default(self.decoder_table, 1, max, 4096),
+            connection_window: with_default(self.connection_window, 65_535, max, 1 << 20),
+            stream_window: with_default(self.stream_window, 1, max, 1 << 20),
             ..H2Limits::default()
         };
-        let streams = self.max_streams as u32;
-        if streams >= 1 {
-            limits.streams = streams;
-        }
-        let frame = self.max_frame as u32;
-        if (16_384..=16_777_215).contains(&frame) {
-            limits.frame_size = frame;
-        }
-        let table = self.decoder_table as u32;
-        if table >= 1 {
-            limits.decoder_table = table;
-        }
-        let connection = self.connection_window as i32;
-        if connection >= 65_535 {
-            limits.connection_window = connection as u32;
-        }
-        let stream = self.stream_window as i32;
-        if stream >= 1 {
-            limits.stream_window = stream as u32;
-        }
         if self.send_ping > 0 {
             limits.ping_after = Some(Duration::from_nanos(self.send_ping as u64));
         }
@@ -201,9 +191,9 @@ mod tests {
                 "MaxReceiveBufferPerStream": -5, "PingTimeout": -1, "SendPingTimeout": -1}"#,
         )
         .unwrap();
-        assert_eq!(params.limits(1), H2Limits { header_list: Some(1), ..H2Limits::default() });
+        assert_eq!(params.limits(1), H2Params::default().limits(1));
         let wrapped = H2Params::parse(r#"{"MaxConcurrentStreams": -1}"#).unwrap();
-        assert_eq!(wrapped.limits(1).streams, u32::MAX);
+        assert_eq!(wrapped.limits(1).streams, 250);
     }
 
     #[test]

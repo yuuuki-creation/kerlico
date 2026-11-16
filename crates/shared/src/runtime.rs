@@ -3,8 +3,8 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::{OutboundChoice, Transport};
 
@@ -88,6 +88,9 @@ pub enum NetworkConnection {
 
 pub trait NetworkStream: Read + Write + Send {
     fn set_timeout(&mut self, timeout: Duration) -> io::Result<()>;
+    fn set_nonblocking(&self, _enabled: bool) -> io::Result<()> {
+        Err(unsupported("nonblocking mode"))
+    }
     fn split(self: Box<Self>) -> io::Result<NetworkPair>;
 }
 
@@ -104,6 +107,14 @@ pub trait NetworkWrite: Write + Send {
 pub type NetworkPair = (Box<dyn NetworkRead>, Box<dyn NetworkWrite>);
 
 impl NetworkConnection {
+    pub fn set_nonblocking(&self, enabled: bool) -> io::Result<()> {
+        match self {
+            Self::Tcp(socket) => socket.set_nonblocking(enabled),
+            Self::Udp(socket) => socket.set_nonblocking(enabled),
+            Self::Stream(stream) => stream.set_nonblocking(enabled),
+        }
+    }
+
     pub fn split(self) -> io::Result<NetworkPair> {
         match self {
             Self::Tcp(socket) => Ok((
@@ -251,11 +262,48 @@ pub trait Network: fmt::Debug + Send + Sync {
     fn connect_unix(&self, _path: &std::path::Path) -> io::Result<NetworkConnection> {
         Err(unsupported("Unix stream dial"))
     }
+    #[cfg(unix)]
+    fn connect_unix_socket(&self, _path: &std::path::Path) -> io::Result<std::os::unix::net::UnixStream> {
+        Err(unsupported("Unix stream dial"))
+    }
+    /// Continues a handshake carrier as a byte relay without opening a second target connection.
+    fn relay_connected_tcp(&self, _client: &TcpStream, _target: &TcpStream, _rate_bits: u64) -> io::Result<()> {
+        Err(unsupported("connected TCP relay"))
+    }
     fn exchange_dns(&self, _request: &NetworkDial, _message: &[u8]) -> io::Result<Vec<u8>> {
         Err(unsupported("DNS exchange"))
     }
+    fn exchange_configured_dns(&self, _message: &[u8]) -> io::Result<Vec<u8>> {
+        Err(unsupported("configured DNS exchange"))
+    }
     fn exchange_http(&self, _request: &HttpRequest) -> io::Result<HttpResponse> {
         Err(unsupported("HTTP exchange"))
+    }
+}
+
+/// Directional pacing for unauthenticated fallback. Zero leaves the rate unlimited.
+pub struct FallbackRate {
+    rate: u64,
+    next: Mutex<Instant>,
+}
+
+impl FallbackRate {
+    pub fn new(rate: u64) -> Self {
+        Self { rate, next: Mutex::new(Instant::now()) }
+    }
+
+    pub fn limit(&self, count: usize) -> usize {
+        if self.rate == 0 { count } else { count.min((self.rate / 800).clamp(1, 65536) as usize) }
+    }
+
+    pub fn wait(&self, count: usize) {
+        if self.rate == 0 || count == 0 { return; }
+        let now = Instant::now();
+        let mut next = self.next.lock().expect("fallback rate");
+        let delay = next.saturating_duration_since(now);
+        *next = (*next).max(now) + Duration::from_secs_f64(count as f64 * 8.0 / self.rate as f64);
+        drop(next);
+        std::thread::sleep(delay);
     }
 }
 
@@ -298,4 +346,16 @@ fn unsupported(service: &str) -> io::Error {
         io::ErrorKind::Unsupported,
         format!("host does not provide {service}"),
     )
+}
+/// Unconnected datagram I/O supplied by the socket owner and wrapped by transports.
+pub trait PacketIo: Send + Sync {
+    fn local_addr(&self) -> io::Result<SocketAddr>;
+    fn recv_from(&self, out: &mut [u8]) -> io::Result<(usize, SocketAddr)>;
+    fn send_to(&self, packet: &[u8], peer: SocketAddr) -> io::Result<usize>;
+}
+
+impl PacketIo for UdpSocket {
+    fn local_addr(&self) -> io::Result<SocketAddr> { UdpSocket::local_addr(self) }
+    fn recv_from(&self, out: &mut [u8]) -> io::Result<(usize, SocketAddr)> { UdpSocket::recv_from(self, out) }
+    fn send_to(&self, packet: &[u8], peer: SocketAddr) -> io::Result<usize> { UdpSocket::send_to(self, packet, peer) }
 }

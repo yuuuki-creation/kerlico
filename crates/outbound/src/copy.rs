@@ -41,6 +41,19 @@ pub trait PipeWrite: Send {
     }
 }
 
+pub fn report_connect<T>(stream: &dyn InboundStream, result: Result<T, OpenError>) -> Result<T, OpenError> {
+    match result {
+        Ok(connected) => {
+            stream.report_connect(Ok(())).map_err(|_| OpenError::Transport)?;
+            Ok(connected)
+        }
+        Err(error) => {
+            let _ = stream.report_connect(Err(error.clone()));
+            Err(error)
+        }
+    }
+}
+
 struct Pace {
     start: Instant,
     last_ms: AtomicU64,
@@ -89,7 +102,7 @@ pub fn bridge(
         let up =
             scope.spawn(move || pump_up(stream, toward_exit, traffic, flow.transport, &pace_up));
         let down = pump_down(stream, from_exit, &counters, flow.transport, &pace);
-        pace.halt();
+        if down.is_err() { pace.halt(); }
         let up = up.join().unwrap_or(Err(OpenError::Transport));
         down.and(up)
     })
@@ -107,7 +120,18 @@ fn pump_up(
         if pace.halted() {
             return Ok(());
         }
-        match stream.read_from_user(&mut buf) {
+        // The stream may give its own bytes, so they go to the exit without a copy into `buf`.
+        // A TCP read of nothing is EOF, not a write; a UDP datagram of nothing is still sent.
+        let mut failed = None;
+        let read = stream.read_from_user_to(&mut buf, &mut |bytes| {
+            if failed.is_some() || (bytes.is_empty() && transport == Transport::Tcp) {
+                return;
+            }
+            if let Err(error) = toward_exit.write_pipe(bytes) {
+                failed = Some(error);
+            }
+        });
+        match read {
             Ok(0) if transport == Transport::Tcp => {
                 toward_exit.finish()?;
                 return Ok(());
@@ -122,7 +146,7 @@ fn pump_up(
             }
             Ok(n) => {
                 pace.mark();
-                if let Err(error) = toward_exit.write_pipe(&buf[..n]) {
+                if let Some(error) = failed {
                     pace.halt();
                     return Err(error);
                 }
@@ -156,7 +180,9 @@ fn pump_down(
         }
         match from_exit.read_pipe(&mut buf) {
             Ok(ReadEvent::Eof) => {
-                pace.halt();
+                if transport != Transport::Tcp || !stream.finish_to_user().map_err(|_| OpenError::Transport)? {
+                    pace.halt();
+                }
                 return Ok(());
             }
             Ok(ReadEvent::Data(n)) => {

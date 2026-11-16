@@ -5,8 +5,8 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
-use super::cases::TLS_NAME;
-use super::support::{tcp_connect, Result};
+use super::cases::{ID, TLS_NAME};
+use super::support::{localhost, tcp_connect, Result};
 
 pub const LIMIT_PARAMS: &str = r#"{"MaxConcurrentStreams":7,"MaxReadFrameSize":32768,"MaxDecoderHeaderTableSize":8192,"MaxReceiveBufferPerStream":524288,"MaxReceiveBufferPerConnection":2097152}"#;
 pub const LIMIT_FRAME: usize = 32768;
@@ -17,11 +17,21 @@ const PING: u8 = 6;
 const GOAWAY: u8 = 7;
 const WINDOW_UPDATE: u8 = 8;
 const ACK: u8 = 1;
+const DATA: u8 = 0;
+const HEADERS: u8 = 1;
+pub const WRITE_PROBE_BYTES: usize = 8 * 1024 * 1024;
 
 pub enum Wire {
     Plain(TcpStream),
     Tls(kerlico_vless::TlsLink),
+    Advanced {
+        socket: TcpStream,
+        read: kerlico_vless::AdvancedTlsRead<TcpStream>,
+        write: kerlico_vless::AdvancedTlsWrite<TcpStream>,
+    },
 }
+
+pub const PROHIBITED_CIPHER: &str = "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA";
 
 impl Wire {
     pub fn connect(port: u16, tls: bool) -> Result<Self> {
@@ -39,6 +49,7 @@ impl Wire {
                 let _ = tcp.set_read_timeout(Some(timeout));
             }
             Self::Tls(link) => link.set_timeout(Some(timeout)),
+            Self::Advanced { socket, .. } => { let _ = socket.set_read_timeout(Some(timeout)); }
         }
     }
 }
@@ -48,6 +59,7 @@ impl Read for Wire {
         match self {
             Self::Plain(tcp) => tcp.read(buf),
             Self::Tls(link) => link.read(buf),
+            Self::Advanced { read, .. } => read.read(buf),
         }
     }
 }
@@ -57,6 +69,7 @@ impl Write for Wire {
         match self {
             Self::Plain(tcp) => tcp.write(buf),
             Self::Tls(link) => link.write(buf),
+            Self::Advanced { write, .. } => write.write(buf),
         }
     }
 
@@ -64,8 +77,34 @@ impl Write for Wire {
         match self {
             Self::Plain(tcp) => tcp.flush(),
             Self::Tls(link) => link.flush(),
+            Self::Advanced { write, .. } => write.flush(),
         }
     }
+}
+
+pub fn prohibited_cipher(port: u16, permit: bool) -> Result<()> {
+    let tcp = tcp_connect(port)?;
+    let options = kerlico_vless::AdvancedTlsOptions {
+        allow_insecure: true, fingerprint: "unsafe".into(), alpn: vec!["h2".into()],
+        min_version: "1.2".into(), max_version: "1.2".into(), cipher_suites: PROHIBITED_CIPHER.into(),
+        ..Default::default()
+    };
+    let config = kerlico_vless::advanced_client_config(&options)?;
+    let (read, write) = kerlico_vless::connect_advanced_tls_over(tcp.try_clone()?, tcp.try_clone()?, config, TLS_NAME)?;
+    let mut wire = Wire::Advanced { socket: tcp, read, write };
+    if permit { handshake(&mut wire)?; return Ok(()); }
+    wire.wait(Duration::from_secs(3));
+    // Xray can answer before reading the preface; Kerlico needs it to distinguish H1 from H2.
+    let _ = wire.write_all(kerlico_vless::HTTP2_PREFACE);
+    let frame = loop {
+        let frame = read_frame(&mut wire)?;
+        if frame.kind != SETTINGS { break frame; }
+    };
+    let code = frame.payload.get(4..8).map(|bytes| u32::from_be_bytes(bytes.try_into().unwrap()));
+    if frame.kind != GOAWAY || frame.stream != 0 || code != Some(0x0c) {
+        return Err(format!("expected GOAWAY INADEQUATE_SECURITY, received frame type {} and error {code:?}", frame.kind).into());
+    }
+    Ok(())
 }
 
 struct Frame {
@@ -110,10 +149,67 @@ fn closed(error: &io::Error) -> bool {
     )
 }
 
+/// Keep H2 flow control open while stopping the TCP reads long enough to fill
+/// the server's socket. The zero-timeout control must deliver every byte.
+pub fn write_timeout(port: u16, origin: u16, enabled: bool) -> Result<()> {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    socket.set_recv_buffer_size(64 * 1024)?;
+    socket.connect_timeout(&localhost(port).into(), Duration::from_secs(3))?;
+    socket.set_write_timeout(Some(Duration::from_secs(3)))?;
+    let mut wire = Wire::Plain(socket.into());
+    wire.wait(Duration::from_secs(5));
+    wire.write_all(kerlico_vless::HTTP2_PREFACE)?;
+    let window = 16u32 * 1024 * 1024;
+    write_frame(&mut wire, SETTINGS, 0, 0, &[&[0, 4][..], &window.to_be_bytes()].concat())?;
+    write_frame(&mut wire, WINDOW_UPDATE, 0, 0, &(window - 65_535).to_be_bytes())?;
+    let referer = format!("http://{TLS_NAME}/matrix/?x_padding={}", "0".repeat(100));
+    let fields: [(&[u8], &[u8]); 6] = [
+        (b":method", b"POST"), (b":scheme", b"http"), (b":authority", TLS_NAME.as_bytes()),
+        (b":path", b"/matrix/"), (b"content-type", b"application/grpc"), (b"referer", referer.as_bytes()),
+    ];
+    write_frame(&mut wire, HEADERS, 4, 1, &hpack::Encoder::new().encode(fields))?;
+    let mut request = kerlico_vless::encode_request(&kerlico_vless::Request {
+        id: kerlico_vless::parse_id(ID).map_err(|_| "invalid test account")?,
+        flow: String::new(), seed: Vec::new(), command: kerlico_vless::Command::Tcp,
+        port: origin, address: kerlico_vless::Addr::V4(std::net::Ipv4Addr::LOCALHOST),
+    }).map_err(|_| "invalid test VLESS request")?;
+    request.push(0x31);
+    write_frame(&mut wire, DATA, 0, 1, &request)?;
+
+    let mut data = Vec::new();
+    while data.len() < 3 {
+        let frame = read_frame(&mut wire)?;
+        if frame.kind == SETTINGS && frame.flags & ACK == 0 { write_frame(&mut wire, SETTINGS, ACK, 0, &[])?; }
+        if frame.kind == DATA && frame.stream == 1 { data.extend(frame.payload); }
+        if frame.kind == GOAWAY { return Err("GOAWAY before test data".into()); }
+    }
+    if data[..2] != [0, 0] || !data[2..].iter().all(|&b| b == 0x42) {
+        return Err("unexpected VLESS response before the stalled write".into());
+    }
+    let mut received = data.len() - 2;
+    std::thread::sleep(Duration::from_millis(900));
+    loop {
+        match read_frame(&mut wire) {
+            Ok(frame) if frame.kind == DATA && frame.stream == 1 => {
+                if !frame.payload.iter().all(|&b| b == 0x42) { return Err("corrupt stalled-write payload".into()); }
+                received += frame.payload.len();
+                if received == WRITE_PROBE_BYTES {
+                    return if enabled { Err("server drained all data after its write deadline".into()) } else { Ok(()) };
+                }
+            }
+            Ok(frame) if frame.kind == GOAWAY && enabled => return Ok(()),
+            Err(error) if closed(&error) && enabled => return Ok(()),
+            Err(error) => return Err(format!("connection ended after {received} data bytes: {error}").into()),
+            _ => {}
+        }
+    }
+}
+
 /// What a server announces before it has seen any request.
 #[derive(Debug, Default)]
 pub struct Hello {
     pub settings: BTreeMap<u16, u32>,
+    pub settings_order: Vec<u16>,
     pub window: Option<u32>,
 }
 
@@ -131,8 +227,10 @@ pub fn handshake(wire: &mut Wire) -> Result<Hello> {
         match frame.kind {
             SETTINGS if frame.flags & ACK == 0 => {
                 for pair in frame.payload.chunks_exact(6) {
+                    let id = u16::from_be_bytes([pair[0], pair[1]]);
+                    hello.settings_order.push(id);
                     hello.settings.insert(
-                        u16::from_be_bytes([pair[0], pair[1]]),
+                        id,
                         u32::from_be_bytes(pair[2..6].try_into().unwrap()),
                     );
                 }
@@ -148,7 +246,7 @@ pub fn handshake(wire: &mut Wire) -> Result<Hello> {
 }
 
 pub fn expect_limits(hello: &Hello) -> std::result::Result<(), String> {
-    let expected = [(1, 8192), (3, 7), (4, 524_288), (5, 32_768), (6, 8512)];
+    let expected = [(1, 8192), (3, 7), (4, 524_288), (5, 32_768), (6, 8512), (9, 1)];
     for (id, value) in expected {
         if hello.settings.get(&id) != Some(&value) {
             return Err(format!("SETTINGS {id} is {:?}, expected {value}", hello.settings.get(&id)));

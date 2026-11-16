@@ -32,6 +32,7 @@ type options struct {
 	listen, transport, multiplexing, handshake, password string
 	port, mtu, low, sessions                             int
 	timeout                                              time.Duration
+	udpSoak                                              time.Duration
 	tcpTargets, udpTargets                               string
 }
 
@@ -74,11 +75,15 @@ func main() {
 	fs.StringVar(&o.udpTargets, "udp-targets", "", "以逗号分隔的真实 UDP 回显目标")
 	fs.IntVar(&o.sessions, "sessions", 8, "并发 TCP 会话数")
 	fs.DurationVar(&o.timeout, "timeout", 25*time.Second, "操作期限")
+	fs.DurationVar(&o.udpSoak, "udp-soak", 0, "延长同一个 UDP 关联的逐包回显校验")
 	if fs.Parse(os.Args[2:]) != nil || o.port < 1025 || o.port > 65535 || o.mtu < 1280 || o.mtu > 1400 || o.low < 0 || o.low > 4 || o.sessions < 1 || o.timeout <= 0 || net.ParseIP(o.listen) == nil {
 		fail("arguments")
 	}
 	if o.transport != "TCP" && o.transport != "UDP" {
 		fail("transport")
+	}
+	if o.udpSoak < 0 || o.udpSoak >= o.timeout {
+		fail("udp-soak")
 	}
 	var err error
 	switch os.Args[1] {
@@ -316,11 +321,15 @@ func probe(o options) error {
 	if o.udpTargets != "" {
 		udpTargets = strings.Split(o.udpTargets, ",")
 	}
-	if len(tcpTargets) == 0 || len(udpTargets) == 0 {
+	tcpSessions := o.sessions
+	if o.udpSoak > 0 {
+		tcpSessions = 0
+	}
+	if (tcpSessions > 0 && len(tcpTargets) == 0) || len(udpTargets) == 0 {
 		return errors.New("targets")
 	}
-	results := make(chan error, o.sessions)
-	for i := 0; i < o.sessions; i++ {
+	results := make(chan error, tcpSessions)
+	for i := 0; i < tcpSessions; i++ {
 		go func(i int) {
 			a, err := address("tcp", tcpTargets[i%len(tcpTargets)])
 			if err != nil {
@@ -349,7 +358,7 @@ func probe(o options) error {
 			results <- nil
 		}(i)
 	}
-	for i := 0; i < o.sessions; i++ {
+	for i := 0; i < tcpSessions; i++ {
 		if err := <-results; err != nil {
 			return err
 		}
@@ -367,16 +376,19 @@ func probe(o options) error {
 	_ = conn.SetDeadline(deadline)
 	packets := apiCommon.NewUDPAssociateWrapper(apiCommon.NewPacketOverStreamTunnel(conn), apiCommon.UDPAssociateReadFromFQDN{})
 	lengths := []int{0, 1, 1279, 1400, 8192, 32000, 3, 0}
-	for i, length := range lengths {
+	buf := make([]byte, 65535)
+	started := time.Now()
+	i := 0
+	for ; i < len(lengths) || time.Since(started) < o.udpSoak; i++ {
+		length := lengths[i%len(lengths)]
 		a, err := address("udp", udpTargets[i%len(udpTargets)])
 		if err != nil {
 			return errors.New("udp-target")
 		}
-		payload := bytes.Repeat([]byte{byte(i + 1)}, length)
+		payload := bytes.Repeat([]byte{byte(i%255 + 1)}, length)
 		if _, err = packets.WriteTo(payload, a); err != nil {
 			return udpFailure("udp-write", i, length, -1, a.String(), "", nil, err)
 		}
-		buf := make([]byte, 65535)
 		n, from, err := packets.ReadFrom(buf)
 		source := ""
 		if from != nil {
@@ -390,6 +402,7 @@ func probe(o options) error {
 			return udpFailure("udp-source", i, length, n, a.String(), source, buf[:n], splitErr)
 		}
 	}
-	emit(map[string]any{"status": "pass", "tcp_sessions": o.sessions, "udp_packets": len(lengths), "upstream_sha": upstreamSHA})
+	emit(map[string]any{"status": "pass", "tcp_sessions": tcpSessions, "udp_packets": i,
+		"udp_seconds": time.Since(started).Seconds(), "upstream_sha": upstreamSHA})
 	return nil
 }

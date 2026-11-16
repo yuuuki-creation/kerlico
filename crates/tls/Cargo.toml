@@ -1,0 +1,41 @@
+[package]
+name = "kerlico-tls"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+quic = ["dep:bytes", "dep:quinn", "dep:quinn-proto", "dep:ring"]
+
+[dependencies]
+base64 = "0.22"
+boring2 = { package = "rama-boring", version = "=0.7.0" }
+boring-sys = { package = "rama-boring-sys", version = "=0.7.0" }
+brotli = "8"
+bytes = { version = "1", optional = true }
+der = { version = "0.7", features = ["std"] }
+flate2 = "1"
+getrandom = "0.2"
+hkdf = "0.12"
+pkcs8 = { version = "0.10", features = ["std"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
+quinn-proto = { version = "0.11", default-features = false, features = ["rustls-ring"], optional = true }
+ring = { version = "0.17", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+sha3 = "0.10"
+url = "2"
+webpki-roots = "1"
+x509-cert = { version = "0.2.5", features = ["std"] }
+x509-ocsp = { version = "0.2.1", features = ["std"] }
+zstd = "0.13"
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }
+rcgen = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }

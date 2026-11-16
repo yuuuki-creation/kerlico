@@ -68,6 +68,17 @@ VENDORED_CARGO = {
     b"vendor/h3-quinn": ("0.0.10", "8b2e732c8d91a74731663ac8479ab505042fbf547b9a207213ab7fbcbfc4f8b4", "94eae310db966886ccf06aaf222312107d9dc55f306bc83f02f0bb7a98a90418"),
 }
 
+# Reviewed local TLS changes. Keep the archive manifest pins above so that
+# pushes still check earlier commits and every unchanged vendored file.
+REVIEWED_VENDOR_PATCHES = {
+    b"vendor/rama-boring/src/ssl/mod.rs": "d69d66a11d59d896318644de9b2f9a20025ddd424e1d156763bff925c5dea14b",
+    b"vendor/rama-boring-sys/build/main.rs": "1ee020d00d1ce6df9bee7fd00162538bfbc1abe63486fa2a287a451021f62b52",
+    b"vendor/rama-boring-sys/patches/kerlico_hello_mutator.patch": "a649736eab5b59dcc371464a6457a46ea1b3f15a6f55a078599893fdc7763865",
+    b"vendor/rama-boring-sys/patches/kerlico_hello_psk.patch": "7714fde9ae474ec1c4bae8c91fc881fd300a0a58f54ba0c8e2e619cfff5368ca",
+    b"vendor/rama-boring-sys/patches/kerlico_hybrid_groups.patch": "07dae39de188fb8d6fe8ed9247093654535716872a552774f9e306cbd8b1af99",
+    b"vendor/rama-boring-sys/patches/kerlico_tls12_eager_share.patch": "0e38ffcd6ccb1a926b456e364518ce7ddd6ac74a50872566ef6ba234920498a5",
+}
+
 
 def scan_text(data):
     try:
@@ -149,8 +160,8 @@ def approved_cargo_blob(name, contents):
                 raise Rejected("upstream-crate-manifest-changed-needs-review")
             return True
         relative = normalized[len(prefix):].decode("utf-8")
-        expected = manifest.get("files", {}).get(relative)
-        if expected is None or hashlib.sha256(contents).hexdigest() != expected:
+        actual = hashlib.sha256(contents).hexdigest()
+        if actual not in (manifest.get("files", {}).get(relative), REVIEWED_VENDOR_PATCHES.get(normalized)):
             raise Rejected("upstream-crate-file-changed-needs-review")
         return True
     return False

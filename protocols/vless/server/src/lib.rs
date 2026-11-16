@@ -32,7 +32,7 @@ struct RealityConfig {
 /// What an authenticated connection gets once the target has been asked, as in xtls/reality.
 enum Flight {
     /// The flight to send, and the connection to the target that is held until the handshake ends.
-    Accepted(Box<kerlico_vless::ServerHello>, Option<kerlico_shared::runtime::NetworkConnection>),
+    Accepted(Box<kerlico_vless::ServerHello>, Option<TargetWatch>),
     /// The target's answer was not a usable ServerHello. The bytes read so far go to the client,
     /// then both directions are relayed to the target.
     Forward { target: kerlico_shared::runtime::NetworkConnection, captured: Vec<u8> },
@@ -52,7 +52,7 @@ impl RealityConfig {
         let Some(target) = self.target.as_ref().filter(|target| target.network.is_some()) else { return synthetic() };
         match target.probe(record, head, Instant::now() + REALITY_PROBE_TIMEOUT) {
             Answer::Shape(shape, held) => match kerlico_vless::server_flight_with_target(record, &self.private, &self.policy, &self.alpn, self.proof.as_ref(), &shape) {
-                Ok(accepted) => Flight::Accepted(Box::new(accepted), Some(held)),
+                Ok(accepted) => Flight::Accepted(Box::new(accepted), Some(TargetWatch::new(held, shape.remaining_flight()))),
                 Err(_) => Flight::Close,
             },
             Answer::Forward { target, captured } => Flight::Forward { target, captured },
@@ -136,14 +136,14 @@ fn system_roots() -> Option<&'static kerlico_vless::RealityDecoyVerifier> {
 }
 
 impl DetectSlot {
-    fn peek(&self) -> Detected {
-        self.state.lock().expect("REALITY detection").clone()
-    }
-
-    /// Waits for the probe of the records, as Xray's first handshakes do, for at most `limit`.
+    /// Waits for the post-handshake records probe. Xray reads the probed CCS limit only
+    /// after entering this wait; later connections keep the TLS default.
     fn wait(&self, limit: Duration) -> Detected {
         let end = Instant::now() + limit;
         let mut state = self.state.lock().expect("REALITY detection");
+        if state.lengths.is_some() {
+            return Detected { lengths: state.lengths.clone(), max_useless: None };
+        }
         while state.lengths.is_none() {
             let left = end.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -206,14 +206,12 @@ impl RealityTarget {
         }
     }
 
-    /// What was learned for `name` and `alpn`. With `wait`, a probe still running is awaited.
-    /// A name that no probe covers yet gets its probes now.
-    fn detected(&self, name: &str, alpn: kerlico_vless::RealityAlpn, wait: bool) -> Detected {
+    /// What was learned for `name` and `alpn`. A name that no probe covers yet gets its probes now.
+    fn detected(&self, name: &str, alpn: kerlico_vless::RealityAlpn) -> Detected {
         if self.network.is_none() {
             return Detected::default();
         }
-        let slot = self.detect_slot(name, alpn);
-        if wait { slot.wait(REALITY_DETECT_WAIT) } else { slot.peek() }
+        self.detect_slot(name, alpn).wait(REALITY_DETECT_WAIT)
     }
 
     fn detect_slot(&self, name: &str, alpn: kerlico_vless::RealityAlpn) -> Arc<DetectSlot> {
@@ -462,10 +460,97 @@ fn pump(from: &mut impl Read, to: &mut impl Write, last: &Mutex<Instant>, idle: 
 }
 
 struct RealityApp {
-    read: AppReader<Box<Link>>,
-    write: AppWriter<Box<Link>>,
+    read: RealityRead,
+    write: RealityWrite,
     name: String,
     alpn: String,
+}
+
+struct RealityRead {
+    wire: AppReader<Box<Link>>,
+    writer: RealityWrite,
+}
+
+impl Read for RealityRead {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let result = self.wire.read(bytes);
+        if result.as_ref().is_err_and(kerlico_vless::is_too_many_useless_records) {
+            let _ = self.writer.0.lock().expect("REALITY writer")
+                .send_fatal_alert(kerlico_vless::ALERT_UNEXPECTED_MESSAGE);
+        }
+        result
+    }
+}
+
+#[derive(Clone)]
+struct RealityWrite(Arc<Mutex<AppWriter<Box<Link>>>>);
+
+impl Write for RealityWrite {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().expect("REALITY writer").write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.lock().expect("REALITY writer").flush()
+    }
+}
+
+/// Inspect the target between waits for the client's Finished. Go waits for any
+/// extra target record or its EOF; after an extra record arrives it stops watching.
+struct TargetWatch {
+    connection: kerlico_shared::runtime::NetworkConnection,
+    remaining: usize,
+    watching: bool,
+}
+
+impl TargetWatch {
+    fn new(connection: kerlico_shared::runtime::NetworkConnection, remaining: usize) -> Self {
+        let watching = connection.set_nonblocking(true).is_ok();
+        Self { connection, remaining, watching }
+    }
+
+    fn check(&mut self) -> io::Result<()> {
+        if !self.watching {
+            return Ok(());
+        }
+        let mut bytes = [0u8; 1024];
+        loop {
+            let limit = if self.remaining == 0 { 1 } else { self.remaining.min(bytes.len()) };
+            match self.connection.read(&mut bytes[..limit]) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "REALITY target closed before Finished")),
+                Ok(_) if self.remaining == 0 => {
+                    self.watching = false;
+                    return Ok(());
+                }
+                Ok(count) => self.remaining -= count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if reality_would_block(&error) => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+struct FinishRead<'a> {
+    client: &'a mut Link,
+    watch: &'a mut TargetWatch,
+    deadline: Instant,
+}
+
+impl Read for FinishRead<'_> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        loop {
+            self.watch.check()?;
+            match self.client.read(out) {
+                Err(error) if reality_would_block(&error) && Instant::now() < self.deadline => {}
+                result => return result,
+            }
+        }
+    }
+}
+
+fn reality_would_block(error: &io::Error) -> bool {
+    matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
 /// Finishes an authenticated REALITY handshake. `Err` carries the fallback
@@ -485,7 +570,7 @@ fn accept_reality(mut read: Link, mut write: Link, config: &RealityConfig, fallb
     let head = config.target.as_ref().map(|target| target.head(peer, local, &wire)).unwrap_or_default();
     let class = kerlico_vless::RealityAlpn::of_first_offer(&alpn);
     // Xray keeps its connection to the target open until the handshake is over.
-    let (accepted, _held) = match config.flight(&record, &head) {
+    let (accepted, mut held) = match config.flight(&record, &head) {
         Flight::Accepted(accepted, held) => (accepted, held),
         Flight::Forward { target: connection, captured } => {
             if let (Some(target), Ok(())) = (&config.target, write.write_all(&captured)) {
@@ -498,12 +583,22 @@ fn accept_reality(mut read: Link, mut write: Link, config: &RealityConfig, fallb
     };
     let (client_app, server_app) = accepted.application_keys();
     let mut sequence = accepted.server_sequence();
-    // Until the target's probe has an answer, a ChangeCipherSpec flood meets Xray's own limit.
-    let tolerated = config.target.as_ref().and_then(|target| target.detected(&name, class, false).max_useless);
     if write.write_all(&accepted.flight).is_err() {
         return Err(None);
     }
-    if let Err(error) = kerlico_vless::read_client_finished_limited(&mut read, &accepted.handshake, &accepted.expect, tolerated.unwrap_or(kerlico_vless::DEFAULT_MAX_USELESS_RECORDS)) {
+    let finish = |mut read: &mut dyn Read| kerlico_vless::read_client_finished_limited(
+        &mut read, &accepted.handshake, &accepted.expect, kerlico_vless::DEFAULT_MAX_USELESS_RECORDS,
+    ).map(|_| ());
+    let result = if let Some(watch) = held.as_mut().filter(|watch| watch.watching) {
+        read.set_timeout(Duration::from_millis(50));
+        let result = finish(&mut FinishRead { client: &mut read, watch, deadline: Instant::now() + REALITY_PROBE_TIMEOUT })
+            .and_then(|()| watch.check());
+        read.set_timeout(REALITY_PROBE_TIMEOUT);
+        result
+    } else {
+        finish(&mut read)
+    };
+    if let Err(error) = result {
         // Xray's record layer answers a bad record with a fatal alert, sealed with the server's application key.
         if let Some(description) = kerlico_vless::alert_for(&error) {
             let _ = write.write_all(&kerlico_vless::alert_record(&server_app, sequence, description));
@@ -511,7 +606,7 @@ fn accept_reality(mut read: Link, mut write: Link, config: &RealityConfig, fallb
         return Err(None);
     }
     // Xray answers a finished handshake with records as long as the ones the target sends there.
-    let detected = config.target.as_ref().map(|target| target.detected(&name, class, true)).unwrap_or_default();
+    let detected = config.target.as_ref().map(|target| target.detected(&name, class)).unwrap_or_default();
     let (records, next) = kerlico_vless::post_handshake_records(&server_app, sequence, detected.lengths.as_deref().unwrap_or_default());
     if write.write_all(&records).is_err() {
         return Err(None);
@@ -519,8 +614,10 @@ fn accept_reality(mut read: Link, mut write: Link, config: &RealityConfig, fallb
     sequence = next;
     let alpn = String::from_utf8_lossy(accepted.alpn().unwrap_or_default()).into_owned();
     let mut reader = reality_reader(Box::new(read), client_app);
-    reader.set_max_useless(detected.max_useless.unwrap_or(kerlico_vless::DEFAULT_MAX_USELESS_RECORDS));
-    Ok(RealityApp { read: reader, write: reality_writer_at(Box::new(write), server_app, sequence), name, alpn })
+    reader.set_max_useless(detected.max_useless.filter(|&limit| limit != 0)
+        .unwrap_or(kerlico_vless::DEFAULT_MAX_USELESS_RECORDS));
+    let writer = RealityWrite(Arc::new(Mutex::new(reality_writer_at(Box::new(write), server_app, sequence))));
+    Ok(RealityApp { read: RealityRead { wire: reader, writer: writer.clone() }, write: writer, name, alpn })
 }
 
 struct Recorded<'a, R> {
@@ -976,13 +1073,12 @@ fn listen_xhttp(
     } else {
         // Go's HTTP/1 limit becomes a header-list size with 32 bytes of overhead for ten typical fields.
         let header_list = config.max_header_bytes() as u32 + 320;
-        match config.h2_params() {
-            "" => H2Serve { limits: kerlico_vless::H2Limits { header_list: Some(header_list), ..Default::default() }, permit_prohibited_ciphers: false },
-            text => {
-                let params = kerlico_vless::H2Params::parse(text).map_err(|_| OpenError::Settings)?;
-                H2Serve { limits: params.limits(header_list), permit_prohibited_ciphers: params.permit_prohibited_ciphers }
-            }
-        }
+        let params = if config.h2_params().is_empty() {
+            kerlico_vless::H2Params::default()
+        } else {
+            kerlico_vless::H2Params::parse(config.h2_params()).map_err(|_| OpenError::Settings)?
+        };
+        H2Serve { limits: params.limits(header_list), permit_prohibited_ciphers: params.permit_prohibited_ciphers }
     };
     let shared = Arc::new(XhttpListener {
         accounts: accounts.clone(),
@@ -1090,7 +1186,9 @@ fn xhttp_connection(
                 timers.set_write_timeout(Some(timeout))?;
             }
             let (read, write) = socket.split()?;
-            let conn = kerlico_vless::H2Conn::serve_with_limits(read, write, limits)?;
+            let conn = kerlico_vless::H2Conn::serve_with_limits(read, write, limits, move || {
+                let _ = timers.shutdown(std::net::Shutdown::Both);
+            })?;
             loop {
                 match conn.accept() {
                     Ok(stream) => {
@@ -1154,7 +1252,7 @@ fn tcp_pair(socket: TcpStream, masks: &kerlico_vless::finalmask::FinalMask, peer
     } else { Ok((Link::Tcp(socket.try_clone()?), Link::Tcp(socket))) }
 }
 
-type RealityLink = RealityDuplex<AppReader<Box<Link>>, AppWriter<Box<Link>>>;
+type RealityLink = RealityDuplex<RealityRead, RealityWrite>;
 
 fn open_reality(read: Link, write: Link, config: &RealityConfig, ready: &Sender<Ready>, peer: SocketAddr, local: Option<SocketAddr>) -> Option<RealityLink> {
     match accept_reality(read, write, config, &FallbackSet::empty(), peer, local) {
@@ -1912,8 +2010,8 @@ enum Link {
     Mux(Arc<MuxLane>),
     EncRead(Box<EncReader<Box<Link>>>),
     EncWrite(Box<EncWriter<Box<Link>>>),
-    RealityRead(AppReader<Box<Link>>),
-    RealityWrite(AppWriter<Box<Link>>),
+    RealityRead(RealityRead),
+    RealityWrite(RealityWrite),
     H2(Arc<HttpStream>),
     Vision(Box<kerlico_vless::VisionIo<Link>>),
     Duplex(Box<Link>, Box<Link>),
@@ -2056,8 +2154,8 @@ impl Link {
             Self::Mux(_) => {}
             Self::EncRead(enc) => enc.inner_mut().set_timeout(timeout),
             Self::EncWrite(enc) => enc.inner_mut().set_timeout(timeout),
-            Self::RealityRead(link) => link.inner_mut().set_timeout(timeout),
-            Self::RealityWrite(link) => link.inner_mut().set_timeout(timeout),
+            Self::RealityRead(link) => link.wire.inner_mut().set_timeout(timeout),
+            Self::RealityWrite(link) => link.0.lock().expect("REALITY writer").inner_mut().set_timeout(timeout),
             Self::H2(_) => {}
             Self::Vision(link) => link.inner_mut().set_timeout(timeout),
             Self::Duplex(read, write) => { read.set_timeout(timeout); write.set_timeout(timeout); },
@@ -2216,7 +2314,7 @@ impl kerlico_vless::VisionTransport for Link {
         match self {
             Self::TlsRead(tls) => tls.start_direct(),
             Self::EncRead(enc) => enc.start_direct(),
-            Self::RealityRead(reality) => reality.start_direct(),
+            Self::RealityRead(reality) => reality.wire.start_direct(),
             Self::Prefix(inner, _) => inner.read_direct(),
             _ => Err(std::io::Error::other("Vision requires a security record layer")),
         }
@@ -2225,7 +2323,7 @@ impl kerlico_vless::VisionTransport for Link {
         match self {
             Self::TlsWrite(tls) => tls.start_direct(),
             Self::EncWrite(enc) => enc.start_direct(),
-            Self::RealityWrite(reality) => reality.start_direct(),
+            Self::RealityWrite(reality) => reality.0.lock().expect("REALITY writer").start_direct(),
             Self::Response(inner, _) => inner.write_direct(),
             _ => Err(std::io::Error::other("Vision requires a security record layer")),
         }
@@ -3660,6 +3758,9 @@ mod tests {
         let xray = std::env::var("XRAY").expect("XRAY is required");
         let origin = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin_port = origin.local_addr().unwrap().port();
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let udp_port = udp.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let got = Arc::clone(&seen);
         thread::spawn(move || {
@@ -3690,7 +3791,7 @@ mod tests {
         fs::write(
             &config,
             format!(
-                r#"{{"log":{{"loglevel":"warning"}},"outbounds":[{{"protocol":"freedom","tag":"direct","settings":{{"finalRules":[{{"action":"allow","network":"tcp","ip":["127.0.0.1/32"],"port":"{origin_port}"}}]}}}},{{"protocol":"vless","tag":"proxy","settings":{{"address":"127.0.0.1","port":{port},"id":"5783a3e7-e373-51cd-8642-c83782b807c5","encryption":"none","reverse":{{"tag":"bridge"}}}}}}],"routing":{{"rules":[{{"type":"field","inboundTag":["bridge"],"outboundTag":"direct"}}]}}}}"#
+                r#"{{"log":{{"loglevel":"warning"}},"outbounds":[{{"protocol":"freedom","tag":"direct","settings":{{"finalRules":[{{"action":"allow","network":"tcp","ip":["127.0.0.1/32"],"port":"{origin_port}"}},{{"action":"allow","network":"udp","ip":["127.0.0.1/32"],"port":"{udp_port}"}}]}}}},{{"protocol":"vless","tag":"proxy","settings":{{"address":"127.0.0.1","port":{port},"id":"5783a3e7-e373-51cd-8642-c83782b807c5","encryption":"none","reverse":{{"tag":"bridge"}}}}}}],"routing":{{"rules":[{{"type":"field","inboundTag":["bridge"],"outboundTag":"direct"}}]}}}}"#
             ),
         )
         .unwrap();
@@ -3722,12 +3823,31 @@ mod tests {
                 result => break result,
             }
         };
+        let oversized = (|| -> Result<(), String> {
+            let first = vec![0xfa; 8193];
+            assert!(!kerlico_vless::UdpFraming::Mux.carries(&first));
+            let lane = open_reverse("bridge", "127.0.0.1", udp_port, false, &first).map_err(|e| format!("open UDP lane: {e:?}"))?;
+            lane.write_to_user(b"second datagram").map_err(|e| format!("write UDP lane: {e:?}"))?;
+            let mut bytes = vec![0; 16 * 1024];
+            let (n, peer) = udp.recv_from(&mut bytes).map_err(|e| format!("receive next datagram: {e}"))?;
+            if &bytes[..n] != b"second datagram" { return Err(format!("the origin got {n} bytes instead of the second datagram")); }
+            udp.send_to(b"udp reply", peer).map_err(|e| format!("send UDP reply: {e}"))?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(4);
+            loop {
+                match lane.read_from_user(&mut bytes) {
+                    Ok(n) if &bytes[..n] == b"udp reply" => return Ok(()),
+                    Err(PlaneFault::Again) if std::time::Instant::now() < deadline => continue,
+                    other => return Err(format!("UDP reply did not arrive: {other:?}")),
+                }
+            }
+        })();
         let _ = child.kill();
         let _ = child.wait();
         let _ = fs::remove_file(config);
         assert_eq!(body, b"ping");
         assert_eq!(received, Ok(4));
         assert_eq!(&reply, b"pong");
+        oversized.expect("oversized first Portal datagram");
     }
 
     #[test]
@@ -5494,6 +5614,30 @@ mod tests {
         assert!(matches!(target.probe(&record, &record, started + Duration::from_secs(1)), Answer::Close), "a target that never finishes its flight ends the connection");
         let elapsed = started.elapsed();
         assert!(elapsed < Duration::from_millis(1600), "a target answering one byte at a time held the probe for {elapsed:?}");
+    }
+
+    #[test]
+    fn reality_watches_the_target_until_one_byte_after_its_flight() {
+        use kerlico_shared::runtime::NetworkConnection;
+
+        for (extra, closes) in [(&b"part"[..], true), (&b"part!"[..], false)] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let target = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut other, _) = listener.accept().unwrap();
+            other.write_all(extra).unwrap();
+            other.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut watch = TargetWatch::new(NetworkConnection::Tcp(target), 4);
+            let until = Instant::now() + Duration::from_secs(1);
+            loop {
+                let result = watch.check();
+                if result.is_err() || !watch.watching {
+                    assert_eq!(result.is_err(), closes);
+                    break;
+                }
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
     }
 
     #[test]
