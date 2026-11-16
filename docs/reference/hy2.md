@@ -10,7 +10,7 @@ UDP 分片按会话和包号区分。每片的地址和总片数必须一致；�
 
 服务端按普通节点配置，`protocol` 写 `hy2`，账号用 `users: [{"email":"用户标识","password":"凭据"}]`。证书与私钥用 `certificate` / `privateKey` 或 `certificateFile` / `privateKeyFile`；也可以通过 `tls.certificates` 配置。`udp` 默认为 `true`。`udpIdleTimeout` 为秒数，默认 60。`masquerade` 可配置 `string`、`file` 或 `proxy`；默认 HTTP/3 404。代理源站连接由服务端出站模块打开。
 
-两端可以设置 `sendRate`、`receiveRate`（字节每秒）。服务端的 `receiveRate: "auto"` 要求两端使用常规拥塞控制。`quicParams` 复用 QUIC 窗口、控制器、Chrome 指纹和 MTU 选项。`obfs` 可写 `{"type":"salamander","password":"..."}` 或 `{"type":"gecko","password":"..."}`；Gecko 另接受 `minPacketSize` 和 `maxPacketSize`，默认为 512 和 1200。客户端可用 `hopPorts` 指定一个逗号分隔的端口列表或范围，`hopInterval` 写秒数或 `最小-最大`，默认 30 秒。服务器或外层网络需要让这些端口转发到同一个 Hy2 监听套接字。
+两端可以设置 `sendRate`、`receiveRate`（字节每秒）。服务端的 `receiveRate: "auto"` 要求两端使用常规拥塞控制。`quicParams` 复用 QUIC 窗口、控制器、Chrome 指纹和 MTU 选项。Hy2 从 QUIC 的 1200 字节 UDP 载荷起步，再按路径探测放大，避免低 MTU 隧道丢掉握手包。`obfs` 可写 `{"type":"salamander","password":"..."}` 或 `{"type":"gecko","password":"..."}`；Gecko 另接受 `minPacketSize` 和 `maxPacketSize`，默认为 512 和 1200。客户端可用 `hopPorts` 指定一个逗号分隔的端口列表或范围，`hopInterval` 写秒数或 `最小-最大`，默认 30 秒。服务器或外层网络需要让这些端口转发到同一个 Hy2 监听套接字。
 
 Linux worker 上用 `tools/verify_hy2.py` 运行官方自对照、两个互通方向、落地和协议选项。已通过 13 组验收，覆盖 SOCKS5 和 HTTP CONNECT、TCP/UDP、两个 UDP 目标、UDP 分片、错误密码、TCP 拒绝、UDP 禁用、Salamander、Gecko、配置的 Brutal 速率、TCP 半关闭、通过域名连到只听 IPv6 的官方服务端，以及保留原 TCP 流的本地和远端端口跳跃。
 

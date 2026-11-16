@@ -136,10 +136,12 @@ impl QuicOptions {
 
     pub fn hy2_transport(&self, client: bool) -> io::Result<Arc<TransportConfig>> {
         let mut config = self.transport(QuicCarrier::Hysteria, client, 0)?;
+        let config_mut = Arc::get_mut(&mut config).expect("new QUIC transport");
+        // Start at QUIC's minimum UDP payload. IP and UDP headers leave only
+        // 1232 bytes on an IPv6 path at its minimum link MTU.
+        config_mut.initial_mtu(1200);
         if client && self.raw.keep_alive_period == 0 {
-            Arc::get_mut(&mut config)
-                .expect("new QUIC transport")
-                .keep_alive_interval(Some(Duration::from_secs(10)));
+            config_mut.keep_alive_interval(Some(Duration::from_secs(10)));
         }
         Ok(config)
     }
