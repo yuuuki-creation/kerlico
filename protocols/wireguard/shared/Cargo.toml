@@ -2,3 +2,7 @@
 name = "kerlico-wireguard"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+ipnet = "2"
+kerlico-wg = { path = "../../../crates/wg" }

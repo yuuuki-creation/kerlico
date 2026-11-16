@@ -109,13 +109,19 @@ impl Accept for AnyTlsInbound {
             let Ok(destination) = Destination::new(opened.target.host.clone(), opened.target.port, transport) else {
                 continue;
             };
-            let stream: Box<dyn InboundStream> = match opened.flow {
-                Flow::Tcp(stream) => Box::new(TcpFlow(stream)),
-                Flow::Udp(leg) => Box::new(UdpFlow(leg)),
+            let (stream, group): (Box<dyn InboundStream>, _) = match opened.flow {
+                Flow::Tcp(stream) => (Box::new(TcpFlow(stream)), None),
+                Flow::Udp(leg) => {
+                    let group = leg.datagram_session().cloned();
+                    (Box::new(UdpFlow(leg)), group)
+                }
             };
             let mut handoff = Handoff::new(self.tag.clone(), email, destination, stream);
             if transport == Transport::Udp {
                 handoff.set_peer(opened.peer);
+            }
+            if let Some(group) = group {
+                handoff.set_datagram_session(group);
             }
             return Ok(handoff);
         }
@@ -182,6 +188,11 @@ impl InboundStream for UdpFlow {
 
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
         self.0.send(buf).map_err(map_io)?;
+        Ok(buf.len())
+    }
+
+    fn write_datagram_to_user(&self, buf: &[u8], source: SocketAddr) -> Result<usize, PlaneFault> {
+        self.0.send_from(source, buf).map_err(map_io)?;
         Ok(buf.len())
     }
 }

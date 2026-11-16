@@ -8,18 +8,18 @@
 
 一个 `Server` 持有多个入站节点、一个 `Outbound`、一份 `Stats`、一个 DNS 模块和至多一条落地。
 
-创建节点用 `listen_node`。必须带一个 `ListenAddr`。这个类型只有 `V4` 和 `V6`。一个节点不能同时听两族。要两族都听，就建两个节点。v6 监听在打开套接字时设置 `IPV6_V6ONLY`。mieru 的监听已经这样做。WireGuard 和 OpenVPN 的 `listen` 仍是 `unimplemented!`。`ListenAddr::v6` 会拒绝 IPv4-mapped 地址，也会拒绝端口 0。
+创建节点用 `listen_node`。必须带一个 `ListenAddr`。这个类型只有 `V4` 和 `V6`。一个节点不能同时听两族。要两族都听，就建两个节点。v6 监听在打开套接字时设置 `IPV6_V6ONLY`。OpenVPN 的 `listen` 仍是 `unimplemented!`。`ListenAddr::v6` 会拒绝 IPv4-mapped 地址，也会拒绝端口 0。
 
 节点同时带一个 `OutboundChoice`。
 
 - `Manual(Exit)` 是创建时写明的一种出口。
 - `Default` 是出站留空。
 
-协议 crate 实现 `Accept`。它负责 `add_user`、`remove_user` 和 `accept`。`accept` 交出 `Handoff`。`Handoff` 带着节点、用户、目标和明文流。目标里的主机名用来做域名匹配。协议 crate 不拨号，也不选择 `Exit`。WireGuard 和 OpenVPN 的这些函数体仍是 `unimplemented!`。mieru 的每个会话交出一个 `Handoff`。传输、多路复用和 SOCKS5 的范围在 `docs/reference/mieru.md`。
+协议 crate 实现 `Accept`。它负责 `add_user`、`remove_user` 和 `accept`。`accept` 交出 `Handoff`，包含节点、用户、目标和交给出站的字节流。目标里的主机名用来做域名匹配。协议 crate 不拨号，也不选择 `Exit`。OpenVPN 的这些函数体仍是 `unimplemented!`。[WireGuard](wireguard.md) 从认证后的 IP 包建立 TCP/UDP 流。[SS2022](ss2022.md) 终止入站时交出明文；透明中继时交出下一跳地址和仍然加密的字节流。入站可在多个 UDP 目标的 `Handoff` 中标记同一个会话，让原生出站复用本地套接字，或让支持共享 UDP 关联的落地复用关联。规则仍逐目标选择出口。
 
 报文类入站把一条流收成同一个 `Handoff`。目标一开始是 IP。嗅探或 FakeDNS 可以再补上主机名。
 
-[Hy2](hy2.md) 每条 TCP 流和每个有目标的 UDP 会话各交出一个 `Handoff`。需要向客户端报告连接结果的入站用 `InboundStream::report_connect`。出站在目标拨号完成后、开始复制载荷前调用；分流或 DNS 无法得到拨号目标时也报告失败。支持 TCP 半关闭的流可以保留另一方向继续传输。握手目标如果已经打开（如 ShadowTLS v2/v3 或 RestLS 回落），运行时让出站在原套接字上接续复制，不重新拨号。
+[Hy2](hy2.md) 每条 TCP 流和每个 UDP 会话内的各目标各交出一个 `Handoff`。同一 UDP 会话的 `Handoff` 都带同一个会话标记。需要向客户端报告连接结果的入站用 `InboundStream::report_connect`。出站在目标拨号完成后、开始复制载荷前调用；分流或 DNS 无法得到拨号目标时也报告失败。支持 TCP 半关闭的流可以保留另一方向继续传输。握手目标如果已经打开（如 ShadowTLS v2/v3 或 RestLS 回落），运行时让出站在原套接字上接续复制，不重新拨号。
 
 节点另有一份有序的分流规则。规则只属于这个节点。没命中时使用节点自己的 `OutboundChoice`。
 
@@ -123,7 +123,7 @@ DNS 是服务端的一个模块。协议 crate 不解析域名。
 
 出口已经是 `Landing` 时，本地不再解析，把原来的主机名交给远端。`Default` 以及手动指定的原生或 WARP，在目标仍是域名时解析一次。
 
-`hosts` 先于上游做精确匹配。上游可以是 UDP 或 TCP。查询按那一台服务器的 `OutboundChoice` 选出出口，再由出站模块拨一次。落地还不能承载这次查询。
+`hosts` 先于上游做精确匹配。上游可以是 UDP 或 TCP。查询按那一台服务器的 `OutboundChoice` 选出出口，再由出站模块拨一次。配置为 `landing` 时，查询发往配置里的数字地址；UDP 回答被截断时按同一出口用 TCP 重查。
 
 `dns` 可以写 `listen`。写了之后，进程在这个地址上同时听 UDP 和 TCP，回答客户端的查询。没写 `port` 时用 53。端口 0 拒绝。v6 套接字打开 `IPV6_V6ONLY`。只回答第一个问题，而且只回答 A 和 AAAA。FakeDNS 打开时，这两个类型从假地址池取，同一个名字一直对应同一个地址。FakeDNS 关闭时，回答走 `hosts` 和上游。
 
@@ -139,7 +139,7 @@ AnyTLS 落地启用 ECH 的 DNS 发现时，由服务端 DNS 模块查询 HTTPS 
 
 没有配置落地时，`Manual(Landing)` 使这条流失败。
 
-整条流交给远端，目标保持原样。远端自己解析域名。本地的 DNS 模块不参与这次拨号。
+整条流交给落地实现，目标保持原样。有域名目标能力的远端自己解析；WireGuard 只能发送 IP 包，因此它用服务端 DNS 把目标转换为 IP。
 
 配置里的 `landing` 会装到出站模块。协议必须是这次构建用 `landing-<id>` 编进来的客户端协议。出站模块调用那个 crate 的 `land`，再把用户和远端之间的字节复制完。没有这段配置时，`Manual(Landing)` 使这条流失败。目录规则在 `docs/reference/crates.md`。
 
@@ -171,7 +171,7 @@ TCP 复制在 300 秒没有字节时结束。UDP 会话的键包含 `Handoff` �
 
 用户挂在一个节点上。稳定的键是 `UserEmail`。空字符串、空白和 `>` 不能做邮箱或节点名。同一个邮箱可以出现在两个节点上，计数按邮箱合并。`remove_user` 只从那个节点去掉用户，不把计数清零。
 
-账号的协议字段放在 `Settings` 里，由那个协议的 `add_user` 解释。叶子不解析 UUID 或密码。节点 `settings` 和用户对象里，除 `users` 与 `email` 以外的字符串、数字和布尔值都原样进入 `Settings`；数组和对象序列化为 JSON 后交给协议解释，`null` 拒绝。这条规则是 `Settings::insert_json`，落地设置和客户端文档也用它。`add_user` 和 `remove_user` 在 `Server` 上会找到节点并转给入站。mieru 的 `add_user` 读取 `username` 和 `password`。vless 的 `add_user` 读取 `id`、`flow` 和可选 `reverse`，详细组合与反向 API 见 `docs/reference/vless.md`。[AnyTLS](anytls.md#服务端) 的 `add_user` 只读取 `password`。WireGuard 和 OpenVPN 的函数体仍是 `unimplemented!`。
+账号的协议字段放在 `Settings` 里，由那个协议的 `add_user` 解释。叶子不解析 UUID 或密码。节点 `settings` 和用户对象里，除 `users` 与 `email` 以外的字符串、数字和布尔值都原样进入 `Settings`；数组和对象序列化为 JSON 后交给协议解释，`null` 拒绝。这条规则是 `Settings::insert_json`，落地设置和客户端文档也用它。`add_user` 和 `remove_user` 在 `Server` 上会找到节点并转给入站。各协议的字段见 [mieru](mieru.md)、[VLESS](vless.md)、[AnyTLS](anytls.md)、[SS2022](ss2022.md) 和 [WireGuard](wireguard.md)。OpenVPN 的函数体仍是 `unimplemented!`。
 
 计数的名字是这些形式。
 

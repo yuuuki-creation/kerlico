@@ -9,7 +9,7 @@ pub mod runtime;
 mod egress;
 mod proxy;
 pub use egress::{Exit, OutboundChoice};
-pub use proxy::{Association, ClientEntry, ProxyFn, Stream, TunnelFn, Upstream};
+pub use proxy::{Association, ClientEntry, ProxyFn, Stream, TunFn, TunnelFn, Upstream};
 
 /// Grammar-checked protocol id.
 /// The text is one or more `[a-z0-9]+` segments separated by single hyphens.
@@ -100,10 +100,31 @@ pub enum ListenAddr {
 pub struct AddrError;
 
 impl PeerAddr {
-    /// `host:port`, `ipv4:port` or `[ipv6]:port`. An IPv6 host is kept without brackets.
+    pub fn from_host_port(host: String, port: u16) -> Result<Self, AddrError> {
+        if host.contains(':') && !host.starts_with('[') {
+            return Self::parse(&format!("[{host}]:{port}"));
+        }
+        Self::parse(&format!("{host}:{port}"))
+    }
+
+    /// `host:port`, `ipv4:port` or `[ipv6%scope]:port`. The scope is kept for the protocol.
     pub fn parse(text: &str) -> Result<Self, AddrError> {
         let (host, port) = match text.parse::<SocketAddr>() {
+            Ok(SocketAddr::V6(addr)) if addr.scope_id() != 0 => {
+                (format!("{}%{}", addr.ip(), addr.scope_id()), addr.port())
+            }
             Ok(address) => (address.ip().to_string(), address.port()),
+            Err(_) if text.starts_with('[') => {
+                let (host, port) = text[1..].split_once("]:").ok_or(AddrError)?;
+                let (ip, scope) = host.split_once('%').ok_or(AddrError)?;
+                let ip: std::net::Ipv6Addr = ip.parse().map_err(|_| AddrError)?;
+                if scope.is_empty() || scope.contains(['[', ']', ':', '%'])
+                    || scope.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+                {
+                    return Err(AddrError);
+                }
+                (format!("{ip}%{scope}"), port.parse().map_err(|_| AddrError)?)
+            }
             Err(_) => {
                 let (host, port) = text.rsplit_once(':').ok_or(AddrError)?;
                 if host.is_empty() || host.contains([':', '[', ']']) {
@@ -176,15 +197,27 @@ pub struct Packet {
 pub struct PacketError;
 
 impl Packet {
-    /// Rejects an empty buffer and a version nibble other than 4 or 6.
+    /// Takes one complete IPv4 or IPv6 packet, without link-layer padding.
     pub fn from_ip_packet(bytes: Vec<u8>) -> Result<Self, PacketError> {
-        let _ = bytes;
-        unimplemented!("ip packet check")
+        let length = match bytes.first().map(|tag| tag >> 4) {
+            Some(4) if bytes.len() >= 20 => {
+                let header = usize::from(bytes[0] & 15) * 4;
+                let length = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
+                if header < 20 || header > length { return Err(PacketError); }
+                length
+            }
+            Some(6) if bytes.len() >= 40 => 40 + usize::from(u16::from_be_bytes([bytes[4], bytes[5]])),
+            _ => return Err(PacketError),
+        };
+        if bytes.len() != length { return Err(PacketError); }
+        Ok(Self { bytes })
     }
 
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    pub fn into_bytes(self) -> Vec<u8> { self.bytes }
 }
 
 /// Settings keys for one protocol.
@@ -397,6 +430,10 @@ pub enum Transport {
 pub trait InboundStream: Send + Sync {
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault>;
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault>;
+    /// Gives a UDP reply its actual origin when the outbound socket carries several targets.
+    fn write_datagram_to_user(&self, buf: &[u8], _source: SocketAddr) -> Result<usize, PlaneFault> {
+        self.write_to_user(buf)
+    }
     /// Lets protocols acknowledge or reject a request only once the exit has been dialed.
     fn report_connect(&self, _result: Result<(), OpenError>) -> Result<(), PlaneFault> { Ok(()) }
     /// Says whether uplink can remain open after gracefully ending the downlink.
@@ -435,6 +472,18 @@ pub struct Handoff {
     prefix: Vec<u8>,
     prefix_packet: bool,
     peer: Option<SocketAddr>,
+    datagram_session: Option<std::sync::Arc<DatagramSession>>,
+}
+
+/// Opaque identity of one UDP session that can carry multiple destinations.
+#[derive(Default)]
+pub struct DatagramSession {
+    allow_other_sources: bool,
+}
+
+impl DatagramSession {
+    pub fn new(allow_other_sources: bool) -> Self { Self { allow_other_sources } }
+    pub fn allows_other_sources(&self) -> bool { self.allow_other_sources }
 }
 
 /// The server resolves names once when the outbound module starts copying a flow.
@@ -547,6 +596,7 @@ impl Handoff {
             prefix: Vec::new(),
             prefix_packet: false,
             peer: None,
+            datagram_session: None,
         }
     }
 
@@ -557,6 +607,15 @@ impl Handoff {
 
     pub fn peer(&self) -> Option<SocketAddr> {
         self.peer
+    }
+
+    pub fn set_datagram_session(&mut self, session: std::sync::Arc<DatagramSession>) {
+        debug_assert_eq!(self.destination.transport, Transport::Udp);
+        self.datagram_session = Some(session);
+    }
+
+    pub fn datagram_session(&self) -> Option<&std::sync::Arc<DatagramSession>> {
+        self.datagram_session.as_ref()
     }
 
     pub fn report_connect(&self, result: Result<(), OpenError>) -> Result<(), PlaneFault> {
@@ -613,6 +672,10 @@ impl InboundStream for PrefixStream {
     }
 
     fn finish_to_user(&self) -> Result<bool, PlaneFault> { self.inner.finish_to_user() }
+
+    fn write_datagram_to_user(&self, buf: &[u8], source: SocketAddr) -> Result<usize, PlaneFault> {
+        self.inner.write_datagram_to_user(buf, source)
+    }
 
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
         let mut pending = self.pending.lock().expect("prefix");
@@ -688,6 +751,19 @@ mod tests {
         let document = Document::parse(r#"{"settings":{"address":"node.test","port":"2001"}}"#).unwrap();
         assert_eq!(document.protocol(), None);
         assert_eq!((document.peer().host(), document.peer().port()), ("node.test", 2001));
+    }
+
+    #[test]
+    fn peer_addr_preserves_the_ipv6_zone() {
+        for host in ["fe80::2%7", "fe80::2%veth-right"] {
+            let text = format!(r#"{{"peer":"[{host}]:51820","settings":{{"address":"{host}","port":51820}}}}"#);
+            let document = Document::parse(&text).unwrap();
+            assert_eq!(document.peer(), &PeerAddr::from_host_port(host.to_owned(), 51820).unwrap());
+            assert_eq!(document.peer().host(), host);
+        }
+        for bad in ["[invalid%eth0]:80", "[fe80::1%]:80", "[fe80::1%eth0%eth1]:80", "[fe80::1%eth0]:0"] {
+            assert!(PeerAddr::parse(bad).is_err());
+        }
     }
 
     #[test]

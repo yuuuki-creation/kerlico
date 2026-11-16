@@ -14,6 +14,7 @@ use kerlico_shared::{
 use crate::Exit;
 
 const BUF: usize = 1024 * 1024;
+const UDP_BUF: usize = 65_536;
 const IDLE: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Copy)]
@@ -31,6 +32,7 @@ pub trait PipeRead: Send {
 
 pub enum ReadEvent {
     Data(usize),
+    Datagram(usize, std::net::SocketAddr),
     Eof,
 }
 
@@ -115,7 +117,7 @@ fn pump_up(
     transport: Transport,
     pace: &Pace,
 ) -> Result<(), OpenError> {
-    let mut buf = vec![0u8; BUF];
+    let mut buf = vec![0u8; if transport == Transport::Udp { UDP_BUF } else { BUF }];
     loop {
         if pace.halted() {
             return Ok(());
@@ -173,7 +175,7 @@ fn pump_down(
     transport: Transport,
     pace: &Pace,
 ) -> Result<(), OpenError> {
-    let mut buf = vec![0u8; BUF];
+    let mut buf = vec![0u8; if transport == Transport::Udp { UDP_BUF } else { BUF }];
     loop {
         if pace.halted() {
             return Ok(());
@@ -185,13 +187,19 @@ fn pump_down(
                 }
                 return Ok(());
             }
-            Ok(ReadEvent::Data(n)) => {
+            Ok(event @ (ReadEvent::Data(_) | ReadEvent::Datagram(..))) => {
                 pace.mark();
+                let (n, source) = match event {
+                    ReadEvent::Data(n) => (n, None),
+                    ReadEvent::Datagram(n, source) => (n, Some(source)),
+                    _ => unreachable!(),
+                };
                 let n = if transport == Transport::Udp {
                     // 每次写入恰好一个数据报，零长度也必须实际调用。
-                    let written = stream
-                        .write_to_user(&buf[..n])
-                        .map_err(|_| OpenError::Transport)?;
+                    let written = match source {
+                        Some(source) => stream.write_datagram_to_user(&buf[..n], source),
+                        None => stream.write_to_user(&buf[..n]),
+                    }.map_err(|_| OpenError::Transport)?;
                     if written != n {
                         pace.halt();
                         return Err(OpenError::Transport);

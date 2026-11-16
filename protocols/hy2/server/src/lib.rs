@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -8,8 +9,8 @@ use kerlico_hy2::masquerade::{HysteriaMasquerade, MasqueradeSocket, MasqueradeTa
 use kerlico_hy2::{auth::ReceiveRate, datagram, quic, split_address, tcp};
 use kerlico_shared::runtime::{NetworkConnection, NetworkDial, NetworkRoute};
 use kerlico_shared::{
-    Accept, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError, PlaneFault,
-    Settings, Transport, UserEmail,
+    Accept, DatagramSession, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError,
+    PlaneFault, Settings, Transport, UserEmail,
 };
 use kerlico_tls::advanced::{advanced_quic_server_config, AdvancedTlsOptions, TlsCertificate};
 use subtle::ConstantTimeEq;
@@ -340,22 +341,41 @@ impl InboundStream for UdpFlow {
         Ok(out.len())
     }
     fn write_to_user(&self, data: &[u8]) -> Result<usize, PlaneFault> {
+        self.reply(&self.address, data)
+    }
+    fn write_datagram_to_user(&self, data: &[u8], source: SocketAddr) -> Result<usize, PlaneFault> {
+        self.reply(&source.to_string(), data)
+    }
+}
+
+impl UdpFlow {
+    fn reply(&self, source: &str, data: &[u8]) -> Result<usize, PlaneFault> {
         *self.activity.lock().expect("Hy2 UDP activity") = Instant::now();
-        quic::send_datagram(
-            &self.connection,
-            self.session,
-            &self.packet,
-            &self.address,
-            data,
-        )
-        .map(|_| data.len())
-        .map_err(map_io)
+        quic::send_datagram(&self.connection, self.session, &self.packet, source, data)
+            .map(|_| data.len())
+            .map_err(map_io)
     }
 }
 
 struct UdpPipe {
     sender: mpsc::Sender<Vec<u8>>,
     activity: Arc<Mutex<Instant>>,
+}
+
+struct UdpSession {
+    group: Arc<DatagramSession>,
+    packet: Arc<AtomicU16>,
+    targets: HashMap<String, UdpPipe>,
+}
+
+impl UdpSession {
+    fn new() -> Self {
+        Self {
+            group: Arc::new(DatagramSession::new(true)),
+            packet: Arc::new(AtomicU16::new(1)),
+            targets: HashMap::new(),
+        }
+    }
 }
 
 async fn serve_udp(
@@ -367,34 +387,47 @@ async fn serve_udp(
 ) {
     let mut fragments = datagram::Reassembler::default();
     let mut tick = tokio::time::interval(idle.min(Duration::from_secs(5)));
-    let packet = Arc::new(AtomicU16::new(1));
-    let mut flows = HashMap::<(u32, String), UdpPipe>::new();
+    let mut sessions = HashMap::<u32, UdpSession>::new();
+    let mut flow_count = 0;
     loop {
         tokio::select! {
-            _ = tick.tick() => flows.retain(|_, flow| !flow.sender.is_closed() && flow.activity.lock().expect("Hy2 UDP activity").elapsed() < idle),
+            _ = tick.tick() => sessions.retain(|_, session| {
+                let before = session.targets.len();
+                session.targets.retain(|_, flow| !flow.sender.is_closed() && flow.activity.lock().expect("Hy2 UDP activity").elapsed() < idle);
+                flow_count -= before - session.targets.len();
+                !session.targets.is_empty()
+            }),
             wire = connection.read_datagram() => {
                 let Ok(wire) = wire else { return; };
                 let Ok(piece) = datagram::Packet::read(&wire) else { continue; };
                 let now = Instant::now();
                 let Some(datagram::Datagram { session, address, payload }) = fragments.push(piece, now) else { continue; };
-                let key = (session, address);
-                if let Some(flow) = flows.get(&key).filter(|flow| !flow.sender.is_closed()) {
+                let existing = sessions.get(&session).and_then(|group| group.targets.get(&address));
+                if let Some(flow) = existing.filter(|flow| !flow.sender.is_closed()) {
                     *flow.activity.lock().expect("Hy2 UDP activity") = now;
                     let _ = flow.sender.try_send(payload);
                     continue;
                 }
-                if flows.len() >= MAX_UDP_FLOWS && !flows.contains_key(&key) { continue; }
-                let (host, port) = split_address(&key.1).expect("parsed Hy2 destination");
+                if flow_count >= MAX_UDP_FLOWS && existing.is_none() { continue; }
+                let (host, port) = split_address(&address).expect("parsed Hy2 destination");
                 let Ok(destination) = Destination::new(host, port, Transport::Udp) else { continue; };
                 let (sender, inbound) = mpsc::channel(64);
                 let _ = sender.try_send(payload);
                 let activity = Arc::new(Mutex::new(now));
+                let group = sessions.entry(session).or_insert_with(UdpSession::new);
                 let mut handoff = Handoff::new(tag.clone(), user.clone(), destination, Box::new(UdpFlow {
                     inbound: Mutex::new(inbound), connection: connection.clone(), session,
-                    address: key.1.clone(), packet: packet.clone(), activity: activity.clone(),
+                    address: address.clone(), packet: group.packet.clone(), activity: activity.clone(),
                 }));
                 handoff.set_peer(connection.remote_address());
-                if ready.try_send(handoff).is_ok() { flows.insert(key, UdpPipe { sender, activity }); }
+                handoff.set_datagram_session(group.group.clone());
+                if ready.try_send(handoff).is_ok() {
+                    if group.targets.insert(address, UdpPipe { sender, activity }).is_none() {
+                        flow_count += 1;
+                    }
+                } else if group.targets.is_empty() {
+                    sessions.remove(&session);
+                }
             }
         }
     }

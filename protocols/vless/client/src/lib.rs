@@ -23,7 +23,7 @@ use kerlico_vless::{
 };
 
 /// The client leaf runs its local SOCKS5 and HTTP entry in front of VLESS.
-pub const CLIENT: ClientEntry = ClientEntry::Proxy(entry::upstream);
+pub const CLIENT: ClientEntry = ClientEntry::ProxyWithDatagramLanding(entry::upstream);
 
 pub fn land(
     host: &str,

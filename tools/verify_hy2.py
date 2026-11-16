@@ -8,6 +8,7 @@ import select
 import socket
 import socketserver
 import ssl
+import struct
 import subprocess
 import tempfile
 import threading
@@ -54,7 +55,7 @@ def kerlico_server(paths, config, port, identity, udp=True, landing=None, extra=
                 "users": [{"email": "test-user", "password": PASSWORD}], **(extra or {})}
     inbound = {"tag": "test", "protocol": "hy2", "listen": "127.0.0.1", "port": port,
                "outbound": "native-v4", "settings": settings}
-    root = {"inbounds": [inbound]}
+    root = {"inbounds": [inbound], "warp": {"secretKey": "invalid"}}
     if landing is not None:
         inbound["rules"] = [{"geoip": ["private"], "outbound": "landing"}]
         root["landing"] = {"protocol": "hy2", "address": "127.0.0.1", "port": landing,
@@ -109,9 +110,13 @@ def http_connect(port, origin):
 class ReplyAfterFin(socketserver.BaseRequestHandler):
     def handle(self):
         data = bytearray()
-        while chunk := self.request.recv(4096):
-            data.extend(chunk)
-        self.request.sendall(b"after FIN: " + data)
+        try:
+            while chunk := self.request.recv(4096):
+                data.extend(chunk)
+            self.request.sendall(b"after FIN: " + data)
+        except ConnectionResetError:
+            # A peer without half-close can reset the socket before the reply.
+            pass
 
 
 def tcp_half_close(port, origin):
@@ -129,6 +134,53 @@ def udp_payload(port, origins):
     with control, client:
         for size, target in [(32, origins[0]), (3_900, origins[0]), (48, origins[1]), (4_000, origins[1]), (18, origins[0])]:
             exchange(client, addr, "127.0.0.1", target, bytes(i % 251 for i in range(size)))
+
+
+class SourcePort(socketserver.BaseRequestHandler):
+    def handle(self):
+        data, sock = self.request
+        sock.sendto(struct.pack("!H", self.client_address[1]) + data, self.client_address)
+
+
+@contextlib.contextmanager
+def datagram_origins(origins):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as alternate:
+        class AlternateReply(socketserver.BaseRequestHandler):
+            def handle(self):
+                alternate.sendto(self.request[0], self.client_address)
+
+        alternate.bind(("127.0.0.1", 0))
+        origins.udp_alternate = alternate
+        origins.udp_relay = origins.add(fixtures.SequentialUDP, "127.0.0.1", AlternateReply, "udp-alternate")
+        origins.udp_source = [origins.add(fixtures.SequentialUDP, "127.0.0.1", SourcePort, f"udp-source-{index}")
+                              for index in range(2)]
+        yield
+
+
+def udp_source_port(socks, origins):
+    control, udp, bound = associate(socks)
+    with control, udp:
+        udp.settimeout(4)
+        ports = []
+        for index, target in enumerate(origins.udp_source):
+            host, port = target.server_address
+            data = bytes([index])
+            udp.sendto(b"\0\0\0" + fixtures.encode_address(host, port) + data, bound)
+            source, reply = fixtures.unpack_udp(udp.recv(65535))
+            fixtures.require(source == (host, port) and reply[2:] == data, "incorrect UDP source or payload")
+            ports.append(struct.unpack("!H", reply[:2])[0])
+        return ports[0] == ports[1]
+
+
+def udp_alternate_reply(socks, origins):
+    control, udp, bound = associate(socks)
+    with control, udp:
+        udp.settimeout(4)
+        data = b"reply-from-another-port"
+        udp.sendto(b"\0\0\0" + fixtures.encode_address(*origins.udp_relay.server_address) + data, bound)
+        source, got = fixtures.unpack_udp(udp.recv(65535))
+        fixtures.require(source == origins.udp_alternate.getsockname() and got == data,
+                         "the alternate UDP reply did not keep its real source")
 
 
 def rejected(port, target):
@@ -208,7 +260,7 @@ def hop_case(paths, root, identity, origins):
 
 
 def run(paths, root, identity, origins, name, server_factory, client_factory, *, landing=None, udp=True,
-        server_extra=None, client_extra=None, wrong_password=True, half_close=False, ipv6=False):
+        server_extra=None, client_extra=None, wrong_password=True, half_close=False, ipv6=False, udp_session=False):
     folder = root / name
     folder.mkdir()
     family, listen = (socket.AF_INET6, "::1") if ipv6 else (socket.AF_INET, "127.0.0.1")
@@ -237,11 +289,19 @@ def run(paths, root, identity, origins, name, server_factory, client_factory, *,
             http_connect(http, target)
             if half_close:
                 fin = origins.add(fixtures.ThreadedTCP, "127.0.0.1", ReplyAfterFin, "after-fin")
-                tcp_half_close(socks, fin.server_address[1])
+                try:
+                    tcp_half_close(socks, fin.server_address[1])
+                except (fixtures.Failure, OSError):
+                    if server_factory is not official_server:
+                        raise
+                    print(f"OBSERVED {name}: official peer did not preserve half-close", flush=True)
             unused, = fixtures.free_ports(1)
             rejected(socks, unused)
             if udp:
                 udp_payload(socks, [origins.udp4.server_address[1], origins.udp4b.server_address[1]])
+                if udp_session:
+                    fixtures.require(udp_source_port(socks, origins), "Hy2 UDP session split across source ports")
+                    udp_alternate_reply(socks, origins)
             else:
                 try:
                     control, client_udp, _ = associate(socks)
@@ -273,7 +333,7 @@ def main():
     root = Path(tempfile.mkdtemp(prefix="kerlico-hy2-peer-"))
     print(f"Logs: {root}", flush=True)
     identity = make_identity(root)
-    with fixtures.Fixtures() as origins:
+    with fixtures.Fixtures() as origins, datagram_origins(origins):
         for mode in ("salamander", "gecko"):
             key = "obfs-test-password"
             official = {"obfs": {"type": mode, mode: {"password": key}}}
@@ -284,9 +344,10 @@ def main():
                 server_extra=official, client_extra=kerlico, wrong_password=False)
         if args.obfs_only:
             return
-        run(args, root, identity, origins, "official-control", official_server, official_client)
-        run(args, root, identity, origins, "official-to-kerlico", kerlico_server, official_client)
-        run(args, root, identity, origins, "kerlico-to-official", official_server, kerlico_client)
+        run(args, root, identity, origins, "official-control", official_server, official_client,
+            udp_session=True, half_close=True)
+        run(args, root, identity, origins, "official-to-kerlico", kerlico_server, official_client, udp_session=True)
+        run(args, root, identity, origins, "kerlico-to-official", official_server, kerlico_client, half_close=True)
         run(args, root, identity, origins, "hostname-to-ipv6-official", official_server, kerlico_client,
             ipv6=True, wrong_password=False)
         run(args, root, identity, origins, "kerlico-udp-disabled", kerlico_server, kerlico_client, udp=False)
@@ -298,7 +359,8 @@ def main():
         back, = fixtures.free_ports(1, kind=socket.SOCK_DGRAM)
         with fixtures.managed(official_server(args, root / "origin.json", back, identity), root, "landing-target") as peer:
             fixtures.wait_for(peer, lambda: "server up" in peer.text().lower())
-            run(args, root, identity, origins, "kerlico-hy2-landing", kerlico_server, official_client, landing=back)
+            run(args, root, identity, origins, "kerlico-hy2-landing", kerlico_server, official_client,
+                landing=back, udp_session=True)
         hop_case(args, root, identity, origins)
 
 

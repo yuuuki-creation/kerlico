@@ -14,7 +14,10 @@ use kerlico_shared::{
 };
 
 pub use native::{BytePipe, Native, PacketDevice};
-pub use network::{connect_system_tcp, lookup_system_addresses, open_system_datagram};
+pub use network::{
+    connect_system_tcp, lookup_system_addresses, open_system_datagram, open_tunnel_datagram,
+    open_tunnel_datagram_at,
+};
 #[cfg(feature = "system-dns")]
 pub use network::exchange_system_dns;
 
@@ -88,39 +91,75 @@ pub type LandFn =
 #[derive(Clone)]
 pub struct Outbound {
     warp: Arc<native::WarpSlot>,
-    landing: Arc<Mutex<Option<kerlico_shared::ReverseDial>>>,
+    landing: Arc<Mutex<Option<Landing>>>,
+    datagrams: Arc<native_session::Sessions>,
+}
+
+mod datagram_mux;
+mod association_session;
+mod native_session;
+
+#[derive(Clone)]
+struct Landing {
+    dial: kerlico_shared::ReverseDial,
+    udp: Option<Arc<association_session::AssociationSessions>>,
 }
 
 /// Runtime callbacks do not keep the egress owner or its landing alive.
 #[derive(Clone)]
 pub struct WeakOutbound {
     warp: std::sync::Weak<native::WarpSlot>,
-    landing: std::sync::Weak<Mutex<Option<kerlico_shared::ReverseDial>>>,
+    landing: std::sync::Weak<Mutex<Option<Landing>>>,
+    datagrams: std::sync::Weak<native_session::Sessions>,
 }
 
 impl WeakOutbound {
     pub fn upgrade(&self) -> Option<Outbound> {
-        Some(Outbound { warp: self.warp.upgrade()?, landing: self.landing.upgrade()? })
+        Some(Outbound { warp: self.warp.upgrade()?, landing: self.landing.upgrade()?, datagrams: self.datagrams.upgrade()? })
     }
 }
 
 impl Outbound {
     pub fn downgrade(&self) -> WeakOutbound {
-        WeakOutbound { warp: Arc::downgrade(&self.warp), landing: Arc::downgrade(&self.landing) }
+        WeakOutbound { warp: Arc::downgrade(&self.warp), landing: Arc::downgrade(&self.landing), datagrams: Arc::downgrade(&self.datagrams) }
     }
     pub fn new() -> Self {
         Self {
             warp: Arc::new(native::WarpSlot::empty()),
             landing: Arc::new(Mutex::new(None)),
+            datagrams: Arc::new(native_session::Sessions::default()),
         }
     }
 
     pub fn install_landing(&self, land: LandFn, host: String, port: u16, settings: Settings) {
-        *self.landing.lock().expect("landing") = Some(Arc::new(move |destination| land(&host, port, &settings, destination)));
+        self.set_landing(land, host, port, settings, None);
+    }
+
+    pub fn install_landing_entry(&self, land: LandFn, entry: kerlico_shared::ClientEntry, host: String, port: u16, settings: Settings) {
+        let udp = match entry {
+            kerlico_shared::ClientEntry::ProxyWithDatagramLanding(open) => {
+                Some(Arc::new(association_session::AssociationSessions::new(open, host.clone(), port, settings.clone())))
+            }
+            kerlico_shared::ClientEntry::PacketTunnel(_, _, associate) => {
+                let (host, settings) = (host.clone(), settings.clone());
+                Some(Arc::new(association_session::AssociationSessions::with_opener(move || associate(&host, port, &settings))))
+            }
+            _ => None,
+        };
+        self.set_landing(land, host, port, settings, udp);
+    }
+
+    fn set_landing(&self, land: LandFn, host: String, port: u16, settings: Settings, udp: Option<Arc<association_session::AssociationSessions>>) {
+        let dial = Arc::new(move |destination: &Destination| land(&host, port, &settings, destination));
+        *self.landing.lock().expect("landing") = Some(Landing { dial, udp });
+    }
+
+    fn landing_dial(&self) -> Option<kerlico_shared::ReverseDial> {
+        self.landing.lock().expect("landing").as_ref().map(|landing| landing.dial.clone())
     }
 
     pub fn install_reverse_landing(&self, dial: kerlico_shared::ReverseDial) {
-        *self.landing.lock().expect("landing") = Some(dial);
+        *self.landing.lock().expect("landing") = Some(Landing { dial, udp: None });
     }
 
     pub fn install_warp(&self, device: Arc<dyn native::PacketDevice>) {
@@ -139,22 +178,35 @@ impl Outbound {
         let user = handoff.user().clone();
         let node = handoff.node().clone();
         let destination = handoff.destination().clone();
+        let datagram_session = handoff.datagram_session().cloned();
+        let peer = handoff.peer();
         let stream = handoff.stream();
         match exit {
+            Exit::NativeV4 | Exit::NativeV6 if target.transport == kerlico_shared::Transport::Udp && datagram_session.is_some() => {
+                self.datagrams.dial(datagram_session.expect("UDP session"), &target, stream.as_ref(), copy::Flow {
+                    user: &user, node: &node, exit, traffic, transport: kerlico_shared::Transport::Udp,
+                })
+            }
             Exit::NativeV4 | Exit::NativeV6 => {
                 native::dial_native(&target, stream.as_ref(), &user, &node, exit, traffic)
             }
-            Exit::WarpV4 | Exit::WarpV6 => native::dial_warp(
-                &self.warp,
-                &target,
-                stream.as_ref(),
-                &user,
-                &node,
-                exit,
-                traffic,
-            ),
+            Exit::WarpV4 | Exit::WarpV6 => {
+                if target.transport == Transport::Udp {
+                    if let (Some(session), Some(sessions)) = (datagram_session, self.warp.associations(exit.is_v4())) {
+                        let remote = target.addresses.iter().find(|address| address.is_ipv4() == exit.is_v4());
+                        let destination = remote.and_then(|address| Destination::new(address.ip().to_string(), address.port(), Transport::Udp).ok());
+                        let Some(destination) = destination else {
+                            return copy::report_connect(stream.as_ref(), Err(OpenError::Transport));
+                        };
+                        return sessions.dial(session, peer, &destination, stream.as_ref(), copy::Flow {
+                            user: &user, node: &node, exit, traffic, transport: Transport::Udp,
+                        });
+                    }
+                }
+                native::dial_warp(&self.warp, &target, stream.as_ref(), &user, &node, exit, traffic)
+            }
             Exit::Landing => {
-                self.dial_landing(&destination, stream.as_ref(), &user, &node, traffic)
+                self.dial_landing(&destination, stream.as_ref(), datagram_session, peer, &user, &node, traffic)
             }
         }
     }
@@ -163,6 +215,8 @@ impl Outbound {
         &self,
         destination: &Destination,
         stream: &dyn InboundStream,
+        datagram_session: Option<Arc<kerlico_shared::DatagramSession>>,
+        peer: Option<SocketAddr>,
         user: &kerlico_shared::UserEmail,
         node: &kerlico_shared::NodeTag,
         traffic: &dyn Traffic,
@@ -173,7 +227,14 @@ impl Outbound {
             .expect("landing")
             .clone()
             .ok_or(OpenError::Transport);
-        let remote = copy::report_connect(stream, installed.and_then(|installed| installed(destination)))?;
+        let flow = copy::Flow { user, node, exit: Exit::Landing, traffic, transport: destination.transport() };
+        let landing = installed.inspect_err(|error| { let _ = stream.report_connect(Err(error.clone())); })?;
+        if destination.transport() == kerlico_shared::Transport::Udp {
+            if let (Some(session), Some(udp)) = (datagram_session, landing.udp) {
+                return udp.dial(session, peer, destination, stream, flow);
+            }
+        }
+        let remote = copy::report_connect(stream, (landing.dial)(destination))?;
         let remote: Arc<dyn InboundStream> = Arc::from(remote);
         copy::bridge(
             stream,
@@ -185,13 +246,7 @@ impl Outbound {
                 stream: remote,
                 transport: destination.transport(),
             },
-            copy::Flow {
-                user,
-                node,
-                exit: Exit::Landing,
-                traffic,
-                transport: destination.transport(),
-            },
+            flow,
         )
     }
 
@@ -206,7 +261,7 @@ impl Outbound {
         let family_ok = match exit {
             Exit::NativeV4 | Exit::WarpV4 => peer.is_ipv4(),
             Exit::NativeV6 | Exit::WarpV6 => peer.is_ipv6(),
-            Exit::Landing => false,
+            Exit::Landing => true,
         };
         if !family_ok {
             return Err(OpenError::Transport);
@@ -214,10 +269,15 @@ impl Outbound {
         match exit {
             Exit::NativeV4 | Exit::NativeV6 => native::exchange_native(peer, tcp, request),
             Exit::WarpV4 | Exit::WarpV6 => native::exchange_warp(&self.warp, peer, tcp, request),
-            Exit::Landing => Err(OpenError::Transport),
+            Exit::Landing => {
+                let dial = self.landing_dial().ok_or(OpenError::Transport)?;
+                dns_landing::exchange(dial, peer, tcp, request)
+            }
         }
     }
 }
+
+mod dns_landing;
 
 struct RemoteRead {
     stream: Arc<dyn InboundStream>,

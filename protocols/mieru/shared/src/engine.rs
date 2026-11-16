@@ -8,6 +8,8 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use kerlico_shared::DatagramSession;
+
 use crate::crypto::{self, Direction};
 use crate::meta::{
     self, Meta, ACK_C2S, ACK_S2C, CLOSE_REQUEST, CLOSE_RESPONSE, DATA_C2S, DATA_C2S_LOW, DATA_S2C,
@@ -186,6 +188,7 @@ struct Envelope {
 
 struct Leg {
     sess: Arc<Sess>,
+    datagrams: Arc<DatagramSession>,
     host: String,
     port: u16,
     queue: Mutex<LegQueue>,
@@ -1392,8 +1395,22 @@ impl Conn {
     pub fn write_user(&self, buf: &[u8]) -> io::Result<()> {
         match &self.kind {
             ConnKind::Stream(sess) => sess.write_client(buf),
-            ConnKind::Leg(leg) => leg.write(buf),
+            ConnKind::Leg(leg) => leg.write(&leg.host, leg.port, buf),
         }
+    }
+
+    pub fn datagram_session(&self) -> Option<&Arc<DatagramSession>> {
+        match &self.kind {
+            ConnKind::Stream(_) => None,
+            ConnKind::Leg(leg) => Some(&leg.datagrams),
+        }
+    }
+
+    pub fn write_datagram(&self, source: SocketAddr, payload: &[u8]) -> io::Result<()> {
+        let ConnKind::Leg(leg) = &self.kind else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "UDP association required"));
+        };
+        leg.write(&source.ip().to_string(), source.port(), payload)
     }
 }
 
@@ -1490,11 +1507,11 @@ impl Leg {
         }
     }
 
-    fn write(&self, payload: &[u8]) -> io::Result<()> {
+    fn write(&self, host: &str, port: u16, payload: &[u8]) -> io::Result<()> {
         if self.is_closed() {
             return Err(closed());
         }
-        let packet = udp_datagram(&self.host, self.port, payload)?;
+        let packet = udp_datagram(host, port, payload)?;
         write_frame(&self.sess, &packet)
     }
 }
@@ -1768,6 +1785,7 @@ fn handshake(sess: Arc<Sess>, link: Arc<Link>) {
 }
 
 fn fanout(sess: Arc<Sess>, ready: Sender<Ready>) {
+    let datagrams = Arc::new(DatagramSession::new(true));
     let mut legs: HashMap<(String, u16), Weak<Leg>> = HashMap::new();
     while let Ok(packet) = read_frame(&sess) {
         let (host, port, payload) = match parse_datagram(&packet) {
@@ -1784,6 +1802,7 @@ fn fanout(sess: Arc<Sess>, ready: Sender<Ready>) {
         legs.retain(|_, leg| leg.strong_count() != 0);
         let leg = Arc::new(Leg {
             sess: Arc::clone(&sess),
+            datagrams: Arc::clone(&datagrams),
             host: host.clone(),
             port,
             queue: Mutex::new(LegQueue {

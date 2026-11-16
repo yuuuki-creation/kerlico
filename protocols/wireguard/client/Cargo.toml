@@ -3,6 +3,12 @@ name = "kerlico-wireguard-client"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+tun-device = ["kerlico-wg/tun-device"]
+
 [dependencies]
 kerlico-shared = { path = "../../../crates/shared" }
 kerlico-wireguard = { path = "../shared" }
+kerlico-outbound = { path = "../../../crates/outbound" }
+kerlico-wg = { path = "../../../crates/wg" }
+serde_json = "1"

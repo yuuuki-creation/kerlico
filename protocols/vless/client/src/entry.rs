@@ -76,6 +76,20 @@ impl Upstream for Endpoint {
     }
 
     fn associate(&self) -> io::Result<Box<dyn Association>> {
+        self.udp_association(true)
+    }
+
+    fn associate_landing(&self) -> io::Result<Box<dyn Association>> {
+        self.udp_association(false)
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+}
+
+impl Endpoint {
+    fn udp_association(&self, local_source: bool) -> io::Result<Box<dyn Association>> {
         if self.closed.load(Ordering::Acquire) {
             return Err(closed());
         }
@@ -92,13 +106,10 @@ impl Upstream for Endpoint {
             }),
             flow: self.flow,
             policy: self.policy,
-            global_id: OnceLock::new(),
+            global_id: local_source.then(OnceLock::new),
+            opening: Mutex::new(()),
             inbox: Mutex::new(inbox),
         }))
-    }
-
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
     }
 }
 
@@ -161,8 +172,9 @@ impl Stream for TcpFlow {
 /// to port 53 or 443 never rides a plain link that was opened for another target.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum LaneKey {
-    /// The association's one XUDP or Mux UDP session; each datagram names its destination.
+    /// One session per configured addressed carrier; each datagram names its destination.
     Xudp,
+    Pooled(mux::PoolKind, u16),
     /// A plain UDP command link, which reaches only this destination.
     Plain(String, u16),
 }
@@ -229,22 +241,29 @@ struct UdpAssociation {
     shared: Arc<Lanes>,
     flow: Flow,
     policy: Option<mux::Policy>,
-    /// Taken from the local application's UDP source on the first datagram. A carrier opened
-    /// after a failure sends it again, so the server keeps the same outbound socket.
-    global_id: OnceLock<Option<NonZeroU64>>,
+    /// A local application's socket can resume a session. A landing peer address can carry
+    /// more than one authenticated session and must not identify them as the same session.
+    global_id: Option<OnceLock<Option<NonZeroU64>>>,
+    opening: Mutex<()>,
     inbox: Mutex<Receiver<Reply>>,
 }
 
 impl UdpAssociation {
     fn lane(&self, key: &LaneKey, destination: &Destination, global_id: Option<NonZeroU64>) -> Option<Arc<Lane>> {
         let shared = &self.shared;
+        if let Some(lane) = shared.open.lock().expect("udp lanes").get(key)
+            .filter(|lane| lane.alive.load(Ordering::Acquire)) {
+            return Some(lane.clone());
+        }
+        let _opening = self.opening.lock().expect("udp opening");
+        if shared.finished() { return None; }
         {
             let mut open = shared.open.lock().expect("udp lanes");
             if let Some(lane) = open.get(key).filter(|lane| lane.alive.load(Ordering::Acquire)) {
                 return Some(lane.clone());
             }
             if matches!(key, LaneKey::Plain(..)) {
-                open.retain(|key, lane| matches!(key, LaneKey::Xudp) || lane.idle() < PLAIN_IDLE);
+                open.retain(|key, lane| !matches!(key, LaneKey::Plain(..)) || lane.idle() < PLAIN_IDLE);
                 if open.keys().filter(|key| matches!(key, LaneKey::Plain(..))).count() >= PLAIN_LINKS {
                     return None;
                 }
@@ -252,7 +271,11 @@ impl UdpAssociation {
         }
         let session = udp_session(&shared.host, shared.port, &shared.settings, destination, global_id).ok()?;
         let lane = Arc::new(Lane { session, alive: AtomicBool::new(true), last: Mutex::new(Instant::now()) });
-        shared.open.lock().expect("udp lanes").insert(key.clone(), lane.clone());
+        {
+            let mut open = shared.open.lock().expect("udp lanes");
+            if shared.finished() { return None; }
+            open.insert(key.clone(), lane.clone());
+        }
         let (reader, key, opened) = (shared.clone(), key.clone(), lane.clone());
         std::thread::spawn(move || reader.read(key, opened));
         Some(lane)
@@ -266,13 +289,15 @@ impl Association for UdpAssociation {
         if self.shared.finished() {
             return Err(closed());
         }
-        let global_id = *self.global_id.get_or_init(|| xudp_global_id(source));
+        let global_id = self.global_id.as_ref().and_then(|id| *id.get_or_init(|| xudp_global_id(source)));
         let Ok(destination) = Destination::new(host, port, Transport::Udp) else { return Ok(()) };
         if payload.is_empty() {
             return Ok(());
         }
         let key = match mux::route(self.flow, self.policy, &destination) {
             Ok(mux::Route::Direct(Command::Udp)) => LaneKey::Plain(host.to_string(), port),
+            Ok(mux::Route::Pooled(kind, concurrency)) if self.global_id.is_none() => LaneKey::Pooled(kind, concurrency),
+            // A SOCKS source advertises one GlobalID, so it can have only one addressed lane.
             Ok(mux::Route::Xudp | mux::Route::Pooled(..)) => LaneKey::Xudp,
             _ => return Ok(()),
         };

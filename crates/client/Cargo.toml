@@ -5,12 +5,13 @@ edition = "2021"
 
 [dependencies]
 kerlico-shared = { path = "../shared" }
-wireguard = { package = "kerlico-wireguard-client", path = "../../protocols/wireguard/client", optional = true }
+wireguard = { package = "kerlico-wireguard-client", path = "../../protocols/wireguard/client", optional = true, features = ["tun-device"] }
 openvpn = { package = "kerlico-openvpn-client", path = "../../protocols/openvpn/client", optional = true }
 mieru = { package = "kerlico-mieru-client", path = "../../protocols/mieru/client", optional = true }
 vless = { package = "kerlico-vless-client", path = "../../protocols/vless/client", optional = true }
 anytls = { package = "kerlico-anytls-client", path = "../../protocols/anytls/client", optional = true }
 hy2 = { package = "kerlico-hy2-client", path = "../../protocols/hy2/client", optional = true }
+ss2022 = { package = "kerlico-ss2022-client", path = "../../protocols/ss2022/client", optional = true }
 httparse = "1"
 if-addrs = "0.13"
 socket2 = "0.5"

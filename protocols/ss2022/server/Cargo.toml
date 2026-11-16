@@ -1,0 +1,14 @@
+[package]
+name = "kerlico-ss2022-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aes = "0.8"
+blake3 = "1"
+bytes = "1"
+kerlico-shared = { path = "../../../crates/shared" }
+kerlico-ss2022 = { path = "../shared" }
+rand_core = { version = "0.6", features = ["getrandom"] }
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "sync", "time", "rt"] }

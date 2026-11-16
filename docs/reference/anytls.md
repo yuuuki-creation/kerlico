@@ -4,7 +4,7 @@
 
 固定的 Xray 26.10.31（`reference/.upstream/xray-core-v26.10.31`）没有 AnyTLS 代理。本地可用的实现是 mihomo 1.19.33，只读源码在 `reference/.upstream/mihomo-v1.19.33`：`transport/anytls/`（客户端、会话、流、帧、填充）、`listener/anytls/server.go`、`adapter/outbound/anytls.go`、`listener/config/anytls.go`，UDP over TCP 来自它依赖的 `github.com/metacubex/sing` v0.5.8 的 `common/uot`。互通和性能都以 mihomo 1.19.33 为对端。下文说「mihomo」都指这个版本。
 
-协议目录是 `protocols/anytls/{shared,client,server}`，包名 `kerlico-anytls`、`kerlico-anytls-client`、`kerlico-anytls-server`。叶子上的依赖键是 `anytls`，服务端另有 `landing-anytls`。入站交出 `Handoff`，不拨号；客户端 crate 导出 `CLIENT = ClientEntry::Proxy` 和 `land`。
+协议目录是 `protocols/anytls/{shared,client,server}`，包名 `kerlico-anytls`、`kerlico-anytls-client`、`kerlico-anytls-server`。叶子上的依赖键是 `anytls`，服务端另有 `landing-anytls`。入站交出 `Handoff`，不拨号；客户端 crate 导出 `CLIENT = ClientEntry::ProxyWithDatagramLanding` 和 `land`。
 
 ## 层次
 
@@ -62,7 +62,7 @@ UDP 走 sing 的 UoT。客户端开一条目标是 `sp.v2.udp-over-tcp.arpa:0` �
 
 mihomo 客户端总是发 `isConnect` 为假，请求里的目标是第一个报文的目标。Kerlico 客户端也这样。mihomo 客户端先解析域名再发，Kerlico 客户端照本机应用给的目标发，可以是域名，服务端去解析。
 
-Kerlico 服务端在持有会话接收端的线程里拆报文，按目标分开，每个新目标交出一个 UDP 的 `Handoff`，`peer` 是这条 TLS 连接的对端地址。回包写成同一种格式，来源地址就是请求里的目标。目标是域名时，mihomo 回的是解析出的地址，Kerlico 回的是这个域名。每个目标最多积压 256 KiB 未读报文，再多的丢弃。一个目标的出站结束后，同一目标的下一个报文再交出新的 `Handoff`；流本身在客户端关闭或会话结束时才关。mihomo 在 UDP 会话空闲 5 分钟后会关这条流。
+Kerlico 服务端拆开 UoT 报文，为每个新目标交出一个 UDP `Handoff`，节点仍逐目标选出口。非连接模式下，同一条 UoT 流的目标共用会话标记；走同一原生出口时复用 UDP 源端口，走支持共享关联的落地时复用该关联。UoT 回包携带出站看到的真实来源，包括域名解析后的 IP 和另一个端口发来的回复。连接模式固定一个目标，回包不带地址。每个目标最多积压 256 KiB 未读报文，再多的丢弃。一个目标的出站结束后，同一目标的下一个报文会再次交出 `Handoff`。mihomo 在 UDP 会话空闲 5 分钟后会关这条流。
 
 ## TLS
 
@@ -116,7 +116,7 @@ ShadowTLS 和 RestLS 的握手目标通过运行时向出站模块请求原生 T
 
 会话池和 mihomo 的 `session.Client` 一样：一个会话同时只给一条流用。开流时取最新的空闲会话，没有就新建；流结束（任一端关闭）时，会话还活着就放回空闲池并记下时间。每过 `idle-session-check-interval` 清理一次：从最新的空闲会话往旧的数，没超时的算活跃，超时的在活跃数不足 `min-idle-session` 时保留并重新计时，其余关闭。`close` 关闭全部会话。
 
-本机 SOCKS5 和 HTTP 入口由客户端叶子提供，见 [编译单元](crates.md)。服务端落地调用 `land`，AnyTLS 把上游的主机名和端口交给服务端运行时，由出站模块打开原生 TCP 载体。落地的会话池按运行时、上游地址和设置分别缓存，最多 64 组；无活动且 60 秒没用到的组，以及运行时已销毁的组，在下次使用缓存时清退。
+本机 SOCKS5 和 HTTP 入口由客户端叶子提供，见 [编译单元](crates.md)。AnyTLS 把上游的主机名和端口交给服务端运行时，由出站模块打开原生 TCP 载体。落地的会话池按运行时、上游地址和设置分别缓存，最多 64 组；无活动且 60 秒没用到的组，以及运行时已销毁的组，在下次使用缓存时清退。入站标记为同一 UDP 会话的目标经 AnyTLS 落地时，在这个池里共用一条 UoT 流。
 
 ## 数据路径
 

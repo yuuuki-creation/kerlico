@@ -311,6 +311,9 @@ fn civil(mut days: u64) -> (i32, u32, u32) {
 }
 
 fn resolve(endpoint: &str) -> io::Result<SocketAddr> {
+    if endpoint.starts_with('[') && endpoint.contains('%') {
+        return crate::parse_endpoint(endpoint);
+    }
     endpoint
         .to_socket_addrs()?
         .find(|addr| addr.is_ipv4())

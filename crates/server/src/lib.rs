@@ -384,11 +384,10 @@ impl Server {
         let land = gen::LANDINGS
             .iter()
             .find(|row| row.id.as_str() == protocol)
-            .map(|row| row.land)
             .ok_or(Error::Config)?;
         let mut settings = settings;
         settings.set_runtime(self.landing_runtime.clone());
-        self.outbound.install_landing(land, host, port, settings);
+        self.outbound.install_landing_entry(land.land, land.entry, host, port, settings);
         Ok(())
     }
 

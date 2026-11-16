@@ -106,7 +106,7 @@ impl Policy {
 }
 
 /// Xray's `mux` and `xudp` client managers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum PoolKind {
     Mux,
     Xudp,

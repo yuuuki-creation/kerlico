@@ -139,6 +139,7 @@ impl MieruInbound {
         };
         let destination = Destination::new(ready.target.host, ready.target.port, transport)
             .map_err(|_| OpenError::Settings)?;
+        let datagrams = ready.conn.datagram_session().cloned();
         let mut handoff = Handoff::new(
             self.tag.clone(),
             email,
@@ -147,6 +148,9 @@ impl MieruInbound {
         );
         if ready.udp {
             handoff.set_peer(ready.peer);
+        }
+        if let Some(datagrams) = datagrams {
+            handoff.set_datagram_session(datagrams);
         }
         Ok(handoff)
     }
@@ -187,6 +191,11 @@ impl InboundStream for Stream {
 
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
         self.0.write_user(buf).map_err(map_io)?;
+        Ok(buf.len())
+    }
+
+    fn write_datagram_to_user(&self, buf: &[u8], source: SocketAddr) -> Result<usize, PlaneFault> {
+        self.0.write_datagram(source, buf).map_err(map_io)?;
         Ok(buf.len())
     }
 }

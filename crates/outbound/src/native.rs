@@ -5,8 +5,9 @@ use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use kerlico_shared::{InboundStream, NodeTag, OpenError, Traffic, Transport, UserEmail};
+use kerlico_shared::{Association, InboundStream, NodeTag, OpenError, Traffic, Transport, UserEmail};
 
+use crate::association_session::AssociationSessions;
 use crate::copy::{self, PipeRead, PipeWrite, ReadEvent};
 use crate::{DialTarget, Exit};
 
@@ -58,6 +59,8 @@ fn probe(target: &str, v4: bool) -> bool {
 pub trait PacketDevice: Send + Sync {
     fn connect_tcp(&self, addr: SocketAddr) -> Result<Box<dyn BytePipe + Send>, OpenError>;
     fn connect_udp(&self, addr: SocketAddr) -> Result<Box<dyn BytePipe + Send>, OpenError>;
+    fn supports_udp_associations(&self) -> bool { false }
+    fn associate_udp(&self, _ipv4: bool) -> Result<Box<dyn Association>, OpenError> { Err(OpenError::Settings) }
 }
 
 pub trait BytePipe: Send + Sync {
@@ -66,7 +69,12 @@ pub trait BytePipe: Send + Sync {
 }
 
 pub struct WarpSlot {
-    device: Mutex<Option<Arc<dyn PacketDevice>>>,
+    device: Mutex<Option<WarpDevice>>,
+}
+
+struct WarpDevice {
+    device: Arc<dyn PacketDevice>,
+    udp: [Option<Arc<AssociationSessions>>; 2],
 }
 
 impl WarpSlot {
@@ -77,14 +85,25 @@ impl WarpSlot {
     }
 
     pub fn install(&self, device: Arc<dyn PacketDevice>) {
-        *self.device.lock().expect("warp") = Some(device);
+        let udp = [false, true].map(|ipv4| {
+            device.supports_udp_associations().then(|| {
+                let device = device.clone();
+                Arc::new(AssociationSessions::with_opener(move || device.associate_udp(ipv4)))
+            })
+        });
+        *self.device.lock().expect("warp") = Some(WarpDevice { device, udp });
+    }
+
+    pub(crate) fn associations(&self, ipv4: bool) -> Option<Arc<AssociationSessions>> {
+        self.device.lock().expect("warp").as_ref()?.udp[usize::from(ipv4)].clone()
     }
 
     pub(crate) fn get(&self) -> Result<Arc<dyn PacketDevice>, OpenError> {
         self.device
             .lock()
             .expect("warp")
-            .clone()
+            .as_ref()
+            .map(|installed| installed.device.clone())
             .ok_or(OpenError::Transport)
     }
 }

@@ -32,6 +32,10 @@ pub struct SrvRecord {
 /// owner binds and connects it. Protocol-specific options remain with the protocol.
 pub trait SocketFactory: fmt::Debug + Send + Sync {
     fn open(&self, peer: SocketAddr, transport: Transport) -> io::Result<socket2::Socket>;
+    /// Requested UDP source port, still bound by the outbound owner.
+    fn udp_bind_port(&self) -> u16 {
+        0
+    }
     fn requires_native_socket(&self) -> bool {
         true
     }

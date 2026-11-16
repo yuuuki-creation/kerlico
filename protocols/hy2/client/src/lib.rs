@@ -19,11 +19,10 @@ use kerlico_tls::advanced::{advanced_quic_client_config, AdvancedTlsOptions};
 const POLL: Duration = Duration::from_millis(200);
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub const CLIENT: ClientEntry = ClientEntry::Proxy(upstream);
+pub const CLIENT: ClientEntry = ClientEntry::ProxyWithDatagramLanding(upstream);
 
 fn upstream(peer: &PeerAddr, settings: &Settings) -> Result<Arc<dyn Upstream>, OpenError> {
-    Client::new(peer.host(), peer.port(), settings)
-        .map(|client| Arc::new(client) as Arc<dyn Upstream>)
+    landing_client(peer.host(), peer.port(), settings).map(|client| client as Arc<dyn Upstream>)
 }
 
 pub struct Client {

@@ -19,6 +19,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use kerlico_shared::DatagramSession;
+
 use crate::addr::{Family, Target, UOT_V1, UOT_V2};
 use crate::frame::{
     self, CMD_ALERT, CMD_FIN, CMD_HEART_REQUEST, CMD_HEART_RESPONSE, CMD_PSH, CMD_SERVER_SETTINGS, CMD_SETTINGS,
@@ -590,8 +592,16 @@ enum Parse {
 
 struct Uot {
     connect: Option<Target>,
+    datagrams: Option<Arc<DatagramSession>>,
     tail: Vec<u8>,
     legs: HashMap<Target, Arc<LegCore>>,
+}
+
+impl Uot {
+    fn new(connect: Option<Target>) -> Self {
+        let datagrams = connect.is_none().then(|| Arc::new(DatagramSession::new(true)));
+        Self { connect, datagrams, tail: Vec::new(), legs: HashMap::new() }
+    }
 }
 
 struct Rx {
@@ -907,11 +917,16 @@ pub struct Leg {
     core: Arc<LegCore>,
     stream: Arc<Core>,
     session: Arc<Inner>,
+    datagrams: Option<Arc<DatagramSession>>,
 }
 
 impl Leg {
     pub fn target(&self) -> &Target {
         &self.core.target
+    }
+
+    pub fn datagram_session(&self) -> Option<&Arc<DatagramSession>> {
+        self.datagrams.as_ref()
     }
 
     /// One whole datagram. `UnexpectedEof` once the stream or the session ended; a datagram larger
@@ -944,22 +959,28 @@ impl Leg {
         }
     }
 
-    /// Sends a reply from this destination: `uot.Conn.WriteTo` with the destination as the source.
+    /// Fall back to the requested destination when the outbound stream has no source metadata.
     pub fn send(&self, payload: &[u8]) -> io::Result<()> {
+        self.reply(&self.core.target, payload)
+    }
+
+    pub fn send_from(&self, source: SocketAddr, payload: &[u8]) -> io::Result<()> {
+        self.reply(&Target::new(source.ip().to_string(), source.port()), payload)
+    }
+
+    fn reply(&self, source: &Target, payload: &[u8]) -> io::Result<()> {
         if self.core.is_closed() || self.stream.remote_closed.load(Ordering::Acquire) {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         let len = u16::try_from(payload.len()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "datagram too large"))?;
-        let mut packet = Vec::with_capacity(self.core.target.encoded_len() + 2 + payload.len());
+        let mut packet = Vec::with_capacity(source.encoded_len() + 2 + payload.len());
         if !self.core.connect {
-            self.core.target.encode(Family::Uot, &mut packet)?;
+            source.encode(Family::Uot, &mut packet)?;
         }
         packet.extend_from_slice(&len.to_be_bytes());
         packet.extend_from_slice(payload);
-        for chunk in packet.chunks(MAX_DATA) {
-            self.session.submit(Out::Frames { cmd: CMD_PSH, sid: self.stream.sid, data: chunk }, true)?;
-        }
-        Ok(())
+        // Tx emits all PSH frames of a datagram together, even if there are replies on other legs.
+        self.session.submit(Out::Frames { cmd: CMD_PSH, sid: self.stream.sid, data: &packet }, true)
     }
 }
 
@@ -1500,7 +1521,7 @@ fn server_parse(inner: &Arc<Inner>, core: &Arc<Core>, server: &Server, parse: Pa
                     if target.host == UOT_V2 {
                         server_parse(inner, core, server, Parse::UotRequest(Vec::new()), &rest)
                     } else if target.host == UOT_V1 {
-                        let uot = Uot { connect: None, tail: Vec::new(), legs: HashMap::new() };
+                        let uot = Uot::new(None);
                         server_parse(inner, core, server, Parse::Uot(Box::new(uot)), &rest)
                     } else {
                         server.inbound.open(Opened {
@@ -1525,7 +1546,7 @@ fn server_parse(inner: &Arc<Inner>, core: &Arc<Core>, server: &Server, parse: Pa
                 Ok(Some((target, used))) => {
                     let connect = (acc[0] != 0).then_some(target);
                     let rest = acc[1 + used..].to_vec();
-                    let uot = Uot { connect, tail: Vec::new(), legs: HashMap::new() };
+                    let uot = Uot::new(connect);
                     server_parse(inner, core, server, Parse::Uot(Box::new(uot)), &rest)
                 }
             }
@@ -1587,7 +1608,10 @@ fn uot_packets(inner: &Arc<Inner>, core: &Arc<Core>, server: &Server, uot: &mut 
                     user: server.user,
                     peer: server.peer,
                     target,
-                    flow: Flow::Udp(Leg { core: Arc::clone(&leg), stream: Arc::clone(core), session: Arc::clone(inner) }),
+                    flow: Flow::Udp(Leg {
+                        core: Arc::clone(&leg), stream: Arc::clone(core), session: Arc::clone(inner),
+                        datagrams: uot.datagrams.clone(),
+                    }),
                 });
                 leg
             }

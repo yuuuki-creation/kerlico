@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kerlico_shared::runtime::{
-    FallbackRate, HttpRequest, HttpResponse, NetworkConnection, NetworkDial, NetworkRoute,
+    FallbackRate, HttpRequest, HttpResponse, Network, NetworkConnection, NetworkDial, NetworkRoute,
+    SocketFactory,
 };
 use kerlico_shared::{Destination, InboundStream, OpenError, PlaneFault, Transport};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -125,10 +126,7 @@ impl Outbound {
             }
             let _reset = Reset;
             let dial = self
-                .landing
-                .lock()
-                .expect("landing")
-                .clone()
+                .landing_dial()
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::NotConnected, "landing is not installed")
                 })?;
@@ -229,6 +227,74 @@ pub fn open_system_datagram(peer: SocketAddr, timeout: Duration) -> io::Result<U
         NetworkConnection::Udp(socket) => Ok(socket),
         _ => unreachable!("UDP requested"),
     }
+}
+
+/// Opens one unconnected carrier for an IP tunnel. A dual-stack carrier uses the same port
+/// for both families and can keep it when an authenticated peer moves to the other family.
+pub fn open_tunnel_datagram(
+    network: Option<&dyn Network>,
+    peer: SocketAddr,
+    dual_stack: bool,
+) -> io::Result<UdpSocket> {
+    open_tunnel_datagram_at(network, peer, dual_stack, 0)
+}
+
+/// Reopens an IP tunnel carrier on a previously assigned local port.
+pub fn open_tunnel_datagram_at(
+    network: Option<&dyn Network>,
+    peer: SocketAddr,
+    dual_stack: bool,
+    local_port: u16,
+) -> io::Result<UdpSocket> {
+    let peer = if dual_stack {
+        match peer {
+            SocketAddr::V4(addr) => (addr.ip().to_ipv6_mapped(), addr.port()).into(),
+            _ => peer,
+        }
+    } else {
+        peer
+    };
+    let mut request = NetworkDial::direct(peer, Transport::Udp);
+    if dual_stack || local_port != 0 {
+        request.socket_factory = Some(Arc::new(TunnelUdp { dual_stack, local_port }));
+    }
+    let connection = match network {
+        Some(network) => network.open_datagram(&request),
+        None => open_native_udp(&request, peer, false),
+    }?;
+    match connection {
+        NetworkConnection::Udp(socket) => Ok(socket),
+        _ => Err(io::Error::new(io::ErrorKind::Unsupported, "tunnel needs a native UDP socket")),
+    }
+}
+
+#[derive(Debug)]
+struct TunnelUdp {
+    dual_stack: bool,
+    local_port: u16,
+}
+
+impl SocketFactory for TunnelUdp {
+    fn open(&self, peer: SocketAddr, transport: Transport) -> io::Result<Socket> {
+        if transport != Transport::Udp {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        if self.dual_stack {
+            dual_stack_udp_socket()
+        } else {
+            Socket::new(Domain::for_address(peer), Type::DGRAM, Some(Protocol::UDP))
+        }
+    }
+
+    fn udp_bind_port(&self) -> u16 {
+        self.local_port
+    }
+}
+
+pub(crate) fn dual_stack_udp_socket() -> io::Result<Socket> {
+    let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_only_v6(false)?;
+    Ok(socket)
 }
 
 fn exchange_dns(
@@ -336,12 +402,16 @@ fn open_native_udp(request: &NetworkDial, peer: SocketAddr, connected: bool) -> 
             Ok(NetworkConnection::Tcp(TcpStream::from(socket)))
         }
         Transport::Udp => {
+            let port = request
+                .socket_factory
+                .as_ref()
+                .map_or(0, |factory| factory.udp_bind_port());
             let bind = if peer.is_ipv4() {
-                "0.0.0.0:0"
+                SocketAddr::from(([0; 4], port))
             } else {
-                "[::]:0"
+                SocketAddr::from(([0; 8], port))
             };
-            socket.bind(&bind.parse::<SocketAddr>().expect("literal bind").into())?;
+            socket.bind(&bind.into())?;
             if connected { socket.connect(&peer.into())?; }
             Ok(NetworkConnection::Udp(UdpSocket::from(socket)))
         }

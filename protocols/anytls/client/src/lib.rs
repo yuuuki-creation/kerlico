@@ -21,10 +21,15 @@ use kerlico_shared::{
 };
 
 /// The client leaf runs the local SOCKS5/HTTP entry in front of AnyTLS.
-pub const CLIENT: ClientEntry = ClientEntry::Proxy(upstream);
+pub const CLIENT: ClientEntry = ClientEntry::ProxyWithDatagramLanding(upstream);
 
 fn upstream(peer: &PeerAddr, settings: &Settings) -> Result<Arc<dyn Upstream>, OpenError> {
-    Ok(Arc::new(Client::new(peer.host(), peer.port(), settings)?))
+    let client = if settings.runtime().is_some() {
+        cached_client(peer.host(), peer.port(), settings)?
+    } else {
+        Client::new(peer.host(), peer.port(), settings)?
+    };
+    Ok(Arc::new(client))
 }
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);

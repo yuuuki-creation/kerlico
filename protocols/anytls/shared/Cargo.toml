@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 base64 = "0.22"
 blake3 = "1"
+kerlico-shared = { path = "../../../crates/shared" }
 kerlico-tls = { path = "../../../crates/tls" }
 md-5 = "0.10"
 ring = "0.17"

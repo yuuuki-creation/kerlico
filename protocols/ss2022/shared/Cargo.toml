@@ -1,0 +1,10 @@
+[package]
+name = "kerlico-ss2022"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+base64 = "0.22"
+kerlico-shared = { path = "../../../crates/shared" }
+shadowsocks = { version = "1.25.0", default-features = false, features = ["aead-cipher-2022-extra"] }
+tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "time"] }

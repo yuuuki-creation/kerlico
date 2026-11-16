@@ -10,10 +10,14 @@ members = [
     "crates/wg",
 ]
 default-members = ["crates/client", "crates/server"]
+exclude = ["crates/wg/vendor/boringtun"]
 
 [patch.crates-io]
+boringtun = { path = "crates/wg/vendor/boringtun" }
 h3-quinn = { path = "vendor/h3-quinn" }
 quinn = { path = "vendor/quinn" }
 quinn-proto = { path = "vendor/quinn-proto" }
 rama-boring = { path = "vendor/rama-boring" }
 rama-boring-sys = { path = "vendor/rama-boring-sys" }
+shadowsocks = { path = "vendor/shadowsocks" }
+shadowsocks-crypto = { path = "vendor/shadowsocks-crypto" }

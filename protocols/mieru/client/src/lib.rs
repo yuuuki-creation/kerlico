@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// 客户端叶子在 mieru 前面运行本机 SOCKS5/HTTP 入口。
-pub const CLIENT: ClientEntry = ClientEntry::Proxy(upstream);
+pub const CLIENT: ClientEntry = ClientEntry::ProxyWithDatagramLanding(upstream);
 
 /// 本机入口键已由叶子取走；其余键只能是 mieru 自己的设置。
 fn upstream(peer: &PeerAddr, settings: &Settings) -> Result<Arc<dyn Upstream>, OpenError> {
@@ -32,7 +32,12 @@ fn upstream(peer: &PeerAddr, settings: &Settings) -> Result<Arc<dyn Upstream>, O
     }) {
         return Err(OpenError::Settings);
     }
-    Ok(Arc::new(Client::new(peer.host(), peer.port(), settings)?))
+    let client = if settings.runtime().is_some() {
+        cached_client(peer.host(), peer.port(), settings)?
+    } else {
+        Client::new(peer.host(), peer.port(), settings)?
+    };
+    Ok(Arc::new(client))
 }
 
 impl Upstream for Client {

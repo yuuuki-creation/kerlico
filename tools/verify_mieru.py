@@ -288,12 +288,12 @@ def write_json(path, value):
 
 
 class Process:
-    def __init__(self, command, folder, name):
+    def __init__(self, command, folder, name, env=None):
         self.name = name
         self.path = folder / f"{name}.log"
         self.log = self.path.open("wb")
         self.process = subprocess.Popen(command, cwd=folder, stdin=subprocess.DEVNULL,
-                                        stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
+                                        stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True, env=env)
         self.forced_kill = False
 
     def text(self):
@@ -304,28 +304,34 @@ class Process:
 
     def close(self):
         if self.process.poll() is None:
-            os.killpg(self.process.pid, signal.SIGTERM)
+            if os.name == "nt":
+                self.process.terminate()
+            else:
+                os.killpg(self.process.pid, signal.SIGTERM)
             try:
                 self.process.wait(3)
             except subprocess.TimeoutExpired:
                 self.forced_kill = True
                 # Go 对端的 SIGQUIT 会留下 goroutine 堆栈；仍判退出失败，
                 # 不能把诊断退出当作正常清理。
-                if self.name == "official-server":
+                if os.name != "nt" and self.name == "official-server":
                     os.kill(self.process.pid, signal.SIGQUIT)
                     try:
                         self.process.wait(1)
                     except subprocess.TimeoutExpired:
                         pass
                 if self.process.poll() is None:
-                    os.killpg(self.process.pid, signal.SIGKILL)
+                    if os.name == "nt":
+                        self.process.kill()
+                    else:
+                        os.killpg(self.process.pid, signal.SIGKILL)
                     self.process.wait(3)
         self.log.close()
 
 
 @contextlib.contextmanager
-def managed(command, folder, name):
-    process = Process(command, folder, name)
+def managed(command, folder, name, env=None):
+    process = Process(command, folder, name, env=env)
     try:
         yield process
     finally:

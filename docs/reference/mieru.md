@@ -20,7 +20,7 @@ TCP 和 UDP 两种传输都要有。加密算法是 XChaCha20-Poly1305。密钥�
 
 认证之后的请求是 SOCKS5。`CONNECT` 和 `UDP ASSOCIATE` 都要有。`UDP ASSOCIATE` 的每个数据报先封装成 `0x00`、2 字节大端长度、数据、`0xff`，再作为段的载荷。TCP 和 UDP 两种传输使用同一套封装。
 
-服务端把每个会话交成一个 `Handoff`。`CONNECT` 的传输是 TCP。`UDP ASSOCIATE` 的传输是 UDP，并写上对端地址，供服务端的 UDP 会话表使用。协议 crate 不拨号，也不选择出口。
+服务端为每个 `CONNECT` 交出一个 TCP `Handoff`，为 `UDP ASSOCIATE` 中每个目标各交出一个 UDP `Handoff`。同一 UDP 关联的交接共享会话标记，并携带对端地址。服务端仍逐目标分流，选择相同原生出口或支持共享关联的落地时复用同一出站 UDP 关联。回包头优先用实际回复源，包括未发送过的地址或端口。协议 crate 不拨号，也不选择出口。
 
 ## 监听和账号
 
@@ -34,11 +34,11 @@ TCP 和 UDP 两种传输都要有。加密算法是 XChaCha20-Poly1305。密钥�
 
 ## 客户端入口
 
-mieru 客户端不实现数据包平面。它导出 `CLIENT = ClientEntry::Proxy`，客户端叶子在它前面运行本机 SOCKS5 和 HTTP 代理，官方把这个入口叫做 HTTP / HTTPS 代理。命令行、文档语法、本机端口和 LAN 绑定，以及 SOCKS5 与 HTTP 的行为，见 `docs/reference/crates.md` 的「客户端叶子和本机入口」。
+mieru 客户端不实现数据包平面。它导出 `CLIENT = ClientEntry::ProxyWithDatagramLanding`，客户端叶子在它前面运行本机 SOCKS5 和 HTTP 代理，官方把这个入口叫做 HTTP / HTTPS 代理。同一入站 UDP 会话的目标选中 mieru 落地时，复用同一条上游 `UDP ASSOCIATE`。命令行、文档语法、本机端口和 LAN 绑定，以及 SOCKS5 与 HTTP 的行为，见 `docs/reference/crates.md` 的「客户端叶子和本机入口」。
 
 `multiplexing`、`handshakeMode` 和 `mtu` 使用上面的名字和取值。服务端地址、传输、单个端口或 `portRange` 也在客户端的 `Settings` 里。
 
-`land` 和 `open_stream` 打开一条到目标的会话，走同一套段。落地仍然调用 `land`。
+`land` 和 `open_stream` 打开一条到目标的会话，走同一套段。TCP 和未标记共享会话的 UDP 落地仍调用 `land`。
 
 ## 不进入这份实现的部分
 

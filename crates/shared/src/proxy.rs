@@ -13,6 +13,8 @@ use crate::{DataPlane, OpenError, PeerAddr, Settings};
 pub trait Upstream: Send + Sync {
     fn open_stream(&self, host: &str, port: u16) -> io::Result<Box<dyn Stream>>;
     fn associate(&self) -> io::Result<Box<dyn Association>>;
+    /// The source on a landing is the inbound peer, not a local application's socket.
+    fn associate_landing(&self) -> io::Result<Box<dyn Association>> { self.associate() }
     fn close(&self);
 }
 
@@ -37,12 +39,17 @@ pub trait Association: Send + Sync {
 }
 
 pub type TunnelFn = fn(&PeerAddr, &Settings) -> Result<Box<dyn DataPlane>, OpenError>;
+pub type TunFn = fn(&PeerAddr, &Settings, &str) -> Result<(), OpenError>;
 pub type ProxyFn = fn(&PeerAddr, &Settings) -> Result<Arc<dyn Upstream>, OpenError>;
+pub type DatagramLandingFn = fn(&str, u16, &Settings) -> Result<Box<dyn Association>, OpenError>;
 
 /// The one thing a client protocol crate exports to the client leaf, as `CLIENT`. A protocol is a
 /// packet tunnel or a proxy behind the local entry, never both.
 #[derive(Clone, Copy)]
 pub enum ClientEntry {
     Tunnel(TunnelFn),
+    PacketTunnel(TunnelFn, Option<TunFn>, DatagramLandingFn),
     Proxy(ProxyFn),
+    /// This upstream also supports a shared UDP association when used as a landing.
+    ProxyWithDatagramLanding(ProxyFn),
 }

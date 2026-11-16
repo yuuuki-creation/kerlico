@@ -3,7 +3,7 @@
 
 use kerlico_shared::{
     AddrError, ClientEntry, DocError, Document, IdError, OpenError, Packet, PacketError, PeerAddr,
-    PlaneFault, ProtocolId, ProxyFn, Settings, TunnelFn,
+    PlaneFault, ProtocolId, ProxyFn, Settings, TunFn, TunnelFn,
 };
 
 mod proxy;
@@ -23,7 +23,7 @@ pub struct ClientConfig {
 }
 
 enum Run {
-    Tunnel(TunnelFn),
+    Tunnel(TunnelFn, Option<TunFn>),
     Proxy(ProxyFn, LocalEntry),
 }
 
@@ -90,8 +90,9 @@ impl ClientConfig {
             .find(|registration| registration.id.as_str() == name)
             .ok_or_else(|| Error::NotCompiled(name.to_string()))?;
         let run = match registration.entry {
-            ClientEntry::Tunnel(connect) => Run::Tunnel(connect),
-            ClientEntry::Proxy(open) => {
+            ClientEntry::Tunnel(connect) => Run::Tunnel(connect, None),
+            ClientEntry::PacketTunnel(connect, run, _) => Run::Tunnel(connect, run),
+            ClientEntry::Proxy(open) | ClientEntry::ProxyWithDatagramLanding(open) => {
                 Run::Proxy(open, LocalEntry::take(&mut settings).map_err(|_| Error::Config)?)
             }
         };
@@ -124,9 +125,18 @@ impl Client {
                 let upstream = open(&config.peer, &config.settings)?;
                 Ok(Running::Proxy(Proxy::start(upstream, &entry)?))
             }
-            Run::Tunnel(connect) => Ok(Running::Tunnel(Session {
+            Run::Tunnel(connect, _) => Ok(Running::Tunnel(Session {
                 plane: connect(&config.peer, &config.settings)?,
             })),
+        }
+    }
+
+    /// Runs an explicitly requested local TUN. The protocol may only open
+    /// the named device; address and route policy remains with its owner.
+    pub fn run_tun(config: ClientConfig, interface: &str) -> Result<(), Error> {
+        match config.run {
+            Run::Tunnel(_, Some(run)) => run(&config.peer, &config.settings, interface).map_err(Into::into),
+            _ => Err(Error::Config),
         }
     }
 }

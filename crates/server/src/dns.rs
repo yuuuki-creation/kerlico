@@ -82,13 +82,7 @@ impl Config {
             let reach = if upstream.address.is_ipv4() { Reachability::HasV4 } else { Reachability::V6Only };
             let exit = select_exit(upstream.choice, reach, native).map_err(|_| bad_dns("DNS upstream has no address"))?;
             let peer = SocketAddr::new(upstream.address, upstream.port);
-            let response = outbound.exchange(exit, peer, upstream.tcp, message).and_then(|response| {
-                if !upstream.tcp && response.len() >= 12 && response[..2] == message[..2]
-                    && response[2] & 0x82 == 0x82
-                {
-                    outbound.exchange(exit, peer, true, message)
-                } else { Ok(response) }
-            });
+            let response = exchange_upstream(outbound, exit, peer, upstream.tcp, message);
             match response {
                 Ok(response) if response.len() >= 12 && response[..2] == message[..2] && response[2] & 0x82 == 0x80 && response[3] & 0xf == 0 => return Ok(response),
                 Ok(_) => error = bad_dns("invalid DNS response"),
@@ -412,10 +406,23 @@ fn query(
         return Vec::new();
     };
     let peer = SocketAddr::new(upstream.address, upstream.port);
-    let Ok(buf) = outbound.exchange(exit, peer, upstream.tcp, &message) else {
+    let Ok(buf) = exchange_upstream(outbound, exit, peer, upstream.tcp, &message) else {
         return Vec::new();
     };
+    if buf.len() < 12 || buf[..2] != message[..2] || buf[2] & 0x82 != 0x80 {
+        return Vec::new();
+    }
     answers(&buf, kind)
+}
+
+fn exchange_upstream(outbound: &Outbound, exit: kerlico_outbound::Exit, peer: SocketAddr, tcp: bool, message: &[u8])
+    -> Result<Vec<u8>, kerlico_shared::OpenError> {
+    let response = outbound.exchange(exit, peer, tcp, message)?;
+    if !tcp && response.len() >= 12 && response[..2] == message[..2] && response[2] & 0x82 == 0x82 {
+        outbound.exchange(exit, peer, true, message)
+    } else {
+        Ok(response)
+    }
 }
 
 fn message(host: &str, kind: u16) -> Vec<u8> {

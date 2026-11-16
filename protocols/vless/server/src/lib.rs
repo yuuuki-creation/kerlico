@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use kerlico_shared::{
-    Accept, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError, PlaneFault, Settings,
+    Accept, DatagramSession, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError, PlaneFault, Settings,
     Transport, UserEmail,
 };
 use kerlico_vless::{
@@ -1845,6 +1845,7 @@ impl Accept for VlessInbound {
                 read.set_timeout(Duration::from_millis(200));
                 write.set_timeout(Duration::from_millis(200));
                 let udp_destination = ready.destination.transport() == Transport::Udp;
+                let datagrams = if let Link::Mux(lane) = &read { lane.datagrams.clone() } else { None };
                 let mut handoff = Handoff::new(
                     self.tag.clone(),
                     ready.email,
@@ -1860,6 +1861,9 @@ impl Accept for VlessInbound {
                 );
                 if ready.udp || udp_destination {
                     handoff.set_peer(ready.peer);
+                }
+                if let Some(datagrams) = datagrams {
+                    handoff.set_datagram_session(datagrams);
                 }
                 Ok(handoff)
             }
@@ -2368,6 +2372,7 @@ impl Route {
 
 struct MuxSession {
     destination: Destination,
+    datagrams: Option<Arc<DatagramSession>>,
     lanes: HashMap<(String, u16), Weak<MuxLane>>,
     last: Instant,
     route: Arc<Mutex<Route>>,
@@ -2376,7 +2381,9 @@ struct MuxSession {
 
 impl MuxSession {
     fn new(destination: Destination, route: Route, global_id: Option<NonZeroU64>) -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self { destination, lanes: HashMap::new(), last: Instant::now(), route: Arc::new(Mutex::new(route)), global_id }))
+        let datagrams = (destination.transport() == Transport::Udp)
+            .then(|| Arc::new(DatagramSession::new(true)));
+        Arc::new(Mutex::new(Self { destination, datagrams, lanes: HashMap::new(), last: Instant::now(), route: Arc::new(Mutex::new(route)), global_id }))
     }
 
     /// Whether a NEW frame with this session's GlobalID can still take it over.
@@ -2570,6 +2577,7 @@ fn demux(mut read: Link, mut write: Link, owner: FlowOwner, mut pending: Vec<u8>
             plain: Mutex::new(if udp { VecDeque::new() } else { frame.payload.clone().into() }),
             packets: Mutex::new(if udp && !frame.payload.is_empty() { VecDeque::from([frame.payload]) } else { VecDeque::new() }),
             datagram: udp, cv: Condvar::new(), closed: Mutex::new(false),
+            datagrams: session.datagrams.clone(),
             reply_target: udp.then(|| (mux_address(&destination), destination.port())),
             route: session.route.clone(),
             resumable: session.global_id.is_some(),
@@ -2588,6 +2596,7 @@ struct MuxLane {
     plain: Mutex<std::collections::VecDeque<u8>>,
     packets: Mutex<std::collections::VecDeque<Vec<u8>>>,
     datagram: bool,
+    datagrams: Option<Arc<DatagramSession>>,
     cv: Condvar,
     closed: Mutex<bool>,
     reply_target: Option<(kerlico_vless::Addr, u16)>,
@@ -2673,6 +2682,10 @@ impl MuxLane {
     }
 
     fn push(&self, buf: &[u8]) -> std::io::Result<usize> {
+        self.push_to(buf, self.reply_target.as_ref())
+    }
+
+    fn push_to(&self, buf: &[u8], target: Option<&(kerlico_vless::Addr, u16)>) -> std::io::Result<usize> {
         if self.ended() {
             return Err(std::io::ErrorKind::BrokenPipe.into());
         }
@@ -2686,8 +2699,8 @@ impl MuxLane {
             status: KEEP,
             option: DATA,
             network: if self.datagram { 2 } else { 0 },
-            port: self.reply_target.as_ref().map_or(0, |(_, port)| *port),
-            address: self.reply_target.as_ref().map(|(address, _)| address.clone()),
+            port: target.map_or(0, |(_, port)| *port),
+            address: target.map(|(address, _)| address.clone()),
             payload: buf.to_vec(),
             global_id: None,
         };
@@ -2984,7 +2997,7 @@ fn open_reverse_portal(portal: Arc<Portal>, host: &str, port: u16, tcp: bool, pa
     };
     let lane = Arc::new(MuxLane {
         plain: Mutex::new(VecDeque::new()), packets: Mutex::new(VecDeque::new()),
-        datagram: !tcp, cv: Condvar::new(), closed: Mutex::new(false), reply_target: None,
+        datagram: !tcp, datagrams: None, cv: Condvar::new(), closed: Mutex::new(false), reply_target: None,
         route: Arc::new(Mutex::new(Route::Attached(id, portal.uplink.clone()))), resumable: false,
     });
     sessions.insert(id, Arc::downgrade(&lane));
@@ -3324,6 +3337,21 @@ impl InboundStream for Stream {
             return Err(PlaneFault::Again);
         }
         Ok(buf.len())
+    }
+
+    fn write_datagram_to_user(&self, buf: &[u8], source: SocketAddr) -> Result<usize, PlaneFault> {
+        let socket = self.write.lock().expect("write");
+        if let Link::Mux(lane) = &*socket {
+            if lane.datagrams.is_some() {
+                let address = match source.ip() {
+                    std::net::IpAddr::V4(ip) => kerlico_vless::Addr::V4(ip),
+                    std::net::IpAddr::V6(ip) => kerlico_vless::Addr::V6(ip),
+                };
+                return lane.push_to(buf, Some(&(address, source.port()))).map_err(map_io);
+            }
+        }
+        drop(socket);
+        self.write_to_user(buf)
     }
 
     fn raw_read(&self) -> Option<TcpStream> {
@@ -5890,7 +5918,7 @@ mod tests {
         let route = session.lock().unwrap().route.clone();
         let lane = Arc::new(MuxLane {
             plain: Mutex::default(), packets: Mutex::default(), datagram: true, cv: Condvar::new(),
-            closed: Mutex::new(false), reply_target: None, route, resumable: true,
+            closed: Mutex::new(false), reply_target: None, route, datagrams: None, resumable: true,
         });
         session.lock().unwrap().lanes.insert(("127.0.0.1".into(), 53), Arc::downgrade(&lane));
         (session, lane)

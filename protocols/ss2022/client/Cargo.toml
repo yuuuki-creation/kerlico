@@ -1,0 +1,12 @@
+[package]
+name = "kerlico-ss2022-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytes = "1"
+kerlico-shared = { path = "../../../crates/shared" }
+kerlico-ss2022 = { path = "../shared" }
+kerlico-outbound = { path = "../../../crates/outbound" }
+rand_core = { version = "0.6", features = ["getrandom"] }
+tokio = { version = "1", features = ["io-util", "net"] }

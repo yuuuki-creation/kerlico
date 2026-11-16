@@ -317,7 +317,7 @@ fn a_reused_session_answers_the_next_stream_at_once() {
 }
 
 #[test]
-fn uot_fans_out_by_destination_and_answers_from_it() {
+fn uot_fans_out_by_destination_and_preserves_reply_source() {
     let rig = rig("secret", crate::DEFAULT_SCHEME);
     let stream = open_to(&rig.client, crate::UOT_V2, 0);
     let mut first = vec![0u8];
@@ -336,6 +336,7 @@ fn uot_fans_out_by_destination_and_answers_from_it() {
     }
     let Flow::Udp(one) = &legs[0].flow else { panic!("udp") };
     let Flow::Udp(two) = &legs[1].flow else { panic!("udp") };
+    assert!(Arc::ptr_eq(one.datagram_session().unwrap(), two.datagram_session().unwrap()));
     assert_eq!(one.target(), &Target::new("10.0.0.1", 53));
     assert_eq!(two.target(), &Target::new("example.com", 5353));
     let mut buf = [0u8; 64];
@@ -344,11 +345,13 @@ fn uot_fans_out_by_destination_and_answers_from_it() {
     assert_eq!(two.recv_for(&mut buf, Duration::from_secs(5)).unwrap(), 0, "empty datagram");
     let n = one.recv_for(&mut buf, Duration::from_secs(5)).unwrap();
     assert_eq!(&buf[..n], b"three");
-    two.send(b"reply").unwrap();
+    let alternate = "[::1]:4053".parse().unwrap();
+    let payload = vec![0xb4; usize::from(u16::MAX)];
+    two.send_from(alternate, &payload).unwrap();
     let mut expect = Vec::new();
-    Target::new("example.com", 5353).encode(Family::Uot, &mut expect).unwrap();
-    expect.extend_from_slice(&5u16.to_be_bytes());
-    expect.extend_from_slice(b"reply");
+    Target::new("::1", 4053).encode(Family::Uot, &mut expect).unwrap();
+    expect.extend_from_slice(&u16::MAX.to_be_bytes());
+    expect.extend_from_slice(&payload);
     assert_eq!(read_exact(&stream, expect.len()), expect);
 }
 

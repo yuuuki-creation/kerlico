@@ -3,16 +3,34 @@ name = "kerlico-wg"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+tun-device = ["dep:libc", "dep:socket2", "dep:tokio", "dep:tun", "dep:tokio-util", "dep:windows-sys", "dep:wintun-bindings"]
+
+[[bin]]
+name = "kerlico-wg"
+path = "src/main.rs"
+required-features = ["tun-device"]
+
 [dependencies]
 base64 = "0.22"
-blake2 = "0.10"
-chacha20poly1305 = "0.10"
-hmac = "0.12"
+boringtun = "0.7.1"
+ipnet = "2"
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde_json = "1"
-smoltcp = { version = "0.11", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
+smoltcp = { version = "0.11", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp"] }
+socket2 = { version = "0.6", features = ["all"], optional = true }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"], optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets", "reusable_secrets"] }
 
 [target.'cfg(not(windows))'.dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tun = { version = "0.7.13", features = ["async"], optional = true }
 webpki-roots = "0.26"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Authorization"], optional = true }
+wintun-bindings = { version = "0.7.40", features = ["async"], optional = true }

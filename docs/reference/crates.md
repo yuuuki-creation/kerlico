@@ -11,7 +11,7 @@ crates/server          包 kerlico-server。服务端叶子。依赖 kerlico-out
 crates/outbound        包 kerlico-outbound。服务端以及 AnyTLS 独立客户端的拨号模块。
 crates/manifest        包 kerlico-manifest。构建时核对协议目录和叶子依赖。
 crates/tls             包 kerlico-tls。双方共用的传输 TLS、证书与 ClientHello 配置。
-crates/wg              包 kerlico-wg。用户态 WireGuard，只给出站的 WARP 用。不安装本机默认路由。
+crates/wg              包 kerlico-wg。WireGuard 角色和 WARP 共用的用户态引擎。不安装本机默认路由。
 protocols/<id>/shared  包 kerlico-<id>。这个协议两端共用的帧。
 protocols/<id>/client  包 kerlico-<id>-client。只有客户端叶子可以依赖。
 protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依赖。
@@ -21,7 +21,7 @@ protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依�
 
 代码未跟上：2026-11-09 的 `cargo metadata --format-version 1 --no-deps` 显示协议的 path 依赖也被 Cargo 自动纳入工作区，共 15 个成员。本轮没有改变工作区划分；功能裁剪分别检查叶子的运行时依赖图，不用工作区包数推断角色隔离。
 
-现在的协议目录是 `wireguard`、`openvpn`、`mieru`、`vless`、`anytls` 和 `hy2`。WireGuard 和 OpenVPN 的协议体是 `unimplemented!`。代理协议的配置见各自的参考文档。
+协议目录包括 `wireguard`、`openvpn`、`mieru`、`vless`、`anytls`、`hy2` 和 `ss2022`。OpenVPN 的协议体是 `unimplemented!`。各协议的配置见各自的参考文档。
 
 本机 SOCKS5/HTTP 入口只在客户端叶子里有一份，见下文「客户端叶子和本机入口」。
 
@@ -30,6 +30,8 @@ mieru 共享 crate 的运行时加密依赖是 `chacha20` 和 `ring`，组合实
 VLESS、AnyTLS 和 Hy2 都依赖 `kerlico-tls`。VLESS 和 Hy2 会开启这个引擎的 `quic` feature。AnyTLS 在普通连接上保留 rustls 取密钥和按方向处理记录的路径，浏览器指纹、ECH 以及需要修改首个 ClientHello 的载体使用共享引擎。JLS 的默认握手使用 rustls-jls，见 [AnyTLS](anytls.md#tls)。
 
 `protocols/hy2/shared` 持有 Hysteria 2 的认证和帧格式。VLESS 的 `hysteria` 载体复用认证与流类型；VLESS 命令仍由 VLESS 解析。独立 Hy2 的当前范围见 [Hysteria 2](hy2.md)。
+
+`protocols/ss2022/shared` 使用 `shadowsocks` 1.25.0 和 `shadowsocks-crypto` 0.8.0。工作区固定这两个版本并加上 ChaCha12；[补丁说明](../../vendor/shadowsocks-crypto/KERLICO-PATCH.md) 记录改动和许可。
 
 ## 一次构建选一端和一组协议
 
@@ -47,7 +49,7 @@ cargo build -p kerlico-client --no-default-features --features wireguard
 cargo build -p kerlico-server --no-default-features --features openvpn
 ```
 
-2026-11-08 用 `cargo tree -p kerlico-client --no-default-features --features wireguard --edges normal` 看到的运行时依赖是 `kerlico-client`、`kerlico-shared`、`kerlico-wireguard-client` 和 `kerlico-wireguard`。图里没有 `kerlico-outbound`，也没有服务端协议 crate。
+WireGuard 客户端使用 `kerlico-outbound` 为整个隧道打开一个 UDP 载体，系统支持时在同一个端口收发 IPv4 和 IPv6，依赖图没有服务端协议 crate。检查时用 `cargo tree -p kerlico-client --no-default-features --features wireguard --edges normal,build`。
 
 同一次命令如果写了 `-p kerlico-client -p kerlico-server --features wireguard`，两个叶子都有名为 `wireguard` 的 feature，服务端图里会出现 `kerlico-wireguard-server`。不对称的协议集合用两条命令。
 
@@ -59,15 +61,15 @@ cargo build -p kerlico-server --no-default-features --features openvpn
 2. 需要哪一端，就建立 `protocols/<id>/client` 或 `protocols/<id>/server`。包名是 `kerlico-<id>-client` 或 `kerlico-<id>-server`。
 3. 角色 crate 依赖 `../shared` 和 `../../../crates/shared`。它不依赖另一端。
 4. 在对应叶子的 `[dependencies]` 加一行。键等于协议 id。
-5. 客户端 crate 导出 `pub const CLIENT: ClientEntry`。数据包隧道写 `ClientEntry::Tunnel(connect)`，代理协议写 `ClientEntry::Proxy(upstream)`。生成的注册表引用这个常量，缺少它时构建失败。
+5. 客户端 crate 导出 `pub const CLIENT: ClientEntry`。数据包隧道写 `ClientEntry::Tunnel(connect)`；能提供落地 UDP 关联的隧道使用 `PacketTunnel`，也可提供 TUN 设备入口。代理协议写 `ClientEntry::Proxy(upstream)`；落地能共享 UDP 关联时可用 `ClientEntry::ProxyWithDatagramLanding(upstream)`。生成的注册表引用这个常量，缺少它时构建失败。
 
 客户端的这一行是这个形状。
 
 ```toml
-wireguard = { package = "kerlico-wireguard-client", path = "../../protocols/wireguard/client", optional = true }
+wireguard = { package = "kerlico-wireguard-client", path = "../../protocols/wireguard/client", optional = true, features = ["tun-device"] }
 ```
 
-服务端把包名和路径里的 `client` 换成 `server`。
+服务端入站使用包名和路径里的 `server`，不启用 `tun-device`。
 
 落地是服务端去拨另一个代理。它用的是该协议的客户端 crate，不是入站 crate。这一行只加在服务端叶子上。键是 `landing-` 加上协议 id。
 
@@ -95,7 +97,7 @@ AnyTLS 客户端 crate 用 `kerlico-outbound` 建立独立客户端的 TCP 连�
 
 ## 客户端叶子和本机入口
 
-客户端叶子的注册表把协议 id 对到该协议的 `CLIENT`。`ClientEntry::Tunnel` 是数据包平面（`DataPlane`），`ClientEntry::Proxy` 返回 `Arc<dyn Upstream>`。WireGuard 和 OpenVPN 是 `Tunnel`，mieru、vless、anytls 和 hy2 是 `Proxy`。一个协议只能是其中一种。
+客户端叶子的注册表把协议 id 对到该协议的 `CLIENT`。WireGuard 和 OpenVPN 提供数据包平面（`DataPlane`）。mieru、vless、anytls、hy2 和 ss2022 的 `ClientEntry::Proxy` 返回 `Arc<dyn Upstream>`。一个协议只能是数据包隧道或代理其中一种。
 
 `Upstream`、`Stream` 和 `Association` 定义在 `kerlico-shared` 的 `proxy` 模块，因为协议的客户端 crate 也会作为 `landing-<id>` 编进服务端，不能依赖客户端叶子。`Upstream::open_stream(host, port)` 打开 TCP 流，`associate()` 打开一条 SOCKS5 UDP 关联，`close()` 幂等地取消它打开的全部流和关联。`Stream::read_for` 在等待期内没有数据时返回 `TimedOut`，结束时返回 `Ok(0)` 或 `UnexpectedEof`。`Association::send_to` 带本机应用的 UDP 来源，同一关联的来源不变。协议拒绝的单个数据报以 `Ok` 丢弃，只有关联已经结束才返回错误。`recv_for` 一次给出一个完整数据报及其来源。
 
@@ -104,6 +106,7 @@ SOCKS5 和 HTTP 前端在 `crates/client/src/proxy/`，只属于客户端叶子�
 ```text
 kerlico-client                              # 列出本次构建的客户端协议
 kerlico-client client.json                  # 按文档里的 protocol 启动
+kerlico-client --tun wg-test client.json    # WireGuard 使用指定的 TUN 设备
 kerlico-client --mieru-proxy client.json    # 同一路径，protocol 固定为 mieru，可以省略
 ```
 
@@ -117,4 +120,6 @@ SOCKS5 包含 `CONNECT` 和 `UDP ASSOCIATE`，只接受无认证方法。UDP 关
 
 ## 引擎和协议是两个 crate
 
-`crates/wg` 是以后唯一的 WireGuard 实现。`protocols/wireguard` 是可选的入站和客户端协议，将来依赖 `kerlico-wg`。`crates/outbound` 也会依赖 `kerlico-wg`，因为服务端默认带 WARP。只编客户端、且不编 WireGuard 协议时，不要依赖 `kerlico-wg`。
+`crates/wg` 是唯一的 WireGuard 引擎。入站、客户端、落地和服务端默认带的 WARP 都使用它。仅客户端叶子启用 WireGuard 时加上 `tun-device`，落地使用用户态 TCP/UDP，不需要打开 TUN。只编客户端且不编 WireGuard 时，不依赖 `kerlico-wg`。
+
+`crates/wg/vendor/boringtun` 固定 BoringTun 0.7.1，并加上在线更换预共享密钥和报告握手确认的接口。[补丁说明](../../crates/wg/vendor/boringtun/KERLICO-PATCH.md) 记录上游版本和改动。分发包含 WireGuard 或 WARP 的二进制时，应附上它的 [BSD 许可](../../crates/wg/vendor/boringtun/LICENSE.md)。

@@ -339,7 +339,7 @@ fn write_registry(
             "use kerlico_shared::{ClientEntry, ProtocolId};\n#[allow(dead_code)]\npub(super) struct Registration { pub(super) id: ProtocolId, pub(super) entry: ClientEntry }\n",
         ),
         Role::Server => body.push_str(
-            "use kerlico_shared::{OpenError, ProtocolId, Settings};\nuse kerlico_shared::{Accept, Destination, InboundStream, ListenAddr, NodeTag};\n#[allow(dead_code)]\npub(super) type ListenFn = fn(&NodeTag, &ListenAddr, &Settings) -> Result<Box<dyn Accept>, OpenError>;\n#[allow(dead_code)]\npub(super) struct Registration { pub(super) id: ProtocolId, pub(super) listen: ListenFn }\n#[allow(dead_code)]\npub(super) type LandFn = fn(&str, u16, &Settings, &Destination) -> Result<Box<dyn InboundStream>, OpenError>;\n#[allow(dead_code)]\npub(super) struct LandRegistration { pub(super) id: ProtocolId, pub(super) land: LandFn }\n",
+            "use kerlico_shared::{ClientEntry, OpenError, ProtocolId, Settings};\nuse kerlico_shared::{Accept, Destination, InboundStream, ListenAddr, NodeTag};\n#[allow(dead_code)]\npub(super) type ListenFn = fn(&NodeTag, &ListenAddr, &Settings) -> Result<Box<dyn Accept>, OpenError>;\n#[allow(dead_code)]\npub(super) struct Registration { pub(super) id: ProtocolId, pub(super) listen: ListenFn }\n#[allow(dead_code)]\npub(super) type LandFn = fn(&str, u16, &Settings, &Destination) -> Result<Box<dyn InboundStream>, OpenError>;\n#[allow(dead_code)]\npub(super) struct LandRegistration { pub(super) id: ProtocolId, pub(super) land: LandFn, pub(super) entry: ClientEntry }\n",
         ),
     }
     body.push_str("pub(super) static REGISTRY: &[Registration] = &[\n");
@@ -360,7 +360,7 @@ fn write_registry(
         for id in landings {
             let rust_name = format!("landing_{}", id.replace('-', "_"));
             body.push_str(&format!(
-                "    LandRegistration {{ id: ProtocolId::must(\"{id}\"), land: {rust_name}::land }},\n"
+                "    LandRegistration {{ id: ProtocolId::must(\"{id}\"), land: {rust_name}::land, entry: {rust_name}::CLIENT }},\n"
             ));
         }
         body.push_str("];\n");
