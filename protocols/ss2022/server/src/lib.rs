@@ -6,6 +6,7 @@ use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
+use kerlico_shared::dispatch;
 use kerlico_shared::{
     Accept, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError, PlaneFault,
     Settings, Transport, UserEmail,
@@ -84,7 +85,7 @@ struct Protocol {
     identity: Option<Arc<[u8]>>,
     relay: bool,
     users: RwLock<Users>,
-    ready: mpsc::SyncSender<Handoff>,
+    ready: dispatch::SyncSender<Handoff>,
 }
 
 impl Accept for Node {
@@ -199,7 +200,7 @@ pub fn listen(
         })
         .transpose()
         .map_err(|_| OpenError::Transport)?;
-    let (ready, flows) = mpsc::sync_channel(256);
+    let (ready, flows) = dispatch::sync_channel(256, settings.dispatch_wake());
     let protocol = Arc::new(Protocol {
         tag: tag.clone(),
         kind,
@@ -309,11 +310,12 @@ async fn handshake(stream: tokio::net::TcpStream, peer: SocketAddr, config: Arc<
         };
         let start = identity.len();
         prefix.drain(start..start + identity::BLOCK);
+        let (read, write) = stream.into_split();
         let mut handoff = Handoff::new(
             config.tag.clone(),
             account.email.clone(),
             dest,
-            Box::new(Tcp(TcpFlow::with_prefix(socket, stream, prefix))),
+            Box::new(Tcp(Some(TcpFlow::from_halves(socket, read, write, prefix)))),
         );
         handoff.set_peer(peer);
         let _ = config.ready.try_send(handoff);
@@ -369,27 +371,35 @@ async fn handshake(stream: tokio::net::TcpStream, peer: SocketAddr, config: Arc<
         reject(&socket);
         return;
     };
+    let (read, write) = stream.into_halves();
     let mut handoff = Handoff::new(
         config.tag.clone(),
         account.email.clone(),
         dest,
-        Box::new(Tcp(TcpFlow::with_prefix(socket, stream, first))),
+        Box::new(Tcp(Some(TcpFlow::from_input_halves(socket, read, write, first)))),
     );
     handoff.set_peer(peer);
     let _ = config.ready.try_send(handoff);
 }
 
-struct Tcp(TcpFlow);
+struct Tcp(Option<TcpFlow>);
 
 impl InboundStream for Tcp {
+    fn take_async_tcp(&mut self) -> Result<Option<kerlico_shared::AsyncTcp>, PlaneFault> {
+        let executor = kerlico_ss2022::runtime().map_err(map_io)?.handle().clone();
+        Ok(self.0.take().map(|flow| flow.into_async(executor)))
+    }
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
-        self.0.read(buf, FLOW_WAIT).map_err(map_io)
+        self.0.as_ref().ok_or(PlaneFault::Closed)?.read(buf, FLOW_WAIT).map_err(map_io)
+    }
+    fn read_from_user_to(&self, buf: &mut [u8], sink: &mut dyn FnMut(&[u8])) -> Result<usize, PlaneFault> {
+        self.0.as_ref().ok_or(PlaneFault::Closed)?.read_to(buf, FLOW_WAIT, sink).map_err(map_io)
     }
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
-        self.0.write(buf).map(|_| buf.len()).map_err(map_io)
+        self.0.as_ref().ok_or(PlaneFault::Closed)?.write(buf).map(|_| buf.len()).map_err(map_io)
     }
     fn finish_to_user(&self) -> Result<bool, PlaneFault> {
-        self.0.finish().map(|_| true).map_err(map_io)
+        self.0.as_ref().ok_or(PlaneFault::Closed)?.finish().map(|_| true).map_err(map_io)
     }
 }
 

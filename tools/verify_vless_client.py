@@ -80,12 +80,12 @@ class Fixtures(mieru.Fixtures):
     def __enter__(self):
         super().__enter__()
         try:
-            self.recorder = self.add(mieru.ThreadedUDP, "127.0.0.1", Recorder, "recorder")
-            self.udp53 = self.add(mieru.ThreadedUDP, "127.0.0.1", Recorder, "udp53", 53)
-            self.udp443 = self.add(mieru.ThreadedUDP, "127.0.0.1", Recorder, "udp443", 443)
+            self.recorder = self.add(mieru.SequentialUDP, "127.0.0.1", Recorder, "recorder")
+            self.udp53 = self.add(mieru.SequentialUDP, "127.0.0.1", Recorder, "udp53", 53)
+            self.udp443 = self.add(mieru.SequentialUDP, "127.0.0.1", Recorder, "udp443", 443)
             for server in (self.recorder, self.udp53, self.udp443):
                 server.sources = []
-            self.reflector = self.add(mieru.ThreadedUDP, "127.0.0.1", Reflector, "reflector")
+            self.reflector = self.add(mieru.SequentialUDP, "127.0.0.1", Reflector, "reflector")
             self.reflector.answer = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.reflector.answer.bind(("127.0.0.1", 0))
         except BaseException:

@@ -699,6 +699,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[cfg(target_os = "linux")]
+    mod batching;
+
     #[test]
     fn chrome_parrot_emits_quic_hello_fields() {
         let options = super::super::tests::options();

@@ -27,7 +27,7 @@ use tokio::{runtime::Runtime, sync::mpsc, time::timeout};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn runtime() -> io::Result<&'static Runtime> {
+pub(crate) fn runtime() -> io::Result<&'static Runtime> {
     static RUNTIME: OnceLock<io::Result<Runtime>> = OnceLock::new();
     RUNTIME
         .get_or_init(|| {

@@ -54,8 +54,8 @@ use std::{
 };
 
 use aes::{
-    Aes128, Aes256, Block,
     cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit},
+    Aes128, Aes256, Block,
 };
 use byte_string::ByteStr;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -65,9 +65,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{crypto_io::StreamType, proxy_stream::protocol::v2::SERVER_STREAM_TIMESTAMP_MAX_DIFF};
 use crate::{
-    config::{ServerUserManager, method_support_eih},
+    config::{method_support_eih, ServerUserManager},
     context::Context,
-    crypto::{CipherKind, v2::tcp::TcpCipher},
+    crypto::{v2::tcp::TcpCipher, CipherKind},
 };
 
 #[inline]
@@ -214,13 +214,34 @@ impl DecryptedReader {
     where
         S: AsyncRead + Unpin + ?Sized,
     {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let bytes = ready!(self.poll_fill_buf_decrypted(cx, context, stream))?;
+        let n = bytes.len().min(buf.remaining());
+        buf.put_slice(&bytes[..n]);
+        self.consume_decrypted(n);
+        Poll::Ready(Ok(()))
+    }
+
+    /// Borrow the next authenticated record without copying it into a second buffer.
+    /// The slice remains valid until `consume_decrypted` advances this reader.
+    pub fn poll_fill_buf_decrypted<S>(
+        &mut self,
+        cx: &mut task::Context<'_>,
+        context: &Context,
+        stream: &mut S,
+    ) -> Poll<ProtocolResult<&[u8]>>
+    where
+        S: AsyncRead + Unpin + ?Sized,
+    {
         loop {
             match self.state {
                 DecryptReadState::ReadHeader { ref key } => {
                     let key = unsafe { &*(key.as_ref() as *const _) };
                     match ready!(self.poll_read_header(cx, context, stream, key))? {
                         None => {
-                            return Ok(()).into();
+                            return Poll::Ready(Ok(&[]));
                         }
                         Some(length) => {
                             self.buffer.clear();
@@ -232,7 +253,7 @@ impl DecryptedReader {
                 }
                 DecryptReadState::ReadLength => match ready!(self.poll_read_length(cx, stream))? {
                     None => {
-                        return Ok(()).into();
+                        return Poll::Ready(Ok(&[]));
                     }
                     Some(length) => {
                         self.buffer.clear();
@@ -246,16 +267,9 @@ impl DecryptedReader {
                     self.state = DecryptReadState::BufferedData { pos: 0 };
                     self.data_chunk_count = self.data_chunk_count.wrapping_add(1);
                 }
-                DecryptReadState::BufferedData { ref mut pos } => {
-                    if *pos < self.buffer.len() {
-                        let buffered = &self.buffer[*pos..];
-
-                        let consumed = usize::min(buffered.len(), buf.remaining());
-                        buf.put_slice(&buffered[..consumed]);
-
-                        *pos += consumed;
-
-                        return Ok(()).into();
+                DecryptReadState::BufferedData { pos } => {
+                    if pos < self.buffer.len() {
+                        return Poll::Ready(Ok(&self.buffer[pos..]));
                     }
 
                     self.buffer.clear();
@@ -264,6 +278,37 @@ impl DecryptedReader {
                 }
             }
         }
+    }
+
+    /// Consume only bytes exposed by the most recent authenticated buffer.
+    pub fn consume_decrypted(&mut self, amount: usize) {
+        if amount == 0 {
+            return;
+        }
+        let DecryptReadState::BufferedData { ref mut pos } = self.state else {
+            panic!("no authenticated data to consume");
+        };
+        assert!(amount <= self.buffer.len() - *pos);
+        *pos += amount;
+    }
+
+    /// Reserve a bounded slab before lending a batch of owned records. Once
+    /// those records are dropped, BytesMut can reclaim the same allocation.
+    /// This does not read, authenticate, or consume any input.
+    pub fn reserve_owned_records(&mut self, capacity: usize) {
+        self.buffer.reserve(capacity.saturating_sub(self.buffer.len()));
+    }
+
+    /// Move the authenticated remainder out without copying its payload.
+    /// Call only after a nonempty successful `poll_fill_buf_decrypted`.
+    pub fn take_decrypted(&mut self) -> Bytes {
+        let DecryptReadState::BufferedData { pos } = self.state else {
+            panic!("no authenticated record to take");
+        };
+        assert!(pos < self.buffer.len());
+        let bytes = self.buffer.split().freeze().slice(pos..);
+        self.state = DecryptReadState::ReadLength;
+        bytes
     }
 
     fn poll_read_header<S>(
@@ -392,7 +437,11 @@ impl DecryptedReader {
             let mut request_salt = BytesMut::with_capacity(salt_len);
             request_salt.resize(salt_len, 0);
             header_reader.read_exact(&mut request_salt)?;
-            if self.expected_request_salt.as_deref().is_some_and(|expected| expected != &request_salt[..]) {
+            if self
+                .expected_request_salt
+                .as_deref()
+                .is_some_and(|expected| expected != &request_salt[..])
+            {
                 return Err(ProtocolError::InvalidRequestSalt).into();
             }
             self.request_salt = Some(request_salt.freeze());
@@ -428,6 +477,7 @@ impl DecryptedReader {
         S: AsyncRead + Unpin + ?Sized,
     {
         let length_len = 2 + self.method.tag_len();
+        self.buffer.reserve(length_len);
 
         let n = ready!(self.poll_read_exact(cx, stream, length_len))?;
         if n == 0 {
@@ -533,7 +583,7 @@ impl DecryptedReader {
 enum EncryptWriteState {
     AssembleHeader,
     AssemblePacket,
-    Writing { pos: usize },
+    Writing { pos: usize, plaintext: usize },
 }
 
 /// Writer wrapper that will encrypt data automatically
@@ -545,6 +595,9 @@ pub struct EncryptedWriter {
     state: EncryptWriteState,
     salt: Bytes,
     request_salt: Option<Bytes>,
+    prefix_len: usize,
+    input: [std::ops::Range<usize>; 4],
+    wire_len: usize,
 }
 
 impl EncryptedWriter {
@@ -631,10 +684,13 @@ impl EncryptedWriter {
             stream_ty,
             cipher: TcpCipher::new(method, key, nonce),
             method,
+            prefix_len: buffer.len(),
             buffer,
             state: EncryptWriteState::AssembleHeader,
             salt: Bytes::copy_from_slice(nonce),
             request_salt: None,
+            input: std::array::from_fn(|_| 0..0),
+            wire_len: 0,
         }
     }
 
@@ -659,99 +715,129 @@ impl EncryptedWriter {
         &mut self,
         cx: &mut task::Context<'_>,
         stream: &mut S,
-        mut buf: &[u8],
+        buf: &[u8],
     ) -> Poll<io::Result<usize>>
     where
         S: AsyncWrite + Unpin + ?Sized,
     {
-        if buf.len() > MAX_PACKET_SIZE {
-            buf = &buf[..MAX_PACKET_SIZE];
-        }
-
-        loop {
-            match self.state {
-                EncryptWriteState::AssembleHeader => {
-                    // Step 1. AEAD(TYPE + TIMESTAMP [+ REQUEST_SALT] + LENGTH)
-                    let request_salt_len = match self.request_salt {
-                        None => 0,
-                        Some(ref salt) => salt.len(),
-                    };
-                    let header_len = 1 + 8 + request_salt_len + 2 + self.cipher.tag_len();
-                    self.buffer.reserve(header_len);
-
-                    let mbuf = &mut self.buffer.chunk_mut()[..header_len];
-                    let mbuf = unsafe { slice::from_raw_parts_mut(mbuf.as_mut_ptr(), mbuf.len()) };
-
-                    let stream_ty = match self.stream_ty {
-                        StreamType::Client => 0,
-                        StreamType::Server => 1,
-                    };
-                    self.buffer.put_u8(stream_ty);
-                    self.buffer.put_u64(get_now_timestamp());
-                    if let Some(ref salt) = self.request_salt {
-                        self.buffer.put_slice(salt);
-                    }
-                    self.buffer.put_u16(buf.len() as u16);
-                    self.cipher.encrypt_packet(mbuf);
-                    unsafe { self.buffer.advance_mut(self.cipher.tag_len()) };
-
-                    // Step 2. Data Chunk
-                    let data_size = buf.len() + self.cipher.tag_len();
-                    self.buffer.reserve(data_size);
-
-                    let mbuf = &mut self.buffer.chunk_mut()[..data_size];
-                    let mbuf = unsafe { slice::from_raw_parts_mut(mbuf.as_mut_ptr(), mbuf.len()) };
-
-                    self.buffer.put_slice(buf);
-                    self.cipher.encrypt_packet(mbuf);
-                    unsafe { self.buffer.advance_mut(self.cipher.tag_len()) };
-
-                    // Step 3. Write all
-                    self.state = EncryptWriteState::Writing { pos: 0 };
-                }
-
-                EncryptWriteState::AssemblePacket => {
-                    // Step 1. Append Length
-                    let length_size = 2 + self.cipher.tag_len();
-                    self.buffer.reserve(length_size);
-
-                    let mbuf = &mut self.buffer.chunk_mut()[..length_size];
-                    let mbuf = unsafe { slice::from_raw_parts_mut(mbuf.as_mut_ptr(), mbuf.len()) };
-
-                    self.buffer.put_u16(buf.len() as u16);
-                    self.cipher.encrypt_packet(mbuf);
-                    unsafe { self.buffer.advance_mut(self.cipher.tag_len()) };
-
-                    // Step 2. Append data
-                    let data_size = buf.len() + self.cipher.tag_len();
-                    self.buffer.reserve(data_size);
-
-                    let mbuf = &mut self.buffer.chunk_mut()[..data_size];
-                    let mbuf = unsafe { slice::from_raw_parts_mut(mbuf.as_mut_ptr(), mbuf.len()) };
-
-                    self.buffer.put_slice(buf);
-                    self.cipher.encrypt_packet(mbuf);
-                    unsafe { self.buffer.advance_mut(self.cipher.tag_len()) };
-
-                    // Step 3. Write all
-                    self.state = EncryptWriteState::Writing { pos: 0 };
-                }
-                EncryptWriteState::Writing { ref mut pos } => {
-                    while *pos < self.buffer.len() {
-                        let n = ready!(Pin::new(&mut *stream).poll_write(cx, &self.buffer[*pos..]))?;
-                        if n == 0 {
-                            return Err(ErrorKind::UnexpectedEof.into()).into();
-                        }
-                        *pos += n;
-                    }
-
-                    // Reset state
-                    self.state = EncryptWriteState::AssemblePacket;
-                    self.buffer.clear();
-
-                    return Ok(buf.len()).into();
+        if !matches!(self.state, EncryptWriteState::Writing { .. }) {
+            let plaintext = buf.len().min(4 * MAX_PACKET_SIZE);
+            let mut remaining = &buf[..plaintext];
+            let (storage, regions) = self.prepare_input();
+            for region in regions {
+                let n = remaining.len().min(region.len());
+                storage[region.start..region.start + n].copy_from_slice(&remaining[..n]);
+                remaining = &remaining[n..];
+                if remaining.is_empty() {
+                    break;
                 }
             }
+            self.seal_input(plaintext);
         }
+        self.poll_drain(cx, stream)
+    }
+
+    /// Lend final packet payload regions. Preparing input never advances a
+    /// nonce or fixes the response timestamp. Storage is initialized only when
+    /// it grows, then retained unchanged in size across subsequent batches.
+    pub fn prepare_input(&mut self) -> (&mut [u8], &[std::ops::Range<usize>]) {
+        assert!(!matches!(self.state, EncryptWriteState::Writing { .. }));
+        let tag = self.cipher.tag_len();
+        let first_header = match self.state {
+            EncryptWriteState::AssembleHeader => 1 + 8 + self.request_salt.as_ref().map_or(0, Bytes::len) + 2 + tag,
+            EncryptWriteState::AssemblePacket => 2 + tag,
+            EncryptWriteState::Writing { .. } => unreachable!(),
+        };
+        let mut start = self.prefix_len;
+        for (index, region) in self.input.iter_mut().enumerate() {
+            let body = start + if index == 0 { first_header } else { 2 + tag };
+            *region = body..body + MAX_PACKET_SIZE;
+            start = region.end + tag;
+        }
+        if self.buffer.len() < start {
+            let mut storage = BytesMut::zeroed(start);
+            storage[..self.prefix_len].copy_from_slice(&self.buffer[..self.prefix_len]);
+            self.buffer = storage;
+        }
+        (&mut self.buffer[..], &self.input)
+    }
+
+    /// Seal bytes previously filled in `prepare_input`, in region order, and
+    /// write the same pending batch through every partial socket operation.
+    pub fn poll_send_input<S>(
+        &mut self,
+        cx: &mut task::Context<'_>,
+        stream: &mut S,
+        filled: usize,
+    ) -> Poll<io::Result<usize>>
+    where
+        S: AsyncWrite + Unpin + ?Sized,
+    {
+        if !matches!(self.state, EncryptWriteState::Writing { .. }) {
+            self.seal_input(filled);
+        }
+        self.poll_drain(cx, stream)
+    }
+
+    fn poll_drain<S>(&mut self, cx: &mut task::Context<'_>, stream: &mut S) -> Poll<io::Result<usize>>
+    where
+        S: AsyncWrite + Unpin + ?Sized,
+    {
+        let EncryptWriteState::Writing { ref mut pos, plaintext } = self.state else {
+            unreachable!("sealed records are ready to write");
+        };
+        // Keep the original accepted count across Pending and partial socket
+        // writes; never reseal or advance a nonce when resuming this batch.
+        while *pos < self.wire_len {
+            let n = ready!(Pin::new(&mut *stream).poll_write(cx, &self.buffer[*pos..self.wire_len]))?;
+            if n == 0 {
+                return Err(ErrorKind::WriteZero.into()).into();
+            }
+            *pos += n;
+        }
+        self.state = EncryptWriteState::AssemblePacket;
+        self.prefix_len = 0;
+        self.wire_len = 0;
+        Poll::Ready(Ok(plaintext))
+    }
+
+    fn seal_input(&mut self, filled: usize) {
+        assert!(filled <= 4 * MAX_PACKET_SIZE);
+        let initial = matches!(self.state, EncryptWriteState::AssembleHeader);
+        assert!(!matches!(self.state, EncryptWriteState::Writing { .. }));
+        let tag = self.cipher.tag_len();
+        let mut remaining = filled;
+        let mut start = self.prefix_len;
+        for (index, region) in self.input.iter().enumerate() {
+            assert!(region.len() == MAX_PACKET_SIZE && region.end + tag <= self.buffer.len());
+            let n = remaining.min(MAX_PACKET_SIZE);
+            let length_at = if initial && index == 0 {
+                self.buffer[start] = if self.stream_ty == StreamType::Client { 0 } else { 1 };
+                self.buffer[start + 1..start + 9].copy_from_slice(&get_now_timestamp().to_be_bytes());
+                let mut cursor = start + 9;
+                if let Some(salt) = &self.request_salt {
+                    self.buffer[cursor..cursor + salt.len()].copy_from_slice(salt);
+                    cursor += salt.len();
+                }
+                cursor
+            } else {
+                start
+            };
+            assert_eq!(length_at + 2 + tag, region.start);
+            self.buffer[length_at..length_at + 2].copy_from_slice(&(n as u16).to_be_bytes());
+            self.cipher.encrypt_packet(&mut self.buffer[start..region.start]);
+            let end = region.start + n + tag;
+            self.cipher.encrypt_packet(&mut self.buffer[region.start..end]);
+            remaining -= n;
+            self.wire_len = end;
+            if remaining == 0 {
+                break;
+            }
+            start = end;
+        }
+        self.state = EncryptWriteState::Writing {
+            pos: 0,
+            plaintext: filled,
+        };
     }
 }

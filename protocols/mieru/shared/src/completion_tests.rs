@@ -12,7 +12,7 @@ struct Server {
 impl Server {
     fn new(transport: Transport, mtu: u16) -> Self {
         let accounts = Arc::new(Mutex::new(vec![account()]));
-        let (tx, ready) = mpsc::channel();
+        let (tx, ready) = dispatch::channel(None);
         let handles = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         if transport == Transport::Udp {

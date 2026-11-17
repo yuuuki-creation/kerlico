@@ -16,6 +16,7 @@ pub(super) fn context(
     dns: Arc<RwLock<dns::Config>>,
     catalog: geodata::Catalog,
     landing_allowed: bool,
+    dispatch: Option<kerlico_shared::dispatch::Wake>,
 ) -> Arc<RuntimeContext> {
     Arc::new(RuntimeContext {
         network: Arc::new(ServerNetwork {
@@ -24,6 +25,7 @@ pub(super) fn context(
             landing_allowed,
         }),
         geoip: Arc::new(catalog),
+        dispatch,
     })
 }
 

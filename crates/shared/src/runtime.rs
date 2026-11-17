@@ -343,6 +343,7 @@ pub trait GeoIpCatalog: fmt::Debug + Send + Sync {
 pub struct RuntimeContext {
     pub network: Arc<dyn Network>,
     pub geoip: Arc<dyn GeoIpCatalog>,
+    pub dispatch: Option<crate::dispatch::Wake>,
 }
 
 fn unsupported(service: &str) -> io::Error {

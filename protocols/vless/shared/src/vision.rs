@@ -301,6 +301,20 @@ pub fn vision_pair<T: VisionTransport>(read: T, write: T, id: [u8; 16], prefix: 
 
 impl<T> VisionIo<T> {
     pub fn inner_mut(&mut self) -> &mut T { &mut self.inner }
+
+    /// No decoded or partially parsed input may be skipped when handing off a read.
+    pub fn drained_read_inner(&mut self) -> Option<&mut T> {
+        let state = self.state.lock().expect("vision");
+        let drained = state.inbound_direct() && !state.switch_read
+            && state.plain.is_empty() && state.rest().is_empty();
+        drop(state);
+        drained.then_some(&mut self.inner)
+    }
+
+    /// A writer is available only after its accepted bytes and switch have left.
+    pub fn flushed_write_inner(&mut self) -> Option<&mut T> {
+        (self.accepted.is_none() && self.unsent.is_empty() && !self.switch).then_some(&mut self.inner)
+    }
 }
 
 impl<T: VisionTransport> std::io::Read for VisionIo<T> {
@@ -407,6 +421,40 @@ fn complete_record(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_handoff_waits_until_all_direct_prefix_bytes_are_consumed() {
+        use std::io::{Read, Write};
+        struct Memory(std::io::Cursor<Vec<u8>>);
+        impl Read for Memory {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> { self.0.read(buf) }
+        }
+        impl Write for Memory {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { Ok(buf.len()) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        impl VisionTransport for Memory {
+            fn read_direct(&mut self) -> std::io::Result<()> { Ok(()) }
+            fn write_direct(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let id = [7; 16];
+        let mut prefix = id.to_vec();
+        prefix.extend_from_slice(&[DIRECT, 0, 4, 0, 0]);
+        prefix.extend_from_slice(b"headprefetched");
+        let (mut read, _) = vision_pair(Memory(std::io::Cursor::new(b"socket".to_vec())),
+            Memory(std::io::Cursor::new(Vec::new())), id, &prefix).unwrap();
+        assert!(read.drained_read_inner().is_none());
+        let mut small = [0; 2];
+        read.read_exact(&mut small).unwrap();
+        assert_eq!(&small, b"he");
+        assert!(read.drained_read_inner().is_none());
+        let mut rest = [0; 12];
+        read.read_exact(&mut rest).unwrap();
+        assert_eq!(&rest, b"adprefetched");
+        let mut tail = Vec::new();
+        read.drained_read_inner().unwrap().read_to_end(&mut tail).unwrap();
+        assert_eq!(tail, b"socket");
+    }
 
     fn pull(vision: &mut Vision) -> Vec<u8> {
         let mut out = Vec::new();

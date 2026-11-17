@@ -102,7 +102,7 @@ impl UdpSession {
 pub fn reverse_bridge(host: &str, port: u16, settings: &Settings) -> Result<ReverseBridge, OpenError> {
     let destination = Destination::new("v1.rvs.cool", 1, Transport::Tcp).map_err(|_| OpenError::Settings)?;
     let (read, write) = dial(host, port, settings, Flow::parse(settings)?, Command::Reverse, &destination)?;
-    Ok(ReverseBridge::new(read, write, Vec::new()))
+    Ok(ReverseBridge::new(read, write, Vec::new(), settings.dispatch_wake()))
 }
 
 enum Opened {
@@ -116,7 +116,7 @@ fn open(host: &str, port: u16, settings: &Settings, destination: &Destination, g
     let connect = |command| dial(host, port, settings, flow, command, destination);
     if settings.text("reverse").is_ok_and(|text| !text.is_empty() && text != "false") {
         let (read, write) = connect(Command::Reverse)?;
-        return Ok(Opened::Reverse(ReverseBridge::new(read, write, Vec::new())));
+        return Ok(Opened::Reverse(ReverseBridge::new(read, write, Vec::new(), None)));
     }
     let policy = mux::Policy::parse(settings, settings.text("network").ok() == Some("xdrive"))?;
     Ok(match mux::route(flow, policy, destination)? {
@@ -1515,7 +1515,7 @@ pub enum BridgeLoad {
 }
 
 impl ReverseBridge {
-    fn new(mut read: Link, mut write: Link, prefix: Vec<u8>) -> Self {
+    fn new(mut read: Link, mut write: Link, prefix: Vec<u8>, wake: Option<&kerlico_shared::dispatch::Wake>) -> Self {
         read.set_timeout(Duration::from_millis(200));
         write.set_timeout(Duration::from_millis(200));
         let shared = Arc::new(ReverseShared {
@@ -1525,7 +1525,7 @@ impl ReverseBridge {
             queued: std::sync::atomic::AtomicUsize::new(0),
             closed: std::sync::atomic::AtomicBool::new(false),
         });
-        let (sender, incoming) = std::sync::mpsc::sync_channel(64);
+        let (sender, incoming) = kerlico_shared::dispatch::sync_channel(64, wake);
         let writer = shared.clone();
         std::thread::spawn(move || {
             writer.uplink.run(write);
@@ -1599,7 +1599,7 @@ impl ReverseShared {
         self.uplink.close();
     }
 
-    fn route(self: &Arc<Self>, frame: MuxFrame, incoming: &std::sync::mpsc::SyncSender<ReverseFlow>) -> std::io::Result<()> {
+    fn route(self: &Arc<Self>, frame: MuxFrame, incoming: &kerlico_shared::dispatch::SyncSender<ReverseFlow>) -> std::io::Result<()> {
         let id = frame.id;
         if frame.status == kerlico_vless::END {
             if !frame.payload.is_empty() {
@@ -1681,7 +1681,7 @@ fn reverse_destination(address: Option<&Addr>, port: u16, network: u8) -> std::i
     Destination::new(host, port, transport).map_err(|_| std::io::Error::other("reverse target"))
 }
 
-fn reverse_loop(mut read: Link, mut pending: Vec<u8>, shared: Arc<ReverseShared>, incoming: std::sync::mpsc::SyncSender<ReverseFlow>) {
+fn reverse_loop(mut read: Link, mut pending: Vec<u8>, shared: Arc<ReverseShared>, incoming: kerlico_shared::dispatch::SyncSender<ReverseFlow>) {
     let mut buf = [0; 8192];
     'connection: loop {
         if shared.closed() { break; }
@@ -2036,7 +2036,7 @@ mod tests {
         peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         peer.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
         let reader = client.try_clone().unwrap();
-        (ReverseBridge::new(Link::Tcp(reader), Link::Tcp(client), Vec::new()), peer)
+        (ReverseBridge::new(Link::Tcp(reader), Link::Tcp(client), Vec::new(), None), peer)
     }
 
     fn accept_reverse(bridge: &ReverseBridge) -> ReverseFlow {

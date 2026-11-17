@@ -4,6 +4,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::time::Duration;
 
+use kerlico_shared::dispatch;
 use kerlico_shared::{
     Accept, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError, PlaneFault,
     Settings, Transport, UserEmail,
@@ -128,7 +129,7 @@ pub fn listen(
     let address = bind.socket_addr();
     let socket = open_socket(address).map_err(|_| OpenError::Transport)?;
     let (tx, command) = mpsc::sync_channel(64);
-    let (ready, rx) = mpsc::sync_channel(256);
+    let (ready, rx) = dispatch::sync_channel(256, settings.dispatch_wake());
     let tag = tag.clone();
     std::thread::Builder::new()
         .name("kerlico-wireguard-node".into())
@@ -163,7 +164,7 @@ fn run(
     mut hub: Hub,
     mut stack: Stack,
     command: Receiver<Command>,
-    ready: SyncSender<Handoff>,
+    ready: dispatch::SyncSender<Handoff>,
 ) {
     let mut accounts: HashMap<UserEmail, PeerId> = HashMap::new();
     let mut peers: HashMap<PeerId, UserEmail> = HashMap::new();

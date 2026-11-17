@@ -68,7 +68,13 @@ fn supervise(links: &Weak<Links>, tag: &NodeTag, host: &str, port: u16, settings
         if wanted {
             match landing_vless::reverse_bridge(host, port, settings) {
                 Ok(link) => match links.upgrade() {
-                    Some(shared) => shared.lock().expect("bridge links").push(link),
+                    Some(shared) => {
+                        shared.lock().expect("bridge links").push(link);
+                        if let Some(wake) = settings.dispatch_wake() {
+                            // A flow may already have arrived before the link joined the node.
+                            wake.notify();
+                        }
+                    }
                     None => return,
                 },
                 Err(error) => eprintln!("bridge {} {host}:{port} {error:?}", tag.as_str()),

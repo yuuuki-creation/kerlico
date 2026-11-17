@@ -7,6 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use kerlico_shared::dispatch;
 use kerlico_shared::{
     Accept, DatagramSession, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError, PlaneFault, Settings,
     Transport, UserEmail,
@@ -19,6 +20,8 @@ use kerlico_vless::{
     ChunkReader, HttpHead, XhttpConfig, XhttpRequestKind, read_http_head_with_limit, write_xhttp_response,
     HttpPrefaceRead, RawHttpConfig, RawHttpWrite, UpgradeConfig,
 };
+
+mod async_native;
 
 #[derive(Clone)]
 struct RealityConfig {
@@ -801,7 +804,7 @@ pub fn listen(
     let listener = bind_tcp(bind.socket_addr(), settings).map_err(|_| OpenError::Transport)?;
     listener.set_nonblocking(false).ok();
     let accounts = Arc::new(Users::new(native, settings, tag)?);
-    let (ready_tx, ready_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = dispatch::channel(settings.dispatch_wake());
     let shared = Arc::clone(&accounts);
     let sockopt = kerlico_vless::socket::SocketOptions::parse(settings.text("sockopt").ok()).map_err(|_| OpenError::Settings)?;
     let accept_proxy = settings.text("acceptProxyProtocol").ok() == Some("true") || sockopt.accept_proxy_protocol;
@@ -838,7 +841,7 @@ fn listen_xdrive(tag: &NodeTag, settings: &Settings, native: Option<Decryption>)
     } else { return Err(OpenError::Settings); }.map_err(|_| OpenError::Settings)?;
     let mut listener = drive.listen().map_err(|_| OpenError::Transport)?;
     let accounts = Arc::new(Users::new(native, settings, tag)?);
-    let (ready_tx, ready_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = dispatch::channel(settings.dispatch_wake());
     let shared = accounts.clone();
     thread::spawn(move || loop {
         let Ok((read, write)) = listener.accept() else { thread::sleep(Duration::from_millis(100)); continue; };
@@ -860,7 +863,7 @@ fn listen_hysteria(tag: &NodeTag, bind: &ListenAddr, settings: &Settings, native
     let mut masquerade = kerlico_vless::HysteriaMasquerade::parse(settings.text("masquerade").ok()).map_err(|_| OpenError::Settings)?;
     if let Some(network) = accounts.masks.network() { masquerade = masquerade.with_dialer(network.masquerade_dialer()); }
     let listener = kerlico_vless::HysteriaListener::bind_crypto_with_masquerade(bind.socket_addr(), config, settings.text("auth")?, &accounts.masks, masquerade).map_err(|_| OpenError::Transport)?;
-    let (ready_tx, ready_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = dispatch::channel(settings.dispatch_wake());
     let shared = accounts.clone();
     let default_flow = known_flow(settings.text("flow").unwrap_or(""))?.to_string();
     thread::spawn(move || loop {
@@ -903,7 +906,7 @@ fn listen_kcp(tag: &NodeTag, bind: &ListenAddr, settings: &Settings, native: Opt
         socket.set_write_timeout(Some(Duration::from_millis(200)))?;
         Ok(Arc::new(socket))
     }).map_err(|_| OpenError::Transport)?;
-    let (ready_tx, ready_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = dispatch::channel(settings.dispatch_wake());
     let shared = Arc::clone(&accounts);
     thread::spawn(move || kcp_loop(socket, shared, ready_tx, mask, tls, options));
     Ok(Box::new(VlessInbound {
@@ -914,7 +917,7 @@ fn listen_kcp(tag: &NodeTag, bind: &ListenAddr, settings: &Settings, native: Opt
     }))
 }
 
-fn kcp_loop(socket: Arc<dyn kerlico_vless::finalmask::PacketIo>, accounts: Arc<Users>, ready_tx: Sender<Ready>, mask: kerlico_vless::KcpMask, tls: Option<Arc<kerlico_vless::AdvancedTlsServerConfig>>, options: kerlico_vless::KcpOptions) {
+fn kcp_loop(socket: Arc<dyn kerlico_vless::finalmask::PacketIo>, accounts: Arc<Users>, ready_tx: dispatch::Sender<Ready>, mask: kerlico_vless::KcpMask, tls: Option<Arc<kerlico_vless::AdvancedTlsServerConfig>>, options: kerlico_vless::KcpOptions) {
     let mut lanes: HashMap<(SocketAddr, u16), Arc<KcpLane>> = HashMap::new();
     let mut buf = [0u8; 65535];
     let mut timer = std::time::Instant::now();
@@ -1066,7 +1069,7 @@ fn listen_xhttp(
         Ok(_) => return Err(OpenError::Settings),
     };
     let accounts = Arc::new(Users::new(native, settings, tag)?);
-    let (ready_tx, ready_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = dispatch::channel(settings.dispatch_wake());
     let h3 = tls.is_some() && alpn(settings) == ["h3"];
     let h2 = if h3 {
         H2Serve::default()
@@ -1254,7 +1257,7 @@ fn tcp_pair(socket: TcpStream, masks: &kerlico_vless::finalmask::FinalMask, peer
 
 type RealityLink = RealityDuplex<RealityRead, RealityWrite>;
 
-fn open_reality(read: Link, write: Link, config: &RealityConfig, ready: &Sender<Ready>, peer: SocketAddr, local: Option<SocketAddr>) -> Option<RealityLink> {
+fn open_reality(read: Link, write: Link, config: &RealityConfig, ready: &dispatch::Sender<Ready>, peer: SocketAddr, local: Option<SocketAddr>) -> Option<RealityLink> {
     match accept_reality(read, write, config, &FallbackSet::empty(), peer, local) {
         Ok(app) => Some(RealityDuplex::new(app.read, app.write)),
         Err(handoff) => {
@@ -1275,7 +1278,7 @@ struct XhttpListener {
     h2: H2Serve,
     forwarded_for: kerlico_vless::TrustedForwardedFor,
     accounts: Arc<Users>,
-    ready: Sender<Ready>,
+    ready: dispatch::Sender<Ready>,
     sessions: Mutex<HashMap<String, XhttpSession>>,
 }
 
@@ -1850,14 +1853,7 @@ impl Accept for VlessInbound {
                     self.tag.clone(),
                     ready.email,
                     ready.destination,
-                    Box::new(Stream {
-                        read: Mutex::new(read),
-                        write: Mutex::new(write),
-                        udp: ready.udp,
-                        pending: Mutex::new(Vec::new()),
-                        staged: Mutex::new(ready.prefix),
-                        unsent: Mutex::new(Vec::new()),
-                    }),
+                    Box::new(Stream::new(read, write, ready.udp, ready.prefix)),
                 );
                 if ready.udp || udp_destination {
                     handoff.set_peer(ready.peer);
@@ -1900,7 +1896,7 @@ struct Front {
     forwarded_for: kerlico_vless::TrustedForwardedFor,
 }
 
-fn accept_loop(listener: TcpListener, accounts: Arc<Users>, ready_tx: Sender<Ready>, front: Front) {
+fn accept_loop(listener: TcpListener, accounts: Arc<Users>, ready_tx: dispatch::Sender<Ready>, front: Front) {
     loop {
         let Ok((mut socket, peer)) = listener.accept() else {
             break;
@@ -1993,6 +1989,8 @@ fn accept_loop(listener: TcpListener, accounts: Arc<Users>, ready_tx: Sender<Rea
 }
 
 enum Link {
+    Closed,
+    ReadyTcp(Arc<tokio::net::TcpStream>),
     MaskedRead(kerlico_vless::MaskedRead),
     MaskedWrite(kerlico_vless::MaskedWrite),
     XdriveRead(kerlico_vless::xdrive::XdriveRead),
@@ -2090,6 +2088,36 @@ impl Write for HttpStream {
 }
 
 impl Link {
+    #[cfg(target_os = "linux")]
+    fn has_reality_tcp_writer(&mut self) -> bool {
+        let Self::Vision(vision) = self else { return false; };
+        let Self::Response(inner, _) = vision.inner_mut() else { return false; };
+        let Self::RealityWrite(reality) = inner.as_mut() else { return false; };
+        matches!(reality.0.lock().expect("REALITY writer").inner_mut().as_ref(), Self::Tcp(_))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reality_direct_reader(&mut self) -> Option<TcpStream> {
+        if let Self::Prefix(inner, prefix) = self {
+            return if prefix.is_empty() { inner.reality_direct_reader() } else { None };
+        }
+        let Self::Vision(vision) = self else { return None; };
+        let Self::RealityRead(reality) = vision.drained_read_inner()? else { return None; };
+        let Self::Tcp(tcp) = reality.wire.direct_inner_mut()?.as_mut() else { return None; };
+        tcp.try_clone().ok()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reality_direct_writer(&mut self) -> Option<TcpStream> {
+        let Self::Vision(vision) = self else { return None; };
+        let Self::Response(inner, response) = vision.flushed_write_inner()? else { return None; };
+        if !response.is_empty() { return None; }
+        let Self::RealityWrite(reality) = inner.as_mut() else { return None; };
+        let mut writer = reality.0.lock().expect("REALITY writer");
+        let Self::Tcp(tcp) = writer.direct_inner_mut()?.as_mut() else { return None; };
+        tcp.try_clone().ok()
+    }
+
     fn supports_vision(&self) -> bool {
         match self {
             Self::EncRead(_) | Self::RealityRead(_) => true,
@@ -2103,6 +2131,7 @@ impl Link {
     fn clone_tcp(&mut self) -> Option<TcpStream> {
         match self {
             Self::Tcp(tcp) => tcp.try_clone().ok(),
+            Self::Prefix(inner, prefix) if prefix.is_empty() => inner.clone_tcp(),
             Self::Response(inner, response) => {
                 while !response.is_empty() {
                     match inner.write(response) {
@@ -2119,6 +2148,7 @@ impl Link {
     fn is_tcp(&self) -> bool {
         match self {
             Self::Tcp(_) => true,
+            Self::Prefix(inner, prefix) => prefix.is_empty() && inner.is_tcp(),
             Self::Response(inner, _) => inner.is_tcp(),
             _ => false,
         }
@@ -2126,6 +2156,7 @@ impl Link {
 
     fn close_write(&mut self) {
         match self {
+            Self::ReadyTcp(_) | Self::Closed => {}
             Self::Tcp(tcp) => { let _ = tcp.shutdown(std::net::Shutdown::Write); }
             Self::LimitedWrite(link) => link.inner_mut().close_write(),
             _ => {}
@@ -2134,6 +2165,7 @@ impl Link {
 
     fn set_timeout(&mut self, timeout: Duration) {
         match self {
+            Self::ReadyTcp(_) | Self::Closed => {}
             Self::MaskedRead(link) => link.set_timeout(timeout),
             Self::MaskedWrite(link) => link.set_timeout(timeout),
             Self::XdriveRead(io) => io.set_timeout(Some(timeout)),
@@ -2174,6 +2206,8 @@ impl Link {
 impl Read for Link {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
+            Self::Closed => Err(io::ErrorKind::BrokenPipe.into()),
+            Self::ReadyTcp(socket) => socket.try_read(buf),
             Self::MaskedRead(link) => link.read(buf),
             Self::MaskedWrite(_) => Err(io::ErrorKind::Unsupported.into()),
             Self::XdriveRead(io) => io.read(buf),
@@ -2215,6 +2249,8 @@ impl Read for Link {
 impl Write for Link {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
+            Self::Closed => Err(io::ErrorKind::BrokenPipe.into()),
+            Self::ReadyTcp(socket) => socket.try_write(buf),
             Self::MaskedWrite(link) => link.write(buf),
             Self::MaskedRead(_) => Err(io::ErrorKind::Unsupported.into()),
             Self::XdriveWrite(io) => io.write(buf),
@@ -2249,6 +2285,7 @@ impl Write for Link {
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
+            Self::Closed | Self::ReadyTcp(_) => Ok(()),
             Self::MaskedWrite(link) => link.flush(),
             Self::MaskedRead(_) => Ok(()),
             Self::XdriveWrite(io) => io.flush(),
@@ -2499,7 +2536,7 @@ enum MuxScope {
     Xudp,
 }
 
-fn demux(mut read: Link, mut write: Link, owner: FlowOwner, mut pending: Vec<u8>, ready_tx: &Sender<Ready>, xudp: &XudpSessions, scope: MuxScope) {
+fn demux(mut read: Link, mut write: Link, owner: FlowOwner, mut pending: Vec<u8>, ready_tx: &dispatch::Sender<Ready>, xudp: &XudpSessions, scope: MuxScope) {
     let FlowOwner { email, peer } = owner;
     read.set_timeout(MUX_POLL);
     write.set_timeout(MUX_POLL);
@@ -3012,11 +3049,9 @@ fn open_reverse_portal(portal: Arc<Portal>, host: &str, port: u16, tcp: bool, pa
         portal.sessions.lock().expect("reverse").remove(&id);
         return Err(OpenError::Transport);
     }
-    Ok(Box::new(Stream {
-        read: Mutex::new(Link::Mux(lane.clone())), write: Mutex::new(Link::Mux(lane)),
-        udp: false, pending: Mutex::new(Vec::new()), staged: Mutex::new(Vec::new()),
-        unsent: Mutex::new(Vec::new()),
-    }))
+    Ok(Box::new(Stream::new(
+        Link::Mux(lane.clone()), Link::Mux(lane), false, Vec::new(),
+    )))
 }
 
 fn parse_fallback(text: &str) -> Result<(String, u16), OpenError> {
@@ -3171,7 +3206,7 @@ fn handshake(
     mut read: Link,
     mut write: Link,
     accounts: &Users,
-    ready_tx: &Sender<Ready>,
+    ready_tx: &dispatch::Sender<Ready>,
     fallback: FallbackSet,
     prelude: Vec<u8>,
     arrival: Arrival,
@@ -3280,44 +3315,34 @@ fn read_request(socket: &mut Link, prelude: Vec<u8>) -> Result<(Request, Vec<u8>
 struct Stream {
     read: Mutex<Link>,
     write: Mutex<Link>,
-    udp: bool,
+    plain_udp: Option<DatagramFrames>,
+    #[cfg(target_os = "linux")]
+    splice: bool,
+}
+
+/// Framing for a standalone UDP command. Mux owns its own frame state.
+struct DatagramFrames {
     pending: Mutex<Vec<u8>>,
-    staged: Mutex<Vec<u8>>,
     unsent: Mutex<Vec<u8>>,
 }
 
 impl InboundStream for Stream {
+    fn take_async_tcp(&mut self) -> Result<Option<kerlico_shared::AsyncTcp>, PlaneFault> {
+        async_native::take(self)
+    }
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
-        if self.udp {
-            return self.read_packet(buf);
+        if let Some(frames) = &self.plain_udp {
+            return self.read_packet(frames, buf);
         }
-        let plain = {
-            self.pending.lock().expect("pending").is_empty() && self.staged.lock().expect("staged").is_empty()
-        };
-        if plain {
-            let mut socket = self.read.lock().expect("read");
-            return match socket.read(buf) {
-                Ok(0) => Err(PlaneFault::Closed),
-                Ok(n) => Ok(n),
-                Err(error) => Err(map_io(error)),
-            };
+        match self.read.lock().expect("read").read(buf) {
+            Ok(0) => Err(PlaneFault::Closed),
+            Ok(n) => Ok(n),
+            Err(error) => Err(map_io(error)),
         }
-        self.fill_pending()?;
-        let mut pending = self.pending.lock().expect("pending");
-        if pending.is_empty() {
-            return Err(PlaneFault::Again);
-        }
-        let n = pending.len().min(buf.len());
-        buf[..n].copy_from_slice(&pending[..n]);
-        pending.drain(..n);
-        Ok(n)
     }
 
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
-        if self.finish_unsent()? {
-            return Ok(buf.len());
-        }
-        if !self.udp {
+        let Some(frames) = &self.plain_udp else {
             let mut socket = self.write.lock().expect("write");
             // A Mux UDP lane writes an empty datagram as zero bytes.
             return match socket.write(buf) {
@@ -3325,6 +3350,9 @@ impl InboundStream for Stream {
                 Ok(n) => Ok(n),
                 Err(error) => Err(map_io(error)),
             };
+        };
+        if self.finish_unsent(frames)? {
+            return Ok(buf.len());
         }
         if !kerlico_vless::UdpFraming::Plain.carries(buf) {
             return Ok(buf.len());
@@ -3333,7 +3361,7 @@ impl InboundStream for Stream {
         let mut rest = payload;
         self.write_vec(&mut rest)?;
         if !rest.is_empty() {
-            *self.unsent.lock().expect("unsent") = rest;
+            *frames.unsent.lock().expect("unsent") = rest;
             return Err(PlaneFault::Again);
         }
         Ok(buf.len())
@@ -3355,37 +3383,62 @@ impl InboundStream for Stream {
     }
 
     fn raw_read(&self) -> Option<TcpStream> {
-        if !self.splice_read_ready() {
-            return None;
+        #[cfg(target_os = "linux")]
+        if self.splice {
+            return self.read.lock().expect("read").reality_direct_reader();
         }
-        self.read.lock().expect("read").clone_tcp()
+        self.raw(&self.read)
     }
 
     fn raw_write(&self) -> Option<TcpStream> {
-        if !self.splice_write_ready() {
-            return None;
+        #[cfg(target_os = "linux")]
+        if self.splice {
+            return self.write.lock().expect("write").reality_direct_writer();
         }
-        self.write.lock().expect("write").clone_tcp()
+        self.raw(&self.write)
     }
+
+    #[cfg(target_os = "linux")]
+    fn can_splice(&self) -> bool { self.splice }
 }
 
 impl Stream {
-    fn splice_read_ready(&self) -> bool {
-        if self.udp || !self.pending.lock().expect("pending").is_empty() || !self.staged.lock().expect("staged").is_empty() {
-            return false;
+    fn new(read: Link, write: Link, plain_udp: bool, prefix: Vec<u8>) -> Self {
+        let (read, plain_udp) = if plain_udp {
+            (read, Some(DatagramFrames {
+                pending: Mutex::new(prefix),
+                unsent: Mutex::new(Vec::new()),
+            }))
+        } else if !prefix.is_empty() {
+            (Link::Prefix(Box::new(read), prefix.into()), None)
+        } else {
+            (read, None)
+        };
+        #[cfg(target_os = "linux")]
+        let (write, splice) = {
+            let mut write = write;
+            let splice = plain_udp.is_none() && write.has_reality_tcp_writer();
+            (write, splice)
+        };
+        Self {
+            read: Mutex::new(read), write: Mutex::new(write), plain_udp,
+            #[cfg(target_os = "linux")]
+            splice,
         }
-        self.read.lock().expect("read").is_tcp()
     }
 
-    fn splice_write_ready(&self) -> bool {
-        if self.udp || !self.unsent.lock().expect("unsent").is_empty() {
-            return false;
+    fn raw(&self, side: &Mutex<Link>) -> Option<TcpStream> {
+        if self.plain_udp.is_some() {
+            return None;
         }
-        self.write.lock().expect("write").is_tcp()
+        let mut link = side.lock().expect("link");
+        // Check before clone_tcp, which may flush the initial response.
+        if !link.is_tcp() { return None; }
+        link.clone_tcp()
     }
 
-    fn finish_unsent(&self) -> Result<bool, PlaneFault> {
-        let mut unsent = self.unsent.lock().expect("unsent");
+    fn finish_unsent(&self, frames: &DatagramFrames) -> Result<bool, PlaneFault> {
+        let mut unsent = frames.unsent.lock().expect("unsent");
         if unsent.is_empty() {
             return Ok(false);
         }
@@ -3395,13 +3448,12 @@ impl Stream {
         if rest.is_empty() {
             return Ok(true);
         }
-        *self.unsent.lock().expect("unsent") = rest;
+        *frames.unsent.lock().expect("unsent") = rest;
         Err(PlaneFault::Again)
     }
 
     fn write_vec(&self, rest: &mut Vec<u8>) -> Result<(), PlaneFault> {
         let mut socket = self.write.lock().expect("write");
-        socket.set_timeout(Duration::from_millis(200));
         while !rest.is_empty() {
             match socket.write(rest) {
                 Ok(0) => return Err(PlaneFault::Closed),
@@ -3420,37 +3472,10 @@ impl Stream {
         Ok(())
     }
 
-    fn fill_pending(&self) -> Result<(), PlaneFault> {
-        if !self.udp && !self.pending.lock().expect("pending").is_empty() {
-            return Ok(());
-        }
-        let mut tmp = [0u8; 8192];
-        let n = {
-            let mut staged = self.staged.lock().expect("staged");
-            if staged.is_empty() {
-                drop(staged);
-                let mut socket = self.read.lock().expect("read");
-                socket.set_timeout(Duration::from_millis(200));
-                match socket.read(&mut tmp) {
-                    Ok(0) => return Err(PlaneFault::Closed),
-                    Ok(n) => n,
-                    Err(error) => return Err(map_io(error)),
-                }
-            } else {
-                let n = staged.len().min(tmp.len());
-                tmp[..n].copy_from_slice(&staged[..n]);
-                staged.drain(..n);
-                n
-            }
-        };
-        self.pending.lock().expect("pending").extend_from_slice(&tmp[..n]);
-        Ok(())
-    }
-
-    fn read_packet(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
+    fn read_packet(&self, frames: &DatagramFrames, buf: &mut [u8]) -> Result<usize, PlaneFault> {
         loop {
             {
-                let mut pending = self.pending.lock().expect("pending");
+                let mut pending = frames.pending.lock().expect("pending");
                 match decode_udp(&pending) {
                     Ok((packet, used)) => {
                         if packet.len() > buf.len() {
@@ -3469,10 +3494,13 @@ impl Stream {
                     Err(kerlico_vless::HeaderError::Short) => {}
                 }
             }
-            self.fill_pending()?;
-            if self.pending.lock().expect("pending").is_empty() {
-                return Err(PlaneFault::Again);
-            }
+            let mut tmp = [0u8; 8192];
+            let n = match self.read.lock().expect("read").read(&mut tmp) {
+                Ok(0) => return Err(PlaneFault::Closed),
+                Ok(n) => n,
+                Err(error) => return Err(map_io(error)),
+            };
+            frames.pending.lock().expect("pending").extend_from_slice(&tmp[..n]);
         }
     }
 }
@@ -3503,26 +3531,130 @@ mod tests {
     use kerlico_vless::{decode_mux, decode_udp, encode_request, encode_udp, Addr, Command, Request, Vision, NEW};
     use std::net::Ipv4Addr;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_flushed_vision_direct_exposes_the_reality_tcp_writer() {
+        for direct in [false, true] {
+            let (private, public) = kerlico_vless::reality_pair();
+            let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = reservation.local_addr().unwrap();
+            drop(reservation);
+            let mut settings = Settings::default();
+            settings.insert_text("decryption", "none");
+            settings.insert_text("security", "reality");
+            settings.insert_text("privateKey", kerlico_vless::encode_reality_key(&private));
+            settings.insert_text("shortId", "0102030405060708");
+            let mut inbound = listen(&NodeTag::parse("v").unwrap(),
+                &ListenAddr::v4(Ipv4Addr::LOCALHOST, addr.port()).unwrap(), &settings).unwrap();
+            let uuid = "5783a3e7-e373-51cd-8642-c83782b807c5";
+            let id = parse_id(uuid).unwrap();
+            let mut account = Settings::default();
+            account.insert_text("id", uuid);
+            account.insert_text("flow", "xtls-rprx-vision");
+            inbound.add_user(&UserEmail::parse("alice").unwrap(), &account).unwrap();
+
+            let mut hello = [0u8; 79];
+            hello[..6].copy_from_slice(&[0x16, 3, 3, 0, 74, 2]);
+            hello[44..46].copy_from_slice(&[0x13, 1]);
+            if direct { hello[60..66].copy_from_slice(&[0, 0x2b, 0, 2, 3, 4]); }
+            let data = [0x17, 3, 3, 0, 3, 1, 2, 3];
+            let client = thread::spawn(move || {
+                let mut tcp = TcpStream::connect(addr).unwrap();
+                tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let (offer, secret, kem) = kerlico_vless::reality_offer_hybrid(
+                    &public, &[1, 2, 3, 4, 5, 6, 7, 8], "www.example.com").unwrap();
+                tcp.write_all(&offer).unwrap();
+                let flight = kerlico_vless::take_flight(&mut tcp).unwrap();
+                let (rkey, wkey, finished) = kerlico_vless::client_keys(
+                    &offer, &flight, &secret, Some(&kem), &public).unwrap();
+                tcp.write_all(&finished).unwrap();
+                let mut writer = kerlico_vless::reality_writer(tcp.try_clone().unwrap(), wkey);
+                writer.write_all(&encode_request(&Request {
+                    id, flow: "xtls-rprx-vision".into(), seed: Vec::new(), command: Command::Tcp,
+                    port: 443, address: Addr::Domain("example.com".into()),
+                }).unwrap()).unwrap();
+                let mut reader = kerlico_vless::reality_reader(tcp, rkey);
+                let mut response = [0xFF; 2];
+                reader.read_exact(&mut response).unwrap();
+                assert_eq!(response, [0, 0]);
+                let mut vision = Vision::new(id);
+                let mut got = 0;
+                let mut plain = [0; 87];
+                while got < plain.len() {
+                    let mut record = [0; 4096];
+                    let n = reader.read(&mut record).unwrap();
+                    assert_ne!(n, 0);
+                    vision.push(&record[..n]);
+                    got += vision.pop(&mut plain[got..]);
+                }
+                assert_eq!(&plain[..79], &hello);
+                assert_eq!(&plain[79..], &data);
+                assert_eq!(vision.take_read_switch(), direct);
+                if direct { reader.start_direct().unwrap(); }
+                let mut tail = [0; 4];
+                let buffered = vision.pop(&mut tail);
+                reader.read_exact(&mut tail[buffered..]).unwrap();
+                assert_eq!(&tail, b"tail");
+            });
+
+            let handoff = wait_handoff(&mut *inbound);
+            let stream = handoff.stream();
+            assert!(stream.can_splice());
+            assert!(stream.raw_write().is_none());
+            assert_eq!(stream.write_to_user(&hello).unwrap(), hello.len());
+            assert!(stream.raw_write().is_none());
+            assert_eq!(stream.write_to_user(&data).unwrap(), data.len());
+            match stream.raw_write() {
+                Some(mut tcp) if direct => tcp.write_all(b"tail").unwrap(),
+                None if !direct => assert_eq!(stream.write_to_user(b"tail").unwrap(), 4),
+                _ => panic!("a raw writer must only follow a flushed DIRECT"),
+            }
+            client.join().unwrap();
+        }
+    }
+
     #[test]
     fn splice_waits_for_an_empty_prefix() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let client = TcpStream::connect(addr).unwrap();
         let (server, _) = listener.accept().unwrap();
-        let stream = Stream {
-            read: Mutex::new(Link::Tcp(server.try_clone().unwrap())),
-            write: Mutex::new(Link::Tcp(server)),
-            udp: false,
-            pending: Mutex::new(Vec::new()),
-            staged: Mutex::new(b"left".to_vec()),
-            unsent: Mutex::new(Vec::new()),
-        };
-        assert!(!stream.splice_read_ready());
-        let mut buf = [0u8; 8];
-        assert_eq!(stream.read_from_user(&mut buf).unwrap(), 4);
-        assert!(stream.splice_read_ready());
-        assert!(stream.splice_write_ready());
-        drop(client);
+        let stream = Stream::new(
+            Link::Tcp(server.try_clone().unwrap()), Link::Tcp(server), false, b"left".to_vec(),
+        );
+        assert!(stream.raw_read().is_none());
+        let mut buf = [0u8; 2];
+        assert_eq!(stream.read_from_user(&mut buf).unwrap(), 2);
+        assert_eq!(&buf, b"le");
+        assert!(stream.raw_read().is_none());
+        assert_eq!(stream.read_from_user(&mut buf).unwrap(), 2);
+        assert_eq!(&buf, b"ft");
+        let mut raw = stream.raw_read().unwrap();
+        assert!(stream.raw_write().is_some());
+        (&client).write_all(b"rt").unwrap();
+        raw.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"rt");
+    }
+
+    #[test]
+    fn standalone_udp_reads_a_partial_frame_from_the_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut wire = encode_udp(b"one").unwrap();
+        wire.extend(encode_udp(b"second").unwrap());
+        let stream = Stream::new(
+            Link::Tcp(server.try_clone().unwrap()), Link::Tcp(server), true, wire[..1].to_vec(),
+        );
+        client.write_all(&wire[1..]).unwrap();
+        let mut buf = [0; 16];
+        assert_eq!(stream.read_from_user(&mut buf).unwrap(), 3);
+        assert_eq!(&buf[..3], b"one");
+        assert_eq!(stream.read_from_user(&mut buf).unwrap(), 6);
+        assert_eq!(&buf[..6], b"second");
+        assert!(stream.raw_read().is_none());
+        assert!(stream.raw_write().is_none());
     }
 
     #[test]

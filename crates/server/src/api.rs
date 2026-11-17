@@ -5,6 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use kerlico_shared::Settings;
+use kerlico_shared::dispatch;
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::Stats;
@@ -14,7 +15,7 @@ pub enum Cmd {
     Remove(String, String, Sender<bool>),
 }
 
-pub fn serve(addr: SocketAddr, tx: Sender<Cmd>, stats: Stats) -> Option<SocketAddr> {
+pub fn serve(addr: SocketAddr, tx: dispatch::Sender<Cmd>, stats: Stats) -> Option<SocketAddr> {
     let listener = bind(addr).ok()?;
     let bound = listener.local_addr().ok()?;
     thread::spawn(move || {
@@ -43,7 +44,7 @@ fn bind(addr: SocketAddr) -> std::io::Result<TcpListener> {
     Ok(TcpListener::from(socket))
 }
 
-fn connection(mut tcp: TcpStream, tx: Sender<Cmd>, stats: Stats) {
+fn connection(mut tcp: TcpStream, tx: dispatch::Sender<Cmd>, stats: Stats) {
     tcp.set_nodelay(true).ok();
     tcp.set_read_timeout(Some(Duration::from_secs(30))).ok();
     let mut preface = [0u8; 24];
@@ -107,7 +108,7 @@ fn answer(
     stream: u32,
     block: &[u8],
     data: &[u8],
-    tx: &Sender<Cmd>,
+    tx: &dispatch::Sender<Cmd>,
     stats: &Stats,
 ) {
     let headers = decoder.decode(block).unwrap_or_default();
@@ -129,7 +130,7 @@ fn answer(
     let _ = tcp.write_all(&frame(1, 0x5, stream, &trail));
 }
 
-fn route(path: &str, message: &[u8], tx: &Sender<Cmd>, stats: &Stats) -> (String, Vec<u8>) {
+fn route(path: &str, message: &[u8], tx: &dispatch::Sender<Cmd>, stats: &Stats) -> (String, Vec<u8>) {
     match path {
         "/kerlico.Stats/Get" => {
             let name = text_field(message, 1);
@@ -155,7 +156,7 @@ fn route(path: &str, message: &[u8], tx: &Sender<Cmd>, stats: &Stats) -> (String
 }
 
 fn user_status(
-    tx: &Sender<Cmd>,
+    tx: &dispatch::Sender<Cmd>,
     add: bool,
     tag: String,
     email: String,
@@ -429,9 +430,12 @@ mod tests {
 
     #[test]
     fn stats_and_users_round_trip() {
-        let (tx, rx): (Sender<Cmd>, Receiver<Cmd>) = mpsc::channel();
+        let wake = dispatch::Wake::default();
+        let (tx, rx): (_, Receiver<Cmd>) = dispatch::channel(Some(&wake));
         thread::spawn(move || {
-            while let Ok(cmd) = rx.recv() {
+            loop {
+                wake.wait();
+                let Ok(cmd) = rx.try_recv() else { break; };
                 match cmd {
                     Cmd::Add(_, _, settings, reply) => {
                         let _ = reply.send(settings.text("password").is_ok());

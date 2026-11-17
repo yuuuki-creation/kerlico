@@ -5,10 +5,15 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+pub mod dispatch;
 pub mod runtime;
+mod async_stream;
 mod egress;
 mod proxy;
 pub use egress::{Exit, OutboundChoice};
+pub use async_stream::{AsyncBufReadVectored, AsyncReadHalf, AsyncTcp};
+mod write_input;
+pub use write_input::{AsyncWriteHalf, AsyncWriteInput, WriteInput, MAX_WRITE_INPUT_PARTS};
 pub use proxy::{Association, ClientEntry, ProxyFn, Stream, TunFn, TunnelFn, Upstream};
 
 /// Grammar-checked protocol id.
@@ -276,6 +281,10 @@ impl Settings {
         self.runtime.as_ref()
     }
 
+    pub fn dispatch_wake(&self) -> Option<&dispatch::Wake> {
+        self.runtime()?.dispatch.as_ref()
+    }
+
     pub fn without_runtime(&self) -> Self {
         Self { entries: self.entries.clone(), runtime: None }
     }
@@ -428,6 +437,11 @@ pub enum Transport {
 /// Plaintext after the inbound protocol. The outbound module is the only dialer.
 /// Read and write do not share a lock, so the copy can run both at once.
 pub trait InboundStream: Send + Sync {
+    /// Transfers the established TCP state exactly once. Called only with
+    /// exclusive ownership, after sniffing and reporting the dial result.
+    /// A successful transfer leaves this wrapper unused; no synchronous reader
+    /// or writer may remain active while the halves are moved.
+    fn take_async_tcp(&mut self) -> Result<Option<AsyncTcp>, PlaneFault> { Ok(None) }
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault>;
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault>;
     /// Gives a UDP reply its actual origin when the outbound socket carries several targets.
@@ -453,6 +467,17 @@ pub trait InboundStream: Send + Sync {
         Ok(n)
     }
 
+    /// Gives one ready batch of disjoint plaintext regions to the same outbound
+    /// copy loop. Regions stay valid until `sink` returns. The default preserves
+    /// the existing single-slice reader, including empty UDP datagrams.
+    fn read_from_user_vectored_to(
+        &self,
+        buf: &mut [u8],
+        sink: &mut dyn FnMut(&[std::io::IoSlice<'_>]),
+    ) -> Result<usize, PlaneFault> {
+        self.read_from_user_to(buf, &mut |bytes| sink(&[std::io::IoSlice::new(bytes)]))
+    }
+
     /// Raw user socket once this direction has no protocol bytes left to transform.
     fn raw_read(&self) -> Option<std::net::TcpStream> {
         None
@@ -461,6 +486,10 @@ pub trait InboundStream: Send + Sync {
     fn raw_write(&self) -> Option<std::net::TcpStream> {
         None
     }
+
+    /// The raw socket hooks may become available after consuming protocol bytes.
+    #[cfg(target_os = "linux")]
+    fn can_splice(&self) -> bool { false }
 }
 
 /// One accepted user flow. Protocol crates build this. They do not choose an exit.
@@ -521,6 +550,7 @@ pub type ReverseDial = std::sync::Arc<dyn Fn(&Destination) -> Result<Box<dyn Inb
 pub trait Accept: Send {
     fn add_user(&mut self, email: &UserEmail, account: &Settings) -> Result<(), OpenError>;
     fn remove_user(&mut self, email: &UserEmail) -> Result<(), OpenError>;
+    /// Takes a ready handoff without waiting. Skip discarded entries before returning `Again`.
     fn accept(&mut self) -> Result<Handoff, OpenError>;
     fn reverse_landing(&self, _tag: &str) -> Result<ReverseDial, OpenError> { Err(OpenError::Settings) }
 }
@@ -667,6 +697,14 @@ struct PrefixStream {
 }
 
 impl InboundStream for PrefixStream {
+    fn take_async_tcp(&mut self) -> Result<Option<AsyncTcp>, PlaneFault> {
+        if self.datagram { return Ok(None); }
+        let Some(mut stream) = self.inner.take_async_tcp()? else { return Ok(None); };
+        if let Some(bytes) = self.pending.get_mut().expect("prefix").take() {
+            stream.prepend(bytes);
+        }
+        Ok(Some(stream))
+    }
     fn report_connect(&self, result: Result<(), OpenError>) -> Result<(), PlaneFault> {
         self.inner.report_connect(result)
     }
@@ -718,6 +756,19 @@ impl InboundStream for PrefixStream {
         self.inner.write_to_user(buf)
     }
 
+    fn read_from_user_vectored_to(
+        &self,
+        buf: &mut [u8],
+        sink: &mut dyn FnMut(&[std::io::IoSlice<'_>]),
+    ) -> Result<usize, PlaneFault> {
+        if self.pending.lock().expect("prefix").is_none() {
+            return self.inner.read_from_user_vectored_to(buf, sink);
+        }
+        let n = self.read_from_user(buf)?;
+        sink(&[std::io::IoSlice::new(&buf[..n])]);
+        Ok(n)
+    }
+
     fn raw_read(&self) -> Option<std::net::TcpStream> {
         if self.pending.lock().expect("prefix").is_some() {
             return None;
@@ -728,6 +779,9 @@ impl InboundStream for PrefixStream {
     fn raw_write(&self) -> Option<std::net::TcpStream> {
         self.inner.raw_write()
     }
+
+    #[cfg(target_os = "linux")]
+    fn can_splice(&self) -> bool { self.inner.can_splice() }
 }
 
 #[cfg(test)]
@@ -791,6 +845,91 @@ mod tests {
         assert!(ListenAddr::v6(Ipv6Addr::UNSPECIFIED, 443).is_ok());
         let mapped = Ipv4Addr::LOCALHOST.to_ipv6_mapped();
         assert!(ListenAddr::v6(mapped, 443).is_err());
+    }
+
+    #[test]
+    fn async_handoff_preserves_sniffed_bytes_and_transfers_state_once() {
+        use std::io::{Cursor, Read};
+        use std::sync::Mutex;
+        use tokio::io::AsyncReadExt;
+
+        struct Flow {
+            read: Mutex<Option<Cursor<Vec<u8>>>>,
+            executor: tokio::runtime::Handle,
+        }
+        impl InboundStream for Flow {
+            fn read_from_user(&self, out: &mut [u8]) -> Result<usize, PlaneFault> {
+                Read::read(self.read.lock().unwrap().as_mut().ok_or(PlaneFault::Closed)?, out)
+                    .map_err(|_| PlaneFault::Transport)
+            }
+            fn write_to_user(&self, bytes: &[u8]) -> Result<usize, PlaneFault> { Ok(bytes.len()) }
+            fn take_async_tcp(&mut self) -> Result<Option<AsyncTcp>, PlaneFault> {
+                let Some(read) = self.read.get_mut().unwrap().take() else { return Ok(None); };
+                Ok(Some(AsyncTcp {
+                    executor: self.executor.clone(),
+                    read: AsyncReadHalf::Plain(Box::new(read)),
+                    write: AsyncWriteHalf::plain(tokio::io::sink()),
+                }))
+            }
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let payload = b"sniffed header then application payload";
+        let mut handoff = Handoff::new(
+            NodeTag::parse("node").unwrap(),
+            UserEmail::parse("user").unwrap(),
+            Destination::new("127.0.0.1", 9000, Transport::Tcp).unwrap(),
+            Box::new(Flow { read: Mutex::new(Some(Cursor::new(payload.to_vec()))), executor: runtime.handle().clone() }),
+        );
+        assert_eq!(handoff.read_into_prefix(&mut [0; 7]).unwrap(), 7);
+        let mut stream = handoff.stream();
+        let transferred = stream.take_async_tcp().unwrap().unwrap();
+        assert!(stream.take_async_tcp().unwrap().is_none());
+        drop(stream);
+        let mut received = Vec::new();
+        runtime.block_on(transferred.read.into_buffered(1024).read_to_end(&mut received)).unwrap();
+        assert_eq!(received, payload);
+    }
+
+    #[test]
+    fn vector_borrowing_preserves_sniffed_prefix_then_forwards_the_batch() {
+        use std::io::IoSlice;
+        struct Borrowed;
+        impl InboundStream for Borrowed {
+            fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
+                buf[..4].copy_from_slice(b"head");
+                Ok(4)
+            }
+            fn write_to_user(&self, bytes: &[u8]) -> Result<usize, PlaneFault> { Ok(bytes.len()) }
+            fn read_from_user_vectored_to(&self, _: &mut [u8], sink: &mut dyn FnMut(&[IoSlice<'_>])) -> Result<usize, PlaneFault> {
+                sink(&[IoSlice::new(b"tail"), IoSlice::new(b"body")]);
+                Ok(8)
+            }
+        }
+        let mut handoff = Handoff::new(
+            NodeTag::parse("node").unwrap(), UserEmail::parse("user").unwrap(),
+            Destination::new("127.0.0.1", 9000, Transport::Tcp).unwrap(), Box::new(Borrowed),
+        );
+        assert_eq!(handoff.read_into_prefix(&mut [0; 4]).unwrap(), 4);
+        let stream = handoff.stream();
+        let mut scratch = [0; 8];
+        let mut received = Vec::new();
+        let mut widths = Vec::new();
+        for expected in [4, 8] {
+            assert_eq!(stream.read_from_user_vectored_to(&mut scratch, &mut |parts| {
+                widths.push(parts.len());
+                for part in parts { received.extend_from_slice(part); }
+            }).unwrap(), expected);
+        }
+        assert_eq!(received, b"headtailbody");
+        assert_eq!(widths, [1, 2]);
+        let datagram = Datagram(std::sync::Mutex::new(Some(Vec::new())));
+        let mut calls = 0;
+        assert_eq!(datagram.read_from_user_vectored_to(&mut scratch, &mut |parts| {
+            calls += 1;
+            assert_eq!(parts.len(), 1);
+            assert!(parts[0].is_empty());
+        }).unwrap(), 0);
+        assert_eq!(calls, 1);
     }
 
     struct Datagram(std::sync::Mutex<Option<Vec<u8>>>);

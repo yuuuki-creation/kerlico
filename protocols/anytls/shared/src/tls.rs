@@ -47,6 +47,18 @@ fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
+fn server_provider() -> Arc<CryptoProvider> {
+    let mut crypto = rustls::crypto::ring::default_provider();
+    // Match the reference server's TLS 1.3 AES preference. Preserve every
+    // supported suite and the TLS 1.2 order; the client's offer is unchanged.
+    if let Some(index) = crypto.cipher_suites.iter().position(|suite|
+        suite.suite() == rustls::CipherSuite::TLS13_AES_128_GCM_SHA256)
+    {
+        crypto.cipher_suites[..=index].rotate_right(1);
+    }
+    Arc::new(crypto)
+}
+
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -64,7 +76,7 @@ pub fn server_config_with_client_auth(
     client_ca: Option<&str>,
 ) -> io::Result<Arc<ServerConfig>> {
     let (certs, key) = load_identity(certificate, private_key)?;
-    let crypto = provider();
+    let crypto = server_provider();
     let auth: Arc<dyn ClientCertVerifier> = match (mode, client_ca) {
         ("", None) => Arc::new(NoClientAuth),
         ("request" | "require-any", _) => Arc::new(CertificatePossession {
@@ -89,6 +101,7 @@ pub fn server_config_with_client_auth(
         .with_client_cert_verifier(auth)
         .with_single_cert(certs, key)
         .map_err(io::Error::other)?;
+    config.ignore_client_order = true;
     config.enable_secret_extraction = true;
     config.max_early_data_size = 0;
     // Go's server sends one NewSessionTicket after the handshake.
@@ -685,32 +698,39 @@ impl Cipher {
 
     /// Seals the record whose 5 header bytes start at `start`; its plaintext runs to the end of `out`.
     pub(crate) fn seal(&mut self, out: &mut Vec<u8>, start: usize, inner_type: u8) {
+        let plain = out.len() - start - self.prefix_len();
+        out.resize(out.len() + 16 + usize::from(self.tls13), 0);
+        self.seal_in_place(&mut out[start..], plain, inner_type);
+    }
+
+    /// The initialized record already contains its plaintext and tag space.
+    /// This is the same encoder used by the copying and borrowed-input writers.
+    pub(crate) fn seal_in_place(&mut self, record: &mut [u8], plain: usize, inner_type: u8) {
+        assert_eq!(record.len(), self.prefix_len() + plain + 16 + usize::from(self.tls13));
         if !self.tls13 {
-            let body = start + self.prefix_len();
-            let len = out.len() - body;
+            let body = self.prefix_len();
             let nonce = self.nonce();
             if self.explicit != 0 {
-                out[start + 5..body].copy_from_slice(&nonce.as_ref()[4..]);
+                record[5..body].copy_from_slice(&nonce.as_ref()[4..]);
             }
-            let aad = Aad::from(tls12_aad(self.seq, inner_type, len as u16));
-            let tag = self.key.seal_in_place_separate_tag(nonce, aad, &mut out[body..]).expect("seal");
-            let wire_len = (self.explicit + len + tag.as_ref().len()) as u16;
-            out[start..start + 3].copy_from_slice(&[inner_type, 3, 3]);
-            out[start + 3..start + 5].copy_from_slice(&wire_len.to_be_bytes());
-            out.extend_from_slice(tag.as_ref());
+            let aad = Aad::from(tls12_aad(self.seq, inner_type, plain as u16));
+            let tag = self.key.seal_in_place_separate_tag(nonce, aad, &mut record[body..body + plain]).expect("seal");
+            let wire_len = (self.explicit + plain + tag.as_ref().len()) as u16;
+            record[..3].copy_from_slice(&[inner_type, 3, 3]);
+            record[3..5].copy_from_slice(&wire_len.to_be_bytes());
+            record[body + plain..].copy_from_slice(tag.as_ref());
             self.seq += 1;
             return;
         }
-        out.push(inner_type);
-        let body = start + 5;
-        let len = out.len() - body + 16;
+        record[5 + plain] = inner_type;
+        let len = plain + 1 + 16;
         let header = [CONTENT_APPDATA, 3, 3, (len >> 8) as u8, len as u8];
-        out[start..body].copy_from_slice(&header);
+        record[..5].copy_from_slice(&header);
         let tag = self
             .key
-            .seal_in_place_separate_tag(self.nonce(), Aad::from(header), &mut out[body..])
+            .seal_in_place_separate_tag(self.nonce(), Aad::from(header), &mut record[5..5 + plain + 1])
             .expect("seal");
-        out.extend_from_slice(tag.as_ref());
+        record[5 + plain + 1..].copy_from_slice(tag.as_ref());
         self.seq += 1;
     }
 
@@ -821,6 +841,59 @@ mod tests {
         let timeout = Some(Duration::from_secs(3));
         tcp.set_read_timeout(timeout).unwrap();
         tcp.set_write_timeout(timeout).unwrap();
+    }
+
+    #[test]
+    fn tls13_server_prefers_aes128_and_keeps_aes256_and_chacha_peers() {
+        use rustls::crypto::ring::cipher_suite::{TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256};
+        let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let server = server_config(&identity.cert.pem(), &identity.key_pair.serialize_pem()).unwrap();
+        for (only, expected) in [
+            (None, rustls::CipherSuite::TLS13_AES_128_GCM_SHA256),
+            (Some(TLS13_AES_256_GCM_SHA384), rustls::CipherSuite::TLS13_AES_256_GCM_SHA384),
+            (Some(TLS13_CHACHA20_POLY1305_SHA256), rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256),
+        ] {
+            let mut crypto = rustls::crypto::ring::default_provider();
+            if let Some(suite) = only { crypto.cipher_suites = vec![suite]; }
+            let mut roots = RootCertStore::empty();
+            roots.add(identity.cert.der().clone()).unwrap();
+            let client = ClientConfig::builder_with_provider(Arc::new(crypto))
+                .with_protocol_versions(&[&rustls::version::TLS13]).unwrap()
+                .with_root_certificates(roots).with_no_client_auth();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let config = server.clone();
+            let peer = std::thread::spawn(move || {
+                let (tcp, _) = listener.accept().unwrap();
+                wire_timeout(&tcp);
+                let mut link = accept(tcp, config).unwrap();
+                let Wire::Records(wire) = &mut link.wire else { panic!("kernel TLS") };
+                assert!(wire.tx.is_tls13());
+                let mut out = std::mem::take(&mut wire.pending);
+                let start = out.len();
+                out.resize(start + wire.tx.prefix_len(), 0);
+                out.extend_from_slice(b"ping");
+                wire.tx.seal(&mut out, start, CONTENT_APPDATA);
+                link.tcp.write_all(&out).unwrap();
+                let mut record = vec![0; 5];
+                link.tcp.read_exact(&mut record).unwrap();
+                record.resize(5 + usize::from(u16::from_be_bytes([record[3], record[4]])), 0);
+                link.tcp.read_exact(&mut record[5..]).unwrap();
+                assert_eq!(wire.rx.open(&mut record).unwrap(), (CONTENT_APPDATA, 4));
+                assert_eq!(&record[5..9], b"pong");
+            });
+            let tcp = TcpStream::connect(addr).unwrap();
+            wire_timeout(&tcp);
+            let conn = rustls::ClientConnection::new(Arc::new(client), ServerName::try_from("localhost").unwrap()).unwrap();
+            let mut link = rustls::StreamOwned::new(conn, tcp);
+            let mut bytes = [0; 4];
+            link.read_exact(&mut bytes).unwrap();
+            assert_eq!(&bytes, b"ping");
+            assert_eq!(link.conn.negotiated_cipher_suite().unwrap().suite(), expected);
+            link.write_all(b"pong").unwrap();
+            link.flush().unwrap();
+            peer.join().unwrap();
+        }
     }
 
     #[test]

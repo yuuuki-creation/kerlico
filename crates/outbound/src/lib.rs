@@ -1,6 +1,7 @@
 //! The only server egress. Inbound nodes hand off a flow. They do not pick an exit.
 
 mod copy;
+mod async_copy;
 mod native;
 mod network;
 
@@ -175,6 +176,29 @@ impl Outbound {
         target: DialTarget,
         traffic: &dyn Traffic,
     ) -> Result<(), OpenError> {
+        self.dispatch_inner(handoff, exit, target, traffic, false)
+    }
+
+    /// Moves eligible native TCP flows to their existing I/O executor. Other
+    /// flows finish on the caller, which already owns their preparation thread.
+    pub fn dispatch_on_executor(
+        &self,
+        handoff: Handoff,
+        exit: Exit,
+        target: DialTarget,
+        traffic: &dyn Traffic,
+    ) -> Result<(), OpenError> {
+        self.dispatch_inner(handoff, exit, target, traffic, true)
+    }
+
+    fn dispatch_inner(
+        &self,
+        handoff: Handoff,
+        exit: Exit,
+        target: DialTarget,
+        traffic: &dyn Traffic,
+        detached: bool,
+    ) -> Result<(), OpenError> {
         let user = handoff.user().clone();
         let node = handoff.node().clone();
         let destination = handoff.destination().clone();
@@ -188,7 +212,7 @@ impl Outbound {
                 })
             }
             Exit::NativeV4 | Exit::NativeV6 => {
-                native::dial_native(&target, stream.as_ref(), &user, &node, exit, traffic)
+                native::dial_native(&target, stream, &user, &node, exit, traffic, detached)
             }
             Exit::WarpV4 | Exit::WarpV6 => {
                 if target.transport == Transport::Udp {

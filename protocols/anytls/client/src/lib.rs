@@ -647,7 +647,7 @@ mod tests {
         assert!(matches!(land("peer.invalid", 443, &settings, &target), Err(OpenError::Settings)));
 
         let network = Arc::new(TestNetwork::default());
-        let runtime = || Arc::new(RuntimeContext { network: network.clone(), geoip: network.clone() });
+        let runtime = || Arc::new(RuntimeContext { network: network.clone(), geoip: network.clone(), dispatch: None });
         let first = runtime();
         settings.set_runtime(first.clone());
         let client = cached_client("peer.invalid", 443, &settings).unwrap();

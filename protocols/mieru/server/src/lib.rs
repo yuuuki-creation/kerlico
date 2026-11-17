@@ -2,12 +2,13 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use kerlico_mieru::{serve_tcp, serve_udp, Account, Conn, Ready, ServerHandle};
+use kerlico_shared::dispatch;
 use kerlico_shared::{
     Accept, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError, PlaneFault,
     Settings, Transport, UserEmail,
@@ -36,7 +37,7 @@ pub struct MieruInbound {
     accounts: Arc<Mutex<Vec<Account>>>,
     /// Kept so the session queue stays open after the worker threads are the other senders.
     #[allow(dead_code)]
-    ready_tx: Sender<Ready>,
+    ready_tx: dispatch::Sender<Ready>,
     ready_rx: Receiver<Ready>,
     control: Arc<Control>,
     listeners: Vec<thread::JoinHandle<()>>,
@@ -108,10 +109,16 @@ impl Accept for MieruInbound {
     }
 
     fn accept(&mut self) -> Result<Handoff, OpenError> {
-        match self.ready_rx.try_recv() {
-            Ok(ready) => self.handoff(ready),
-            Err(TryRecvError::Empty) => Err(OpenError::Again),
-            Err(TryRecvError::Disconnected) => Err(OpenError::Transport),
+        loop {
+            match self.ready_rx.try_recv() {
+                Ok(ready) => {
+                    if let Ok(handoff) = self.handoff(ready) {
+                        return Ok(handoff);
+                    }
+                }
+                Err(TryRecvError::Empty) => return Err(OpenError::Again),
+                Err(TryRecvError::Disconnected) => return Err(OpenError::Transport),
+            }
         }
     }
 }
@@ -144,7 +151,7 @@ impl MieruInbound {
             self.tag.clone(),
             email,
             destination,
-            Box::new(Stream(ready.conn, Mutex::new(VecDeque::new()))),
+            Box::new(Stream(Some(ready.conn), Mutex::new(VecDeque::new()))),
         );
         if ready.udp {
             handoff.set_peer(ready.peer);
@@ -156,13 +163,13 @@ impl MieruInbound {
     }
 }
 
-struct Stream(Conn, Mutex<VecDeque<u8>>);
+struct Stream(Option<Conn>, Mutex<VecDeque<u8>>);
 
 const READ_WAIT: Duration = Duration::from_millis(200);
 
 impl InboundStream for Stream {
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
-        self.0.read_for(buf, READ_WAIT).map_err(map_io)
+        self.0.as_ref().ok_or(PlaneFault::Closed)?.read_for(buf, READ_WAIT).map_err(map_io)
     }
 
     /// A stream session gives the copy loop its whole queue, so the bytes reach the exit
@@ -173,7 +180,7 @@ impl InboundStream for Stream {
         sink: &mut dyn FnMut(&[u8]),
     ) -> Result<usize, PlaneFault> {
         let mut spare = self.1.lock().expect("spare");
-        let Some(read) = self.0.read_queued_for(&mut spare, READ_WAIT) else {
+        let Some(read) = self.0.as_ref().ok_or(PlaneFault::Closed)?.read_queued_for(&mut spare, READ_WAIT) else {
             drop(spare);
             let n = self.read_from_user(buf)?;
             sink(&buf[..n]);
@@ -190,13 +197,19 @@ impl InboundStream for Stream {
     }
 
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
-        self.0.write_user(buf).map_err(map_io)?;
+        self.0.as_ref().ok_or(PlaneFault::Closed)?.write_user(buf).map_err(map_io)?;
         Ok(buf.len())
     }
 
     fn write_datagram_to_user(&self, buf: &[u8], source: SocketAddr) -> Result<usize, PlaneFault> {
-        self.0.write_datagram(source, buf).map_err(map_io)?;
+        self.0.as_ref().ok_or(PlaneFault::Closed)?.write_datagram(source, buf).map_err(map_io)?;
         Ok(buf.len())
+    }
+
+    fn take_async_tcp(&mut self) -> Result<Option<kerlico_shared::AsyncTcp>, PlaneFault> {
+        if self.0.as_ref().is_some_and(Conn::supports_async) {
+            Ok(Some(self.0.take().expect("native mieru flow").into_async()))
+        } else { Ok(None) }
     }
 }
 
@@ -217,7 +230,7 @@ pub fn listen(
 ) -> Result<Box<dyn Accept>, OpenError> {
     let plan = plan(bind, settings)?;
     let accounts = Arc::new(Mutex::new(Vec::new()));
-    let (ready_tx, ready_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = dispatch::channel(settings.dispatch_wake());
     let control = Arc::new(Control {
         closed: AtomicBool::new(false),
         connections: Mutex::new(Vec::new()),
@@ -283,7 +296,7 @@ pub fn listen(
 fn accept_loop(
     listener: TcpListener,
     accounts: Arc<Mutex<Vec<Account>>>,
-    ready: Sender<Ready>,
+    ready: dispatch::Sender<Ready>,
     mtu: u16,
     control: Arc<Control>,
 ) {

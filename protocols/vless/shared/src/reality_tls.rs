@@ -1120,6 +1120,11 @@ impl<S> AppReader<S> {
         &mut self.inner
     }
 
+    pub fn direct_inner_mut(&mut self) -> Option<&mut S> {
+        (self.direct && !self.closed && self.plain.is_empty() && self.head == self.tail)
+            .then_some(&mut self.inner)
+    }
+
     /// Ends the stream once more than `max` empty application records arrive in a row. A reader
     /// has no limit until this is called.
     pub fn set_max_useless(&mut self, max: usize) {
@@ -1140,6 +1145,12 @@ impl<S> AppReader<S> {
 impl<S> AppWriter<S> {
     pub fn inner_mut(&mut self) -> &mut S {
         &mut self.inner
+    }
+
+    pub fn direct_inner_mut(&mut self) -> Option<&mut S> {
+        // `accepted` remembers the last completed write's size; only the wire
+        // cursor says whether encrypted output remains to be sent.
+        (self.direct && self.sent >= self.wire.len()).then_some(&mut self.inner)
     }
 }
 
@@ -2273,10 +2284,17 @@ mod tests {
         let mut buf = [0u8; 8192];
         assert_eq!(app.read(&mut buf).unwrap(), 4, "the read stops at what does not open");
         assert_eq!(&buf[..4], b"last");
+        assert!(app.direct_inner_mut().is_none());
         app.start_direct().unwrap();
+        assert!(app.direct_inner_mut().is_none(), "pre-read direct bytes must be delivered first");
+        let mut prefix = [0; 2];
+        app.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, &raw[..2]);
+        assert!(app.direct_inner_mut().is_none());
         let mut rest = Vec::new();
         app.read_to_end(&mut rest).unwrap();
-        assert_eq!(rest, raw);
+        assert_eq!(rest, raw[2..]);
+        assert!(app.direct_inner_mut().is_some());
 
         // Without the switch the same bytes are a record that fails, and the next read says so.
         let (_, reading) = accepted.application_keys();

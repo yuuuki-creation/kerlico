@@ -7,6 +7,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+mod receive;
+
 fn identity(name: &str) -> TlsCertificate {
     let cert = rcgen::generate_simple_self_signed(vec![name.to_string()]).unwrap();
     TlsCertificate {

@@ -27,9 +27,33 @@ protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依�
 
 mieru 共享 crate 的运行时加密依赖是 `chacha20` 和 `ring`，组合实现既有 XChaCha20-Poly1305；原 `chacha20poly1305` 留作测试对照依赖。该变化没有增加协议或角色 feature。`kerlico-shared::Traffic` 在建流时返回 `TrafficCounters`，注册和查询仍由服务端拥有，出站持有计数句柄。
 
+mieru 共享 crate 在 Linux 上通过 `libc` 和 `socket2` 0.6 批量接收已有 UDP 数据报；这两个直接依赖只在 Linux 启用，不增加角色依赖。
+
+mieru 共享 crate 使用 Tokio 驱动服务端 UDP 监听的就绪、发送队列和维护期限，并为其中的 TCP 会话交出 `AsyncTcp`。认证、重排、窗口和恢复仍由同一个共享状态机处理，拨号仍属于出站。
+
+`kerlico-outbound` 在 Linux 上直接依赖 `libc`，用于已完成协议转换的原生 TCP 之间的内核复制；不引入任何协议或角色 crate。
+
+`kerlico-shared::AsyncTcp` 使用 Tokio 的异步读写契约和已有执行器句柄，持有协议交出的明文读写两半；共享包不创建执行器、不拨号，也不依赖协议角色。统一出站可以把原生 TCP 转发移到这个执行器，见服务端文档。出站启用 Tokio 宏来同时推进两个方向和共同空闲期限。
+
+共享的 `AsyncBufReadVectored` 扩展借用读取契约，允许协议一次交出几段认证缓冲；它使用标准库的 `IoSlice`，不引入协议依赖或另一份拨号实现。SS2022 使用其原有 bytes 依赖持有这些记录，出站决定如何写到目标。
+
+同步 `InboundStream::read_from_user_vectored_to` 同样使用标准库 `IoSlice`，把一批借用数据交给现有出站复制循环；默认适配单段读取，不增加包依赖。AnyTLS 持有接收端期间借出原地认证的载荷，原生 TCP 出口完成向量写入后才释放借用。
+
+AnyTLS 共享 crate 直接依赖 Tokio 的套接字就绪、任务和通知接口，让原生 TLS/明文会话的流持有接收状态并移交 `AsyncTcp`。接收端通过同一个向量借用契约交付数据，发送端通过 `AsyncWriteInput` 借出 PSH/TLS 载荷区域；拨号仍只在出站。socket2 0.5 仅作为该共享 crate 的测试依赖，用于构造实际套接字背压。
+
+`AsyncWriteInput` 允许编码器借出最终帧内存中的载荷区域。共享契约只描述互不重叠的 `IoSliceMut` 和本次填充长度；读取目标套接字仍属于出站。普通异步写入和借出输入区域的写入都通过 `AsyncWriteHalf` 交接，不增加协议依赖。
+
+VLESS 服务端直接依赖 Tokio 的套接字就绪与异步读写接口，使用 VLESS 共享包原有的 I/O 执行器移交已经建立的原生 TCP/TLS 字节流。测试用 socket2 构造单连接背压；它不增加运行时角色依赖。
+
 VLESS、AnyTLS 和 Hy2 都依赖 `kerlico-tls`。VLESS 和 Hy2 会开启这个引擎的 `quic` feature。AnyTLS 在普通连接上保留 rustls 取密钥和按方向处理记录的路径，浏览器指纹、ECH 以及需要修改首个 ClientHello 的载体使用共享引擎。JLS 的默认握手使用 rustls-jls，见 [AnyTLS](anytls.md#tls)。
 
+共享 TLS 的握手和发送记录仍由原生 TLS 引擎处理。TLS 1.3 完成握手并验证对端后，将接收方向的应用流量密钥和原生引擎实际的下一记录序号交给 Rust 接收层，使用 `ring` 在接收存储中认证和解密；`ring` 因此为普通依赖，`foreign-types` 用于原生连接和会话句柄。TLS 1.2 及以下继续使用原生记录层。接收密钥只在连接内存中交接，配置未指定 `masterKeyLog` 时不写密钥文件。KeyUpdate 的接收密钥更新由接收层处理，回复仍由原生发送层封装；新会话票据交还原生引擎校验后进入同一配置缓存。
+
+共享 TLS 的接收存储按实际填满的底层读取增长；普通 `Read` 使用至多四条最大 TLS 记录的预读空间，每次仍只交出一条记录，让 Vision 可以在记录之后切换直连。原生异步 VLESS 的底层套接字已经转为非阻塞，可以在交出批次之前继续取回已就绪的密文，至多保存十六条最大记录，然后通过原有向量借用接口交付认证明文。统一出站写完多少才消费多少；批次交出后不再读取、移动或覆盖其中的存储。它不等待新数据凑批次，后续错误留到有效字节交付后报告。
+
 `protocols/hy2/shared` 持有 Hysteria 2 的认证和帧格式。VLESS 的 `hysteria` 载体复用认证与流类型；VLESS 命令仍由 VLESS 解析。独立 Hy2 的当前范围见 [Hysteria 2](hy2.md)。
+
+工作区固定的 Quinn 使用套接字报告的 GSO 能力组织发送批次；合并后的单次 UDP 提交至多 65,507 字节，一次驱动最多交付 128 个数据报或 256 KiB，随后让其他任务继续。密文缓冲按实际需要增长并复用，不为安静连接预留整批存储。套接字背压时保留原批次，恢复后计入本次驱动的预算，不重新生成包或推进密钥。MTU、拥塞控制和实际发包时机仍由原 QUIC 状态机决定，不等待额外数据凑批次。
 
 `protocols/ss2022/shared` 使用 `shadowsocks` 1.25.0 和 `shadowsocks-crypto` 0.8.0。工作区固定这两个版本并加上 ChaCha12；[补丁说明](../../vendor/shadowsocks-crypto/KERLICO-PATCH.md) 记录改动和许可。
 

@@ -25,6 +25,12 @@ kerlico-wg peer.json
 
 独立工具读取 `listen`（数字 UDP 地址和端口）、`privateKey`、`tun`（本机 TUN 名称）、可选 `mtu` 及 `peers` 数组。各 peer 用入站账号同样的字段，省略 `email`。该模式把完整的 IPv4/IPv6 包交给操作系统，允许 ICMP 等协议。地址、路由、转发和防火墙由系统管理，适用于需要内核转发而不需要 Kerlico 节点分流的部署。
 
+Linux TUN 的 UDP 套接字和网卡由同一个数据线程等待就绪和转发，数据包不经过线程之间的队列。网卡暂时写不进时，已认证的包可以在该线程内按顺序短暂排队。发送侧可以将已经到达、同一目的地址、长度一致的连续 WireGuard 数据包交给内核执行 UDP 分段；最后一个包可以较短。它不等待后续的包，也不合并握手。如果内核或路由不支持分段，这几包按原顺序逐个发送。
+
+Linux TUN 会尝试把自身 UDP 套接字的收、发队列各增至内核计入开销后的 14 MiB，即与 wireguard-go 相同的 7 MiB 请求值。进程已有权限时仅对此套接字使用 [Linux 缓冲选项](https://man7.org/linux/man-pages/man7/socket.7.html)；否则在系统上限内尽量增大。不会缩小已有队列，也不修改系统参数。打开新端口或重新启用接口时同样设置。
+
+接收侧每次可以取回多条已到达的 UDP 报文。每条报文保留自己的来源地址和边界，仍按原顺序处理并分别认证；不支持批量接收时逐个读取。
+
 Linux 上，独立工具发布权限为 `0600` 的 [WireGuard 控制套接字](https://www.wireguard.com/xplatform/)，路径为 `/run/wireguard/<接口名>.sock`。可用原版 `wg show` 读统计，`wg set`、`wg setconf` 或 `wg syncconf` 在线改设置。用 `kerlico-wg <接口名>` 可在后台启动未设私钥的双栈接口，`-f` 或 `--foreground` 可让它留在前台。移除控制套接字会关闭接口。JSON 的启动参数仍可用；在线变更只作用于运行中的接口，不回写 JSON。
 
 按接口名启动时，Linux 网卡最初处于停用状态，可以先用 `wg set` 配置，再用 `ip link set dev <接口名> up` 启用。JSON 启动会立即启用网卡。执行 `ip link set dev <接口名> down` 会释放 UDP 端口并清除当前会话和排队的数据，保留配置、统计和最近的握手防重放记录。停用期间可以修改监听端口；再次启用时按保存的端口监听，peer 重新握手。独立工具也跟随 `ip link set ... mtu` 对网卡 MTU 的调整。

@@ -12,6 +12,13 @@ use crate::wire::MAX_IP_PACKET;
 use crate::wire::{PeerKeys, WIRE_BUFFER};
 use crate::{Hub, HubEvent};
 
+#[cfg(all(feature = "tun-device", target_os = "linux"))]
+pub(crate) mod tun_linux;
+#[cfg(all(feature = "tun-device", target_os = "linux"))]
+mod udp_batch;
+#[cfg(all(feature = "tun-device", target_os = "linux"))]
+mod socket_buffer;
+
 const POLL: Duration = Duration::from_millis(5);
 const QUEUE: usize = 128;
 
@@ -88,8 +95,94 @@ impl TunCarrier {
             None => (self.reopen)(port, mark)?,
         };
         socket.set_nonblocking(true)?;
+        #[cfg(target_os = "linux")]
+        socket_buffer::tune(&socket);
         Ok(socket)
     }
+}
+
+#[cfg(all(feature = "tun-device", any(target_os = "linux", windows)))]
+struct TunBinding {
+    carrier: TunCarrier,
+    socket: Option<UdpSocket>,
+    port: u16,
+    mark: u32,
+    up: bool,
+}
+
+#[cfg(all(feature = "tun-device", any(target_os = "linux", windows)))]
+impl TunBinding {
+    fn new(mut carrier: TunCarrier, up: bool) -> io::Result<Self> {
+        let port = carrier.bind.port();
+        let socket = if up {
+            Some(carrier.open(port, 0)?)
+        } else {
+            carrier.first = None;
+            None
+        };
+        let port = socket
+            .as_ref()
+            .map(UdpSocket::local_addr)
+            .transpose()?
+            .map_or(port, |addr| addr.port());
+        Ok(Self {
+            carrier,
+            socket,
+            port,
+            mark: 0,
+            up,
+        })
+    }
+
+    fn control(&mut self, hub: &mut Hub, (action, reply): crate::uapi::Request) {
+        if reply.is_closed() {
+            return;
+        }
+        let answer = match action {
+            crate::uapi::Action::Get => Ok(hub.snapshot(self.port, self.mark)),
+            crate::uapi::Action::Set(change) => (|| {
+                let plan = hub.plan(&change, self.carrier.bind.ip(), self.carrier.dual)?;
+                let mark = change.mark.unwrap_or(self.mark);
+                let port = change.port.unwrap_or(self.port);
+                if self.up && (self.socket.is_none() || port != self.port) {
+                    let next = self.carrier.open(port, mark)?;
+                    self.port = next.local_addr()?.port();
+                    #[cfg(target_os = "linux")]
+                    if self.socket.is_none() {
+                        hub.reset_transport();
+                    }
+                    self.socket = Some(next);
+                } else {
+                    #[cfg(target_os = "linux")]
+                    if let Some(active) = self.socket.as_ref().filter(|_| mark != self.mark) {
+                        socket2::SockRef::from(active).set_mark(mark)?;
+                    }
+                    self.port = port;
+                }
+                self.mark = mark;
+                hub.commit(plan);
+                Ok(String::new())
+            })(),
+        };
+        let _ = reply.send(answer);
+    }
+}
+
+#[cfg(feature = "tun-device")]
+fn check_tun_mtu(hub: &Hub, mtu: usize) -> io::Result<()> {
+    if !(576..=MAX_IP_PACKET).contains(&mtu)
+        || (mtu < 1280
+            && hub
+                .allowed_ips()
+                .iter()
+                .any(|net| matches!(net, IpNet::V6(_))))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid WireGuard MTU",
+        ));
+    }
+    Ok(())
 }
 
 impl PacketLink {
@@ -177,158 +270,58 @@ impl PacketLink {
         self.tx.allowed.as_deref().unwrap_or(&[])
     }
 
-    #[cfg(feature = "tun-device")]
+    #[cfg(all(feature = "tun-device", not(target_os = "linux")))]
     pub(crate) fn from_hub(
-        mut carrier: TunCarrier,
-        mut hub: crate::Hub,
+        carrier: TunCarrier,
+        mut hub: Hub,
         mtu: usize,
-        #[cfg(any(target_os = "linux", windows))] control: Option<Receiver<crate::uapi::Request>>,
-        #[cfg(target_os = "linux")] (initial, link): (
-            crate::linux_link::LinkState,
-            Receiver<crate::linux_link::LinkState>,
-        ),
+        #[cfg(windows)] control: Option<Receiver<crate::uapi::Request>>,
     ) -> io::Result<Self> {
-        let allowed = hub.allowed_ips();
-        if !(576..=MAX_IP_PACKET).contains(&mtu)
-            || (mtu < 1280 && allowed.iter().any(|net| matches!(net, IpNet::V6(_))))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid WireGuard MTU",
-            ));
-        }
-        #[cfg(target_os = "linux")]
-        let mut desired_up = initial.up;
-        #[cfg(not(target_os = "linux"))]
-        let desired_up = true;
-        #[cfg(target_os = "linux")]
-        hub.update_mtu(initial.mtu);
-        let (bind, dual, reserved) = (carrier.bind, carrier.dual, carrier.reserved);
-        let mut socket = desired_up
-            .then(|| carrier.open(bind.port(), 0))
-            .transpose()?;
-        if !desired_up {
-            carrier.first = None;
-        }
+        check_tun_mtu(&hub, mtu)?;
+        let (dual, reserved) = (carrier.dual, carrier.reserved);
+        #[cfg(windows)]
+        let mut binding = TunBinding::new(carrier, true)?;
+        #[cfg(not(windows))]
+        let socket = {
+            let mut carrier = carrier;
+            carrier.open(carrier.bind.port(), 0)?
+        };
         let (tx, outbound) = mpsc::sync_channel::<Vec<u8>>(QUEUE);
         let (inbound, rx) = mpsc::sync_channel(QUEUE);
-        #[cfg(any(target_os = "linux", windows))]
-        let mut listen_port = socket
-            .as_ref()
-            .map(UdpSocket::local_addr)
-            .transpose()?
-            .map_or(bind.port(), |local| local.port());
         let worker = thread::Builder::new()
             .name("kerlico-wireguard-tun-udp".into())
             .spawn(move || {
                 let mut packet = vec![0; WIRE_BUFFER];
-                #[cfg(any(target_os = "linux", windows))]
-                let mut mark = 0;
                 loop {
-                    #[cfg(target_os = "linux")]
-                    for state in link.try_iter().take(32) {
-                        hub.update_mtu(state.mtu);
-                        if state.up == desired_up {
-                            continue;
-                        }
-                        desired_up = state.up;
-                        if desired_up {
-                            match carrier
-                                .open(listen_port, mark)
-                                .and_then(|carrier| Ok((carrier.local_addr()?.port(), carrier)))
-                            {
-                                Ok((port, carrier)) => {
-                                    listen_port = port;
-                                    socket = Some(carrier);
-                                    hub.reset_transport();
-                                }
-                                // Keep UAPI available so the operator can free or change the port.
-                                Err(error) => eprintln!("WireGuard: bring up UDP carrier: {error}"),
-                            }
-                        } else {
-                            socket = None;
-                            carrier.first = None;
-                            hub.reset_transport();
-                            for _ in 0..QUEUE {
-                                if outbound.try_recv().is_err() {
-                                    break;
-                                }
-                            }
+                    #[cfg(windows)]
+                    if let Some(requests) = &control {
+                        for request in requests.try_iter().take(4) {
+                            binding.control(&mut hub, request);
                         }
                     }
-                    #[cfg(any(target_os = "linux", windows))]
-                    for _ in 0..4 {
-                        let Some((action, reply)) = control
-                            .as_ref()
-                            .and_then(|requests| requests.try_recv().ok())
-                        else {
-                            break;
-                        };
-                        if reply.is_closed() {
-                            continue;
-                        }
-                        let result = match action {
-                            crate::uapi::Action::Get => Ok(hub.snapshot(listen_port, mark)),
-                            crate::uapi::Action::Set(change) => (|| {
-                                let plan = hub.plan(&change, bind.ip(), dual)?;
-                                let new_mark = change.mark.unwrap_or(mark);
-                                let new_port = change.port.unwrap_or(listen_port);
-                                if desired_up && (socket.is_none() || new_port != listen_port) {
-                                    let next = carrier.open(new_port, new_mark)?;
-                                    listen_port = next.local_addr()?.port();
-                                    #[cfg(target_os = "linux")]
-                                    if socket.is_none() {
-                                        hub.reset_transport();
-                                    }
-                                    socket = Some(next);
-                                } else {
-                                    #[cfg(target_os = "linux")]
-                                    if let Some(active) =
-                                        socket.as_ref().filter(|_| new_mark != mark)
-                                    {
-                                        socket2::SockRef::from(active).set_mark(new_mark)?;
-                                    }
-                                    listen_port = new_port;
-                                }
-                                mark = new_mark;
-                                hub.commit(plan);
-                                Ok(String::new())
-                            })(),
-                        };
-                        let _ = reply.send(result);
-                    }
-                    let carrier = socket.as_ref();
-                    let emit = |event| {
-                        if let Some(carrier) = carrier {
-                            deliver(carrier, dual, reserved, &inbound, event);
-                        }
-                    };
+                    #[cfg(windows)]
+                    let socket = binding.socket.as_ref().expect("Windows TUN carrier");
+                    let emit = |event| deliver(&socket, dual, reserved, &inbound, event);
                     let mut busy = false;
                     for _ in 0..QUEUE {
                         match outbound.try_recv() {
                             Ok(frame) => {
                                 busy = true;
-                                if carrier.is_some() {
-                                    if let Some(event) = hub.send(&frame) {
-                                        emit(event);
-                                    }
+                                if let Some(event) = hub.send(&frame) {
+                                    emit(event);
                                 }
                             }
                             Err(TryRecvError::Empty) => break,
                             Err(TryRecvError::Disconnected) => return,
                         }
                     }
-                    let Some(carrier) = carrier else {
-                        thread::park_timeout(POLL);
-                        continue;
-                    };
                     for _ in 0..32 {
-                        match carrier.recv_from(&mut packet) {
+                        match socket.recv_from(&mut packet) {
                             Ok((len, source)) => {
                                 busy = true;
                                 let source = unmapped(source, dual);
                                 reserved.apply(&mut packet[..len], true);
-                                hub.receive(source, &packet[..len], emit)
+                                hub.receive(source, &packet[..len], emit);
                             }
                             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                             Err(error)
@@ -340,7 +333,7 @@ impl PacketLink {
                                         | io::ErrorKind::ConnectionReset
                                 ) =>
                             {
-                                break
+                                break;
                             }
                             Err(_) => return,
                         }
@@ -355,9 +348,6 @@ impl PacketLink {
             tx: PacketTx {
                 tx,
                 allowed: None, // The live Hub owns routing for this interface.
-                #[cfg(target_os = "linux")]
-                mtu: MAX_IP_PACKET,
-                #[cfg(not(target_os = "linux"))]
                 mtu,
                 wake: worker.thread().clone(),
             },
@@ -462,17 +452,35 @@ fn deliver(
     inbound: &SyncSender<Vec<u8>>,
     event: HubEvent,
 ) {
+    deliver_via(
+        dual,
+        reserved,
+        event,
+        |endpoint, frame| {
+            let _ = socket.send_to(&frame, endpoint);
+        },
+        |frame| {
+            let _ = inbound.try_send(frame);
+        },
+    );
+}
+
+fn deliver_via(
+    dual: bool,
+    reserved: Reserved,
+    event: HubEvent,
+    send: impl FnOnce(SocketAddr, Vec<u8>),
+    receive: impl FnOnce(Vec<u8>),
+) {
     match event {
         HubEvent::Datagram(mut endpoint, mut frame) => {
             if let (true, SocketAddr::V4(v4)) = (dual, endpoint) {
                 endpoint = (v4.ip().to_ipv6_mapped(), v4.port()).into();
             }
             reserved.apply(&mut frame, false);
-            let _ = socket.send_to(&frame, endpoint);
+            send(endpoint, frame);
         }
-        HubEvent::Packet(_, _, frame) => {
-            let _ = inbound.try_send(frame);
-        }
+        HubEvent::Packet(_, _, frame) => receive(frame),
     }
 }
 

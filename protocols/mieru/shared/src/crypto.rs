@@ -107,13 +107,16 @@ impl Direction {
         nonce: &[u8; 24],
         sealed: &mut Vec<u8>,
     ) -> Option<()> {
-        let (key, nonce) = self.cipher_at(nonce);
-        let len = key
-            .open_in_place(nonce, aead::Aad::empty(), sealed)
-            .ok()?
-            .len();
+        let len = self.open_at_slice(nonce, sealed)?;
         sealed.truncate(len);
         Some(())
+    }
+
+    pub(crate) fn open_at_slice(&mut self, nonce: &[u8; 24], sealed: &mut [u8]) -> Option<usize> {
+        let (key, nonce) = self.cipher_at(nonce);
+        key.open_in_place(nonce, aead::Aad::empty(), sealed)
+            .ok()
+            .map(|plain| plain.len())
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -147,10 +150,7 @@ impl Direction {
         let nonce = self.nonce.as_mut()?;
         bump(nonce);
         let nonce = *nonce;
-        let (key, nonce) = self.cipher_at(&nonce);
-        key.open_in_place(nonce, aead::Aad::empty(), packet)
-            .ok()
-            .map(|plain| plain.len())
+        self.open_at_slice(&nonce, packet)
     }
 
     pub fn open_next(&mut self, mut packet: Vec<u8>) -> Option<Vec<u8>> {

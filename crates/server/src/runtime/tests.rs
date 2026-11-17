@@ -17,6 +17,7 @@ fn configured_hosts_and_system_dns_remain_distinct_and_scope_outlives_server_saf
         Arc::new(RwLock::new(config)),
         geodata::Catalog::empty(),
         true,
+        None,
     );
     let addresses = context
         .network
@@ -73,6 +74,7 @@ fn landing_scope_rejects_self_reference_before_resolving() {
         Arc::new(RwLock::new(dns::Config::default())),
         geodata::Catalog::empty(),
         false,
+        None,
     );
     let mut request = NetworkDial::direct(
         "127.0.0.1:443".parse().unwrap(),
@@ -142,6 +144,7 @@ fn dns_srv_and_txt_follow_the_configured_upstream() {
         Arc::new(RwLock::new(config)),
         geodata::Catalog::empty(),
         true,
+        None,
     );
     let srv = context
         .network
@@ -199,7 +202,7 @@ fn configured_https_query_retries_a_truncated_udp_reply_over_tcp() {
         }],
         ..dns::Config::default()
     };
-    let runtime = context(&outbound, Arc::new(RwLock::new(config)), geodata::Catalog::empty(), false);
+    let runtime = context(&outbound, Arc::new(RwLock::new(config)), geodata::Catalog::empty(), false, None);
     let mut expected = query;
     expected[2] = 0x81;
     assert_eq!(runtime.network.exchange_configured_dns(&query).unwrap(), expected);

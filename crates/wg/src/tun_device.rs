@@ -1,14 +1,18 @@
 //! OS TUN attachment for the packet plane. The owner supplies addresses and routes.
 
+#[cfg(not(target_os = "linux"))]
+use std::time::Duration;
 use std::{
     io,
     net::{SocketAddr, UdpSocket},
-    time::Duration,
 };
+#[cfg(not(target_os = "linux"))]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::packet::{peer_hub, TunCarrier};
-use crate::{Hub, LinkPeer, PacketLink, Reserved};
+#[cfg(not(target_os = "linux"))]
+use crate::PacketLink;
+use crate::{Hub, LinkPeer, Reserved};
 
 pub fn bind_tun(bind: SocketAddr, hub: Hub, name: &str, mtu: u16) -> io::Result<()> {
     run_tun_hub(
@@ -50,40 +54,21 @@ fn run_tun_hub(
     managed: bool,
     ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
-    let buffer_size = if cfg!(target_os = "linux") {
-        crate::wire::MAX_IP_PACKET
-    } else {
-        usize::from(mtu)
-    };
-    #[cfg(any(target_os = "linux", windows))]
-    return run_tun_until(name, mtu, up, buffer_size, ready, || {
+    #[cfg(target_os = "linux")]
+    return crate::packet::tun_linux::run(name, mtu, hub, carrier, up, managed, ready);
+    #[cfg(windows)]
+    return run_tun_until(name, mtu, up, usize::from(mtu), ready, || {
         let (requests, control) = if managed {
             let (requests, control) = crate::uapi::open(name)?;
             (Some(requests), Some(control))
         } else {
             (None, None)
         };
-        #[cfg(target_os = "linux")]
-        let monitor = crate::linux_link::Monitor::open(name)?;
-        #[cfg(target_os = "linux")]
-        let (updates, state) = std::sync::mpsc::channel();
-        let link = PacketLink::from_hub(
-            carrier,
-            hub,
-            usize::from(mtu),
-            requests,
-            #[cfg(target_os = "linux")]
-            (monitor.initial, state),
-        )?;
-        #[cfg(target_os = "linux")]
-        let watch = monitor.watch(updates);
-        #[cfg(windows)]
-        let watch = std::future::pending();
+        let link = PacketLink::from_hub(carrier, hub, usize::from(mtu), requests)?;
         Ok((link, async move {
             tokio::select! {
                 biased;
                 result = stop_signal() => result,
-                result = watch => result,
                 result = async move {
                     match control {
                         Some(control) => control.await,
@@ -94,7 +79,7 @@ fn run_tun_hub(
         }))
     });
     #[cfg(not(any(target_os = "linux", windows)))]
-    run_tun_until(name, mtu, up, buffer_size, ready, || {
+    run_tun_until(name, mtu, up, usize::from(mtu), ready, || {
         Ok((
             PacketLink::from_hub(carrier, hub, usize::from(mtu))?,
             stop_signal(),
@@ -128,7 +113,7 @@ pub fn run_tun(
 }
 
 #[cfg(target_os = "linux")]
-async fn stop_signal() -> io::Result<()> {
+pub(crate) async fn stop_signal() -> io::Result<()> {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         _ = term.recv() => Ok(()),
@@ -141,6 +126,7 @@ async fn stop_signal() -> io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
+#[cfg(not(target_os = "linux"))]
 fn run_tun_until<S: std::future::Future<Output = io::Result<()>>>(
     name: &str,
     mtu: u16,
@@ -189,7 +175,7 @@ fn run_tun_until<S: std::future::Future<Output = io::Result<()>>>(
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn create_tun(name: &str, mtu: u16, up: bool) -> io::Result<impl AsyncRead + AsyncWrite + Unpin> {
     let mut config = tun::Configuration::default();
     config.tun_name(name).mtu(mtu);

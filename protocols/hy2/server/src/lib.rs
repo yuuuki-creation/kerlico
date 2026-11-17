@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use kerlico_hy2::masquerade::{HysteriaMasquerade, MasqueradeSocket, MasqueradeTarget};
 use kerlico_hy2::{auth::ReceiveRate, datagram, quic, split_address, tcp};
 use kerlico_shared::runtime::{NetworkConnection, NetworkDial, NetworkRoute};
+use kerlico_shared::dispatch;
 use kerlico_shared::{
     Accept, DatagramSession, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError,
     PlaneFault, Settings, Transport, UserEmail,
@@ -27,6 +28,8 @@ struct Node {
     users: Users,
     incoming: mpsc::Receiver<Handoff>,
 }
+
+type Incoming = dispatch::Notifying<mpsc::Sender<Handoff>>;
 
 impl Drop for Node {
     fn drop(&mut self) {
@@ -186,6 +189,7 @@ pub fn listen(
     let users = Users::default();
     let credentials = users.clone();
     let (ready, incoming) = mpsc::channel(128);
+    let ready = Incoming::new(ready, settings.dispatch_wake());
     let udp_ready = ready.clone();
     let udp_tag = tag.clone();
     let config = Arc::new(quic::Server {
@@ -251,7 +255,7 @@ pub fn listen(
     }))
 }
 
-async fn serve_tcp(mut stream: quic::Tcp<UserEmail>, node: NodeTag, ready: mpsc::Sender<Handoff>) {
+async fn serve_tcp(mut stream: quic::Tcp<UserEmail>, node: NodeTag, ready: Incoming) {
     let address =
         match tokio::time::timeout(quic::HANDSHAKE_TIMEOUT, tcp::read_request(&mut stream.recv))
             .await
@@ -274,20 +278,24 @@ async fn serve_tcp(mut stream: quic::Tcp<UserEmail>, node: NodeTag, ready: mpsc:
         stream.user,
         dest,
         Box::new(TcpFlow {
-            pipe: quic::Duplex::new(stream.recv, stream.send),
+            pipe: Some(quic::Duplex::new(stream.recv, stream.send)),
             replied: AtomicBool::new(false),
         }),
     );
     handoff.set_peer(stream.peer);
-    let _ = ready.send(handoff).await;
+    let _ = ready.queued(ready.sender().send(handoff).await);
 }
 
 struct TcpFlow {
-    pipe: quic::Duplex,
+    pipe: Option<quic::Duplex>,
     replied: AtomicBool,
 }
 
 impl InboundStream for TcpFlow {
+    fn take_async_tcp(&mut self) -> Result<Option<kerlico_shared::AsyncTcp>, PlaneFault> {
+        let executor = quic::runtime().map_err(map_io)?.handle().clone();
+        Ok(self.pipe.take().map(|flow| flow.into_async(executor)))
+    }
     fn report_connect(&self, result: Result<(), OpenError>) -> Result<(), PlaneFault> {
         if self.replied.swap(true, Ordering::AcqRel) {
             return Ok(());
@@ -297,20 +305,20 @@ impl InboundStream for TcpFlow {
             if result.is_ok() { "" } else { "connect failed" },
         )
         .map_err(map_io)?;
-        self.pipe.write(&frame, SEND_TIMEOUT).map_err(map_io)?;
+        self.pipe.as_ref().ok_or(PlaneFault::Closed)?.write(&frame, SEND_TIMEOUT).map_err(map_io)?;
         if result.is_err() {
-            self.pipe.finish().map_err(map_io)?;
+            self.pipe.as_ref().ok_or(PlaneFault::Closed)?.finish().map_err(map_io)?;
         }
         Ok(())
     }
     fn finish_to_user(&self) -> Result<bool, PlaneFault> {
-        self.pipe.finish().map(|_| true).map_err(map_io)
+        self.pipe.as_ref().ok_or(PlaneFault::Closed)?.finish().map(|_| true).map_err(map_io)
     }
     fn read_from_user(&self, data: &mut [u8]) -> Result<usize, PlaneFault> {
-        self.pipe.read(data, POLL).map_err(map_io)
+        self.pipe.as_ref().ok_or(PlaneFault::Closed)?.read(data, POLL).map_err(map_io)
     }
     fn write_to_user(&self, data: &[u8]) -> Result<usize, PlaneFault> {
-        self.pipe
+        self.pipe.as_ref().ok_or(PlaneFault::Closed)?
             .write(data, SEND_TIMEOUT)
             .map(|_| data.len())
             .map_err(map_io)
@@ -382,7 +390,7 @@ async fn serve_udp(
     connection: quinn::Connection,
     user: UserEmail,
     tag: NodeTag,
-    ready: mpsc::Sender<Handoff>,
+    ready: Incoming,
     idle: Duration,
 ) {
     let mut fragments = datagram::Reassembler::default();
@@ -421,7 +429,7 @@ async fn serve_udp(
                 }));
                 handoff.set_peer(connection.remote_address());
                 handoff.set_datagram_session(group.group.clone());
-                if ready.try_send(handoff).is_ok() {
+                if ready.queued(ready.sender().try_send(handoff)).is_ok() {
                     if group.targets.insert(address, UdpPipe { sender, activity }).is_none() {
                         flow_count += 1;
                     }

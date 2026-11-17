@@ -1024,34 +1024,41 @@ impl State {
     fn drive_transmit(&mut self, cx: &mut Context) -> io::Result<bool> {
         let now = self.runtime.now();
         let mut transmits = 0;
-
-        let max_datagrams = self
-            .socket
-            .max_transmit_segments()
-            .min(MAX_TRANSMIT_SEGMENTS);
+        let mut transmitted_bytes = 0;
 
         loop {
             // Retry the last transmit, or get a new one.
             let t = match self.buffered_transmit.take() {
                 Some(t) => t,
                 None => {
+                    // Let the socket's GSO capability determine each train,
+                    // while bounding both packet work and bytes per turn.
+                    // Reuse this connection's existing ciphertext storage;
+                    // idle connections do not preallocate a full GSO train.
+                    let mtu = self.inner.current_mtu() as usize;
+                    let max_datagrams = self.socket.max_transmit_segments()
+                        .min(MAX_TRANSMIT_DATAGRAMS - transmits)
+                        .min((MAX_TRANSMIT_BYTES - transmitted_bytes) / mtu)
+                        .min(MAX_GSO_BYTES / mtu)
+                        .max(1);
                     self.send_buffer.clear();
-                    self.send_buffer.reserve(self.inner.current_mtu() as usize);
+                    self.send_buffer.reserve(mtu);
                     match self
                         .inner
                         .poll_transmit(now, max_datagrams, &mut self.send_buffer)
                     {
-                        Some(t) => {
-                            transmits += match t.segment_size {
-                                None => 1,
-                                Some(s) => t.size.div_ceil(s), // round up
-                            };
-                            t
-                        }
+                        Some(t) => t,
                         None => break,
                     }
                 }
             };
+
+            if t.size > MAX_TRANSMIT_BYTES - transmitted_bytes {
+                // A jumbo datagram or MTU probe may not fit the tail of this
+                // turn. Preserve its ciphertext and send it with a fresh budget.
+                self.buffered_transmit = Some(t);
+                return Ok(true);
+            }
 
             if self.io_poller.as_mut().poll_writable(cx)?.is_pending() {
                 // Retry after a future wakeup
@@ -1077,7 +1084,11 @@ impl State {
                 continue;
             }
 
-            if transmits >= MAX_TRANSMIT_DATAGRAMS {
+            // Count successful transmits, including a buffered train resumed
+            // after WouldBlock. Retrying never rebuilds or re-encrypts it.
+            transmits += t.segment_size.map_or(1, |s| t.size.div_ceil(s));
+            transmitted_bytes += t.size;
+            if transmits >= MAX_TRANSMIT_DATAGRAMS || transmitted_bytes >= MAX_TRANSMIT_BYTES {
                 // TODO: What isn't ideal here yet is that if we don't poll all
                 // datagrams that could be sent we don't go into the `app_limited`
                 // state and CWND continues to grow until we get here the next time.
@@ -1339,11 +1350,12 @@ pub enum SendDatagramError {
 ///
 /// This limits the amount of CPU resources consumed by datagram generation,
 /// and allows other tasks (like receiving ACKs) to run in between.
-const MAX_TRANSMIT_DATAGRAMS: usize = 20;
+const MAX_TRANSMIT_DATAGRAMS: usize = 128;
 
-/// The maximum amount of datagrams that are sent in a single transmit
-///
-/// This can be lower than the maximum platform capabilities, to avoid excessive
-/// memory allocations when calling `poll_transmit()`. Benchmarks have shown
-/// that numbers around 10 are a good compromise.
-const MAX_TRANSMIT_SEGMENTS: usize = 10;
+/// Bound each turn independently of path MTU and the socket's GSO limit.
+const MAX_TRANSMIT_BYTES: usize = 256 * 1024;
+
+/// A GSO capability is a segment count, not permission to exceed the UDP/IP
+/// send length. Larger trains otherwise become EMSGSIZE losses in quinn-udp.
+/// This IPv4 payload bound is also safe for ordinary IPv6 UDP submissions.
+const MAX_GSO_BYTES: usize = 65_507;

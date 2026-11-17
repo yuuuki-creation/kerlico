@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -13,6 +13,7 @@ use kerlico_anytls::session::{Flow, Inbound, Leg, Opened, Session, Stream};
 use kerlico_anytls::tls::{ServerTransport, HANDSHAKE_TIMEOUT};
 use kerlico_anytls::{jls, password_hash, rest, shadow, Scheme, SchemeCell};
 use kerlico_shared::runtime::{FallbackRate, Network, NetworkConnection, NetworkDial, NetworkRoute};
+use kerlico_shared::dispatch;
 use kerlico_shared::{
     Accept, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError, PeerAddr, PlaneFault, Settings, Transport,
     UserEmail,
@@ -110,7 +111,7 @@ impl Accept for AnyTlsInbound {
                 continue;
             };
             let (stream, group): (Box<dyn InboundStream>, _) = match opened.flow {
-                Flow::Tcp(stream) => (Box::new(TcpFlow(stream)), None),
+                Flow::Tcp(stream) => (Box::new(TcpFlow(Some(stream))), None),
                 Flow::Udp(leg) => {
                     let group = leg.datagram_session().cloned();
                     (Box::new(UdpFlow(leg)), group)
@@ -128,7 +129,7 @@ impl Accept for AnyTlsInbound {
     }
 }
 
-struct TcpFlow(Stream);
+struct TcpFlow(Option<Stream>);
 
 struct FallbackFlow {
     tcp: TcpStream,
@@ -169,12 +170,26 @@ impl InboundStream for FallbackFlow {
 
 impl InboundStream for TcpFlow {
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
-        self.0.read_for(buf, WAIT).map_err(map_io)
+        self.0.as_ref().ok_or(PlaneFault::Closed)?.read_for(buf, WAIT).map_err(map_io)
+    }
+
+    fn read_from_user_vectored_to(
+        &self,
+        buf: &mut [u8],
+        sink: &mut dyn FnMut(&[io::IoSlice<'_>]),
+    ) -> Result<usize, PlaneFault> {
+        self.0.as_ref().ok_or(PlaneFault::Closed)?.read_vectored_for(buf, WAIT, sink).map_err(map_io)
     }
 
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
-        self.0.write(buf).map_err(map_io)?;
+        self.0.as_ref().ok_or(PlaneFault::Closed)?.write(buf).map_err(map_io)?;
         Ok(buf.len())
+    }
+
+    fn take_async_tcp(&mut self) -> Result<Option<kerlico_shared::AsyncTcp>, PlaneFault> {
+        if self.0.as_ref().is_some_and(Stream::supports_async) {
+            Ok(Some(self.0.take().expect("native AnyTLS stream").into_async()))
+        } else { Ok(None) }
     }
 }
 
@@ -210,7 +225,7 @@ fn map_io(error: io::Error) -> PlaneFault {
 
 struct Listener {
     users: Users,
-    ready: Arc<Mutex<Sender<Ready>>>,
+    ready: Arc<Mutex<dispatch::Sender<Ready>>>,
 }
 
 impl Inbound for Listener {
@@ -276,7 +291,7 @@ impl RestConfig {
 }
 
 impl RestServer {
-    fn accept(&self, mut tcp: TcpStream, ready: &Mutex<Sender<Ready>>) -> io::Result<Option<kerlico_anytls::tls::Established>> {
+    fn accept(&self, mut tcp: TcpStream, ready: &Mutex<dispatch::Sender<Ready>>) -> io::Result<Option<kerlico_anytls::tls::Established>> {
         let hello = shadow::record(&mut tcp)?;
         if !self.config.candidate(&hello) {
             let dest = Destination::new(self.peer.host(), self.peer.port(), Transport::Tcp)
@@ -383,7 +398,7 @@ impl ShadowConfig {
 }
 
 impl ShadowServer {
-    fn accept(&self, mut tcp: TcpStream, ready: &Mutex<Sender<Ready>>) -> io::Result<Option<kerlico_anytls::tls::Established>> {
+    fn accept(&self, mut tcp: TcpStream, ready: &Mutex<dispatch::Sender<Ready>>) -> io::Result<Option<kerlico_anytls::tls::Established>> {
         let first = if matches!(self.version, shadow::Version::V1) {
             Vec::new()
         } else {
@@ -495,7 +510,7 @@ pub fn listen(tag: &NodeTag, bind: &ListenAddr, settings: &Settings) -> Result<B
     let node = node(settings)?;
     let listener = bind_tcp(bind.socket_addr()).map_err(|_| OpenError::Transport)?;
     let users: Users = Arc::new(RwLock::new(HashMap::new()));
-    let (ready_tx, ready) = mpsc::channel();
+    let (ready_tx, ready) = dispatch::channel(settings.dispatch_wake());
     let control = Arc::new(Control {
         closed: AtomicBool::new(false),
         listener,
@@ -514,7 +529,7 @@ pub fn listen(tag: &NodeTag, bind: &ListenAddr, settings: &Settings) -> Result<B
     Ok(Box::new(AnyTlsInbound { tag: tag.clone(), users, ready, control, accept_loop: Some(task) }))
 }
 
-fn accept_loop(control: Arc<Control>, node: Node, inbound: Arc<dyn Inbound>, ready: Arc<Mutex<Sender<Ready>>>) {
+fn accept_loop(control: Arc<Control>, node: Node, inbound: Arc<dyn Inbound>, ready: Arc<Mutex<dispatch::Sender<Ready>>>) {
     while !control.closed.load(Ordering::Acquire) {
         let tcp = match control.listener.accept() {
             Ok((tcp, _)) => tcp,
@@ -533,9 +548,13 @@ fn accept_loop(control: Arc<Control>, node: Node, inbound: Arc<dyn Inbound>, rea
         let padding = node.padding.clone();
         let inbound = Arc::clone(&inbound);
         let ready = ready.clone();
+        struct Registration { control: Arc<Control>, id: u64 }
+        impl Drop for Registration {
+            fn drop(&mut self) { self.control.connections.lock().expect("connections").remove(&self.id); }
+        }
+        let registration = Registration { control, id };
         let spawned = thread::Builder::new().name("anytls-conn".into()).spawn(move || {
-            let _ = serve(tcp, &carrier, padding, inbound, &ready);
-            control.connections.lock().expect("connections").remove(&id);
+            let _ = serve(tcp, &carrier, padding, inbound, &ready, Box::new(move || drop(registration)));
         });
         if spawned.is_err() {
             thread::sleep(Duration::from_millis(20));
@@ -544,7 +563,7 @@ fn accept_loop(control: Arc<Control>, node: Node, inbound: Arc<dyn Inbound>, rea
 }
 
 /// mihomo has no deadline for the handshake and the password; this one shares ten seconds.
-fn serve(tcp: TcpStream, config: &Carrier, padding: SchemeCell, inbound: Arc<dyn Inbound>, ready: &Mutex<Sender<Ready>>) -> io::Result<()> {
+fn serve(tcp: TcpStream, config: &Carrier, padding: SchemeCell, inbound: Arc<dyn Inbound>, ready: &Mutex<dispatch::Sender<Ready>>, close: Box<dyn FnOnce() + Send>) -> io::Result<()> {
     tcp.set_nodelay(true)?;
     tcp.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let link = match config {
@@ -564,11 +583,11 @@ fn serve(tcp: TcpStream, config: &Carrier, padding: SchemeCell, inbound: Arc<dyn
             }
         }
     };
-    Session::serve(link, padding, inbound)
+    Session::serve_detached(link, padding, inbound, close)
 }
 
 fn send_fallback(
-    ready: &Mutex<Sender<Ready>>, dest: Destination, tcp: TcpStream, prefix: Vec<u8>, rate: u64,
+    ready: &Mutex<dispatch::Sender<Ready>>, dest: Destination, tcp: TcpStream, prefix: Vec<u8>, rate: u64,
 ) -> io::Result<()> {
     let flow = FallbackFlow::new(tcp, prefix, rate)?;
     let _ = ready.lock().expect("ready").send(Ready::Fallback(dest, flow));

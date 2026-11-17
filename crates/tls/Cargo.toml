@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-quic = ["dep:bytes", "dep:quinn", "dep:quinn-proto", "dep:ring"]
+quic = ["dep:bytes", "dep:quinn", "dep:quinn-proto"]
 
 [dependencies]
 base64 = "0.22"
@@ -14,12 +14,13 @@ brotli = "8"
 bytes = { version = "1", optional = true }
 der = { version = "0.7", features = ["std"] }
 flate2 = "1"
+foreign-types = "0.5"
 getrandom = "0.2"
 hkdf = "0.12"
 pkcs8 = { version = "0.10", features = ["std"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
 quinn-proto = { version = "0.11", default-features = false, features = ["rustls-ring"], optional = true }
-ring = { version = "0.17", optional = true }
+ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"

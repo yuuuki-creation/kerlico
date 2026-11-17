@@ -13,9 +13,12 @@ use kerlico_shared::{
 
 use crate::Exit;
 
-const BUF: usize = 1024 * 1024;
+#[cfg(target_os = "linux")]
+mod splice;
+
+pub(super) const BUF: usize = 1024 * 1024;
 const UDP_BUF: usize = 65_536;
-const IDLE: Duration = Duration::from_secs(300);
+pub(super) const IDLE: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Copy)]
 pub struct Flow<'a> {
@@ -28,6 +31,8 @@ pub struct Flow<'a> {
 
 pub trait PipeRead: Send {
     fn read_pipe(&mut self, buf: &mut [u8]) -> Result<ReadEvent, OpenError>;
+    #[cfg(target_os = "linux")]
+    fn native_tcp(&self) -> Option<&std::net::TcpStream> { None }
 }
 
 pub enum ReadEvent {
@@ -38,6 +43,14 @@ pub enum ReadEvent {
 
 pub trait PipeWrite: Send {
     fn write_pipe(&mut self, buf: &[u8]) -> Result<(), OpenError>;
+    fn write_pipe_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> Result<(), OpenError> {
+        for buf in bufs {
+            self.write_pipe(buf)?;
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    fn native_tcp(&self) -> Option<&std::net::TcpStream> { None }
     fn finish(&mut self) -> Result<(), OpenError> {
         Ok(())
     }
@@ -118,6 +131,9 @@ fn pump_up(
     pace: &Pace,
 ) -> Result<(), OpenError> {
     let mut buf = vec![0u8; if transport == Transport::Udp { UDP_BUF } else { BUF }];
+    #[cfg(target_os = "linux")]
+    let mut check_splice = transport == Transport::Tcp
+        && toward_exit.native_tcp().is_some() && stream.can_splice();
     loop {
         if pace.halted() {
             return Ok(());
@@ -125,11 +141,11 @@ fn pump_up(
         // The stream may give its own bytes, so they go to the exit without a copy into `buf`.
         // A TCP read of nothing is EOF, not a write; a UDP datagram of nothing is still sent.
         let mut failed = None;
-        let read = stream.read_from_user_to(&mut buf, &mut |bytes| {
-            if failed.is_some() || (bytes.is_empty() && transport == Transport::Tcp) {
+        let read = stream.read_from_user_vectored_to(&mut buf, &mut |bytes| {
+            if failed.is_some() || (bytes.iter().all(|part| part.is_empty()) && transport == Transport::Tcp) {
                 return;
             }
-            if let Err(error) = toward_exit.write_pipe(bytes) {
+            if let Err(error) = toward_exit.write_pipe_vectored(bytes) {
                 failed = Some(error);
             }
         });
@@ -153,6 +169,16 @@ fn pump_up(
                     return Err(error);
                 }
                 traffic.add_uplink(n as u64);
+                #[cfg(target_os = "linux")]
+                if check_splice {
+                    if let (Some(user), Some(target)) = (stream.raw_read(), toward_exit.native_tcp()) {
+                        match splice::forward(&user, target, pace, |n| traffic.add_uplink(n as u64)) {
+                            Ok(splice::Outcome::Fallback) => check_splice = false,
+                            Ok(splice::Outcome::Stopped) => return Ok(()),
+                            Err(error) => { pace.halt(); return Err(error); }
+                        }
+                    }
+                }
             }
             Err(PlaneFault::Again) => {
                 if pace.idle() {
@@ -176,6 +202,9 @@ fn pump_down(
     pace: &Pace,
 ) -> Result<(), OpenError> {
     let mut buf = vec![0u8; if transport == Transport::Udp { UDP_BUF } else { BUF }];
+    #[cfg(target_os = "linux")]
+    let mut check_splice = transport == Transport::Tcp
+        && from_exit.native_tcp().is_some() && stream.can_splice();
     loop {
         if pace.halted() {
             return Ok(());
@@ -209,6 +238,16 @@ fn pump_down(
                     write_all_user(stream, &buf[..n])?
                 };
                 traffic.add_downlink(n);
+                #[cfg(target_os = "linux")]
+                if check_splice {
+                    if let (Some(source), Some(user)) = (from_exit.native_tcp(), stream.raw_write()) {
+                        match splice::forward(source, &user, pace, |n| traffic.add_downlink(n as u64)) {
+                            Ok(splice::Outcome::Fallback) => check_splice = false,
+                            Ok(splice::Outcome::Stopped) => return Ok(()),
+                            Err(error) => { pace.halt(); return Err(error); }
+                        }
+                    }
+                }
             }
             Err(OpenError::Again) => {
                 if pace.idle() {

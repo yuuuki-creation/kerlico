@@ -4,7 +4,8 @@
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::task::Waker;
 
 use crate::frame::{self, CMD_PSH, CMD_WASTE, HEADER, MAX_DATA};
 use crate::padding::{SchemeCell, CHECK};
@@ -13,6 +14,9 @@ use crate::tls::{key_update, Cipher, Kernel, CONTENT_APPDATA, MAX_PLAIN, RECORD_
 const CONTENT_ALERT: u8 = 21;
 const CONTENT_HANDSHAKE: u8 = 22;
 
+pub(crate) mod input;
+
+#[derive(Clone, Copy)]
 pub(crate) enum Out<'a> {
     /// One frame, or PSH frames split at 65535 bytes, as one `writeConn`.
     Frames { cmd: u8, sid: u32, data: &'a [u8] },
@@ -28,6 +32,21 @@ pub(crate) struct Waiter {
     pub(crate) cv: Arc<Condvar>,
     /// Already notified since it last went to sleep, so no second futex call.
     pub(crate) woken: bool,
+}
+
+pub(crate) struct TaskWaiter {
+    pub(crate) ticket: u64,
+    pub(crate) end: Option<u64>,
+    pub(crate) waker: Waker,
+    pub(crate) woken: bool,
+}
+
+pub(crate) struct NativeBatch {
+    pub(crate) storage: Vec<u8>,
+    pub(crate) len: usize,
+    /// Application input is advanced only by its own completing write task.
+    pub(crate) owner: Option<u64>,
+    pub(crate) input: bool,
 }
 
 /// How fast the socket has been taking bytes, for the queue bound.
@@ -74,6 +93,11 @@ pub(crate) struct Tx {
     pub(crate) flushing: bool,
     pub(crate) waiters: VecDeque<Waiter>,
     pub(crate) next_ticket: u64,
+    pub(crate) task_waiters: VecDeque<TaskWaiter>,
+    pub(crate) native_head: usize,
+    pub(crate) native_batch: Option<(Instant, u64)>,
+    pub(crate) ready: VecDeque<NativeBatch>,
+    pub(crate) input_pool: Vec<Vec<u8>>,
     /// The waiter that takes over writing from the thread that just finished its own bytes.
     pub(crate) handoff: Option<u64>,
     pub(crate) helper_wanted: bool,
@@ -101,6 +125,11 @@ impl Tx {
             flushing: false,
             waiters: VecDeque::new(),
             next_ticket: 0,
+            task_waiters: VecDeque::new(),
+            native_head: 0,
+            native_batch: None,
+            ready: VecDeque::new(),
+            input_pool: Vec::new(),
             handoff: None,
             helper_wanted: false,
             helper_started: false,
@@ -310,7 +339,15 @@ impl Tx {
     }
 
     fn open_record(&mut self, kernel: &Mutex<Kernel>) -> io::Result<usize> {
-        if let Some(cipher) = self.cipher.as_mut().filter(|cipher| cipher.seq() >= RECORD_LIMIT) {
+        self.reserve_records(1, kernel)?;
+        let start = self.out.len();
+        self.out.resize(start + self.prefix_len(), 0);
+        self.open = Some(start);
+        Ok(start)
+    }
+
+    fn reserve_records(&mut self, count: usize, kernel: &Mutex<Kernel>) -> io::Result<()> {
+        if let Some(cipher) = self.cipher.as_mut().filter(|cipher| cipher.seq().saturating_add(count as u64) > RECORD_LIMIT) {
             if !cipher.is_tls13() {
                 return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "TLS 1.2 send record limit"));
             }
@@ -320,10 +357,23 @@ impl Tx {
             cipher.seal(&mut self.out, start, CONTENT_HANDSHAKE);
             *cipher = kernel.lock().expect("kernel").next_tx()?;
         }
-        let start = self.out.len();
-        self.out.resize(start + self.prefix_len(), 0);
-        self.open = Some(start);
-        Ok(start)
+        Ok(())
+    }
+
+    pub(crate) fn input_format(&self) -> Option<input::Format> {
+        self.cipher.as_ref().map(input::Format::cipher).or_else(|| self.plaintext.then_some(input::Format::Plain))
+    }
+
+    /// A borrowed batch uses the same cipher and record limit as `put`.
+    /// A KeyUpdate needed by this batch remains in `out`, before its data.
+    pub(crate) fn seal_input(&mut self, sid: u32, input: &mut input::Input, kernel: &Mutex<Kernel>) -> io::Result<input::Encoded> {
+        if input.filled == 0 { return Err(io::ErrorKind::InvalidInput.into()); }
+        let before = self.out.len();
+        self.reserve_records(input.records(), kernel)?;
+        self.appended += (self.out.len() - before) as u64;
+        let encoded = input.seal(sid, self.cipher.as_mut())?;
+        self.appended += encoded.len as u64;
+        Ok(encoded)
     }
 
     fn close_record(&mut self, inner_type: u8) {

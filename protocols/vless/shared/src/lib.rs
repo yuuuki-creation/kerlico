@@ -82,3 +82,8 @@ pub type QuicServerCrypto = std::sync::Arc<dyn quinn::crypto::ServerConfig>;
 pub use advanced_tls::{TlsNetwork, TlsNetworkRequest, TlsNetworkResponse};
 
 pub mod socket;
+
+/// The protocol's existing I/O executor also owns handed-off native TCP flows.
+pub fn io_executor() -> std::io::Result<tokio::runtime::Handle> {
+    Ok(quic::runtime()?.handle().clone())
+}

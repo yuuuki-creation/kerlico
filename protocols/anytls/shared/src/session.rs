@@ -1,6 +1,10 @@
 //! One AnyTLS session: a TLS connection carrying many streams.
 //!
-//! One thread at a time holds the receive side: it reads the socket, opens every record where it
+//! Native record/plaintext sessions run on a shared readiness executor and
+//! lend async stream halves to outbound. Library-wrapped transports retain
+//! synchronous ownership. Both use the parser, cipher, padding and queues below.
+//!
+//! For the synchronous carrier, one thread at a time holds the receive side: it reads the socket, opens every record where it
 //! was read and hands each frame's bytes to the stream it names, waking that stream's reader only
 //! if it is waiting. A stream reader with nothing queued takes the receive side itself when it is
 //! free, so a session with one busy stream reads without a thread switch; the session's own thread reads only while no stream reader has asked
@@ -12,12 +16,15 @@
 //! writing.
 
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, IoSlice, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::task::Waker;
+
+mod native;
 
 use kerlico_shared::DatagramSession;
 
@@ -83,7 +90,7 @@ struct Inner {
     kernel: Mutex<Kernel>,
     synack_deadline: Mutex<Option<Instant>>,
     on_close: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    rx: Mutex<RxSide>,
+    rx: Mutex<Option<RxSide>>,
     started: Instant,
     /// Microseconds after `started` when a stream reader last entered or left `read_for`.
     last_lead: AtomicU64,
@@ -94,6 +101,7 @@ struct Inner {
     /// Stream readers waiting for whoever holds the receive side.
     followers: AtomicUsize,
     background: Mutex<Option<thread::Thread>>,
+    native: Option<native::Native>,
 }
 
 /// A handle to a session. Clones share it.
@@ -108,7 +116,7 @@ impl Session {
     /// and `Session.Run` arrange.
     pub fn client(link: Established, padding: SchemeCell, metadata: &str, password: &[u8; 32]) -> io::Result<Self> {
         link.tcp.set_read_timeout(Some(READ_SLICE))?;
-        let inner = Arc::new(Inner::new(Role::Client, link, padding, Parser::new(Role::Client, None)));
+        let inner = Arc::new(Inner::new(Role::Client, link, padding, Parser::new(Role::Client, None))?);
         {
             let scheme = inner.padding.load();
             let mut sizes = Vec::new();
@@ -118,6 +126,10 @@ impl Session {
             tx.buffering = true;
             let settings = frame::string_map(&[("v", "2"), ("client", metadata), ("padding-md5", scheme.md5())]);
             tx.put(Out::Frames { cmd: CMD_SETTINGS, sid: 0, data: &settings }, &inner.padding, &inner.kernel)?;
+        }
+        if inner.native.is_some() {
+            native::start(&inner);
+            return Ok(Self { inner });
         }
         let worker = Arc::clone(&inner);
         let handle = thread::Builder::new()
@@ -134,9 +146,25 @@ impl Session {
     /// Runs a server session on this thread until it ends. The socket's read deadline, set for the
     /// handshake, stays until the password and its padding have arrived.
     pub fn serve(link: Established, padding: SchemeCell, inbound: Arc<dyn Inbound>) -> io::Result<()> {
+        Self::serve_inner(link, padding, inbound, false, None)
+    }
+
+    /// The accept thread owns the handshake; an eligible native connection
+    /// transfers steady I/O to the shared executor. The hook owns registration
+    /// cleanup until the physical session has actually ended.
+    pub fn serve_detached(link: Established, padding: SchemeCell, inbound: Arc<dyn Inbound>, close: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+        Self::serve_inner(link, padding, inbound, true, Some(close))
+    }
+
+    fn serve_inner(link: Established, padding: SchemeCell, inbound: Arc<dyn Inbound>, detached: bool, close: Option<Box<dyn FnOnce() + Send>>) -> io::Result<()> {
         let peer = link.tcp.peer_addr()?;
         let parser = Parser::new(Role::Server, Some(Server { inbound, peer, user: [0; 32] }));
-        let inner = Arc::new(Inner::new(Role::Server, link, padding, parser));
+        let inner = Arc::new(Inner::new(Role::Server, link, padding, parser)?);
+        *inner.on_close.lock().expect("close hook") = close;
+        if inner.native.is_some() {
+            let completed = native::start(&inner);
+            return if detached { Ok(()) } else { native::runtime()?.block_on(completed).map_err(io::Error::other)? };
+        }
         *inner.background.lock().expect("background") = Some(thread::current());
         let result = background(&inner);
         inner.close();
@@ -210,7 +238,7 @@ impl Session {
 }
 
 impl Inner {
-    fn new(role: Role, link: Established, padding: SchemeCell, parser: Parser) -> Self {
+    fn new(role: Role, link: Established, padding: SchemeCell, parser: Parser) -> io::Result<Self> {
         let (reader, early, tx, kernel, library_write) = match link.wire {
             Wire::Records(records) => (
                 Reader::new(records.rx, records.rx_buf, records.rx_len),
@@ -234,9 +262,11 @@ impl Inner {
                 None,
             ),
         };
-        let side = RxSide { reader, parser, early, ended: false };
-        Self {
-            rx: Mutex::new(side),
+        let native = if library_write.is_none() { Some(native::Native::new(&link.tcp)?) } else { None };
+        let side = RxSide { reader, parser, early, early_pos: 0, pending: None, ended: false };
+        Ok(Self {
+            native,
+            rx: Mutex::new(Some(side)),
             started: Instant::now(),
             last_lead: AtomicU64::new(0),
             readers: AtomicUsize::new(0),
@@ -256,11 +286,18 @@ impl Inner {
             kernel: Mutex::new(kernel),
             synack_deadline: Mutex::new(None),
             on_close: Mutex::new(None),
-        }
+        })
     }
 
     fn lock_tx(&self) -> MutexGuard<'_, Tx> {
         self.tx.lock().expect("tx")
+    }
+
+    fn read_socket(&self, bytes: &mut [u8]) -> io::Result<usize> {
+        match &self.native {
+            Some(native) => native.socket.try_read(bytes),
+            None => (&self.tcp).read(bytes),
+        }
     }
 
     fn now_micros(&self) -> u64 {
@@ -288,6 +325,7 @@ impl Inner {
     }
 
     fn wake_background(&self) {
+        if let Some(native) = &self.native { native.read_notify.notify_one(); }
         if let Some(thread) = self.background.lock().expect("background").as_ref() {
             thread.unpark();
         }
@@ -312,6 +350,7 @@ impl Inner {
     /// Queues one item. `sync` waits for a turn in the queue bound and returns once the socket
     /// took the bytes; otherwise the bytes are left for the current writer or the helper.
     fn submit(self: &Arc<Self>, item: Out<'_>, sync: bool) -> io::Result<()> {
+        if self.native.is_some() { return native::submit(self, item, sync); }
         let mut tx = self.lock_tx();
         if tx.dead.is_some() {
             return Err(closed_error());
@@ -479,6 +518,7 @@ impl Inner {
 
     /// Waits up to `limit` for what is queued now to reach the socket.
     fn drain(&self, limit: Duration) {
+        if self.native.is_some() { return; } // native close drains asynchronously
         let deadline = Instant::now() + limit;
         let mut tx = self.lock_tx();
         let end = tx.appended;
@@ -496,8 +536,12 @@ impl Inner {
         remove_waiter(&mut tx, ticket);
     }
 
-    fn close(&self) {
+    fn close(self: &Arc<Self>) {
         if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self.native.is_some() {
+            native::close(self);
             return;
         }
         {
@@ -611,6 +655,8 @@ struct Rx {
     error: Option<String>,
     app_waiting: bool,
     reader_waiting: bool,
+    task_readers: Vec<(u64, Waker)>,
+    next_task_reader: u64,
 }
 
 struct Core {
@@ -640,6 +686,8 @@ impl Core {
                 error: None,
                 app_waiting: false,
                 reader_waiting: false,
+                task_readers: Vec::new(),
+                next_task_reader: 0,
             }),
             data_cv: Condvar::new(),
             space_cv: Condvar::new(),
@@ -660,6 +708,7 @@ impl Core {
             }
             self.data_cv.notify_all();
             self.space_cv.notify_all();
+            for (_, waker) in rx.task_readers.drain(..) { waker.wake(); }
             match std::mem::replace(&mut rx.parse, Parse::Data) {
                 Parse::Uot(uot) => uot.legs.into_values().collect(),
                 _ => Vec::new(),
@@ -706,6 +755,39 @@ pub struct Stream {
     session: Arc<Inner>,
 }
 
+enum ReadTarget<'a> {
+    Buffer(&'a mut [u8]),
+    Borrowed { fallback: &'a mut [u8], sink: &'a mut dyn FnMut(&[IoSlice<'_>]) },
+}
+
+impl ReadTarget<'_> {
+    fn buffer(&mut self) -> &mut [u8] {
+        match self {
+            Self::Buffer(buf) => buf,
+            Self::Borrowed { fallback, .. } => fallback,
+        }
+    }
+
+    fn buffered(&mut self, n: usize) {
+        if let Self::Borrowed { fallback, sink } = self {
+            sink(&[IoSlice::new(&fallback[..n])]);
+        }
+    }
+
+    fn direct(&mut self, parts: &[IoSlice<'_>]) {
+        match self {
+            Self::Buffer(buf) => {
+                let mut at = 0;
+                for part in parts {
+                    buf[at..at + part.len()].copy_from_slice(part);
+                    at += part.len();
+                }
+            }
+            Self::Borrowed { sink, .. } => sink(parts),
+        }
+    }
+}
+
 impl Stream {
     pub fn id(&self) -> u32 {
         self.core.sid
@@ -721,23 +803,45 @@ impl Stream {
     /// hands what belongs to other streams to them; so a session with one busy stream costs no
     /// thread switch per read. Otherwise it waits for the thread that holds the socket.
     pub fn read_for(&self, buf: &mut [u8], wait: Duration) -> io::Result<usize> {
+        self.read_target(&mut ReadTarget::Buffer(buf), wait)
+    }
+
+    /// Lends the ready regions in the receive storage until `sink` returns.
+    /// Queued bytes from another session reader use `fallback`; both modes
+    /// share parsing, ordering, receive arbitration and the same deadline.
+    pub fn read_vectored_for(
+        &self,
+        fallback: &mut [u8],
+        wait: Duration,
+        sink: &mut dyn FnMut(&[IoSlice<'_>]),
+    ) -> io::Result<usize> {
+        self.read_target(&mut ReadTarget::Borrowed { fallback, sink }, wait)
+    }
+
+    fn read_target(&self, target: &mut ReadTarget<'_>, wait: Duration) -> io::Result<usize> {
+        if target.buffer().is_empty() {
+            return Ok(0);
+        }
+        if self.session.native.is_some() { return native::read_target(self, target, wait); }
         let session = &self.session;
         self.core.start_reading(session);
         session.present.fetch_add(1, Ordering::AcqRel);
         session.mark_lead();
-        let result = self.read_inner(buf, wait);
+        let result = self.read_inner(target, wait);
         session.mark_lead();
         session.present.fetch_sub(1, Ordering::AcqRel);
         result
     }
 
-    fn read_inner(&self, buf: &mut [u8], wait: Duration) -> io::Result<usize> {
+    fn read_inner(&self, target: &mut ReadTarget<'_>, wait: Duration) -> io::Result<usize> {
         let deadline = Instant::now() + wait;
         let session = &self.session;
         loop {
             {
                 let mut rx = self.core.rx.lock().expect("rx");
-                if let Some(result) = self.take(&mut rx, buf) {
+                if let Some(result) = self.take(&mut rx, target.buffer()) {
+                    drop(rx);
+                    if let Ok(n) = result { target.buffered(n); }
                     return result;
                 }
             }
@@ -745,30 +849,49 @@ impl Stream {
             if now >= deadline {
                 return Err(io::ErrorKind::TimedOut.into());
             }
-            if let Ok(mut side) = session.rx.try_lock() {
+            if let Ok(mut side_slot) = session.rx.try_lock() {
+                let side = side_slot.as_mut().expect("synchronous receive owner");
                 if side.ended {
-                    drop(side);
+                    drop(side_slot);
                     let mut rx = self.core.rx.lock().expect("rx");
-                    if let Some(result) = self.take(&mut rx, buf) {
+                    if let Some(result) = self.take(&mut rx, target.buffer()) {
+                        drop(rx);
+                        if let Ok(n) = result { target.buffered(n); }
                         return result;
                     }
                     return Err(closed_error());
                 }
-                let mut direct = Direct { sid: Some(self.core.sid), delivered: false };
-                let alive = pump(session, &mut side, &mut direct);
-                if !matches!(alive, Ok(true)) {
+                let mut direct = Direct::reader(self.core.sid, target.buffer().len());
+                let alive = pump(session, side, &mut direct);
+                let ended = !matches!(alive, Ok(true));
+                // Parsing and decryption have finished for this batch. Holding
+                // only the receive-side guard prevents storage reuse while the
+                // outbound consumes it; no stream queue or writer lock is held.
+                if direct.count != 0 {
+                    let mut parts = [IoSlice::new(&[]); DIRECT_PARTS];
+                    for (part, range) in parts.iter_mut().zip(&direct.ranges[..direct.count]) {
+                        *part = IoSlice::new(&side.reader.buf[range.clone()]);
+                    }
+                    target.direct(&parts[..direct.count]);
+                }
+                if ended {
                     side.ended = true;
-                    drop(side);
+                    drop(side_slot);
                     session.close();
                 } else {
-                    drop(side);
+                    drop(side_slot);
                     session.wake_follower();
+                }
+                if direct.bytes != 0 {
+                    return Ok(direct.bytes);
                 }
                 continue;
             }
             // Someone else holds the socket: wait for it to hand over data or the socket.
             let mut rx = self.core.rx.lock().expect("rx");
-            if let Some(result) = self.take(&mut rx, buf) {
+            if let Some(result) = self.take(&mut rx, target.buffer()) {
+                drop(rx);
+                if let Ok(n) = result { target.buffered(n); }
                 return result;
             }
             session.followers.fetch_add(1, Ordering::AcqRel);
@@ -787,6 +910,10 @@ impl Stream {
             if rx.reader_waiting {
                 rx.reader_waiting = false;
                 self.core.space_cv.notify_one();
+                if let Some(native) = &self.session.native {
+                    native.read_notify.notify_one();
+                    native.space_notify.notify_waiters();
+                }
             }
             return Some(Ok(n));
         }
@@ -837,6 +964,7 @@ impl Stream {
             rx.queue.clear();
             self.core.data_cv.notify_all();
             self.core.space_cv.notify_all();
+            for (_, waker) in rx.task_readers.drain(..) { waker.wake(); }
             match std::mem::replace(&mut rx.parse, Parse::Data) {
                 Parse::Uot(uot) => uot.legs.into_values().collect(),
                 _ => Vec::new(),
@@ -850,6 +978,7 @@ impl Stream {
             let _ = self.session.submit(Out::Frames { cmd: CMD_FIN, sid: self.core.sid, data: &[] }, false);
         }
         self.core.release_reader();
+        if let Some(native) = &self.session.native { native.read_notify.notify_one(); }
         self.core.run_hook();
     }
 
@@ -863,6 +992,10 @@ impl Stream {
             *slot = Some(hook);
         }
     }
+
+    pub fn supports_async(&self) -> bool { self.session.native.is_some() }
+
+    pub fn into_async(self) -> kerlico_shared::AsyncTcp { native::stream(self) }
 }
 
 impl Drop for Stream {
@@ -1030,6 +1163,8 @@ struct RxSide {
     reader: Reader,
     parser: Parser,
     early: Vec<u8>,
+    early_pos: usize,
+    pending: Option<std::ops::Range<usize>>,
     ended: bool,
 }
 
@@ -1043,7 +1178,7 @@ const LEAD_AWAY: Duration = Duration::from_millis(5);
 /// Each look is a wakeup; at 20 ms, 300 quiet sessions cost a quarter more CPU than at 100 ms.
 const PRESENT_RECHECK: Duration = Duration::from_millis(100);
 
-fn finish_next(inner: &Inner, next: Next) -> bool {
+fn finish_next(inner: &Arc<Inner>, next: Next) -> bool {
     match next {
         Next::Go => true,
         Next::Stop => false,
@@ -1058,31 +1193,42 @@ fn finish_next(inner: &Inner, next: Next) -> bool {
 /// the records it completed. `Ok(false)` when the session is over.
 fn pump(inner: &Arc<Inner>, side: &mut RxSide, direct: &mut Direct) -> io::Result<bool> {
     if side.reader.cipher.is_none() {
+        if !pending_plain(inner, side, direct)? || direct.blocked { return Ok(!side.ended); }
         let got = match &mut side.reader.library {
             Some(read) => read.read(&mut side.reader.buf),
-            None => (&inner.tcp).read(&mut side.reader.buf),
+            None => inner.read_socket(&mut side.reader.buf),
         };
         let n = match got {
             Ok(0) => return Ok(false),
             Ok(n) => n,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock && inner.native.is_some() => {
+                direct.needs_read = true;
+                return Ok(true);
+            }
             Err(error) if side.parser.auth.is_none()
                 && matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
                 return Ok(true),
             Err(error) => return Err(error),
         };
-        return Ok(finish_next(inner, side.parser.feed(inner, &side.reader.buf[..n], direct)?));
+        side.reader.start = 0;
+        side.reader.end = n;
+        side.pending = Some(0..n);
+        return pending_plain(inner, side, direct);
     }
     if !side.early.is_empty() {
-        let early = std::mem::take(&mut side.early);
-        if !finish_next(inner, side.parser.feed(inner, &early, direct)?) {
+        if !finish_next(inner, side.parser.feed(inner, &side.early[side.early_pos..], direct, None)?) {
             return Ok(false);
         }
+        side.early_pos += direct.consumed;
+        if direct.blocked { return Ok(true); }
+        side.early.clear();
+        side.early_pos = 0;
     }
     if !process(inner, side, direct)? {
         return Ok(false);
     }
-    if direct.delivered {
+    if direct.delivered || direct.blocked {
         return Ok(true);
     }
     let reader = &mut side.reader;
@@ -1095,10 +1241,14 @@ fn pump(inner: &Arc<Inner>, side: &mut RxSide, direct: &mut Direct) -> io::Resul
         reader.start = 0;
     }
     let free = reader.buf.len() - reader.end;
-    let n = match (&inner.tcp).read(&mut reader.buf[reader.end..]) {
+    let n = match inner.read_socket(&mut reader.buf[reader.end..]) {
         Ok(0) => return Ok(false),
         Ok(n) => n,
         Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock && inner.native.is_some() => {
+            direct.needs_read = true;
+            return Ok(true);
+        }
         Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
             // Before the password the socket deadline is the handshake's, and it is final.
             if side.parser.auth.is_some() {
@@ -1123,14 +1273,46 @@ fn pump(inner: &Arc<Inner>, side: &mut RxSide, direct: &mut Direct) -> io::Resul
 /// Which stream's own reader holds the receive side, if any. That stream never waits for room in
 /// its own queue, since its reader is the one that would empty it; and its reader stops pumping as
 /// soon as something for it arrived.
+const DIRECT_PARTS: usize = 64;
+
+#[cfg(test)]
+mod receive_tests;
+
 struct Direct {
     sid: Option<u32>,
     delivered: bool,
+    ranges: [std::ops::Range<usize>; DIRECT_PARTS],
+    count: usize,
+    bytes: usize,
+    limit: usize,
+    queued: bool,
+    blocked: bool,
+    needs_read: bool,
+    consumed: usize,
 }
 
 impl Direct {
     fn none() -> Self {
-        Self { sid: None, delivered: false }
+        Self {
+            sid: None, delivered: false, ranges: std::array::from_fn(|_| 0..0),
+            count: 0, bytes: 0, limit: 0, queued: false, blocked: false, needs_read: false, consumed: 0,
+        }
+    }
+
+    fn reader(sid: u32, limit: usize) -> Self {
+        Self { sid: Some(sid), limit, ..Self::none() }
+    }
+
+    fn capture(&mut self, offset: Option<usize>, len: usize) -> usize {
+        let Some(offset) = offset else { return 0; };
+        if self.queued || self.count == DIRECT_PARTS { return 0; }
+        let n = len.min(self.limit - self.bytes);
+        if n != 0 {
+            self.ranges[self.count] = offset..offset + n;
+            self.count += 1;
+            self.bytes += n;
+        }
+        n
     }
 }
 
@@ -1145,28 +1327,31 @@ fn background(inner: &Arc<Inner>) -> io::Result<()> {
             thread::park_timeout(wait);
             continue;
         }
-        let Ok(mut side) = inner.rx.try_lock() else {
+        let Ok(mut side_slot) = inner.rx.try_lock() else {
             // A stream reader that just ended may still be finishing its last read.
             thread::park_timeout(Duration::from_millis(1));
             continue;
         };
+        let side = side_slot.as_mut().expect("synchronous receive owner");
         if side.ended {
             return Ok(());
         }
-        let alive = pump(inner, &mut side, &mut Direct::none());
+        let alive = pump(inner, side, &mut Direct::none());
         if !matches!(alive, Ok(true)) {
             side.ended = true;
-            drop(side);
+            drop(side_slot);
             inner.close();
             return alive.map(|_| ());
         }
-        drop(side);
+        drop(side_slot);
         inner.wake_follower();
     }
 }
 
 /// Opens every whole record already in the buffer. `Ok(false)` when the session is over.
 fn process(inner: &Arc<Inner>, side: &mut RxSide, direct: &mut Direct) -> io::Result<bool> {
+    if !pending_plain(inner, side, direct)? { return Ok(false); }
+    if direct.blocked { return Ok(true); }
     let RxSide { reader, parser, .. } = side;
     {
         // Open every whole record that is already here.
@@ -1183,7 +1368,12 @@ fn process(inner: &Arc<Inner>, side: &mut RxSide, direct: &mut Direct) -> io::Re
             let (kind, plain) = reader.cipher.as_mut().expect("record TLS").open(&mut reader.buf[record.clone()])?;
             let body = record.start + 5..record.start + 5 + plain;
             let next = if kind == CONTENT_APPDATA {
-                parser.feed(inner, &reader.buf[body], direct)?
+                let next = parser.feed(inner, &reader.buf[body.clone()], direct, Some(body.start))?;
+                if direct.blocked {
+                    side.pending = Some(body.start + direct.consumed..body.end);
+                    return Ok(true);
+                }
+                next
             } else {
                 let mut next = Next::Go;
                 for event in tls::control(kind, &reader.buf[body], &mut reader.hs)? {
@@ -1204,6 +1394,17 @@ fn process(inner: &Arc<Inner>, side: &mut RxSide, direct: &mut Direct) -> io::Re
                 return Ok(false);
             }
         }
+    }
+    Ok(true)
+}
+
+/// A paused PSH keeps its already authenticated bytes in the receive slab.
+/// Resuming queue space must never decrypt that TLS record a second time.
+fn pending_plain(inner: &Arc<Inner>, side: &mut RxSide, direct: &mut Direct) -> io::Result<bool> {
+    if let Some(range) = side.pending.clone() {
+        let next = side.parser.feed(inner, &side.reader.buf[range.clone()], direct, Some(range.start))?;
+        if !finish_next(inner, next) { side.ended = true; return Ok(false); }
+        side.pending = direct.blocked.then_some(range.start + direct.consumed..range.end);
     }
     Ok(true)
 }
@@ -1248,7 +1449,11 @@ impl Parser {
         }
     }
 
-    fn feed(&mut self, inner: &Arc<Inner>, mut data: &[u8], direct: &mut Direct) -> io::Result<Next> {
+    fn feed(&mut self, inner: &Arc<Inner>, mut data: &[u8], direct: &mut Direct, base: Option<usize>) -> io::Result<Next> {
+        let length = data.len();
+        let initial = data.len();
+        direct.consumed = 0;
+        direct.blocked = false;
         while !data.is_empty() {
             if let Some(auth) = &mut self.auth {
                 match auth {
@@ -1301,11 +1506,13 @@ impl Parser {
                 State::Psh { sid, left } => {
                     let n = (*left).min(data.len());
                     let sid = *sid;
-                    *left -= n;
-                    if *left == 0 {
-                        self.state = State::Header;
+                    let remaining = *left - n;
+                    if !self.deliver(inner, sid, &data[..n], direct, base.map(|base| base + length - data.len())) {
+                        direct.blocked = true;
+                        direct.consumed = initial - data.len();
+                        return Ok(Next::Go);
                     }
-                    self.deliver(inner, sid, &data[..n], direct);
+                    self.state = if remaining == 0 { State::Header } else { State::Psh { sid, left: remaining } };
                     data = &data[n..];
                 }
                 State::Ctrl { cmd, sid, left } => {
@@ -1336,6 +1543,7 @@ impl Parser {
                 }
             }
         }
+        direct.consumed = initial - data.len();
         Ok(Next::Go)
     }
 
@@ -1436,24 +1644,26 @@ impl Parser {
         Ok(Next::Go)
     }
 
-    fn deliver(&mut self, inner: &Arc<Inner>, sid: u32, chunk: &[u8], direct: &mut Direct) {
+    fn deliver(&mut self, inner: &Arc<Inner>, sid: u32, chunk: &[u8], direct: &mut Direct, offset: Option<usize>) -> bool {
         if !self.last.as_ref().is_some_and(|(last, _)| *last == sid) {
             let core = inner.streams.lock().expect("streams").get(&sid).cloned();
             match core {
                 Some(core) => self.last = Some((sid, core)),
-                None => return,
+                None => return true,
             }
         }
         let core = &self.last.as_ref().expect("stream").1;
         if core.local_closed.load(Ordering::Acquire) {
-            return;
+            return true;
         }
         let own = direct.sid == Some(sid);
         let mut rx = core.rx.lock().expect("rx");
         if matches!(rx.parse, Parse::Data) {
-            direct.delivered |= own;
-            push_data(inner, core, rx, chunk, own);
-            return;
+            let borrowed = if own { direct.capture(offset, chunk.len()) } else { 0 };
+            let accepted = borrowed == chunk.len() || push_data(inner, core, rx, &chunk[borrowed..], own);
+            direct.delivered |= own && accepted;
+            direct.queued |= own && borrowed < chunk.len();
+            return accepted;
         }
         let server = self.server.as_ref().expect("server");
         let parse = std::mem::replace(&mut rx.parse, Parse::Data);
@@ -1469,11 +1679,14 @@ impl Parser {
                 let _ = inner.submit(Out::Frames { cmd: CMD_FIN, sid, data: &[] }, false);
             }
             core_finish_local(&core);
-            return;
+            return true;
         }
         if !rest.is_empty() {
-            push_data(inner, core, rx, &rest, own);
+            direct.queued |= own;
+            direct.delivered |= own;
+            assert!(push_data(inner, core, rx, &rest, own), "newly addressed stream has room");
         }
+        true
     }
 }
 
@@ -1484,22 +1697,25 @@ fn core_finish_local(core: &Arc<Core>) {
 
 /// Appends application bytes, waiting while the stream holds more than its bound, unless the
 /// thread delivering them is that stream's own reader (`own`).
-fn push_data(inner: &Inner, core: &Core, mut rx: MutexGuard<'_, Rx>, chunk: &[u8], own: bool) {
+fn push_data(inner: &Inner, core: &Core, mut rx: MutexGuard<'_, Rx>, chunk: &[u8], own: bool) -> bool {
     loop {
         if core.local_closed.load(Ordering::Acquire) || inner.closed.load(Ordering::Acquire) {
-            return;
+            return true;
         }
         if own || rx.queue.is_empty() || rx.queue.len() + chunk.len() <= STREAM_RX_LIMIT {
             break;
         }
         rx.reader_waiting = true;
+        if inner.native.is_some() { return false; }
         rx = core.space_cv.wait(rx).expect("rx");
     }
     rx.queue.push(chunk);
+    for (_, waker) in rx.task_readers.drain(..) { waker.wake(); }
     if rx.app_waiting {
         rx.app_waiting = false;
         core.data_cv.notify_one();
     }
+    true
 }
 
 /// Server side of a stream before it carries plain data: the address, then for UoT the request

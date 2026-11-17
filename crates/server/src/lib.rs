@@ -5,9 +5,9 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use kerlico_outbound::{DialTarget, Exit, Native, Outbound, OutboundChoice};
+use kerlico_shared::dispatch;
 use kerlico_shared::{
     Accept, AddrError, DocError, Handoff, IdError, ListenAddr, NodeTag, OpenError, PacketError,
     PlaneFault, ProtocolId, Settings, Traffic, TrafficCounters, UserEmail,
@@ -205,18 +205,20 @@ pub struct Server {
     landing_runtime: Arc<kerlico_shared::runtime::RuntimeContext>,
     udp: udp::Table,
     api: Option<std::net::SocketAddr>,
-    api_tx: mpsc::Sender<api::Cmd>,
+    wake: dispatch::Wake,
+    api_tx: dispatch::Sender<api::Cmd>,
     api_rx: mpsc::Receiver<api::Cmd>,
 }
 
 impl Server {
     pub fn new() -> Self {
-        let (api_tx, api_rx) = mpsc::channel();
+        let wake = dispatch::Wake::default();
+        let (api_tx, api_rx) = dispatch::channel(Some(&wake));
         let outbound = Outbound::new();
         let geodata = geodata::Catalog::empty();
         let dns = Arc::new(std::sync::RwLock::new(dns::Config::default()));
-        let runtime = runtime::context(&outbound, dns.clone(), geodata.clone(), true);
-        let landing_runtime = runtime::context(&outbound, dns.clone(), geodata.clone(), false);
+        let runtime = runtime::context(&outbound, dns.clone(), geodata.clone(), true, Some(wake.clone()));
+        let landing_runtime = runtime::context(&outbound, dns.clone(), geodata.clone(), false, None);
         Self {
             nodes: Vec::new(),
             next_node: 0,
@@ -230,6 +232,7 @@ impl Server {
             landing_runtime,
             udp: udp::Table::new(),
             api: None,
+            wake,
             api_tx,
             api_rx,
         }
@@ -424,7 +427,7 @@ impl Server {
         loop {
             self.drain_api();
             if !self.dispatch_next_with(native, &local, &dns) {
-                thread::sleep(Duration::from_millis(1));
+                self.wake.wait();
             }
         }
     }
@@ -604,7 +607,7 @@ impl Server {
             addresses,
         };
         outbound
-            .dispatch(handoff, exit, target, traffic)
+            .dispatch_on_executor(handoff, exit, target, traffic)
             .map_err(|_| fail(session.as_ref()))
     }
 }

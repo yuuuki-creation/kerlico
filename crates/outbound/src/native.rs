@@ -110,25 +110,29 @@ impl WarpSlot {
 
 pub fn dial_native(
     target: &DialTarget,
-    stream: &dyn InboundStream,
+    mut stream: Box<dyn InboundStream>,
     user: &UserEmail,
     node: &NodeTag,
     exit: Exit,
     traffic: &dyn Traffic,
+    detached: bool,
 ) -> Result<(), OpenError> {
     let addr = pick(target, exit).inspect_err(|_| {
         let _ = stream.report_connect(Err(OpenError::Transport));
     })?;
     match target.transport {
         Transport::Tcp => {
-            let tcp = copy::report_connect(stream, TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+            let tcp = copy::report_connect(stream.as_ref(), TcpStream::connect_timeout(&addr, Duration::from_secs(10))
                 .map_err(|_| OpenError::Transport))?;
             tcp.set_nodelay(true).ok();
+            if let Some(inbound) = stream.take_async_tcp().map_err(|_| OpenError::Transport)? {
+                return crate::async_copy::dispatch(tcp, inbound, traffic.bind(user, node, exit.tag()), detached);
+            }
             tcp.set_read_timeout(Some(Duration::from_millis(200)))
                 .map_err(|_| OpenError::Transport)?;
             let read = tcp.try_clone().map_err(|_| OpenError::Transport)?;
             copy::bridge(
-                stream,
+                stream.as_ref(),
                 TcpWrite(tcp),
                 TcpRead(read),
                 copy::Flow {
@@ -153,7 +157,7 @@ pub fn dial_native(
                 .ok();
             let read = socket.try_clone().map_err(|_| OpenError::Transport)?;
             copy::bridge(
-                stream,
+                stream.as_ref(),
                 UdpWrite(socket),
                 UdpRead(read),
                 copy::Flow {
@@ -338,6 +342,9 @@ fn pick(target: &DialTarget, exit: Exit) -> Result<SocketAddr, OpenError> {
 struct TcpRead(TcpStream);
 
 impl PipeRead for TcpRead {
+    #[cfg(target_os = "linux")]
+    fn native_tcp(&self) -> Option<&TcpStream> { Some(&self.0) }
+
     fn read_pipe(&mut self, buf: &mut [u8]) -> Result<ReadEvent, OpenError> {
         match self.0.read(buf) {
             Ok(0) => Ok(ReadEvent::Eof),
@@ -356,13 +363,81 @@ impl PipeRead for TcpRead {
 struct TcpWrite(TcpStream);
 
 impl PipeWrite for TcpWrite {
+    #[cfg(target_os = "linux")]
+    fn native_tcp(&self) -> Option<&TcpStream> { Some(&self.0) }
+
     fn write_pipe(&mut self, buf: &[u8]) -> Result<(), OpenError> {
         self.0.write_all(buf).map_err(|_| OpenError::Transport)
+    }
+    fn write_pipe_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> Result<(), OpenError> {
+        if bufs.len() == 1 { return self.write_pipe(&bufs[0]); }
+        write_all_vectored(&mut self.0, bufs).map_err(|_| OpenError::Transport)
     }
     fn finish(&mut self) -> Result<(), OpenError> {
         self.0
             .shutdown(std::net::Shutdown::Write)
             .map_err(|_| OpenError::Transport)
+    }
+}
+
+fn write_all_vectored(writer: &mut impl Write, mut parts: &[std::io::IoSlice<'_>]) -> std::io::Result<()> {
+    // A fixed stack batch also bounds callers larger than the OS IOV limit.
+    let mut offset = 0;
+    while !parts.is_empty() {
+        let mut slices = [std::io::IoSlice::new(&[]); 64];
+        let count = parts.len().min(slices.len());
+        slices[0] = std::io::IoSlice::new(&parts[0][offset..]);
+        for (out, bytes) in slices[1..count].iter_mut().zip(&parts[1..count]) {
+            *out = std::io::IoSlice::new(bytes);
+        }
+        let mut written = match writer.write_vectored(&slices[..count]) {
+            Ok(0) if slices[..count].iter().all(|part| part.is_empty()) => {
+                parts = &parts[count..];
+                offset = 0;
+                continue;
+            }
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        while !parts.is_empty() && written >= parts[0].len() - offset {
+            written -= parts[0].len() - offset;
+            parts = &parts[1..];
+            offset = 0;
+        }
+        offset += written;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod vectored_tests {
+    use super::*;
+    use std::io::{self, IoSlice};
+
+    #[test]
+    fn partial_writes_and_interrupts_preserve_every_region() {
+        struct Sink { bytes: Vec<u8>, calls: usize }
+        impl Write for Sink {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> { panic!("expected vector write") }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+            fn write_vectored(&mut self, parts: &[IoSlice<'_>]) -> io::Result<usize> {
+                self.calls += 1;
+                if self.calls % 3 == 0 { return Err(io::ErrorKind::Interrupted.into()); }
+                let bytes: Vec<_> = parts.iter().flat_map(|part| part.iter().copied()).take(7).collect();
+                self.bytes.extend_from_slice(&bytes);
+                Ok(bytes.len())
+            }
+        }
+        let regions: Vec<Vec<u8>> = (0..130).map(|i| vec![i as u8; i % 5]).collect();
+        let parts: Vec<_> = regions.iter().map(|part| IoSlice::new(part)).collect();
+        let mut sink = Sink { bytes: Vec::new(), calls: 0 };
+        write_all_vectored(&mut sink, &parts).unwrap();
+        assert_eq!(sink.bytes, regions.concat());
+        assert!(sink.calls > 3);
+        let error = write_all_vectored(&mut &mut [0u8; 0][..], &[IoSlice::new(b"lost")]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
     }
 }
 

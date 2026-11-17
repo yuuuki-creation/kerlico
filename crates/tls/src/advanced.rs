@@ -1,6 +1,8 @@
 mod config;
 mod ech;
 mod ocsp;
+mod receive;
+mod records;
 pub use ech::{TlsNetwork, TlsNetworkRequest, TlsNetworkResponse};
 pub mod fingerprint;
 #[cfg(feature = "quic")]
@@ -13,10 +15,11 @@ pub use config::{
     AdvancedTlsClientConfig, AdvancedTlsOptions, AdvancedTlsServerConfig, TlsCertificate,
 };
 
-use boring2::ssl::{ErrorCode, NameType, Ssl, SslStream, SslVersion};
+use boring2::ssl::{ErrorCode, NameType, ShutdownState, Ssl, SslStream, SslVersion};
+use foreign_types::{ForeignType, ForeignTypeRef};
 use std::collections::VecDeque;
-use std::io::{self, Read, Write};
-use std::ops::{Deref, DerefMut};
+use std::io::{self, IoSlice, Read, Write};
+use std::ops::{Deref, DerefMut, Range};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, MutexGuard, RwLock,
@@ -25,7 +28,22 @@ use std::sync::{
 #[derive(Default)]
 struct MemoryIo {
     input: VecDeque<u8>,
+    record: Option<(Vec<u8>, Range<usize>)>,
     output: Vec<u8>,
+    terminal_write: bool,
+}
+
+impl MemoryIo {
+    fn reclaim_record(&mut self, wire: &mut Vec<u8>) {
+        if let Some((buffer, remaining)) = self.record.take() {
+            // If TLS did not consume the whole record, keep the residue ahead of
+            // the next record while returning the read-ahead buffer to the reader.
+            if !remaining.is_empty() {
+                self.input.extend(&buffer[remaining]);
+            }
+            *wire = buffer;
+        }
+    }
 }
 
 impl Read for MemoryIo {
@@ -33,10 +51,18 @@ impl Read for MemoryIo {
         if bytes.is_empty() {
             return Ok(0);
         }
-        if self.input.is_empty() {
-            return Err(io::ErrorKind::WouldBlock.into());
+        if !self.input.is_empty() {
+            return self.input.read(bytes);
         }
-        self.input.read(bytes)
+        if let Some((wire, range)) = &mut self.record {
+            let len = range.len().min(bytes.len());
+            if len != 0 {
+                bytes[..len].copy_from_slice(&wire[range.start..range.start + len]);
+                range.start += len;
+                return Ok(len);
+            }
+        }
+        Err(io::ErrorKind::WouldBlock.into())
     }
 }
 
@@ -51,6 +77,18 @@ impl Write for MemoryIo {
 }
 
 type Core = Arc<Mutex<SslStream<MemoryIo>>>;
+
+fn flush_open_tls(core: &mut SslStream<MemoryIo>) -> Result<(), boring2::ssl::Error> {
+    // flush_tls uses SSL_write with an empty application buffer. Once the
+    // write half has sent close_notify, that call is forbidden even though the
+    // read half may still receive application bytes. Already sealed output is
+    // drained by WriterState without creating another application write.
+    if core.get_ref().terminal_write || core.get_shutdown().contains(ShutdownState::SENT) {
+        Ok(())
+    } else {
+        core.flush_tls()
+    }
+}
 
 /// The longest record accepted on the wire, header included.
 const MAX_RECORD: usize = 18437;
@@ -70,6 +108,11 @@ pub struct AdvancedTlsRead<R> {
     wire: Vec<u8>,
     head: usize,
     tail: usize,
+    grow_read: bool,
+    rx: Option<records::Receiver>,
+    plaintext: VecDeque<Range<usize>>,
+    closed: bool,
+    session_cache: Option<Arc<AdvancedTlsClientConfig>>,
     direct: bool,
     pending_error: Option<io::Error>,
 }
@@ -115,35 +158,48 @@ pub fn connect_advanced_tls_over<R: Read, W: Write + Send + 'static>(
 
 /// Runs the usual TLS handshake with a transport-specific first ClientHello mutation.
 pub fn connect_advanced_tls_with_hello<R: Read, W: Write + Send + 'static>(
-    read: R, write: W, config: Arc<AdvancedTlsClientConfig>, name: &str,
+    read: R,
+    write: W,
+    config: Arc<AdvancedTlsClientConfig>,
+    name: &str,
     callback: impl Fn(&[u8], &mut [u8; 32], &mut [u8]) -> bool + Send + Sync + 'static,
 ) -> io::Result<(AdvancedTlsRead<R>, AdvancedTlsWrite<W>)> {
     connect_advanced_tls_configured(read, write, config, name, |ssl| {
-        ssl.set_client_hello_mutator(callback).map_err(io::Error::other)
+        ssl.set_client_hello_mutator(callback)
+            .map_err(io::Error::other)
     })
 }
 
 /// Supplies public shares that will be reused by the TLS 1.2 ClientKeyExchange.
 pub fn connect_advanced_tls_with_tls12_shares<R: Read, W: Write + Send + 'static>(
-    read: R, write: W, config: Arc<AdvancedTlsClientConfig>, name: &str, groups: &[u16],
+    read: R,
+    write: W,
+    config: Arc<AdvancedTlsClientConfig>,
+    name: &str,
+    groups: &[u16],
     callback: impl Fn(&[u8], &[Vec<u8>], &mut [u8]) -> bool + Send + Sync + 'static,
 ) -> io::Result<(AdvancedTlsRead<R>, AdvancedTlsWrite<W>)> {
     connect_advanced_tls_configured(read, write, config, name, |ssl| {
         let public = ssl.prepare_tls12_shares(groups).map_err(io::Error::other)?;
-        ssl.set_client_hello_mutator(move |hello, _, session| callback(hello, &public, session)).map_err(io::Error::other)
+        ssl.set_client_hello_mutator(move |hello, _, session| callback(hello, &public, session))
+            .map_err(io::Error::other)
     })
 }
 
 fn connect_advanced_tls_configured<R: Read, W: Write + Send + 'static>(
-    read: R, write: W, config: Arc<AdvancedTlsClientConfig>, name: &str,
+    read: R,
+    write: W,
+    config: Arc<AdvancedTlsClientConfig>,
+    name: &str,
     configure: impl FnOnce(&mut Ssl) -> io::Result<()>,
 ) -> io::Result<(AdvancedTlsRead<R>, AdvancedTlsWrite<W>)> {
     let mut ssl = config.ssl(name)?;
     configure(&mut ssl)?;
-    let (reader, writer) = handshake(read, write, ssl, false)?;
+    let (mut reader, writer) = handshake(read, write, ssl, false)?;
     let core = reader.core.lock().expect("TLS state");
     config.verify(core.ssl(), name)?;
     drop(core);
+    reader.session_cache = Some(config);
     Ok((reader, writer))
 }
 
@@ -158,9 +214,10 @@ pub fn accept_advanced_tls_over<R: Read, W: Write + Send + 'static>(
 fn handshake<R: Read, W: Write + Send + 'static>(
     mut read: R,
     mut write: W,
-    ssl: Ssl,
+    mut ssl: Ssl,
     server: bool,
 ) -> io::Result<(AdvancedTlsRead<R>, AdvancedTlsWrite<W>)> {
+    let capture = records::capture(&mut ssl);
     let mut core = SslStream::new(ssl, MemoryIo::default()).map_err(io::Error::other)?;
     let mut record = Vec::new();
     loop {
@@ -179,6 +236,10 @@ fn handshake<R: Read, W: Write + Send + 'static>(
             }
             Err(error) => return Err(io::Error::other(error)),
         }
+    }
+    let rx = records::Receiver::from_handshake(core.ssl(), capture)?;
+    if rx.is_some() && (!core.get_ref().input.is_empty() || core.ssl().pending() != 0) {
+        return Err(io::Error::other("TLS handshake left application data"));
     }
     let core = Arc::new(Mutex::new(core));
     let state = Arc::new(Mutex::new(WriterState {
@@ -200,6 +261,11 @@ fn handshake<R: Read, W: Write + Send + 'static>(
             wire: Vec::new(),
             head: 0,
             tail: 0,
+            grow_read: false,
+            rx,
+            plaintext: VecDeque::new(),
+            closed: false,
+            session_cache: None,
             direct: false,
             pending_error: None,
         },
@@ -255,6 +321,11 @@ impl<R> AdvancedTlsRead<R> {
             wire: self.wire,
             head: self.head,
             tail: self.tail,
+            grow_read: self.grow_read,
+            rx: self.rx,
+            plaintext: self.plaintext,
+            closed: self.closed,
+            session_cache: self.session_cache,
             direct: self.direct,
             pending_error: self.pending_error,
         }
@@ -294,7 +365,11 @@ impl<R> AdvancedTlsRead<R> {
         let core = self.core.lock().expect("TLS state");
         let ssl = core.ssl();
         let old = matches!(ssl.version(), Some(version) if version == SslVersion::TLS1 || version == SslVersion::TLS1_1);
-        (old, ssl.current_cipher().map_or(0, |cipher| cipher.protocol_id()))
+        (
+            old,
+            ssl.current_cipher()
+                .map_or(0, |cipher| cipher.protocol_id()),
+        )
     }
     pub fn protocol_version(&self) -> String {
         self.core
@@ -315,8 +390,28 @@ impl<R> AdvancedTlsRead<R> {
     /// the handshake. The record may contain TLS metadata, but no app data or
     /// message that requires a TLS reply.
     pub fn consume_tls_metadata(&mut self, record: &[u8]) -> io::Result<bool> {
-        if self.direct || self.head != self.tail || record.len() > MAX_RECORD {
+        if self.direct
+            || self.head != self.tail
+            || !self.plaintext.is_empty()
+            || record.len() > MAX_RECORD
+        {
             return Err(io::ErrorKind::InvalidInput.into());
+        }
+        if let Some(rx) = &mut self.rx {
+            let mut record = record.to_vec();
+            let (kind, len) = rx.open(&mut record)?;
+            if kind == 23 {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let messages = rx.control(kind, &record[5..5 + len])?;
+            if messages
+                .iter()
+                .any(|m| matches!(m, records::Message::KeyUpdate(true)))
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            self.process_messages(messages)?;
+            return Ok(!self.closed);
         }
         let mut core = self.core.lock().expect("TLS state");
         core.get_mut().input.extend(record);
@@ -349,12 +444,26 @@ impl<R: Read> Read for AdvancedTlsRead<R> {
         if bytes.is_empty() {
             return Ok(0);
         }
+        if self.rx.is_some() && !self.direct {
+            self.fill_tls13_records(1)?;
+            return Ok(self.copy_plaintext(bytes));
+        }
+        if !self.plaintext.is_empty() {
+            return Ok(self.copy_plaintext(bytes));
+        }
         if let Some(error) = self.pending_error.take() {
             return Err(error);
         }
         loop {
             if self.needs_write() {
-                self.control.flush(&self.core)?;
+                if let Err(error) = self.control.flush(&self.core) {
+                    self.core
+                        .lock()
+                        .expect("TLS state")
+                        .get_mut()
+                        .reclaim_record(&mut self.wire);
+                    return Err(error);
+                }
             }
             let result = {
                 let mut core = self.core.lock().expect("TLS state");
@@ -364,18 +473,21 @@ impl<R: Read> Read for AdvancedTlsRead<R> {
                 } else {
                     None
                 };
-                if !self.direct
+                let flushed = if !self.direct
                     && result.as_ref().is_some_and(|result| match result {
                         Ok(_) => true,
                         Err(error) => error.code() == ErrorCode::WANT_READ,
-                    })
-                {
-                    if let Err(error) = core.flush_tls() {
-                        if result.as_ref().is_some_and(Result::is_ok) {
-                            self.pending_error = Some(io::Error::other(error));
-                        } else {
-                            return Err(io::Error::other(error));
-                        }
+                    }) {
+                    flush_open_tls(&mut core)
+                } else {
+                    Ok(())
+                };
+                core.get_mut().reclaim_record(&mut self.wire);
+                if let Err(error) = flushed {
+                    if result.as_ref().is_some_and(Result::is_ok) {
+                        self.pending_error = Some(io::Error::other(error));
+                    } else {
+                        return Err(io::Error::other(error));
                     }
                 }
                 if !core.get_ref().output.is_empty() {
@@ -426,32 +538,40 @@ impl<R: Read> AdvancedTlsRead<R> {
     fn feed_record(&mut self) -> io::Result<()> {
         loop {
             let have = self.tail - self.head;
-            let needed = if have < 5 {
-                5
-            } else {
-                5 + u16::from_be_bytes([self.wire[self.head + 3], self.wire[self.head + 4]]) as usize
-            };
-            if needed > MAX_RECORD {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "TLS record too large",
-                ));
-            }
+            let needed = self.next_record_len()?;
             if have >= needed {
-                self.core
-                    .lock()
-                    .expect("TLS state")
-                    .get_mut()
-                    .input
-                    .extend(&self.wire[self.head..self.head + needed]);
-                self.head += needed;
+                let mut core = self.core.lock().expect("TLS state");
+                let io = core.get_mut();
+                let end = self.head + needed;
+                debug_assert!(io.record.is_none());
+                io.record = Some((std::mem::take(&mut self.wire), self.head..end));
+                self.head = end;
                 if self.head == self.tail {
                     self.head = 0;
                     self.tail = 0;
                 }
                 return Ok(());
             }
-            if self.head > 0 {
+            self.read_wire()?;
+        }
+    }
+
+    fn read_wire(&mut self) -> io::Result<()> {
+        debug_assert!(self.plaintext.is_empty());
+        if self.head == self.tail {
+            self.head = 0;
+            self.tail = 0;
+        }
+        loop {
+            if self.grow_read && self.wire.len() < READ_AHEAD {
+                self.wire
+                    .resize((self.wire.len() * 2).clamp(4096, READ_AHEAD), 0);
+            }
+            self.grow_read = false;
+            // Keep consuming the initialized tail before moving the small
+            // incomplete record. Growing after a full socket read must not be
+            // prevented merely because one complete TLS record was consumed.
+            if self.head > 0 && self.wire.len() - self.tail < MAX_RECORD {
                 self.wire.copy_within(self.head..self.tail, 0);
                 self.tail -= self.head;
                 self.head = 0;
@@ -461,6 +581,7 @@ impl<R: Read> AdvancedTlsRead<R> {
                 let len = (self.wire.len() * 2).clamp(4096, READ_AHEAD);
                 self.wire.resize(len, 0);
             }
+            let available = self.wire.len() - self.tail;
             match self.inner.read(&mut self.wire[self.tail..]) {
                 Ok(0) => {
                     return Err(io::Error::new(
@@ -468,7 +589,11 @@ impl<R: Read> AdvancedTlsRead<R> {
                         "TLS peer closed without close_notify",
                     ))
                 }
-                Ok(len) => self.tail += len,
+                Ok(len) => {
+                    self.tail += len;
+                    self.grow_read = len == available;
+                    return Ok(());
+                }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
             }
@@ -534,7 +659,7 @@ impl<W: Write + Send> AdvancedTlsWrite<W> {
                 Err(error) if error.code() == ErrorCode::WANT_READ => {}
                 Err(error) => return Err(io::Error::other(error)),
             }
-            state.wire.append(&mut core.get_mut().output);
+            state.take_output(&mut core.get_mut().output);
         }
         state.drain()
     }
@@ -551,6 +676,16 @@ impl<W: Write + Send> AdvancedTlsWrite<W> {
 }
 
 impl<W: Write> WriterState<W> {
+    fn take_output(&mut self, output: &mut Vec<u8>) {
+        if self.wire.is_empty() {
+            if !output.is_empty() {
+                std::mem::swap(&mut self.wire, output);
+            }
+        } else {
+            self.wire.append(output);
+        }
+    }
+
     fn drain(&mut self) -> io::Result<()> {
         while self.sent < self.wire.len() {
             match self
@@ -582,8 +717,8 @@ impl<W: Write> WriterState<W> {
         loop {
             let empty = {
                 let mut core = core.lock().expect("TLS state");
-                core.flush_tls().map_err(io::Error::other)?;
-                self.wire.append(&mut core.get_mut().output);
+                flush_open_tls(&mut core).map_err(io::Error::other)?;
+                self.take_output(&mut core.get_mut().output);
                 self.wire.is_empty()
             };
             if empty {
@@ -641,10 +776,8 @@ impl<W: Write + Send> Write for AdvancedTlsWrite<W> {
         };
         let n = {
             let mut core = self.core.lock().expect("TLS state");
-            let n = core
-                .ssl_write(&bytes[..limit])
-                .map_err(io::Error::other)?;
-            state.wire.append(&mut core.get_mut().output);
+            let n = core.ssl_write(&bytes[..limit]).map_err(io::Error::other)?;
+            state.take_output(&mut core.get_mut().output);
             n
         };
         if let Err(error) = state.drain() {

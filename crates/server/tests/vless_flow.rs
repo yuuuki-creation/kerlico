@@ -163,7 +163,7 @@ fn every_native_carrier_uses_the_owned_resolver_and_socket_settings() {
         fn load(&self, _: &str, _: &str) -> std::io::Result<GeoIpSet> { Ok(GeoIpSet::new(true, false, |ip| ip.is_loopback())) }
     }
     let network = Arc::new(OwnedNetwork { outbound: kerlico_outbound::Outbound::new(), lookups: AtomicUsize::new(0), dials: AtomicUsize::new(0) });
-    let context = Arc::new(RuntimeContext { network: network.clone(), geoip: Arc::new(Catalog) });
+    let context = Arc::new(RuntimeContext { network: network.clone(), geoip: Arc::new(Catalog), dispatch: None });
     for (carrier, h3) in [("raw", false), ("ws", false), ("grpc", false), ("xhttp", false), ("mkcp", false), ("xhttp", true), ("hysteria", true)] {
         eprintln!("runtime carrier {carrier} h3={h3}");
         let (mut server, mut client) = settings(carrier, "tls", "stream-one");

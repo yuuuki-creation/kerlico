@@ -357,6 +357,15 @@ pub(super) fn advanced_client_config_with_profile(
 }
 
 impl AdvancedTlsClientConfig {
+    pub(super) fn cache_ticket(&self, ssl: &SslRef, session: SslSession) {
+        if !self.options.enable_session_resumption { return; }
+        if let Some(name) = ssl.servername(NameType::HOST_NAME) {
+            let mut cache = self.sessions.lock().expect("TLS session cache");
+            if cache.len() >= 128 { cache.clear(); }
+            cache.insert(name.to_string(), session);
+        }
+    }
+
     pub(super) fn ssl(&self, name: &str) -> io::Result<Ssl> {
         let mut configuration = self.connector.configure().map_err(io::Error::other)?;
         configuration.set_verify_hostname(false);
@@ -901,18 +910,21 @@ fn common(builder: &mut SslContextBuilder, options: &AdvancedTlsOptions) -> io::
     builder
         .set_alpn_protos(&wire_alpn(&options.alpn)?)
         .map_err(io::Error::other)?;
-    if !options.master_key_log.is_empty() && options.master_key_log != "none" {
+    let keylog = if !options.master_key_log.is_empty() && options.master_key_log != "none" {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&options.master_key_log)?;
-        let file = Mutex::new(file);
-        builder.set_keylog_callback(move |_ssl, line| {
+        Some(Mutex::new(file))
+    } else { None };
+    builder.set_keylog_callback(move |ssl, line| {
+        super::records::keylog(ssl, line);
+        if let Some(file) = &keylog {
             if let Ok(mut file) = file.lock() {
                 let _ = writeln!(file, "{line}");
             }
-        });
-    }
+        }
+    });
     Ok(())
 }
 
