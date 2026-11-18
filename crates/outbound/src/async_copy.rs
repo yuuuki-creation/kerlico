@@ -328,6 +328,15 @@ where
     .await
 }
 
+// A pending socket or writer already yields to the executor. Count only
+// consecutive ready bytes against the voluntary fairness budget.
+fn reset_on_wait<T>(result: Poll<T>, turn: &mut usize) -> Poll<T> {
+    if result.is_pending() {
+        *turn = 0;
+    }
+    result
+}
+
 async fn run_pump(
     mut transfer: Transfer,
     activity: &Activity,
@@ -335,7 +344,8 @@ async fn run_pump(
 ) -> io::Result<()> {
     let mut turn = 0;
     loop {
-        let n = std::future::poll_fn(|cx| transfer.poll_transfer(cx)).await?;
+        let n =
+            std::future::poll_fn(|cx| reset_on_wait(transfer.poll_transfer(cx), &mut turn)).await?;
         let Some(n) = n else {
             return transfer.write.shutdown().await;
         };
@@ -346,8 +356,11 @@ async fn run_pump(
         activity.touch();
         // AsyncWrite may buffer even a successful write. Commit before waiting
         // for the next input, otherwise a request/reply exchange can deadlock.
-        transfer.write.flush().await?;
         turn += n;
+        std::future::poll_fn(|cx| {
+            reset_on_wait(Pin::new(&mut transfer.write).poll_flush(cx), &mut turn)
+        })
+        .await?;
         if turn >= TURN {
             turn = 0;
             tokio::task::yield_now().await;
@@ -540,6 +553,69 @@ mod tests {
         assert!(audit.bytes.is_empty() && audit.batches.is_empty());
         for n in up.into_iter().chain(down) {
             assert_eq!(n.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn only_continuously_ready_bytes_exhaust_a_relay_turn() {
+        use std::future::Future;
+        use std::task::{Context, Wake, Waker};
+
+        struct SourceChunks {
+            remaining: usize,
+            paced: bool,
+            wait: bool,
+        }
+        impl AsyncRead for SourceChunks {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                out: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                if std::mem::take(&mut self.wait) {
+                    // The test supplies the next socket event explicitly.
+                    return Poll::Pending;
+                }
+                if self.remaining > 0 {
+                    const CHUNK: &[u8] = &[0; TURN / 2];
+                    out.put_slice(CHUNK);
+                    self.remaining -= 1;
+                    self.wait = self.paced;
+                }
+                Poll::Ready(Ok(()))
+            }
+        }
+        #[derive(Default)]
+        struct Wakes(std::sync::atomic::AtomicUsize);
+        impl Wake for Wakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        for paced in [false, true] {
+            let wakes = Arc::new(Wakes::default());
+            let waker = Waker::from(wakes.clone());
+            let mut cx = Context::from_waker(&waker);
+            let bytes = std::cell::Cell::new(0u64);
+            let activity = Activity::new();
+            let read = AsyncReadHalf::Plain(Box::new(SourceChunks {
+                remaining: 4,
+                paced,
+                wait: false,
+            }));
+            let mut future = std::pin::pin!(pump(read, tokio::io::sink(), &activity, |n| bytes
+                .set(bytes.get() + n)));
+            let mut polls = 0;
+            loop {
+                polls += 1;
+                assert!(polls < 10);
+                if let Poll::Ready(result) = future.as_mut().poll(&mut cx) {
+                    result.unwrap();
+                    break;
+                }
+            }
+            assert_eq!(bytes.get(), (2 * TURN) as u64);
+            assert_eq!(wakes.0.load(Ordering::Relaxed), if paced { 0 } else { 2 });
         }
     }
 

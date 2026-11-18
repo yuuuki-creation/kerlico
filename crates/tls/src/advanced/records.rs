@@ -1,5 +1,5 @@
-//! TLS 1.3 receive records after the native handshake has authenticated its peer.
-//! Writes, handshake policy, ticket validation and KeyUpdate replies stay native.
+//! TLS 1.3 traffic records after the native handshake. The server can transfer
+//! its write epoch after confirming the native record boundaries.
 
 use boring2::{
     ex_data::Index,
@@ -12,18 +12,22 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 
-type Capture = Arc<Mutex<Vec<u8>>>;
+#[derive(Default)]
+pub(super) struct Secrets {
+    read: Vec<u8>,
+    server_write: Vec<u8>,
+}
+type Capture = Arc<Mutex<Secrets>>;
 static CAPTURE: LazyLock<Index<Ssl, Capture>> =
     LazyLock::new(|| Ssl::new_ex_index().expect("TLS receive secret index"));
 
 pub(super) fn capture(ssl: &mut Ssl) -> Capture {
-    let value = Arc::new(Mutex::new(Vec::new()));
+    let value = Arc::new(Mutex::new(Secrets::default()));
     ssl.set_ex_data(*CAPTURE, value.clone());
     value
 }
 
-/// The native callback only copies this direction's application traffic secret
-/// into this connection. It never logs it or retains handshake traffic keys.
+/// Capture this connection’s receive secret and the server’s initial write secret.
 pub(super) fn keylog(ssl: &SslRef, line: &str) {
     let Some(capture) = ssl.ex_data(*CAPTURE) else {
         return;
@@ -34,7 +38,9 @@ pub(super) fn keylog(ssl: &SslRef, line: &str) {
     } else {
         "SERVER_TRAFFIC_SECRET_0"
     };
-    if parts.next() != Some(wanted) {
+    let label = parts.next();
+    let writing = ssl.is_server() && label == Some("SERVER_TRAFFIC_SECRET_0");
+    if !writing && label != Some(wanted) {
         return;
     }
     let _random = parts.next();
@@ -54,7 +60,12 @@ pub(super) fn keylog(ssl: &SslRef, line: &str) {
         };
         secret.push(a * 16 + b);
     }
-    *capture.lock().expect("TLS receive secret") = secret;
+    let mut capture = capture.lock().expect("TLS traffic secrets");
+    if writing {
+        capture.server_write = secret;
+    } else {
+        capture.read = secret;
+    }
 }
 
 pub(super) enum Message {
@@ -131,7 +142,7 @@ impl Receiver {
             0x1303 => (&aead::CHACHA20_POLY1305, hkdf::HKDF_SHA256),
             _ => return Err(invalid("TLS 1.3 receive cipher")),
         };
-        let mut captured = std::mem::take(&mut *capture.lock().expect("TLS receive secret"));
+        let mut captured = std::mem::take(&mut capture.lock().expect("TLS traffic secrets").read);
         if captured.len() != hash.hmac_algorithm().digest_algorithm().output_len() {
             return Err(invalid("missing TLS 1.3 receive secret"));
         }
@@ -172,27 +183,44 @@ impl Receiver {
     }
 
     pub(super) fn open(&mut self, record: &mut [u8]) -> io::Result<(u8, usize)> {
-        if record.len() < 22
-            || record.len() > 5 + 16384 + 256
-            || record[..3] != [23, 3, 3]
-            || usize::from(u16::from_be_bytes([record[3], record[4]])) != record.len() - 5
+        let (header, encrypted) = record
+            .split_first_chunk_mut::<5>()
+            .ok_or_else(|| invalid("TLS 1.3 record header"))?;
+        self.open_within(*header, encrypted, 0)
+    }
+
+    /// Open the ciphertext at offset into the beginning of storage. The
+    /// caller reserves every previously authenticated byte before storage.
+    pub(super) fn open_within(
+        &mut self,
+        header: [u8; 5],
+        storage: &mut [u8],
+        offset: usize,
+    ) -> io::Result<(u8, usize)> {
+        let len = storage
+            .len()
+            .checked_sub(offset)
+            .ok_or_else(|| invalid("TLS 1.3 record header"))?;
+        if !(17..=16384 + 256).contains(&len)
+            || header[..3] != [23, 3, 3]
+            || usize::from(u16::from_be_bytes([header[3], header[4]])) != len
         {
             return Err(invalid("TLS 1.3 record header"));
         }
         if self.seq == u64::MAX {
             return Err(invalid("TLS receive sequence exhausted"));
         }
-        let header: [u8; 5] = record[..5].try_into().expect("record header");
         let mut iv = self.iv;
         for (byte, seq) in iv[4..].iter_mut().zip(self.seq.to_be_bytes()) {
             *byte ^= seq;
         }
         let plain = self
             .key
-            .open_in_place(
+            .open_within(
                 aead::Nonce::assume_unique_for_key(iv),
                 aead::Aad::from(header),
-                &mut record[5..],
+                storage,
+                offset..,
             )
             .map_err(|_| alert(20, "TLS record authentication"))?;
         self.seq += 1;
@@ -286,5 +314,120 @@ impl Receiver {
         }
         self.handshake.drain(..used);
         Ok(messages)
+    }
+}
+
+pub(super) struct Sender {
+    key: aead::LessSafeKey,
+    secret: hkdf::Prk,
+    hash: hkdf::Algorithm,
+    algorithm: &'static aead::Algorithm,
+    iv: [u8; 12],
+    pub seq: u64,
+    #[cfg(test)]
+    pub test_update_interval: Option<u64>,
+}
+
+impl Sender {
+    pub fn from_handshake(
+        ssl: &SslRef,
+        rx: &Receiver,
+        capture: Capture,
+    ) -> io::Result<Option<Self>> {
+        let mut bytes =
+            std::mem::take(&mut capture.lock().expect("TLS traffic secrets").server_write);
+        if !ssl.is_server() || bytes.is_empty() {
+            return Ok(None);
+        }
+        if bytes.len() != rx.hash.hmac_algorithm().digest_algorithm().output_len() {
+            bytes.fill(0);
+            return Err(invalid("TLS server write secret length"));
+        }
+        let secret = hkdf::Prk::new_less_safe(rx.hash, &bytes);
+        bytes.fill(0);
+        let (key, iv) = Receiver::key(&secret, rx.algorithm)?;
+        // SAFETY: the native handshake has completed and flushed its output.
+        let seq = unsafe { boring_sys::SSL_get_write_sequence(ssl.as_ptr()) };
+        Ok(Some(Self {
+            key,
+            iv,
+            seq,
+            secret,
+            hash: rx.hash,
+            algorithm: rx.algorithm,
+            #[cfg(test)]
+            test_update_interval: None,
+        }))
+    }
+
+    /// The caller places plaintext in the payload region before sealing it.
+    /// Ordinary writes and encoder-owned input use exactly the same record format.
+    pub fn seal_region(&mut self, frame: &mut [u8], kind: u8, n: usize) -> io::Result<usize> {
+        if self.seq == u64::MAX || n > 16384 || frame.len() < n + 22 {
+            return Err(invalid("TLS send record limit"));
+        }
+        let [hi, lo] = ((n + 17) as u16).to_be_bytes();
+        let header = [23, 3, 3, hi, lo];
+        frame[..5].copy_from_slice(&header);
+        frame[5 + n] = kind;
+        let mut nonce = self.iv;
+        for (b, v) in nonce[4..].iter_mut().zip(self.seq.to_be_bytes()) {
+            *b ^= v;
+        }
+        let end = 6 + n;
+        let tag = self
+            .key
+            .seal_in_place_separate_tag(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::from(header),
+                &mut frame[5..end],
+            )
+            .map_err(|_| invalid("TLS send record"))?;
+        self.seq += 1;
+        frame[end..end + 16].copy_from_slice(tag.as_ref());
+        Ok(end + 16)
+    }
+
+    pub fn seal(&mut self, out: &mut Vec<u8>, kind: u8, data: &[u8]) -> io::Result<()> {
+        let start = out.len();
+        out.extend_from_slice(&[0; 5]);
+        out.extend_from_slice(data);
+        out.extend_from_slice(&[0; 17]);
+        if let Err(error) = self.seal_region(&mut out[start..], kind, data.len()) {
+            out.truncate(start);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn should_update(&self, records: u64) -> bool {
+        let limit = 1 << 23;
+        #[cfg(test)]
+        let limit = self.test_update_interval.unwrap_or(limit);
+        self.seq.saturating_add(records) > limit
+    }
+    pub fn update(&mut self, out: &mut Vec<u8>) -> io::Result<()> {
+        let mut next = [0; 48];
+        let n = self.hash.hmac_algorithm().digest_algorithm().output_len();
+        expand(&self.secret, b"traffic upd", &mut next[..n])?;
+        let secret = hkdf::Prk::new_less_safe(self.hash, &next[..n]);
+        next.fill(0);
+        let (key, iv) = Receiver::key(&secret, self.algorithm)?;
+        self.seal(out, 22, &[24, 0, 0, 1, 0])?;
+        self.secret = secret;
+        self.key = key;
+        self.iv = iv;
+        self.seq = 0;
+        Ok(())
+    }
+
+    pub fn application(&mut self, out: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
+        for chunk in bytes.chunks(16384) {
+            if self.should_update(1) {
+                self.update(out)?;
+            }
+            self.seal(out, 23, chunk)?;
+        }
+        Ok(())
     }
 }

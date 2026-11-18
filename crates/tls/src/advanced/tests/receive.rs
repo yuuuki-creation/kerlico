@@ -62,11 +62,12 @@ impl Read for QueuedWire {
 
 #[test]
 fn full_tls_reads_grow_bounded_storage_and_preserve_record_boundaries_and_errors() {
-    for (version, borrowed, ready) in [
-        ("1.2", false, false),
-        ("1.3", false, false),
-        ("1.3", true, false),
-        ("1.3", true, true),
+    for (version, borrowed, ready, record_sender) in [
+        ("1.2", false, false, false),
+        ("1.3", false, false, false),
+        ("1.3", true, false, false),
+        ("1.3", true, true, false),
+        ("1.3", true, true, true),
     ] {
         for (timeout, corrupt) in [(false, false), (true, false), (false, true)] {
             let mut options = options();
@@ -87,12 +88,21 @@ fn full_tls_reads_grow_bounded_storage_and_preserve_record_boundaries_and_errors
             socket
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
-            let (_client_read, write) =
+            let (mut client_read, write) =
                 connect_advanced_tls_over(socket.try_clone().unwrap(), socket, client, "localhost")
                     .unwrap();
-            let (read, server_write) = accepting.join().unwrap();
+            let (read, mut server_write) = accepting.join().unwrap();
+            if record_sender {
+                server_write.request_record_sender();
+                let pilot = vec![83; 32768];
+                server_write.write_all(&pilot).unwrap();
+                let mut observed = vec![0; pilot.len()];
+                client_read.read_exact(&mut observed).unwrap();
+                assert_eq!(observed, pilot);
+                assert!(server_write.core.lock().unwrap().get_ref().sender.is_some());
+            }
             let alert_writes = Arc::new(AtomicUsize::new(0));
-            let _server_write = server_write.map_inner(|socket| AlertProbe {
+            let mut server_write = server_write.map_inner(|socket| AlertProbe {
                 socket,
                 calls: alert_writes.clone(),
                 blocked: corrupt && borrowed,
@@ -131,6 +141,9 @@ fn full_tls_reads_grow_bounded_storage_and_preserve_record_boundaries_and_errors
                         let mut slices = [IoSlice::new(&[]); 16];
                         let count = read.buffered_records(&mut slices);
                         let total: usize = slices[..count].iter().map(|s| s.len()).sum();
+                        if ready && total > 16_384 {
+                            assert_eq!(count, 1, "ready records share one authenticated span");
+                        }
                         let take = total.min(37_001);
                         let expected: Vec<_> = slices[..count]
                             .iter()
@@ -221,6 +234,18 @@ fn full_tls_reads_grow_bounded_storage_and_preserve_record_boundaries_and_errors
                         "borrowed TLS must attempt its deferred fatal alert"
                     );
                 }
+                if record_sender {
+                    server_write.inner_mut().blocked = false;
+                    server_write.flush().unwrap();
+                    assert_eq!(
+                        server_write.write(b"later").unwrap_err().kind(),
+                        io::ErrorKind::BrokenPipe
+                    );
+                    assert_eq!(
+                        client_read.read(&mut [0; 1]).unwrap_err().kind(),
+                        io::ErrorKind::ConnectionAborted
+                    );
+                }
                 assert!(actual.len() < payload.len());
                 assert!(actual.len() >= payload.len() - 16_384);
             } else {
@@ -239,11 +264,14 @@ fn rustls_suites_key_updates_and_half_close_keep_borrowed_records_in_order() {
     use rustls::crypto::ring::cipher_suite::{
         TLS13_AES_128_GCM_SHA256, TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256,
     };
-    for suite in [
+    for (suite, small_fragments) in [
         TLS13_AES_128_GCM_SHA256,
         TLS13_AES_256_GCM_SHA384,
         TLS13_CHACHA20_POLY1305_SHA256,
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|suite| [(suite, false), (suite, true)])
+    {
         let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let mut options = options();
         options.min_version = "1.3".into();
@@ -268,17 +296,68 @@ fn rustls_suites_key_updates_and_half_close_keep_borrowed_records_in_order() {
             socket
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
+            let control = socket.try_clone().unwrap();
             let (mut read, mut write) =
                 accept_advanced_tls_over(socket.try_clone().unwrap(), socket, config).unwrap();
+            if small_fragments {
+                write
+                    .core
+                    .lock()
+                    .unwrap()
+                    .ssl_mut()
+                    .set_max_send_fragment(512);
+            }
+            write.request_record_sender();
+            write.write_all(&vec![83; 32768]).unwrap();
+            {
+                let mut core = write.core.lock().unwrap();
+                assert_eq!(core.get_ref().sender.is_some(), !small_fragments);
+                if let Some(sender) = core.get_mut().sender.as_mut() {
+                    sender.test_update_interval = Some(2);
+                }
+            }
+            // Force one real short write followed by WouldBlock. The retry must
+            // keep previously sealed application and KeyUpdate records in order.
+            struct ShortOnce(TcpStream, Option<usize>);
+            impl Write for ShortOnce {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    match self.1 {
+                        Some(0) => {
+                            self.1 = None;
+                            Err(io::ErrorKind::WouldBlock.into())
+                        }
+                        Some(left) => {
+                            let n = self.0.write(&bytes[..left.min(bytes.len())])?;
+                            self.1 = Some(left - n);
+                            Ok(n)
+                        }
+                        None => self.0.write(bytes),
+                    }
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    self.0.flush()
+                }
+            }
+            let mut write = write.map_inner(|socket| ShortOnce(socket, None));
             assert!(read.has_buffered_records());
+            control.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
             let mut actual = Vec::new();
             loop {
-                read.prepare_buffered_records().unwrap();
+                match read.prepare_nonblocking_records() {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline);
+                        thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    result => result.unwrap(),
+                }
                 let mut slices = [IoSlice::new(&[]); 16];
                 let count = read.buffered_records(&mut slices);
                 if count == 0 {
                     break;
                 }
+                assert_eq!(count, 1);
                 let used: usize = slices[..count].iter().map(|s| s.len()).sum();
                 for slice in &slices[..count] {
                     actual.extend_from_slice(slice);
@@ -286,7 +365,53 @@ fn rustls_suites_key_updates_and_half_close_keep_borrowed_records_in_order() {
                 read.consume_records(used);
             }
             assert_eq!(actual, expected);
-            write.write_all(&actual).unwrap();
+            control.set_nonblocking(false).unwrap();
+            let split = if small_fragments { actual.len() } else { 49153 };
+            write.inner_mut().1 = Some(100);
+            assert_eq!(
+                write.write(&actual[..split]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            assert_eq!(
+                write.write(b"wrong retry").unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            write.write_all(&actual[..split]).unwrap();
+            if !small_fragments {
+                write
+                    .core
+                    .lock()
+                    .unwrap()
+                    .get_mut()
+                    .sender
+                    .as_mut()
+                    .unwrap()
+                    .test_update_interval = Some(8);
+                let (capacity, regions) = AdvancedTlsWrite::<ShortOnce>::record_input_layout();
+                let mut slab = vec![0; capacity];
+                for source in actual[split..].chunks(8 * 16384) {
+                    for (part, region) in source.chunks(16384).zip(&regions) {
+                        slab[region.start..region.start + part.len()].copy_from_slice(part);
+                    }
+                    write.inner_mut().1 = Some(100);
+                    let mut sealed = false;
+                    assert_eq!(
+                        write
+                            .write_record_input(&mut slab, source.len(), &mut sealed)
+                            .unwrap_err()
+                            .kind(),
+                        io::ErrorKind::WouldBlock
+                    );
+                    assert!(sealed);
+                    // A control flush may deliver everything the writer staged.
+                    // Its subsequent retry must never submit those bytes twice.
+                    write.flush().unwrap();
+                    write
+                        .write_record_input(&mut slab, source.len(), &mut sealed)
+                        .unwrap();
+                    assert!(!sealed);
+                }
+            }
             write.send_close_notify().unwrap();
         });
         let socket = TcpStream::connect(address).unwrap();
@@ -299,6 +424,9 @@ fn rustls_suites_key_updates_and_half_close_keep_borrowed_records_in_order() {
         )
         .unwrap();
         let mut client = rustls::StreamOwned::new(conn, socket);
+        let mut pilot = vec![0; 32768];
+        client.read_exact(&mut pilot).unwrap();
+        assert!(pilot.iter().all(|&byte| byte == 83));
         client.write_all(&payload[..100_003]).unwrap();
         client.flush().unwrap();
         client.conn.refresh_traffic_keys().unwrap();

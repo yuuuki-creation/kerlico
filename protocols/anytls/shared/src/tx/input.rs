@@ -160,6 +160,7 @@ impl Input {
         &mut self,
         sid: u32,
         mut cipher: Option<&mut Cipher>,
+        count: usize,
     ) -> io::Result<Encoded> {
         if self.filled == 0 {
             return Err(io::ErrorKind::InvalidInput.into());
@@ -168,7 +169,6 @@ impl Input {
         if actual != self.format {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let count = self.records();
         for (index, header) in self.headers.iter().enumerate() {
             let size = self.filled.saturating_sub(index * MAX_DATA).min(MAX_DATA);
             if size == 0 {
@@ -301,13 +301,14 @@ mod tests {
         let mut input = Input::new(Format::Plain);
         let body = vec![0x73; 90_000];
         assert_eq!(input.copy_from(&body), body.len());
-        let encoded = input.seal(42, None).unwrap();
+        let count = input.records();
+        let encoded = input.seal(42, None, count).unwrap();
         let mut expected = Vec::new();
         frame::push_data(&mut expected, 42, &body);
         assert_eq!(&encoded.storage[..encoded.len], expected);
         input.recycle(encoded.storage);
         assert!(
-            input.seal(42, None).is_err(),
+            input.seal(42, None, 0).is_err(),
             "EOF does not create an empty frame"
         );
     }

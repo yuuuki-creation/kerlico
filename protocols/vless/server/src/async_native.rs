@@ -4,11 +4,15 @@
 use std::future::Future;
 use std::io::{self, IoSlice, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
-use kerlico_shared::{AsyncBufReadVectored, AsyncReadHalf, AsyncTcp, PlaneFault};
+use kerlico_shared::{
+    AsyncBufReadVectored, AsyncReadHalf, AsyncTcp, AsyncWriteHalf, AsyncWriteInput, PlaneFault,
+    WriteInput,
+};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{Link, Stream};
@@ -42,17 +46,39 @@ pub(super) fn take(stream: &mut Stream) -> Result<Option<AsyncTcp>, PlaneFault> 
     promote(read, &socket);
     promote(write, &socket);
     let read = std::mem::replace(read, Link::Closed);
+    let can_lend = tls_writer(write, false).is_some_and(|tls| tls.supports_record_input());
     let write = std::mem::replace(write, Link::Closed);
+    let read = read_half(read, socket.clone());
+    let writer = Writer {
+        link: write,
+        socket,
+        shutdown: writer,
+        closed: false,
+        input: can_lend.then(|| Box::new(Input::new())),
+    };
     Ok(Some(AsyncTcp {
         executor,
-        read: read_half(read, socket.clone()),
-        write: kerlico_shared::AsyncWriteHalf::plain(Writer {
-            link: write,
-            socket,
-            shutdown: writer,
-            closed: false,
-        }),
+        read,
+        write: if can_lend {
+            AsyncWriteHalf::Input(Box::new(writer))
+        } else {
+            AsyncWriteHalf::plain(writer)
+        },
     }))
+}
+
+fn tls_writer(
+    link: &mut Link,
+    require_empty_response: bool,
+) -> Option<&mut kerlico_vless::AdvancedTlsWrite<Box<Link>>> {
+    match link {
+        Link::TlsWrite(tls) => Some(tls),
+        Link::Prefix(inner, _) => tls_writer(inner, require_empty_response),
+        Link::Response(inner, prefix) if !require_empty_response || prefix.is_empty() => {
+            tls_writer(inner, require_empty_response)
+        }
+        _ => None,
+    }
 }
 
 fn native_socket(link: &mut Link, write: bool) -> io::Result<Option<TcpStream>> {
@@ -76,7 +102,10 @@ fn promote(link: &mut Link, socket: &Arc<tokio::net::TcpStream>) {
         Link::Tcp(_) => *link = Link::ReadyTcp(socket.clone()),
         Link::Prefix(inner, _) | Link::Response(inner, _) => promote(inner, socket),
         Link::TlsRead(tls) => promote(tls.inner_mut(), socket),
-        Link::TlsWrite(tls) => promote(&mut tls.inner_mut(), socket),
+        Link::TlsWrite(tls) => {
+            promote(&mut tls.inner_mut(), socket);
+            tls.request_record_sender();
+        }
         _ => unreachable!("native TCP stack checked before transferring ownership"),
     }
 }
@@ -310,11 +339,106 @@ impl AsyncRead for Reader {
     }
 }
 
+struct Input {
+    storage: Vec<u8>,
+    capacity: usize,
+    regions: [Range<usize>; 8],
+    plain: [Range<usize>; 1],
+    filled: usize,
+    plain_pos: usize,
+    use_records: bool,
+    sealed: bool,
+}
+
+impl Input {
+    fn new() -> Self {
+        let (capacity, regions) =
+            kerlico_vless::AdvancedTlsWrite::<Box<Link>>::record_input_layout();
+        Self {
+            storage: Vec::new(),
+            capacity,
+            regions,
+            plain: [0..65536],
+            filled: 0,
+            plain_pos: 0,
+            use_records: false,
+            sealed: false,
+        }
+    }
+}
+
 struct Writer {
+    input: Option<Box<Input>>,
     link: Link,
     socket: Arc<tokio::net::TcpStream>,
     shutdown: TcpStream,
     closed: bool,
+}
+
+impl AsyncWriteInput for Writer {
+    fn poll_input(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<WriteInput<'_>>> {
+        let this = self.get_mut();
+        if this.closed {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        let batch = this.input.as_mut().expect("TLS record input");
+        if batch.storage.is_empty() {
+            batch.storage.resize(batch.capacity, 0);
+        }
+        batch.use_records =
+            tls_writer(&mut this.link, true).is_some_and(|tls| tls.record_sender_active());
+        let regions = if batch.use_records {
+            &batch.regions[..]
+        } else {
+            &batch.plain[..]
+        };
+        Poll::Ready(Ok(WriteInput::new(
+            &mut batch.storage,
+            regions,
+            &mut batch.filled,
+        )))
+    }
+
+    fn poll_send_input(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if this.closed {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        let batch = this.input.as_mut().expect("TLS record input");
+        loop {
+            let result = if batch.use_records {
+                tls_writer(&mut this.link, true)
+                    .expect("active TLS writer")
+                    .write_record_input(&mut batch.storage, batch.filled, &mut batch.sealed)
+            } else {
+                match this
+                    .link
+                    .write(&batch.storage[batch.plain_pos..batch.filled])
+                {
+                    Ok(0) => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
+                    Ok(n) => {
+                        batch.plain_pos += n;
+                        if batch.plain_pos != batch.filled {
+                            continue;
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            };
+            match result {
+                Ok(()) => {
+                    batch.plain_pos = 0;
+                    return Poll::Ready(Ok(std::mem::take(&mut batch.filled)));
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    ready!(this.socket.poll_write_ready(cx))?;
+                }
+                Err(e) => return Poll::Ready(Err(e)),
+            }
+        }
+    }
 }
 
 impl AsyncWrite for Writer {
@@ -390,12 +514,12 @@ mod tests {
         .unwrap()
         .into();
         socket.set_nonblocking(true).unwrap();
+        // The raw read reports NotConnected without waiting for a readiness
+        // notification on a socket that will never establish a connection.
+        let failed = socket.try_clone().unwrap();
         let socket = Arc::new(tokio::net::TcpStream::from_std(socket).unwrap());
         let mut read = Reader {
-            link: Link::Prefix(
-                Box::new(Link::ReadyTcp(socket.clone())),
-                b"ready bytes".to_vec().into(),
-            ),
+            link: Link::Prefix(Box::new(Link::Tcp(failed)), b"ready bytes".to_vec().into()),
             socket,
             writable: None,
             ended: false,
@@ -425,6 +549,20 @@ mod tests {
         }
     }
 
+    fn assert_response_is_deferred<R: Read>(read: &mut R, socket: fn(&mut R) -> &TcpStream) {
+        socket(read)
+            .set_read_timeout(Some(Duration::from_millis(40)))
+            .unwrap();
+        let error = read.read(&mut [0]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ));
+        socket(read)
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+    }
+
     fn exercise(version: Option<&str>) {
         eprintln!("native asynchronous ownership / TLS {version:?}");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -451,11 +589,20 @@ mod tests {
         } else {
             (None, None)
         };
-        let payload = vec![53; 256 * 1024 + 13];
+        let payload = vec![53; 4 * 1024 * 1024 + 13];
         let expected = payload.clone();
         let (release, released) = std::sync::mpsc::sync_channel(1);
         let client = std::thread::spawn(move || {
-            let socket = TcpStream::connect(address).unwrap();
+            let socket = socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            )
+            .unwrap();
+            // Set the receive window before the peers negotiate window scaling.
+            socket.set_recv_buffer_size(4096).unwrap();
+            socket.connect(&address.into()).unwrap();
+            let socket: TcpStream = socket.into();
             socket.set_nodelay(true).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(10)))
@@ -463,36 +610,22 @@ mod tests {
             socket
                 .set_write_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
-            socket2::SockRef::from(&socket)
-                .set_recv_buffer_size(4096)
-                .unwrap();
             let (mut read, mut write): (Box<dyn Read>, Box<dyn Write>) =
                 if let Some(config) = client_config {
-                    let (read, write) = kerlico_vless::connect_advanced_tls_over(
+                    let (mut read, write) = kerlico_vless::connect_advanced_tls_over(
                         socket.try_clone().unwrap(),
                         socket.try_clone().unwrap(),
                         config,
                         "localhost",
                     )
                     .unwrap();
+                    assert_response_is_deferred(&mut read, |r| r.inner_mut());
                     (Box::new(read), Box::new(write))
                 } else {
-                    (
-                        Box::new(socket.try_clone().unwrap()),
-                        Box::new(socket.try_clone().unwrap()),
-                    )
+                    let mut read = socket.try_clone().unwrap();
+                    assert_response_is_deferred(&mut read, |r| r);
+                    (Box::new(read), Box::new(socket.try_clone().unwrap()))
                 };
-            socket
-                .set_read_timeout(Some(Duration::from_millis(40)))
-                .unwrap();
-            let error = read.read(&mut [0]).unwrap_err();
-            assert!(matches!(
-                error.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ));
-            socket
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
             write.write_all(b"later").unwrap();
             write.flush().unwrap();
             released.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -551,13 +684,66 @@ mod tests {
                 let mut first = [0; 10];
                 read.read_exact(&mut first).await.unwrap();
                 assert_eq!(&first, b"earlylater");
-                let mut sending = Box::pin(write.write_all(&payload));
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(40), &mut sending)
-                        .await
-                        .is_err(),
-                    "fixture did not produce write backpressure"
-                );
+                let mut sending = Box::pin(async {
+                    if version != Some("1.3") {
+                        // Winsock can accept an entire large send before it reports
+                        // a full queue. Fill it with several finite writes.
+                        for chunk in payload.chunks(16 * 1024) {
+                            write.write_all(chunk).await?;
+                        }
+                        return Ok::<(), io::Error>(());
+                    }
+                    let AsyncWriteHalf::Input(writer) = &mut write else {
+                        panic!("TLS 1.3 native handoff did not offer record input");
+                    };
+                    let mut total = 0;
+                    let mut entered_records = false;
+                    while total < payload.len() {
+                        let n = std::future::poll_fn(|cx| {
+                            let mut request = ready!(Pin::new(&mut **writer).poll_input(cx))?;
+                            let mut slots: [io::IoSliceMut<'_>;
+                                kerlico_shared::MAX_WRITE_INPUT_PARTS] =
+                                std::array::from_fn(|_| io::IoSliceMut::new(&mut []));
+                            let count = request.slices(&mut slots);
+                            if total == 0 {
+                                assert_eq!(
+                                    count, 1,
+                                    "keep the VLESS response on the first native write"
+                                );
+                            }
+                            entered_records |= count > 1;
+                            let mut filled = 0;
+                            for slot in &mut slots[..count] {
+                                let n = slot.len().min(payload.len() - total - filled);
+                                slot[..n]
+                                    .copy_from_slice(&payload[total + filled..total + filled + n]);
+                                filled += n;
+                                if total + filled == payload.len() {
+                                    break;
+                                }
+                            }
+                            request.commit(filled);
+                            Poll::Ready(Ok::<usize, io::Error>(filled))
+                        })
+                        .await?;
+                        assert_eq!(
+                            std::future::poll_fn(|cx| Pin::new(&mut **writer).poll_send_input(cx))
+                                .await?,
+                            n
+                        );
+                        total += n;
+                    }
+                    assert!(
+                        entered_records,
+                        "a full TLS native record must enable the in-place writer"
+                    );
+                    Ok(())
+                });
+                match tokio::time::timeout(Duration::from_millis(40), &mut sending).await {
+                    Err(_) => {}
+                    Ok(Ok(())) => panic!("fixture did not produce write backpressure"),
+                    Ok(Err(error)) => panic!("write failed before backpressure: {error}"),
+                }
                 socket2::SockRef::from(&control)
                     .set_send_buffer_size(1024 * 1024)
                     .unwrap();

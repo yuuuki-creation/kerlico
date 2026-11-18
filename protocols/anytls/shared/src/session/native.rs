@@ -480,10 +480,52 @@ fn poll_input_send(
             state.register(&mut tx, cx);
             return Poll::Pending;
         }
-        let ticket = *state.ticket.get_or_insert_with(|| tx.ticket());
         compact(&mut tx);
         match tx.seal_input(sid, input, &inner.kernel) {
             Ok(encoded) => {
+                // A writable empty session can hand its buffer straight back
+                // to this stream. Only a suffix which actually remains queued
+                // needs a completion ticket and a socket waker.
+                if state.ticket.is_none()
+                    && tx.task_waiters.is_empty()
+                    && tx.ready.is_empty()
+                    && tx.out.is_empty()
+                    && tx.native_head == 0
+                    && tx.native_batch.is_none()
+                {
+                    let started = Instant::now();
+                    let socket = &inner.native.as_ref().expect("native session").socket;
+                    match socket.try_write(&encoded.storage[..encoded.len]) {
+                        Ok(n) if n == encoded.len => {
+                            tx.written += n as u64;
+                            tx.rate.record(n as u64, started.elapsed());
+                            let accepted = input.filled;
+                            input.recycle(encoded.storage);
+                            return Poll::Ready(Ok(accepted));
+                        }
+                        Ok(n) if n != 0 => {
+                            tx.native_batch = Some((started, tx.written));
+                            tx.native_head = n;
+                            tx.written += n as u64;
+                        }
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                            ) => {}
+                        result => {
+                            let error = result
+                                .err()
+                                .unwrap_or_else(|| io::ErrorKind::WriteZero.into());
+                            tx.dead = Some(error.kind());
+                            state.remove(&mut tx);
+                            drop(tx);
+                            inner.close();
+                            return Poll::Ready(Err(error));
+                        }
+                    }
+                }
+                let ticket = *state.ticket.get_or_insert_with(|| tx.ticket());
                 // Any required KeyUpdate was sealed first by the same cipher.
                 compact(&mut tx);
                 tx.ready.push_back(NativeBatch {

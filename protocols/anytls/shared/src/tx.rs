@@ -369,9 +369,10 @@ impl Tx {
     pub(crate) fn seal_input(&mut self, sid: u32, input: &mut input::Input, kernel: &Mutex<Kernel>) -> io::Result<input::Encoded> {
         if input.filled == 0 { return Err(io::ErrorKind::InvalidInput.into()); }
         let before = self.out.len();
-        self.reserve_records(input.records(), kernel)?;
+        let count = input.records();
+        self.reserve_records(count, kernel)?;
         self.appended += (self.out.len() - before) as u64;
-        let encoded = input.seal(sid, self.cipher.as_mut())?;
+        let encoded = input.seal(sid, self.cipher.as_mut(), count)?;
         self.appended += encoded.len as u64;
         Ok(encoded)
     }

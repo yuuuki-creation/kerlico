@@ -31,6 +31,9 @@ struct MemoryIo {
     record: Option<(Vec<u8>, Range<usize>)>,
     output: Vec<u8>,
     terminal_write: bool,
+    prepared_sender: Option<records::Sender>,
+    sender: Option<records::Sender>,
+    requested_sender: bool,
 }
 
 impl MemoryIo {
@@ -83,7 +86,10 @@ fn flush_open_tls(core: &mut SslStream<MemoryIo>) -> Result<(), boring2::ssl::Er
     // write half has sent close_notify, that call is forbidden even though the
     // read half may still receive application bytes. Already sealed output is
     // drained by WriterState without creating another application write.
-    if core.get_ref().terminal_write || core.get_shutdown().contains(ShutdownState::SENT) {
+    if core.get_ref().sender.is_some()
+        || core.get_ref().terminal_write
+        || core.get_shutdown().contains(ShutdownState::SENT)
+    {
         Ok(())
     } else {
         core.flush_tls()
@@ -237,7 +243,11 @@ fn handshake<R: Read, W: Write + Send + 'static>(
             Err(error) => return Err(io::Error::other(error)),
         }
     }
-    let rx = records::Receiver::from_handshake(core.ssl(), capture)?;
+    let rx = records::Receiver::from_handshake(core.ssl(), capture.clone())?;
+    if let Some(receive) = &rx {
+        core.get_mut().prepared_sender =
+            records::Sender::from_handshake(core.ssl(), receive, capture)?;
+    }
     if rx.is_some() && (!core.get_ref().input.is_empty() || core.ssl().pending() != 0) {
         return Err(io::Error::other("TLS handshake left application data"));
     }
@@ -602,6 +612,29 @@ impl<R: Read> AdvancedTlsRead<R> {
 }
 
 impl<W> AdvancedTlsWrite<W> {
+    /// Use the record sender only after a full-size native application record
+    /// has confirmed the peer's fragment limit and the traffic epoch.
+    pub fn request_record_sender(&mut self) {
+        self.core
+            .lock()
+            .expect("TLS state")
+            .get_mut()
+            .requested_sender = true;
+    }
+
+    pub fn supports_record_input(&self) -> bool {
+        let core = self.core.lock().expect("TLS state");
+        core.get_ref().prepared_sender.is_some() || core.get_ref().sender.is_some()
+    }
+
+    pub fn record_sender_active(&self) -> bool {
+        self.core
+            .lock()
+            .expect("TLS state")
+            .get_ref()
+            .sender
+            .is_some()
+    }
     pub fn inner_mut(&mut self) -> impl DerefMut<Target = W> + '_ {
         InnerGuard(self.state.lock().expect("TLS writer"))
     }
@@ -646,6 +679,78 @@ impl<W: Write + Send + 'static> AdvancedTlsWrite<W> {
 }
 
 impl<W: Write + Send> AdvancedTlsWrite<W> {
+    /// Header and tag space remains with TLS while the caller fills application data.
+    pub fn record_input_layout() -> (usize, [Range<usize>; 8]) {
+        const STRIDE: usize = 16384 + 22;
+        (
+            8 * STRIDE,
+            std::array::from_fn(|i| i * STRIDE + 5..i * STRIDE + 5 + 16384),
+        )
+    }
+
+    /// Retry the same batch after WouldBlock. Only the unsent suffix needs
+    /// owned storage when the socket cannot accept the complete ciphertext.
+    pub fn write_record_input(
+        &mut self,
+        input: &mut [u8],
+        n: usize,
+        sealed: &mut bool,
+    ) -> io::Result<()> {
+        if n == 0 || n > 8 * 16384 || input.len() < n + 22 * n.div_ceil(16384) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let mut state = self.state.lock().expect("TLS writer");
+        if *sealed {
+            state.drain()?;
+            *sealed = false;
+            return Ok(());
+        }
+        if state.direct || state.retry.is_some() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let mut core = self.core.lock().expect("TLS state");
+        if core.get_ref().terminal_write || core.get_shutdown().contains(ShutdownState::SENT) {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        let io = core.get_mut();
+        let sender = io.sender.as_mut().ok_or(io::ErrorKind::InvalidInput)?;
+        if sender.should_update(n.div_ceil(16384) as u64) {
+            sender.update(&mut io.output)?;
+        }
+        // Flush all frames already assigned earlier sequence numbers, including
+        // any KeyUpdate. Input remains plaintext until the older output drains.
+        state.take_output(&mut io.output);
+        state.drain()?;
+        let mut wire_len = 0;
+        let mut left = n;
+        while left != 0 {
+            let len = left.min(16384);
+            wire_len += sender.seal_region(&mut input[wire_len..], 23, len)?;
+            left -= len;
+        }
+        *sealed = true;
+        let wire = &input[..wire_len];
+        let mut pos = 0;
+        while pos < wire_len {
+            match state
+                .inner
+                .as_mut()
+                .expect("TLS writer mapping")
+                .write(&wire[pos..])
+            {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(sent) => pos += sent,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    state.wire.extend_from_slice(&wire[pos..]);
+                    return Err(e);
+                }
+            }
+        }
+        *sealed = false;
+        Ok(())
+    }
+
     pub fn send_close_notify(&mut self) -> io::Result<()> {
         self.flush()?;
         let mut state = self.state.lock().expect("TLS writer");
@@ -654,10 +759,25 @@ impl<W: Write + Send> AdvancedTlsWrite<W> {
         }
         {
             let mut core = self.core.lock().expect("TLS state");
-            match core.shutdown() {
-                Ok(_) => {}
-                Err(error) if error.code() == ErrorCode::WANT_READ => {}
-                Err(error) => return Err(io::Error::other(error)),
+            if core.get_ref().sender.is_some() {
+                if !core.get_shutdown().contains(ShutdownState::SENT)
+                    && !core.get_ref().terminal_write
+                {
+                    let io = core.get_mut();
+                    io.sender
+                        .as_mut()
+                        .unwrap()
+                        .seal(&mut io.output, 21, &[1, 0])?;
+                    let shutdown = core.get_shutdown() | ShutdownState::SENT;
+                    core.set_shutdown(shutdown);
+                }
+            } else {
+                match core.shutdown() {
+                    Ok(_) => {}
+                    Err(error) if error.code() == ErrorCode::WANT_READ => {}
+                    Err(error) => return Err(io::Error::other(error)),
+                }
+                core.get_mut().prepared_sender = None;
             }
             state.take_output(&mut core.get_mut().output);
         }
@@ -776,7 +896,62 @@ impl<W: Write + Send> Write for AdvancedTlsWrite<W> {
         };
         let n = {
             let mut core = self.core.lock().expect("TLS state");
-            let n = core.ssl_write(&bytes[..limit]).map_err(io::Error::other)?;
+            let n = if core.get_ref().sender.is_some() {
+                if core.get_ref().terminal_write
+                    || core.get_shutdown().contains(ShutdownState::SENT)
+                {
+                    return Err(io::ErrorKind::BrokenPipe.into());
+                }
+                let io = core.get_mut();
+                io.sender
+                    .as_mut()
+                    .unwrap()
+                    .application(&mut io.output, &bytes[..limit])?;
+                limit
+            } else {
+                let start = core.get_ref().output.len();
+                // Only observe the native sequence while a server is waiting
+                // to hand off this epoch.
+                let observe =
+                    core.get_ref().requested_sender && core.get_ref().prepared_sender.is_some();
+                let before = if observe {
+                    unsafe { boring_sys::SSL_get_write_sequence(core.ssl().as_ptr()) }
+                } else {
+                    0
+                };
+                let n = core.ssl_write(&bytes[..limit]).map_err(io::Error::other)?;
+                if observe {
+                    let after = unsafe { boring_sys::SSL_get_write_sequence(core.ssl().as_ptr()) };
+                    let io = core.get_mut();
+                    let sender = io.prepared_sender.as_mut().unwrap();
+                    let mut records = &io.output[start..];
+                    let mut count = 0;
+                    let mut full = false;
+                    while records.len() >= 5 && records[..3] == [23, 3, 3] {
+                        let len = u16::from_be_bytes([records[3], records[4]]) as usize;
+                        if len + 5 > records.len() {
+                            break;
+                        }
+                        full |= len == 16384 + 17;
+                        count += 1;
+                        records = &records[5 + len..];
+                    }
+                    if before != sender.seq
+                        || !records.is_empty()
+                        || before.checked_add(count) != Some(after)
+                    {
+                        io.prepared_sender = None;
+                    } else {
+                        sender.seq = after;
+                        if full {
+                            io.sender = io.prepared_sender.take();
+                        }
+                    }
+                } else {
+                    core.get_mut().prepared_sender = None;
+                }
+                n
+            };
             state.take_output(&mut core.get_mut().output);
             n
         };

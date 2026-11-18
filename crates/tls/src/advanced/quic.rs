@@ -866,7 +866,15 @@ mod tests {
                     let address = server.local_addr().unwrap();
                     let server_task = tokio::spawn(async move {
                         server.accept().await.unwrap().retry().unwrap();
-                        let connection = server.accept().await.unwrap().await.unwrap();
+                        let connection = loop {
+                            let incoming = server.accept().await.unwrap();
+                            if incoming.remote_address_validated() {
+                                break incoming.await.unwrap();
+                            }
+                            // Another datagram from the first ClientHello can arrive
+                            // before the Initial carrying the Retry token.
+                            incoming.ignore();
+                        };
                         eprintln!("QUIC server accepted");
                         for expected in [b"before".as_slice(), b"after".as_slice()] {
                             let (mut send, mut recv) = connection.accept_bi().await.unwrap();

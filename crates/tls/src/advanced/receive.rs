@@ -8,9 +8,16 @@ impl<R> AdvancedTlsRead<R> {
     }
 
     pub fn buffered_records<'a>(&'a self, slices: &mut [IoSlice<'a>]) -> usize {
-        let count = slices.len().min(self.plaintext.len());
-        for (out, range) in slices.iter_mut().zip(&self.plaintext) {
-            *out = IoSlice::new(&self.wire[range.clone()]);
+        let mut ranges = self.plaintext.iter().peekable();
+        let mut count = 0;
+        for slot in slices {
+            let Some(first) = ranges.next() else { break };
+            let mut end = first.end;
+            while let Some(next) = ranges.next_if(|next| next.start == end) {
+                end = next.end;
+            }
+            *slot = IoSlice::new(&self.wire[first.start..end]);
+            count += 1;
         }
         count
     }
@@ -54,12 +61,19 @@ impl<R> AdvancedTlsRead<R> {
                     core.set_shutdown(state);
                 }
                 records::Message::KeyUpdate(true)
-                    if !core.get_shutdown().contains(ShutdownState::SENT) =>
+                    if !core.get_shutdown().contains(ShutdownState::SENT)
+                        && !core.get_ref().terminal_write =>
                 {
-                    core.ssl_mut()
-                        .request_key_update(false)
-                        .map_err(io::Error::other)?;
-                    flush_open_tls(&mut core).map_err(io::Error::other)?;
+                    let io = core.get_mut();
+                    if let Some(sender) = &mut io.sender {
+                        sender.update(&mut io.output)?;
+                    } else {
+                        io.prepared_sender = None;
+                        core.ssl_mut()
+                            .request_key_update(false)
+                            .map_err(io::Error::other)?;
+                        flush_open_tls(&mut core).map_err(io::Error::other)?;
+                    }
                     if !core.get_ref().output.is_empty() {
                         self.control.pending.store(true, Ordering::Release);
                     }
@@ -124,7 +138,7 @@ impl<R: Read> AdvancedTlsRead<R> {
             return Err(error);
         }
         while !self.closed {
-            let step = match self.decode_tls13_record() {
+            let step = match self.decode_tls13_record(drain_ready) {
                 Ok(false) if drain_ready && !self.plaintext.is_empty() => self.read_ready_tail(),
                 result => result,
             };
@@ -160,17 +174,19 @@ impl<R: Read> AdvancedTlsRead<R> {
                     {
                         {
                             let mut core = self.core.lock().expect("TLS state");
-                            // SAFETY: this live native connection still owns
-                            // the transmit keys; only receive records moved.
-                            unsafe {
-                                boring_sys::SSL_send_fatal_alert(
-                                    core.ssl_mut().as_ptr(),
-                                    record.alert,
-                                );
+                            let io = core.get_mut();
+                            if let Some(sender) = &mut io.sender {
+                                sender.seal(&mut io.output, 21, &[2, record.alert])?;
+                            } else {
+                                io.prepared_sender = None;
+                                // SAFETY: the live native connection still owns this send epoch.
+                                unsafe {
+                                    boring_sys::SSL_send_fatal_alert(
+                                        core.ssl_mut().as_ptr(),
+                                        record.alert,
+                                    );
+                                }
                             }
-                            // SSL_get_shutdown reports SENT for close_notify,
-                            // not fatal alerts. Do not call SSL_write again;
-                            // the native engine already sealed the final alert.
                             core.get_mut().terminal_write = true;
                             self.control
                                 .pending
@@ -223,7 +239,7 @@ impl<R: Read> AdvancedTlsRead<R> {
         }
     }
 
-    fn decode_tls13_record(&mut self) -> io::Result<bool> {
+    fn decode_tls13_record(&mut self, compact: bool) -> io::Result<bool> {
         if self.needs_write() {
             if !self.plaintext.is_empty() {
                 return Ok(true);
@@ -237,14 +253,23 @@ impl<R: Read> AdvancedTlsRead<R> {
         let start = self.head;
         let end = start + needed;
         let rx = self.rx.as_mut().expect("TLS 1.3 receiver");
-        let (kind, len) = rx.open(&mut self.wire[start..end])?;
+        let encrypted = start + 5;
+        let header = self.wire[start..encrypted]
+            .try_into()
+            .expect("complete record header");
+        let dest = if compact {
+            self.plaintext.back().map_or(encrypted, |range| range.end)
+        } else {
+            encrypted
+        };
+        let (kind, len) = rx.open_within(header, &mut self.wire[dest..end], encrypted - dest)?;
         self.head = end;
         if kind == 23 {
             if len != 0 {
-                self.plaintext.push_back(start + 5..start + 5 + len);
+                self.plaintext.push_back(dest..dest + len);
             }
         } else {
-            let messages = rx.control(kind, &self.wire[start + 5..start + 5 + len])?;
+            let messages = rx.control(kind, &self.wire[dest..dest + len])?;
             self.process_messages(messages)?;
         }
         Ok(true)
