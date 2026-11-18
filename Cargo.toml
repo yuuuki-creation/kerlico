@@ -21,3 +21,12 @@ rama-boring = { path = "vendor/rama-boring" }
 rama-boring-sys = { path = "vendor/rama-boring-sys" }
 shadowsocks = { path = "vendor/shadowsocks" }
 shadowsocks-crypto = { path = "vendor/shadowsocks-crypto" }
+
+[profile.release.package.kerlico-vless]
+codegen-units = 1
+
+[profile.release.package.kerlico-vless-server]
+codegen-units = 1
+
+[profile.release.package.kerlico-tls]
+codegen-units = 1

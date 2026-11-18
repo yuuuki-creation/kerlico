@@ -103,7 +103,12 @@ impl Wire {
         self.inner.set_preshared_key(key);
     }
 
-    pub fn send(&mut self, packet: &[u8], mtu: usize) -> Option<Event> {
+    pub fn send<'a>(
+        &'a mut self,
+        packet: &[u8],
+        mtu: usize,
+        output: Option<(&'a mut Vec<u8>, usize)>,
+    ) -> Option<&'a mut [u8]> {
         if packet.len() > mtu || packet.len() > MAX_IP_PACKET {
             return None;
         }
@@ -117,10 +122,23 @@ impl Wire {
         } else {
             packet
         };
-        if length + 32 > self.buffer.len() {
-            self.buffer.resize(length + 32, 0);
+        let required = (length + 32).max(148);
+        // Before a session exists, BoringTun queues the IP packet and returns
+        // a handshake instead. Its later drain uses the peer's own buffer.
+        if self.buffer.len() < required {
+            self.buffer.resize(required, 0);
         }
-        collect(self.inner.encapsulate(packet, &mut self.buffer))
+        let (output, offset) = output.unwrap_or((&mut self.buffer, 0));
+        if offset + required > output.len() {
+            output.resize(offset + required, 0);
+        }
+        match self
+            .inner
+            .encapsulate(packet, &mut output[offset..offset + required])
+        {
+            TunnResult::WriteToNetwork(frame) => Some(frame),
+            _ => None,
+        }
     }
 
     pub fn tick(&mut self) -> Option<Event> {

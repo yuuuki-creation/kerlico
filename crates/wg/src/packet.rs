@@ -474,13 +474,18 @@ fn deliver_via(
 ) {
     match event {
         HubEvent::Datagram(mut endpoint, mut frame) => {
-            if let (true, SocketAddr::V4(v4)) = (dual, endpoint) {
-                endpoint = (v4.ip().to_ipv6_mapped(), v4.port()).into();
-            }
+            endpoint = carrier_endpoint(endpoint, dual);
             reserved.apply(&mut frame, false);
             send(endpoint, frame);
         }
         HubEvent::Packet(_, _, frame) => receive(frame),
+    }
+}
+
+fn carrier_endpoint(endpoint: SocketAddr, dual: bool) -> SocketAddr {
+    match (dual, endpoint) {
+        (true, SocketAddr::V4(v4)) => (v4.ip().to_ipv6_mapped(), v4.port()).into(),
+        _ => endpoint,
     }
 }
 

@@ -13,6 +13,8 @@ pub(super) struct Packets {
     bytes: Vec<u8>,
     #[cfg(target_os = "linux")]
     single: bool,
+    #[cfg(target_os = "linux")]
+    messages: Messages,
 }
 
 impl Packets {
@@ -21,23 +23,27 @@ impl Packets {
             bytes: vec![0; BATCH * MAX_PACKET],
             #[cfg(target_os = "linux")]
             single: false,
+            #[cfg(target_os = "linux")]
+            messages: Messages::new(),
         }
     }
 
     pub(super) fn read(
         &mut self,
         socket: &UdpSocket,
-        visit: impl FnMut(SocketAddr, &[u8]),
+        visit: impl FnMut(SocketAddr, &mut [u8]),
     ) -> io::Result<usize> {
         self.read_impl(socket, true, visit)
     }
 
     /// The native reactor already waited for readiness. Every syscall here is
     /// nonblocking, including the first packet and the single-packet fallback.
+    /// A final WouldBlock is returned even if earlier packets were delivered
+    /// to the visitor, so try_io can clear the readiness that produced them.
     pub(super) fn read_ready(
         &mut self,
         socket: &UdpSocket,
-        visit: impl FnMut(SocketAddr, &[u8]),
+        visit: impl FnMut(SocketAddr, &mut [u8]),
     ) -> io::Result<usize> {
         self.read_impl(socket, false, visit)
     }
@@ -46,7 +52,7 @@ impl Packets {
         &mut self,
         socket: &UdpSocket,
         wait_first: bool,
-        mut visit: impl FnMut(SocketAddr, &[u8]),
+        mut visit: impl FnMut(SocketAddr, &mut [u8]),
     ) -> io::Result<usize> {
         #[cfg(target_os = "linux")]
         if !self.single {
@@ -60,12 +66,21 @@ impl Packets {
                 } else {
                     libc::MSG_DONTWAIT
                 };
-                match read_batch(socket, &mut self.bytes, BATCH - received, flags, &mut visit) {
+                match self.messages.read(
+                    socket,
+                    &mut self.bytes,
+                    BATCH - received,
+                    flags,
+                    &mut visit,
+                ) {
                     Ok(count) => {
                         received += count;
                         if count == 0 || received == BATCH {
                             return Ok(received);
                         }
+                    }
+                    Err(error) if !wait_first && error.kind() == io::ErrorKind::WouldBlock => {
+                        return Err(error);
                     }
                     Err(error)
                         if received != 0
@@ -97,81 +112,102 @@ impl Packets {
         #[cfg(not(target_os = "linux"))]
         let _ = wait_first;
         let (n, peer) = socket.recv_from(&mut self.bytes[..MAX_PACKET])?;
-        visit(peer, &self.bytes[..n]);
+        visit(peer, &mut self.bytes[..n]);
         Ok(1)
     }
 }
 
 #[cfg(target_os = "linux")]
-fn read_batch(
-    socket: &UdpSocket,
-    bytes: &mut [u8],
-    slots: usize,
-    flags: libc::c_int,
-    visit: &mut impl FnMut(SocketAddr, &[u8]),
-) -> io::Result<usize> {
-    use std::os::fd::AsRawFd;
+struct Messages {
+    names: [libc::sockaddr_storage; BATCH],
+    headers: [libc::mmsghdr; BATCH],
+    iovecs: [libc::iovec; BATCH],
+}
 
-    let mut names: [_; BATCH] = std::array::from_fn(|_| socket2::SockAddrStorage::zeroed());
-    // SAFETY: These C structures contain only integer and pointer fields. All
-    // writable pointers are filled below before handing them to the kernel.
-    let mut headers: [libc::mmsghdr; BATCH] = unsafe { std::mem::zeroed() };
-    let mut iovecs = [libc::iovec {
-        iov_base: std::ptr::null_mut(),
-        iov_len: 0,
-    }; BATCH];
-    for (i, packet) in bytes.chunks_exact_mut(MAX_PACKET).take(slots).enumerate() {
-        let header = &mut headers[i].msg_hdr;
-        header.msg_namelen = names[i].size_of();
-        // SAFETY: The storage has Linux sockaddr_storage alignment and capacity.
-        header.msg_name = (unsafe { names[i].view_as::<libc::sockaddr_storage>() }
-            as *mut libc::sockaddr_storage)
-            .cast();
-        iovecs[i] = libc::iovec {
-            iov_base: packet.as_mut_ptr().cast(),
-            iov_len: packet.len(),
+// SAFETY: only the receiver owns these headers. read rewrites every pointer
+// for the current borrow, uses them in a synchronous syscall, and never
+// dereferences a pointer from an earlier call.
+#[cfg(target_os = "linux")]
+unsafe impl Send for Messages {}
+
+#[cfg(target_os = "linux")]
+impl Messages {
+    fn new() -> Self {
+        // SAFETY: these Linux ABI structures contain only integers and raw
+        // pointers. Ancillary fields remain null throughout the receiver's life.
+        unsafe { std::mem::zeroed() }
+    }
+
+    fn read(
+        &mut self,
+        socket: &UdpSocket,
+        bytes: &mut [u8],
+        slots: usize,
+        flags: libc::c_int,
+        visit: &mut impl FnMut(SocketAddr, &mut [u8]),
+    ) -> io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        let Self {
+            names,
+            headers,
+            iovecs,
+        } = self;
+        for (i, packet) in bytes.chunks_exact_mut(MAX_PACKET).take(slots).enumerate() {
+            let header = &mut headers[i].msg_hdr;
+            header.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as _;
+            header.msg_name = std::ptr::from_mut(&mut names[i]).cast();
+            iovecs[i] = libc::iovec {
+                iov_base: packet.as_mut_ptr().cast(),
+                iov_len: packet.len(),
+            };
+            header.msg_iov = &mut iovecs[i];
+            header.msg_iovlen = 1;
+        }
+        // SAFETY: All pointers refer to distinct, live writable slots for this call.
+        // Only the initial call uses WAITFORONE and SO_RCVTIMEO like recv_from;
+        // every follow-up uses DONTWAIT. No recvmmsg timeout or batch-fill wait.
+        let count = unsafe {
+            libc::recvmmsg(
+                socket.as_raw_fd(),
+                headers.as_mut_ptr(),
+                slots as _,
+                flags,
+                std::ptr::null_mut(),
+            )
         };
-        header.msg_iov = &mut iovecs[i];
-        header.msg_iovlen = 1;
-    }
-    // SAFETY: All pointers refer to distinct, live writable slots for this call.
-    // Only the initial call uses WAITFORONE and SO_RCVTIMEO like recv_from;
-    // every follow-up uses DONTWAIT. No recvmmsg timeout or batch-fill wait.
-    let count = unsafe {
-        libc::recvmmsg(
-            socket.as_raw_fd(),
-            headers.as_mut_ptr(),
-            slots as _,
-            flags,
-            std::ptr::null_mut(),
-        )
-    };
-    if count < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    for (i, mut name) in names.into_iter().take(count as usize).enumerate() {
-        let header = &headers[i];
-        let len = header.msg_len as usize;
-        if header.msg_hdr.msg_flags & libc::MSG_TRUNC != 0 || len > MAX_PACKET {
-            continue;
+        if count < 0 {
+            return Err(io::Error::last_os_error());
         }
-        // SAFETY: This is the same initialized sockaddr_storage passed above.
-        let family = unsafe { name.view_as::<libc::sockaddr_storage>() }.ss_family as libc::c_int;
-        let expected = match family {
-            libc::AF_INET => std::mem::size_of::<libc::sockaddr_in>(),
-            libc::AF_INET6 => std::mem::size_of::<libc::sockaddr_in6>(),
-            _ => continue,
-        };
-        let namelen = header.msg_hdr.msg_namelen;
-        if namelen as usize != expected {
-            continue;
+        for (i, name) in names.iter().take(count as usize).enumerate() {
+            let header = &headers[i];
+            let len = header.msg_len as usize;
+            if header.msg_hdr.msg_flags & libc::MSG_TRUNC != 0 || len > MAX_PACKET {
+                continue;
+            }
+            let namelen = header.msg_hdr.msg_namelen as usize;
+            let addr = std::ptr::from_ref(name);
+            // SAFETY: these sockaddr types fit the aligned, initialized storage.
+            // Check the kernel's family and exact returned length before reading one.
+            let peer = match name.ss_family as libc::c_int {
+                libc::AF_INET if namelen == std::mem::size_of::<libc::sockaddr_in>() => {
+                    let v4 = unsafe { &*addr.cast::<libc::sockaddr_in>() };
+                    SocketAddr::from((v4.sin_addr.s_addr.to_ne_bytes(), u16::from_be(v4.sin_port)))
+                }
+                libc::AF_INET6 if namelen == std::mem::size_of::<libc::sockaddr_in6>() => {
+                    let v6 = unsafe { &*addr.cast::<libc::sockaddr_in6>() };
+                    SocketAddr::V6(std::net::SocketAddrV6::new(
+                        v6.sin6_addr.s6_addr.into(),
+                        u16::from_be(v6.sin6_port),
+                        v6.sin6_flowinfo,
+                        v6.sin6_scope_id,
+                    ))
+                }
+                _ => continue,
+            };
+            visit(peer, &mut bytes[i * MAX_PACKET..][..len]);
         }
-        // SAFETY: The kernel returned a complete address of the checked family.
-        if let Some(peer) = unsafe { socket2::SockAddr::new(name, namelen) }.as_socket() {
-            visit(peer, &bytes[i * MAX_PACKET..][..len]);
-        }
+        Ok(count as usize)
     }
-    Ok(count as usize)
 }
 
 #[cfg(test)]
@@ -202,15 +238,22 @@ mod tests {
             sender
                 .send_to(b"ready", socket.local_addr().unwrap())
                 .unwrap();
-            assert_eq!(
-                packets
-                    .read_ready(&socket, |peer, bytes| {
-                        assert_eq!(peer, sender.local_addr().unwrap());
-                        assert_eq!(bytes, b"ready");
-                    })
-                    .unwrap(),
-                1
-            );
+            let mut visits = 0;
+            let result = packets.read_ready(&socket, |peer, bytes| {
+                assert_eq!(peer, sender.local_addr().unwrap());
+                assert_eq!(bytes, b"ready");
+                visits += 1;
+            });
+            assert_eq!(visits, 1);
+            #[cfg(target_os = "linux")]
+            let batched = !packets.single;
+            #[cfg(not(target_os = "linux"))]
+            let batched = false;
+            if batched {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+            } else {
+                assert_eq!(result.unwrap(), 1);
+            }
             assert_eq!(
                 packets
                     .read_ready(&socket, |_, _| panic!("drained socket"))

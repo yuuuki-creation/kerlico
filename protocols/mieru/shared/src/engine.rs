@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, Read, Write};
@@ -154,13 +155,10 @@ struct Sess {
     send_cv: Condvar,
     send_task: Mutex<Option<Waker>>,
     reorder: Mutex<Reorder>,
-    inflight: Mutex<BTreeMap<u32, Flight>>,
-    recovery: Mutex<udp::Recovery>,
+    send_window: Mutex<SendWindow>,
     retry_at: AtomicU64,
     ack_at: AtomicU64,
     next_send: AtomicU32,
-    peer_window: AtomicU32,
-    cwnd: AtomicU32,
     open_response: AtomicBool,
     closed: AtomicBool,
     last_tx: Mutex<Instant>,
@@ -168,6 +166,14 @@ struct Sess {
     write_lock: Mutex<()>,
     read_lock: Mutex<()>,
     phase: Mutex<ClientPhase>,
+}
+
+struct SendWindow {
+    flights: BTreeMap<u32, Flight>,
+    recovery: udp::Recovery,
+    cwnd: u32,
+    advertised: u32,
+    last_empty_ack: Option<u32>,
 }
 
 struct Pipe {
@@ -775,13 +781,16 @@ impl Sess {
                 held: BTreeMap::new(),
                 held_bytes: 0,
             }),
-            inflight: Mutex::new(BTreeMap::new()),
-            recovery: Mutex::new(udp::Recovery::new(u32::from(WINDOW))),
+            send_window: Mutex::new(SendWindow {
+                flights: BTreeMap::new(),
+                recovery: udp::Recovery::new(u32::from(WINDOW)),
+                cwnd: INITIAL_WINDOW,
+                advertised: INITIAL_WINDOW,
+                last_empty_ack: None,
+            }),
             retry_at: AtomicU64::new(u64::MAX),
             ack_at: AtomicU64::new(u64::MAX),
             next_send: AtomicU32::new(0),
-            peer_window: AtomicU32::new(INITIAL_WINDOW),
-            cwnd: AtomicU32::new(INITIAL_WINDOW),
             open_response: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             last_tx: Mutex::new(Instant::now()),
@@ -922,24 +931,24 @@ impl Sess {
         self.reorder.lock().expect("reorder").next
     }
 
-    fn push_in(&self, seq: u32, payload: Vec<u8>) -> Vec<u8> {
+    fn push_in<'a>(&self, seq: u32, payload: Cow<'a, [u8]>) -> Cow<'a, [u8]> {
         let mut reorder = self.reorder.lock().expect("reorder");
         if seq.wrapping_sub(reorder.next) > WINDOW as u32 {
-            return Vec::new();
+            return Cow::Borrowed(&[]);
         }
         if seq != reorder.next && reorder.held.len() >= WINDOW as usize {
-            return Vec::new();
+            return Cow::Borrowed(&[]);
         }
         if reorder.held_bytes.saturating_add(payload.len()) > PIPE_LIMIT {
-            return Vec::new();
+            return Cow::Borrowed(&[]);
         }
         if seq != reorder.next {
             if let std::collections::btree_map::Entry::Vacant(entry) = reorder.held.entry(seq) {
                 let len = payload.len();
-                entry.insert(payload);
+                entry.insert(payload.into_owned());
                 reorder.held_bytes += len;
             }
-            return Vec::new();
+            return Cow::Borrowed(&[]);
         }
         let mut out = payload;
         reorder.next = reorder.next.wrapping_add(1);
@@ -949,35 +958,36 @@ impl Sess {
                 break;
             };
             reorder.held_bytes -= payload.len();
-            out.extend(payload);
+            out.to_mut().extend(payload);
             reorder.next = next.wrapping_add(1);
         }
         out
     }
 
-    /// Takes the next segment in order when nothing is held back. The caller then delivers the
-    /// payload from where it lies.
-    fn accept_next(&self, seq: u32) -> bool {
-        let mut reorder = self.reorder.lock().expect("reorder");
-        if seq != reorder.next || !reorder.held.is_empty() {
-            return false;
-        }
-        reorder.next = reorder.next.wrapping_add(1);
-        true
-    }
-
     fn on_ack(&self, unack: u32, window: u16) {
+        let mut state = self.send_window.lock().expect("UDP send window");
+        let window = u32::from(window);
+        let old_window = std::mem::replace(&mut state.advertised, window);
+        if state.last_empty_ack == Some(unack) {
+            // New tracked output invalidates this cache. A repeated empty
+            // acknowledgement can still advertise newly available credit.
+            drop(state);
+            if old_window != window {
+                self.send_cv.notify_all();
+                self.wake_sender();
+            }
+            return;
+        }
         let now = Instant::now();
-        let mut inflight = self.inflight.lock().expect("inflight");
-        let mut recovery = self.recovery.lock().expect("UDP recovery");
-        let removed = acknowledge(&mut inflight, unack, |flight| {
+        let SendWindow { flights: inflight, recovery, cwnd: congestion, .. } = &mut *state;
+        let removed = acknowledge(inflight, unack, |flight| {
             if flight.tx == 1 {
                 recovery.sample(now.saturating_duration_since(flight.sent));
             }
         });
         let cwnd = recovery.acknowledged(unack, removed as u32,
-            self.cwnd.load(Ordering::Relaxed), u32::from(WINDOW));
-        self.cwnd.store(cwnd.max(INITIAL_WINDOW), Ordering::Relaxed);
+            *congestion, u32::from(WINDOW));
+        *congestion = cwnd.max(INITIAL_WINDOW);
         // Only the first unacknowledged segment can be the gap indicated by
         // cumulative ACKs. Never walk or retransmit the entire pending window.
         let fast = inflight.get_mut(&unack).and_then(|flight| {
@@ -991,14 +1001,12 @@ impl Sess {
             flight.timeout = recovery.timeout(flight.tx);
             let deadline = self.link.stamp(now + flight.timeout);
             self.retry_at.fetch_min(deadline, Ordering::Relaxed);
-            self.cwnd.store(recovery.lost(self.next_send.load(Ordering::Relaxed),
-                cwnd, INITIAL_WINDOW, false), Ordering::Relaxed);
+            *congestion = recovery.lost(self.next_send.load(Ordering::Relaxed),
+                cwnd, INITIAL_WINDOW, false);
             Some((flight.kind, flight.payload.clone(), flight.fragment, deadline))
         });
-        let window = u32::from(window);
-        let old_window = self.peer_window.swap(window, Ordering::Relaxed);
-        drop(recovery);
-        drop(inflight);
+        state.last_empty_ack = inflight.is_empty().then_some(unack);
+        drop(state);
         if let Some((kind, payload, fragment, deadline)) = fast {
             self.link.schedule(deadline);
             let _ = self.emit_fragment(kind, unack, &payload, false, fragment);
@@ -1014,16 +1022,13 @@ impl Sess {
             return Ok(());
         }
         let start = Instant::now();
-        let mut inflight = self.inflight.lock().expect("inflight");
+        let mut state = self.send_window.lock().expect("UDP send window");
         loop {
             if self.closed.load(Ordering::SeqCst) {
                 return Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"));
             }
-            let limit = self
-                .cwnd
-                .load(Ordering::Relaxed)
-                .min(self.peer_window.load(Ordering::Relaxed));
-            if limit > 0 && inflight.len() < limit as usize {
+            let limit = state.cwnd.min(state.advertised);
+            if limit > 0 && state.flights.len() < limit as usize {
                 return Ok(());
             }
             if start.elapsed() > Duration::from_secs(60) {
@@ -1031,9 +1036,9 @@ impl Sess {
             }
             let (next, _) = self
                 .send_cv
-                .wait_timeout(inflight, Duration::from_millis(200))
+                .wait_timeout(state, Duration::from_millis(200))
                 .expect("cv");
-            inflight = next;
+            state = next;
         }
     }
 
@@ -1172,16 +1177,17 @@ impl Sess {
         }
         let result = self.write_wire(&envelope, payload);
         if result.is_err() && remember {
-            self.inflight.lock().expect("inflight").remove(&seq);
+            self.send_window.lock().expect("UDP send window").flights.remove(&seq);
         }
         result
     }
 
     fn remember(&self, kind: u8, seq: u32, payload: &[u8], fragment: u8) {
-        let mut inflight = self.inflight.lock().expect("inflight");
+        let mut state = self.send_window.lock().expect("UDP send window");
         let sent = Instant::now();
-        let timeout = self.recovery.lock().expect("UDP recovery").timeout(1);
-        inflight.insert(
+        let timeout = state.recovery.timeout(1);
+        state.last_empty_ack = None;
+        state.flights.insert(
             seq,
             Flight {
                 kind,
@@ -1195,7 +1201,7 @@ impl Sess {
         );
         let deadline = self.link.stamp(sent + timeout);
         let earlier = deadline < self.retry_at.fetch_min(deadline, Ordering::Relaxed);
-        drop(inflight);
+        drop(state);
         if earlier {
             self.link.schedule(deadline);
         }
@@ -1264,7 +1270,9 @@ impl Sess {
     }
 
     fn request_ack(&self) {
-        if self.link.tcp || self.closed.load(Ordering::Acquire) {
+        if self.link.tcp || self.closed.load(Ordering::Acquire)
+            || self.ack_at.load(Ordering::Acquire) != u64::MAX
+        {
             return;
         }
         let deadline = self.link.stamp(Instant::now() + udp::ACK_DELAY);
@@ -1318,7 +1326,7 @@ impl Sess {
                 }
                 retired.insert((self.peer, self.id), Instant::now());
             }
-            self.inflight.lock().expect("inflight").clear();
+            self.send_window.lock().expect("UDP send window").flights.clear();
             if self.link.role == Role::Client
                 && !self.link.reusable.load(Ordering::Acquire)
                 && self.link.session_count() == 0
@@ -1549,16 +1557,15 @@ impl Sess {
         }
         self.link.schedule(self.ack_at.load(Ordering::Acquire));
         let due = if self.retry_at.load(Ordering::Relaxed) <= stamp {
-            let mut inflight = self.inflight.lock().expect("inflight");
-            let mut recovery = self.recovery.lock().expect("UDP recovery");
+            let mut state = self.send_window.lock().expect("UDP send window");
+            let SendWindow { flights: inflight, recovery, cwnd, .. } = &mut *state;
             let mut due = Vec::new();
             for (seq, flight) in inflight.iter_mut() {
                 if now.saturating_duration_since(flight.sent) < flight.timeout {
                     continue;
                 }
                 if flight.tx >= 20 {
-                    drop(recovery);
-                    drop(inflight);
+                    drop(state);
                     self.shutdown(false);
                     return;
                 }
@@ -1569,8 +1576,7 @@ impl Sess {
                 due.push((*seq, flight.kind, flight.payload.clone(), flight.fragment));
             }
             if !due.is_empty() {
-                self.cwnd.store(recovery.lost(self.next_send.load(Ordering::Relaxed),
-                    self.cwnd.load(Ordering::Relaxed), INITIAL_WINDOW, true), Ordering::Relaxed);
+                *cwnd = recovery.lost(self.next_send.load(Ordering::Relaxed), *cwnd, INITIAL_WINDOW, true);
             }
             let next = inflight.values().map(|flight| self.link.stamp(flight.sent + flight.timeout))
                 .min().unwrap_or(u64::MAX);
@@ -1883,26 +1889,42 @@ fn reader_udp(socket: UdpSocket, link: Arc<Link>) {
     link.close();
 }
 
-struct Incoming {
+enum PacketSource {
+    Session(Arc<Sess>),
+    Account { key: [u8; 32], username: String },
+}
+
+struct Incoming<'a> {
     peer: SocketAddr,
     meta: Meta,
-    payload: Vec<u8>,
-    key: [u8; 32],
-    username: String,
+    payload: Cow<'a, [u8]>,
+    source: PacketSource,
 }
 
-fn dispatch(link: &Arc<Link>, incoming: Incoming) {
-    dispatch_with_wakes(link, incoming, None);
-}
-
-fn dispatch_with_wakes(link: &Arc<Link>, incoming: Incoming, wakes: Option<&mut Vec<Arc<Sess>>>) {
+fn dispatch_with_wakes(
+    link: &Arc<Link>,
+    incoming: Incoming<'_>,
+    wakes: Option<&mut Vec<Arc<Sess>>>,
+) {
     if !from_peer(link.role, incoming.meta.kind) {
         return;
     }
     let received = Instant::now();
-    *link.last_activity.lock().expect("activity") = received;
-    let existing = link.get(incoming.peer, incoming.meta.session);
-    if let Some(sess) = &existing {
+    if link.tcp || link.role == Role::Client {
+        *link.last_activity.lock().expect("activity") = received;
+    }
+    let looked_up;
+    let existing = match &incoming.source {
+        PacketSource::Session(sess) => Some(sess),
+        PacketSource::Account { key, .. } => {
+            looked_up = link.get(incoming.peer, incoming.meta.session);
+            if looked_up.as_ref().is_some_and(|sess| sess.key != *key) {
+                return;
+            }
+            looked_up.as_ref()
+        }
+    };
+    if let Some(sess) = existing {
         *sess.last_rx.lock().expect("rx") = received;
     }
     if meta::is_ack(incoming.meta.kind) {
@@ -1937,16 +1959,11 @@ fn dispatch_with_wakes(link: &Arc<Link>, incoming: Incoming, wakes: Option<&mut 
             return;
         }
         if link.session_count() >= WINDOW as usize {
-            close_unknown(link, &incoming);
+            close_unknown(link, incoming);
             return;
         }
-        let sess = Sess::new(
-            Arc::clone(link),
-            incoming.meta.session,
-            incoming.peer,
-            incoming.username.clone(),
-            incoming.key,
-        );
+        let PacketSource::Account { key, username } = incoming.source else { return };
+        let sess = Sess::new(Arc::clone(link), incoming.meta.session, incoming.peer, username, key);
         let delivered = sess.push_in(incoming.meta.seq, incoming.payload);
         sess.append(&delivered);
         if !link.insert(Arc::clone(&sess)) {
@@ -1981,7 +1998,7 @@ fn dispatch_with_wakes(link: &Arc<Link>, incoming: Incoming, wakes: Option<&mut 
     }
     if meta::is_data(incoming.meta.kind) {
         let Some(sess) = existing else {
-            close_unknown(link, &incoming);
+            close_unknown(link, incoming);
             return;
         };
         if !link.tcp {
@@ -1990,9 +2007,9 @@ fn dispatch_with_wakes(link: &Arc<Link>, incoming: Incoming, wakes: Option<&mut 
         let delivered = sess.push_in(incoming.meta.seq, incoming.payload);
         if let Some(wakes) = wakes {
             if sess.append_with_notification(&delivered, false)
-                && !wakes.iter().any(|waiting| Arc::ptr_eq(waiting, &sess))
+                && !wakes.iter().any(|waiting| Arc::ptr_eq(waiting, sess))
             {
-                wakes.push(Arc::clone(&sess));
+                wakes.push(Arc::clone(sess));
             }
         } else {
             sess.append(&delivered);
@@ -2003,13 +2020,14 @@ fn dispatch_with_wakes(link: &Arc<Link>, incoming: Incoming, wakes: Option<&mut 
     }
 }
 
-fn close_unknown(link: &Arc<Link>, incoming: &Incoming) {
+fn close_unknown(link: &Arc<Link>, incoming: Incoming<'_>) {
+    let PacketSource::Account { key, username } = incoming.source else { return };
     let sess = Sess::new(
         Arc::clone(link),
         incoming.meta.session,
         incoming.peer,
-        incoming.username.clone(),
-        incoming.key,
+        username,
+        key,
     );
     sess.send_close(false);
     sess.shutdown(false);
@@ -2228,146 +2246,89 @@ fn read_tcp_segment(
 /// Hands a TCP segment to its session. Data in order goes from the read buffer straight into the
 /// session; every other segment takes the common path.
 fn deliver_tcp(link: &Arc<Link>, peer: SocketAddr, meta: Meta, payload: &[u8], key: [u8; 32]) {
-    if meta::is_data(meta.kind) && from_peer(link.role, meta.kind) {
-        if let Some(sess) = link.get(peer, meta.session) {
-            let now = Instant::now();
-            *link.last_activity.lock().expect("activity") = now;
-            *sess.last_rx.lock().expect("rx") = now;
-            if sess.accept_next(meta.seq) {
-                sess.append(payload);
-            } else {
-                let delivered = sess.push_in(meta.seq, payload.to_vec());
-                sess.append(&delivered);
-            }
-            return;
-        }
-    }
-    let username = link.bound_user.lock().expect("user").clone();
-    dispatch(
-        link,
-        Incoming {
-            peer,
-            meta,
-            payload: payload.to_vec(),
+    let source = match link.get(peer, meta.session) {
+        Some(sess) => PacketSource::Session(sess),
+        None => PacketSource::Account {
             key,
-            username,
+            username: link.bound_user.lock().expect("user").clone(),
         },
-    );
-}
-
-fn parse_udp_packet(packet: &[u8], peer: SocketAddr, link: &Arc<Link>) -> Option<Incoming> {
-    if packet.len() < 24 + 32 + 16 {
-        return None;
-    }
-    if crate::replay::reject(&packet[..16], Some(peer)) {
-        return None;
-    }
-    let nonce = packet[..24].try_into().ok()?;
-    if let Some(found) = decrypt_known(link, peer, packet, &nonce) {
-        return Some(found);
-    }
-    if link.role != Role::Server {
-        let accounts = link.accounts.lock().expect("accounts").clone();
-        for account in &accounts {
-            if let Some(mut opened) = crypto::open_first(
-                &account.username,
-                &account.password,
-                &packet[..72],
-                meta::unix_now(),
-            ) {
-                let meta = meta::parse(&opened.plain).ok()?;
-                let payload = udp_body(&meta, &nonce, &packet[72..], &mut opened.direction)?;
-                return Some(Incoming {
-                    peer,
-                    meta,
-                    payload,
-                    key: opened.direction.key_bytes(),
-                    username: opened.username,
-                });
-            }
-        }
-        return None;
-    }
-    let accounts = link.accounts.lock().expect("accounts").clone();
-    for account in &accounts {
-        if let Some(mut opened) = crypto::open_first(
-            &account.username,
-            &account.password,
-            &packet[..72],
-            meta::unix_now(),
-        ) {
-            let meta = meta::parse(&opened.plain).ok()?;
-            if meta.kind != OPEN_REQUEST || meta.session == 0 {
-                return None;
-            }
-            let payload = udp_body(&meta, &nonce, &packet[72..], &mut opened.direction)?;
-            return Some(Incoming {
-                peer,
-                meta,
-                payload,
-                key: opened.direction.key_bytes(),
-                username: opened.username,
-            });
-        }
-    }
-    None
-}
-
-fn decrypt_known(
-    link: &Link,
-    peer: SocketAddr,
-    packet: &[u8],
-    nonce: &[u8; 24],
-) -> Option<Incoming> {
-    let (meta, sess, mut direction) = {
-        let sessions = link.sessions.lock().expect("sessions");
-        let keys = sessions.get(&peer)?;
-        let sealed: &[u8; 48] = packet[24..72].try_into().ok()?;
-        // Authenticate each distinct key for this peer once. Only then is the
-        // decoded session ID used, and only within the matching key's group.
-        keys.iter().find_map(|(key, sessions)| {
-            let mut header = *sealed;
-            let mut direction = Direction::from_key(*key);
-            let len = direction.open_at_slice(nonce, &mut header)?;
-            let meta = meta::parse(&header[..len]).ok()?;
-            let sess = sessions.get(&meta.session)?.upgrade()?;
-            Some((meta, sess, direction))
-        })?
     };
-    let payload = udp_body(&meta, nonce, &packet[72..], &mut direction)?;
-    Some(Incoming { peer, meta, payload, key: sess.key, username: sess.username.clone() })
+    dispatch_with_wakes(link, Incoming { peer, meta, payload: Cow::Borrowed(payload), source }, None);
 }
 
-fn udp_body(meta: &Meta, nonce: &[u8; 24], mut rest: &[u8], direction: &mut Direction) -> Option<Vec<u8>> {
-    if meta.prefix as usize > rest.len() {
+fn parse_udp_packet<'a>(packet: &'a mut [u8], peer: SocketAddr, link: &Link) -> Option<Incoming<'a>> {
+    if packet.len() < 72 || crate::replay::reject(&packet[..16], Some(peer)) {
         return None;
     }
-    rest = &rest[meta.prefix as usize..];
-    if meta.payload_len == 0 {
-        if rest.len() != meta.suffix as usize {
+    let (header, body) = packet.split_at_mut(72);
+    let nonce = header[..24].try_into().ok()?;
+    let (meta, source, mut direction) = if let Some((meta, sess, direction)) =
+        decrypt_known_header(link, peer, header, &nonce)
+    {
+        (meta, PacketSource::Session(sess), direction)
+    } else {
+        let accounts = link.accounts.lock().expect("accounts").clone();
+        let opened = accounts.iter().find_map(|account| {
+            crypto::open_first(&account.username, &account.password, header, meta::unix_now())
+        })?;
+        let meta = meta::parse(&opened.plain).ok()?;
+        if link.role == Role::Server && (meta.kind != OPEN_REQUEST || meta.session == 0) {
             return None;
         }
-        return Some(Vec::new());
+        let source = PacketSource::Account { key: opened.direction.key_bytes(), username: opened.username };
+        (meta, source, opened.direction)
+    };
+    let payload = udp_body(&meta, &nonce, body, &mut direction)?;
+    Some(Incoming { peer, meta, payload, source })
+}
+
+fn decrypt_known_header(
+    link: &Link,
+    peer: SocketAddr,
+    header: &[u8],
+    nonce: &[u8; 24],
+) -> Option<(Meta, Arc<Sess>, Direction)> {
+    let sessions = link.sessions.lock().expect("sessions");
+    let keys = sessions.get(&peer)?;
+    let sealed: &[u8; 48] = header[24..72].try_into().ok()?;
+    // Authenticate each distinct key for this peer once. Only then is the
+    // decoded session ID used, and only within the matching key's group.
+    keys.iter().find_map(|(key, sessions)| {
+        let mut header = *sealed;
+        let mut direction = Direction::from_key(*key);
+        let len = direction.open_at_slice(nonce, &mut header)?;
+        let meta = meta::parse(&header[..len]).ok()?;
+        let sess = sessions.get(&meta.session)?.upgrade()?;
+        Some((meta, sess, direction))
+    })
+}
+
+fn udp_body<'a>(
+    meta: &Meta,
+    nonce: &[u8; 24],
+    rest: &'a mut [u8],
+    direction: &mut Direction,
+) -> Option<Cow<'a, [u8]>> {
+    let rest = rest.get_mut(usize::from(meta.prefix)..)?;
+    if meta.payload_len == 0 {
+        return (rest.len() == usize::from(meta.suffix)).then_some(Cow::Borrowed(&[]));
     }
-    let wire = meta.payload_len as usize + 16;
-    if rest.len() != wire + meta.suffix as usize {
+    let len = usize::from(meta.payload_len);
+    let wire = len + 16;
+    if rest.len() != wire + usize::from(meta.suffix) {
         return None;
     }
-    let mut sealed = rest[..wire].to_vec();
+    let sealed = &mut rest[..wire];
     if meta::is_low(meta.kind) {
-        let body = crate::entropy::decode(
-            &sealed[..meta.payload_len as usize],
-            meta.extracted as usize,
-            meta.low_mode,
-            meta.low_mask,
-            meta.rotation,
+        let mut decoded = crate::entropy::decode(
+            &sealed[..len], usize::from(meta.extracted), meta.low_mode, meta.low_mask, meta.rotation,
         )?;
-        let tag: [u8; 16] = sealed[meta.payload_len as usize..].try_into().ok()?;
-        sealed = body;
-        sealed.extend(tag);
+        decoded.extend_from_slice(&sealed[len..]);
+        direction.open_at_in_place(nonce, &mut decoded)?;
+        return Some(Cow::Owned(decoded));
     }
-    direction.open_at_in_place(nonce, &mut sealed)?;
-    Some(sealed)
+    let plain = direction.open_at_slice(nonce, sealed)?;
+    Some(Cow::Borrowed(&sealed[..plain]))
 }
 
 fn write_all_timeout(mut tcp: &TcpStream, bytes: &[u8]) -> io::Result<()> {
@@ -2854,13 +2815,14 @@ mod tests {
         }
         sess.on_ack(1, 16);
         sess.on_ack(1, 16);
-        assert_eq!(sess.inflight.lock().unwrap()[&1].tx, 1);
+        assert_eq!(sess.send_window.lock().unwrap().flights[&1].tx, 1);
         sess.on_ack(1, 16);
         let n = peer.recv(&mut packet).unwrap();
         assert!(n > b"checked payload".len());
         assert_eq!(sess.next_send.load(Ordering::Relaxed), 3);
         {
-            let flights = sess.inflight.lock().unwrap();
+            let state = sess.send_window.lock().unwrap();
+            let flights = &state.flights;
             assert!(!flights.contains_key(&0));
             assert_eq!(flights[&1].tx, 2);
             assert_eq!(flights[&1].payload, b"checked payload");
@@ -2870,8 +2832,19 @@ mod tests {
         peer.set_nonblocking(true).unwrap();
         assert_eq!(peer.recv(&mut packet).unwrap_err().kind(), io::ErrorKind::WouldBlock);
         sess.on_ack(3, 16);
-        assert!(sess.inflight.lock().unwrap().is_empty());
+        assert!(sess.send_window.lock().unwrap().flights.is_empty());
         sess.shutdown(false);
+    }
+
+    #[test]
+    fn repeated_empty_ack_updates_credit_and_does_not_hide_new_flights() {
+        let (sess, _peer) = packet_session();
+        sess.on_ack(1, 0);
+        sess.on_ack(1, 12);
+        assert_eq!(sess.send_window.lock().unwrap().advertised, 12);
+        sess.remember(DATA_S2C, 0, b"pending", 0);
+        sess.on_ack(1, 12);
+        assert!(sess.send_window.lock().unwrap().flights.is_empty());
     }
 
     #[test]
@@ -2905,7 +2878,7 @@ mod tests {
                     meta: Meta { kind: DATA_C2S, session: sess.id, seq, unack: 0, window: WINDOW,
                         fragment: 0, prefix: 0, payload_len: 1, suffix: 0,
                         low_mode: 0, low_mask: 0, extracted: 0, rotation: 0 },
-                    payload: vec![payload], key: sess.key, username: sess.username.clone(),
+                    payload: Cow::Borrowed(&[payload]), source: PacketSource::Session(Arc::clone(sess)),
                 }, Some(&mut wakes));
             }
         }
@@ -2949,18 +2922,19 @@ mod tests {
     #[test]
     fn retry_timer_uses_the_measured_deadline_without_incoming_packets() {
         let (sess, peer) = packet_session();
-        sess.recovery.lock().unwrap().sample(Duration::from_millis(2));
+        sess.send_window.lock().unwrap().recovery.sample(Duration::from_millis(2));
         sess.next_send.store(1, Ordering::Relaxed);
         sess.emit(DATA_S2C, 0, b"recover me", true).unwrap();
         let mut packet = [0; 2048];
         peer.recv(&mut packet).unwrap();
         start_timer(&sess.link);
         peer.recv(&mut packet).unwrap();
-        let flights = sess.inflight.lock().unwrap();
+        let state = sess.send_window.lock().unwrap();
+        let flights = &state.flights;
         assert_eq!(flights[&0].payload, b"recover me");
         assert!(flights[&0].tx >= 2);
         assert_eq!(sess.next_send.load(Ordering::Relaxed), 1);
-        drop(flights);
+        drop(state);
         sess.link.close();
     }
 
@@ -3043,21 +3017,28 @@ mod tests {
             packet
         };
         let old = packet(second.id, key);
-        let incoming = decrypt_known(link, peer, &old, &nonce).unwrap();
+        let mut received = old.clone();
+        let incoming = parse_udp_packet(&mut received, peer, link).unwrap();
         assert_eq!(incoming.meta.session, second.id);
-        assert_eq!(incoming.payload, payload);
-        assert!(decrypt_known(link, different_peer, &old, &nonce).is_none());
-        assert!(decrypt_known(link, peer, &packet(isolated.id, key), &nonce).is_none());
+        assert!(matches!(&incoming.payload, Cow::Borrowed(bytes) if *bytes == payload));
+        assert!(decrypt_known_header(link, different_peer, &old[..72], &nonce).is_none());
+        assert!(parse_udp_packet(&mut packet(isolated.id, key), peer, link).is_none());
         let mut corrupted = old.clone();
         *corrupted.last_mut().unwrap() ^= 1;
-        assert!(decrypt_known(link, peer, &corrupted, &nonce).is_none());
+        assert!(parse_udp_packet(&mut corrupted, peer, link).is_none());
 
         let replacement = Sess::new(Arc::clone(link), second.id, peer, "bob".into(), isolated.key);
         assert!(link.insert(replacement.clone()));
         assert!(!link.remove(&second));
-        assert!(decrypt_known(link, peer, &old, &nonce).is_none());
-        assert_eq!(decrypt_known(link, peer, &packet(second.id, isolated.key), &nonce)
-            .unwrap().username, "bob");
+        // An intervening registration must not redirect the authenticated payload.
+        dispatch_with_wakes(link, incoming, None);
+        assert_eq!(replacement.queued(), 0);
+        assert_eq!(second.queued(), payload.len());
+        assert!(parse_udp_packet(&mut old.clone(), peer, link).is_none());
+        let mut new_packet = packet(second.id, isolated.key);
+        let new = parse_udp_packet(&mut new_packet, peer, link).unwrap();
+        assert!(matches!(new.source, PacketSource::Session(ref sess) if Arc::ptr_eq(sess, &replacement)));
+        drop(new);
         drop(replacement);
         link.live_sessions();
         assert!(link.get(peer, second.id).is_none());
@@ -3067,21 +3048,21 @@ mod tests {
     #[test]
     fn ordered_delivery_waits_for_the_hole() {
         let sess = detached_session();
-        assert!(sess.push_in(1, b"b".to_vec()).is_empty());
-        assert!(sess.push_in(1, b"duplicate".to_vec()).is_empty());
-        assert_eq!(sess.push_in(0, b"a".to_vec()), b"ab");
-        assert!(sess.push_in(0, b"a".to_vec()).is_empty());
+        assert!(sess.push_in(1, Cow::Borrowed(b"b")).is_empty());
+        assert!(sess.push_in(1, Cow::Borrowed(b"duplicate")).is_empty());
+        assert_eq!(sess.push_in(0, Cow::Borrowed(b"a")).as_ref(), b"ab");
+        assert!(sess.push_in(0, Cow::Borrowed(b"a")).is_empty());
     }
 
     #[test]
     fn ordered_delivery_crosses_the_sequence_wrap() {
         let sess = detached_session();
         sess.reorder.lock().unwrap().next = u32::MAX - 1;
-        assert!(sess.push_in(0, b"c".to_vec()).is_empty());
-        assert!(sess.push_in(u32::MAX, b"b".to_vec()).is_empty());
-        assert_eq!(sess.push_in(u32::MAX - 1, b"a".to_vec()), b"abc");
-        assert!(sess.push_in(u32::MAX, b"old".to_vec()).is_empty());
-        assert_eq!(sess.push_in(1, b"d".to_vec()), b"d");
+        assert!(sess.push_in(0, Cow::Borrowed(b"c")).is_empty());
+        assert!(sess.push_in(u32::MAX, Cow::Borrowed(b"b")).is_empty());
+        assert_eq!(sess.push_in(u32::MAX - 1, Cow::Borrowed(b"a")).as_ref(), b"abc");
+        assert!(sess.push_in(u32::MAX, Cow::Borrowed(b"old")).is_empty());
+        assert_eq!(sess.push_in(1, Cow::Borrowed(b"d")).as_ref(), b"d");
     }
 
     #[test]
@@ -3089,11 +3070,11 @@ mod tests {
         let sess = detached_session();
         let count = (PIPE_LIMIT / meta::MAX_PDU) as u32;
         for seq in 1..=count {
-            assert!(sess.push_in(seq, vec![7; meta::MAX_PDU]).is_empty());
+            assert!(sess.push_in(seq, Cow::Owned(vec![7; meta::MAX_PDU])).is_empty());
         }
-        assert_eq!(sess.push_in(0, Vec::new()), vec![7; PIPE_LIMIT]);
-        assert!(sess.push_in(count + 2, vec![8; meta::MAX_PDU]).is_empty());
-        assert_eq!(sess.push_in(count + 1, Vec::new()), vec![8; meta::MAX_PDU]);
+        assert_eq!(sess.push_in(0, Cow::Owned(Vec::new())), vec![7; PIPE_LIMIT]);
+        assert!(sess.push_in(count + 2, Cow::Owned(vec![8; meta::MAX_PDU])).is_empty());
+        assert_eq!(sess.push_in(count + 1, Cow::Owned(Vec::new())), vec![8; meta::MAX_PDU]);
     }
 
     #[test]

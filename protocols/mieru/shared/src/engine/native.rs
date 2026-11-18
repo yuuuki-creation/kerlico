@@ -4,6 +4,7 @@
 use super::*;
 use std::io::IoSlice;
 use std::pin::Pin;
+use std::sync::atomic::AtomicUsize;
 use std::sync::OnceLock;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, Interest, ReadBuf};
@@ -12,16 +13,33 @@ use tokio::sync::{futures::OwnedNotified, Notify};
 const QUEUE_LIMIT: usize = 2 * 1024 * 1024;
 const MAX_WIRE: usize = 65535;
 
-fn runtime() -> io::Result<&'static tokio::runtime::Runtime> {
-    static RUNTIME: OnceLock<io::Result<tokio::runtime::Runtime>> = OnceLock::new();
-    RUNTIME
+/// Keep a UDP socket and its native stream relays on the same reactor.
+fn udp_executor() -> io::Result<&'static tokio::runtime::Handle> {
+    type Reactor = OnceLock<io::Result<tokio::runtime::Handle>>;
+    static REACTORS: OnceLock<Vec<Reactor>> = OnceLock::new();
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let reactors = REACTORS.get_or_init(|| {
+        let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let count = std::env::var("TOKIO_WORKER_THREADS")
+            .ok()
+            .and_then(|value| value.parse::<std::num::NonZeroUsize>().ok())
+            .map_or(cpus, |n| n.get().min(cpus));
+        (0..count).map(|_| OnceLock::new()).collect()
+    });
+    let index = NEXT.fetch_add(1, Ordering::Relaxed) % reactors.len();
+    reactors[index]
         .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
-                .build()
+                .build()?;
+            let handle = runtime.handle().clone();
+            std::thread::Builder::new()
+                .name(format!("mieru-udp-{index}"))
+                .spawn(move || runtime.block_on(std::future::pending::<()>()))?;
+            Ok(handle)
         })
         .as_ref()
-        .map_err(|error| io::Error::new(error.kind(), error.to_string()))
+        .map_err(|e| io::Error::new(e.kind(), e.to_string()))
 }
 
 struct Packet {
@@ -59,14 +77,14 @@ impl Udp {
         raw.set_nonblocking(true)?;
         raw.set_read_timeout(None)?;
         raw.set_write_timeout(None)?;
-        let runtime = runtime()?;
+        let runtime = udp_executor()?;
         let _entered = runtime.enter();
         Ok(Arc::new(Self {
             transport: Mutex::new(Some(Arc::new(Socket {
                 socket: tokio::net::UdpSocket::from_std(raw.try_clone()?)?,
                 raw,
             }))),
-            executor: runtime.handle().clone(),
+            executor: runtime.clone(),
             tx: Mutex::new(Tx::default()),
             pending: Notify::new(),
             space: Arc::new(Notify::new()),
@@ -226,7 +244,13 @@ async fn receive(link: &Arc<Link>) -> io::Result<()> {
             match result {
                 Ok(0) => break,
                 Ok(count) => packets += count,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    // A short batch can deliver bytes before its final EAGAIN.
+                    if bytes >= 256 * 1024 {
+                        tokio::task::yield_now().await;
+                    }
+                    break;
+                }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => break,
                 Err(error) => return Err(error),
             }
@@ -406,16 +430,13 @@ impl AsyncWrite for Writer {
         let sess = flow.session();
         let native = sess.link.native.as_ref().unwrap();
         {
-            let inflight = sess.inflight.lock().expect("inflight");
+            let state = sess.send_window.lock().expect("UDP send window");
             *sess.send_task.lock().expect("send task") = Some(cx.waker().clone());
             if sess.closed.load(Ordering::Acquire) {
                 return Poll::Ready(Err(closed()));
             }
-            let limit = sess
-                .cwnd
-                .load(Ordering::Relaxed)
-                .min(sess.peer_window.load(Ordering::Relaxed));
-            if limit == 0 || inflight.len() >= limit as usize {
+            let limit = state.cwnd.min(state.advertised);
+            if limit == 0 || state.flights.len() >= limit as usize {
                 return this.stalled(cx);
             }
         }
@@ -558,7 +579,7 @@ mod tests {
         let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let native = Udp::new(UdpSocket::bind("127.0.0.1:0").unwrap()).unwrap();
-        runtime()
+        udp_executor()
             .unwrap()
             .block_on(native.transport().unwrap().socket.writable())
             .unwrap();
@@ -585,7 +606,7 @@ mod tests {
     #[test]
     fn window_pending_is_cancel_safe_and_ack_releases_the_same_stream() {
         let (sess, peer) = session();
-        let runtime = runtime().unwrap();
+        let runtime = udp_executor().unwrap();
         let _entered = runtime.enter();
         let mut halves = Conn {
             kind: ConnKind::Stream(sess.clone()),
@@ -594,12 +615,12 @@ mod tests {
         let wakes = Arc::new(Count::default());
         let waker = Waker::from(wakes.clone());
         let mut cx = Context::from_waker(&waker);
-        sess.peer_window.store(0, Ordering::Relaxed);
+        sess.send_window.lock().unwrap().advertised = 0;
         assert!(Pin::new(&mut halves.write)
             .poll_write(&mut cx, b"canceled")
             .is_pending());
         assert_eq!(sess.next_send.load(Ordering::Relaxed), 0);
-        assert!(sess.inflight.lock().unwrap().is_empty());
+        assert!(sess.send_window.lock().unwrap().flights.is_empty());
         sess.on_ack(0, 16);
         assert!(wakes.0.load(Ordering::Relaxed) > 0);
         assert!(matches!(
@@ -614,7 +635,9 @@ mod tests {
         let meta = meta::parse(&wire[24..24 + header_len]).unwrap();
         assert_eq!((meta.seq, meta.fragment), (0, 0));
         assert_eq!(
-            udp_body(&meta, &nonce, &wire[72..len], &mut cipher).unwrap(),
+            udp_body(&meta, &nonce, &mut wire[72..len], &mut cipher)
+                .unwrap()
+                .as_ref(),
             b"replacement"
         );
         assert!(matches!(
@@ -639,7 +662,7 @@ mod tests {
     #[test]
     fn bounded_send_queue_does_not_encode_while_full_and_close_wakes_both_halves() {
         let (sess, _peer) = session();
-        let runtime = runtime().unwrap();
+        let runtime = udp_executor().unwrap();
         let _entered = runtime.enter();
         let native = sess.link.native.as_ref().unwrap();
         let address = native.transport().unwrap().raw.local_addr().unwrap();
@@ -665,7 +688,7 @@ mod tests {
             .poll_write(&mut cx, b"pending")
             .is_pending());
         assert_eq!(sess.next_send.load(Ordering::Relaxed), 0);
-        assert!(sess.inflight.lock().unwrap().is_empty());
+        assert!(sess.send_window.lock().unwrap().flights.is_empty());
         let mut bytes = [0; 1];
         let mut read = ReadBuf::new(&mut bytes);
         assert!(Pin::new(&mut halves.read)
@@ -746,7 +769,7 @@ mod tests {
         assert_eq!(got, payload);
         writer.join().unwrap();
         client.close();
-        runtime().unwrap().block_on(echo).unwrap();
+        udp_executor().unwrap().block_on(echo).unwrap();
         server.close();
         assert!(server.is_closed());
     }
@@ -754,7 +777,7 @@ mod tests {
     #[test]
     fn flush_waits_for_its_packets_without_waiting_for_later_sessions() {
         let (sess, _peer) = session();
-        let runtime = runtime().unwrap();
+        let runtime = udp_executor().unwrap();
         let _entered = runtime.enter();
         let native = sess.link.native.as_ref().unwrap();
         {

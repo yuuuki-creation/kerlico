@@ -27,9 +27,9 @@ protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依�
 
 mieru 共享 crate 的运行时加密依赖是 `chacha20` 和 `ring`，组合实现既有 XChaCha20-Poly1305；原 `chacha20poly1305` 留作测试对照依赖。该变化没有增加协议或角色 feature。`kerlico-shared::Traffic` 在建流时返回 `TrafficCounters`，注册和查询仍由服务端拥有，出站持有计数句柄。
 
-mieru 共享 crate 在 Linux 上通过 `libc` 和 `socket2` 0.6 批量接收已有 UDP 数据报；这两个直接依赖只在 Linux 启用，不增加角色依赖。
+mieru 共享 crate 在 Linux 上通过 `libc` 的 `recvmmsg` 批量接收 UDP 数据报，复用每个接收器自己的消息头、地址和缓冲区。该直接依赖只在 Linux 启用。
 
-mieru 共享 crate 使用 Tokio 驱动服务端 UDP 监听的就绪、发送队列和维护期限，并为其中的 TCP 会话交出 `AsyncTcp`。认证、重排、窗口和恢复仍由同一个共享状态机处理，拨号仍属于出站。
+mieru 共享 crate 将每个服务端 UDP 监听分配给一个按需启动的 Tokio 单线程执行器。监听的套接字、发送队列、维护定时器和已交给出站的 `AsyncTcp` 都由该执行器驱动。认证、重排、窗口和恢复仍由同一个共享状态机处理，拨号仍属于出站。
 
 `kerlico-outbound` 在 Linux 上直接依赖 `libc`，用于已完成协议转换的原生 TCP 之间的内核复制；不引入任何协议或角色 crate。
 
@@ -44,6 +44,8 @@ AnyTLS 共享 crate 直接依赖 Tokio 的套接字就绪、任务和通知接�
 `AsyncWriteInput` 允许编码器借出最终帧内存中的载荷区域。共享契约只描述互不重叠的 `IoSliceMut` 和本次填充长度；读取目标套接字仍属于出站。普通异步写入和借出输入区域的写入都通过 `AsyncWriteHalf` 交接，不增加协议依赖。
 
 VLESS 服务端直接依赖 Tokio 的套接字就绪与异步读写接口，使用 VLESS 共享包原有的 I/O 执行器移交已经建立的原生 TCP/TLS 字节流。测试用 socket2 构造单连接背压；它不增加运行时角色依赖。
+
+工作区的 release 配置把 `kerlico-vless`、`kerlico-vless-server` 和 `kerlico-tls` 各编为一个代码生成单元。同一包被客户端或其他协议引用时也使用这项设置。原生 VLESS TCP/TLS 的实测数据见 [VLESS 性能记录](vless-performance.md#2026-11-18-原生-tcptls-固定-500-mbps)。
 
 VLESS、AnyTLS 和 Hy2 都依赖 `kerlico-tls`。VLESS 和 Hy2 会开启这个引擎的 `quic` feature。AnyTLS 在普通连接上保留 rustls 取密钥和按方向处理记录的路径，浏览器指纹、ECH 以及需要修改首个 ClientHello 的载体使用共享引擎。JLS 的默认握手使用 rustls-jls，见 [AnyTLS](anytls.md#tls)。
 
@@ -145,5 +147,7 @@ SOCKS5 包含 `CONNECT` 和 `UDP ASSOCIATE`，只接受无认证方法。UDP 关
 ## 引擎和协议是两个 crate
 
 `crates/wg` 是唯一的 WireGuard 引擎。入站、客户端、落地和服务端默认带的 WARP 都使用它。仅客户端叶子启用 WireGuard 时加上 `tun-device`，落地使用用户态 TCP/UDP，不需要打开 TUN。只编客户端且不编 WireGuard 时，不依赖 `kerlico-wg`。
+
+Linux 的 `tun-device` 使用 `tun-rs` 的异步 TUN 分段、合并与写入续传接口，直接依赖 `bytes` 和 `futures-util` 对接帧流。普通入站、落地和 WARP 使用用户态 IP 引擎，各自的构建无需引入这些 TUN 依赖。
 
 `crates/wg/vendor/boringtun` 固定 BoringTun 0.7.1，并加上在线更换预共享密钥和报告握手确认的接口。[补丁说明](../../crates/wg/vendor/boringtun/KERLICO-PATCH.md) 记录上游版本和改动。分发包含 WireGuard 或 WARP 的二进制时，应附上它的 [BSD 许可](../../crates/wg/vendor/boringtun/LICENSE.md)。

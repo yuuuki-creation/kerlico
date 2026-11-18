@@ -19,3 +19,14 @@ UDP 分片按会话和包号区分。每片的地址和总片数必须一致；�
 Linux worker 上用 `tools/verify_hy2.py` 运行官方自对照、两个互通方向、落地和协议选项。已通过 13 组验收，覆盖 SOCKS5 和 HTTP CONNECT、TCP/UDP、同一 UDP 会话访问两个目标时的源端口复用、从不同端口返回回复、UDP 分片、错误密码、TCP 拒绝、UDP 禁用、Salamander、Gecko、配置的 Brutal 速率、TCP 半关闭、通过域名连到只听 IPv6 的官方服务端，以及保留原 TCP 流的本地和远端端口跳跃。
 
 这里实现 Hysteria 2 的线协议，使用 Kerlico 自己的节点和客户端配置。官方应用的 Realm 发现、Mimic Fake TCP 和 ACME 自动签证书不属于这个线协议入口。
+
+## 500 Mbps 服务端 CPU 对照
+
+2026-11-18 在 perf-01 的隔离 veth 内网对照 Kerlico 和官方 Hysteria。两个服务端都固定在核 1–2，共用同一客户端和源站。每轮用 8 条持久 TCP 流预热 5 秒，再计量 30 秒，核对 1,875,000,000 字节有效载荷。三轮中的第二轮交换运行顺序。12 个窗口均在 500 Mbps 的 1% 以内，最大发送迟到小于 1 秒。
+
+| 方向 | Kerlico 进程 CPU 中位数 | Hysteria 进程 CPU 中位数 | 三轮配对降幅 |
+| --- | ---: | ---: | --- |
+| 上行 | 20.87% | 41.20% | 49.35%、47.96%、49.91% |
+| 下行 | 17.67% | 28.27% | 39.11%、37.35%、34.32% |
+
+CPU 占用取服务端进程的用户态与内核态时间，一核满载为 100%。Kerlico 服务端 SHA-256 为 `13ae6e69bcc9ade8f7cccecc4cff18f07a0f538fbc3e34a05e59a4d7a3abdcaf`，Hysteria 为 `fc25edff9948708cb00a4ff01f3bccde677660aca050133bb1ad46c6860362d2`，共同客户端为 `22bdea591247fed9ec049e75f2461c61fbe9b144152a16ee940ea9d153b37c2a`。

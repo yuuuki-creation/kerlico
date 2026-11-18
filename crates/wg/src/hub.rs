@@ -208,9 +208,19 @@ impl Hub {
     }
 
     pub fn send(&mut self, packet: &[u8]) -> Option<HubEvent> {
-        let dst = Tunn::dst_address(packet)?;
-        let id = self.route(&dst)?;
-        self.send_routed(id, packet)
+        self.send_with(packet, None, |peer, bytes| {
+            HubEvent::Datagram(peer, bytes.to_vec())
+        })
+    }
+
+    pub(crate) fn send_with<T>(
+        &mut self,
+        packet: &[u8],
+        buffer: Option<(&mut Vec<u8>, usize)>,
+        emit: impl FnOnce(SocketAddr, &mut [u8]) -> T,
+    ) -> Option<T> {
+        let id = self.route(&Tunn::dst_address(packet)?)?;
+        self.send_routed(id, packet, buffer, emit)
     }
 
     pub(crate) fn initiate(&mut self, id: PeerId) -> Option<HubEvent> {
@@ -228,19 +238,25 @@ impl Hub {
         if self.route(&dst) != Some(id) {
             return None;
         }
-        self.send_routed(id, packet)
+        self.send_routed(id, packet, None, |peer, bytes| {
+            HubEvent::Datagram(peer, bytes.to_vec())
+        })
     }
 
-    fn send_routed(&mut self, id: PeerId, packet: &[u8]) -> Option<HubEvent> {
+    fn send_routed<T>(
+        &mut self,
+        id: PeerId,
+        packet: &[u8],
+        buffer: Option<(&mut Vec<u8>, usize)>,
+        emit: impl FnOnce(SocketAddr, &mut [u8]) -> T,
+    ) -> Option<T> {
         let peer = self.peers.get_mut(&id)?;
         let endpoint = peer.endpoint?;
-        match peer.wire.as_mut()?.send(packet, self.mtu) {
-            Some(Event::Datagram(data)) => {
-                peer.record_send(data.len());
-                Some(HubEvent::Datagram(endpoint, data))
-            }
-            _ => None,
-        }
+        let frame = peer.wire.as_mut()?.send(packet, self.mtu, buffer)?;
+        let len = frame.len();
+        let result = emit(endpoint, frame);
+        peer.record_send(len);
+        Some(result)
     }
 
     #[cfg(all(feature = "tun-device", target_os = "linux"))]
@@ -271,7 +287,8 @@ impl Hub {
                 });
             let event = if tick.is_none() && due {
                 peer.last_traffic = Some(Instant::now());
-                wire.send(&[], self.mtu)
+                wire.send(&[], self.mtu, None)
+                    .map(|bytes| Event::Datagram(bytes.to_vec()))
             } else {
                 tick
             };
@@ -347,6 +364,51 @@ mod tests {
             HubEvent::Packet(..) => panic!("unexpected IP packet during handshake"),
         });
         reply.expect("expected a WireGuard handshake response or cookie")
+    }
+
+    #[test]
+    fn jumbo_packet_queued_during_handshake_survives_batch_reuse() {
+        let mut hub = Hub::with_mtu([42; 32], 9000).unwrap();
+        let endpoint: SocketAddr = "127.0.0.1:3000".parse().unwrap();
+        let secret = StaticSecret::from([99; 32]);
+        let allowed = "192.0.2.9/32".parse().unwrap();
+        hub.add(
+            *PublicKey::from(&secret).as_bytes(),
+            None,
+            0,
+            vec![allowed],
+            Some(endpoint),
+        )
+        .unwrap();
+        let mut remote = Tunn::new(secret, hub.public, None, None, 43, None);
+        let mut ip = vec![7; 9000];
+        ip[0] = 0x45;
+        ip[2..4].copy_from_slice(&9000u16.to_be_bytes());
+        ip[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        ip[16..20].copy_from_slice(&[192, 0, 2, 9]);
+        let mut batch = vec![0; 16];
+        let initiation = hub
+            .send_with(&ip, Some((&mut batch, 16)), |_, bytes| bytes.to_vec())
+            .unwrap();
+        batch.fill(0);
+
+        let mut scratch = vec![0; 9100];
+        let response = datagram(remote.decapsulate(Some(endpoint), &initiation, &mut scratch));
+        let mut delivered = 0;
+        hub.receive(endpoint, &response, |event| {
+            let HubEvent::Datagram(_, frame) = event else {
+                panic!("expected a datagram")
+            };
+            match remote.decapsulate(Some(endpoint), &frame, &mut scratch) {
+                TunnResult::Done => {}
+                TunnResult::WriteToTunnelV4(packet, _) => {
+                    assert_eq!(packet, &ip[..]);
+                    delivered += 1;
+                }
+                _ => panic!("unexpected handshake or payload result"),
+            }
+        });
+        assert_eq!(delivered, 1);
     }
 
     #[cfg(all(feature = "tun-device", target_os = "linux"))]

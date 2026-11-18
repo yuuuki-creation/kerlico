@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-tun-device = ["dep:libc", "dep:socket2", "dep:tokio", "dep:tun", "dep:tokio-util", "dep:windows-sys", "dep:wintun-bindings"]
+tun-device = ["dep:libc", "dep:socket2", "dep:tokio", "dep:tun", "dep:tun-rs", "dep:futures-util", "dep:bytes", "dep:tokio-util", "dep:windows-sys", "dep:wintun-bindings"]
 
 [[bin]]
 name = "kerlico-wg"
@@ -24,10 +24,15 @@ x25519-dalek = { version = "2", features = ["static_secrets", "reusable_secrets"
 
 [target.'cfg(not(windows))'.dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tun = { version = "0.7.13", features = ["async"], optional = true }
 webpki-roots = "0.26"
 
+[target.'cfg(not(any(windows, target_os = "linux")))'.dependencies]
+tun = { version = "0.7.13", features = ["async"], optional = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
+tun-rs = { version = "=2.8.18", default-features = false, features = ["async_tokio", "async_framed"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink"], optional = true }
+bytes = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]

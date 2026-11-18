@@ -5,7 +5,7 @@ use std::os::fd::AsRawFd;
 use crate::wire::WIRE_BUFFER;
 
 // Bound the work before the next socket read. A batch never waits for more packets.
-const LIMIT: usize = 16;
+const LIMIT: usize = 64;
 // Leave room for the IPv6 and UDP headers in a non-jumbo IP packet.
 const MAX_BYTES: usize = u16::MAX as usize - 48;
 
@@ -25,54 +25,34 @@ impl ReceiveBatch {
         }
     }
 
-    pub(super) fn drain(
+    pub(super) fn read(
         &mut self,
         socket: &UdpSocket,
-        mut budget: usize,
+        budget: usize,
         mut visit: impl FnMut(SocketAddr, &mut [u8]),
-    ) -> io::Result<()> {
-        while budget > 0 {
-            let slots = if self.unavailable {
-                1
-            } else {
-                budget.min(RECEIVE_BATCH)
-            };
-            let result = if self.unavailable {
-                let packet = &mut self.packets[..WIRE_BUFFER];
-                socket.recv_from(packet).map(|(len, peer)| {
-                    visit(peer, &mut packet[..len]);
-                    1
-                })
-            } else {
-                receive_batch(socket, &mut self.packets, slots, &mut visit)
-            };
-            match result {
-                Ok(count) if count < slots => break,
-                Ok(count) => budget -= count,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => budget -= 1,
+    ) -> io::Result<usize> {
+        if !self.unavailable {
+            match receive_batch(
+                socket,
+                &mut self.packets,
+                budget.min(RECEIVE_BATCH),
+                &mut visit,
+            ) {
                 Err(error)
                     if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock
-                            | io::ErrorKind::ConnectionRefused
-                            | io::ErrorKind::ConnectionReset
+                        error.raw_os_error(),
+                        Some(libc::ENOSYS | libc::EPERM | libc::EOPNOTSUPP)
                     ) =>
-                {
-                    break
-                }
-                Err(error)
-                    if !self.unavailable
-                        && matches!(
-                            error.raw_os_error(),
-                            Some(libc::ENOSYS | libc::EPERM | libc::EOPNOTSUPP)
-                        ) =>
                 {
                     self.unavailable = true
                 }
-                Err(error) => return Err(error),
+                result => return result,
             }
         }
-        Ok(())
+        let packet = &mut self.packets[..WIRE_BUFFER];
+        let (len, peer) = socket.recv_from(packet)?;
+        visit(peer, &mut packet[..len]);
+        Ok(1)
     }
 }
 
@@ -144,39 +124,46 @@ fn receive_batch(
 #[derive(Default)]
 pub(super) struct SendBatch {
     endpoint: Option<SocketAddr>,
-    pending: Vec<Vec<u8>>,
-    bytes: usize,
+    payload: Vec<u8>,
+    used: usize,
+    segment: usize,
     unavailable: bool,
 }
 
 impl SendBatch {
-    pub(super) fn push(&mut self, socket: &UdpSocket, endpoint: SocketAddr, frame: Vec<u8>) {
-        if self.unavailable || frame.first() != Some(&4) || frame.len() > MAX_BYTES {
+    pub(super) fn encode(
+        &mut self,
+        socket: &UdpSocket,
+        encode: impl FnOnce(&mut Vec<u8>, usize) -> Option<(SocketAddr, usize)>,
+    ) {
+        // Keep the initialized high-water mark. The encoder writes just the
+        // next datagram at the end of the pending train.
+        let start = self.used;
+        let Some((endpoint, len)) = encode(&mut self.payload, start) else {
+            return;
+        };
+        let end = start + len;
+        if self.unavailable || self.payload[start..end].first() != Some(&4) || len > MAX_BYTES {
             self.flush(socket);
-            let _ = socket.send_to(&frame, endpoint);
+            let _ = socket.send_to(&self.payload[start..end], endpoint);
             return;
         }
-        let mut tail = false;
-        if let Some(first) = self.pending.first() {
-            if self.endpoint != Some(endpoint)
-                || frame.len() > first.len()
-                || self.bytes + frame.len() > MAX_BYTES
-            {
-                self.flush(socket);
-                if self.unavailable {
-                    let _ = socket.send_to(&frame, endpoint);
-                    return;
-                }
-            } else {
-                tail = frame.len() < first.len();
+        if self.endpoint.is_some()
+            && (self.endpoint != Some(endpoint) || len > self.segment || end > MAX_BYTES)
+        {
+            self.flush(socket);
+            if self.unavailable {
+                let _ = socket.send_to(&self.payload[start..end], endpoint);
+                return;
             }
+            self.payload.copy_within(start..end, 0);
         }
-        self.endpoint = Some(endpoint);
-        self.bytes += frame.len();
-        self.pending.push(frame);
-        // After a short last segment there is no way to add another datagram
-        // and keep the original boundaries.
-        if tail || self.pending.len() == LIMIT {
+        if self.endpoint.is_none() {
+            self.endpoint = Some(endpoint);
+            self.segment = len;
+        }
+        self.used += len;
+        if len < self.segment || self.used >= LIMIT * self.segment {
             self.flush(socket);
         }
     }
@@ -185,38 +172,34 @@ impl SendBatch {
         let Some(endpoint) = self.endpoint.take() else {
             return;
         };
-        self.bytes = 0;
-        if self.pending.len() > 1 && !self.unavailable {
-            match send_segmented(socket, endpoint, &self.pending) {
-                Ok(()) => {
-                    self.pending.clear();
-                    return;
-                }
+        let used = std::mem::take(&mut self.used);
+        let payload = &self.payload[..used];
+        if used > self.segment {
+            match send_segmented(socket, endpoint, payload, self.segment as u16) {
+                Ok(()) => return,
                 Err(error) => {
                     self.unavailable =
                         matches!(error.raw_os_error(), Some(libc::ENOPROTOOPT | libc::ENOSYS));
                 }
             }
         }
-        // Datagram sendmsg is atomic. If the route or kernel can't segment
-        // the group, send its original datagrams without the control message.
-        for frame in self.pending.drain(..) {
-            let _ = socket.send_to(&frame, endpoint);
+        for frame in payload.chunks(self.segment) {
+            let _ = socket.send_to(frame, endpoint);
         }
     }
 }
 
-fn send_segmented(socket: &UdpSocket, endpoint: SocketAddr, batch: &[Vec<u8>]) -> io::Result<()> {
+fn send_segmented(
+    socket: &UdpSocket,
+    endpoint: SocketAddr,
+    data: &[u8],
+    segment: u16,
+) -> io::Result<()> {
     let address = socket2::SockAddr::from(endpoint);
-    let segment = batch[0].len() as u16;
-    let mut parts = [libc::iovec {
-        iov_base: std::ptr::null_mut(),
-        iov_len: 0,
-    }; LIMIT];
-    for (part, frame) in parts.iter_mut().zip(batch) {
-        part.iov_base = frame.as_ptr().cast_mut().cast();
-        part.iov_len = frame.len();
-    }
+    let mut part = libc::iovec {
+        iov_base: data.as_ptr().cast_mut().cast(),
+        iov_len: data.len(),
+    };
     // Send one aligned ancillary header whose payload is a native-endian u16.
     let mut control = [0usize; 8];
     // SAFETY: All fields are integers or pointers. The address, iovecs, payloads
@@ -224,8 +207,8 @@ fn send_segmented(socket: &UdpSocket, endpoint: SocketAddr, batch: &[Vec<u8>]) -
     let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
     message.msg_name = address.as_ptr().cast_mut().cast();
     message.msg_namelen = address.len();
-    message.msg_iov = parts.as_mut_ptr();
-    message.msg_iovlen = batch.len() as _;
+    message.msg_iov = &mut part;
+    message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
     let value_len = std::mem::size_of_val(&segment) as libc::c_uint;
     // SAFETY: CMSG_SPACE/LEN describe how much space the configured u16 needs.
@@ -275,15 +258,20 @@ mod tests {
             let mut batch = ReceiveBatch::new();
             batch.unavailable = unavailable;
             let mut actual = Vec::new();
-            batch.drain(&receiver, 2, |peer, packet| {
-                actual.push((peer, packet.to_vec()))
-            })?;
-            assert_eq!(actual, expected[..2]);
-            batch.drain(&receiver, 8, |peer, packet| {
-                actual.push((peer, packet.to_vec()))
-            })?;
-            assert_eq!(actual, expected);
-            batch.drain(&receiver, 8, |_, _| panic!("unexpected datagram"))?;
+            for limit in [2, 4] {
+                while actual.len() < limit {
+                    let budget = limit - actual.len();
+                    let n = batch.read(&receiver, budget, |peer, packet| {
+                        actual.push((peer, packet.to_vec()));
+                    })?;
+                    assert!((1..=budget).contains(&n));
+                }
+                assert_eq!(actual, expected[..limit]);
+            }
+            let error = batch
+                .read(&receiver, 8, |_, _| panic!("unexpected datagram"))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         }
         Ok(())
     }
@@ -313,7 +301,14 @@ mod tests {
             (b.local_addr()?, 64, 5),
             (a.local_addr()?, 128, 6),
         ] {
-            batch.push(&sender, addr, frame(len, value));
+            batch.encode(&sender, |storage, offset| {
+                let packet = frame(len, value);
+                if offset + len > storage.len() {
+                    storage.resize(offset + len, 0);
+                }
+                storage[offset..offset + len].copy_from_slice(&packet);
+                Some((addr, len))
+            });
         }
         batch.flush(&sender);
         for (socket, size, value) in [

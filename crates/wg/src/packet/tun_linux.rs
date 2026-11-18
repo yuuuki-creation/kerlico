@@ -1,20 +1,25 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::UdpSocket;
-use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
-use std::thread;
+use std::task::Poll;
+
+use bytes::Bytes;
+use futures_util::{Sink, Stream};
+use tokio::io::unix::AsyncFd;
+use tun_rs::async_framed::{BytesCodec, DeviceFramedRead, DeviceFramedWrite};
+use tun_rs::{AsyncDevice, DeviceBuilder};
 
 use super::udp_batch::{ReceiveBatch, SendBatch};
 use super::{
-    check_tun_mtu, deliver_via, unmapped, TunBinding, TunCarrier, MAX_IP_PACKET, POLL, QUEUE,
+    carrier_endpoint, check_tun_mtu, deliver_via, unmapped, TunBinding, TunCarrier, POLL, QUEUE,
 };
 use crate::linux_link::{LinkState, Monitor};
 use crate::{uapi, Hub};
 
-const BURST: usize = 32;
+const BURST: usize = 64;
 
 pub(crate) fn run(
     name: &str,
@@ -30,13 +35,27 @@ pub(crate) fn run(
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let mut config = tun::Configuration::default();
-        config.tun_name(name).mtu(mtu);
-        if up {
-            config.up();
-        }
-        let tun = tun::create(&config).map_err(io::Error::other)?;
-        tun.set_nonblock()?;
+        let create = |offload| {
+            let config = DeviceBuilder::new().name(name).mtu(mtu).offload(offload);
+            if up {
+                config.enable(true)
+            } else {
+                config.inherit_enable_state()
+            }
+            .build_async()
+        };
+        let tun = match create(true) {
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::EINVAL | libc::ENOTTY | libc::EOPNOTSUPP)
+                ) =>
+            {
+                create(false)?
+            }
+            result => result?,
+        };
+        let tun = Arc::new(tun);
         let monitor = Monitor::open(name)?;
         let (updates, state) = mpsc::channel();
         hub.update_mtu(monitor.initial.mtu);
@@ -47,188 +66,219 @@ pub(crate) fn run(
         } else {
             (None, None)
         };
-        let stopped = Arc::new(AtomicBool::new(false));
-        let stop = stopped.clone();
-        let (finish, done) = tokio::sync::oneshot::channel();
-        let worker = thread::Builder::new()
-            .name("kerlico-wg-io".into())
-            .spawn(move || {
-                let _ = finish.send(drive(tun, binding, hub, state, requests, &stop));
-            })?;
-        let result = match ready() {
-            Err(error) => Err(error),
-            Ok(()) => tokio::select! {
-                biased;
-                result = done => result.unwrap_or_else(|_| Err(io::ErrorKind::BrokenPipe.into())),
-                result = crate::tun_device::stop_signal() => result,
-                result = monitor.watch(updates) => result,
-                result = async {
-                    match control {
-                        Some(control) => control.await,
-                        None => std::future::pending().await,
-                    }
-                } => result,
-            },
-        };
-        stopped.store(true, Ordering::Release);
-        let joined = worker
-            .join()
-            .map_err(|_| io::Error::other("WireGuard data thread panicked"));
-        result.and(joined)
+        ready()?;
+        tokio::select! {
+            result = drive(tun, binding, hub, state, requests) => result,
+            result = crate::tun_device::stop_signal() => result,
+            result = monitor.watch(updates) => result,
+            result = async {
+                match control {
+                    Some(control) => control.await,
+                    None => std::future::pending().await,
+                }
+            } => result,
+        }
     })
 }
 
-fn drive(
-    tun: tun::Device,
+fn watch(socket: Option<&UdpSocket>) -> io::Result<Option<AsyncFd<UdpSocket>>> {
+    socket
+        .map(|socket| {
+            let fd = socket.try_clone()?;
+            // SAFETY: the registration owns this descriptor. It is not closed
+            // or registered elsewhere while AsyncFd is live.
+            Ok(unsafe { AsyncFd::register_with_interest(fd, tokio::io::Interest::READABLE)? })
+        })
+        .transpose()
+}
+
+async fn drive(
+    tun: Arc<AsyncDevice>,
     mut binding: TunBinding,
     mut hub: Hub,
     state: Receiver<LinkState>,
     requests: Option<Receiver<uapi::Request>>,
-    stopped: &AtomicBool,
 ) -> io::Result<()> {
     let (dual, reserved) = (binding.carrier.dual, binding.carrier.reserved);
+    let mut reader = DeviceFramedRead::new(tun.clone(), BytesCodec::new());
+    let mut writer = DeviceFramedWrite::new(tun.clone(), BytesCodec::new());
+    let mut carrier = watch(binding.socket.as_ref())?;
     let mut receive = ReceiveBatch::new();
-    let mut inner = vec![0; MAX_IP_PACKET];
     let mut batches = SendBatch::default();
-    let mut to_tun = VecDeque::new();
-    while !stopped.load(Ordering::Acquire) {
-        for link in state.try_iter().take(BURST) {
-            hub.update_mtu(link.mtu);
-            if binding.up == link.up {
-                continue;
-            }
-            binding.up = link.up;
-            if link.up {
-                match binding
-                    .carrier
-                    .open(binding.port, binding.mark)
-                    .and_then(|socket| Ok((socket.local_addr()?.port(), socket)))
-                {
-                    Ok((port, socket)) => {
-                        binding.port = port;
-                        binding.socket = Some(socket);
-                        hub.reset_transport();
-                    }
-                    // Keep UAPI available to free or change the saved port.
-                    Err(error) => eprintln!("WireGuard: bring up UDP carrier: {error}"),
+    let mut queue = VecDeque::new();
+    let mut submitted = 0;
+    let mut retry_tun = false;
+    let mut timer = tokio::time::interval(POLL);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    std::future::poll_fn(move |cx| {
+        let maintenance = timer.poll_tick(cx).is_ready();
+        if maintenance {
+            retry_tun = false;
+            for link in state.try_iter().take(BURST) {
+                hub.update_mtu(link.mtu);
+                reader.set_read_buffer_size(link.mtu.saturating_add(tun_rs::VIRTIO_NET_HDR_LEN));
+                if binding.up == link.up {
+                    continue;
                 }
-            } else {
-                binding.socket = None;
-                binding.carrier.first = None;
-                hub.reset_transport();
-                to_tun.clear();
-                for _ in 0..QUEUE {
-                    if !matches!(tun.recv(&mut inner), Ok(1..)) {
-                        break;
+                // Release the registered clone before changing or releasing the port.
+                drop(carrier.take());
+                binding.up = link.up;
+                if link.up {
+                    match binding
+                        .carrier
+                        .open(binding.port, binding.mark)
+                        .and_then(|socket| Ok((socket.local_addr()?.port(), socket)))
+                    {
+                        Ok((port, socket)) => {
+                            binding.port = port;
+                            binding.socket = Some(socket);
+                            hub.reset_transport();
+                        }
+                        Err(e) => eprintln!("WireGuard: bring up UDP carrier: {e}"),
                     }
-                }
-            }
-        }
-        if let Some(requests) = &requests {
-            for request in requests.try_iter().take(4) {
-                binding.control(&mut hub, request);
-            }
-        }
-        let mut fds = [
-            libc::pollfd {
-                fd: if binding.up { tun.as_raw_fd() } else { -1 },
-                events: libc::POLLIN | if to_tun.is_empty() { 0 } else { libc::POLLOUT },
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: binding.socket.as_ref().map_or(-1, UdpSocket::as_raw_fd),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        // Both descriptors are owned by this thread for the entire call.
-        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, POLL.as_millis() as _) } < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-        if stopped.load(Ordering::Acquire) {
-            break;
-        }
-        if fds.iter().any(|fd| fd.revents & libc::POLLNVAL != 0) {
-            return Err(io::ErrorKind::BrokenPipe.into());
-        }
-        if fds[0].revents & libc::POLLHUP != 0 {
-            return Ok(());
-        }
-        if fds[0].revents & (libc::POLLERR | libc::POLLIN) == libc::POLLERR {
-            // Let the monitor report a concurrent link-down before trying again.
-            thread::sleep(POLL);
-        }
-        let socket = binding.socket.as_ref();
-        if fds[0].revents & libc::POLLIN != 0 {
-            for _ in 0..BURST {
-                match tun.recv(&mut inner) {
-                    Ok(0) => return Ok(()),
-                    Ok(n) => {
-                        if let Some((socket, event)) = socket
-                            .and_then(|socket| hub.send(&inner[..n]).map(|event| (socket, event)))
-                        {
-                            deliver_via(
-                                dual,
-                                reserved,
-                                event,
-                                |peer, datagram| batches.push(socket, peer, datagram),
-                                |_| {},
-                            );
+                } else {
+                    binding.socket = None;
+                    binding.carrier.first = None;
+                    hub.reset_transport();
+                    queue.clear();
+                    submitted = 0;
+                    reader = DeviceFramedRead::new(tun.clone(), BytesCodec::new());
+                    writer = DeviceFramedWrite::new(tun.clone(), BytesCodec::new());
+                    let mut discarded = vec![0; u16::MAX as usize + tun_rs::VIRTIO_NET_HDR_LEN];
+                    for _ in 0..QUEUE {
+                        if !matches!(tun.try_recv(&mut discarded), Ok(1..)) {
+                            break;
                         }
                     }
-                    Err(error) if changed_interface(&error) => break,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(error) => return Err(error),
+                }
+                carrier = watch(binding.socket.as_ref())?;
+            }
+            if let Some(requests) = &requests {
+                for request in requests.try_iter().take(4) {
+                    drop(carrier.take());
+                    binding.control(&mut hub, request);
+                    carrier = watch(binding.socket.as_ref())?;
+                }
+            }
+        }
+
+        let mut full_turn = false;
+        let socket = binding.socket.as_ref();
+        if binding.up && !retry_tun {
+            for i in 0..BURST {
+                match Pin::new(&mut reader).poll_next(cx) {
+                    Poll::Ready(Some(Ok(packet))) => {
+                        if let Some(socket) = socket {
+                            batches.encode(socket, |buffer, offset| {
+                                hub.send_with(&packet, Some((buffer, offset)), |peer, frame| {
+                                    reserved.apply(frame, false);
+                                    (carrier_endpoint(peer, dual), frame.len())
+                                })
+                            });
+                        }
+                        full_turn |= i + 1 == BURST;
+                    }
+                    Poll::Pending => break,
+                    Poll::Ready(None) => return Poll::Ready(Ok(())),
+                    Poll::Ready(Some(Err(error))) if changed_interface(&error) => {
+                        retry_tun = true;
+                        break;
+                    }
+                    Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
                 }
             }
             if let Some(socket) = socket {
                 batches.flush(socket);
             }
         }
-        if let Some(socket) = socket {
+        if let Some(registered) = carrier.as_ref() {
+            let socket = registered.get_ref();
             let mut emit = |event| {
                 deliver_via(
                     dual,
                     reserved,
                     event,
-                    |peer, datagram| {
-                        let _ = socket.send_to(&datagram, peer);
+                    |peer, frame| {
+                        let _ = socket.send_to(&frame, peer);
                     },
                     |packet| {
-                        if to_tun.len() < QUEUE {
-                            to_tun.push_back(packet);
+                        if queue.len() + submitted < QUEUE {
+                            queue.push_back(packet);
                         }
                     },
                 )
             };
-            if fds[1].revents & (libc::POLLIN | libc::POLLERR) != 0 {
-                receive.drain(socket, BURST, |from, packet| {
-                    reserved.apply(packet, true);
-                    hub.receive(unmapped(from, dual), packet, &mut emit);
-                })?;
-            }
-            hub.tick(emit);
-        }
-        for _ in 0..BURST {
-            let Some(packet) = to_tun.front() else {
-                break;
-            };
-            match tun.send(packet) {
-                Ok(n) if n == packet.len() => {
-                    to_tun.pop_front();
+            let mut n = 0;
+            while n < BURST {
+                let mut ready = match registered.poll_read_ready(cx) {
+                    Poll::Pending => break,
+                    Poll::Ready(result) => result?,
+                };
+                match ready.try_io(|_| {
+                    receive.read(socket, BURST - n, |from, packet| {
+                        reserved.apply(packet, true);
+                        hub.receive(unmapped(from, dual), packet, &mut emit);
+                    })
+                }) {
+                    // WouldBlock cleared readiness. Poll again to register the
+                    // next packet's waker before returning to the executor.
+                    Err(_) => continue,
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(count)) => n += count,
+                    Ok(Err(e))
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::Interrupted
+                                | io::ErrorKind::ConnectionRefused
+                                | io::ErrorKind::ConnectionReset
+                        ) =>
+                    {
+                        break
+                    }
+                    Ok(Err(e)) => return Poll::Ready(Err(e)),
                 }
-                Ok(_) => return Err(io::ErrorKind::WriteZero.into()),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) if changed_interface(&error) => break,
-                Err(error) => return Err(error),
+            }
+            full_turn |= n == BURST;
+            if maintenance {
+                hub.tick(emit);
             }
         }
-    }
-    Ok(())
+
+        if binding.up && !retry_tun {
+            for _ in 0..BURST {
+                if queue.is_empty() {
+                    break;
+                }
+                match Sink::<Bytes>::poll_ready(Pin::new(&mut writer), cx) {
+                    Poll::Pending => break,
+                    Poll::Ready(Err(e)) if changed_interface(&e) => {
+                        retry_tun = true;
+                        break;
+                    }
+                    Poll::Ready(result) => result?,
+                }
+                Pin::new(&mut writer).start_send(Bytes::from(queue.pop_front().unwrap()))?;
+                submitted += 1;
+            }
+            if submitted != 0 {
+                match Sink::<Bytes>::poll_flush(Pin::new(&mut writer), cx) {
+                    Poll::Ready(Ok(())) => {
+                        submitted = 0;
+                        full_turn |= !queue.is_empty();
+                    }
+                    Poll::Ready(Err(e)) if changed_interface(&e) => retry_tun = true,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => {}
+                }
+            }
+        }
+        if full_turn || maintenance {
+            cx.waker().wake_by_ref();
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 fn changed_interface(error: &io::Error) -> bool {
