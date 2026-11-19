@@ -26,7 +26,7 @@ use landing_anytls::Client;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-const VERSION: &str = "Mihomo Meta 1.19.33";
+const VERSION: &str = "1.19.33";
 const PASSWORD: &str = "interop-secret";
 /// Fixed sizes, so both clients must produce the same record lengths.
 const FIXED_SCHEME: &str = "stop=5\n0=20-20\n1=150-150\n2=200-200\n3=300-300,c,90-90\n4=64-64";
@@ -35,7 +35,8 @@ fn mihomo() -> PathBuf {
     let path = PathBuf::from(std::env::var("MIHOMO").expect("MIHOMO is not set: the mihomo interop tests did not run"));
     let output = Command::new(&path).arg("-v").output().expect("mihomo binary does not start: not run");
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.starts_with(VERSION), "peer is {text:?}, not {VERSION}: not run");
+    let version = text.strip_prefix("Mihomo Meta ").and_then(|rest| rest.split_whitespace().next());
+    assert_eq!(version.map(|v| v.strip_prefix('v').unwrap_or(v)), Some(VERSION), "unexpected mihomo peer: {text:?}");
     path
 }
 

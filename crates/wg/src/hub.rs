@@ -10,7 +10,7 @@ use boringtun::noise::{
 use boringtun::x25519::{PublicKey, StaticSecret};
 use ipnet::IpNet;
 
-use crate::wire::{Event, PeerKeys, Wire};
+use crate::wire::{PeerKeys, Received, Wire};
 
 #[cfg(all(feature = "tun-device", any(target_os = "linux", windows)))]
 #[path = "hub_control.rs"]
@@ -22,6 +22,11 @@ pub struct PeerId(pub(crate) u32);
 pub enum HubEvent {
     Datagram(SocketAddr, Vec<u8>),
     Packet(PeerId, SocketAddr, Vec<u8>),
+}
+
+pub(crate) enum HubEventRef<'a> {
+    Datagram(SocketAddr, &'a mut [u8]),
+    Packet(PeerId, SocketAddr, &'a [u8]),
 }
 
 struct Peer {
@@ -49,6 +54,7 @@ pub struct Hub {
     limiter: Arc<RateLimiter>,
     peers: HashMap<PeerId, Peer>,
     by_key: HashMap<[u8; 32], PeerId>,
+    receive_buffer: Vec<u8>,
     next: u32,
     mtu: usize,
 }
@@ -74,6 +80,7 @@ impl Hub {
             public,
             peers: HashMap::new(),
             by_key: HashMap::new(),
+            receive_buffer: Vec::new(),
             next: 1,
             mtu,
         })
@@ -136,12 +143,7 @@ impl Hub {
     }
 
     pub fn route(&self, address: &IpAddr) -> Option<PeerId> {
-        self.peers
-            .iter()
-            .flat_map(|(id, peer)| peer.allowed.iter().map(move |net| (*id, net)))
-            .filter(|(_, net)| net.contains(address))
-            .max_by_key(|(_, net)| net.prefix_len())
-            .map(|(id, _)| id)
+        find_route(&self.peers, address)
     }
 
     pub(crate) fn allowed_ips(&self) -> Vec<IpNet> {
@@ -152,6 +154,18 @@ impl Hub {
     }
 
     pub fn receive(&mut self, from: SocketAddr, packet: &[u8], mut emit: impl FnMut(HubEvent)) {
+        self.receive_with(from, packet, |event| match event {
+            HubEventRef::Datagram(addr, data) => emit(HubEvent::Datagram(addr, data.to_vec())),
+            HubEventRef::Packet(id, addr, ip) => emit(HubEvent::Packet(id, addr, ip.to_vec())),
+        });
+    }
+
+    pub(crate) fn receive_with(
+        &mut self,
+        from: SocketAddr,
+        packet: &[u8],
+        mut emit: impl FnMut(HubEventRef<'_>),
+    ) {
         if self.secret.to_bytes() == [0; 32] {
             return;
         }
@@ -159,7 +173,7 @@ impl Hub {
         let parsed = match self.limiter.verify_packet(Some(from), packet, &mut cookie) {
             Ok(parsed) => parsed,
             Err(TunnResult::WriteToNetwork(data)) => {
-                emit(HubEvent::Datagram(from, data.to_vec()));
+                emit(HubEventRef::Datagram(from, data));
                 return;
             }
             Err(_) => return,
@@ -182,15 +196,7 @@ impl Hub {
         let Some(wire) = &mut peer.wire else {
             return;
         };
-        let mut packets = Vec::new();
-        let mut sent = 0;
-        let reception = wire.receive_verified(parsed, packet.len(), |event| match event {
-            Event::Datagram(data) => {
-                sent += data.len() as u64;
-                emit(HubEvent::Datagram(from, data));
-            }
-            Event::Packet(data, src) => packets.push((data, src)),
-        });
+        let reception = wire.receive_verified(parsed, packet.len(), &mut self.receive_buffer);
         if reception.authenticated {
             peer.endpoint = Some(from);
             peer.last_traffic = Some(Instant::now());
@@ -199,11 +205,21 @@ impl Hub {
         if reception.handshake_completed {
             peer.last_handshake = Some(SystemTime::now());
         }
-        peer.sent = peer.sent.saturating_add(sent);
-        for (data, src) in packets {
-            if self.route(&src) == Some(id) {
-                emit(HubEvent::Packet(id, from, data));
+        match reception.output {
+            Some(Received::Datagram(data)) => {
+                let mut send = |data: &mut [u8]| {
+                    peer.sent = peer.sent.saturating_add(data.len() as u64);
+                    emit(HubEventRef::Datagram(from, data));
+                };
+                send(data);
+                wire.drain(&mut self.receive_buffer, send);
             }
+            Some(Received::Packet(data, src)) => {
+                if find_route(&self.peers, &src) == Some(id) {
+                    emit(HubEventRef::Packet(id, from, data));
+                }
+            }
+            None => {}
         }
     }
 
@@ -223,12 +239,27 @@ impl Hub {
         self.send_routed(id, packet, buffer, emit)
     }
 
+    #[cfg(all(feature = "tun-device", target_os = "linux"))]
+    pub(crate) fn send_prepared<T>(
+        &mut self,
+        frame: &mut [u8],
+        n: usize,
+        emit: impl FnOnce(SocketAddr, &mut [u8]) -> T,
+    ) -> Option<T> {
+        let id = self.route(&Tunn::dst_address(frame.get(16..16 + n)?)?)?;
+        let peer = self.peers.get_mut(&id)?;
+        let endpoint = peer.endpoint?;
+        let wire = peer.wire.as_mut()?.seal_prepared(frame, n, self.mtu)?;
+        let len = wire.len();
+        let out = emit(endpoint, wire);
+        peer.record_send(len);
+        Some(out)
+    }
+
     pub(crate) fn initiate(&mut self, id: PeerId) -> Option<HubEvent> {
         let peer = self.peers.get_mut(&id)?;
         let endpoint = peer.endpoint?;
-        let Event::Datagram(data) = peer.wire.as_mut()?.initiate()? else {
-            return None;
-        };
+        let data = peer.wire.as_mut()?.initiate()?;
         peer.record_send(data.len());
         Some(HubEvent::Datagram(endpoint, data))
     }
@@ -270,6 +301,11 @@ impl Hub {
     }
 
     #[cfg(all(feature = "tun-device", target_os = "linux"))]
+    pub(crate) fn mtu(&self) -> usize {
+        self.mtu
+    }
+
+    #[cfg(all(feature = "tun-device", target_os = "linux"))]
     pub(crate) fn update_mtu(&mut self, mtu: usize) {
         self.mtu = mtu.min(crate::wire::MAX_IP_PACKET);
     }
@@ -287,17 +323,25 @@ impl Hub {
                 });
             let event = if tick.is_none() && due {
                 peer.last_traffic = Some(Instant::now());
-                wire.send(&[], self.mtu, None)
-                    .map(|bytes| Event::Datagram(bytes.to_vec()))
+                wire.send(&[], self.mtu, None).map(|bytes| bytes.to_vec())
             } else {
                 tick
             };
-            if let Some(Event::Datagram(data)) = event {
+            if let Some(data) = event {
                 peer.record_send(data.len());
                 emit(HubEvent::Datagram(endpoint, data));
             }
         }
     }
+}
+
+fn find_route(peers: &HashMap<PeerId, Peer>, address: &IpAddr) -> Option<PeerId> {
+    peers
+        .iter()
+        .flat_map(|(id, peer)| peer.allowed.iter().map(move |net| (*id, net)))
+        .filter(|(_, net)| net.contains(address))
+        .max_by_key(|(_, net)| net.prefix_len())
+        .map(|(id, _)| id)
 }
 
 fn canonical_private_key(mut key: [u8; 32]) -> [u8; 32] {
@@ -368,6 +412,16 @@ mod tests {
 
     #[test]
     fn jumbo_packet_queued_during_handshake_survives_batch_reuse() {
+        queued_jumbo(false);
+    }
+
+    #[cfg(all(feature = "tun-device", target_os = "linux"))]
+    #[test]
+    fn prepared_jumbo_survives_reuse_before_the_handshake_completes() {
+        queued_jumbo(true);
+    }
+
+    fn queued_jumbo(prepared: bool) {
         let mut hub = Hub::with_mtu([42; 32], 9000).unwrap();
         let endpoint: SocketAddr = "127.0.0.1:3000".parse().unwrap();
         let secret = StaticSecret::from([99; 32]);
@@ -387,9 +441,20 @@ mod tests {
         ip[12..16].copy_from_slice(&[192, 0, 2, 1]);
         ip[16..20].copy_from_slice(&[192, 0, 2, 9]);
         let mut batch = vec![0; 16];
-        let initiation = hub
-            .send_with(&ip, Some((&mut batch, 16)), |_, bytes| bytes.to_vec())
-            .unwrap();
+        let initiation = if prepared {
+            #[cfg(all(feature = "tun-device", target_os = "linux"))]
+            {
+                batch.resize(32 + ip.len(), 0);
+                batch[16..16 + ip.len()].copy_from_slice(&ip);
+                hub.send_prepared(&mut batch, ip.len(), |_, bytes| bytes.to_vec())
+                    .unwrap()
+            }
+            #[cfg(not(all(feature = "tun-device", target_os = "linux")))]
+            unreachable!()
+        } else {
+            hub.send_with(&ip, Some((&mut batch, 16)), |_, bytes| bytes.to_vec())
+                .unwrap()
+        };
         batch.fill(0);
 
         let mut scratch = vec![0; 9100];

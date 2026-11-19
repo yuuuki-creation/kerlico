@@ -80,6 +80,44 @@ fn borrowed_records_stay_in_receive_storage_and_other_streams_remain_readable() 
 }
 
 #[test]
+fn a_new_receive_owner_preserves_the_previous_owners_queued_prefix() {
+    let mut f = Fixture::new();
+    f.stream.core.rx.lock().unwrap().queue.push(b"first ");
+    f.frame(1, b"second");
+    f.queued_records();
+    {
+        let mut slot = f.stream.session.rx.lock().unwrap();
+        let mut direct = Direct::reader(1, 32);
+        assert!(pump(&f.stream.session, slot.as_mut().unwrap(), &mut direct).unwrap());
+        assert_eq!(direct.count, 0);
+    }
+    let mut data = [0; 12];
+    assert_eq!(f.stream.read_for(&mut data, Duration::from_secs(1)).unwrap(), data.len());
+    assert_eq!(&data, b"first second");
+}
+
+#[test]
+fn a_resumed_plaintext_frame_stays_intact_when_the_socket_is_readable() {
+    let mut f = Fixture::new();
+    let inner = &f.stream.session;
+    let mut slot = inner.rx.lock().unwrap();
+    let side = slot.as_mut().unwrap();
+    side.reader = Reader::stream(None);
+    let mut pending = Vec::new();
+    frame::push_data(&mut pending, 1, b"earlier");
+    side.reader.buf[..pending.len()].copy_from_slice(&pending);
+    side.reader.end = pending.len();
+    side.pending = Some(0..pending.len());
+    let mut next = Vec::new();
+    frame::push_data(&mut next, 1, b"latest!");
+    f.peer.write_all(&next).unwrap();
+    let mut direct = Direct::reader(1, 32);
+    assert!(pump(inner, side, &mut direct).unwrap());
+    assert_eq!(direct.count, 1);
+    assert_eq!(&side.reader.buf[direct.ranges[0].clone()], b"earlier");
+}
+
+#[test]
 fn short_reads_and_borrowed_reads_share_one_ordered_cursor() {
     let mut f = Fixture::new();
     let payload: Vec<u8> = (0..65_000).map(|i| (i % 251) as u8).collect();

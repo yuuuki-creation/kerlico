@@ -1,3 +1,4 @@
+mod input;
 use std::collections::VecDeque;
 use std::io;
 use std::net::UdpSocket;
@@ -6,10 +7,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::task::Poll;
 
-use bytes::Bytes;
-use futures_util::{Sink, Stream};
+use bytes::BytesMut;
+use futures_util::Sink;
 use tokio::io::unix::AsyncFd;
-use tun_rs::async_framed::{BytesCodec, DeviceFramedRead, DeviceFramedWrite};
+use tun_rs::async_framed::{DeviceFramedWrite, Encoder};
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
 use super::udp_batch::{ReceiveBatch, SendBatch};
@@ -17,9 +18,37 @@ use super::{
     carrier_endpoint, check_tun_mtu, deliver_via, unmapped, TunBinding, TunCarrier, POLL, QUEUE,
 };
 use crate::linux_link::{LinkState, Monitor};
-use crate::{uapi, Hub};
+use crate::{hub::HubEventRef, uapi, Hub};
 
 const BURST: usize = 64;
+
+// DeviceFramedWrite appends to its own GRO arena before start_send returns.
+struct TunPayload;
+impl Encoder<&[u8]> for TunPayload {
+    type Error = io::Error;
+    fn encode(&mut self, packet: &[u8], storage: &mut BytesMut) -> io::Result<()> {
+        storage.extend_from_slice(packet);
+        Ok(())
+    }
+}
+
+fn deliver_packet(
+    packet: &[u8],
+    queue: &mut VecDeque<Vec<u8>>,
+    submitted: &mut usize,
+    mut try_write: impl FnMut(&[u8]) -> io::Result<bool>,
+) -> io::Result<()> {
+    if queue.len() + *submitted >= QUEUE {
+        return Ok(());
+    }
+    if queue.is_empty() && try_write(packet)? {
+        *submitted += 1;
+    } else {
+        // The hub will reuse the plaintext scratch on the next datagram.
+        queue.push_back(packet.to_vec());
+    }
+    Ok(())
+}
 
 pub(crate) fn run(
     name: &str,
@@ -85,6 +114,8 @@ fn watch(socket: Option<&UdpSocket>) -> io::Result<Option<AsyncFd<UdpSocket>>> {
     socket
         .map(|socket| {
             let fd = socket.try_clone()?;
+            // Older kernels simply continue delivering individual datagrams.
+            let _ = super::udp_batch::enable_gro(&fd);
             // SAFETY: the registration owns this descriptor. It is not closed
             // or registered elsewhere while AsyncFd is live.
             Ok(unsafe { AsyncFd::register_with_interest(fd, tokio::io::Interest::READABLE)? })
@@ -100,8 +131,9 @@ async fn drive(
     requests: Option<Receiver<uapi::Request>>,
 ) -> io::Result<()> {
     let (dual, reserved) = (binding.carrier.dual, binding.carrier.reserved);
-    let mut reader = DeviceFramedRead::new(tun.clone(), BytesCodec::new());
-    let mut writer = DeviceFramedWrite::new(tun.clone(), BytesCodec::new());
+    let mut reader = input::Input::new();
+    let mut mtu = hub.mtu();
+    let mut writer = DeviceFramedWrite::new(tun.clone(), TunPayload);
     let mut carrier = watch(binding.socket.as_ref())?;
     let mut receive = ReceiveBatch::new();
     let mut batches = SendBatch::default();
@@ -117,12 +149,13 @@ async fn drive(
             retry_tun = false;
             for link in state.try_iter().take(BURST) {
                 hub.update_mtu(link.mtu);
-                reader.set_read_buffer_size(link.mtu.saturating_add(tun_rs::VIRTIO_NET_HDR_LEN));
+                mtu = hub.mtu();
                 if binding.up == link.up {
                     continue;
                 }
                 // Release the registered clone before changing or releasing the port.
                 drop(carrier.take());
+                receive.discard_pending();
                 binding.up = link.up;
                 if link.up {
                     match binding
@@ -143,8 +176,8 @@ async fn drive(
                     hub.reset_transport();
                     queue.clear();
                     submitted = 0;
-                    reader = DeviceFramedRead::new(tun.clone(), BytesCodec::new());
-                    writer = DeviceFramedWrite::new(tun.clone(), BytesCodec::new());
+                    reader.discard();
+                    writer = DeviceFramedWrite::new(tun.clone(), TunPayload);
                     let mut discarded = vec![0; u16::MAX as usize + tun_rs::VIRTIO_NET_HDR_LEN];
                     for _ in 0..QUEUE {
                         if !matches!(tun.try_recv(&mut discarded), Ok(1..)) {
@@ -157,7 +190,11 @@ async fn drive(
             if let Some(requests) = &requests {
                 for request in requests.try_iter().take(4) {
                     drop(carrier.take());
+                    let previous = binding.port;
                     binding.control(&mut hub, request);
+                    if binding.port != previous {
+                        receive.discard_pending();
+                    }
                     carrier = watch(binding.socket.as_ref())?;
                 }
             }
@@ -166,26 +203,28 @@ async fn drive(
         let mut full_turn = false;
         let socket = binding.socket.as_ref();
         if binding.up && !retry_tun {
-            for i in 0..BURST {
-                match Pin::new(&mut reader).poll_next(cx) {
-                    Poll::Ready(Some(Ok(packet))) => {
+            // Service one bounded TUN batch before flushing the UDP trains.
+            // No packet is held when the TUN reader first returns Pending.
+            for i in 0..tun_rs::IDEAL_BATCH_SIZE {
+                match reader.poll_slot(cx, &tun, &mut batches, mtu) {
+                    Poll::Ready(Ok(Some(slot))) => {
                         if let Some(socket) = socket {
-                            batches.encode(socket, |buffer, offset| {
-                                hub.send_with(&packet, Some((buffer, offset)), |peer, frame| {
+                            batches.encode_prepared(socket, slot.start, slot.stride, |storage| {
+                                hub.send_prepared(storage, slot.ip_len, |peer, frame| {
                                     reserved.apply(frame, false);
                                     (carrier_endpoint(peer, dual), frame.len())
                                 })
                             });
                         }
-                        full_turn |= i + 1 == BURST;
+                        full_turn |= i + 1 == tun_rs::IDEAL_BATCH_SIZE;
                     }
                     Poll::Pending => break,
-                    Poll::Ready(None) => return Poll::Ready(Ok(())),
-                    Poll::Ready(Some(Err(error))) if changed_interface(&error) => {
+                    Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
+                    Poll::Ready(Err(error)) if changed_interface(&error) => {
                         retry_tun = true;
                         break;
                     }
-                    Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 }
             }
             if let Some(socket) = socket {
@@ -194,33 +233,60 @@ async fn drive(
         }
         if let Some(registered) = carrier.as_ref() {
             let socket = registered.get_ref();
-            let mut emit = |event| {
-                deliver_via(
-                    dual,
-                    reserved,
-                    event,
-                    |peer, frame| {
-                        let _ = socket.send_to(&frame, peer);
-                    },
-                    |packet| {
-                        if queue.len() + submitted < QUEUE {
-                            queue.push_back(packet);
-                        }
-                    },
-                )
-            };
             let mut n = 0;
             while n < BURST {
-                let mut ready = match registered.poll_read_ready(cx) {
-                    Poll::Pending => break,
-                    Poll::Ready(result) => result?,
+                let ready = if receive.has_pending() {
+                    None
+                } else {
+                    match registered.poll_read_ready(cx) {
+                        Poll::Pending => break,
+                        Poll::Ready(result) => Some(result?),
+                    }
                 };
-                match ready.try_io(|_| {
+                let mut tun_error = None;
+                let mut read = || {
                     receive.read(socket, BURST - n, |from, packet| {
                         reserved.apply(packet, true);
-                        hub.receive(unmapped(from, dual), packet, &mut emit);
+                        hub.receive_with(unmapped(from, dual), packet, |event| match event {
+                            HubEventRef::Datagram(endpoint, wire) => {
+                                reserved.apply(wire, false);
+                                let _ = socket.send_to(wire, carrier_endpoint(endpoint, dual));
+                            }
+                            HubEventRef::Packet(_, _, ip) if tun_error.is_none() => {
+                                if let Err(error) =
+                                    deliver_packet(ip, &mut queue, &mut submitted, |bytes| {
+                                        if retry_tun {
+                                            return Ok(false);
+                                        }
+                                        match Sink::<&[u8]>::poll_ready(Pin::new(&mut writer), cx) {
+                                            Poll::Pending => Ok(false),
+                                            Poll::Ready(Err(e)) if changed_interface(&e) => {
+                                                retry_tun = true;
+                                                Ok(false)
+                                            }
+                                            Poll::Ready(status) => {
+                                                status?;
+                                                Pin::new(&mut writer).start_send(bytes)?;
+                                                Ok(true)
+                                            }
+                                        }
+                                    })
+                                {
+                                    tun_error = Some(error);
+                                }
+                            }
+                            HubEventRef::Packet(..) => {}
+                        });
                     })
-                }) {
+                };
+                let result = match ready {
+                    Some(mut ready) => ready.try_io(|_| read()),
+                    None => Ok(read()),
+                };
+                if let Some(error) = tun_error {
+                    return Poll::Ready(Err(error));
+                }
+                match result {
                     // WouldBlock cleared readiness. Poll again to register the
                     // next packet's waker before returning to the executor.
                     Err(_) => continue,
@@ -241,7 +307,21 @@ async fn drive(
             }
             full_turn |= n == BURST;
             if maintenance {
-                hub.tick(emit);
+                hub.tick(|event| {
+                    deliver_via(
+                        dual,
+                        reserved,
+                        event,
+                        |peer, wire| {
+                            let _ = socket.send_to(&wire, peer);
+                        },
+                        |ip| {
+                            if queue.len() + submitted < QUEUE {
+                                queue.push_back(ip);
+                            }
+                        },
+                    )
+                });
             }
         }
 
@@ -250,7 +330,7 @@ async fn drive(
                 if queue.is_empty() {
                     break;
                 }
-                match Sink::<Bytes>::poll_ready(Pin::new(&mut writer), cx) {
+                match Sink::<&[u8]>::poll_ready(Pin::new(&mut writer), cx) {
                     Poll::Pending => break,
                     Poll::Ready(Err(e)) if changed_interface(&e) => {
                         retry_tun = true;
@@ -258,11 +338,11 @@ async fn drive(
                     }
                     Poll::Ready(result) => result?,
                 }
-                Pin::new(&mut writer).start_send(Bytes::from(queue.pop_front().unwrap()))?;
+                Pin::new(&mut writer).start_send(&queue.pop_front().unwrap())?;
                 submitted += 1;
             }
             if submitted != 0 {
-                match Sink::<Bytes>::poll_flush(Pin::new(&mut writer), cx) {
+                match Sink::<&[u8]>::poll_flush(Pin::new(&mut writer), cx) {
                     Poll::Ready(Ok(())) => {
                         submitted = 0;
                         full_turn |= !queue.is_empty();
@@ -284,4 +364,33 @@ async fn drive(
 fn changed_interface(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::WouldBlock
         || matches!(error.raw_os_error(), Some(libc::ENETDOWN | libc::EIO))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn backpressure_preserves_borrowed_bytes_and_queue_order() -> io::Result<()> {
+        let mut queue = VecDeque::new();
+        let mut submitted = 0;
+        let mut frame = [1u8; 160];
+        deliver_packet(&frame, &mut queue, &mut submitted, |_| Ok(true))?;
+        assert!(queue.is_empty());
+        assert_eq!(submitted, 1);
+        frame.fill(2);
+        deliver_packet(&frame, &mut queue, &mut submitted, |_| Ok(false))?;
+        frame.fill(3);
+        deliver_packet(&frame, &mut queue, &mut submitted, |_| {
+            panic!("queued packet overtaken")
+        })?;
+        frame.fill(4);
+        assert_eq!(queue.pop_front().unwrap(), [2; 160]);
+        assert_eq!(queue.pop_front().unwrap(), [3; 160]);
+        submitted = QUEUE;
+        deliver_packet(&frame, &mut queue, &mut submitted, |_| {
+            panic!("over budget")
+        })?;
+        assert!(queue.is_empty());
+        Ok(())
+    }
 }

@@ -25,6 +25,8 @@ protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依�
 
 本机 SOCKS5/HTTP 入口只在客户端叶子里有一份，见下文「客户端叶子和本机入口」。
 
+AnyTLS 共享 crate 使用 `ring` 认证并解开接收记录，使用工作区的 `rama-boring` 将 TLS 发送记录封装到指定缓冲区。密钥和下一记录序号由同一握手状态提供。
+
 mieru 共享 crate 的运行时加密依赖是 `chacha20` 和 `ring`，组合实现既有 XChaCha20-Poly1305；原 `chacha20poly1305` 留作测试对照依赖。该变化没有增加协议或角色 feature。`kerlico-shared::Traffic` 在建流时返回 `TrafficCounters`，注册和查询仍由服务端拥有，出站持有计数句柄。
 
 mieru 共享 crate 在 Linux 上通过 `libc` 的 `recvmmsg` 批量接收 UDP 数据报，复用每个接收器自己的消息头、地址和缓冲区。该直接依赖只在 Linux 启用。

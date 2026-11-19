@@ -158,11 +158,15 @@ impl Session {
         ret
     }
 
-    /// src - an IP packet from the interface
+    /// The plaintext is already in the data region, following the 16-byte header.
     /// dst - pre-allocated space to hold the encapsulating UDP packet to send over the network
     /// returns the size of the formatted packet
-    pub(super) fn format_packet_data<'a>(&self, src: &[u8], dst: &'a mut [u8]) -> &'a mut [u8] {
-        if dst.len() < src.len() + super::DATA_OVERHEAD_SZ {
+    pub(super) fn format_packet_data<'a>(
+        &self,
+        plain_len: usize,
+        dst: &'a mut [u8],
+    ) -> &'a mut [u8] {
+        if dst.len() < plain_len + super::DATA_OVERHEAD_SZ {
             panic!("The destination buffer is too small");
         }
 
@@ -180,16 +184,15 @@ impl Session {
         let n = {
             let mut nonce = [0u8; 12];
             nonce[4..12].copy_from_slice(&sending_key_counter.to_le_bytes());
-            data[..src.len()].copy_from_slice(src);
             self.sender
                 .seal_in_place_separate_tag(
                     Nonce::assume_unique_for_key(nonce),
                     Aad::from(&[]),
-                    &mut data[..src.len()],
+                    &mut data[..plain_len],
                 )
                 .map(|tag| {
-                    data[src.len()..src.len() + AEAD_SIZE].copy_from_slice(tag.as_ref());
-                    src.len() + AEAD_SIZE
+                    data[plain_len..plain_len + AEAD_SIZE].copy_from_slice(tag.as_ref());
+                    plain_len + AEAD_SIZE
                 })
                 .unwrap()
         };

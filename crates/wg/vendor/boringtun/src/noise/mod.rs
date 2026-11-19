@@ -266,21 +266,39 @@ impl Tunn {
     /// Panics if dst buffer is too small.
     /// Size of dst should be at least src.len() + 32, and no less than 148 bytes.
     pub fn encapsulate<'a>(&mut self, src: &[u8], dst: &'a mut [u8]) -> TunnResult<'a> {
+        self.encapsulate_payload(Some(src), src.len(), dst)
+    }
+
+    /// Encapsulate initialized and padded IP bytes at offset 16 of the wire buffer.
+    /// The output has the same size requirements as encapsulate.
+    pub fn encapsulate_prepared<'a>(&mut self, len: usize, dst: &'a mut [u8]) -> TunnResult<'a> {
+        self.encapsulate_payload(None, len, dst)
+    }
+
+    fn encapsulate_payload<'a>(
+        &mut self,
+        source: Option<&[u8]>,
+        len: usize,
+        dst: &'a mut [u8],
+    ) -> TunnResult<'a> {
         let current = self.current;
         if let Some(ref session) = self.sessions[current % N_SESSIONS] {
             // Send the packet using an established session
-            let packet = session.format_packet_data(src, dst);
+            if let Some(source) = source {
+                dst[16..16 + len].copy_from_slice(source);
+            }
+            let packet = session.format_packet_data(len, dst);
             self.timer_tick(TimerName::TimeLastPacketSent);
             // Exclude Keepalive packets from timer update.
-            if !src.is_empty() {
+            if len != 0 {
                 self.timer_tick(TimerName::TimeLastDataPacketSent);
             }
-            self.tx_bytes += src.len();
+            self.tx_bytes += len;
             return TunnResult::WriteToNetwork(packet);
         }
 
         // If there is no session, queue the packet for future retry
-        self.queue_packet(src);
+        self.queue_packet(source.unwrap_or_else(|| &dst[16..16 + len]));
         // Initiate a new handshake if none is in progress
         self.format_handshake_initiation(dst, false)
     }
@@ -374,7 +392,7 @@ impl Tunn {
 
         let session = self.handshake.receive_handshake_response(p)?;
 
-        let keepalive_packet = session.format_packet_data(&[], dst);
+        let keepalive_packet = session.format_packet_data(0, dst);
         // Store new session in ring buffer
         let l_idx = session.local_index();
         let index = l_idx % N_SESSIONS;

@@ -1,14 +1,12 @@
-//! Initialized PSH/TLS storage lent to the outbound socket reader.
-//!
-//! Payload, frame headers and TLS overhead have disjoint regions. Preparing
-//! input consumes no nonce; sealing uses the session's one transmit cipher.
+//! The origin fills at most two PSH payloads. TLS seals from that plaintext
+//! directly into the contiguous buffer sent to the socket.
 
 use std::io;
 use std::ops::Range;
 
 use kerlico_shared::WriteInput;
 
-use super::{frame, Cipher, CMD_PSH, CONTENT_APPDATA, MAX_DATA, MAX_PLAIN};
+use super::{frame, SendCipher, CMD_PSH, CONTENT_APPDATA, MAX_DATA, MAX_PLAIN};
 
 const FRAMES: usize = 2;
 
@@ -19,7 +17,7 @@ pub(crate) enum Format {
 }
 
 impl Format {
-    pub(crate) fn cipher(cipher: &Cipher) -> Self {
+    pub(crate) fn cipher(cipher: &SendCipher) -> Self {
         Self::Tls {
             prefix: cipher.prefix_len(),
             trailer: 16 + usize::from(cipher.is_tls13()),
@@ -34,20 +32,11 @@ impl Format {
     }
 }
 
-struct Record {
-    start: usize,
-    first_part: usize,
-    last_part: usize,
-}
-
 pub(crate) struct Input {
-    pub(crate) storage: Vec<u8>,
-    parts: Vec<Range<usize>>,
-    headers: [Range<usize>; FRAMES],
-    records: Vec<Record>,
-    ends: Vec<usize>,
+    storage: Vec<u8>,
+    output: Vec<u8>,
+    parts: [Range<usize>; FRAMES],
     format: Format,
-    size: usize,
     pub(crate) filled: usize,
 }
 
@@ -56,66 +45,25 @@ pub(crate) struct Encoded {
     pub(crate) len: usize,
 }
 
+const FRAME_SIZE: usize = frame::HEADER + MAX_DATA;
+const CAPACITY: usize = FRAMES * FRAME_SIZE;
+
 impl Input {
     pub(crate) fn new(format: Format) -> Self {
-        let (prefix, trailer) = format.overhead();
-        let mut parts = Vec::new();
-        let mut headers = std::array::from_fn(|_| 0..0);
-        let mut records = Vec::new();
-        let mut at = 0;
-        let mut plain = MAX_PLAIN;
-        for header in &mut headers {
-            if plain == MAX_PLAIN {
-                records.push(Record {
-                    start: at,
-                    first_part: parts.len(),
-                    last_part: parts.len(),
-                });
-                at += prefix;
-                plain = 0;
-            }
-            // With two 65535-byte frames, headers begin at plaintext offsets
-            // zero and six within a TLS record; neither header is split.
-            assert!(MAX_PLAIN - plain >= frame::HEADER);
-            *header = at..at + frame::HEADER;
-            at += frame::HEADER;
-            plain += frame::HEADER;
-            let mut left = MAX_DATA;
-            while left != 0 {
-                if plain == MAX_PLAIN {
-                    at += trailer;
-                    records.push(Record {
-                        start: at,
-                        first_part: parts.len(),
-                        last_part: parts.len(),
-                    });
-                    at += prefix;
-                    plain = 0;
-                }
-                let n = left.min(MAX_PLAIN - plain);
-                parts.push(at..at + n);
-                records.last_mut().expect("record").last_part = parts.len();
-                at += n;
-                plain += n;
-                left -= n;
-            }
-        }
-        at += trailer;
-        let ends = vec![0; records.len()];
+        let parts = std::array::from_fn(|index| {
+            let start = index * FRAME_SIZE + frame::HEADER;
+            start..start + MAX_DATA
+        });
         Self {
-            storage: vec![0; at],
+            storage: vec![0; CAPACITY],
+            output: Vec::new(),
             parts,
-            headers,
-            records,
-            ends,
             format,
-            size: at,
             filled: 0,
         }
     }
 
     pub(crate) fn borrow(&mut self) -> WriteInput<'_> {
-        assert_eq!(self.storage.len(), self.size);
         WriteInput::new(&mut self.storage, &self.parts, &mut self.filled)
     }
 
@@ -126,81 +74,61 @@ impl Input {
             let n = part.len().min(bytes.len() - used);
             self.storage[part.start..part.start + n].copy_from_slice(&bytes[used..used + n]);
             used += n;
-            if used == bytes.len() {
-                break;
-            }
+            if used == bytes.len() { break; }
         }
         self.filled = used;
         used
     }
 
-    /// Compute the active records without writing headers or consuming keys.
-    pub(crate) fn records(&mut self) -> usize {
-        let mut left = self.filled;
-        let mut count = 0;
-        for (index, record) in self.records.iter().enumerate() {
-            self.ends[index] = 0;
-            for part in &self.parts[record.first_part..record.last_part] {
-                let n = part.len().min(left);
-                if n == 0 {
-                    break;
-                }
-                self.ends[index] = part.start + n;
-                left -= n;
-            }
-            if self.ends[index] != 0 {
-                count += 1;
-            }
-        }
-        assert_eq!(left, 0);
-        count
+    fn plaintext_len(&self) -> usize {
+        self.filled + self.filled.div_ceil(MAX_DATA) * frame::HEADER
+    }
+
+    pub(crate) fn records(&self) -> usize {
+        self.plaintext_len().div_ceil(MAX_PLAIN)
     }
 
     pub(crate) fn seal(
         &mut self,
         sid: u32,
-        mut cipher: Option<&mut Cipher>,
+        mut cipher: Option<&mut SendCipher>,
         count: usize,
     ) -> io::Result<Encoded> {
-        if self.filled == 0 {
+        if self.filled == 0 || cipher.as_deref().map_or(Format::Plain, Format::cipher) != self.format {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let actual = cipher.as_deref().map_or(Format::Plain, Format::cipher);
-        if actual != self.format {
-            return Err(io::ErrorKind::InvalidInput.into());
+        let plain = self.plaintext_len();
+        debug_assert_eq!(count, plain.div_ceil(MAX_PLAIN));
+        for (index, chunk) in self.storage[..plain].chunks_mut(FRAME_SIZE).enumerate() {
+            let n = (self.filled - index * MAX_DATA).min(MAX_DATA);
+            chunk[..frame::HEADER].copy_from_slice(&frame::header(CMD_PSH, sid, n));
         }
-        for (index, header) in self.headers.iter().enumerate() {
-            let size = self.filled.saturating_sub(index * MAX_DATA).min(MAX_DATA);
-            if size == 0 {
-                break;
-            }
-            self.storage[header.clone()].copy_from_slice(&frame::header(CMD_PSH, sid, size));
-        }
+        let Some(cipher) = cipher.as_deref_mut() else {
+            return Ok(Encoded { storage: std::mem::take(&mut self.storage), len: plain });
+        };
         let (prefix, trailer) = self.format.overhead();
-        let mut end = 0;
-        for (record, &plain_end) in self.records.iter().zip(&self.ends).take(count) {
-            end = plain_end + trailer;
-            if let Some(cipher) = cipher.as_deref_mut() {
-                cipher.seal_in_place(
-                    &mut self.storage[record.start..end],
-                    plain_end - record.start - prefix,
-                    CONTENT_APPDATA,
-                );
-            }
+        let overhead = prefix + trailer;
+        let len = plain + count * overhead;
+        if self.output.len() < len {
+            self.output.reserve_exact(len - self.output.len());
+            self.output.resize(len, 0);
         }
-        // Keep the initialized length, including the unused final tail. The
-        // sender limits its wire view to `len`; recycling does not zero it.
-        Ok(Encoded {
-            storage: std::mem::take(&mut self.storage),
-            len: end,
-        })
+        let mut wire = &mut self.output[..len];
+        for payload in self.storage[..plain].chunks(MAX_PLAIN) {
+            let (record, rest) = wire.split_at_mut(payload.len() + overhead);
+            cipher.seal_from(payload, record, CONTENT_APPDATA)?;
+            wire = rest;
+        }
+        Ok(Encoded { storage: std::mem::take(&mut self.output), len })
     }
 
     pub(crate) fn recycle(&mut self, mut storage: Vec<u8>) {
-        if storage.len() != self.size {
-            storage.resize(self.size, 0);
+        if self.format == Format::Plain {
+            storage.resize(CAPACITY, 0);
+            self.storage = storage;
+        } else {
+            self.output = storage;
         }
-        self.storage = storage;
         self.filled = 0;
     }
 }
@@ -250,7 +178,8 @@ mod tests {
         let mut tx = Tx::new(Some(client.tx), client.pending, false);
         let mut input = Input::new(tx.input_format().unwrap());
         let address = input.storage.as_ptr();
-        for (index, size) in [1, 16_377, 65_535, 78_125, 131_070, 3]
+        let mut wire_address = None;
+        for (index, size) in [131_070, 1, 16_376, 16_377, 16_378, 65_534, 65_535, 65_536, 78_125, 3]
             .into_iter()
             .enumerate()
         {
@@ -284,7 +213,7 @@ mod tests {
                 }
             }
             let encoded = tx.seal_input(7, &mut input, &kernel).unwrap();
-            assert_eq!(encoded.storage.as_ptr(), address);
+            assert_eq!(*wire_address.get_or_insert(encoded.storage.as_ptr()), encoded.storage.as_ptr());
             let got = open(&mut peer, &encoded.storage[..encoded.len]);
             let mut expected = Vec::new();
             frame::push_data(&mut expected, 7, &payload);
@@ -292,7 +221,7 @@ mod tests {
             let tail = encoded.storage.last().copied();
             input.recycle(encoded.storage);
             assert_eq!(input.storage.as_ptr(), address);
-            assert_eq!(input.storage.last().copied(), tail);
+            assert_eq!(input.output.last().copied(), tail);
         }
     }
 

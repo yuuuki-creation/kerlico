@@ -44,14 +44,15 @@ pub struct PeerKeys {
     pub keepalive: u16,
 }
 
-pub(crate) enum Event {
-    Datagram(Vec<u8>),
-    Packet(Vec<u8>, IpAddr),
+pub(crate) enum Received<'a> {
+    Datagram(&'a mut [u8]),
+    Packet(&'a [u8], IpAddr),
 }
 
-pub(crate) struct Reception {
+pub(crate) struct Reception<'a> {
     pub authenticated: bool,
     pub handshake_completed: bool,
+    pub output: Option<Received<'a>>,
 }
 
 pub(crate) struct Wire {
@@ -91,8 +92,8 @@ impl Wire {
         })
     }
 
-    pub fn initiate(&mut self) -> Option<Event> {
-        collect(
+    pub fn initiate(&mut self) -> Option<Vec<u8>> {
+        datagram(
             self.inner
                 .format_handshake_initiation(&mut self.buffer, false),
         )
@@ -141,8 +142,32 @@ impl Wire {
         }
     }
 
-    pub fn tick(&mut self) -> Option<Event> {
-        collect(self.inner.update_timers(&mut self.buffer))
+    #[cfg(all(feature = "tun-device", target_os = "linux"))]
+    pub(crate) fn seal_prepared<'a>(
+        &mut self,
+        frame: &'a mut [u8],
+        n: usize,
+        mtu: usize,
+    ) -> Option<&'a mut [u8]> {
+        if n > mtu || n > MAX_IP_PACKET {
+            return None;
+        }
+        let padded = n.next_multiple_of(16).min(mtu);
+        let required = (padded + 32).max(148);
+        let frame = frame.get_mut(..required)?;
+        frame[16 + n..16 + padded].fill(0);
+        // A packet queued before the handshake later drains via this peer-owned buffer.
+        if self.buffer.len() < required {
+            self.buffer.resize(required, 0);
+        }
+        match self.inner.encapsulate_prepared(padded, frame) {
+            TunnResult::WriteToNetwork(wire) => Some(wire),
+            _ => None,
+        }
+    }
+
+    pub fn tick(&mut self) -> Option<Vec<u8>> {
+        datagram(self.inner.update_timers(&mut self.buffer))
     }
 
     #[cfg(all(feature = "tun-device", target_os = "linux"))]
@@ -150,43 +175,45 @@ impl Wire {
         self.inner.reset_transport();
     }
 
-    pub fn receive_verified(
+    pub fn receive_verified<'a>(
         &mut self,
         packet: VerifiedPacket<'_>,
         wire_len: usize,
-        mut emit: impl FnMut(Event),
-    ) -> Reception {
-        if wire_len > self.buffer.len() {
-            self.buffer.resize(wire_len, 0);
+        scratch: &'a mut Vec<u8>,
+    ) -> Reception<'a> {
+        // A handshake response may release outbound packets as large as the
+        // ones previously queued by send(), even if the response is short.
+        let capacity = wire_len.max(self.buffer.len());
+        if scratch.len() < capacity {
+            scratch.resize(capacity, 0);
         }
         let is_cookie = matches!(packet.packet(), Packet::PacketCookieReply(_));
-        let result = self.inner.handle_verified_packet(packet, &mut self.buffer);
-        let (authenticated, drain) = match &result {
-            TunnResult::Err(_) => (false, false),
-            TunnResult::WriteToNetwork(_) => (true, true),
-            _ => (true, false),
-        };
+        let result = self.inner.handle_verified_packet(packet, scratch);
+        let authenticated = !is_cookie && !matches!(result, TunnResult::Err(_));
         let handshake_completed = self.inner.take_handshake_completed();
-        if let Some(event) = collect(result) {
-            emit(event);
-        }
-        if drain {
-            while let Some(event) = collect(self.inner.decapsulate(None, &[], &mut self.buffer)) {
-                emit(event);
-            }
-        }
+        let output = match result {
+            TunnResult::WriteToNetwork(data) => Some(Received::Datagram(data)),
+            TunnResult::WriteToTunnelV4(data, addr) => Some(Received::Packet(data, addr.into())),
+            TunnResult::WriteToTunnelV6(data, addr) => Some(Received::Packet(data, addr.into())),
+            TunnResult::Done | TunnResult::Err(_) => None,
+        };
         Reception {
-            authenticated: authenticated && !is_cookie,
+            authenticated,
             handshake_completed,
+            output,
+        }
+    }
+
+    pub fn drain(&mut self, scratch: &mut [u8], mut send: impl FnMut(&mut [u8])) {
+        while let TunnResult::WriteToNetwork(data) = self.inner.decapsulate(None, &[], scratch) {
+            send(data);
         }
     }
 }
 
-fn collect(result: TunnResult<'_>) -> Option<Event> {
+fn datagram(result: TunnResult<'_>) -> Option<Vec<u8>> {
     match result {
-        TunnResult::WriteToNetwork(data) => Some(Event::Datagram(data.to_vec())),
-        TunnResult::WriteToTunnelV4(data, addr) => Some(Event::Packet(data.to_vec(), addr.into())),
-        TunnResult::WriteToTunnelV6(data, addr) => Some(Event::Packet(data.to_vec(), addr.into())),
-        TunnResult::Done | TunnResult::Err(_) => None,
+        TunnResult::WriteToNetwork(data) => Some(data.to_vec()),
+        _ => None,
     }
 }

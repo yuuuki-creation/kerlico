@@ -1193,7 +1193,7 @@ fn finish_next(inner: &Arc<Inner>, next: Next) -> bool {
 /// the records it completed. `Ok(false)` when the session is over.
 fn pump(inner: &Arc<Inner>, side: &mut RxSide, direct: &mut Direct) -> io::Result<bool> {
     if side.reader.cipher.is_none() {
-        if !pending_plain(inner, side, direct)? || direct.blocked { return Ok(!side.ended); }
+        if !pending_plain(inner, side, direct)? || direct.blocked || direct.delivered { return Ok(!side.ended); }
         let got = match &mut side.reader.library {
             Some(read) => read.read(&mut side.reader.buf),
             None => inner.read_socket(&mut side.reader.buf),
@@ -1659,7 +1659,9 @@ impl Parser {
         let own = direct.sid == Some(sid);
         let mut rx = core.rx.lock().expect("rx");
         if matches!(rx.parse, Parse::Data) {
-            let borrowed = if own { direct.capture(offset, chunk.len()) } else { 0 };
+            // Another receive owner may have queued an older prefix between
+            // the stream reader checking its queue and obtaining the socket.
+            let borrowed = if own && rx.queue.is_empty() { direct.capture(offset, chunk.len()) } else { 0 };
             let accepted = borrowed == chunk.len() || push_data(inner, core, rx, &chunk[borrowed..], own);
             direct.delivered |= own && accepted;
             direct.queued |= own && borrowed < chunk.len();

@@ -42,6 +42,10 @@ pub(super) fn forward(
     let Ok((pipe_out, pipe_in)) = pipe() else {
         return Ok(Outcome::Fallback);
     };
+    let mut bulk = BulkRead {
+        delivered: 0,
+        last: None,
+    };
     let mut delivered = |len| {
         pace.mark();
         count(len);
@@ -56,6 +60,9 @@ pub(super) fn forward(
         if stopped() {
             return Ok(Outcome::Stopped);
         }
+        if !bulk.ready(source).map_err(|_| OpenError::Transport)? {
+            continue;
+        }
         let mut remaining = match transfer(source.as_raw_fd(), pipe_in.as_raw_fd(), SLICE) {
             // Let the ordinary socket read disambiguate EOF from a socket
             // condition (such as an urgent mark) that splice cannot pass.
@@ -68,6 +75,7 @@ pub(super) fn forward(
             }
             Err(_) => return Err(OpenError::Transport),
         };
+        bulk.observe(remaining);
         while remaining > 0 {
             if stopped() {
                 return Ok(Outcome::Stopped);
@@ -248,5 +256,61 @@ mod tests {
             copy.join().unwrap();
             Ok(())
         })
+    }
+}
+
+// Allow consecutive TCP segments of an active bulk transfer to share a splice.
+// Poll before inspecting the queue so a short request after an idle period
+// can proceed immediately. The two sockets keep their caller's blocking mode.
+struct BulkRead {
+    delivered: usize,
+    last: Option<std::time::Instant>,
+}
+impl BulkRead {
+    fn observe(&mut self, bytes: usize) {
+        self.delivered = self.delivered.saturating_add(bytes);
+        self.last = Some(std::time::Instant::now());
+    }
+    fn ready(&self, source: &TcpStream) -> io::Result<bool> {
+        let Some(last) = self.last.filter(|_| self.delivered >= 256 * 1024) else {
+            return Ok(true);
+        };
+        let active = Duration::from_millis(20);
+        if last.elapsed() > active {
+            return Ok(true);
+        }
+        let mut entry = libc::pollfd {
+            fd: source.as_raw_fd(),
+            events: libc::POLLIN | libc::POLLRDHUP,
+            revents: 0,
+        };
+        let count = unsafe { libc::poll(&mut entry, 1, WAIT.as_millis() as _) };
+        if count < 0 {
+            let e = io::Error::last_os_error();
+            return if e.kind() == io::ErrorKind::Interrupted {
+                Ok(false)
+            } else {
+                Err(e)
+            };
+        }
+        if count == 0 {
+            return Ok(false);
+        }
+        if entry.revents != libc::POLLIN || last.elapsed() > active {
+            return Ok(true);
+        }
+        let mut available: libc::c_int = 0;
+        if unsafe { libc::ioctl(entry.fd, libc::FIONREAD, &mut available) } == 0
+            && (8192..49152).contains(&available)
+        {
+            let pause = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 80_000,
+            };
+            unsafe {
+                libc::clock_nanosleep(libc::CLOCK_MONOTONIC, 0, &pause, std::ptr::null_mut());
+            }
+        }
+        Ok(true)
     }
 }

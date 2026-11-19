@@ -81,6 +81,36 @@ impl AeadKey {
         Ok(())
     }
 
+    /// Encrypt a plaintext slice and its suffix into one separate ciphertext and tag.
+    pub fn seal_from(
+        &self,
+        nonce: &[u8; 12],
+        aad: &[u8],
+        plaintext: &[u8],
+        suffix: &[u8],
+        output: &mut [u8],
+    ) -> Result<(), ErrorStack> {
+        let tail_len = suffix.len().checked_add(16).ok_or_else(ErrorStack::get)?;
+        if output.len().checked_sub(plaintext.len()) != Some(tail_len) {
+            return Err(ErrorStack::get());
+        }
+        let (body, tail) = output.split_at_mut(plaintext.len());
+        let mut written = 0;
+        // The two output regions are disjoint. BoringSSL writes the encrypted
+        // suffix immediately before the tag, so the input needs no trailer.
+        unsafe {
+            cvt(ffi::EVP_AEAD_CTX_seal_scatter(
+                self.0.as_ptr(), body.as_mut_ptr(), tail.as_mut_ptr(), &mut written,
+                tail.len(), nonce.as_ptr(), nonce.len(), plaintext.as_ptr(), plaintext.len(),
+                suffix.as_ptr(), suffix.len(), aad.as_ptr(), aad.len(),
+            ))?;
+        }
+        if written != tail.len() {
+            return Err(ErrorStack::get());
+        }
+        Ok(())
+    }
+
     /// Authenticate and decrypt in place, returning the plaintext prefix.
     pub fn open_in_place<'a>(
         &self,
@@ -149,6 +179,14 @@ mod tests {
             ciphertext.resize(plaintext.len() + 16, 0);
             key.seal_in_place(&nonce, &aad, &mut ciphertext).unwrap();
             assert_eq!(ciphertext, expected);
+            for split in 0..=plaintext.len() {
+                let (body, suffix) = plaintext.split_at(split);
+                let mut separate = vec![0; expected.len()];
+                key.seal_from(&nonce, &aad, body, suffix, &mut separate).unwrap();
+                assert_eq!(separate, expected);
+                separate.pop();
+                assert!(key.seal_from(&nonce, &aad, body, suffix, &mut separate).is_err());
+            }
             assert_eq!(
                 key.open_in_place(&nonce, &aad, &mut ciphertext).unwrap(),
                 plaintext

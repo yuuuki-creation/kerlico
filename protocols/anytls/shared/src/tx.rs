@@ -9,7 +9,7 @@ use std::task::Waker;
 
 use crate::frame::{self, CMD_PSH, CMD_WASTE, HEADER, MAX_DATA};
 use crate::padding::{SchemeCell, CHECK};
-use crate::tls::{key_update, Cipher, Kernel, CONTENT_APPDATA, MAX_PLAIN, RECORD_LIMIT};
+use crate::tls::{key_update, Kernel, SendCipher, CONTENT_APPDATA, MAX_PLAIN, RECORD_LIMIT};
 
 const CONTENT_ALERT: u8 = 21;
 const CONTENT_HANDSHAKE: u8 = 22;
@@ -82,7 +82,7 @@ impl Rate {
 }
 
 pub(crate) struct Tx {
-    cipher: Option<Cipher>,
+    cipher: Option<SendCipher>,
     plaintext: bool,
     pub(crate) out: Vec<u8>,
     pub(crate) spare: Vec<u8>,
@@ -114,7 +114,7 @@ pub(crate) struct Tx {
 }
 
 impl Tx {
-    pub(crate) fn new(cipher: Option<Cipher>, pending: Vec<u8>, client: bool) -> Self {
+    pub(crate) fn new(cipher: Option<SendCipher>, pending: Vec<u8>, client: bool) -> Self {
         Self {
             cipher,
             plaintext: false,
@@ -335,7 +335,7 @@ impl Tx {
     }
 
     fn prefix_len(&self) -> usize {
-        self.cipher.as_ref().map_or(if self.plaintext { 0 } else { 2 }, Cipher::prefix_len)
+        self.cipher.as_ref().map_or(if self.plaintext { 0 } else { 2 }, SendCipher::prefix_len)
     }
 
     fn open_record(&mut self, kernel: &Mutex<Kernel>) -> io::Result<usize> {

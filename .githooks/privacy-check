@@ -77,6 +77,7 @@ VENDORED_CARGO = {
 # Reviewed local TLS changes. Keep the archive manifest pins above so that
 # pushes still check earlier commits and every unchanged vendored file.
 REVIEWED_VENDOR_PATCHES = {
+    b"vendor/rama-boring/src/aead.rs": "d4e23e7fe02eb38623cd434f022592db0fbbbfd9c1335259b8e9ec881c299220",
     b"vendor/rama-boring/src/ssl/mod.rs": "d69d66a11d59d896318644de9b2f9a20025ddd424e1d156763bff925c5dea14b",
     b"vendor/rama-boring-sys/build/main.rs": "1ee020d00d1ce6df9bee7fd00162538bfbc1abe63486fa2a287a451021f62b52",
     b"vendor/rama-boring-sys/patches/kerlico_hello_mutator.patch": "a649736eab5b59dcc371464a6457a46ea1b3f15a6f55a078599893fdc7763865",

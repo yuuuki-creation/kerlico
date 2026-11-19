@@ -11,6 +11,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use kerlico_tls::advanced::{self, AdvancedTlsClientConfig, AdvancedTlsOptions,
                             AdvancedTlsServerConfig, AdvancedTlsWrite, TlsCertificate};
 pub use kerlico_tls::advanced::{TlsNetwork, TlsNetworkRequest, TlsNetworkResponse};
+use boring2::aead::{AeadKey, Algorithm as NativeAlgorithm};
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::{ClientConnectionData, Resumption, UnbufferedClientConnection, WebPkiServerVerifier};
@@ -426,13 +427,13 @@ impl Kernel {
         version == rustls::ProtocolVersion::TLSv1_3
     }
 
-    pub(crate) fn next_tx(&mut self) -> io::Result<Cipher> {
+    pub(crate) fn next_tx(&mut self) -> io::Result<SendCipher> {
         let secrets = match self {
             Self::Client(kernel) => kernel.update_tx_secret(),
             Self::Server(kernel) => kernel.update_tx_secret(),
             Self::Library => return Err(invalid("library TLS owns the send keys")),
         };
-        Cipher::new(secrets.map_err(|error| invalid(error.to_string()))?, true)
+        SendCipher::for_send(secrets.map_err(|error| invalid(error.to_string()))?, true)
     }
 
     pub(crate) fn next_rx(&mut self) -> io::Result<Cipher> {
@@ -475,7 +476,7 @@ pub(crate) struct Records {
     pub(crate) early: Vec<u8>,
     /// The client's last flight, held back so it leaves with the first AnyTLS bytes.
     pub(crate) pending: Vec<u8>,
-    pub(crate) tx: Cipher,
+    pub(crate) tx: SendCipher,
     pub(crate) rx: Cipher,
     pub(crate) kernel: Kernel,
 }
@@ -641,7 +642,7 @@ impl HandshakeIo {
             rx_len: incoming.filled,
             early: self.early,
             pending,
-            tx: Cipher::new(secrets.tx, tls13)?,
+            tx: SendCipher::for_send(secrets.tx, tls13)?,
             rx: Cipher::new(secrets.rx, tls13)?,
             kernel,
         };
@@ -649,90 +650,109 @@ impl HandshakeIo {
     }
 }
 
-/// One direction of the TLS record layer.
-pub(crate) struct Cipher {
-    key: LessSafeKey,
+/// The receiving and sending keys retain the same negotiated record parameters.
+pub(crate) type Cipher = RecordCipher<LessSafeKey>;
+pub(crate) type SendCipher = RecordCipher<AeadKey>;
+
+pub(crate) struct RecordCipher<K> {
+    key: K,
     iv: [u8; 12],
     seq: u64,
     tls13: bool,
     explicit: usize,
 }
 
-impl Cipher {
-    fn new((seq, secrets): (u64, ConnectionTrafficSecrets), tls13: bool) -> io::Result<Self> {
-        let (algorithm, key, iv) = match &secrets {
-            ConnectionTrafficSecrets::Aes128Gcm { key, iv } => (&aead::AES_128_GCM, key, iv),
-            ConnectionTrafficSecrets::Aes256Gcm { key, iv } => (&aead::AES_256_GCM, key, iv),
-            ConnectionTrafficSecrets::Chacha20Poly1305 { key, iv } => (&aead::CHACHA20_POLY1305, key, iv),
+impl<K> RecordCipher<K> {
+    fn with_key(
+        (seq, secrets): (u64, ConnectionTrafficSecrets),
+        tls13: bool,
+        prepare: impl FnOnce(&'static aead::Algorithm, NativeAlgorithm, &[u8]) -> io::Result<K>,
+    ) -> io::Result<Self> {
+        let (open, seal, key, iv) = match &secrets {
+            ConnectionTrafficSecrets::Aes128Gcm { key, iv } => (&aead::AES_128_GCM, NativeAlgorithm::Aes128Gcm, key, iv),
+            ConnectionTrafficSecrets::Aes256Gcm { key, iv } => (&aead::AES_256_GCM, NativeAlgorithm::Aes256Gcm, key, iv),
+            ConnectionTrafficSecrets::Chacha20Poly1305 { key, iv } => (&aead::CHACHA20_POLY1305, NativeAlgorithm::ChaCha20Poly1305, key, iv),
             _ => return Err(invalid("cipher suite")),
         };
-        let key = UnboundKey::new(algorithm, key.as_ref()).map_err(|_| invalid("traffic key"))?;
-        let mut nonce = [0u8; 12];
+        let key = prepare(open, seal, key.as_ref())?;
+        let mut nonce = [0; 12];
         nonce.copy_from_slice(iv.as_ref());
-        // TLS 1.2 AES-GCM carries the last eight nonce bytes in the record. ChaCha20
-        // and all TLS 1.3 suites derive them from the sequence number on both sides.
-        let explicitly_encoded = !tls13 && !matches!(&secrets, ConnectionTrafficSecrets::Chacha20Poly1305 { .. });
-        let explicit = if explicitly_encoded { 8 } else { 0 };
-        Ok(Self { key: LessSafeKey::new(key), iv: nonce, seq, tls13, explicit })
+        let explicit = if !tls13 && seal != NativeAlgorithm::ChaCha20Poly1305 { 8 } else { 0 };
+        Ok(Self { key, iv: nonce, seq, tls13, explicit })
     }
 
-    pub(crate) fn seq(&self) -> u64 {
-        self.seq
-    }
+    pub(crate) fn seq(&self) -> u64 { self.seq }
+    pub(crate) fn is_tls13(&self) -> bool { self.tls13 }
+    pub(crate) fn prefix_len(&self) -> usize { 5 + self.explicit }
 
-    pub(crate) fn is_tls13(&self) -> bool {
-        self.tls13
-    }
-
-    pub(crate) fn prefix_len(&self) -> usize {
-        5 + self.explicit
-    }
-
-    fn nonce(&self) -> Nonce {
+    fn nonce_bytes(&self) -> [u8; 12] {
         let mut nonce = self.iv;
         for (byte, seq) in nonce[4..].iter_mut().zip(self.seq.to_be_bytes()) {
             *byte ^= seq;
         }
-        Nonce::assume_unique_for_key(nonce)
+        nonce
+    }
+}
+
+impl SendCipher {
+    fn for_send(secrets: (u64, ConnectionTrafficSecrets), tls13: bool) -> io::Result<Self> {
+        Self::with_key(secrets, tls13, |_, algorithm, key| {
+            AeadKey::new(algorithm, key).map_err(|_| invalid("traffic key"))
+        })
     }
 
-    /// Seals the record whose 5 header bytes start at `start`; its plaintext runs to the end of `out`.
     pub(crate) fn seal(&mut self, out: &mut Vec<u8>, start: usize, inner_type: u8) {
         let plain = out.len() - start - self.prefix_len();
         out.resize(out.len() + 16 + usize::from(self.tls13), 0);
-        self.seal_in_place(&mut out[start..], plain, inner_type);
+        self.write_record(&mut out[start..], plain, inner_type, None).expect("seal");
     }
 
-    /// The initialized record already contains its plaintext and tag space.
-    /// This is the same encoder used by the copying and borrowed-input writers.
-    pub(crate) fn seal_in_place(&mut self, record: &mut [u8], plain: usize, inner_type: u8) {
-        assert_eq!(record.len(), self.prefix_len() + plain + 16 + usize::from(self.tls13));
-        if !self.tls13 {
-            let body = self.prefix_len();
-            let nonce = self.nonce();
-            if self.explicit != 0 {
-                record[5..body].copy_from_slice(&nonce.as_ref()[4..]);
-            }
-            let aad = Aad::from(tls12_aad(self.seq, inner_type, plain as u16));
-            let tag = self.key.seal_in_place_separate_tag(nonce, aad, &mut record[body..body + plain]).expect("seal");
-            let wire_len = (self.explicit + plain + tag.as_ref().len()) as u16;
-            record[..3].copy_from_slice(&[inner_type, 3, 3]);
-            record[3..5].copy_from_slice(&wire_len.to_be_bytes());
-            record[body + plain..].copy_from_slice(tag.as_ref());
-            self.seq += 1;
-            return;
-        }
-        record[5 + plain] = inner_type;
-        let len = plain + 1 + 16;
-        let header = [CONTENT_APPDATA, 3, 3, (len >> 8) as u8, len as u8];
-        record[..5].copy_from_slice(&header);
-        let tag = self
-            .key
-            .seal_in_place_separate_tag(self.nonce(), Aad::from(header), &mut record[5..5 + plain + 1])
-            .expect("seal");
-        record[5 + plain + 1..].copy_from_slice(tag.as_ref());
-        self.seq += 1;
+    pub(crate) fn seal_from(&mut self, plain: &[u8], record: &mut [u8], inner_type: u8) -> io::Result<()> {
+        self.write_record(record, plain.len(), inner_type, Some(plain))
     }
+
+    fn write_record(&mut self, record: &mut [u8], n: usize, inner_type: u8, source: Option<&[u8]>) -> io::Result<()> {
+        let prefix = self.prefix_len();
+        let suffix = if self.tls13 { std::slice::from_ref(&inner_type) } else { &[] };
+        if n > MAX_PLAIN || record.len() != prefix + n + suffix.len() + 16 {
+            return Err(invalid("TLS send record length"));
+        }
+        let [hi, lo] = ((record.len() - 5) as u16).to_be_bytes();
+        let outer_type = if self.tls13 { CONTENT_APPDATA } else { inner_type };
+        let header = [outer_type, 3, 3, hi, lo];
+        record[..5].copy_from_slice(&header);
+        let nonce = self.nonce_bytes();
+        if self.explicit != 0 {
+            record[5..prefix].copy_from_slice(&nonce[4..]);
+        }
+        let aad12;
+        let aad: &[u8] = if self.tls13 {
+            &header
+        } else {
+            aad12 = tls12_aad(self.seq, inner_type, n as u16);
+            &aad12
+        };
+        let body = &mut record[prefix..];
+        match source {
+            Some(input) => self.key.seal_from(&nonce, aad, input, suffix, body),
+            None => {
+                body[n..n + suffix.len()].copy_from_slice(suffix);
+                self.key.seal_in_place(&nonce, aad, body)
+            }
+        }.map_err(|_| invalid("TLS record encryption"))?;
+        self.seq += 1;
+        Ok(())
+    }
+}
+
+impl Cipher {
+    fn new(secrets: (u64, ConnectionTrafficSecrets), tls13: bool) -> io::Result<Self> {
+        Self::with_key(secrets, tls13, |algorithm, _, key| {
+            UnboundKey::new(algorithm, key).map(LessSafeKey::new).map_err(|_| invalid("traffic key"))
+        })
+    }
+
+    fn nonce(&self) -> Nonce { Nonce::assume_unique_for_key(self.nonce_bytes()) }
 
     /// Opens one whole record in place. Returns the inner content type and the plaintext length;
     /// the plaintext starts at `record[5]`.
@@ -843,6 +863,18 @@ mod tests {
         tcp.set_write_timeout(timeout).unwrap();
     }
 
+    fn send_ping(wire: &mut Records, tcp: &mut TcpStream) {
+        let mut out = std::mem::take(&mut wire.pending);
+        let first = out.len();
+        out.resize(first + wire.tx.prefix_len(), 0);
+        out.extend_from_slice(b"pi");
+        wire.tx.seal(&mut out, first, CONTENT_APPDATA);
+        let next = out.len();
+        out.resize(next + wire.tx.prefix_len() + 2 + 16 + usize::from(wire.tx.is_tls13()), 0);
+        wire.tx.seal_from(b"ng", &mut out[next..], CONTENT_APPDATA).unwrap();
+        tcp.write_all(&out).unwrap();
+    }
+
     #[test]
     fn tls13_server_prefers_aes128_and_keeps_aes256_and_chacha_peers() {
         use rustls::crypto::ring::cipher_suite::{TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256};
@@ -869,12 +901,7 @@ mod tests {
                 let mut link = accept(tcp, config).unwrap();
                 let Wire::Records(wire) = &mut link.wire else { panic!("kernel TLS") };
                 assert!(wire.tx.is_tls13());
-                let mut out = std::mem::take(&mut wire.pending);
-                let start = out.len();
-                out.resize(start + wire.tx.prefix_len(), 0);
-                out.extend_from_slice(b"ping");
-                wire.tx.seal(&mut out, start, CONTENT_APPDATA);
-                link.tcp.write_all(&out).unwrap();
+                send_ping(wire, &mut link.tcp);
                 let mut record = vec![0; 5];
                 link.tcp.read_exact(&mut record).unwrap();
                 record.resize(5 + usize::from(u16::from_be_bytes([record[3], record[4]])), 0);
@@ -899,12 +926,17 @@ mod tests {
     #[test]
     fn tls12_records_interoperate_with_the_standard_rustls_record_layer() {
         use rustls::crypto::ring::cipher_suite::{
-            TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+            TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
         };
         let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let certificate = identity.cert.der().clone();
         let key = PrivateKeyDer::try_from(identity.key_pair.serialize_der()).unwrap();
-        for suite in [TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256] {
+        for suite in [
+            TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        ] {
             let mut peer_provider = rustls::crypto::ring::default_provider();
             peer_provider.cipher_suites = vec![suite];
             let server = ServerConfig::builder_with_provider(Arc::new(peer_provider))
@@ -933,12 +965,7 @@ mod tests {
             let Wire::Records(wire) = &mut link.wire else { panic!("kernel TLS") };
             assert!(!wire.tx.is_tls13());
             assert_eq!(wire.rx_len, 0);
-            let mut out = std::mem::take(&mut wire.pending);
-            let start = out.len();
-            out.resize(start + wire.tx.prefix_len(), 0);
-            out.extend_from_slice(b"ping");
-            wire.tx.seal(&mut out, start, CONTENT_APPDATA);
-            link.tcp.write_all(&out).unwrap();
+            send_ping(wire, &mut link.tcp);
             let mut record = vec![0; 5];
             link.tcp.read_exact(&mut record).unwrap();
             record.resize(5 + usize::from(u16::from_be_bytes([record[3], record[4]])), 0);
@@ -1002,7 +1029,7 @@ mod tests {
     #[test]
     fn records_round_trip_and_reject_tampering() {
         let secrets = || ConnectionTrafficSecrets::Aes256Gcm { key: [7u8; 32].into(), iv: [9u8; 12].into() };
-        let mut seal = Cipher::new((5, secrets()), true).unwrap();
+        let mut seal = SendCipher::for_send((5, secrets()), true).unwrap();
         let mut open = Cipher::new((5, secrets()), true).unwrap();
         let mut out = vec![0u8; 5];
         out.extend_from_slice(b"hello");
