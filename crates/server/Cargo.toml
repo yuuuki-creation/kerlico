@@ -7,6 +7,8 @@ edition = "2021"
 kerlico-shared = { path = "../shared" }
 kerlico-outbound = { path = "../outbound" }
 kerlico-wg = { path = "../wg" }
+socks = { package = "kerlico-socks-server", path = "../../protocols/socks/server", optional = true }
+landing-socks = { package = "kerlico-socks-client", path = "../../protocols/socks/client", optional = true }
 wireguard = { package = "kerlico-wireguard-server", path = "../../protocols/wireguard/server", optional = true }
 landing-wireguard = { package = "kerlico-wireguard-client", path = "../../protocols/wireguard/client", optional = true }
 openvpn = { package = "kerlico-openvpn-server", path = "../../protocols/openvpn/server", optional = true }

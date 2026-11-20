@@ -1,0 +1,9 @@
+[package]
+name = "kerlico-socks-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kerlico-shared = { path = "../../../crates/shared" }
+kerlico-socks = { path = "../shared" }
+kerlico-outbound = { path = "../../../crates/outbound", features = ["system-dns"] }

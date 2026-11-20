@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 kerlico-shared = { path = "../shared" }
+socks = { package = "kerlico-socks-client", path = "../../protocols/socks/client", optional = true }
 wireguard = { package = "kerlico-wireguard-client", path = "../../protocols/wireguard/client", optional = true, features = ["tun-device"] }
 openvpn = { package = "kerlico-openvpn-client", path = "../../protocols/openvpn/client", optional = true }
 mieru = { package = "kerlico-mieru-client", path = "../../protocols/mieru/client", optional = true }

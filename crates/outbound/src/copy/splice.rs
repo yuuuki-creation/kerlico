@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use super::{OpenError, Pace};
 
+mod reactor;
+pub(crate) use reactor::reactor;
+
 const SLICE: usize = 1024 * 1024;
 const WAIT: Duration = Duration::from_millis(200);
 
@@ -19,6 +22,7 @@ pub(super) fn forward(
     source: &TcpStream,
     target: &TcpStream,
     pace: &Pace,
+    coalesce: bool,
     mut count: impl FnMut(usize),
 ) -> Result<Outcome, OpenError> {
     // F_NONBLOCK makes the pipe nonblocking but some Linux kernels still
@@ -42,10 +46,10 @@ pub(super) fn forward(
     let Ok((pipe_out, pipe_in)) = pipe() else {
         return Ok(Outcome::Fallback);
     };
-    let mut bulk = BulkRead {
+    let mut bulk = coalesce.then_some(BulkRead {
         delivered: 0,
         last: None,
-    };
+    });
     let mut delivered = |len| {
         pace.mark();
         count(len);
@@ -60,8 +64,10 @@ pub(super) fn forward(
         if stopped() {
             return Ok(Outcome::Stopped);
         }
-        if !bulk.ready(source).map_err(|_| OpenError::Transport)? {
-            continue;
+        if let Some(bulk) = &bulk {
+            if !bulk.ready(source).map_err(|_| OpenError::Transport)? {
+                continue;
+            }
         }
         let mut remaining = match transfer(source.as_raw_fd(), pipe_in.as_raw_fd(), SLICE) {
             // Let the ordinary socket read disambiguate EOF from a socket
@@ -75,7 +81,9 @@ pub(super) fn forward(
             }
             Err(_) => return Err(OpenError::Transport),
         };
-        bulk.observe(remaining);
+        if let Some(bulk) = &mut bulk {
+            bulk.observe(remaining);
+        }
         while remaining > 0 {
             if stopped() {
                 return Ok(Outcome::Stopped);
@@ -200,8 +208,11 @@ mod tests {
         target.set_write_timeout(original)?;
         let pace = Pace::new();
         std::thread::scope(|scope| {
-            let worker =
-                scope.spawn(|| forward(&source, &target, &pace, |_| panic!("unexpected bytes")));
+            let worker = scope.spawn(|| {
+                forward(&source, &target, &pace, true, |_| {
+                    panic!("unexpected bytes")
+                })
+            });
             std::thread::sleep(Duration::from_millis(30));
             let start = std::time::Instant::now();
             pace.halt();
@@ -218,7 +229,7 @@ mod tests {
         let (_origin, source) = tcp_pair()?;
         let (_user, target) = tcp_pair()?;
         assert_eq!(
-            forward(&source, &target, &Pace::new(), |_| panic!(
+            forward(&source, &target, &Pace::new(), true, |_| panic!(
                 "unexpected bytes"
             ))
             .unwrap(),
@@ -243,7 +254,8 @@ mod tests {
             });
             let copy = scope.spawn(|| {
                 let mut count = 0;
-                let outcome = forward(&source, &target, &Pace::new(), |n| count += n).unwrap();
+                let outcome =
+                    forward(&source, &target, &Pace::new(), true, |n| count += n).unwrap();
                 assert_eq!(outcome, Outcome::Fallback);
                 assert_eq!(count, payload.len());
                 assert_eq!(target.write_timeout().unwrap(), None);

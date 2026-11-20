@@ -125,6 +125,12 @@ pub fn dial_native(
             let tcp = copy::report_connect(stream.as_ref(), TcpStream::connect_timeout(&addr, Duration::from_secs(10))
                 .map_err(|_| OpenError::Transport))?;
             tcp.set_nodelay(true).ok();
+            #[cfg(target_os = "linux")]
+            if let Some(inbound) = stream.take_splice_socket() {
+                if let Some(relay) = copy::splice::reactor() {
+                    return relay.dispatch(inbound, tcp, traffic.bind(user, node, exit.tag()), detached);
+                }
+            }
             if let Some(inbound) = stream.take_async_tcp().map_err(|_| OpenError::Transport)? {
                 return crate::async_copy::dispatch(tcp, inbound, traffic.bind(user, node, exit.tag()), detached);
             }

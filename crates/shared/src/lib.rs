@@ -442,6 +442,11 @@ pub trait InboundStream: Send + Sync {
     /// A successful transfer leaves this wrapper unused; no synchronous reader
     /// or writer may remain active while the halves are moved.
     fn take_async_tcp(&mut self) -> Result<Option<AsyncTcp>, PlaneFault> { Ok(None) }
+
+    /// Offers an unbuffered socket to the native relay after the dial reply.
+    /// The relay owns both directions once it takes the socket.
+    #[cfg(target_os = "linux")]
+    fn take_splice_socket(&mut self) -> Option<std::net::TcpStream> { None }
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault>;
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault>;
     /// Gives a UDP reply its actual origin when the outbound socket carries several targets.
@@ -490,6 +495,10 @@ pub trait InboundStream: Send + Sync {
     /// The raw socket hooks may become available after consuming protocol bytes.
     #[cfg(target_os = "linux")]
     fn can_splice(&self) -> bool { false }
+
+    /// Whether native relaying may briefly wait for adjacent TCP segments.
+    #[cfg(target_os = "linux")]
+    fn coalesce_splice_reads(&self) -> bool { true }
 }
 
 /// One accepted user flow. Protocol crates build this. They do not choose an exit.
@@ -782,6 +791,9 @@ impl InboundStream for PrefixStream {
 
     #[cfg(target_os = "linux")]
     fn can_splice(&self) -> bool { self.inner.can_splice() }
+
+    #[cfg(target_os = "linux")]
+    fn coalesce_splice_reads(&self) -> bool { self.inner.coalesce_splice_reads() }
 }
 
 #[cfg(test)]
