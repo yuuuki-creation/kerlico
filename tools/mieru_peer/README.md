@@ -2,7 +2,7 @@
 
 本工具使用官方 `apis/client`、`apis/server`、`apis/common`，不复制官方协议实现。固定参照 SHA 是 `1367cf2d2dd81c5f27d455be7cea691d7948c420`；`go.mod` 的 `v3.0.0` 只是模块定位，执行前必须在独立 worker 副本使用本地 replace 指向该 SHA。不要在上游缓存目录改源码，不要使用真实账号。
 
-以下命令只在专用 worker 执行。当前实现和验收记录见 [mieru 接口文档](../../docs/reference/mieru.md)。
+以下命令在本机执行。当前实现和验收记录见 [mieru 接口文档](../../docs/reference/mieru.md)。
 
 ```sh
 # 在 worker 仓库根执行；先由调度者核实上游只读目录的提交 SHA。
@@ -18,7 +18,7 @@ python3 tools/verify_mieru.py \
   --output /private/run/directory/mieru-results.json
 ```
 
-Go 模块变动和 `go.sum` 只在 worker 副本生成。输出内的 upstream_sha 是预期参照标识，不能单独证明依赖源码；必须同时留存 worker 对源码 SHA 和 replace 的核验记录。
+Go 模块变动和 `go.sum` 在独立的本地副本生成。输出内的 upstream_sha 是预期参照标识。保留源码 SHA 和 replace 的核验记录，以确认实际构建依赖。
 
 默认是五个因素（TCP/UDP、四级复用、两种握手、低熵 0..4、MTU 1280/1400）的确定性两两覆盖，每行运行两个方向。`--full` 显式选择同一默认矩阵；`--quick` 为 8 行 smoke，JSON 会明确标注 smoke，不能当完整矩阵报告。每个方向有自己的总期限，默认每 case 90 秒、整套 2400 秒；更慢的 worker 可通过 `--case-timeout` 和 `--suite-timeout` 显式调整。IPv6 fixture 不能绑定会直接失败，没有静默跳过。
 

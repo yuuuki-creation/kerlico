@@ -2,7 +2,7 @@
 
 只回答“在这一组固定配置、相同负载和 VPS 内网路径下，两服务端的有效载荷指标有什么差别”。工具不会据单次结果宣称某实现普遍更快，也不会扫描配置组合。两边都使用同一官方 Client SDK，固定 TCP、MULTIPLEXING_LOW、HANDSHAKE_STANDARD、低熵 OFF、MTU 1400，以及合成账号 `test-user/test-password`。
 
-模块参照官方 SHA `1367cf2d2dd81c5f27d455be7cea691d7948c420`。在独立 worker 副本核实该提交并执行本地 replace；`go.mod` 的版本只是模块定位，不足以证明编译来源。构建、格式、检查和执行都只在 worker，当前结果见[一分钟性能记录](../../docs/reference/mieru-performance.md)：
+模块参照官方 SHA `1367cf2d2dd81c5f27d455be7cea691d7948c420`。在独立的本地副本核实该提交并执行本地 replace。`go.mod` 的版本用于模块定位。构建、格式检查和执行都在本机，历史结果见[一分钟性能记录](../../docs/reference/mieru-performance.md)：
 
 ```sh
 cd tools/mieru_bench

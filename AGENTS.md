@@ -14,8 +14,6 @@ Do not read or use git branch `old`. The branch and everything on it are out of 
 
 要解释为什么是这个形状，读 `docs/explanation/shape.md`。那篇不写操作步骤。
 
-要上测试机，读 `docs/reference/workers.md`。连接资料在 `.private/machines/`，不要写进 git。
-
 ## 改动的规则
 
 设计变了，就在同一次改动里更新拥有它的那一篇。不要另写一篇架构说明。
@@ -31,6 +29,8 @@ WireGuard 引擎只放在 `crates/wg`，包名 `kerlico-wg`。不要把引擎写
 增加协议时，按 `docs/reference/crates.md` 的目录和那一行依赖来加。`kerlico-manifest` 会对不上的清单让构建失败。不要再写一份协议名单。
 
 ## 验证
+
+编译、单测、互通测试和压测都在本机运行。需要特定系统或内核功能时，使用本机虚拟机。此前的环境见 [历史测试机](docs/reference/workers.md)。
 
 客户端只编 WireGuard。
 

@@ -56,7 +56,7 @@ kerlico 的窗口起于 14:43:35，mita 起于 14:44:47。CPU 百分比以单核
 
 ## 复现与指纹
 
-工具入口是 [`tools/mieru_bench/run_comparison.py`](../../tools/mieru_bench/run_comparison.py)，方法及参数见[负载工具说明](../../tools/mieru_bench/README.md)。构建与执行只在专用 worker，原始数据和私有运行目录继续保留在本地 `.private/` 及 worker，不进入 Git。
+工具入口是 [`tools/mieru_bench/run_comparison.py`](../../tools/mieru_bench/run_comparison.py)，方法及参数见[负载工具说明](../../tools/mieru_bench/README.md)。本节的构建与执行在专用 worker 完成，原始数据和私有运行目录留在本地 `.private/` 和当时的 worker。
 
 | 二进制 | SHA-256 |
 | --- | --- |
@@ -178,7 +178,7 @@ TCP 的 [`wait_slot`](https://github.com/yuuuki-creation/kerlico/blob/df2e347/pr
 | P5、P6 | 1,000 与 10,000 条空闲或慢读流，UDP 多目标，资源不足时记录实际接入数 | heap 活跃量与保留量、RSS、线程、FD、内核 socket 内存、取消和空闲回收时间 |
 | P8 | 低熵五种模式分别比较，认证区分冷缓存、热缓存及跨时间桶 | 编解码 CPU、有效吞吐、握手速率、缓存内存、密钥轮换与账号变更结果 |
 
-构建、协议测试和压测仍只在专用 worker。后续对比至少交替运行五轮，报告中位数和范围；profile 单独运行，不把剖析开销混进正式成绩。服务器、负载端和目标同时采样，拒绝、超时、错字节与未完成操作单列，不能把资源拒绝算成吞吐提升。LOW 的随机连接数和负载生成器自身上限需要一起记录。
+后续构建、协议测试和压测在本机执行。后续对比至少交替运行五轮，报告中位数和范围；profile 单独运行，不把剖析开销混进正式成绩。服务器、负载端和目标同时采样，拒绝、超时、错字节与未完成操作单列，不能把资源拒绝算成吞吐提升。LOW 的随机连接数和负载生成器自身上限需要一起记录。
 
 正确性覆盖继续包含官方双向互通、TCP 并发 nonce 顺序、u32 序号回绕、读超时后保留半帧、空 UDP 包和数据报边界、关闭后缓冲读取、取消唤醒、账号与节点隔离。防重放缓存需要继续识别跨 peer 重放，不能随 UDP 会话索引按 peer 拆开；依据见 [`replay::reject`](https://github.com/yuuuki-creation/kerlico/blob/df2e347/protocols/mieru/shared/src/replay.rs#L37)。
 
