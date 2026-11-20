@@ -1,5 +1,5 @@
 //! Split one TUN superpacket into the initialized slots in which it will be sealed.
-use super::SendBatch;
+use super::{multishot::Multishot, SendBatch};
 use std::io;
 use std::task::{ready, Context, Poll};
 use tun_rs::{AsyncDevice, VirtioNetHdr, VIRTIO_NET_HDR_LEN};
@@ -7,6 +7,8 @@ use tun_rs::{AsyncDevice, VirtioNetHdr, VIRTIO_NET_HDR_LEN};
 const HEAD: usize = 16;
 const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
 const OVERFLOW_BYTES: usize = 8 << 20;
+const RAW_CAPACITY: usize = 65536 + VIRTIO_NET_HDR_LEN;
+
 pub(super) struct Input {
     raw: Vec<u8>,
     sizes: Vec<usize>,
@@ -22,7 +24,11 @@ pub(super) struct Slot {
 impl Input {
     pub(super) fn new() -> Self {
         Self {
-            raw: vec![0; 65536 + VIRTIO_NET_HDR_LEN],
+            raw: if cfg!(test) {
+                vec![0; RAW_CAPACITY]
+            } else {
+                Vec::new()
+            },
             sizes: Vec::new(),
             next: 0,
             start: 0,
@@ -37,15 +43,39 @@ impl Input {
         &mut self,
         cx: &mut Context<'_>,
         tun: &AsyncDevice,
+        reads: &mut Option<Multishot>,
         batches: &mut SendBatch,
         mtu: usize,
     ) -> Poll<io::Result<Option<Slot>>> {
         if self.next == self.sizes.len() {
-            let n = ready!(tun.poll_recv(cx, &mut self.raw))?;
-            if n == 0 {
-                return Poll::Ready(Ok(None));
+            let mut prepared = false;
+            if let Some(reader) = reads.as_mut() {
+                match ready!(reader.poll_packet(cx, |raw| {
+                    self.prepare_slice(raw, tun.tcp_gso(), batches, mtu)
+                })) {
+                    Ok(result) => {
+                        result?;
+                        prepared = true;
+                    }
+                    Err(error)
+                        if matches!(
+                            error.raw_os_error(),
+                            Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP | libc::EPERM)
+                        ) =>
+                    {
+                        *reads = None;
+                    }
+                    Err(error) => return Poll::Ready(Err(error)),
+                }
             }
-            self.prepare(n, tun.tcp_gso(), batches, mtu)?;
+            if !prepared {
+                self.raw.resize(RAW_CAPACITY, 0);
+                let n = ready!(tun.poll_recv(cx, &mut self.raw))?;
+                if n == 0 {
+                    return Poll::Ready(Ok(None));
+                }
+                self.prepare(n, tun.tcp_gso(), batches, mtu)?;
+            }
             debug_assert!(!self.sizes.is_empty());
         }
         let index = self.next;
@@ -63,7 +93,19 @@ impl Input {
         batches: &mut SendBatch,
         mtu: usize,
     ) -> io::Result<()> {
-        let raw = &mut self.raw[..len];
+        let mut raw = std::mem::take(&mut self.raw);
+        let result = self.prepare_slice(&mut raw[..len], with_header, batches, mtu);
+        self.raw = raw;
+        result
+    }
+
+    fn prepare_slice(
+        &mut self,
+        raw: &mut [u8],
+        with_header: bool,
+        batches: &mut SendBatch,
+        mtu: usize,
+    ) -> io::Result<()> {
         let (mut hdr, ip) = if with_header {
             let (header, ip) = raw
                 .split_at_mut_checked(VIRTIO_NET_HDR_LEN)

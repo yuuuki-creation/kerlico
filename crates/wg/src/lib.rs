@@ -1,7 +1,7 @@
 //! WireGuard link and userspace IP stack. This crate does not install host routes.
 
-mod engine;
 mod endpoint;
+mod engine;
 mod fragments;
 mod hub;
 #[cfg(all(feature = "tun-device", target_os = "linux"))]
@@ -13,19 +13,23 @@ mod register;
 mod stack;
 #[cfg(feature = "tun-device")]
 mod tun_device;
+#[cfg(all(feature = "tun-device", target_os = "linux"))]
+mod tun_egress;
 #[cfg(all(feature = "tun-device", any(target_os = "linux", windows)))]
 mod uapi;
 #[cfg(all(feature = "tun-device", windows))]
 mod windows_uapi;
 mod wire;
 
-pub use engine::{Datagrams, Pipe, Profile, Tunnel};
 pub use endpoint::parse_endpoint;
+pub use engine::{Datagrams, Pipe, Profile, Tunnel};
 pub use hub::{Hub, HubEvent, PeerId};
 pub use ipnet::IpNet;
 pub use packet::{LinkPeer, PacketLink, PacketRx, PacketTx, Reserved};
 pub use register::load_profile;
 pub use stack::{Incoming, Protocol, Stack};
+#[cfg(all(feature = "tun-device", target_os = "linux"))]
+pub use tun_device::bind_tun_with_egress;
 #[cfg(feature = "tun-device")]
 pub use tun_device::{bind_tun, run_tun};
 #[cfg(all(feature = "tun-device", any(target_os = "linux", windows)))]

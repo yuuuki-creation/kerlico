@@ -1,10 +1,8 @@
 // Copyright (c) 2019 Cloudflare, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-use super::PacketData;
+use super::{DataHeader, PacketData};
 use crate::noise::errors::WireGuardError;
-use parking_lot::Mutex;
-use portable_atomic::{AtomicU64, Ordering};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 
 pub struct Session {
@@ -12,8 +10,9 @@ pub struct Session {
     sending_index: u32,
     receiver: LessSafeKey,
     sender: LessSafeKey,
-    sending_key_counter: AtomicU64,
-    receiving_key_counter: Mutex<ReceivingKeyCounterValidator>,
+    // Packet processing holds an exclusive borrow of this session.
+    sending_key_counter: u64,
+    receiving_key_counter: ReceivingKeyCounterValidator,
 }
 
 impl std::fmt::Debug for Session {
@@ -97,11 +96,15 @@ impl ReceivingKeyCounterValidator {
         }
     }
 
-    /// Marks the counter as received, and returns true if it is still good (in case during
-    /// decryption something changed)
+    /// Rejects replays before authentication and records only authenticated packets.
     #[inline(always)]
-    fn mark_did_receive(&mut self, counter: u64) -> Result<(), WireGuardError> {
+    fn authenticate<T>(
+        &mut self,
+        counter: u64,
+        authenticate: impl FnOnce() -> Result<T, WireGuardError>,
+    ) -> Result<T, WireGuardError> {
         self.will_accept(counter)?;
+        let plaintext = authenticate()?;
         if counter >= self.next {
             let old_word = self.next.saturating_sub(1) / WORD_SIZE;
             let new_word = counter / WORD_SIZE;
@@ -115,7 +118,8 @@ impl ReceivingKeyCounterValidator {
             self.next = counter + 1;
         }
         self.set_bit(counter);
-        Ok(())
+        self.receive_cnt += 1;
+        Ok(plaintext)
     }
 }
 
@@ -133,8 +137,8 @@ impl Session {
                 UnboundKey::new(&CHACHA20_POLY1305, &receiving_key).unwrap(),
             ),
             sender: LessSafeKey::new(UnboundKey::new(&CHACHA20_POLY1305, &sending_key).unwrap()),
-            sending_key_counter: AtomicU64::new(0),
-            receiving_key_counter: Mutex::new(Default::default()),
+            sending_key_counter: 0,
+            receiving_key_counter: ReceivingKeyCounterValidator::default(),
         }
     }
 
@@ -142,27 +146,11 @@ impl Session {
         self.receiving_index as usize
     }
 
-    /// Returns true if receiving counter is good to use
-    fn receiving_counter_quick_check(&self, counter: u64) -> Result<(), WireGuardError> {
-        let counter_validator = self.receiving_key_counter.lock();
-        counter_validator.will_accept(counter)
-    }
-
-    /// Returns true if receiving counter is good to use, and marks it as used {
-    fn receiving_counter_mark(&self, counter: u64) -> Result<(), WireGuardError> {
-        let mut counter_validator = self.receiving_key_counter.lock();
-        let ret = counter_validator.mark_did_receive(counter);
-        if ret.is_ok() {
-            counter_validator.receive_cnt += 1;
-        }
-        ret
-    }
-
     /// The plaintext is already in the data region, following the 16-byte header.
     /// dst - pre-allocated space to hold the encapsulating UDP packet to send over the network
     /// returns the size of the formatted packet
     pub(super) fn format_packet_data<'a>(
-        &self,
+        &mut self,
         plain_len: usize,
         dst: &'a mut [u8],
     ) -> &'a mut [u8] {
@@ -170,7 +158,8 @@ impl Session {
             panic!("The destination buffer is too small");
         }
 
-        let sending_key_counter = self.sending_key_counter.fetch_add(1, Ordering::Relaxed) as u64;
+        let sending_key_counter = self.sending_key_counter;
+        self.sending_key_counter = sending_key_counter.wrapping_add(1);
 
         let (message_type, rest) = dst.split_at_mut(4);
         let (receiver_index, rest) = rest.split_at_mut(4);
@@ -205,7 +194,7 @@ impl Session {
     ///       dst will always take less space than src
     /// return the size of the encapsulated packet on success
     pub(super) fn receive_packet_data<'a>(
-        &self,
+        &mut self,
         packet: PacketData,
         dst: &'a mut [u8],
     ) -> Result<&'a mut [u8], WireGuardError> {
@@ -214,34 +203,42 @@ impl Session {
             // This is a very incorrect use of the library, therefore panic and not error
             panic!("The destination buffer is too small");
         }
-        if packet.receiver_idx != self.receiving_index {
+        self.open_data(
+            packet.header(),
+            Some(packet.encrypted_encapsulated_packet),
+            &mut dst[..ct_len],
+        )
+    }
+
+    pub(super) fn open_data<'a>(
+        &mut self,
+        header: DataHeader,
+        source: Option<&[u8]>,
+        dst: &'a mut [u8],
+    ) -> Result<&'a mut [u8], WireGuardError> {
+        if header.receiver_idx != self.receiving_index {
             return Err(WireGuardError::WrongIndex);
         }
-        // Don't reuse counters, in case this is a replay attack we want to quickly check the counter without running expensive decryption
-        self.receiving_counter_quick_check(packet.counter)?;
-
-        let ret = {
-            let mut nonce = [0u8; 12];
-            nonce[4..12].copy_from_slice(&packet.counter.to_le_bytes());
-            dst[..ct_len].copy_from_slice(packet.encrypted_encapsulated_packet);
-            self.receiver
-                .open_in_place(
-                    Nonce::assume_unique_for_key(nonce),
-                    Aad::from(&[]),
-                    &mut dst[..ct_len],
-                )
-                .map_err(|_| WireGuardError::InvalidAeadTag)?
-        };
-
-        // After decryption is done, check counter again, and mark as received
-        self.receiving_counter_mark(packet.counter)?;
-        Ok(ret)
+        let receiver = &self.receiver;
+        self.receiving_key_counter
+            .authenticate(header.counter, move || {
+                let mut nonce = [0u8; 12];
+                nonce[4..12].copy_from_slice(&header.counter.to_le_bytes());
+                if let Some(source) = source {
+                    dst.copy_from_slice(source);
+                }
+                receiver
+                    .open_in_place(Nonce::assume_unique_for_key(nonce), Aad::from(&[]), dst)
+                    .map_err(|_| WireGuardError::InvalidAeadTag)
+            })
     }
 
     /// Returns the estimated downstream packet loss for this session
     pub(super) fn current_packet_cnt(&self) -> (u64, u64) {
-        let counter_validator = self.receiving_key_counter.lock();
-        (counter_validator.next, counter_validator.receive_cnt)
+        (
+            self.receiving_key_counter.next,
+            self.receiving_key_counter.receive_cnt,
+        )
     }
 }
 
@@ -251,29 +248,33 @@ mod tests {
     #[test]
     fn test_replay_counter() {
         let mut c: ReceivingKeyCounterValidator = Default::default();
+        let verified = || Ok(());
 
-        assert!(c.mark_did_receive(0).is_ok());
-        assert!(c.mark_did_receive(0).is_err());
-        assert!(c.mark_did_receive(1).is_ok());
-        assert!(c.mark_did_receive(1).is_err());
-        assert!(c.mark_did_receive(63).is_ok());
-        assert!(c.mark_did_receive(63).is_err());
-        assert!(c.mark_did_receive(15).is_ok());
-        assert!(c.mark_did_receive(15).is_err());
+        assert!(c.authenticate(0, verified).is_ok());
+        assert!(matches!(
+            c.authenticate::<()>(0, || panic!("attempted to authenticate a replay")),
+            Err(WireGuardError::DuplicateCounter)
+        ));
+        assert!(c.authenticate(1, verified).is_ok());
+        assert!(c.authenticate(1, verified).is_err());
+        assert!(c.authenticate(63, verified).is_ok());
+        assert!(c.authenticate(63, verified).is_err());
+        assert!(c.authenticate(15, verified).is_ok());
+        assert!(c.authenticate(15, verified).is_err());
 
         for i in 64..N_BITS + 128 {
-            assert!(c.mark_did_receive(i).is_ok());
-            assert!(c.mark_did_receive(i).is_err());
+            assert!(c.authenticate(i, verified).is_ok());
+            assert!(c.authenticate(i, verified).is_err());
         }
 
-        assert!(c.mark_did_receive(N_BITS * 3).is_ok());
+        assert!(c.authenticate(N_BITS * 3, verified).is_ok());
         let oldest = N_BITS * 3 - REPLAY_WINDOW;
         for i in 0..oldest {
             assert!(matches!(
                 c.will_accept(i),
                 Err(WireGuardError::InvalidCounter)
             ));
-            assert!(c.mark_did_receive(i).is_err());
+            assert!(c.authenticate(i, verified).is_err());
         }
         for i in oldest..N_BITS * 3 {
             assert!(c.will_accept(i).is_ok());
@@ -284,20 +285,20 @@ mod tests {
         ));
 
         for i in (oldest..N_BITS * 3).rev() {
-            assert!(c.mark_did_receive(i).is_ok());
-            assert!(c.mark_did_receive(i).is_err());
+            assert!(c.authenticate(i, verified).is_ok());
+            assert!(c.authenticate(i, verified).is_err());
         }
 
-        assert!(c.mark_did_receive(N_BITS * 3 + 70).is_ok());
-        assert!(c.mark_did_receive(N_BITS * 3 + 71).is_ok());
-        assert!(c.mark_did_receive(N_BITS * 3 + 72).is_ok());
-        assert!(c.mark_did_receive(N_BITS * 3 + 72 + 125).is_ok());
-        assert!(c.mark_did_receive(N_BITS * 3 + 63).is_ok());
+        assert!(c.authenticate(N_BITS * 3 + 70, verified).is_ok());
+        assert!(c.authenticate(N_BITS * 3 + 71, verified).is_ok());
+        assert!(c.authenticate(N_BITS * 3 + 72, verified).is_ok());
+        assert!(c.authenticate(N_BITS * 3 + 72 + 125, verified).is_ok());
+        assert!(c.authenticate(N_BITS * 3 + 63, verified).is_ok());
 
-        assert!(c.mark_did_receive(N_BITS * 3 + 70).is_err());
-        assert!(c.mark_did_receive(N_BITS * 3 + 71).is_err());
-        assert!(c.mark_did_receive(N_BITS * 3 + 72).is_err());
+        assert!(c.authenticate(N_BITS * 3 + 70, verified).is_err());
+        assert!(c.authenticate(N_BITS * 3 + 71, verified).is_err());
+        assert!(c.authenticate(N_BITS * 3 + 72, verified).is_err());
         assert!(c.will_accept(REJECT_AFTER_MESSAGES).is_err());
-        assert!(c.mark_did_receive(u64::MAX).is_err());
+        assert!(c.authenticate(u64::MAX, verified).is_err());
     }
 }

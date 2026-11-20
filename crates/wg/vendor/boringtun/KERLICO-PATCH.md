@@ -18,6 +18,13 @@ The upstream BSD terms are in [LICENSE.md](LICENSE.md).
   handshakes per second with a burst of 5 per IPv4 address or IPv6 /64.
 - Receive replay protection uses the 8,128-packet window from 64-bit Linux
   WireGuard and wireguard-go, with the Linux receive counter ceiling.
+- Packet processing holds an exclusive borrow of the session. The send counter
+  and receive replay window use that borrow for synchronization. The receive
+  path checks the counter once before authentication and records it after
+  authentication succeeds.
+- The Linux TUN receive path opens transport packets in their UDP buffers.
+  The in-place and borrowed paths share the session lookup, replay checks,
+  authentication and plaintext validation.
 - `Tunn::reset_transport` clears ephemeral keys and queued packets when a Linux
   interface goes down while retaining the last authenticated handshake timestamp.
 

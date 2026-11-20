@@ -26,6 +26,25 @@ pub fn bind_tun(bind: SocketAddr, hub: Hub, name: &str, mtu: u16) -> io::Result<
     )
 }
 
+/// Open a standalone Linux TUN with a transmit class on a preconfigured link.
+#[cfg(target_os = "linux")]
+pub fn bind_tun_with_egress(
+    bind: SocketAddr,
+    hub: Hub,
+    name: &str,
+    mtu: u16,
+    device: &str,
+    class: &str,
+) -> io::Result<()> {
+    let class = crate::tun_egress::class_id(class)?;
+    let _link = crate::tun_egress::attach(device, class).map_err(|error| {
+        io::Error::other(format!("attach WireGuard egress to {device}: {error}"))
+    })?;
+    let mut carrier = TunCarrier::listener(bind, false);
+    carrier.egress_class = Some(class);
+    run_tun_hub(name, mtu, hub, carrier, true, true, || Ok(()))
+}
+
 #[cfg(any(target_os = "linux", windows))]
 pub fn run_interface(name: &str) -> io::Result<()> {
     run_interface_ready(name, || Ok(()))
@@ -108,6 +127,8 @@ pub fn run_tun(
         reserved,
         first: Some(socket),
         reopen: Box::new(move |port, _| reopen(port)),
+        #[cfg(target_os = "linux")]
+        egress_class: None,
     };
     run_tun_hub(name, mtu, hub, carrier, true, false, || Ok(()))
 }

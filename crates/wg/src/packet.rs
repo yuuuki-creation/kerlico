@@ -13,11 +13,11 @@ use crate::wire::{PeerKeys, WIRE_BUFFER};
 use crate::{Hub, HubEvent};
 
 #[cfg(all(feature = "tun-device", target_os = "linux"))]
+mod socket_buffer;
+#[cfg(all(feature = "tun-device", target_os = "linux"))]
 pub(crate) mod tun_linux;
 #[cfg(all(feature = "tun-device", target_os = "linux"))]
 mod udp_batch;
-#[cfg(all(feature = "tun-device", target_os = "linux"))]
-mod socket_buffer;
 
 const POLL: Duration = Duration::from_millis(5);
 const QUEUE: usize = 128;
@@ -71,6 +71,8 @@ pub(crate) struct TunCarrier {
     pub reserved: Reserved,
     pub first: Option<UdpSocket>,
     pub reopen: Box<dyn FnMut(u16, u32) -> io::Result<UdpSocket> + Send>,
+    #[cfg(target_os = "linux")]
+    pub egress_class: Option<u32>,
 }
 
 #[cfg(feature = "tun-device")]
@@ -81,6 +83,8 @@ impl TunCarrier {
             dual,
             reserved: Reserved::Standard,
             first: None,
+            #[cfg(target_os = "linux")]
+            egress_class: None,
             reopen: Box::new(move |port, mark| {
                 let mut address = bind;
                 address.set_port(port);
@@ -96,7 +100,14 @@ impl TunCarrier {
         };
         socket.set_nonblocking(true)?;
         #[cfg(target_os = "linux")]
-        socket_buffer::tune(&socket);
+        {
+            if let Some(class) = self.egress_class {
+                crate::tun_egress::set_class(&socket, class).map_err(|error| {
+                    io::Error::other(format!("set WireGuard egress class: {error}"))
+                })?;
+            }
+            socket_buffer::tune(&socket);
+        }
         Ok(socket)
     }
 }

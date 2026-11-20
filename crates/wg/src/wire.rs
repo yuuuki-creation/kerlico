@@ -152,7 +152,15 @@ impl Wire {
         if n > mtu || n > MAX_IP_PACKET {
             return None;
         }
-        let padded = n.next_multiple_of(16).min(mtu);
+        let minimum = n.next_multiple_of(16).min(mtu);
+        // All slots from a split TUN packet share the stride of its largest
+        // segment. An aligned short tail can use that space without moving it.
+        let slot_capacity = frame.len().saturating_sub(32);
+        let padded = if slot_capacity > minimum && slot_capacity <= mtu && slot_capacity % 16 == 0 {
+            slot_capacity
+        } else {
+            minimum
+        };
         let required = (padded + 32).max(148);
         let frame = frame.get_mut(..required)?;
         frame[16 + n..16 + padded].fill(0);
@@ -175,6 +183,16 @@ impl Wire {
         self.inner.reset_transport();
     }
 
+    #[cfg(all(feature = "tun-device", target_os = "linux"))]
+    pub(crate) fn receive_in_place<'a>(
+        &mut self,
+        header: boringtun::noise::DataHeader,
+        packet: &'a mut [u8],
+    ) -> Reception<'a> {
+        let result = self.inner.handle_transport_in_place(header, packet);
+        self.finish_receive(result, false)
+    }
+
     pub fn receive_verified<'a>(
         &mut self,
         packet: VerifiedPacket<'_>,
@@ -189,6 +207,10 @@ impl Wire {
         }
         let is_cookie = matches!(packet.packet(), Packet::PacketCookieReply(_));
         let result = self.inner.handle_verified_packet(packet, scratch);
+        self.finish_receive(result, is_cookie)
+    }
+
+    fn finish_receive<'a>(&mut self, result: TunnResult<'a>, is_cookie: bool) -> Reception<'a> {
         let authenticated = !is_cookie && !matches!(result, TunnResult::Err(_));
         let handshake_completed = self.inner.take_handshake_completed();
         let output = match result {

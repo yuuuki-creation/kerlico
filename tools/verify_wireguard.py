@@ -596,6 +596,30 @@ def windows_tun(args):
         print("PASS Windows Wintun: IPv4 and IPv6 TCP/UDP, production wg.exe show, set and syncconf", flush=True)
 
 
+def egress_queue(stack):
+    commands = ["tc", "-j", "qdisc", "show", "dev", "veth-left"]
+    original = json.loads(call(*commands))
+    assert [queue["kind"] for queue in original] == ["noqueue"]
+    call("tc", "qdisc", "add", "dev", "veth-left", "root", "handle", "1:", "prio",
+         "bands", "2", "priomap", *("0",) * 16)
+
+    def restore():
+        call("tc", "qdisc", "del", "dev", "veth-left", "root")
+        assert json.loads(call(*commands)) == original
+
+    stack.callback(restore)
+    call("tc", "qdisc", "add", "dev", "veth-left", "parent", "1:2", "handle", "20:",
+         "netem", "limit", "1024", "slot", "250us", "250us")
+
+    def packets():
+        stats = json.loads(call("tc", "-j", "-s", "qdisc", "show", "dev", "veth-left"))
+        netem, = [queue for queue in stats if queue["kind"] == "netem"]
+        assert netem["drops"] == 0, netem
+        return netem["packets"]
+
+    return packets
+
+
 def run(args):
     outer = os.readlink("/proc/self/ns/net")
     if outer == os.readlink("/proc/1/ns/net"):
@@ -652,6 +676,7 @@ def run(args):
         uapi = args.direction in ("uapi", "uapi-background")
         multipeer = args.direction in ("multipeer", "multipeer-landing")
         landing = args.direction in ("landing", "multipeer-landing")
+        paced_packets = None
         if args.direction in ("inbound", "xray-client", "raw") or uapi:
             settings = {"privateKey": skey, "users": [{"email": "kernel-peer", "publicKey": cpub,
                          "presharedKey": psk, "allowedIPs": allowed.split(",")}]}
@@ -702,7 +727,19 @@ def run(args):
             elif args.direction == "raw":
                 who = dict(settings["users"][0])
                 del who["email"]
-                cfg = json_doc(root / "raw.json", {"privateKey": skey, "listen": raw_bind, "tun": "raw-wg", "peers": [who]})
+                raw_options = {"privateKey": skey, "listen": raw_bind, "tun": "raw-wg", "peers": [who]}
+                if args.linux_egress:
+                    paced_packets = egress_queue(stack)
+                    family = socket.AF_INET6 if args.link_local else socket.AF_INET
+                    endpoint_plain = (
+                        ("fe80::b", 53021, 0, socket.if_nametoindex("veth-left"))
+                        if args.link_local else (RIGHT, 53021)
+                    )
+                    with socket.socket(family, socket.SOCK_DGRAM) as plain:
+                        assert plain.sendto(b"ordinary", endpoint_plain) == 8
+                    assert paced_packets() == 0
+                    raw_options["egress"] = {"device": "veth-left", "class": "1:2"}
+                cfg = json_doc(root / "raw.json", raw_options)
                 server = stack.enter_context(process([args.raw, cfg], args.logs, "server"))
                 expect(server, lambda: udp_port_open(PORT) and subprocess.run(
                     ["ip", "link", "show", "raw-wg"], stdout=subprocess.DEVNULL,
@@ -797,6 +834,20 @@ def run(args):
             "inbound": "fragments", "raw": "fragments", "uapi": "fragments", "uapi-background": "fragments",
             "warp": "warp-traffic", "xray-client": "socks"}.get(args.direction, "traffic")
         call(*right, sys.executable, script, mode)
+        if paced_packets is not None:
+            before_rebind = paced_packets()
+            assert before_rebind > 0
+            handles = (fd.readlink().name for fd in Path(f"/proc/{server.pid}/fd").iterdir())
+            assert "anon_inode:bpf_link" in handles
+            port = PORT + 6
+            call("wg", "set", "raw-wg", "listen-port", str(port))
+            assert call("wg", "show", "raw-wg", "listen-port") == str(port)
+            endpoint = f"{endpoint.rsplit(':', 1)[0]}:{port}"
+            call(*right, "wg", "set", "wg-test", "peer", spub, "endpoint", endpoint)
+            call(*right, sys.executable, script, mode)
+            assert paced_packets() > before_rebind
+            print("PASS egress: ordinary UDP bypassed the slot; WireGuard used it before and after port change",
+                  flush=True)
         if args.link_local:
             print(f"PASS {args.direction}: native peer over IPv6 link-local UDP with {args.link_local} zone", flush=True)
             return
@@ -908,7 +959,10 @@ if __name__ == "__main__":
     parser.add_argument("--logs", type=Path)
     parser.add_argument("--natural-rekey", action="store_true")
     parser.add_argument("--link-local", nargs="?", const="name", choices=("name", "index"))
+    parser.add_argument("--linux-egress", action="store_true")
     options = parser.parse_args()
+    if options.linux_egress and options.direction != "raw":
+        parser.error("--linux-egress requires raw")
     if options.natural_rekey and options.direction not in ("inbound", "outbound"):
         parser.error("--natural-rekey requires inbound or outbound")
     if options.link_local and (options.natural_rekey or options.direction not in ("inbound", "outbound", "raw", "uapi")):

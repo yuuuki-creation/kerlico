@@ -116,6 +116,21 @@ pub struct PacketData<'a> {
     encrypted_encapsulated_packet: &'a [u8],
 }
 
+#[derive(Clone, Copy)]
+pub struct DataHeader {
+    receiver_idx: u32,
+    counter: u64,
+}
+
+impl PacketData<'_> {
+    pub fn header(&self) -> DataHeader {
+        DataHeader {
+            receiver_idx: self.receiver_idx,
+            counter: self.counter,
+        }
+    }
+}
+
 /// Describes a packet from network
 #[derive(Debug)]
 pub enum Packet<'a> {
@@ -282,7 +297,7 @@ impl Tunn {
         dst: &'a mut [u8],
     ) -> TunnResult<'a> {
         let current = self.current;
-        if let Some(ref session) = self.sessions[current % N_SESSIONS] {
+        if let Some(session) = self.sessions[current % N_SESSIONS].as_mut() {
             // Send the packet using an established session
             if let Some(source) = source {
                 dst[16..16 + len].copy_from_slice(source);
@@ -390,7 +405,7 @@ impl Tunn {
             remote_idx = p.sender_idx
         );
 
-        let session = self.handshake.receive_handshake_response(p)?;
+        let mut session = self.handshake.receive_handshake_response(p)?;
 
         let keepalive_packet = session.format_packet_data(0, dst);
         // Store new session in ring buffer
@@ -443,24 +458,45 @@ impl Tunn {
         }
     }
 
-    /// Decrypts a data packet, and stores the decapsulated packet in dst.
+    /// Open the transport body of the same datagram that supplied `header`.
+    /// The caller must discard the buffer if authentication fails.
+    pub fn handle_transport_in_place<'a>(
+        &mut self,
+        header: DataHeader,
+        packet: &'a mut [u8],
+    ) -> TunnResult<'a> {
+        if packet.len() < DATA_OVERHEAD_SZ {
+            return TunnResult::Err(WireGuardError::InvalidPacket);
+        }
+        self.handle_data_with(header, move |session| {
+            session.open_data(header, None, &mut packet[16..])
+        })
+        .unwrap_or_else(TunnResult::from)
+    }
+
     fn handle_data<'a>(
         &mut self,
         packet: PacketData,
         dst: &'a mut [u8],
     ) -> Result<TunnResult<'a>, WireGuardError> {
-        let r_idx = packet.receiver_idx as usize;
-        let idx = r_idx % N_SESSIONS;
+        let header = packet.header();
+        self.handle_data_with(header, move |session| {
+            session.receive_packet_data(packet, dst)
+        })
+    }
 
-        // Get the (probably) right session
-        let decapsulated_packet = {
-            let session = self.sessions[idx].as_ref();
-            let session = session.ok_or_else(|| {
-                tracing::trace!(message = "No current session available", remote_idx = r_idx);
-                WireGuardError::NoCurrentSession
-            })?;
-            session.receive_packet_data(packet, dst)?
-        };
+    fn handle_data_with<'a>(
+        &mut self,
+        header: DataHeader,
+        open: impl FnOnce(&mut session::Session) -> Result<&'a mut [u8], WireGuardError>,
+    ) -> Result<TunnResult<'a>, WireGuardError> {
+        let r_idx = header.receiver_idx as usize;
+        let idx = r_idx % N_SESSIONS;
+        let session = self.sessions[idx].as_mut().ok_or_else(|| {
+            tracing::trace!(message = "No current session available", remote_idx = r_idx);
+            WireGuardError::NoCurrentSession
+        })?;
+        let decapsulated_packet = open(session)?;
 
         if self.pending_confirmation == Some(r_idx) {
             self.pending_confirmation = None;

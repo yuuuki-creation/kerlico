@@ -34,11 +34,10 @@ fn run(path: std::ffi::OsString) -> io::Result<()> {
     let config: Value =
         serde_json::from_slice(&std::fs::read(path)?).map_err(|_| invalid("document"))?;
     let config = config.as_object().ok_or_else(|| invalid("document"))?;
-    if config.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "listen" | "privateKey" | "tun" | "mtu" | "peers"
-        )
+    if config.keys().any(|key| match key.as_str() {
+        "listen" | "privateKey" | "tun" | "mtu" | "peers" => false,
+        "egress" => !cfg!(target_os = "linux"),
+        _ => true,
     }) {
         return Err(invalid("document field"));
     }
@@ -96,7 +95,26 @@ fn run(path: std::ffi::OsString) -> io::Result<()> {
             endpoint,
         )?;
     }
-    bind_tun(bind, hub, text(config, "tun")?, mtu)
+    let name = text(config, "tun")?;
+    #[cfg(target_os = "linux")]
+    if let Some(egress) = config.get("egress") {
+        let egress = egress.as_object().ok_or_else(|| invalid("egress"))?;
+        if egress
+            .keys()
+            .any(|key| !matches!(key.as_str(), "device" | "class"))
+        {
+            return Err(invalid("egress field"));
+        }
+        return kerlico_wg::bind_tun_with_egress(
+            bind,
+            hub,
+            name,
+            mtu,
+            text(egress, "device")?,
+            text(egress, "class")?,
+        );
+    }
+    bind_tun(bind, hub, name, mtu)
 }
 
 fn main() -> ExitCode {

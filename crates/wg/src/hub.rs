@@ -29,6 +29,22 @@ pub(crate) enum HubEventRef<'a> {
     Packet(PeerId, SocketAddr, &'a [u8]),
 }
 
+enum Datagram<'a> {
+    Borrowed(&'a [u8]),
+    #[cfg(all(feature = "tun-device", target_os = "linux"))]
+    Mutable(&'a mut [u8]),
+}
+
+impl AsRef<[u8]> for Datagram<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            #[cfg(all(feature = "tun-device", target_os = "linux"))]
+            Self::Mutable(bytes) => bytes,
+        }
+    }
+}
+
 struct Peer {
     key: [u8; 32],
     allowed: Vec<IpNet>,
@@ -164,11 +180,33 @@ impl Hub {
         &mut self,
         from: SocketAddr,
         packet: &[u8],
+        emit: impl FnMut(HubEventRef<'_>),
+    ) {
+        self.receive_datagram(from, Datagram::Borrowed(packet), emit);
+    }
+
+    #[cfg(all(feature = "tun-device", target_os = "linux"))]
+    pub(crate) fn receive_mut(
+        &mut self,
+        from: SocketAddr,
+        packet: &mut [u8],
+        emit: impl FnMut(HubEventRef<'_>),
+    ) {
+        self.receive_datagram(from, Datagram::Mutable(packet), emit);
+    }
+
+    #[allow(unused_mut)]
+    fn receive_datagram(
+        &mut self,
+        from: SocketAddr,
+        mut datagram: Datagram<'_>,
         mut emit: impl FnMut(HubEventRef<'_>),
     ) {
         if self.secret.to_bytes() == [0; 32] {
             return;
         }
+        let packet = datagram.as_ref();
+        let packet_len = packet.len();
         let mut cookie = [0; 64];
         let parsed = match self.limiter.verify_packet(Some(from), packet, &mut cookie) {
             Ok(parsed) => parsed,
@@ -196,11 +234,27 @@ impl Hub {
         let Some(wire) = &mut peer.wire else {
             return;
         };
-        let reception = wire.receive_verified(parsed, packet.len(), &mut self.receive_buffer);
+        #[cfg(all(feature = "tun-device", target_os = "linux"))]
+        let reception = {
+            let header = match (&datagram, parsed.packet()) {
+                (Datagram::Mutable(_), Packet::PacketData(frame)) => Some(frame.header()),
+                _ => None,
+            };
+            if let Some(header) = header {
+                let Datagram::Mutable(packet) = &mut datagram else {
+                    unreachable!("the header came from a mutable datagram");
+                };
+                wire.receive_in_place(header, packet)
+            } else {
+                wire.receive_verified(parsed, packet_len, &mut self.receive_buffer)
+            }
+        };
+        #[cfg(not(all(feature = "tun-device", target_os = "linux")))]
+        let reception = wire.receive_verified(parsed, packet_len, &mut self.receive_buffer);
         if reception.authenticated {
             peer.endpoint = Some(from);
             peer.last_traffic = Some(Instant::now());
-            peer.received = peer.received.saturating_add(packet.len() as u64);
+            peer.received = peer.received.saturating_add(packet_len as u64);
         }
         if reception.handshake_completed {
             peer.last_handshake = Some(SystemTime::now());
@@ -555,6 +609,29 @@ mod tests {
 
     #[test]
     fn receive_transport_with_original_wireguard_reorder_window() {
+        check_reorder_window(|hub, from, bytes, deliver| {
+            hub.receive_with(from, bytes, deliver);
+        });
+    }
+
+    #[cfg(all(feature = "tun-device", target_os = "linux"))]
+    #[test]
+    fn receive_transport_in_place_checks_original_replay_window() {
+        check_reorder_window(|hub, from, bytes, deliver| {
+            let mut datagram = bytes.to_vec();
+            let body = datagram.as_ptr().wrapping_add(16);
+            hub.receive_mut(from, &mut datagram, |event| {
+                if let HubEventRef::Packet(_, _, ip) = event {
+                    assert_eq!(ip.as_ptr(), body);
+                }
+                deliver(event);
+            });
+        });
+    }
+
+    fn check_reorder_window(
+        mut input: impl FnMut(&mut Hub, SocketAddr, &[u8], &mut dyn FnMut(HubEventRef<'_>)),
+    ) {
         let from = "127.0.0.1:3000".parse().unwrap();
         let mut hub = Hub::new([42; 32]).unwrap();
         let secret = StaticSecret::from([99; 32]);
@@ -588,6 +665,12 @@ mod tests {
                 captured.insert(counter, wire);
             }
         }
+        let mut invalid_tag = captured[&8194].clone();
+        *invalid_tag.last_mut().unwrap() ^= 1;
+        input(&mut hub, from, &invalid_tag, &mut |_| {
+            panic!("accepted a damaged tag")
+        });
+
         for (counter, accepted) in [
             (8193, true),
             (65, true),
@@ -596,8 +679,8 @@ mod tests {
             (8194, true),
         ] {
             let mut delivered = 0;
-            hub.receive(from, &captured[&counter], |event| {
-                let HubEvent::Packet(_, _, payload) = event else {
+            input(&mut hub, from, &captured[&counter], &mut |event| {
+                let HubEventRef::Packet(_, _, payload) = event else {
                     panic!("unexpected traffic response");
                 };
                 assert_eq!(payload, ip);

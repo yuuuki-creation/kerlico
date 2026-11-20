@@ -1,7 +1,9 @@
 mod input;
+mod multishot;
 use std::collections::VecDeque;
 use std::io;
 use std::net::UdpSocket;
+use std::os::fd::AsRawFd;
 use std::pin::Pin;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -21,6 +23,7 @@ use crate::linux_link::{LinkState, Monitor};
 use crate::{hub::HubEventRef, uapi, Hub};
 
 const BURST: usize = 64;
+const EGRESS_SEND_BUDGET: usize = 256;
 
 // DeviceFramedWrite appends to its own GRO arena before start_send returns.
 struct TunPayload;
@@ -131,7 +134,13 @@ async fn drive(
     requests: Option<Receiver<uapi::Request>>,
 ) -> io::Result<()> {
     let (dual, reserved) = (binding.carrier.dual, binding.carrier.reserved);
+    let send_budget = if binding.carrier.egress_class.is_some() {
+        EGRESS_SEND_BUDGET
+    } else {
+        tun_rs::IDEAL_BATCH_SIZE
+    };
     let mut reader = input::Input::new();
+    let mut reads = multishot::Multishot::new(tun.as_raw_fd()).ok();
     let mut mtu = hub.mtu();
     let mut writer = DeviceFramedWrite::new(tun.clone(), TunPayload);
     let mut carrier = watch(binding.socket.as_ref())?;
@@ -176,6 +185,9 @@ async fn drive(
                     hub.reset_transport();
                     queue.clear();
                     submitted = 0;
+                    if let Some(reads) = reads.as_mut() {
+                        reads.discard()?;
+                    }
                     reader.discard();
                     writer = DeviceFramedWrite::new(tun.clone(), TunPayload);
                     let mut discarded = vec![0; u16::MAX as usize + tun_rs::VIRTIO_NET_HDR_LEN];
@@ -205,8 +217,8 @@ async fn drive(
         if binding.up && !retry_tun {
             // Service one bounded TUN batch before flushing the UDP trains.
             // No packet is held when the TUN reader first returns Pending.
-            for i in 0..tun_rs::IDEAL_BATCH_SIZE {
-                match reader.poll_slot(cx, &tun, &mut batches, mtu) {
+            for i in 0..send_budget {
+                match reader.poll_slot(cx, &tun, &mut reads, &mut batches, mtu) {
                     Poll::Ready(Ok(Some(slot))) => {
                         if let Some(socket) = socket {
                             batches.encode_prepared(socket, slot.start, slot.stride, |storage| {
@@ -216,7 +228,7 @@ async fn drive(
                                 })
                             });
                         }
-                        full_turn |= i + 1 == tun_rs::IDEAL_BATCH_SIZE;
+                        full_turn |= i + 1 == send_budget;
                     }
                     Poll::Pending => break,
                     Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
@@ -247,7 +259,7 @@ async fn drive(
                 let mut read = || {
                     receive.read(socket, BURST - n, |from, packet| {
                         reserved.apply(packet, true);
-                        hub.receive_with(unmapped(from, dual), packet, |event| match event {
+                        hub.receive_mut(unmapped(from, dual), packet, |event| match event {
                             HubEventRef::Datagram(endpoint, wire) => {
                                 reserved.apply(wire, false);
                                 let _ = socket.send_to(wire, carrier_endpoint(endpoint, dual));
