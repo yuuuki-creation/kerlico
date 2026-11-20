@@ -352,7 +352,8 @@ def main():
                     landing=landing, allow_lost_half_close=True)
         if args.mihomo:
             version = subprocess.check_output([args.mihomo, "-v"], text=True, timeout=10)
-            fixtures.require(version.startswith("Mihomo Meta 1.19.33"), "unexpected mihomo version")
+            fixtures.require(version.startswith(("Mihomo Meta 1.19.33 ", "Mihomo Meta v1.19.33 ")),
+                             "unexpected mihomo version")
             anytls_landing(args, root, origins, stock=True)
             anytls_landing(args, root, origins, stock=False)
         if args.mita:

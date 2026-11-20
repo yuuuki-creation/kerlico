@@ -33,6 +33,23 @@ MUX = ["MULTIPLEXING_OFF", "MULTIPLEXING_LOW", "MULTIPLEXING_MIDDLE", "MULTIPLEX
 HANDSHAKES = ["HANDSHAKE_STANDARD", "HANDSHAKE_NO_WAIT"]
 FACTORS = [["TCP", "UDP"], MUX, HANDSHAKES, list(range(5)), [1280, 1400]]
 
+def use_loopback_v6(folder, inbound):
+    # The native IPv6 default requires a global source address. The fixture
+    # only needs to reach ::1, including on hosts without an IPv6 default route.
+    name = b"loopback-v6"
+    cidr = b"\x0a\x10" + socket.inet_pton(socket.AF_INET6, "::1") + b"\x10\x80\x01"
+    entry = bytes([10, len(name)]) + name + bytes([18, len(cidr)]) + cidr
+    (folder / "geoip.dat").write_bytes(bytes([10, len(entry)]) + entry)
+    inbound.setdefault("rules", []).insert(0, {"geoip": [name.decode()], "outbound": "native-v6"})
+
+
+def large_udp_payload():
+    if sys.platform == "darwin":
+        limit = int(subprocess.check_output(["sysctl", "-n", "net.inet.udp.maxdgram"], text=True))
+        # Keep room for the largest SOCKS5 UDP address used in these cases.
+        return min(32000, limit - 22)
+    return 32000
+
 
 class Failure(Exception):
     pass
@@ -505,7 +522,8 @@ def udp_check(socks, fixtures, negatives=False, soak_seconds=0):
         udp.bind(("127.0.0.1", 0))
         udp.settimeout(IO_BUDGET)
         targets = fixtures.udp_targets()
-        lengths = [0, 1, 1279, 1400, 8192, 32000, 3, 0]
+        large = large_udp_payload()
+        lengths = [0, 1, 1279, 1400, min(8192, large), large, 3, 0]
         started = time.monotonic()
         for index in itertools.count():
             if index >= len(lengths) and time.monotonic() - started >= soak_seconds:
@@ -642,11 +660,12 @@ def official_to_rust(args, folder, row, fixtures, negative=False):
     kind = socket.SOCK_STREAM if row[0] == "TCP" else socket.SOCK_DGRAM
     port = free_ports(1, kind, args.node_host)[0]
     config = {"warp": {"secretKey": "invalid"},
-              "dns": {"hosts": {"localhost": ["127.0.0.1", "::1"]}},
+              "dns": {"hosts": {"localhost": ["127.0.0.1"]}},
               "inbounds": [{"tag": "fixture", "protocol": "mieru", "listen": args.node_host, "port": port,
                             "outbound": "default", "rules": [],
                             "settings": {"transport": row[0], "mtu": row[4],
                                          "users": [{"email": "test-user", "username": "test-user", "password": "test-password"}]}}]}
+    use_loopback_v6(folder, config["inbounds"][0])
     config_path = folder / "server.json"
     write_json(config_path, config)
     # 显式非法 secretKey 使 load_profile 在注册之前解析失败；本地非法文件
@@ -657,7 +676,8 @@ def official_to_rust(args, folder, row, fixtures, negative=False):
         probe_timeout = IO_BUDGET + args.udp_soak_seconds
         command = [args.peer_bin, "probe"] + peer_options(row, port, args.node_host) + [
             "--tcp-targets", ",".join(authority(*x) for x in fixtures.tcp_targets()),
-            "--udp-targets", ",".join(authority(*x) for x in fixtures.udp_targets())]
+            "--udp-targets", ",".join(authority(*x) for x in fixtures.udp_targets()),
+            "--large-udp", str(large_udp_payload())]
         if args.udp_soak_seconds:
             command += ["--udp-soak", f"{args.udp_soak_seconds}s"]
         command += ["--timeout", f"{probe_timeout}s"]
@@ -796,7 +816,7 @@ def main():
     result = {"status": "fail", "upstream_sha": SHA,
               "coverage": "partial" if args.case_index is not None else ("smoke" if args.quick else "pairwise"), "cases": [],
               "case_index": args.case_index,
-              "node_host": args.node_host,
+              "node_host": args.node_host, "large_udp_payload": large_udp_payload(),
               "udp_soak_seconds": args.udp_soak_seconds,
               "limitations": ["黑盒进程清理不能证明进程内 Arc 或 FD 已全部回收",
                               "线协议互通成功不能证明官方复用概率分布",

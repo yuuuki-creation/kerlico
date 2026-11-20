@@ -1,6 +1,7 @@
 //! Turns authenticated IP traffic into TCP and UDP flows without dialing it.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -8,14 +9,14 @@ use std::time::{Duration, Instant};
 
 use rand_core::{OsRng, RngCore};
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
-use smoltcp::phy::ChecksumCapabilities;
+use smoltcp::phy::{Checksum, ChecksumCapabilities};
 use smoltcp::socket::tcp::{self, State};
 use smoltcp::wire::{
     HardwareAddress, IpAddress, IpCidr, IpProtocol, Ipv4Packet, Ipv4Repr, Ipv6Packet, Ipv6Repr,
     TcpPacket, UdpPacket,
 };
 
-use crate::engine::{service_tcp, Flow, IpDev, Pipe};
+use crate::engine::{service_tcp, Flow, IpDev, Pipe, StackWake, UdpDriver, FLOW_PACKETS};
 use crate::fragments::{Fragment, Reassembly};
 use crate::wire::MAX_IP_PACKET;
 use crate::PeerId;
@@ -58,8 +59,21 @@ struct TcpSlot {
 }
 
 struct UdpSlot {
-    flow: Arc<Mutex<Flow>>,
+    route: UdpRoute,
     seen: Instant,
+}
+
+enum UdpRoute {
+    Pipe(Arc<Mutex<Flow>>),
+    Connected { driver: UdpDriver, requests: VecDeque<Vec<u8>> },
+}
+
+impl UdpRoute {
+    fn close(&self) {
+        if let Self::Pipe(flow) = self {
+            flow.lock().expect("UDP flow").close();
+        }
+    }
 }
 
 pub struct Stack {
@@ -69,23 +83,35 @@ pub struct Stack {
     tcp_index: HashMap<Key, u16>,
     tcp: HashMap<u16, TcpSlot>,
     udp: HashMap<Key, UdpSlot>,
+    udp_receive: Vec<u8>,
     next: u16,
     fragment_id: u32,
     fragments: Reassembly,
+    tcp_limit: usize,
+    tcp_nodelay: bool,
+    udp_limit: usize,
+    wake: Option<StackWake>,
 }
 
 impl Stack {
     pub fn new(mtu: usize) -> io::Result<Self> {
+        Self::with_limits(mtu, MAX_TCP, MAX_UDP)
+    }
+
+    pub fn with_limits(mtu: usize, tcp_limit: usize, udp_limit: usize) -> io::Result<Self> {
         if !(576..=MAX_IP_PACKET).contains(&mtu) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "invalid WireGuard node MTU",
+                "invalid IP stack MTU",
             ));
         }
         let mut device = IpDev {
             rx: Default::default(),
             tx: Default::default(),
             mtu,
+            // TCP checksums cover the external addresses and ports, so verify
+            // ingress and fill egress at the translation boundary.
+            tcp_checksum: Checksum::None,
         };
         let mut config = smoltcp::iface::Config::new(HardwareAddress::Ip);
         config.random_seed = OsRng.next_u64();
@@ -105,10 +131,23 @@ impl Stack {
             tcp_index: HashMap::new(),
             tcp: HashMap::new(),
             udp: HashMap::new(),
+            udp_receive: Vec::new(),
             next: 1024,
             fragment_id: OsRng.next_u32(),
             fragments: Reassembly::default(),
+            tcp_limit,
+            tcp_nodelay: false,
+            udp_limit,
+            wake: None,
         })
+    }
+
+    pub fn set_wake(&mut self, wake: impl Fn() + Send + Sync + 'static) {
+        self.wake = Some(Arc::new(wake));
+    }
+
+    pub fn enable_tcp_nodelay(&mut self) {
+        self.tcp_nodelay = true;
     }
 
     pub fn receive(
@@ -117,10 +156,28 @@ impl Stack {
         endpoint: SocketAddr,
         packet: &[u8],
     ) -> Option<Incoming> {
+        self.receive_packet(peer, endpoint, Cow::Borrowed(packet))
+    }
+
+    pub fn receive_owned(
+        &mut self,
+        peer: PeerId,
+        endpoint: SocketAddr,
+        packet: Vec<u8>,
+    ) -> Option<Incoming> {
+        self.receive_packet(peer, endpoint, Cow::Owned(packet))
+    }
+
+    fn receive_packet(
+        &mut self,
+        peer: PeerId,
+        endpoint: SocketAddr,
+        packet: Cow<'_, [u8]>,
+    ) -> Option<Incoming> {
         if packet.len() > self.device.mtu {
             return None;
         }
-        let mut ip = parse_ip(packet)?;
+        let mut ip = parse_ip(&packet)?;
         let joined;
         if let Some(fragment) = ip.fragment {
             joined =
@@ -149,7 +206,7 @@ impl Stack {
                 let port = if let Some(&port) = self.tcp_index.get(&key) {
                     port
                 } else {
-                    if !segment.syn() || segment.ack() || self.tcp.len() >= MAX_TCP {
+                    if !segment.syn() || segment.ack() || self.tcp.len() >= self.tcp_limit {
                         return None;
                     }
                     let port = self.port()?;
@@ -158,6 +215,7 @@ impl Stack {
                         tcp::SocketBuffer::new(vec![0; 32 * 1024]),
                     );
                     socket.set_timeout(Some(smoltcp::time::Duration::from_secs(300)));
+                    socket.set_nagle_enabled(!self.tcp_nodelay);
                     let (local, _) = aliases(ip.src);
                     socket.listen((smol(local), port)).ok()?;
                     let handle = self.sockets.add(socket);
@@ -167,7 +225,7 @@ impl Stack {
                             key,
                             endpoint,
                             handle,
-                            flow: Flow::new(true, key.src),
+                            flow: Flow::with_wake(true, key.src, self.wake.clone()),
                             offered: false,
                         },
                     );
@@ -176,13 +234,26 @@ impl Stack {
                 };
                 if self.device.rx.len() < 128 {
                     let (local, remote) = aliases(ip.src);
-                    self.device.rx.push_back(tcp_packet(
-                        ip.payload,
-                        remote,
-                        local,
-                        segment.src_port(),
-                        port,
-                    )?);
+                    let src = SocketAddr::new(remote, segment.src_port());
+                    let dst = SocketAddr::new(local, port);
+                    let offset = ip_header_len(remote);
+                    let translated = match packet {
+                        Cow::Owned(mut packet)
+                            if ip.fragment.is_none()
+                                && packet.len() == offset + ip.payload.len() =>
+                        {
+                            translate_tcp(&mut packet, src, dst, false);
+                            packet
+                        }
+                        _ => {
+                            let (mut packet, offset) =
+                                header(src.ip(), dst.ip(), IpProtocol::Tcp, ip.payload.len())?;
+                            packet[offset..].copy_from_slice(ip.payload);
+                            set_tcp_endpoints(&mut packet[offset..], src, dst, false);
+                            packet
+                        }
+                    };
+                    self.device.rx.push_back(translated);
                 }
                 None
             }
@@ -203,25 +274,53 @@ impl Stack {
                 };
                 let now = Instant::now();
                 if let Some(entry) = self.udp.get_mut(&key) {
-                    let mut flow = entry.flow.lock().expect("WireGuard UDP flow");
-                    if !flow.dropped && !flow.closed && now.duration_since(entry.seen) < IDLE {
-                        entry.seen = now;
-                        flow.receive_udp(body.payload());
-                        return None;
+                    if now.duration_since(entry.seen) < IDLE {
+                        match &mut entry.route {
+                            UdpRoute::Connected { requests, .. } => {
+                                entry.seen = now;
+                                if requests.len() < FLOW_PACKETS {
+                                    let payload = body.payload();
+                                    let owned = if ip.fragment.is_some() {
+                                        payload.to_vec()
+                                    } else {
+                                        let offset = payload.as_ptr().addr() - packet.as_ptr().addr();
+                                        let len = payload.len();
+                                        match packet {
+                                            Cow::Owned(mut bytes) => {
+                                                bytes.copy_within(offset..offset + len, 0);
+                                                bytes.truncate(len);
+                                                bytes
+                                            }
+                                            Cow::Borrowed(bytes) => bytes[offset..offset + len].to_vec(),
+                                        }
+                                    };
+                                    requests.push_back(owned);
+                                }
+                                return None;
+                            }
+                            UdpRoute::Pipe(flow) => {
+                                let mut flow = flow.lock().expect("UDP flow");
+                                if !flow.dropped && !flow.closed {
+                                    entry.seen = now;
+                                    flow.receive_udp(body.payload());
+                                    return None;
+                                }
+                            }
+                        }
                     }
-                    flow.closed = true;
+                    entry.route.close();
                 }
-                if self.udp.len() >= MAX_UDP && !self.udp.contains_key(&key) {
+                if self.udp.len() >= self.udp_limit && !self.udp.contains_key(&key) {
                     return None;
                 }
-                let flow = Flow::new(false, key.src);
+                let flow = Flow::with_wake(false, key.src, self.wake.clone());
                 flow.lock()
                     .expect("WireGuard UDP flow")
                     .receive_udp(body.payload());
                 self.udp.insert(
                     key,
                     UdpSlot {
-                        flow: flow.clone(),
+                        route: UdpRoute::Pipe(flow.clone()),
                         seen: now,
                     },
                 );
@@ -239,15 +338,28 @@ impl Stack {
 
     pub fn poll(
         &mut self,
+        accept: impl FnMut(Incoming),
+        emit: impl FnMut(PeerId, Vec<u8>),
+    ) {
+        self.poll_with_udp(false, accept, emit);
+    }
+
+    pub fn poll_with_udp(
+        &mut self,
+        udp_ready: bool,
         mut accept: impl FnMut(Incoming),
         mut emit: impl FnMut(PeerId, Vec<u8>),
     ) {
         let now = smoltcp::time::Instant::now();
-        self.iface.poll(now, &mut self.device, &mut self.sockets);
+        let ingress = !self.device.rx.is_empty();
+        if ingress {
+            self.iface.poll(now, &mut self.device, &mut self.sockets);
+        }
+        let mut egress = !ingress;
         for entry in self.tcp.values_mut() {
             let mut flow = entry.flow.lock().expect("WireGuard TCP flow");
             let socket = self.sockets.get_mut::<tcp::Socket>(entry.handle);
-            service_tcp(socket, &mut flow);
+            egress |= service_tcp(socket, &mut flow);
             if flow.established && !flow.failed && !entry.offered {
                 entry.offered = true;
                 drop(flow);
@@ -260,11 +372,16 @@ impl Stack {
                 });
             }
         }
-        self.iface.poll(now, &mut self.device, &mut self.sockets);
-        while let Some(data) = self.device.tx.pop_front() {
+        if egress {
+            self.iface.poll(now, &mut self.device, &mut self.sockets);
+        }
+        while let Some(mut data) = self.device.tx.pop_front() {
             let Some(ip) = parse_ip(&data) else {
                 continue;
             };
+            if ip.protocol != IpProtocol::Tcp {
+                continue;
+            }
             let Ok(segment) = TcpPacket::new_checked(ip.payload) else {
                 continue;
             };
@@ -272,21 +389,17 @@ impl Stack {
                 continue;
             };
             let key = entry.key;
-            if let Some(packet) = tcp_packet(
-                ip.payload,
-                key.dst.ip(),
-                key.src.ip(),
-                key.dst.port(),
-                key.src.port(),
-            ) {
-                emit(key.peer, packet);
+            if data.len() == ip_header_len(key.dst.ip()) + ip.payload.len() {
+                translate_tcp(&mut data, key.dst, key.src, true);
+                emit(key.peer, data);
             }
         }
         self.tcp.retain(|_, entry| {
+            if self.sockets.get::<tcp::Socket>(entry.handle).state() != State::Closed {
+                return true;
+            }
             let flow = entry.flow.lock().expect("WireGuard TCP flow");
-            if (flow.failed || flow.closed)
-                && self.sockets.get::<tcp::Socket>(entry.handle).state() == State::Closed
-            {
+            if flow.failed || flow.closed {
                 self.sockets.remove(entry.handle);
                 self.tcp_index.remove(&entry.key);
                 false
@@ -294,32 +407,73 @@ impl Stack {
                 true
             }
         });
+        self.poll_udp(udp_ready, emit);
+    }
+
+    pub fn poll_udp(&mut self, udp_ready: bool, mut emit: impl FnMut(PeerId, Vec<u8>)) {
         let now = Instant::now();
         let mtu = self.device.mtu;
         let ident = &mut self.fragment_id;
+        let receive = &mut self.udp_receive;
         self.udp.retain(|key, entry| {
-            let mut flow = entry.flow.lock().expect("WireGuard UDP flow");
-            if flow.dropped || flow.closed || now.duration_since(entry.seen) >= IDLE {
-                flow.closed = true;
+            if now.duration_since(entry.seen) >= IDLE {
+                entry.route.close();
                 return false;
             }
-            for _ in 0..16 {
-                let Some(data) = flow.datagrams.pop_front() else {
-                    break;
+            let seen = &mut entry.seen;
+            let mut send = |data: &[u8]| {
+                let Some(packet) = udp_packet(data, key.dst, key.src) else {
+                    return false;
                 };
-                if let Some(packet) = udp_packet(&data, key.dst, key.src) {
-                    if packet.len() <= mtu {
-                        emit(key.peer, packet);
-                    } else {
-                        *ident = ident.wrapping_add(1);
-                        fragment_udp(&packet, key.dst.ip(), key.src.ip(), mtu, *ident, |packet| {
-                            emit(key.peer, packet)
-                        });
+                if packet.len() <= mtu {
+                    emit(key.peer, packet);
+                } else {
+                    *ident = ident.wrapping_add(1);
+                    fragment_udp(&packet, key.dst.ip(), key.src.ip(), mtu, *ident, |packet| {
+                        emit(key.peer, packet)
+                    });
+                }
+                *seen = now;
+                true
+            };
+            if let UdpRoute::Pipe(flow) = &entry.route {
+                let mut flow = flow.lock().expect("UDP flow");
+                if flow.dropped || flow.closed {
+                    flow.close();
+                    return false;
+                }
+                if let Some(driver) = flow.udp_driver.take() {
+                    let requests = std::mem::take(&mut flow.packets);
+                    drop(flow);
+                    entry.route = UdpRoute::Connected { requests, driver };
+                } else {
+                    let queued = flow.datagrams.len();
+                    for _ in 0..16 {
+                        let Some(data) = flow.datagrams.pop_front() else {
+                            break;
+                        };
+                        send(&data);
                     }
-                    entry.seen = now;
+                    if queued - flow.datagrams.len() == 16 {
+                        flow.wake_stack();
+                    }
+                    if queued != flow.datagrams.len() {
+                        flow.notify_writer();
+                    }
+                    return true;
                 }
             }
-            true
+            let UdpRoute::Connected { requests, driver } = &mut entry.route else {
+                unreachable!("pipe already driven");
+            };
+            if !udp_ready && requests.is_empty() {
+                return true;
+            }
+            let buffer = udp_ready.then(|| {
+                receive.resize(4 * 65_536, 0);
+                receive.as_mut_slice()
+            });
+            driver(requests, buffer, &mut send).is_ok()
         });
     }
 
@@ -329,14 +483,14 @@ impl Stack {
             if key.peer != peer {
                 return true;
             }
-            entry.flow.lock().expect("WireGuard UDP flow").closed = true;
+            entry.route.close();
             false
         });
         self.tcp.retain(|_, entry| {
             if entry.key.peer != peer {
                 return true;
             }
-            entry.flow.lock().expect("WireGuard TCP flow").failed = true;
+            entry.flow.lock().expect("WireGuard TCP flow").fail();
             self.sockets.remove(entry.handle);
             self.tcp_index.remove(&entry.key);
             false
@@ -454,56 +608,66 @@ pub(crate) fn header(
     protocol: IpProtocol,
     length: usize,
 ) -> Option<(Vec<u8>, usize)> {
+    let offset = ip_header_len(src);
+    if src.is_ipv4() != dst.is_ipv4() || (src.is_ipv4() && length > 65_515) {
+        return None;
+    }
+    let mut packet = vec![0; length + offset];
+    emit_header(&mut packet, src, dst, protocol);
+    Some((packet, offset))
+}
+
+fn ip_header_len(address: IpAddr) -> usize {
+    if address.is_ipv4() {
+        20
+    } else {
+        40
+    }
+}
+
+fn emit_header(packet: &mut [u8], src: IpAddr, dst: IpAddr, protocol: IpProtocol) {
     let hop_limit = 64;
     match (src, dst) {
         (IpAddr::V4(src), IpAddr::V4(dst)) => {
-            if length > 65_515 {
-                return None;
-            }
-            let mut packet = vec![0; length + 20];
             Ipv4Repr {
                 src_addr: src.into(),
                 dst_addr: dst.into(),
                 next_header: protocol,
-                payload_len: length,
+                payload_len: packet.len() - 20,
                 hop_limit,
             }
             .emit(
-                &mut Ipv4Packet::new_unchecked(&mut packet[..]),
+                &mut Ipv4Packet::new_unchecked(packet),
                 &ChecksumCapabilities::default(),
             );
-            Some((packet, 20))
         }
         (IpAddr::V6(src), IpAddr::V6(dst)) => {
-            let mut packet = vec![0; length + 40];
             Ipv6Repr {
                 src_addr: src.into(),
                 dst_addr: dst.into(),
                 next_header: protocol,
-                payload_len: length,
+                payload_len: packet.len() - 40,
                 hop_limit,
             }
-            .emit(&mut Ipv6Packet::new_unchecked(&mut packet[..]));
-            Some((packet, 40))
+            .emit(&mut Ipv6Packet::new_unchecked(packet));
         }
-        _ => None,
+        _ => unreachable!("matched IP address families"),
     }
 }
 
-fn tcp_packet(
-    tcp: &[u8],
-    src: IpAddr,
-    dst: IpAddr,
-    src_port: u16,
-    dst_port: u16,
-) -> Option<Vec<u8>> {
-    let (mut packet, offset) = header(src, dst, IpProtocol::Tcp, tcp.len())?;
-    packet[offset..].copy_from_slice(tcp);
-    let mut tcp = TcpPacket::new_checked(&mut packet[offset..]).ok()?;
-    tcp.set_src_port(src_port);
-    tcp.set_dst_port(dst_port);
-    tcp.fill_checksum(&smol(src), &smol(dst));
-    Some(packet)
+fn translate_tcp(packet: &mut [u8], src: SocketAddr, dst: SocketAddr, checksum: bool) {
+    emit_header(packet, src.ip(), dst.ip(), IpProtocol::Tcp);
+    set_tcp_endpoints(&mut packet[ip_header_len(src.ip())..], src, dst, checksum);
+}
+
+fn set_tcp_endpoints(segment: &mut [u8], src: SocketAddr, dst: SocketAddr, checksum: bool) {
+    // The caller already checked the segment before changing its endpoints.
+    let mut tcp = TcpPacket::new_unchecked(segment);
+    tcp.set_src_port(src.port());
+    tcp.set_dst_port(dst.port());
+    if checksum {
+        tcp.fill_checksum(&smol(src.ip()), &smol(dst.ip()));
+    }
 }
 
 pub(crate) fn udp_packet(data: &[u8], src: SocketAddr, dst: SocketAddr) -> Option<Vec<u8>> {
@@ -560,10 +724,99 @@ pub(crate) fn fragment_udp(
 impl Drop for Stack {
     fn drop(&mut self) {
         for entry in self.tcp.values() {
-            entry.flow.lock().expect("WireGuard TCP flow").failed = true;
+            entry.flow.lock().expect("WireGuard TCP flow").fail();
         }
         for entry in self.udp.values() {
-            entry.flow.lock().expect("WireGuard UDP flow").closed = true;
+            entry.route.close();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connected_udp_keeps_the_flow_after_the_handoff_is_released() -> io::Result<()> {
+        let client = "10.73.11.2:45000".parse::<SocketAddr>().unwrap();
+        let target = "192.0.2.17:8080".parse::<SocketAddr>().unwrap();
+        let carrier = "127.0.0.1:1194".parse::<SocketAddr>().unwrap();
+        let mut stack = Stack::new(1400)?;
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let captured = sent.clone();
+        let initial = udp_packet(b"first", client, target).unwrap();
+        let handoff = stack.receive_owned(PeerId::SINGLE, carrier, initial).unwrap();
+        handoff.pipe.install_udp_driver(Box::new(move |requests, receive, reply| {
+            captured.lock().unwrap().extend(requests.drain(..));
+            if receive.is_some() {
+                assert!(reply(b"reply"));
+            }
+            Ok(())
+        }))?;
+        drop(handoff);
+        stack.poll(|_| panic!("duplicate handoff"), |_, _| panic!("unexpected reply"));
+
+        let next = udp_packet(b"second", client, target).unwrap();
+        assert!(stack.receive_owned(PeerId::SINGLE, carrier, next).is_none());
+        let large = vec![7; 2600];
+        let packet = udp_packet(&large, client, target).unwrap();
+        fragment_udp(&packet, client.ip(), target.ip(), 1400, 7, |fragment| {
+            assert!(stack.receive_owned(PeerId::SINGLE, carrier, fragment).is_none());
+        });
+        let mut replies = Vec::new();
+        stack.poll_udp(true, |_, packet| replies.push(packet));
+        assert_eq!(
+            *sent.lock().unwrap(),
+            [b"first".to_vec(), b"second".to_vec(), large]
+        );
+        assert_eq!(replies, [udp_packet(b"reply", target, client).unwrap()]);
+        stack.remove_peer(PeerId::SINGLE);
+        let fresh = udp_packet(b"new", client, target).unwrap();
+        assert!(stack.receive_owned(PeerId::SINGLE, carrier, fresh).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn translated_tcp_checksums_cover_the_original_endpoints() -> io::Result<()> {
+        let client = "10.73.11.2:45000".parse::<SocketAddr>().unwrap();
+        let target = "192.0.2.17:8080".parse::<SocketAddr>().unwrap();
+        let carrier = "127.0.0.1:1194".parse::<SocketAddr>().unwrap();
+        let (mut syn, offset) = header(client.ip(), target.ip(), IpProtocol::Tcp, 20).unwrap();
+        let mut tcp = TcpPacket::new_unchecked(&mut syn[offset..]);
+        tcp.set_header_len(20);
+        tcp.set_syn(true);
+        tcp.set_src_port(client.port());
+        tcp.set_dst_port(target.port());
+        tcp.set_window_len(4096);
+        tcp.fill_checksum(&smol(client.ip()), &smol(target.ip()));
+
+        let mut stack = Stack::new(1400)?;
+        let mut bad = syn.clone();
+        bad[offset + 16] ^= 1;
+        stack.receive_owned(PeerId::SINGLE, carrier, bad);
+        stack.poll(
+            |_| panic!("invalid TCP accepted"),
+            |_, _| panic!("invalid TCP answered"),
+        );
+
+        stack.receive_owned(PeerId::SINGLE, carrier, syn);
+        let mut replies = Vec::new();
+        stack.poll(
+            |_| panic!("SYN alone opened a flow"),
+            |_, reply| replies.push(reply),
+        );
+        let [reply] = replies.as_slice() else {
+            panic!("expected one SYN-ACK")
+        };
+        let ip = parse_ip(reply).expect("valid IP checksum");
+        let reply = TcpPacket::new_checked(ip.payload).expect("valid TCP header");
+        assert_eq!((ip.src, ip.dst), (target.ip(), client.ip()));
+        assert_eq!(
+            (reply.src_port(), reply.dst_port()),
+            (target.port(), client.port())
+        );
+        assert!(reply.syn() && reply.ack());
+        assert!(reply.verify_checksum(&smol(ip.src), &smol(ip.dst)));
+        Ok(())
     }
 }

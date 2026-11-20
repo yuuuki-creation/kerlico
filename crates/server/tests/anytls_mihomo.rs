@@ -177,12 +177,14 @@ fn mihomo_client_with_ech(mixed: u16, server: u16, password: &str, ech: Option<&
 }
 
 fn mihomo_client_with_transport(mixed: u16, server: u16, password: &str, extra: &str) -> Peer {
+    let readiness = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = readiness.local_addr().unwrap().port();
     let yaml = format!(
-        "log-level: debug\nallow-lan: false\nbind-address: 127.0.0.1\nipv6: true\nmode: rule\nmixed-port: {mixed}\nproxies:\n  - name: any\n    type: anytls\n    server: 127.0.0.1\n    port: {server}\n    password: {password}\n    sni: localhost\n    skip-cert-verify: true\n    udp: true\n    idle-session-check-interval: 6\n    idle-session-timeout: 6\n{extra}rules:\n  - IP-CIDR,127.0.0.2/32,DIRECT,no-resolve\n  - MATCH,any\n"
+        "log-level: debug\nallow-lan: false\nbind-address: 127.0.0.1\nipv6: true\nmode: rule\nmixed-port: {mixed}\nproxies:\n  - name: any\n    type: anytls\n    server: 127.0.0.1\n    port: {server}\n    password: {password}\n    sni: localhost\n    skip-cert-verify: true\n    udp: true\n    idle-session-check-interval: 6\n    idle-session-timeout: 6\n{extra}rules:\n  - DST-PORT,{port},DIRECT\n  - MATCH,any\n"
     );
     let peer = Peer::start(&format!("client-{mixed}"), &yaml, &[]);
     wait_port(mixed);
-    wait_mihomo_client(mixed);
+    wait_mihomo_client(mixed, readiness);
     peer
 }
 
@@ -195,10 +197,8 @@ fn mihomo_server_with_transport(port: u16, extra: &str) -> Peer {
     peer
 }
 
-/// Waits until mihomo's tunnel runs (see `mihomo_server`). The probe goes to 127.0.0.2, which
-/// the client's rules send DIRECT, so it opens no AnyTLS session that a test would then count.
-fn wait_mihomo_client(mixed: u16) {
-    let listener = TcpListener::bind("127.0.0.2:0").unwrap();
+/// The probe uses a dedicated DIRECT destination so it does not count as an AnyTLS session.
+fn wait_mihomo_client(mixed: u16, listener: TcpListener) {
     let echo = listener.local_addr().unwrap();
     thread::spawn(move || {
         for mut tcp in listener.incoming().flatten() {

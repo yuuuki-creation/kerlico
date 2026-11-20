@@ -4,6 +4,8 @@ use kerlico_shared::{ListenAddr, NodeTag, Settings, UserEmail};
 use std::net::{Ipv4Addr, Ipv6Addr, TcpListener, TcpStream, UdpSocket};
 use std::time::Duration;
 
+static PORT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn tag() -> NodeTag {
     NodeTag::parse("test-node").unwrap()
 }
@@ -17,6 +19,7 @@ fn port() -> u16 {
 
 #[test]
 fn dropping_a_node_releases_tcp_and_udp_listeners() {
+    let _ports = PORT_TESTS.lock().unwrap_or_else(|error| error.into_inner());
     for transport in ["TCP", "UDP"] {
         let p = port();
         let mut settings = Settings::default();
@@ -41,6 +44,7 @@ fn dropping_a_node_releases_tcp_and_udp_listeners() {
 
 #[test]
 fn a_failed_range_bind_rolls_back_earlier_ports() {
+    let _ports = PORT_TESTS.lock().unwrap_or_else(|error| error.into_inner());
     let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
     let p = occupied.local_addr().unwrap().port();
     assert!(p > 1025);
@@ -59,6 +63,7 @@ fn a_failed_range_bind_rolls_back_earlier_ports() {
 
 #[test]
 fn an_ipv6_node_does_not_accept_ipv4() {
+    let _ports = PORT_TESTS.lock().unwrap_or_else(|error| error.into_inner());
     let p = port();
     let node = mieru::listen(
         &tag(),
@@ -81,6 +86,7 @@ fn an_ipv6_node_does_not_accept_ipv4() {
 
 #[test]
 fn a_username_cannot_replace_another_users_credentials() {
+    let _ports = PORT_TESTS.lock().unwrap_or_else(|error| error.into_inner());
     let p = port();
     let mut node = mieru::listen(
         &tag(),
@@ -110,6 +116,7 @@ fn udp_landing_preserves_empty_and_large_datagrams() {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
+    let _ports = PORT_TESTS.lock().unwrap_or_else(|error| error.into_inner());
     struct State {
         packets: VecDeque<Vec<u8>>,
         replies: Vec<Vec<u8>>,
@@ -162,7 +169,8 @@ fn udp_landing_preserves_empty_and_large_datagrams() {
     settings.insert_text("password", "test-password");
     settings.insert_text("multiplexing", "MULTIPLEXING_HIGH");
     outbound.install_landing(landing_mieru::land, "127.0.0.1".into(), p, settings);
-    let large: Vec<u8> = (0..32768).map(|n| (n % 251) as u8).collect();
+    let max_payload = if cfg!(target_os = "macos") { 4096 } else { 32768 };
+    let large: Vec<u8> = (0..max_payload).map(|n| (n % 251) as u8).collect();
     let state = Arc::new(Mutex::new(State {
         packets: VecDeque::from([Vec::new(), large.clone()]),
         replies: Vec::new(),

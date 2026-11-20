@@ -48,7 +48,9 @@ pub(super) fn configure(
         )?;
     }
     if kind == SocketKind::Tcp {
-        if let Some(backlog) = settings.tcp_fast_open {
+        if let Some(backlog) = settings.tcp_fast_open.filter(|_| {
+            !cfg!(target_os = "macos") || role == SocketRole::Dialer
+        }) {
             option("tcpFastOpen", fast_open(socket, role, backlog))?;
         }
         option("TCP keepalive", keepalive(socket, settings, role))?;
@@ -269,13 +271,20 @@ fn fast_open(socket: &Socket, role: SocketRole, backlog: i32) -> io::Result<()> 
 }
 
 #[cfg(target_os = "macos")]
-fn fast_open(socket: &Socket, role: SocketRole, backlog: i32) -> io::Result<()> {
-    let flag = match (role, backlog > 0) {
-        (_, false) => 0,
-        (SocketRole::Listener, true) => 1,
-        (SocketRole::Dialer, true) => 2,
-    };
-    set_int(socket, libc::IPPROTO_TCP, libc::TCP_FASTOPEN, flag)
+fn fast_open(_: &Socket, _: SocketRole, backlog: i32) -> io::Result<()> {
+    if backlog > 0 {
+        return Err(platform_unsupported("TCP Fast Open on an outbound socket"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn listen_fast_open(socket: &Socket, enabled: bool) -> io::Result<()> {
+    // Darwin applies TCP_FASTOPEN only to a socket already in LISTEN.
+    match set_int(socket, libc::IPPROTO_TCP, libc::TCP_FASTOPEN, i32::from(enabled)) {
+        Err(error) if !enabled && error.kind() == io::ErrorKind::Unsupported => Ok(()),
+        result => result,
+    }
 }
 
 #[cfg(target_os = "freebsd")]

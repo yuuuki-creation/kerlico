@@ -13,6 +13,8 @@ import tempfile
 import threading
 import time
 
+from verify_mieru import use_loopback_v6
+
 
 def exact(conn, size):
     out = bytearray()
@@ -178,6 +180,49 @@ def udp_roundtrip(endpoint, origin, auth=False):
                 assert packet == header + payload
 
 
+def verify_shared_udp_port(endpoint, auth):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as application, \
+        socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as first, \
+        socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as second, \
+        socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as alternate, \
+        request(endpoint, ("0.0.0.0", 0), auth, command=3) as control:
+        status, relay = reply(control)
+        assert status == 0
+        application.settimeout(2)
+        for origin in (first, second, alternate):
+            origin.bind(("127.0.0.1", 0))
+            origin.settimeout(2)
+        outbound = None
+        for destination, responder, message in (
+            (first, first, b"first"),
+            (second, alternate, b"reply from another port"),
+            (second, second, b"second"),
+        ):
+            application.sendto(b"\0\0\0" + address(*destination.getsockname()) + message, relay)
+            data, source = destination.recvfrom(512)
+            assert data == message
+            if outbound is None:
+                outbound = source
+            assert source == outbound
+            responder.sendto(message, source)
+            response = b"\0\0\0" + address(*responder.getsockname()) + message
+            assert application.recvfrom(512)[0] == response
+
+
+def verify_connect_bound(endpoint, auth):
+    for family, address in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        with socket.socket(family, socket.SOCK_STREAM) as origin:
+            origin.bind((address, 0))
+            origin.listen(1)
+            origin.settimeout(2)
+            with request(endpoint, origin.getsockname()[:2], auth) as control:
+                status, bound = reply(control)
+                assert status == 0
+                connection, source = origin.accept()
+                with connection:
+                    assert bound == source[:2]
+
+
 def verify_backpressure(endpoint, origin):
     payload = bytes(range(256)) * 16384
     with request(endpoint, origin, False, payload=payload[:197]) as conn:
@@ -237,6 +282,7 @@ def verify_outgoing(args, root, origin, udp):
 def verify_ipv6_relay(args, root, origin):
     endpoint = local_port(socket.AF_INET6)
     config = native(endpoint, False, True)
+    use_loopback_v6(root, config["inbounds"][0])
     config["inbounds"][0]["settings"]["ip"] = "::1"
     with process([args.server.resolve()], root, config, "kerlico-v6", endpoint), \
         socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as udp:
@@ -323,8 +369,12 @@ def main():
         endpoint = local_port()
         for auth, udp_enabled in ((False, False), (True, True)):
             config = native(endpoint, auth, udp_enabled)
+            use_loopback_v6(root, config["inbounds"][0])
             with process([args.server.resolve()], root, config, "kerlico", endpoint):
                 validate(endpoint, targets, udp, auth, udp_enabled)
+                verify_connect_bound(endpoint, auth)
+                if udp_enabled:
+                    verify_shared_udp_port(endpoint, auth)
                 if not auth:
                     with echo(TcpServer, ("127.0.0.1", 0), DuplexEcho) as duplex:
                         verify_backpressure(endpoint, duplex)
@@ -348,7 +398,7 @@ def main():
                         echo(TcpServer, ("127.0.0.1", 0), StreamingEcho) as streaming:
                         streaming_roundtrip((host, port), streaming)
                         udp_roundtrip((host, port), udp)
-        print("PASS SOCKS5 IPv4/IPv6/domain CONNECT, backpressure, half-close, authentication and UDP association")
+        print("PASS SOCKS5 IPv4/IPv6/domain CONNECT, bound endpoint, backpressure, half-close, authentication and UDP association")
         print("PASS Xray SOCKS outbound to Kerlico SOCKS inbound over TCP and UDP")
         config = native(endpoint, True, False)
         settings = config["inbounds"][0]["settings"]
@@ -360,12 +410,13 @@ def main():
             if args.client or args.landing_server:
                 verify_outgoing(args, root, streaming, udp)
         verify_ipv6_relay(args, root, udp6)
-        config = native(endpoint, False, False)
-        config["inbounds"][0]["sniffing"] = {"enabled": True, "destOverride": ["http"]}
+        config = native(endpoint, False, True)
+        config["inbounds"][0]["sniffing"] = {"enabled": True, "destOverride": ["http", "quic"]}
         with process([args.server.resolve()], root, config, "kerlico-sniffing", endpoint), \
             echo(TcpServer, ("127.0.0.1", 0), DuplexEcho) as duplex:
             verify_backpressure(endpoint, duplex)
-        print("PASS pipelined TCP payload survives sniffing")
+            verify_shared_udp_port(endpoint, False)
+        print("PASS pre-read TCP and UDP payload, shared UDP port and alternate reply source")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,10 @@ mod egress;
 mod proxy;
 pub use egress::{Exit, OutboundChoice};
 pub use async_stream::{AsyncBufReadVectored, AsyncReadHalf, AsyncTcp};
+mod datagram;
+pub use datagram::{DatagramReply, DatagramUplink, DirectDatagram, InstallDatagramUplink};
+#[cfg(target_os = "linux")]
+pub use datagram::{grow_udp_receive_buffer, ConnectedDatagrams};
 mod write_input;
 pub use write_input::{AsyncWriteHalf, AsyncWriteInput, WriteInput, MAX_WRITE_INPUT_PARTS};
 pub use proxy::{Association, ClientEntry, ProxyFn, Stream, TunFn, TunnelFn, Upstream};
@@ -434,6 +438,13 @@ pub enum Transport {
     Udp,
 }
 
+/// The local endpoint reported by the exit that connected to the target.
+#[derive(Clone, Debug)]
+pub enum ConnectBound {
+    Socket(SocketAddr),
+    Name(PeerAddr),
+}
+
 /// Plaintext after the inbound protocol. The outbound module is the only dialer.
 /// Read and write do not share a lock, so the copy can run both at once.
 pub trait InboundStream: Send + Sync {
@@ -442,6 +453,19 @@ pub trait InboundStream: Send + Sync {
     /// A successful transfer leaves this wrapper unused; no synchronous reader
     /// or writer may remain active while the halves are moved.
     fn take_async_tcp(&mut self) -> Result<Option<AsyncTcp>, PlaneFault> { Ok(None) }
+
+    /// Lets native UDP forward without a worker waiting on this stream's queue.
+    fn direct_datagram(&self) -> Option<DirectDatagram> { None }
+
+    /// Lets an inbound that already waits on socket readiness drive the
+    /// connected native UDP relay there.
+    #[cfg(target_os = "linux")]
+    fn connected_datagrams(&self) -> bool { false }
+
+    #[cfg(target_os = "linux")]
+    fn attach_datagrams(&self, _relay: Box<dyn ConnectedDatagrams>) -> Result<(), PlaneFault> {
+        Err(PlaneFault::Transport)
+    }
 
     /// Offers an unbuffered socket to the native relay after the dial reply.
     /// The relay owns both directions once it takes the socket.
@@ -455,6 +479,12 @@ pub trait InboundStream: Send + Sync {
     }
     /// Lets protocols acknowledge or reject a request only once the exit has been dialed.
     fn report_connect(&self, _result: Result<(), OpenError>) -> Result<(), PlaneFault> { Ok(()) }
+
+    fn report_connect_bound(&self, result: Result<(), OpenError>, _bound: Option<ConnectBound>) -> Result<(), PlaneFault> {
+        self.report_connect(result)
+    }
+
+    fn connect_bound(&self) -> Option<ConnectBound> { None }
     /// Says whether uplink can remain open after gracefully ending the downlink.
     fn finish_to_user(&self) -> Result<bool, PlaneFault> { Ok(false) }
 
@@ -517,11 +547,19 @@ pub struct Handoff {
 #[derive(Default)]
 pub struct DatagramSession {
     allow_other_sources: bool,
+    executor: Option<tokio::runtime::Handle>,
 }
 
 impl DatagramSession {
-    pub fn new(allow_other_sources: bool) -> Self { Self { allow_other_sources } }
+    pub fn new(allow_other_sources: bool) -> Self { Self { allow_other_sources, executor: None } }
     pub fn allows_other_sources(&self) -> bool { self.allow_other_sources }
+
+    pub fn with_executor(mut self, executor: tokio::runtime::Handle) -> Self {
+        self.executor = Some(executor);
+        self
+    }
+
+    pub fn executor(&self) -> Option<&tokio::runtime::Handle> { self.executor.as_ref() }
 }
 
 /// The server resolves names once when the outbound module starts copying a flow.
@@ -716,6 +754,14 @@ impl InboundStream for PrefixStream {
     }
     fn report_connect(&self, result: Result<(), OpenError>) -> Result<(), PlaneFault> {
         self.inner.report_connect(result)
+    }
+
+    fn report_connect_bound(&self, result: Result<(), OpenError>, bound: Option<ConnectBound>) -> Result<(), PlaneFault> {
+        self.inner.report_connect_bound(result, bound)
+    }
+
+    fn connect_bound(&self) -> Option<ConnectBound> {
+        self.inner.connect_bound()
     }
 
     fn finish_to_user(&self) -> Result<bool, PlaneFault> { self.inner.finish_to_user() }

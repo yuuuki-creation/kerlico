@@ -3516,10 +3516,7 @@ fn map_io(error: std::io::Error) -> PlaneFault {
 }
 
 fn bind_tcp(addr: SocketAddr, settings: &Settings) -> std::io::Result<TcpListener> {
-    let socket = kerlico_vless::socket::SocketOptions::parse(settings.text("sockopt").ok())?.open(kerlico_vless::socket::SocketKind::Tcp, kerlico_vless::socket::SocketRole::Listener, addr)?;
-    socket.bind(&addr.into())?;
-    socket.listen(128)?;
-    Ok(TcpListener::from(socket))
+    kerlico_vless::socket::SocketOptions::parse(settings.text("sockopt").ok())?.listen_tcp(addr, 128)
 }
 
 #[cfg(test)]

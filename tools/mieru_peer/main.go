@@ -31,6 +31,7 @@ const upstreamSHA = "1367cf2d2dd81c5f27d455be7cea691d7948c420"
 type options struct {
 	listen, transport, multiplexing, handshake, password string
 	port, mtu, low, sessions                             int
+	largeUDP                                             int
 	timeout                                              time.Duration
 	udpSoak                                              time.Duration
 	tcpTargets, udpTargets                               string
@@ -74,6 +75,7 @@ func main() {
 	fs.StringVar(&o.tcpTargets, "tcp-targets", "", "以逗号分隔的真实 TCP 回显目标")
 	fs.StringVar(&o.udpTargets, "udp-targets", "", "以逗号分隔的真实 UDP 回显目标")
 	fs.IntVar(&o.sessions, "sessions", 8, "并发 TCP 会话数")
+	fs.IntVar(&o.largeUDP, "large-udp", 32000, "验收的最大 UDP 载荷")
 	fs.DurationVar(&o.timeout, "timeout", 25*time.Second, "操作期限")
 	fs.DurationVar(&o.udpSoak, "udp-soak", 0, "延长同一个 UDP 关联的逐包回显校验")
 	if fs.Parse(os.Args[2:]) != nil || o.port < 1025 || o.port > 65535 || o.mtu < 1280 || o.mtu > 1400 || o.low < 0 || o.low > 4 || o.sessions < 1 || o.timeout <= 0 || net.ParseIP(o.listen) == nil {
@@ -82,7 +84,7 @@ func main() {
 	if o.transport != "TCP" && o.transport != "UDP" {
 		fail("transport")
 	}
-	if o.udpSoak < 0 || o.udpSoak >= o.timeout {
+	if o.largeUDP < 1400 || o.largeUDP > 65000 || o.udpSoak < 0 || o.udpSoak >= o.timeout {
 		fail("udp-soak")
 	}
 	var err error
@@ -375,7 +377,11 @@ func probe(o options) error {
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetDeadline(deadline)
 	packets := apiCommon.NewUDPAssociateWrapper(apiCommon.NewPacketOverStreamTunnel(conn), apiCommon.UDPAssociateReadFromFQDN{})
-	lengths := []int{0, 1, 1279, 1400, 8192, 32000, 3, 0}
+	middle := 8192
+	if o.largeUDP < middle {
+		middle = o.largeUDP
+	}
+	lengths := []int{0, 1, 1279, 1400, middle, o.largeUDP, 3, 0}
 	buf := make([]byte, 65535)
 	started := time.Now()
 	i := 0

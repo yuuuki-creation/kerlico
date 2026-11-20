@@ -31,6 +31,7 @@ def verify_peer(path):
 def make_identity(folder):
     cert, key = folder / "cert.pem", folder / "key.pem"
     subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                    "-pkeyopt", "ec_param_enc:named_curve",
                     "-nodes", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
                     "-days", "1", "-out", cert, "-keyout", key], check=True, timeout=10,
                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -281,8 +282,19 @@ def run(paths, root, identity, origins, name, server_factory, client_factory, *,
                 except OSError:
                     return True
         fixtures.wait_for(server, bound)
+        peer_options = {}
+        if ipv6:
+            for hostname in ("localhost", "ip6-localhost"):
+                try:
+                    addresses = socket.getaddrinfo(hostname, upstream, type=socket.SOCK_DGRAM)
+                except socket.gaierror:
+                    continue
+                if any(address[4][0] == "::1" for address in addresses):
+                    peer_options["peer"] = hostname
+                    break
+            fixtures.require(peer_options, "no hostname resolves to IPv6 loopback")
         command = client_factory(paths, folder / "client.json", upstream, socks, http, identity, PASSWORD,
-                                 extra=client_extra, **({"peer": "localhost"} if ipv6 else {}))
+                                 extra=client_extra, **peer_options)
         with fixtures.managed(command, folder, "client") as client:
             fixtures.wait_for(client, lambda: fixtures.ports_ready([socks, http]))
             tcp_payload(socks, target)

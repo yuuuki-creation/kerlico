@@ -60,15 +60,31 @@ def cpu_result(before, after):
     }
 
 
+def udp_kernel_counters(namespace):
+    if namespace:
+        content = subprocess.check_output(
+            [*namespace, "cat", "/proc/net/snmp"], text=True,
+        )
+    else:
+        content = Path("/proc/net/snmp").read_text()
+    keys, values = [line.split()[1:] for line in content.splitlines() if line.startswith("Udp:")]
+    counters = dict(zip(keys, map(int, values)))
+    return {key: counters[key] for key in ("InErrors", "RcvbufErrors", "SndbufErrors")}
+
+
 def udp_result(stack, workload, server, proxy, origin, logs, options):
     echo_log = logs / "echo.log"
     client_log = logs / "roundtrip.log"
-    echo = stack.enter_context(workload(echo_log, "3", "udp-echo", origin))
+    endpoint_buffer = str(options.endpoint_udp_buffer)
+    echo = stack.enter_context(workload(echo_log, "3", "udp-echo", origin, endpoint_buffer))
     marker(echo_log, "listening", echo)
     rate = options.packets_per_second
     duration = options.seconds
+    endpoint_namespace = ("ip", "netns", "exec", "socks-end") if options.veth else ()
+    namespaces = {"proxy": (), "endpoints": endpoint_namespace} if options.veth else {"local": ()}
+    kernel_before = {name: udp_kernel_counters(ns) for name, ns in namespaces.items()}
     client = stack.enter_context(workload(client_log, "0", "udp-roundtrip", proxy,
-                                          "5", str(duration), origin, str(rate)))
+                                          "5", str(duration), origin, str(rate), endpoint_buffer))
     start, = marker(client_log, "start", client)
     start += 5_000_000_000
     time.sleep(max(0, (start - time.monotonic_ns()) / 1e9))
@@ -77,12 +93,20 @@ def udp_result(stack, workload, server, proxy, origin, logs, options):
     time.sleep(max(0, (stop - time.monotonic_ns()) / 1e9))
     after = sample(server.pid)
     assert client.wait(timeout=3) == 0, client_log.read_text()
-    sent, received, duplicates, lateness = marker(client_log, "udp_result", client)
-    assert sent == duration * rate and lateness < 1_000_000_000
+    sent, received, duplicates, lateness, tail_late = marker(client_log, "udp_result", client)
+    assert sent == duration * rate and lateness < 1_000_000_000 and tail_late < 3_000_000, client_log.read_text()
+    kernel_after = {name: udp_kernel_counters(ns) for name, ns in namespaces.items()}
+    kernel_errors = {
+        name: {key: value - kernel_before[name][key] for key, value in counts.items()}
+        for name, counts in kernel_after.items()
+    }
     return {
         "direction": "roundtrip", "offered_packets": sent, "verified_packets": received,
         "duplicates": duplicates, "lost_packets": sent - received,
         "source_late_ms": lateness / 1e6,
+        "source_tail_late_ms": tail_late / 1e6,
+        "endpoint_udp_buffer_request": options.endpoint_udp_buffer,
+        "kernel_udp_errors": kernel_errors,
         "verified_mbps_each_direction": received * 1200 * 8 / (1e6 * duration),
         **cpu_result(before, after),
     }
@@ -109,7 +133,8 @@ def check_run(kind, logs, options):
         configuration["outbounds"] = [{"protocol": "freedom"}]
         args = [options.xray.resolve(), "run", "-c", conf]
     else:
-        args = [options.server.resolve(), conf]
+        binary = options.baseline_server if kind == "baseline" else options.server
+        args = [binary.resolve(), conf]
     conf.write_text(json.dumps(configuration))
     with ExitStack() as stack:
         proxylog = logs / "proxy.log"
@@ -170,6 +195,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     parser.add_argument("--server", type=Path, required=True)
+    parser.add_argument("--baseline-server", type=Path)
     parser.add_argument("--xray", type=Path, required=True)
     parser.add_argument("--load", type=Path, required=True)
     parser.add_argument("--seconds", type=int, default=12)
@@ -177,12 +203,17 @@ def main():
     parser.add_argument("--direction", choices=("up", "down"), default="down")
     parser.add_argument("--udp", action="store_true")
     parser.add_argument("--packets-per-second", type=int, default=8000)
-    parser.add_argument("implementations", nargs="+", choices=("kerlico", "xray"))
+    parser.add_argument("--endpoint-udp-buffer", type=int, default=0)
+    parser.add_argument("implementations", nargs="+", choices=("kerlico", "xray", "baseline"))
     args = parser.parse_intermixed_args()
     if args.seconds < 1:
         parser.error("--seconds must be positive")
     if args.packets_per_second < 1:
         parser.error("--packets-per-second must be positive")
+    if not 0 <= args.endpoint_udp_buffer <= 2**31 - 1:
+        parser.error("--endpoint-udp-buffer must be between 0 and 2147483647")
+    if "baseline" in args.implementations and args.baseline_server is None:
+        parser.error("baseline requires --baseline-server")
     args.output.mkdir(parents=True, exist_ok=False)
     for i, impl in enumerate(args.implementations, 1):
         logs = args.output / f"{i:02}-{impl}"

@@ -19,6 +19,11 @@ pub(crate) mod control;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PeerId(pub(crate) u32);
 
+impl PeerId {
+    /// A stack scoped to one authenticated tunnel does not need a peer table.
+    pub const SINGLE: Self = Self(0);
+}
+
 pub enum HubEvent {
     Datagram(SocketAddr, Vec<u8>),
     Packet(PeerId, SocketAddr, Vec<u8>),

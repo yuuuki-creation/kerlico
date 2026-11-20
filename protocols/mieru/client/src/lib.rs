@@ -90,9 +90,10 @@ struct ClientInner {
 impl Client {
     pub fn new(host: &str, port: u16, settings: &Settings) -> Result<Self, OpenError> {
         let plan = config::Plan::parse(host, port, settings)?;
-        let peers = plan.peers()?;
-        let wire =
-            WireClient::new(peers, plan.account, plan.options).map_err(|_| OpenError::Settings)?;
+        let network = settings.runtime().map(|runtime| &runtime.network);
+        let peers = plan.peers(network.map(AsRef::as_ref))?;
+        let wire = WireClient::with_network(peers, plan.account, plan.options, network.map(Arc::downgrade))
+            .map_err(|_| OpenError::Settings)?;
         Ok(Self {
             inner: Arc::new(ClientInner { wire }),
         })

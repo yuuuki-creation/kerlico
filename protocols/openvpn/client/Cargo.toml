@@ -4,5 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+kerlico-outbound = { path = "../../../crates/outbound" }
 kerlico-shared = { path = "../../../crates/shared" }
 kerlico-openvpn = { path = "../shared" }
+
+[target.'cfg(unix)'.dependencies]
+tun-rs = { version = "=2.8.18", default-features = false }

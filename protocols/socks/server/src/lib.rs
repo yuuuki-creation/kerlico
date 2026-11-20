@@ -1,7 +1,7 @@
 //! SOCKS5 inbound. The server dispatcher owns DNS, target connections and relaying.
 
 use kerlico_shared::{
-    dispatch, Accept, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError,
+    dispatch, Accept, ConnectBound, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError,
     PlaneFault, Settings, Transport, UserEmail,
 };
 use kerlico_socks::{encode_ip, invalid, read_address, Address};
@@ -361,6 +361,10 @@ impl InboundStream for TcpFlow {
     }
 
     fn report_connect(&self, result: Result<(), OpenError>) -> Result<(), PlaneFault> {
+        self.report_connect_bound(result, None)
+    }
+
+    fn report_connect_bound(&self, result: Result<(), OpenError>, bound: Option<ConnectBound>) -> Result<(), PlaneFault> {
         if self.acknowledged.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -369,14 +373,17 @@ impl InboundStream for TcpFlow {
             Err(OpenError::Settings) => 2,
             Err(_) => 5,
         };
-        let bound = if code == 0 {
-            self.socket.local_addr().map_err(map_io)?
-        } else {
-            unspecified(self.peer)
+        let wire = match bound.filter(|_| code == 0) {
+            Some(ConnectBound::Socket(address)) => reply(code, address),
+            Some(ConnectBound::Name(name)) => {
+                let mut wire = vec![5, code, 0];
+                kerlico_socks::encode(&mut wire, &Address { host: name.host().to_owned(), port: name.port() })
+                    .map_err(map_io)?;
+                wire
+            }
+            None => reply(code, unspecified(self.peer)),
         };
-        (&self.socket)
-            .write_all(&reply(code, bound))
-            .map_err(map_io)
+        (&self.socket).write_all(&wire).map_err(map_io)
     }
 
     fn finish_to_user(&self) -> Result<bool, PlaneFault> {

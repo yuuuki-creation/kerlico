@@ -8,20 +8,24 @@
 
 一个 `Server` 持有多个入站节点、一个 `Outbound`、一份 `Stats`、一个 DNS 模块和至多一条落地。
 
-创建节点用 `listen_node`。必须带一个 `ListenAddr`。这个类型只有 `V4` 和 `V6`。一个节点不能同时听两族。要两族都听，就建两个节点。v6 监听在打开套接字时设置 `IPV6_V6ONLY`。OpenVPN 的 `listen` 仍是 `unimplemented!`。`ListenAddr::v6` 会拒绝 IPv4-mapped 地址，也会拒绝端口 0。
+创建节点用 `listen_node`。必须带一个 `ListenAddr`。这个类型只有 `V4` 和 `V6`。一个节点不能同时听两族。要两族都听，就建两个节点。v6 监听在打开套接字时设置 `IPV6_V6ONLY`。`ListenAddr::v6` 会拒绝 IPv4-mapped 地址，也会拒绝端口 0。
 
 节点同时带一个 `OutboundChoice`。
 
 - `Manual(Exit)` 是创建时写明的一种出口。
 - `Default` 是出站留空。
 
-协议 crate 实现 `Accept`。它负责 `add_user`、`remove_user` 和 `accept`。`accept` 交出 `Handoff`，包含节点、用户、目标和交给出站的字节流。目标里的主机名用来做域名匹配。协议 crate 不拨号，也不选择 `Exit`。OpenVPN 的这些函数体仍是 `unimplemented!`。[WireGuard](wireguard.md) 从认证后的 IP 包建立 TCP/UDP 流。[SS2022](ss2022.md) 终止入站时交出明文；透明中继时交出下一跳地址和仍然加密的字节流。入站可在多个 UDP 目标的 `Handoff` 中标记同一个会话，让原生出站复用本地套接字，或让支持共享 UDP 关联的落地复用关联。规则仍逐目标选择出口。
+协议 crate 实现 `Accept`。它负责 `add_user`、`remove_user` 和 `accept`。`accept` 交出 `Handoff`，包含节点、用户、目标和交给出站的字节流。目标里的主机名用来做域名匹配。协议 crate 不拨号，也不选择 `Exit`。[WireGuard](wireguard.md) 和 [OpenVPN](openvpn.md) 从认证后的 IP 包建立 TCP/UDP 流。[SS2022](ss2022.md) 终止入站时交出明文；透明中继时交出下一跳地址和仍然加密的字节流。入站可在多个 UDP 目标的 `Handoff` 中标记同一个会话，让原生出站复用本地套接字，或让支持共享 UDP 关联的落地复用关联。规则仍逐目标选择出口。
 
 报文类入站把一条流收成同一个 `Handoff`。目标一开始是 IP。嗅探或 FakeDNS 可以再补上主机名。
 
 各节点保留自己的流队列。调度线程按节点轮转取流；没有可用流或管理请求时等待通知。协议成功排入新流、反向桥登记连接，或管理接口排入账号请求后会唤醒它。通知可以合并，调度线程醒来后会检查各队列，已入队的工作不会因通知早于等待而滞留。
 
+WireGuard、Hy2 和 SS2022 与其余已实现的入口使用同样的非阻塞取流契约。队列为空时返回 `OpenError::Again`，继续由入队通知唤醒调度器。
+
 [Hy2](hy2.md) 每条 TCP 流和每个 UDP 会话内的各目标各交出一个 `Handoff`。同一 UDP 会话的 `Handoff` 都带同一个会话标记。需要向客户端报告连接结果的入站用 `InboundStream::report_connect`。出站在目标拨号完成后、开始复制载荷前调用；分流或 DNS 无法得到拨号目标时也报告失败。支持 TCP 半关闭的流可以保留另一方向继续传输。握手目标如果已经打开（如 ShadowTLS v2/v3 或 RestLS 回落），运行时让出站在原套接字上接续复制，不重新拨号。
+
+复制 UDP 回复时，入站因短暂背压返回 `PlaneFault::Again` 会丢弃当前数据报，保持该流可继续接收后续数据报。计数只增加已交给入站的数据量。
 
 节点另有一份有序的分流规则。规则只属于这个节点。没命中时使用节点自己的 `OutboundChoice`。
 
@@ -105,6 +109,8 @@ FakeDNS 默认关闭。打开后，DNS 模块把本进程要回答的 A 记录�
 
 这个判断跟着地址和路由变化重算。一次拨号失败不改变它。
 
+新流和 DNS 查询共用当前原生地址族与本机接口地址的探测结果。结果最多缓存一秒。已选定出口的流继续使用原有出口。
+
 选定出口之后只拨一次。失败就结束这条流。不换另一种出口。WARP 也拨失败时同样结束，不改走落地。落地拨失败时也结束，不改走原生。
 
 域名要得到「有 IPv4」「只有 IPv6」或「没有地址」时，走 DNS 一节。没有地址时失败，不改走 WARP，也不改走落地。
@@ -125,6 +131,8 @@ DNS 是服务端的一个模块。协议 crate 不解析域名。
 
 出口已经是 `Landing` 时，本地不再解析，把原来的主机名交给远端。`Default` 以及手动指定的原生或 WARP，在目标仍是域名时解析一次。
 
+同一条流的选路和拨号复用一次 DNS 查询的结果。查询过且没有所选地址族时结束该流。
+
 `hosts` 先于上游做精确匹配。上游可以是 UDP 或 TCP。查询按那一台服务器的 `OutboundChoice` 选出出口，再由出站模块拨一次。配置为 `landing` 时，查询发往配置里的数字地址；UDP 回答被截断时按同一出口用 TCP 重查。
 
 `dns` 可以写 `listen`。写了之后，进程在这个地址上同时听 UDP 和 TCP，回答客户端的查询。没写 `port` 时用 53。端口 0 拒绝。v6 套接字打开 `IPV6_V6ONLY`。只回答第一个问题，而且只回答 A 和 AAAA。FakeDNS 打开时，这两个类型从假地址池取，同一个名字一直对应同一个地址。FakeDNS 关闭时，回答走 `hosts` 和上游。
@@ -143,6 +151,8 @@ AnyTLS 落地启用 ECH 的 DNS 发现时，由服务端 DNS 模块查询 HTTPS 
 
 整条流交给落地实现，目标保持原样。有域名目标能力的远端自己解析；WireGuard 只能发送 IP 包，因此它用服务端 DNS 把目标转换为 IP。
 
+同一 UDP 会话的多个目标共用一次关联建立。会话表锁只保护查询和登记，建立关联时只锁住当前会话。
+
 配置里的 `landing` 会装到出站模块。协议必须是这次构建用 `landing-<id>` 编进来的客户端协议。出站模块调用那个 crate 的 `land`，再把用户和远端之间的字节复制完。没有这段配置时，`Manual(Landing)` 使这条流失败。目录规则在 `docs/reference/crates.md`。
 
 ## WARP
@@ -153,6 +163,8 @@ AnyTLS 落地启用 ECH 的 DNS 发现时，由服务端 DNS 模块查询 HTTPS 
 
 配置里没有这段时，向 Cloudflare WARP 的设备注册接口注册一次，把得到的字段写到配置旁边的 `warp.json`。下次启动直接读这个文件。注册接口的版本写进该文件。实现时用 Cloudflare 当时的客户端注册接口。
 
+自动注册的 `warp.json` 通过同目录的临时文件原子发布，Unix 上新文件仅允许所有者读写。若另一实例已经发布配置，则读取现有配置。
+
 对端 `endpoint` 用原生出口拨号。它是主机名时用系统解析器。这一族没有原生地址时，WARP 不可用。选中 `WarpV4` 或 `WarpV6` 的流因此失败。
 
 引擎在 `crates/wg`。配置里的 `warp` 段和旁边的 `warp.json` 可以加载。两边都没有 `secretKey` 时，向 `https://api.cloudflareclient.com/v0a4005/reg` 注册一次。请求带 `CF-Client-Version: a-6.30-3596`。得到的私钥、地址、对端和 `reserved` 写成 `warp.json`，`registration` 记为 `v0a4005`。下次启动直接读这个文件。注册失败时不安装隧道，进程仍然启动。
@@ -160,6 +172,8 @@ AnyTLS 落地启用 ECH 的 DNS 发现时，由服务端 DNS 模块查询 HTTPS 
 ## TCP 和 UDP
 
 TCP 在连接开始时选定出口，这条连接中途不改。
+
+原生 TCP 出口的读取被信号中断时重试。此时保持 TCP 流和既有的读超时处理。
 
 UDP 按源地址和目标组成一个会话。第一个报文选定出口。同一会话的后续报文沿用它。空闲 300 秒后会话结束。这个时间和 Xray `policy` 的 `connIdle` 默认值相同。
 
@@ -173,7 +187,7 @@ TCP 复制在 300 秒没有字节时结束。UDP 会话的键包含 `Handoff` �
 
 用户挂在一个节点上。稳定的键是 `UserEmail`。空字符串、空白和 `>` 不能做邮箱或节点名。同一个邮箱可以出现在两个节点上，计数按邮箱合并。`remove_user` 只从那个节点去掉用户，不把计数清零。
 
-账号的协议字段放在 `Settings` 里，由那个协议的 `add_user` 解释。叶子不解析 UUID 或密码。节点 `settings` 和用户对象里，除 `users` 与 `email` 以外的字符串、数字和布尔值都原样进入 `Settings`；数组和对象序列化为 JSON 后交给协议解释，`null` 拒绝。这条规则是 `Settings::insert_json`，落地设置和客户端文档也用它。`add_user` 和 `remove_user` 在 `Server` 上会找到节点并转给入站。各协议的字段见 [mieru](mieru.md)、[VLESS](vless.md)、[AnyTLS](anytls.md)、[SS2022](ss2022.md) 和 [WireGuard](wireguard.md)。OpenVPN 的函数体仍是 `unimplemented!`。
+账号的协议字段放在 `Settings` 里，由那个协议的 `add_user` 解释。叶子不解析 UUID 或密码。节点 `settings` 和用户对象里，除 `users` 与 `email` 以外的字符串、数字和布尔值都原样进入 `Settings`；数组和对象序列化为 JSON 后交给协议解释，`null` 拒绝。这条规则是 `Settings::insert_json`，落地设置和客户端文档也用它。`add_user` 和 `remove_user` 在 `Server` 上会找到节点并转给入站。各协议的字段见 [mieru](mieru.md)、[VLESS](vless.md)、[AnyTLS](anytls.md)、[SS2022](ss2022.md)、[WireGuard](wireguard.md) 和 [OpenVPN](openvpn.md)。
 
 计数的名字是这些形式。
 
@@ -196,7 +210,7 @@ outbound>>>出口>>>traffic>>>downlink
 
 SS2022、Hy2、经 mieru 服务端 UDP 监听承载的 TCP 会话、原生 TLS/明文 AnyTLS 和由原生 TCP/TLS 直接承载的普通 VLESS TCP 字节流，在完成嗅探、分流和拨号结果响应后，可以把原有解析、加解密和预读状态一次性交成 `AsyncTcp`。VLESS 首响应仍等首批下行数据，不因交接而提前发送。AnyTLS 的 FIN 仍同时结束流的两个方向，没有改成 TCP 半关闭。原生 TCP 出口由出站模块拨号，再在入站已有的 Tokio 执行器上用一个任务同时推进两个方向；准备这条流的线程随交接结束退出，不为稳态转发保留两条阻塞线程。同步 `Outbound::dispatch` 仍等待转发结束，服务端使用允许移交任务的入口；它们共享同一次选路、拨号和复制实现。交接失败时终止这条流，不在已经改变或移走的 I/O 状态上重新尝试另一条路径。
 
-异步转发直接借用协议持有的已认证明文，出口实际写出多少才消费和累计多少；目标读取使用有界缓冲。两端背压直接停止对应 future 的推进，不另排入无界队列。任一方向收到 EOF 只关闭对侧写半边，另一方向继续。双向共用 300 秒无成功交付字节的期限；超时或任一方向发生错误时释放两边的读写状态，正在等可写的操作也随任务退出。WARP、落地、UDP 及未交出异步状态的协议继续由原出口接口驱动，同一协议的线协议解析不另写一份。
+异步转发直接借用协议持有的已认证明文，出口实际写出多少才消费和累计多少；目标读取使用有界缓冲。两端背压直接停止对应 future 的推进，不另排入无界队列。任一方向收到 EOF 只关闭对侧写半边，另一方向继续。双向共用 300 秒无成功交付字节的期限；超时或任一方向发生错误时释放两边的读写状态，正在等可写的操作也随任务退出。WARP、落地和未交出异步状态的协议继续由原出口接口驱动。
 
 异步读取明确区分协议已有的认证缓冲和没有缓冲的字节流。前者直接交付原缓冲，后者由出站分配通用读取缓冲，协议不另定通用转发容量。同步与异步复制共用同一份 1 MiB 通用读取容量及 300 秒空闲规则；一次读取只取已经可读的字节，不等待凑满。这让更换执行方式时保留原来的读取粒度。
 
@@ -221,6 +235,8 @@ Linux 上，原生 TCP 出口与已排空协议缓冲的 REALITY/Vision 或 [SOC
 同步分批读取路径在该方向累计转发 256 KiB 后，如果距上次读取在 20 毫秒内，转发线程先等源套接字可读，再检查内核接收队列。队列已有至少 8 KiB 且不足 48 KiB 时，线程请求休眠 80 微秒，让同一批后续 TCP 段可以一起进入管道。其他队列长度、空闲后恢复、半关闭和错误事件直接按原有路径处理。实际交付延迟还取决于系统调度。[500 Mbps 实测](vless-performance.md)
 
 UDP 的 `InboundStream` 一次读写表示一个完整数据报。`Ok(0)` 是有效空包，`PlaneFault::Closed` 才表示关闭；缓冲区容纳不下时返回错误，不拆分。出口内部读事件区分数据与 EOF，UDP 单次写入必须完整；TCP 仍是字节流。嗅探预读保存完整 UDP 包，空包也要交还复制循环。`Settings::optional_text` 区分缺少可选项与已有键类型错误，不把类型错误作为默认值处理。
+
+SOCKS5 在原生 UDP 出口上，可以把目标路由绑定到连接所在的 Tokio 执行器。出站先按顺序交付等待选路的报文，再安装发送器。后续报文借用原缓冲，上行直接写入原生套接字，下行用协议的回包函数封装并发送。出站根据实际来源回包，多个目标共享同一个原生 UDP 端口，空闲 300 秒的目标从载体表移除。含嗅探预读的流、WARP 和落地仍经原复制接口交付。
 
 ## 配置和运行时接口
 
@@ -271,6 +287,8 @@ UDP 的 `InboundStream` 一次读写表示一个完整数据报。`Ok(0)` 是有
 `listen` 的地址族就是节点的地址族。`0.0.0.0` 是 v4。`::` 是 v6。端口 0 拒绝。`outbound` 的取值是 `default`、`native-v4`、`native-v6`、`warp-v4`、`warp-v6`、`landing`。
 
 `api` 可以不写。写了之后在 `listen` 和 `port` 上打开 gRPC。端口 0 拒绝。v6 套接字打开 `IPV6_V6ONLY`。`/kerlico.Users/Add` 和 `/kerlico.Users/Remove` 按节点名和邮箱添加或删除用户。添加时可以带一组文本设置，交给那个协议的 `add_user`。`/kerlico.Stats/Get` 按上一节的计数名字查询，回答是这个名字和当前值。节点、规则、DNS、WARP 和落地不在这个接口里改。改它们要重新加载配置。
+
+管理接口对每次请求最多累计 64 KiB 的 HTTP/2 头块和 1 MiB 的 DATA。超限或帧填充无效时关闭该连接并释放缓冲。
 
 `bridges` 可以不写。每一项是一个 VLESS 反向桥节点，对应 Xray 带 `reverse.tag` 的 VLESS 出站。`tag` 是节点名，和 `inbounds` 共用一个名字空间；桥上的流在计数里也用它作用户名。`address` 和 `port` 是 Portal。`settings` 是 VLESS 客户端设置，写法和 VLESS 落地相同，例如 `id`、`encryption`、`flow` 以及传输和安全字段。`outbound`、`rules` 和 `sniffing` 的写法和入站节点相同。这一项需要服务端叶子的 `landing-vless` feature；没有它的构建拒绝含 `bridges` 的配置。
 

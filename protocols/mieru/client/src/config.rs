@@ -1,6 +1,7 @@
 use kerlico_mieru::{Account, ClientOptions, HandshakeMode, Multiplexing, Transport};
 use kerlico_shared::{OpenError, Settings};
-use std::net::{SocketAddr, ToSocketAddrs};
+use kerlico_shared::runtime::{Network, ResolutionSource};
+use std::net::SocketAddr;
 
 pub(crate) struct Plan {
     host: String,
@@ -96,19 +97,23 @@ impl Plan {
             },
         })
     }
-    pub fn peers(&self) -> Result<Vec<SocketAddr>, OpenError> {
-        let ips: std::collections::BTreeSet<_> = (self.host.as_str(), *self.ports.start())
-            .to_socket_addrs()
-            .map_err(|_| OpenError::Transport)?
-            .map(|address| address.ip())
-            .collect();
-        if ips.is_empty() {
+    pub fn peers(&self, network: Option<&dyn Network>) -> Result<Vec<SocketAddr>, OpenError> {
+        let port = *self.ports.start();
+        let addresses = match network {
+            Some(network) => network.lookup_ip(&self.host, port, None, ResolutionSource::Configured),
+            None => kerlico_outbound::lookup_system_addresses(&self.host, port),
+        }.map_err(|_| OpenError::Transport)?;
+        let peers: std::collections::BTreeSet<_> = addresses.into_iter().collect();
+        if peers.is_empty() {
             return Err(OpenError::Transport);
         }
         Ok(self
             .ports
             .clone()
-            .flat_map(|port| ips.iter().map(move |ip| SocketAddr::new(*ip, port)))
+            .flat_map(|port| peers.iter().copied().map(move |mut peer| {
+                peer.set_port(port);
+                peer
+            }))
             .collect())
     }
 }
@@ -136,7 +141,7 @@ mod tests {
             s.insert_text(key, value);
         }
         let plan = Plan::parse("127.0.0.1", 2001, &s).unwrap();
-        assert_eq!(plan.peers().unwrap().len(), 3);
+        assert_eq!(plan.peers(None).unwrap().len(), 3);
         assert!(matches!(plan.options.transport, Transport::Udp));
         assert!(matches!(plan.options.handshake, HandshakeMode::NoWait));
         for (key, bad) in [

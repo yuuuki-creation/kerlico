@@ -217,15 +217,23 @@ pub fn lookup_system_addresses(host: &str, port: u16) -> io::Result<Vec<SocketAd
     (host.trim_matches(['[', ']']), port).to_socket_addrs().map(Iterator::collect)
 }
 
+pub fn connect_system_peer(peer: SocketAddr, transport: Transport, timeout: Duration) -> io::Result<NetworkConnection> {
+    open_native_udp(&system_peer_request(peer, transport, timeout), peer, true)
+}
+
 /// An unconnected socket lets the QUIC transport address its peer directly.
 pub fn open_system_datagram(peer: SocketAddr, timeout: Duration) -> io::Result<UdpSocket> {
-    let request = NetworkDial {
-        host: peer.ip().to_string(), port: peer.port(), transport: Transport::Udp, addresses: vec![peer],
-        route: NetworkRoute::Direct, timeout, socket_factory: None, race: None,
-    };
+    let request = system_peer_request(peer, Transport::Udp, timeout);
     match open_native_udp(&request, peer, false)? {
         NetworkConnection::Udp(socket) => Ok(socket),
         _ => unreachable!("UDP requested"),
+    }
+}
+
+fn system_peer_request(peer: SocketAddr, transport: Transport, timeout: Duration) -> NetworkDial {
+    NetworkDial {
+        host: peer.ip().to_string(), port: peer.port(), transport, addresses: vec![peer],
+        route: NetworkRoute::Direct, timeout, socket_factory: None, race: None,
     }
 }
 
@@ -398,7 +406,11 @@ fn open_native_udp(request: &NetworkDial, peer: SocketAddr, connected: bool) -> 
     match request.transport {
         Transport::Tcp => {
             socket.connect_timeout(&peer.into(), request.timeout)?;
-            socket.set_tcp_nodelay(true)?;
+            if let Err(error) = socket.set_tcp_nodelay(true) {
+                if error.kind() != io::ErrorKind::Unsupported {
+                    return Err(error);
+                }
+            }
             Ok(NetworkConnection::Tcp(TcpStream::from(socket)))
         }
         Transport::Udp => {

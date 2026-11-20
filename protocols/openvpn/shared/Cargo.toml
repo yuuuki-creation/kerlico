@@ -2,3 +2,13 @@
 name = "kerlico-openvpn"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+getrandom = "0.2"
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+zeroize = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

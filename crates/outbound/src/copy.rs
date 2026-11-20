@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use kerlico_shared::{
+    ConnectBound,
     InboundStream, NodeTag, OpenError, PlaneFault, Traffic, TrafficCounters, Transport, UserEmail,
 };
 
@@ -57,9 +58,17 @@ pub trait PipeWrite: Send {
 }
 
 pub fn report_connect<T>(stream: &dyn InboundStream, result: Result<T, OpenError>) -> Result<T, OpenError> {
+    report_connect_with(stream, result, |_| None)
+}
+
+pub(super) fn report_connect_with<T>(
+    stream: &dyn InboundStream,
+    result: Result<T, OpenError>,
+    bound: impl FnOnce(&T) -> Option<ConnectBound>,
+) -> Result<T, OpenError> {
     match result {
         Ok(connected) => {
-            stream.report_connect(Ok(())).map_err(|_| OpenError::Transport)?;
+            stream.report_connect_bound(Ok(()), bound(&connected)).map_err(|_| OpenError::Transport)?;
             Ok(connected)
         }
         Err(error) => {
@@ -69,14 +78,14 @@ pub fn report_connect<T>(stream: &dyn InboundStream, result: Result<T, OpenError
     }
 }
 
-struct Pace {
+pub(super) struct Pace {
     start: Instant,
     last_ms: AtomicU64,
     stop: AtomicBool,
 }
 
 impl Pace {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             start: Instant::now(),
             last_ms: AtomicU64::new(0),
@@ -84,12 +93,12 @@ impl Pace {
         }
     }
 
-    fn mark(&self) {
+    pub(super) fn mark(&self) {
         let ms = self.start.elapsed().as_millis() as u64;
         self.last_ms.store(ms, Ordering::Release);
     }
 
-    fn idle(&self) -> bool {
+    pub(super) fn idle(&self) -> bool {
         let now = self.start.elapsed().as_millis() as u64;
         now.saturating_sub(self.last_ms.load(Ordering::Acquire)) > IDLE.as_millis() as u64
     }
@@ -228,7 +237,12 @@ fn pump_down(
                     let written = match source {
                         Some(source) => stream.write_datagram_to_user(&buf[..n], source),
                         None => stream.write_to_user(&buf[..n]),
-                    }.map_err(|_| OpenError::Transport)?;
+                    };
+                    let written = match written {
+                        Ok(written) => written,
+                        Err(PlaneFault::Again) => continue,
+                        Err(_) => return Err(OpenError::Transport),
+                    };
                     if written != n {
                         pace.halt();
                         return Err(OpenError::Transport);
@@ -275,4 +289,58 @@ fn write_all_user(stream: &dyn InboundStream, chunk: &[u8]) -> Result<u64, OpenE
         }
     }
     Ok(sent as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use super::*;
+
+    struct Replies(VecDeque<&'static [u8]>);
+
+    impl PipeRead for Replies {
+        fn read_pipe(&mut self, buf: &mut [u8]) -> Result<ReadEvent, OpenError> {
+            let Some(packet) = self.0.pop_front() else {
+                return Ok(ReadEvent::Eof);
+            };
+            buf[..packet.len()].copy_from_slice(packet);
+            Ok(ReadEvent::Data(packet.len()))
+        }
+    }
+
+    #[derive(Default)]
+    struct Backpressure(AtomicBool);
+
+    impl InboundStream for Backpressure {
+        fn read_from_user(&self, _buf: &mut [u8]) -> Result<usize, PlaneFault> {
+            Err(PlaneFault::Closed)
+        }
+
+        fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
+            if !self.0.swap(true, Ordering::Relaxed) {
+                assert_eq!(buf, b"dropped");
+                return Err(PlaneFault::Again);
+            }
+            assert_eq!(buf, b"reply");
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn udp_downlink_survives_temporary_backpressure() {
+        let uplink = std::array::from_fn(|_| Arc::new(AtomicU64::new(0)));
+        let downlink = std::array::from_fn(|_| Arc::new(AtomicU64::new(0)));
+        let counters = TrafficCounters::new(uplink, downlink.clone());
+        let replies = Replies(VecDeque::from([&b"dropped"[..], &b"reply"[..]]));
+        pump_down(
+            &Backpressure::default(),
+            replies,
+            &counters,
+            Transport::Udp,
+            &Pace::new(),
+        )
+        .unwrap();
+        assert!(downlink.iter().all(|counter| counter.load(Ordering::Relaxed) == 5));
+    }
 }

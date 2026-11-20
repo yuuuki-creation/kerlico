@@ -57,6 +57,10 @@ impl BytePipe for WarpPipe {
     fn write_pipe(&self, buf: &[u8]) -> Result<usize, OpenError> {
         self.0.write(buf).map_err(map_io)
     }
+
+    fn local_addr(&self) -> Option<SocketAddr> {
+        self.0.local_addr()
+    }
 }
 
 fn map_io(error: std::io::Error) -> OpenError {

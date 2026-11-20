@@ -230,23 +230,30 @@ impl TcpFlow {
     /// do not expose a buffer (clients and transparent relays) use the scratch.
     pub fn read_to(&self, buf: &mut [u8], wait: Duration, sink: &mut dyn FnMut(&[u8])) -> io::Result<usize> {
         let mut reader = self.read.lock().expect("Shadowsocks TCP read");
+        // After Pending the callback runs under block_on. Leave the executor
+        // while the synchronous exit writes, since it may enter its own runtime.
+        let mut deliver = |slices: &[std::io::IoSlice<'_>]| {
+            tokio::task::block_in_place(|| {
+                for bytes in slices {
+                    sink(bytes);
+                }
+            });
+        };
         let mut read = std::pin::pin!(std::future::poll_fn(|cx| {
             match &mut *reader {
                 Reader::Buffered(reader) => {
                     let bytes = ready!(Pin::new(&mut **reader).poll_fill_buf(cx))?;
                     let n = bytes.len();
-                    sink(bytes);
+                    deliver(&[std::io::IoSlice::new(bytes)]);
                     Pin::new(&mut **reader).consume(n);
                     Poll::Ready(Ok(n))
                 }
                 Reader::Vectored(reader) => {
                     let mut slices = [std::io::IoSlice::new(&[]); 16];
                     let len = ready!(Pin::new(&mut **reader).poll_fill_buf_vectored(cx, &mut slices))?;
-                    let mut n = 0;
-                    for bytes in &slices[..len] {
-                        sink(bytes);
-                        n += bytes.len();
-                    }
+                    let slices = &slices[..len];
+                    let n = slices.iter().map(|bytes| bytes.len()).sum();
+                    deliver(slices);
                     Pin::new(&mut **reader).consume(n);
                     Poll::Ready(Ok(n))
                 }
@@ -254,7 +261,7 @@ impl TcpFlow {
                     let mut out = ReadBuf::new(buf);
                     ready!(Pin::new(&mut **reader).poll_read(cx, &mut out))?;
                     let n = out.filled().len();
-                    sink(out.filled());
+                    deliver(&[std::io::IoSlice::new(out.filled())]);
                     Poll::Ready(Ok(n))
                 }
             }
@@ -387,8 +394,12 @@ mod tests {
             write.write_all(b"later payload").await
         });
         let mut actual = Vec::new();
-        while flow.read_to(&mut scratch, Duration::from_secs(2), &mut |b| actual.extend_from_slice(b))? != 0 {}
-        runtime()?.block_on(send).map_err(io::Error::other)??;
+        let runtime = runtime()?;
+        while flow.read_to(&mut scratch, Duration::from_secs(2), &mut |b| {
+            runtime.block_on(std::future::ready(()));
+            actual.extend_from_slice(b);
+        })? != 0 {}
+        runtime.block_on(send).map_err(io::Error::other)??;
         assert_eq!(actual, b"later payload");
         Ok(())
     }

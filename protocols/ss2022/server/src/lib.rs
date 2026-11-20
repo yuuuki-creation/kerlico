@@ -147,7 +147,10 @@ impl Accept for Node {
     }
 
     fn accept(&mut self) -> Result<Handoff, OpenError> {
-        self.flows.recv().map_err(|_| OpenError::Transport)
+        self.flows.try_recv().map_err(|error| match error {
+            std::sync::mpsc::TryRecvError::Empty => OpenError::Again,
+            std::sync::mpsc::TryRecvError::Disconnected => OpenError::Transport,
+        })
     }
 }
 

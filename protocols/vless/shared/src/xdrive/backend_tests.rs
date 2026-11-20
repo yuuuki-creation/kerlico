@@ -103,6 +103,7 @@ impl PersistentMock {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
                         id += 1;
                         let id = id.to_string();
                         live.lock().unwrap().push(stream.try_clone().unwrap());

@@ -77,13 +77,19 @@ class Reflector(socketserver.BaseRequestHandler):
 
 
 class Fixtures(mieru.Fixtures):
+    def __init__(self, fixed_udp_ports):
+        super().__init__()
+        self.fixed_udp_ports = fixed_udp_ports
+
     def __enter__(self):
         super().__enter__()
         try:
             self.recorder = self.add(mieru.SequentialUDP, "127.0.0.1", Recorder, "recorder")
-            self.udp53 = self.add(mieru.SequentialUDP, "127.0.0.1", Recorder, "udp53", 53)
-            self.udp443 = self.add(mieru.SequentialUDP, "127.0.0.1", Recorder, "udp443", 443)
-            for server in (self.recorder, self.udp53, self.udp443):
+            self.udp53 = self.udp443 = None
+            if self.fixed_udp_ports:
+                self.udp53 = self.add(mieru.SequentialUDP, "127.0.0.1", Recorder, "udp53", 53)
+                self.udp443 = self.add(mieru.SequentialUDP, "127.0.0.1", Recorder, "udp443", 443)
+            for server in filter(None, (self.recorder, self.udp53, self.udp443)):
                 server.sources = []
             self.reflector = self.add(mieru.SequentialUDP, "127.0.0.1", Reflector, "reflector")
             self.reflector.answer = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -385,7 +391,7 @@ def udp_check(socks, fixtures, row, kind, tap):
             require(unpack_udp(udp.recvfrom(65535)[0])[1] == payload, "UDP 连发的顺序或边界不符")
         expected = row.get("policy", {}).get(kind, {})
         for port, fixture in ((53, fixtures.udp53), (443, fixtures.udp443)):
-            if port not in expected:
+            if fixture is None or port not in expected:
                 continue
             if expected[port]:
                 mieru.run_phase(f"udp-{port}", lambda: exchange(udp, bound, "127.0.0.1", port, f"to-{port}".encode()))
@@ -394,7 +400,8 @@ def udp_check(socks, fixtures, row, kind, tap):
         lanes = None
         if tap and row.get("tap") == "udp-lanes":
             lanes = dict(collections.Counter(tap.commands(since)))
-            require(lanes == UDP_LANES[kind], f"UDP 关联的承载命令不符：{lanes}")
+            expected_lanes = UDP_LANES[kind] if fixtures.fixed_udp_ports else {"mux": 1}
+            require(lanes == expected_lanes, f"UDP 关联的承载命令不符：{lanes}")
         control.close()
         time.sleep(0.3)
         before = fixtures.udp_count()
@@ -495,6 +502,8 @@ def reattach_case(args, folder, server_kind, client_kind, fixtures):
         with server_process(args, folder, server_kind, row, keys, None, peer), \
                 client_process(args, folder, client_kind, row, keys, tap.port) as (client, socks, _http):
             for label, fixture, same in (("xudp", fixtures.recorder, True), ("plain-udp", fixtures.udp53, False)):
+                if fixture is None:
+                    continue
                 control, udp, bound = associate(socks)
                 with contextlib.closing(control), contextlib.closing(udp):
                     port = fixture.server_address[1]
@@ -527,6 +536,7 @@ def main():
     parser.add_argument("--rows", default=",".join(ROWS), help="逗号分隔的行名")
     parser.add_argument("--clients", default="kerlico,xray", help="kerlico、xray 或两者")
     parser.add_argument("--skip-reattach", action="store_true")
+    parser.add_argument("--skip-fixed-udp-ports", action="store_true", help="跳过需要绑定 UDP/53 或 UDP/443 的断言")
     parser.add_argument("--case-timeout", type=float, default=120)
     args = parser.parse_args()
     rows = [row for row in args.rows.split(",") if row]
@@ -548,7 +558,8 @@ def main():
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     run_root = Path(tempfile.mkdtemp(prefix=output.stem + "-cases-", dir=output.parent))
-    result = {"status": "fail", "xray": version.split("\n", 1)[0], "cases": []}
+    result = {"status": "fail", "xray": version.split("\n", 1)[0],
+              "fixed_udp_ports": not args.skip_fixed_udp_ports, "cases": []}
 
     def timeout(_signum, _frame):
         raise Failure("当前 case 超时")
@@ -577,7 +588,7 @@ def main():
         mieru.write_json(output, result)
         print(f"{record['status']}: {name}" + (f" ({record['error']})" if record["status"] != "pass" else ""), flush=True)
 
-    with Fixtures() as fixtures:
+    with Fixtures(result["fixed_udp_ports"]) as fixtures:
         for row in rows:
             for kind in clients:
                 run_case(f"{row}/{kind}-client", lambda folder, r=row, k=kind: row_case(args, folder, r, k, fixtures))

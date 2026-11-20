@@ -156,6 +156,12 @@ pub struct Echo {
     worker: Option<JoinHandle<()>>,
 }
 
+pub fn accept_blocking(listener: &TcpListener) -> io::Result<TcpStream> {
+    let (stream, _) = listener.accept()?;
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
 impl Echo {
     pub fn tcp(tls: Option<Arc<kerlico_vless::ServerConfig>>) -> Result<Self> {
         let listener = TcpListener::bind(localhost(0))?;
@@ -163,8 +169,8 @@ impl Echo {
         listener.set_nonblocking(true)?;
         Ok(Self::start(port, move |stop| {
             while !stop.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
+                match accept_blocking(&listener) {
+                    Ok(stream) => {
                         let tls = tls.clone();
                         thread::spawn(move || {
                             let _ = stream.set_read_timeout(Some(TIMEOUT));

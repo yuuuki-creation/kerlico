@@ -356,6 +356,18 @@ fn happy_eyeballs_starts_the_next_address_when_an_attempt_fails() -> io::Result<
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn explicitly_disabled_tcp_fast_open_allows_listen_and_dial() -> io::Result<()> {
+    let options = settings(r#"{"tcpFastOpen":false}"#);
+    let listener = options.listen_tcp("127.0.0.1:0".parse().unwrap(), 8)?;
+    let peer = listener.local_addr()?;
+    let client = options.open(SocketKind::Tcp, SocketRole::Dialer, peer)?;
+    client.connect_timeout(&peer.into(), Duration::from_secs(2))?;
+    listener.accept()?;
+    Ok(())
+}
+
 #[cfg(any(target_os = "linux", windows))]
 mod native {
     use super::*;

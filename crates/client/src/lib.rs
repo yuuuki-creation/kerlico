@@ -91,6 +91,7 @@ impl ClientConfig {
             .ok_or_else(|| Error::NotCompiled(name.to_string()))?;
         let run = match registration.entry {
             ClientEntry::Tunnel(connect) => Run::Tunnel(connect, None),
+            ClientEntry::TunnelWithTun(connect, run) => Run::Tunnel(connect, Some(run)),
             ClientEntry::PacketTunnel(connect, run, _) => Run::Tunnel(connect, run),
             ClientEntry::Proxy(open) | ClientEntry::ProxyWithDatagramLanding(open) => {
                 Run::Proxy(open, LocalEntry::take(&mut settings).map_err(|_| Error::Config)?)

@@ -102,7 +102,10 @@ impl Accept for Node {
     }
 
     fn accept(&mut self) -> Result<Handoff, OpenError> {
-        self.ready.recv().map_err(|_| OpenError::Transport)
+        self.ready.try_recv().map_err(|error| match error {
+            TryRecvError::Empty => OpenError::Again,
+            TryRecvError::Disconnected => OpenError::Transport,
+        })
     }
 }
 

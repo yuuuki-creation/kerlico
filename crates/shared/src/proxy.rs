@@ -48,6 +48,7 @@ pub type DatagramLandingFn = fn(&str, u16, &Settings) -> Result<Box<dyn Associat
 #[derive(Clone, Copy)]
 pub enum ClientEntry {
     Tunnel(TunnelFn),
+    TunnelWithTun(TunnelFn, TunFn),
     PacketTunnel(TunnelFn, Option<TunFn>, DatagramLandingFn),
     Proxy(ProxyFn),
     /// This upstream also supports a shared UDP association when used as a landing.

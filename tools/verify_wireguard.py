@@ -411,9 +411,11 @@ def portable(args):
     ip, inner = "127.0.0.1", "10.122.0.2"
     # The Xray userspace IP stack handles 127/8 inside its tunnel. The real
     # origin therefore uses this machine's private IPv4 interface address.
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-        probe.connect(("192.0.2.1", 9))
-        host = probe.getsockname()[0]
+    host = args.origin_host
+    if host is None:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))
+            host = probe.getsockname()[0]
     assert ipaddress.IPv4Address(host).is_private and not ipaddress.IPv4Address(host).is_loopback
 
     def udp_ready(port):
@@ -957,6 +959,7 @@ if __name__ == "__main__":
     parser.add_argument("--ss-client", type=Path)
     parser.add_argument("--raw", type=Path)
     parser.add_argument("--logs", type=Path)
+    parser.add_argument("--origin-host", help="local private IPv4 address for the portable origin")
     parser.add_argument("--natural-rekey", action="store_true")
     parser.add_argument("--link-local", nargs="?", const="name", choices=("name", "index"))
     parser.add_argument("--linux-egress", action="store_true")

@@ -1,7 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use kerlico_outbound::{Exit, Native, OutboundChoice, Reachability};
-use kerlico_shared::{Destination, Transport};
+use kerlico_shared::Destination;
 
 use crate::geodata::Catalog;
 
@@ -16,6 +18,19 @@ pub struct Resolved {
     pub addresses: Vec<SocketAddr>,
     pub host: String,
     pub port: u16,
+    queried: bool,
+}
+
+impl Resolved {
+    pub fn resolve(&mut self, lookup: &mut dyn FnMut(&str) -> Vec<IpAddr>) {
+        if self.queried {
+            return;
+        }
+        self.queried = true;
+        let ips = lookup(&self.host);
+        self.reach = reach_of(&ips);
+        self.addresses = ips.into_iter().map(|ip| SocketAddr::new(ip, self.port)).collect();
+    }
 }
 
 pub struct Environment<'a> {
@@ -37,20 +52,21 @@ pub fn choose(
         local,
         catalog,
     } = environment;
-    let mut asked = !resolved.addresses.is_empty();
     for rule in rules {
         if rule_hits(
             &rule.lines,
             rule_host,
             resolved,
-            &mut asked,
             resolve,
             catalog,
         ) {
+            if matches!(rule.choice, OutboundChoice::Default) {
+                resolved.resolve(resolve);
+            }
             return finish(rule.choice, resolved, native);
         }
     }
-    fill(resolved, &mut asked, resolve);
+    resolved.resolve(resolve);
     if let Some(ip) = resolved.addresses.first().map(|addr| addr.ip()) {
         if listed_private(catalog, ip) || local.contains(&ip) {
             return native_family(ip, native);
@@ -62,9 +78,10 @@ pub fn choose(
 pub fn resolved_from(host: &str, port: u16, ips: &[IpAddr]) -> Resolved {
     Resolved {
         reach: reach_of(ips),
-        addresses: sockets(ips, port, Transport::Tcp),
+        addresses: ips.iter().map(|ip| SocketAddr::new(*ip, port)).collect(),
         host: host.to_string(),
         port,
+        queried: !ips.is_empty() || host.parse::<IpAddr>().is_ok(),
     }
 }
 
@@ -88,20 +105,18 @@ fn rule_hits(
     lines: &[String],
     name: Option<&str>,
     resolved: &mut Resolved,
-    asked: &mut bool,
     resolve: &mut dyn FnMut(&str) -> Vec<IpAddr>,
     catalog: &Catalog,
 ) -> bool {
     lines
         .iter()
-        .any(|line| line_hits(line, name, resolved, asked, resolve, catalog))
+        .any(|line| line_hits(line, name, resolved, resolve, catalog))
 }
 
 fn line_hits(
     line: &str,
     name: Option<&str>,
     resolved: &mut Resolved,
-    asked: &mut bool,
     resolve: &mut dyn FnMut(&str) -> Vec<IpAddr>,
     catalog: &Catalog,
 ) -> bool {
@@ -110,7 +125,7 @@ fn line_hits(
         return false;
     }
     if let Some(rest) = line.strip_prefix("geoip:!") {
-        fill(resolved, asked, resolve);
+        resolved.resolve(resolve);
         return !resolved.addresses.is_empty()
             && resolved
                 .addresses
@@ -118,7 +133,7 @@ fn line_hits(
                 .all(|addr| !geo_hit(catalog, rest, addr.ip()));
     }
     if let Some(rest) = line.strip_prefix("geoip:") {
-        fill(resolved, asked, resolve);
+        resolved.resolve(resolve);
         return resolved
             .addresses
             .iter()
@@ -129,7 +144,7 @@ fn line_hits(
             return false;
         };
         if catalog.ext_has_net(file, category) {
-            fill(resolved, asked, resolve);
+            resolved.resolve(resolve);
             return resolved
                 .addresses
                 .iter()
@@ -179,19 +194,6 @@ fn listed_private(catalog: &Catalog, ip: IpAddr) -> bool {
     geo_hit(catalog, "private", ip)
 }
 
-fn fill(resolved: &mut Resolved, asked: &mut bool, resolve: &mut dyn FnMut(&str) -> Vec<IpAddr>) {
-    if *asked || !resolved.addresses.is_empty() {
-        return;
-    }
-    *asked = true;
-    if resolved.host.parse::<IpAddr>().is_ok() {
-        return;
-    }
-    let ips = resolve(&resolved.host);
-    resolved.reach = reach_of(&ips);
-    resolved.addresses = sockets(&ips, resolved.port, Transport::Tcp);
-}
-
 pub fn literal(destination: &Destination) -> Option<IpAddr> {
     destination.host().parse().ok()
 }
@@ -204,14 +206,6 @@ pub fn reach_of(addresses: &[IpAddr]) -> Reachability {
     } else {
         Reachability::None
     }
-}
-
-pub fn sockets(addresses: &[IpAddr], port: u16, transport: Transport) -> Vec<SocketAddr> {
-    let _ = transport;
-    addresses
-        .iter()
-        .map(|addr| SocketAddr::new(*addr, port))
-        .collect()
 }
 
 fn private_ip(ip: IpAddr) -> bool {
@@ -245,10 +239,26 @@ fn private_v6(addr: Ipv6Addr) -> bool {
         || (addr.segments()[0] & 0xff00) == 0xff00
 }
 
-pub fn remember_locals() -> Vec<IpAddr> {
-    if_addrs::get_if_addrs()
+struct LocalNetwork {
+    checked: Instant,
+    native: Native,
+    addresses: Arc<[IpAddr]>,
+}
+
+pub(crate) fn local_network() -> (Native, Arc<[IpAddr]>) {
+    static NETWORK: Mutex<Option<LocalNetwork>> = Mutex::new(None);
+    let mut cached = NETWORK.lock().expect("local network");
+    if let Some(network) = &*cached {
+        if network.checked.elapsed() < Duration::from_secs(1) {
+            return (network.native, network.addresses.clone());
+        }
+    }
+    let native = Native::detect();
+    let addresses: Arc<[IpAddr]> = if_addrs::get_if_addrs()
         .map(|items| items.into_iter().map(|item| item.ip()).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    *cached = Some(LocalNetwork { checked: Instant::now(), native, addresses: addresses.clone() });
+    (native, addresses)
 }
 
 #[cfg(test)]
@@ -257,12 +267,39 @@ mod tests {
     use kerlico_outbound::Exit;
 
     fn bare(host: &str) -> Resolved {
-        Resolved {
-            reach: Reachability::None,
-            addresses: Vec::new(),
-            host: host.to_string(),
-            port: 80,
-        }
+        resolved_from(host, 80, &[])
+    }
+
+    #[test]
+    fn a_completed_empty_lookup_is_not_repeated_by_dispatch() {
+        let mut resolved = bare("example.test");
+        let mut calls = 0;
+        let mut lookup = |_: &str| {
+            calls += 1;
+            Vec::new()
+        };
+        let rules = [Rule {
+            lines: vec!["geoip:private".to_owned()],
+            choice: OutboundChoice::Default,
+        }];
+        assert_eq!(
+            choose(
+                Some("example.test"),
+                &rules,
+                OutboundChoice::Manual(Exit::NativeV4),
+                &mut resolved,
+                &mut lookup,
+                Environment {
+                    native: Native { v4: true, v6: false },
+                    local: &[],
+                    catalog: &Catalog::empty(),
+                },
+            ),
+            Ok(Exit::NativeV4)
+        );
+        resolved.resolve(&mut lookup);
+        assert!(resolved.addresses.is_empty());
+        assert_eq!(calls, 1);
     }
 
     #[test]

@@ -16,6 +16,7 @@ use kerlico_shared::{
 
 pub use native::{BytePipe, Native, PacketDevice};
 pub use network::{
+    connect_system_peer,
     connect_system_tcp, lookup_system_addresses, open_system_datagram, open_tunnel_datagram,
     open_tunnel_datagram_at,
 };
@@ -179,7 +180,7 @@ impl Outbound {
         self.dispatch_inner(handoff, exit, target, traffic, false)
     }
 
-    /// Moves eligible native TCP flows to their existing I/O executor. Other
+    /// Moves eligible native flows to their I/O executor. Other
     /// flows finish on the caller, which already owns their preparation thread.
     pub fn dispatch_on_executor(
         &self,
@@ -209,7 +210,7 @@ impl Outbound {
             Exit::NativeV4 | Exit::NativeV6 if target.transport == kerlico_shared::Transport::Udp && datagram_session.is_some() => {
                 self.datagrams.dial(datagram_session.expect("UDP session"), &target, stream.as_ref(), copy::Flow {
                     user: &user, node: &node, exit, traffic, transport: kerlico_shared::Transport::Udp,
-                })
+                }, detached)
             }
             Exit::NativeV4 | Exit::NativeV6 => {
                 native::dial_native(&target, stream, &user, &node, exit, traffic, detached)
@@ -258,7 +259,7 @@ impl Outbound {
                 return udp.dial(session, peer, destination, stream, flow);
             }
         }
-        let remote = copy::report_connect(stream, (landing.dial)(destination))?;
+        let remote = copy::report_connect_with(stream, (landing.dial)(destination), |remote| remote.connect_bound())?;
         let remote: Arc<dyn InboundStream> = Arc::from(remote);
         copy::bridge(
             stream,

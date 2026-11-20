@@ -403,15 +403,12 @@ impl Server {
     /// Accepts flows and dials the chosen exit. This call does not return.
     pub fn run(&mut self, dns: dns::Config) -> Result<(), Error> {
         self.set_dns(dns.clone());
-        let native = Native::detect();
-        let local = route::remember_locals();
         if let Some(addr) = dns.listen {
             dns::serve(
                 addr,
                 dns.clone(),
                 self.fakedns.clone(),
                 self.fake_on,
-                native,
                 self.outbound.clone(),
             );
         }
@@ -426,7 +423,7 @@ impl Server {
         }
         loop {
             self.drain_api();
-            if !self.dispatch_next_with(native, &local, &dns) {
+            if !self.dispatch_next_with(&dns) {
                 self.wake.wait();
             }
         }
@@ -461,10 +458,8 @@ impl Server {
 
     /// Accepts one ready flow and dials it. No ready flow leaves the process idle.
     pub fn dispatch_next(&mut self) -> Result<(), Error> {
-        let native = Native::detect();
-        let local = route::remember_locals();
         let dns = self.dns.read().expect("DNS runtime").clone();
-        self.dispatch_next_with(native, &local, &dns);
+        self.dispatch_next_with(&dns);
         Ok(())
     }
 
@@ -479,7 +474,7 @@ impl Server {
         None
     }
 
-    fn dispatch_next_with(&mut self, native: Native, local: &[IpAddr], dns: &dns::Config) -> bool {
+    fn dispatch_next_with(&mut self, dns: &dns::Config) -> bool {
         let Some((index, handoff)) = self.accept_next() else {
             return false;
         };
@@ -488,7 +483,7 @@ impl Server {
         let sniff = self.nodes[index].sniff.clone();
         let outbound = self.outbound.clone();
         let stats = self.stats.clone();
-        let local = local.to_vec();
+        let (native, local) = route::local_network();
         let dns = dns.clone();
         let fakes = self.fakedns.clone();
         let fake_on = self.fake_on;
@@ -561,6 +556,7 @@ impl Server {
             }
             Error::Connect
         };
+        let mut lookup = |host: &str| dns.lookup(host, native, outbound);
         let exit = udp::adopt(
             sessions,
             session.as_ref(),
@@ -571,7 +567,7 @@ impl Server {
                     rules,
                     choice,
                     &mut resolved,
-                    &mut |host| dns.lookup(host, native, outbound),
+                    &mut lookup,
                     route::Environment {
                         native,
                         local,
@@ -584,21 +580,13 @@ impl Server {
             let _ = handoff.report_connect(Err(OpenError::Transport));
             fail(session.as_ref())
         })?;
-        let mut addresses = family_addresses(&resolved.addresses, exit);
+        if !matches!(exit, Exit::Landing) {
+            resolved.resolve(&mut lookup);
+        }
+        let addresses = family_addresses(&resolved.addresses, exit);
         if addresses.is_empty() && !matches!(exit, Exit::Landing) {
-            if route::literal(&destination).is_some() {
-                let _ = handoff.report_connect(Err(OpenError::Transport));
-                return Err(fail(session.as_ref()));
-            }
-            let looked = dns.lookup(destination.host(), native, outbound);
-            addresses = family_addresses(
-                &route::sockets(&looked, destination.port(), destination.transport()),
-                exit,
-            );
-            if addresses.is_empty() {
-                let _ = handoff.report_connect(Err(OpenError::Transport));
-                return Err(fail(session.as_ref()));
-            }
+            let _ = handoff.report_connect(Err(OpenError::Transport));
+            return Err(fail(session.as_ref()));
         }
         let target = DialTarget {
             host: destination.host().to_string(),
@@ -744,6 +732,47 @@ mod tests {
             assert_eq!(handoff.node().as_str(), expected);
         }
         assert!(server.accept_next().is_none());
+    }
+
+    #[cfg(all(feature = "wireguard", feature = "hy2", feature = "ss2022"))]
+    #[test]
+    fn quiet_protocol_listeners_do_not_block_round_robin() {
+        use std::net::{Ipv4Addr, UdpSocket};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let sockets = [(); 3].map(|_| UdpSocket::bind(("127.0.0.1", 0)).unwrap());
+        let ports = sockets.each_ref().map(|socket| socket.local_addr().unwrap().port());
+        drop(sockets);
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let mut wireguard = Settings::default();
+        wireguard.insert_text("privateKey", "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=");
+        let mut hy2 = Settings::default();
+        hy2.insert_text("certificate", cert.cert.pem());
+        hy2.insert_text("privateKey", cert.key_pair.serialize_pem());
+        let mut ss2022 = Settings::default();
+        ss2022.insert_text("method", "2022-blake3-aes-128-gcm");
+        ss2022.insert_text("mode", "udp_only");
+        let mut server = Server::new();
+        for ((id, settings), port) in
+            [("wireguard", wireguard), ("hy2", hy2), ("ss2022", ss2022)].into_iter().zip(ports)
+        {
+            let protocol = Server::compiled().iter().copied().find(|item| item.as_str() == id).unwrap();
+            server.listen_node(
+                NodeTag::parse(id).unwrap(),
+                protocol,
+                ListenAddr::v4(Ipv4Addr::LOCALHOST, port).unwrap(),
+                OutboundChoice::Default,
+                &settings,
+            ).unwrap();
+        }
+        let (checked, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let empty = server.accept_next().is_none();
+            let _ = checked.send(empty);
+        });
+        assert!(result.recv_timeout(Duration::from_secs(2)).expect("idle listeners must return immediately"));
+        worker.join().unwrap();
     }
 
     #[test]

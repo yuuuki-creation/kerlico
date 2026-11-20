@@ -5,7 +5,7 @@ use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use kerlico_shared::{Association, InboundStream, NodeTag, OpenError, Traffic, Transport, UserEmail};
+use kerlico_shared::{Association, ConnectBound, InboundStream, NodeTag, OpenError, Traffic, Transport, UserEmail};
 
 use crate::association_session::AssociationSessions;
 use crate::copy::{self, PipeRead, PipeWrite, ReadEvent};
@@ -66,6 +66,7 @@ pub trait PacketDevice: Send + Sync {
 pub trait BytePipe: Send + Sync {
     fn read_pipe(&self, buf: &mut [u8]) -> Result<usize, OpenError>;
     fn write_pipe(&self, buf: &[u8]) -> Result<usize, OpenError>;
+    fn local_addr(&self) -> Option<SocketAddr> { None }
 }
 
 pub struct WarpSlot {
@@ -122,8 +123,11 @@ pub fn dial_native(
     })?;
     match target.transport {
         Transport::Tcp => {
-            let tcp = copy::report_connect(stream.as_ref(), TcpStream::connect_timeout(&addr, Duration::from_secs(10))
-                .map_err(|_| OpenError::Transport))?;
+            let tcp = copy::report_connect_with(
+                stream.as_ref(),
+                TcpStream::connect_timeout(&addr, Duration::from_secs(10)).map_err(|_| OpenError::Transport),
+                |tcp| tcp.local_addr().ok().map(ConnectBound::Socket),
+            )?;
             tcp.set_nodelay(true).ok();
             #[cfg(target_os = "linux")]
             if let Some(inbound) = stream.take_splice_socket() {
@@ -158,6 +162,18 @@ pub fn dial_native(
             })
             .map_err(|_| OpenError::Transport)?;
             socket.connect(addr).map_err(|_| OpenError::Transport)?;
+            #[cfg(target_os = "linux")]
+            if stream.connected_datagrams() {
+                socket.set_nonblocking(true).map_err(|_| OpenError::Transport)?;
+                kerlico_shared::grow_udp_receive_buffer(&socket);
+                let relay = ConnectedUdp {
+                    socket,
+                    counters: traffic.bind(user, node, exit.tag()),
+                    gso: true,
+                    batch_receive: true,
+                };
+                return stream.attach_datagrams(Box::new(relay)).map_err(|_| OpenError::Transport);
+            }
             socket
                 .set_read_timeout(Some(Duration::from_millis(200)))
                 .ok();
@@ -187,14 +203,14 @@ pub fn dial_warp(
     exit: Exit,
     traffic: &dyn Traffic,
 ) -> Result<(), OpenError> {
-    let pipe = copy::report_connect(stream, (|| {
+    let pipe = copy::report_connect_with(stream, (|| {
         let device = slot.get()?;
         let addr = pick(target, exit)?;
         match target.transport {
             Transport::Tcp => device.connect_tcp(addr),
             Transport::Udp => device.connect_udp(addr),
         }
-    })())?;
+    })(), |pipe| pipe.local_addr().map(ConnectBound::Socket))?;
     let (read, write) = split_pipe(pipe, target.transport);
     copy::bridge(
         stream,
@@ -352,16 +368,18 @@ impl PipeRead for TcpRead {
     fn native_tcp(&self) -> Option<&TcpStream> { Some(&self.0) }
 
     fn read_pipe(&mut self, buf: &mut [u8]) -> Result<ReadEvent, OpenError> {
-        match self.0.read(buf) {
-            Ok(0) => Ok(ReadEvent::Eof),
-            Ok(n) => Ok(ReadEvent::Data(n)),
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    || error.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                Err(OpenError::Again)
+        loop {
+            match self.0.read(buf) {
+                Ok(0) => return Ok(ReadEvent::Eof),
+                Ok(n) => return Ok(ReadEvent::Data(n)),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error)
+                    if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+                {
+                    return Err(OpenError::Again);
+                }
+                Err(_) => return Err(OpenError::Transport),
             }
-            Err(_) => Err(OpenError::Transport),
         }
     }
 }
@@ -448,6 +466,215 @@ mod vectored_tests {
 }
 
 struct UdpRead(UdpSocket);
+
+#[cfg(target_os = "linux")]
+struct ConnectedUdp {
+    socket: UdpSocket,
+    counters: kerlico_shared::TrafficCounters,
+    gso: bool,
+    batch_receive: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl ConnectedUdp {
+    fn send(&mut self, requests: &mut std::collections::VecDeque<Vec<u8>>) -> std::io::Result<()> {
+        use std::io::ErrorKind;
+
+        let mut sent = 0;
+        let mut status = Ok(());
+        while let Some(first) = requests.front() {
+            let size = first.len();
+            if self.gso && size != 0 {
+                let cap = (65_507 / size).min(32);
+                let packets = requests.make_contiguous();
+                let count = packets.iter().take(cap).take_while(|p| p.len() == size).count();
+                if count > 1 {
+                    match udp_segments(&self.socket, &packets[..count], size as u16) {
+                        Ok(n) => {
+                            sent += n as u64;
+                            requests.drain(..count);
+                            continue;
+                        }
+                        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
+                            requests.drain(..count);
+                            continue;
+                        }
+                        Err(error) if matches!(error.raw_os_error(), Some(
+                            libc::EINVAL | libc::EMSGSIZE | libc::EIO | libc::ENOPROTOOPT
+                            | libc::EOPNOTSUPP | libc::EPERM | libc::ENOSYS
+                        )) => self.gso = false,
+                        Err(error) => {
+                            status = Err(error);
+                            break;
+                        }
+                    }
+                }
+            }
+            let packet = requests.pop_front().expect("first UDP packet");
+            match self.socket.send(&packet) {
+                Ok(n) => sent += n as u64,
+                Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+                Err(error) => {
+                    status = Err(error);
+                    break;
+                }
+            }
+        }
+        if sent != 0 {
+            self.counters.add_uplink(sent);
+        }
+        status
+    }
+
+    fn receive_ready(
+        &mut self,
+        buf: &mut [u8],
+        reply: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> std::io::Result<()> {
+        use std::io::ErrorKind;
+        let mut received = 0;
+        let mut report = |packet: &[u8]| {
+            if reply(packet) {
+                received += packet.len() as u64;
+            }
+        };
+        let result = if self.batch_receive {
+            match receive_udp_batch(&self.socket, buf, &mut report) {
+                Err(error) if matches!(error.raw_os_error(), Some(
+                    libc::ENOSYS | libc::EPERM | libc::EOPNOTSUPP
+                )) => {
+                    self.batch_receive = false;
+                    Ok(())
+                }
+                result => result,
+            }
+        } else {
+            let mut result = Ok(());
+            for _ in 0..32 {
+                match self.socket.recv(buf) {
+                    Ok(n) => report(&buf[..n]),
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        result = Err(error);
+                        break;
+                    }
+                }
+            }
+            result
+        };
+        if received != 0 {
+            self.counters.add_downlink(received);
+        }
+        result
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn receive_udp_batch(
+    socket: &UdpSocket,
+    buf: &mut [u8],
+    deliver: &mut dyn FnMut(&[u8]),
+) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+    use std::os::fd::AsRawFd;
+
+    const COUNT: usize = 4;
+    const SIZE: usize = 65_536;
+    if buf.len() < COUNT * SIZE {
+        return Err(ErrorKind::InvalidInput.into());
+    }
+    // Each message points to one exclusive slot for the duration of the call.
+    let mut messages: [libc::mmsghdr; COUNT] = unsafe { std::mem::zeroed() };
+    let mut vectors: [libc::iovec; COUNT] = unsafe { std::mem::zeroed() };
+    for ((slot, message), vector) in buf.chunks_exact_mut(SIZE).zip(&mut messages).zip(&mut vectors) {
+        vector.iov_base = slot.as_mut_ptr().cast();
+        vector.iov_len = slot.len();
+        message.msg_hdr.msg_iov = vector;
+        message.msg_hdr.msg_iovlen = 1;
+    }
+    for _ in 0..(32 / COUNT) {
+        // Only initialized headers and equally sized live slots are supplied.
+        let n = unsafe {
+            libc::recvmmsg(
+                socket.as_raw_fd(), messages.as_mut_ptr(), COUNT as _,
+                libc::MSG_DONTWAIT, std::ptr::null_mut(),
+            )
+        };
+        if n < 0 {
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                ErrorKind::WouldBlock => break,
+                ErrorKind::Interrupted => continue,
+                _ => return Err(error),
+            }
+        }
+        for (slot, message) in buf.chunks_exact(SIZE).zip(&messages[..n as usize]) {
+            if message.msg_hdr.msg_flags & libc::MSG_TRUNC == 0 {
+                deliver(&slot[..message.msg_len as usize]);
+            }
+        }
+        if (n as usize) < COUNT {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn udp_segments(socket: &UdpSocket, packets: &[Vec<u8>], size: u16) -> std::io::Result<usize> {
+    use std::mem::{size_of, zeroed};
+    use std::os::fd::AsRawFd;
+
+    // The kernel reads one live slice per datagram and a single aligned control message.
+    let mut vectors: [libc::iovec; 32] = unsafe { zeroed() };
+    for (vector, packet) in vectors.iter_mut().zip(packets) {
+        vector.iov_base = packet.as_ptr().cast_mut().cast();
+        vector.iov_len = packet.len();
+    }
+    let mut message: libc::msghdr = unsafe { zeroed() };
+    let mut control = [0usize; 4];
+    message.msg_iov = vectors.as_mut_ptr();
+    message.msg_iovlen = packets.len();
+    message.msg_control = control.as_mut_ptr().cast();
+    // The aligned control array has room for the header and its two-byte value.
+    let sent = unsafe {
+        message.msg_controllen = libc::CMSG_SPACE(size_of::<u16>() as _) as _;
+        let header = libc::CMSG_FIRSTHDR(&message);
+        (*header).cmsg_level = libc::IPPROTO_UDP;
+        (*header).cmsg_type = libc::UDP_SEGMENT;
+        (*header).cmsg_len = libc::CMSG_LEN(size_of::<u16>() as _) as _;
+        libc::CMSG_DATA(header).cast::<u16>().write_unaligned(size);
+        libc::sendmsg(socket.as_raw_fd(), &message, 0)
+    };
+    if sent < 0 {
+        Err(std::io::Error::last_os_error())
+    } else if sent as usize != packets.len() * usize::from(size) {
+        Err(std::io::ErrorKind::WriteZero.into())
+    } else {
+        Ok(sent as usize)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl kerlico_shared::ConnectedDatagrams for ConnectedUdp {
+    fn descriptor(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.socket)
+    }
+
+    fn drive(
+        &mut self,
+        requests: &mut std::collections::VecDeque<Vec<u8>>,
+        receive: Option<&mut [u8]>,
+        reply: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> std::io::Result<()> {
+        self.send(requests)?;
+        if let Some(buf) = receive {
+            self.receive_ready(buf, reply)?;
+        }
+        Ok(())
+    }
+}
 
 impl PipeRead for UdpRead {
     fn read_pipe(&mut self, buf: &mut [u8]) -> Result<ReadEvent, OpenError> {

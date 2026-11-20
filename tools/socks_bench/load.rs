@@ -153,7 +153,7 @@ fn receive(mut streams: Vec<(TcpStream, Vec<u8>)>, warmup: u64, rounds: u64) -> 
 fn main() -> io::Result<()> {
     let args: Vec<_> = env::args().collect();
     match args[1].as_str() {
-        "udp-echo" => return udp::echo(&args[2]),
+        "udp-echo" => return udp::echo(&args[2], args[3].parse().unwrap()),
         "udp-roundtrip" => {
             return udp::roundtrip(
                 &args[2],
@@ -161,6 +161,7 @@ fn main() -> io::Result<()> {
                 args[3].parse().unwrap(),
                 args[4].parse().unwrap(),
                 args[6].parse().unwrap(),
+                args[7].parse().unwrap(),
             )
         }
         _ => {}

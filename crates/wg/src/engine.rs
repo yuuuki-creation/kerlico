@@ -3,12 +3,12 @@ use std::io;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use smoltcp::iface::{Interface, SocketSet};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp::{self, State};
 use smoltcp::wire::{
     HardwareAddress, IpAddress, IpCidr, IpProtocol, Ipv4Address, Ipv6Address, UdpPacket,
@@ -35,7 +35,7 @@ enum Op {
 }
 
 const FLOW_BYTES: usize = 64 * 1024;
-const FLOW_PACKETS: usize = 32;
+pub(crate) const FLOW_PACKETS: usize = 32;
 
 pub(crate) struct Flow {
     stream: bool,
@@ -49,12 +49,38 @@ pub(crate) struct Flow {
     pub(crate) dropped: bool,
     read_done: bool,
     write_done: bool,
+    local: Option<SocketAddr>,
     remote: SocketAddr,
     opened: Instant,
+    notify: Option<Arc<FlowNotify>>,
+    reader_waiting: bool,
+    writer_waiting: bool,
+    pub(crate) udp_driver: Option<UdpDriver>,
+}
+
+pub(crate) type StackWake = Arc<dyn Fn() + Send + Sync>;
+pub type UdpDriver = Box<
+    dyn FnMut(&mut VecDeque<Vec<u8>>, Option<&mut [u8]>, &mut dyn FnMut(&[u8]) -> bool)
+        -> io::Result<()>
+        + Send,
+>;
+
+struct FlowNotify {
+    readable: Condvar,
+    writable: Condvar,
+    wake_stack: StackWake,
 }
 
 impl Flow {
     pub(crate) fn new(stream: bool, remote: SocketAddr) -> Arc<Mutex<Self>> {
+        Self::with_wake(stream, remote, None)
+    }
+
+    pub(crate) fn with_wake(
+        stream: bool,
+        remote: SocketAddr,
+        wake: Option<StackWake>,
+    ) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             stream,
             incoming: VecDeque::new(),
@@ -67,15 +93,87 @@ impl Flow {
             dropped: false,
             read_done: false,
             write_done: false,
+            local: None,
             remote,
             opened: Instant::now(),
+            notify: wake.map(|wake_stack| {
+                Arc::new(FlowNotify {
+                    readable: Condvar::new(),
+                    writable: Condvar::new(),
+                    wake_stack,
+                })
+            }),
+            reader_waiting: false,
+            writer_waiting: false,
+            udp_driver: None,
         }))
     }
 
     pub(crate) fn receive_udp(&mut self, packet: &[u8]) {
         if self.packets.len() < FLOW_PACKETS && !self.closed {
+            let was_empty = self.packets.is_empty();
             self.packets.push_back(packet.to_vec());
+            if was_empty {
+                self.notify_reader();
+            }
         }
+    }
+
+    fn notify_reader(&self) {
+        if self.reader_waiting {
+            self.notify
+                .as_ref()
+                .expect("waiting reader")
+                .readable
+                .notify_one();
+        }
+    }
+
+    pub(crate) fn wake_stack(&self) {
+        if let Some(notify) = &self.notify {
+            (notify.wake_stack)();
+        }
+    }
+
+    pub(crate) fn notify_writer(&self) {
+        if self.writer_waiting {
+            self.notify
+                .as_ref()
+                .expect("waiting writer")
+                .writable
+                .notify_one();
+        }
+    }
+
+    fn read_pending(&self) -> bool {
+        !self.failed
+            && !self.closed
+            && !self.read_done
+            && self.incoming.is_empty()
+            && self.packets.is_empty()
+    }
+
+    fn write_pending(&self, buf: &[u8]) -> bool {
+        !self.closed
+            && !self.failed
+            && !self.write_done
+            && if self.stream {
+                !buf.is_empty() && self.outgoing.len() >= FLOW_BYTES
+            } else {
+                self.datagrams.len() >= FLOW_PACKETS
+            }
+    }
+
+    pub(crate) fn close(&mut self) {
+        self.closed = true;
+        self.notify_reader();
+        self.notify_writer();
+    }
+
+    pub(crate) fn fail(&mut self) {
+        self.failed = true;
+        self.notify_reader();
+        self.notify_writer();
     }
 }
 
@@ -300,8 +398,42 @@ impl Pipe {
         Self { flow }
     }
 
+    pub fn local_addr(&self) -> Option<SocketAddr> {
+        self.flow.lock().expect("flow").local
+    }
+
+    /// Move UDP forwarding to the stack owner. The caller gives up the pipe.
+    pub fn install_udp_driver(&self, driver: UdpDriver) -> io::Result<()> {
+        let mut flow = self.flow.lock().expect("flow");
+        if flow.stream || flow.failed || flow.closed || flow.dropped || flow.udp_driver.is_some() {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        flow.udp_driver = Some(driver);
+        flow.wake_stack();
+        Ok(())
+    }
+
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         let mut flow = self.flow.lock().expect("flow");
+        Self::read_inner(&mut flow, buf)
+    }
+
+    pub fn read_for(&self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+        let mut flow = self.flow.lock().expect("flow");
+        if flow.read_pending() {
+            if let Some(notify) = flow.notify.clone() {
+                flow.reader_waiting = true;
+                (flow, _) = notify
+                    .readable
+                    .wait_timeout_while(flow, timeout, |flow| flow.read_pending())
+                    .expect("flow");
+                flow.reader_waiting = false;
+            }
+        }
+        Self::read_inner(&mut flow, buf)
+    }
+
+    fn read_inner(flow: &mut Flow, buf: &mut [u8]) -> io::Result<usize> {
         if flow.failed {
             return Err(io::ErrorKind::ConnectionReset.into());
         }
@@ -314,8 +446,14 @@ impl Pipe {
                 };
             }
             let n = flow.incoming.len().min(buf.len());
-            for (slot, byte) in buf.iter_mut().zip(flow.incoming.drain(..n)) {
-                *slot = byte;
+            let (front, back) = flow.incoming.as_slices();
+            let split = n.min(front.len());
+            buf[..split].copy_from_slice(&front[..split]);
+            buf[split..n].copy_from_slice(&back[..n - split]);
+            let was_full = flow.incoming.len() == FLOW_BYTES;
+            flow.incoming.drain(..n);
+            if was_full && n != 0 {
+                flow.wake_stack();
             }
             return Ok(n);
         }
@@ -339,6 +477,25 @@ impl Pipe {
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         let mut flow = self.flow.lock().expect("flow");
+        Self::write_inner(&mut flow, buf)
+    }
+
+    pub fn write_for(&self, buf: &[u8], timeout: Duration) -> io::Result<usize> {
+        let mut flow = self.flow.lock().expect("flow");
+        if flow.write_pending(buf) {
+            if let Some(notify) = flow.notify.clone() {
+                flow.writer_waiting = true;
+                (flow, _) = notify
+                    .writable
+                    .wait_timeout_while(flow, timeout, |flow| flow.write_pending(buf))
+                    .expect("flow");
+                flow.writer_waiting = false;
+            }
+        }
+        Self::write_inner(&mut flow, buf)
+    }
+
+    fn write_inner(flow: &mut Flow, buf: &[u8]) -> io::Result<usize> {
         if flow.closed || flow.failed || flow.write_done {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "warp"));
         }
@@ -349,13 +506,21 @@ impl Pipe {
             if n == 0 && !buf.is_empty() {
                 return Err(io::ErrorKind::WouldBlock.into());
             }
+            let was_empty = flow.outgoing.is_empty();
             flow.outgoing.extend(buf[..n].iter().copied());
+            if was_empty && n != 0 {
+                flow.wake_stack();
+            }
             return Ok(n);
         } else {
             if flow.datagrams.len() >= FLOW_PACKETS {
                 return Err(io::ErrorKind::WouldBlock.into());
             }
+            let was_empty = flow.datagrams.is_empty();
             flow.datagrams.push_back(buf.to_vec());
+            if was_empty {
+                flow.wake_stack();
+            }
         }
         Ok(buf.len())
     }
@@ -365,18 +530,27 @@ impl Pipe {
         if !flow.stream {
             return false;
         }
-        flow.write_done = true;
+        if !flow.write_done {
+            flow.write_done = true;
+            flow.wake_stack();
+        }
         true
     }
 
     pub fn abort(&self) {
-        self.flow.lock().expect("flow").failed = true;
+        let mut flow = self.flow.lock().expect("flow");
+        flow.fail();
+        flow.wake_stack();
     }
 }
 
 impl Drop for Pipe {
     fn drop(&mut self) {
-        self.flow.lock().expect("flow").dropped = true;
+        let mut flow = self.flow.lock().expect("flow");
+        if flow.udp_driver.is_none() {
+            flow.dropped = true;
+            flow.wake_stack();
+        }
     }
 }
 
@@ -385,6 +559,7 @@ fn run(addresses: Vec<IpAddr>, mtu: usize, link: PacketLink, cmd: Receiver<Op>) 
         rx: VecDeque::new(),
         tx: VecDeque::new(),
         mtu,
+        tcp_checksum: Checksum::Both,
     };
     let mut config = smoltcp::iface::Config::new(HardwareAddress::Ip);
     config.random_seed = OsRng.next_u64();
@@ -670,10 +845,12 @@ fn open_one(
             let _ = reply.send(Err(io::ErrorKind::AddrNotAvailable.into()));
             return;
         };
+        let local = SocketAddr::new(local, port);
+        flow.lock().expect("flow").local = Some(local);
         udp.insert(
             port,
             LiveUdp {
-                local: vec![SocketAddr::new(local, port)],
+                local: vec![local],
                 kind: UdpKind::Connected(flow.clone()),
             },
         );
@@ -693,6 +870,13 @@ fn open_one(
             )));
             return;
         }
+        flow.lock().expect("flow").local = socket.local_endpoint().map(|endpoint| {
+            let ip = match endpoint.addr {
+                IpAddress::Ipv4(ip) => IpAddr::from(ip.0),
+                IpAddress::Ipv6(ip) => IpAddr::from(ip.0),
+            };
+            SocketAddr::new(ip, endpoint.port)
+        });
         socket.set_timeout(Some(smoltcp::time::Duration::from_secs(300)));
         sockets.add(socket)
     };
@@ -714,18 +898,19 @@ fn allocate_port(next_port: &mut u16, used: impl Fn(u16) -> bool) -> u16 {
     }
 }
 
-pub(crate) fn service_tcp(socket: &mut tcp::Socket<'_>, flow: &mut Flow) {
+pub(crate) fn service_tcp(socket: &mut tcp::Socket<'_>, flow: &mut Flow) -> bool {
     if flow.failed
         || (flow.dropped && !flow.write_done)
         || (!flow.established && flow.opened.elapsed() > Duration::from_secs(8))
     {
         socket.abort();
-        flow.failed = true;
-        return;
+        flow.fail();
+        return true;
     }
     if socket.state() == State::Established || socket.may_send() {
         flow.established = true;
     }
+    let queued = flow.incoming.len();
     while socket.can_recv() {
         let capacity = FLOW_BYTES.saturating_sub(flow.incoming.len());
         if capacity == 0 {
@@ -742,21 +927,38 @@ pub(crate) fn service_tcp(socket: &mut tcp::Socket<'_>, flow: &mut Flow) {
             break;
         }
     }
-    if flow.established && !socket.may_recv() {
+    let received = flow.incoming.len() != queued;
+    if queued == 0 && received {
+        flow.notify_reader();
+    }
+    if flow.established && !flow.read_done && !socket.may_recv() {
         flow.read_done = true;
+        flow.notify_reader();
     }
-    if socket.can_send() && !flow.outgoing.is_empty() {
+    let queued = flow.outgoing.len();
+    while socket.can_send() && !flow.outgoing.is_empty() {
         let (front, _) = flow.outgoing.as_slices();
-        if let Ok(n) = socket.send_slice(front) {
-            flow.outgoing.drain(..n);
+        let Ok(n) = socket.send_slice(front) else {
+            break;
+        };
+        if n == 0 {
+            break;
         }
+        flow.outgoing.drain(..n);
     }
-    if flow.write_done && flow.outgoing.is_empty() && socket.may_send() {
+    let sent = flow.outgoing.len() != queued;
+    if queued == FLOW_BYTES && sent {
+        flow.notify_writer();
+    }
+    let closing = flow.write_done && flow.outgoing.is_empty() && socket.may_send();
+    if closing {
         socket.close();
     }
-    if flow.established && matches!(socket.state(), State::Closed | State::TimeWait) {
-        flow.closed = true;
+    if flow.established && !flow.closed && matches!(socket.state(), State::Closed | State::TimeWait)
+    {
+        flow.close();
     }
+    received || sent || closing
 }
 
 fn smol(addr: SocketAddr) -> (IpAddress, u16) {
@@ -784,6 +986,7 @@ pub(crate) struct IpDev {
     pub(crate) rx: VecDeque<Vec<u8>>,
     pub(crate) tx: VecDeque<Vec<u8>>,
     pub(crate) mtu: usize,
+    pub(crate) tcp_checksum: Checksum,
 }
 
 impl Device for IpDev {
@@ -806,6 +1009,7 @@ impl Device for IpDev {
         let mut caps = DeviceCapabilities::default();
         caps.medium = Medium::Ip;
         caps.max_transmission_unit = self.mtu;
+        caps.checksum.tcp = self.tcp_checksum;
         caps
     }
 }

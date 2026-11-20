@@ -26,7 +26,7 @@ Go 模块变动和 `go.sum` 在独立的本地副本生成。输出内的 upstre
 
 `--node-host` 默认 `127.0.0.1`。传入 `--node-host ::1` 可以验证 IPv6 节点承载；Rust 服务端监听、官方对端地址、Rust 客户端远端地址、临时端口分配及退出后的绑定检查都会使用 IPv6，IPv6 检查设置 `IPV6_V6ONLY` 并实际执行 `bind+listen`。本机 SOCKS/HTTP 入口仍使用 `127.0.0.1`，独立目标夹具不变。`--quick --node-host ::1` 是 8 行双向加配置负面共 17 项 smoke，结果明确记录 `coverage=smoke` 与 `node_host=::1`，不能据此宣称完整两两矩阵通过。
 
-`server` 子命令是真正的代理服务端：完成官方 API 要求的 SOCKS 应答，CONNECT 使用 TCP 拨目标，UDP ASSOCIATE 使用官方 PacketOverStreamTunnel 和 UDPAssociateWrapper，按包目标拨独立 UDP socket，再带真实源地址返回。不会把入站数据直接自行 echo。`probe` 通过官方 API 建立可复用客户端，8 条并发 TCP 流逐字节核对，UDP 包含空包、1 字节、MTU 边界、32KB 分片和多目标；所有目标由外部 Python fixture 提供。
+`server` 子命令是真正的代理服务端：完成官方 API 要求的 SOCKS 应答，CONNECT 使用 TCP 拨目标，UDP ASSOCIATE 使用官方 PacketOverStreamTunnel 和 UDPAssociateWrapper，按包目标拨独立 UDP socket，再带真实源地址返回。不会把入站数据直接自行 echo。`probe` 通过官方 API 建立可复用客户端，8 条并发 TCP 流逐字节核对，UDP 包含空包、1 字节、MTU 边界、大报文和多目标；所有目标由外部 Python fixture 提供。Linux 用 32,000 字节的大报文。macOS 驱动按内核的 `net.inet.udp.maxdgram` 留出 SOCKS5 UDP 封装空间，通过 `--large-udp` 把同一上限交给 Go 探针，并在 JSON 结果里记录该载荷长度。
 
 ```sh
 /tmp/kerlico-mieru-peer server --listen 127.0.0.1 --port 46000 --transport UDP --mtu 1280 --low 4

@@ -21,21 +21,29 @@ protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依�
 
 代码未跟上：2026-11-09 的 `cargo metadata --format-version 1 --no-deps` 显示协议的 path 依赖也被 Cargo 自动纳入工作区，共 15 个成员。本轮没有改变工作区划分；功能裁剪分别检查叶子的运行时依赖图，不用工作区包数推断角色隔离。
 
-协议目录包括 `wireguard`、`openvpn`、`mieru`、`vless`、`anytls`、`hy2`、`ss2022` 和 [`socks`](socks.md)。OpenVPN 的协议体是 `unimplemented!`。各协议的配置见各自的参考文档。
+协议目录包括 `wireguard`、[`openvpn`](openvpn.md)、`mieru`、`vless`、`anytls`、`hy2`、`ss2022` 和 [`socks`](socks.md)。各协议的配置见各自的参考文档。
 
 本机 SOCKS5/HTTP 入口只在客户端叶子里有一份，见下文「客户端叶子和本机入口」。
 
+OpenVPN 的共享 crate 负责控制帧、rustls 控制通道和 AEAD 数据帧。服务端复用 `kerlico-wg` 里独立于 WireGuard 握手的 IP 流处理。客户端通过 `kerlico-outbound` 打开 TCP 或 UDP 载体，在 Unix 上通过 `tun-rs` 提供 TUN 入口。
+
 `protocols/socks/shared` 编解码 SOCKS5 地址和 UDP 封装。入站通过 Tokio 读取握手和 UDP 控制连接，再把流交给出站模块。客户端与 `landing-socks` 共用客户端 crate；连接代理所用的 TCP 和 UDP 套接字由出站模块打开。
+
+`kerlico-shared::DirectDatagram` 允许入站在原生 UDP 选路完成后接收出站发送器，并交出非阻塞回包函数。入站保留封装，出站持有拨号结果、原生套接字和双向流量计数。出站在会话提供的 Tokio 执行器上收包并安装发送器。`ConnectBound` 携带出口报告的本地地址和端口，协议可把它写入拨号响应。
+
+Linux 的 `kerlico-shared::ConnectedDatagrams` 让已有就绪循环的入站接入出站拨好的单目标 UDP 套接字。出站负责提交请求、读回已就绪回复和计数。OpenVPN 把回复包装成已认证会话的数据包。
 
 AnyTLS 共享 crate 使用 `ring` 认证并解开接收记录，使用工作区的 `rama-boring` 将 TLS 发送记录封装到指定缓冲区。密钥和下一记录序号由同一握手状态提供。
 
 mieru 共享 crate 的运行时加密依赖是 `chacha20` 和 `ring`，组合实现既有 XChaCha20-Poly1305；原 `chacha20poly1305` 留作测试对照依赖。该变化没有增加协议或角色 feature。`kerlico-shared::Traffic` 在建流时返回 `TrafficCounters`，注册和查询仍由服务端拥有，出站持有计数句柄。
 
+mieru 客户端 crate 通过运行时或出站的系统解析入口取得对端地址。共享 crate 通过运行时或 `kerlico-outbound` 接收已连接载体，并继续处理线协议。WARP 的注册文件由 `kerlico-wg` 使用 `tempfile` 私有地创建并原子发布。
+
 mieru 共享 crate 在 Linux 上通过 `libc` 的 `recvmmsg` 批量接收 UDP 数据报，复用每个接收器自己的消息头、地址和缓冲区。该直接依赖只在 Linux 启用。
 
 mieru 共享 crate 将每个服务端 UDP 监听分配给一个按需启动的 Tokio 单线程执行器。监听的套接字、发送队列、维护定时器和已交给出站的 `AsyncTcp` 都由该执行器驱动。认证、重排、窗口和恢复仍由同一个共享状态机处理，拨号仍属于出站。
 
-`kerlico-outbound` 在 Linux 上直接依赖 `libc`，用于已完成协议转换的原生 TCP 之间的内核复制；不引入任何协议或角色 crate。
+`kerlico-outbound` 在 Linux 上直接依赖 `libc`，用于已完成协议转换的原生 TCP 之间的内核复制和原生 UDP 的批量收发。依赖图保持独立于协议和角色 crate。
 
 `kerlico-shared::AsyncTcp` 使用 Tokio 的异步读写契约和已有执行器句柄，持有协议交出的明文读写两半；共享包不创建执行器、不拨号，也不依赖协议角色。统一出站可以把原生 TCP 转发移到这个执行器，见服务端文档。出站启用 Tokio 宏来同时推进两个方向和共同空闲期限。
 
@@ -93,7 +101,7 @@ WireGuard 客户端使用 `kerlico-outbound` 为整个隧道打开一个 UDP 载
 2. 需要哪一端，就建立 `protocols/<id>/client` 或 `protocols/<id>/server`。包名是 `kerlico-<id>-client` 或 `kerlico-<id>-server`。
 3. 角色 crate 依赖 `../shared` 和 `../../../crates/shared`。它不依赖另一端。
 4. 在对应叶子的 `[dependencies]` 加一行。键等于协议 id。
-5. 客户端 crate 导出 `pub const CLIENT: ClientEntry`。数据包隧道写 `ClientEntry::Tunnel(connect)`；能提供落地 UDP 关联的隧道使用 `PacketTunnel`，也可提供 TUN 设备入口。代理协议写 `ClientEntry::Proxy(upstream)`；落地能共享 UDP 关联时可用 `ClientEntry::ProxyWithDatagramLanding(upstream)`。生成的注册表引用这个常量，缺少它时构建失败。
+5. 客户端 crate 导出 `pub const CLIENT: ClientEntry`。数据包隧道写 `ClientEntry::Tunnel(connect)`，也可用 `TunnelWithTun` 提供 TUN 设备入口。能提供落地 UDP 关联的隧道使用 `PacketTunnel`。代理协议写 `ClientEntry::Proxy(upstream)`；落地能共享 UDP 关联时可用 `ClientEntry::ProxyWithDatagramLanding(upstream)`。生成的注册表引用这个常量，缺少它时构建失败。
 
 客户端的这一行是这个形状。
 

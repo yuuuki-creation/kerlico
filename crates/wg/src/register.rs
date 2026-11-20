@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -118,11 +118,23 @@ fn register_to(path: &Path) -> io::Result<String> {
     let value: Value = serde_json::from_str(&response)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let text = registration_document(&secret.to_bytes(), &value)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    save_registration(path, text)
+}
+
+fn save_registration(path: &Path, text: String) -> io::Result<String> {
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(text.as_bytes())?;
+    file.as_file().sync_all()?;
+    match file.persist_noclobber(path) {
+        Ok(_) => Ok(text),
+        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => std::fs::read_to_string(path),
+        Err(error) => Err(error.error),
     }
-    std::fs::write(path, &text)?;
-    Ok(text)
 }
 
 fn registration_document(private_key: &[u8; 32], value: &Value) -> io::Result<String> {
@@ -329,6 +341,19 @@ fn resolve(endpoint: &str) -> io::Result<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn registration_is_private_and_does_not_replace_an_existing_profile() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("warp.json");
+        assert_eq!(save_registration(&path, "first".to_owned()).unwrap(), "first");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        assert_eq!(save_registration(&path, "second".to_owned()).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+    }
 
     #[test]
     fn registration_reply_becomes_warp_json() {

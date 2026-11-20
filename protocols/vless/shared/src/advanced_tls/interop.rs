@@ -343,6 +343,7 @@ impl Decoy {
                     Ok((socket, _)) => {
                         let config = config.clone();
                         thread::spawn(move || {
+                            socket.set_nonblocking(false).unwrap();
                             socket
                                 .set_read_timeout(Some(Duration::from_secs(3)))
                                 .unwrap();
@@ -408,6 +409,7 @@ fn xray_reality_browser_fingerprints() {
         };
         let mut xray = Xray::start(xray_config);
         let mut socket = xray.connect(listen);
+        socket.set_nodelay(true).unwrap();
         let offer =
             crate::reality_offer_fingerprint(&public, &short_id, "localhost", &[], fingerprint)
                 .unwrap();
@@ -435,6 +437,8 @@ fn xray_reality_browser_fingerprints() {
             continue;
         }
         let (read, write, finished, _) = flight.unwrap();
+        // The REALITY peer can use its full target probe budget before routing.
+        socket.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
         let echo = thread::spawn(move || {
             let (mut socket, _) = echo.accept().unwrap();
             socket
@@ -456,10 +460,9 @@ fn xray_reality_browser_fingerprints() {
             port: destination.port(),
             address: crate::Addr::V4(std::net::Ipv4Addr::LOCALHOST),
         };
-        writer
-            .write_all(&crate::encode_request(&request).unwrap())
-            .unwrap();
-        writer.write_all(b"ping").unwrap();
+        let mut request = crate::encode_request(&request).unwrap();
+        request.extend_from_slice(b"ping");
+        writer.write_all(&request).unwrap();
         let mut response = [0; 6];
         reader.read_exact(&mut response).unwrap();
         assert_eq!(&response, b"\0\0pong");

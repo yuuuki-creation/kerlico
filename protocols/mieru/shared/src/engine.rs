@@ -2,14 +2,15 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use kerlico_shared::dispatch::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex, Weak};
-use std::thread;
 use std::task::Waker;
+use std::thread;
 use std::time::{Duration, Instant};
 
+use kerlico_shared::dispatch::{self, Sender};
+use kerlico_shared::runtime::{Network, NetworkConnection, NetworkDial, NetworkRoute};
 use kerlico_shared::DatagramSession;
 
 use crate::crypto::{self, Direction};
@@ -76,6 +77,7 @@ pub struct Client {
 
 struct ClientInner {
     peers: Vec<SocketAddr>,
+    network: Option<Weak<dyn Network>>,
     account: Account,
     options: ClientOptions,
     links: Mutex<Vec<Arc<Link>>>,
@@ -253,12 +255,8 @@ struct LegQueue {
 }
 
 pub fn resolve_peer(host: &str, port: u16) -> io::Result<SocketAddr> {
-    let text = if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    };
-    text.to_socket_addrs()?
+    kerlico_outbound::lookup_system_addresses(host, port)?
+        .into_iter()
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "peer"))
 }
@@ -295,6 +293,15 @@ impl Client {
         account: Account,
         options: ClientOptions,
     ) -> io::Result<Self> {
+        Self::with_network(peers, account, options, None)
+    }
+
+    pub fn with_network(
+        peers: Vec<SocketAddr>,
+        account: Account,
+        options: ClientOptions,
+        network: Option<Weak<dyn Network>>,
+    ) -> io::Result<Self> {
         if peers.is_empty()
             || peers.iter().any(|peer| peer.port() < 1025)
             || account.username.is_empty()
@@ -310,6 +317,7 @@ impl Client {
         Ok(Self {
             inner: Arc::new(ClientInner {
                 peers,
+                network,
                 account,
                 options,
                 links: Mutex::new(Vec::new()),
@@ -333,7 +341,7 @@ impl Client {
             }
         }
         let peer = self.inner.peers[random_below(self.inner.peers.len())];
-        let link = dial_options(peer, &self.inner.account, &self.inner.options)?;
+        let link = dial_options(peer, &self.inner.account, &self.inner.options, self.inner.network.as_ref())?;
         let mut links = self.inner.links.lock().expect("links");
         if self.inner.closed.load(Ordering::Acquire) {
             drop(links);
@@ -485,6 +493,7 @@ fn dial(peer: SocketAddr, account: &Account, tcp: bool) -> io::Result<Arc<Link>>
             multiplexing: Multiplexing::Off,
             ..ClientOptions::default()
         },
+        None,
     )
 }
 
@@ -492,13 +501,33 @@ fn dial_options(
     peer: SocketAddr,
     account: &Account,
     options: &ClientOptions,
+    network: Option<&Weak<dyn Network>>,
 ) -> io::Result<Arc<Link>> {
     let accounts = Arc::new(Mutex::new(vec![account.clone()]));
     let now = meta::unix_now();
     let send = crypto::client_direction(&account.username, &account.password, now);
+    let transport = match options.transport {
+        Transport::Tcp => kerlico_shared::Transport::Tcp,
+        Transport::Udp => kerlico_shared::Transport::Udp,
+    };
+    let timeout = Duration::from_secs(10);
+    let carrier = match network {
+        Some(network) => network.upgrade().ok_or(io::ErrorKind::NotConnected)?.connect(&NetworkDial {
+            host: peer.ip().to_string(),
+            port: peer.port(),
+            transport,
+            addresses: vec![peer],
+            route: NetworkRoute::Direct,
+            timeout,
+            socket_factory: None,
+            race: None,
+        })?,
+        None => kerlico_outbound::connect_system_peer(peer, transport, timeout)?,
+    };
     if options.transport == Transport::Tcp {
-        let tcp = TcpStream::connect_timeout(&peer, Duration::from_secs(10))?;
-        tcp.set_nodelay(true).ok();
+        let NetworkConnection::Tcp(tcp) = carrier else {
+            return Err(io::ErrorKind::Unsupported.into());
+        };
         tcp.set_read_timeout(Some(Duration::from_millis(200))).ok();
         tcp.set_write_timeout(Some(Duration::from_secs(2)))?;
         let write = tcp.try_clone()?;
@@ -521,13 +550,9 @@ fn dial_options(
         thread::spawn(move || reader_tcp(tcp, reader, peer));
         Ok(link)
     } else {
-        let bind = if peer.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
+        let NetworkConnection::Udp(socket) = carrier else {
+            return Err(io::ErrorKind::Unsupported.into());
         };
-        let socket = UdpSocket::bind(bind)?;
-        socket.connect(peer)?;
         socket
             .set_read_timeout(Some(Duration::from_millis(200)))
             .ok();
@@ -1464,7 +1489,7 @@ impl Sess {
             let udp = udp
                 .as_ref()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "udp"))?;
-            udp.send_to(wire, self.peer)?;
+            udp.send(wire)?;
         }
         *self.last_tx.lock().expect("tx") = Instant::now();
         *self.link.last_activity.lock().expect("activity") = Instant::now();
@@ -2790,11 +2815,13 @@ mod tests {
         let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         let addr = peer.local_addr().unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.connect(addr).unwrap();
         let link = Link::new(LinkSetup {
             role: Role::Server,
             mtu: 1280,
             accounts: Arc::new(Mutex::new(Vec::new())),
-            socket: LinkSocket::Udp(UdpSocket::bind("127.0.0.1:0").unwrap()),
+            socket: LinkSocket::Udp(socket),
             ready: None,
             bound_user: "alice".into(),
             remote: addr,

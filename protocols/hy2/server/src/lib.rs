@@ -64,7 +64,10 @@ impl Accept for Node {
     }
 
     fn accept(&mut self) -> Result<Handoff, OpenError> {
-        self.incoming.blocking_recv().ok_or(OpenError::Transport)
+        self.incoming.try_recv().map_err(|error| match error {
+            mpsc::error::TryRecvError::Empty => OpenError::Again,
+            mpsc::error::TryRecvError::Disconnected => OpenError::Transport,
+        })
     }
 }
 

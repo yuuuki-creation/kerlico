@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, TcpListener};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SocketKind {
@@ -235,13 +235,28 @@ impl SocketOptions {
         };
         let socket = Socket::new(domain, socket_type, Some(protocol))?;
         if kind == SocketKind::Tcp {
-            socket.set_tcp_nodelay(true)?;
+            if let Err(error) = socket.set_tcp_nodelay(true) {
+                if !self.tcp_mptcp || error.kind() != io::ErrorKind::Unsupported {
+                    return Err(error);
+                }
+            }
             if role == SocketRole::Listener {
                 socket.set_reuse_address(true)?;
             }
         }
         self.configure(&socket, kind, role, addr)?;
         Ok(socket)
+    }
+
+    pub fn listen_tcp(&self, addr: SocketAddr, backlog: i32) -> io::Result<TcpListener> {
+        let socket = self.open(SocketKind::Tcp, SocketRole::Listener, addr)?;
+        socket.bind(&addr.into())?;
+        socket.listen(backlog)?;
+        #[cfg(target_os = "macos")]
+        if let Some(value) = self.tcp_fast_open {
+            option("tcpFastOpen", native::listen_fast_open(&socket, value > 0))?;
+        }
+        Ok(socket.into())
     }
 
     /// Applies native options before bind or connect. Custom options run in

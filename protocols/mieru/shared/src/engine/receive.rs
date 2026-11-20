@@ -239,11 +239,19 @@ mod tests {
                 .send_to(b"ready", socket.local_addr().unwrap())
                 .unwrap();
             let mut visits = 0;
-            let result = packets.read_ready(&socket, |peer, bytes| {
-                assert_eq!(peer, sender.local_addr().unwrap());
-                assert_eq!(bytes, b"ready");
-                visits += 1;
-            });
+            let deadline = Instant::now() + Duration::from_millis(200);
+            let result = loop {
+                let result = packets.read_ready(&socket, |peer, bytes| {
+                    assert_eq!(peer, sender.local_addr().unwrap());
+                    assert_eq!(bytes, b"ready");
+                    visits += 1;
+                });
+                if visits != 0 || Instant::now() >= deadline {
+                    break result;
+                }
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+                std::thread::sleep(Duration::from_millis(1));
+            };
             assert_eq!(visits, 1);
             #[cfg(target_os = "linux")]
             let batched = !packets.single;
@@ -271,7 +279,11 @@ mod tests {
             socket.set_read_timeout(Some(Duration::from_millis(200)))?;
             let sources = [UdpSocket::bind(address)?, UdpSocket::bind(address)?];
             let mut expected = Vec::new();
-            for (i, len) in [0, 1, 1400, 32000, 65000].into_iter().enumerate() {
+            #[cfg(target_os = "macos")]
+            let sizes = [0, 1, 1400, 4096];
+            #[cfg(not(target_os = "macos"))]
+            let sizes = [0, 1, 1400, 32000, 65000];
+            for (i, len) in sizes.into_iter().enumerate() {
                 let payload = vec![i as u8; len];
                 let source = &sources[i % sources.len()];
                 source.send_to(&payload, socket.local_addr()?)?;

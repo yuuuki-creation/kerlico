@@ -45,6 +45,8 @@ fn bind(addr: SocketAddr) -> std::io::Result<TcpListener> {
 }
 
 fn connection(mut tcp: TcpStream, tx: dispatch::Sender<Cmd>, stats: Stats) {
+    const MAX_HEADERS: usize = 64 * 1024;
+    const MAX_MESSAGE: usize = 1024 * 1024;
     tcp.set_nodelay(true).ok();
     tcp.set_read_timeout(Some(Duration::from_secs(30))).ok();
     let mut preface = [0u8; 24];
@@ -69,8 +71,12 @@ fn connection(mut tcp: TcpStream, tx: dispatch::Sender<Cmd>, stats: Stats) {
                 let _ = tcp.write_all(&frame(6, 1, 0, &payload));
             }
             1 => {
-                let rest = header_bytes(&payload, flags);
-                block.extend_from_slice(rest);
+                let Some(rest) = header_bytes(&payload, flags) else {
+                    return;
+                };
+                if !append(&mut block, rest, MAX_HEADERS) {
+                    return;
+                }
                 stream = id;
                 if flags & 0x4 != 0 {
                     headers_done = true;
@@ -83,13 +89,20 @@ fn connection(mut tcp: TcpStream, tx: dispatch::Sender<Cmd>, stats: Stats) {
                 }
             }
             9 => {
-                block.extend_from_slice(&payload);
+                if !append(&mut block, &payload, MAX_HEADERS) {
+                    return;
+                }
                 if flags & 0x4 != 0 {
                     headers_done = true;
                 }
             }
             0 => {
-                data.extend_from_slice(data_bytes(&payload, flags));
+                let Some(bytes) = data_bytes(&payload, flags) else {
+                    return;
+                };
+                if !append(&mut data, bytes, MAX_MESSAGE) {
+                    return;
+                }
                 if flags & 1 != 0 && headers_done {
                     answer(&mut tcp, &mut decoder, stream, &block, &data, &tx, &stats);
                     block.clear();
@@ -355,35 +368,45 @@ fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-fn header_bytes(payload: &[u8], flags: u8) -> &[u8] {
-    let mut rest = payload;
-    if flags & 0x8 != 0 {
-        if rest.is_empty() {
-            return rest;
-        }
-        let pad = rest[0] as usize;
-        rest = &rest[1..rest.len().saturating_sub(pad)];
+fn append(buffer: &mut Vec<u8>, bytes: &[u8], limit: usize) -> bool {
+    if bytes.len() > limit.saturating_sub(buffer.len()) {
+        return false;
     }
-    if flags & 0x20 != 0 && rest.len() >= 5 {
-        rest = &rest[5..];
-    }
-    rest
+    buffer.extend_from_slice(bytes);
+    true
 }
 
-fn data_bytes(payload: &[u8], flags: u8) -> &[u8] {
-    if flags & 0x8 == 0 || payload.is_empty() {
-        return payload;
+fn header_bytes(payload: &[u8], flags: u8) -> Option<&[u8]> {
+    let bytes = data_bytes(payload, flags)?;
+    if flags & 0x20 != 0 {
+        bytes.get(5..)
+    } else {
+        Some(bytes)
     }
-    let pad = payload[0] as usize;
-    let end = payload.len().saturating_sub(pad);
-    if end <= 1 {
-        return &[];
+}
+
+fn data_bytes(payload: &[u8], flags: u8) -> Option<&[u8]> {
+    if flags & 0x8 == 0 {
+        return Some(payload);
     }
-    &payload[1..end]
+    let (&pad, bytes) = payload.split_first()?;
+    let end = bytes.len().checked_sub(usize::from(pad))?;
+    bytes.get(..end)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn request_parts_stay_bounded_and_reject_invalid_padding() {
+        let mut buffer = Vec::new();
+        assert!(super::append(&mut buffer, b"ab", 3));
+        assert!(super::append(&mut buffer, b"c", 3));
+        assert!(!super::append(&mut buffer, b"d", 3));
+        assert_eq!(buffer, b"abc");
+        assert_eq!(super::header_bytes(&[1, 9, 0], 0x08), Some(&[9][..]));
+        assert_eq!(super::header_bytes(&[2, 0], 0x08), None);
+    }
+
     use super::*;
     use std::net::Ipv4Addr;
     use std::sync::mpsc::Receiver;

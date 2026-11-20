@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 chacha20 = "0.9"
 getrandom = "0.2"
+kerlico-outbound = { path = "../../../crates/outbound" }
 kerlico-shared = { path = "../../../crates/shared" }
 pbkdf2 = "0.12"
 ring = "0.17"

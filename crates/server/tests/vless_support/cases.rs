@@ -928,7 +928,10 @@ pub fn cases() -> Vec<Case> {
             cases.push(Case::new(name, network, security, Tcp).xff(marker));
         }
     }
+    #[cfg(target_os = "linux")]
     const SOCKOPT: &str = r#"{"TCPKeepAliveIdle":30,"tcpKEEPALIVEInterval":10,"TcpUserTimeout":10000,"Penetrate":true,"TcpFastOpen":false,"DomainStrategy":"UseIPv4","UnknownOption":{"nested":[1]}}"#;
+    #[cfg(not(target_os = "linux"))]
+    const SOCKOPT: &str = r#"{"TCPKeepAliveIdle":30,"tcpKEEPALIVEInterval":10,"Penetrate":true,"TcpFastOpen":false,"DomainStrategy":"UseIPv4","UnknownOption":{"nested":[1]}}"#;
     cases.push(Case::new("raw-tls-sockopt-mixed-case", Raw, Tls(""), Tcp).sockopt(SOCKOPT));
     cases.push(Case::new("ws-none-sockopt-mixed-case", WebSocket(false), None, Tcp).sockopt(SOCKOPT));
     cases.push(Case::new("xhttp-h2-tls-sockopt-mixed-case", Xhttp("packet-up"), Tls("h2"), Tcp).sockopt(SOCKOPT));

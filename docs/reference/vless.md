@@ -65,6 +65,8 @@ mKCP 处理绝对接收窗口、累积确认、丢包重传、乱序、重复数
 
 `sockopt` 的键按 Go `encoding/json` 匹配，不区分大小写，未知键忽略，`null` 保持默认值，类型错误仍然拒绝配置。
 
+macOS 的 TCP 监听器在进入 LISTEN 状态后应用 `tcpFastOpen`。出站显式设为 `false` 时使用普通 TCP 建连，设为开启时报告当前拨号方式不支持 TCP Fast Open。
+
 `acceptProxyProtocol: true` 在 TCP 载体握手之前消费 PROXY v1/v2，普通非 PROXY 连接仍可使用；解析后的来源用于 UDP Handoff，目的地址用于 fallback PROXY 头。该选项只应配置在实际接收 PROXY 头的入口上。
 
 XDrive 使用 `xdriveSettings` 对象；local 也接受 `service: local` 和 `remoteFolder`。HTTP 后端支持 OAuth、模板预签名 PUT、S3 SigV4/会话令牌/path-style/virtual-host，以及 Google Drive 的 multipart、分段对象和环形槽位。`storageAddress` / `storagePort` 是显式存储连接覆盖；不会用 VLESS 逻辑监听地址替代云服务地址。
@@ -176,10 +178,12 @@ cargo test -p kerlico-vless -p kerlico-vless-client -p kerlico-vless-server --li
 XRAY=/path/to/xray XRAY_BIN=/path/to/xray cargo test -p kerlico-vless -p kerlico-vless-client -p kerlico-vless-server --lib -- --ignored --test-threads=1 --skip cloud_storage_round_trips
 cargo test -p kerlico-server --no-default-features --features vless,landing-vless --test vless_flow
 XRAY=/path/to/xray VLESS_XRAY_CONTROL=1 cargo test -p kerlico-server --no-default-features --features vless,landing-vless --test vless_xray -- --ignored --nocapture
-python3 tools/verify_vless_client.py --xray-bin /path/to/xray --client-bin <kerlico-client> --server-bin <kerlico-server>
+python3 tools/verify_vless_client.py --xray-bin /path/to/xray --client-bin <kerlico-client> --server-bin <kerlico-server> --output /path/to/results.json
 ```
 
-库测试里有四个 ignored 测试对照 Xray：`xray_advanced_tls_bidirectional` 检查 TLS 1.0 至 1.3 和各指纹的双向握手，`xray_reality_browser_fingerprints` 检查 Kerlico 客户端用各指纹连 Xray 的 REALITY，另两个检查客户端和服务端的反向 API。`vless_xray` 有八个测试：完整矩阵、拒绝用例、XUDP 续接、反向桥、XUDP 多目标、UDP 大小、h2Params 和 REALITY target。REALITY target 还检查认证连接在握手记录之后收到的记录，与 decoy 发给真实客户端的 NewSessionTicket 同长，Xray 和 Kerlico 两个服务端都比较；两者通过 `SSL_CERT_FILE` 信任 decoy 的证书，否则探测验证不过，什么也学不到。它还重放一个客户端的 ClientHello，读完服务端的握手记录后发一条无法认证的记录，要求两个服务端都只回一条 24 字节的 alert 记录再关闭。`verify_vless_client.py` 的覆盖见「客户端入口」。
+无权绑定 UDP/53 和 UDP/443 时，可给 Rust 夹具设置 `VLESS_HIGH_PORTS_ONLY=1`，给 Python 夹具传 `--skip-fixed-udp-ports`。Rust 日志列出跳过的固定端口用例，Python JSON 将 `fixed_udp_ports` 标为 `false`。
+
+库测试里有五个 ignored 测试对照 Xray。`xray_advanced_tls_bidirectional` 检查 TLS 1.0 至 1.3 和各指纹的双向握手，`xray_nist_hybrid_key_shares_bidirectional` 检查 NIST 混合密钥组，`xray_reality_browser_fingerprints` 检查 Kerlico 客户端用各指纹连 Xray 的 REALITY，另两个检查客户端和服务端的反向 API。`vless_xray` 有八个测试：完整矩阵、拒绝用例、XUDP 续接、反向桥、XUDP 多目标、UDP 大小、h2Params 和 REALITY target。REALITY target 还检查认证连接在握手记录之后收到的记录，与 decoy 发给真实客户端的 NewSessionTicket 同长，Xray 和 Kerlico 两个服务端都比较；两者通过 `SSL_CERT_FILE` 信任 decoy 的证书，否则探测验证不过，什么也学不到。它还重放一个客户端的 ClientHello，读完服务端的握手记录后发一条无法认证的记录，要求两个服务端都只回一条 24 字节的 alert 记录再关闭。`verify_vless_client.py` 的覆盖见「客户端入口」。
 
 叶子隔离按 `crates.md` 分别构建四条命令：客户端只编 WireGuard、服务端只编 OpenVPN、客户端只编 VLESS、服务端只编 VLESS 加 `landing-vless`，再用 `cargo tree` 检查只编 WireGuard 和只编 OpenVPN 的依赖图。上面互操作测试的 feature 组合不能用作隔离结论。
 
@@ -191,6 +195,9 @@ REALITY 认证之后的伪装（NewSessionTicket 同长记录、探测 target �
 
 已知差异和未完成项：
 
+- Linux 上的 `tcpMptcp` 会使用 MPTCP 套接字。当内核不支持给这种套接字设置 `TCP_NODELAY` 时，保留该套接字继续绑定或拨号。
+- KCP 接管已连接的 UDP 套接字时使用该套接字的固定对端收发。通过数据报载体打开的 KCP 会话仍可使用目标地址发送。
+- XDrive 的 HTTP 复用测试将接受的套接字显式设为阻塞模式，以适配 macOS 的套接字标志继承行为。
 - REALITY 在等待目标探测完成的连接上应用探测得到的空记录上限，其余连接沿用 32。探测客户端在目标请求证书时回空证书。在等客户端 Finished 时，原生 TCP 和 Unix target 提前断开会中止握手。握手完成后连续空记录超限时，发送 TLS fatal alert，然后关闭。与 target 的 NewSessionTicket 同长的记录只在它已随握手记录到达时记下，到达是否赶得上取决于读取，Xray 也一样。
 - Xray 客户端用 ios、edge、qq 和部分 `randomized` 指纹发出的 ClientHello 只有 X25519 share，连 Xray 和 Kerlico 的 REALITY 服务端都会失败；android 和 360 指纹只有 TLS 1.2，也不能用于 REALITY。这是 Xray 的规则，Kerlico 保持一致。
 - TLS 1.3 服务端的组选择有意与 Go 不同，见上文 TLS 段。`curvePreferences` 支持 `SecP256r1MLKEM768` 和 `SecP384r1MLKEM1024`，两组均已与 Xray 双向验证。未识别的组名按 Xray 的方式忽略。

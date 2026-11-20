@@ -726,6 +726,28 @@ struct KcpCore {
     ready: Condvar,
 }
 
+struct ConnectedUdp {
+    socket: UdpSocket,
+    peer: std::net::SocketAddr,
+}
+
+impl crate::finalmask::PacketIo for ConnectedUdp {
+    fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, std::net::SocketAddr)> {
+        self.socket.recv(buf).map(|n| (n, self.peer))
+    }
+
+    fn send_to(&self, packet: &[u8], peer: std::net::SocketAddr) -> std::io::Result<usize> {
+        if peer != self.peer {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        self.socket.send(packet)
+    }
+}
+
 impl KcpCore {
     fn send(&self, packets: Vec<Vec<u8>>) {
         for packet in packets {
@@ -814,7 +836,7 @@ impl KcpIo {
         let options = KcpOptions::default();
         socket.set_read_timeout(Some(options.poll_interval())).ok();
         socket.set_write_timeout(Some(Duration::from_millis(200))).ok();
-        Ok(Self::start(Arc::new(socket), peer, conv, mask, options))
+        Ok(Self::start(Arc::new(ConnectedUdp { socket, peer }), peer, conv, mask, options))
     }
 
     pub fn from_packets(socket: Arc<dyn crate::finalmask::PacketIo>, peer: std::net::SocketAddr, mask: KcpMask, options: KcpOptions) -> std::io::Result<Self> {

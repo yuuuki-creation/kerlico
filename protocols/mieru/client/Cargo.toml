@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+kerlico-outbound = { path = "../../../crates/outbound" }
 kerlico-shared = { path = "../../../crates/shared" }
 kerlico-mieru = { path = "../shared" }

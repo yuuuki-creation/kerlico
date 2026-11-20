@@ -6,3 +6,11 @@ edition = "2021"
 [dependencies]
 kerlico-shared = { path = "../../../crates/shared" }
 kerlico-openvpn = { path = "../shared" }
+kerlico-wg = { path = "../../../crates/wg" }
+hex = "0.4"
+ipnet = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+socket2 = { version = "0.6", features = ["all"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

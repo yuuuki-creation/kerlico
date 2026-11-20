@@ -4,7 +4,7 @@ use kerlico_shared::runtime::{
     Network, NetworkConnection, NetworkDial, NetworkRoute, ResolutionSource,
 };
 use kerlico_shared::{
-    Association, ClientEntry, Destination, InboundStream, OpenError, PeerAddr, PlaneFault,
+    Association, ClientEntry, ConnectBound, Destination, InboundStream, OpenError, PeerAddr, PlaneFault,
     Settings, Stream, Transport, Upstream,
 };
 use kerlico_socks::{decode, decode_udp, encode, invalid, Address};
@@ -150,14 +150,18 @@ impl Client {
         if port == 0 {
             return Err(invalid());
         }
-        let (socket, _) = self.connect(
+        let (socket, bound) = self.connect(
             1,
             &Address {
                 host: host.into(),
                 port,
             },
         )?;
-        Ok(Plain(socket))
+        let bound = match bound.host.parse::<IpAddr>() {
+            Ok(ip) => Some(ConnectBound::Socket(SocketAddr::new(ip, bound.port))),
+            Err(_) => PeerAddr::from_host_port(bound.host, bound.port).ok().map(ConnectBound::Name),
+        };
+        Ok(Plain { socket, bound })
     }
 }
 
@@ -248,26 +252,29 @@ fn read_reply(mut stream: &TcpStream) -> io::Result<Address> {
     decode(&bytes[..offset + length]).map(|(address, _)| address)
 }
 
-struct Plain(Arc<TcpStream>);
+struct Plain {
+    socket: Arc<TcpStream>,
+    bound: Option<ConnectBound>,
+}
 impl Stream for Plain {
     fn read_for(&self, buf: &mut [u8], wait: Duration) -> io::Result<usize> {
         if wait.is_zero() {
             return Err(io::ErrorKind::TimedOut.into());
         }
-        self.0.set_read_timeout(Some(wait))?;
-        (&*self.0).read(buf)
+        self.socket.set_read_timeout(Some(wait))?;
+        (&*self.socket).read(buf)
     }
     fn write_all(&self, buf: &[u8]) -> io::Result<()> {
-        (&*self.0).write_all(buf)
+        (&*self.socket).write_all(buf)
     }
     fn finish_write(&self) -> io::Result<()> {
-        self.0.shutdown(Shutdown::Write)
+        self.socket.shutdown(Shutdown::Write)
     }
     fn supports_half_close(&self) -> bool {
         true
     }
     fn close(&self) {
-        let _ = self.0.shutdown(Shutdown::Both);
+        let _ = self.socket.shutdown(Shutdown::Both);
     }
 }
 
@@ -387,6 +394,13 @@ enum Landing {
 }
 
 impl InboundStream for Landing {
+    fn connect_bound(&self) -> Option<ConnectBound> {
+        match self {
+            Self::Tcp(stream) => stream.bound.clone(),
+            Self::Udp(..) => None,
+        }
+    }
+
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
         match self {
             Self::Tcp(stream) => stream.read_for(buf, FLOW_WAIT).map_err(map_io),
@@ -402,13 +416,12 @@ impl InboundStream for Landing {
 
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
         match self {
-            Self::Tcp(stream) => stream.write_all(buf),
-            Self::Udp(association, target) => {
-                association.send_to(([0; 4], 0).into(), target.host(), target.port(), buf)
-            }
+            Self::Tcp(stream) => (&*stream.socket).write(buf).map_err(map_io),
+            Self::Udp(association, target) => association
+                .send_to(([0; 4], 0).into(), target.host(), target.port(), buf)
+                .map(|()| buf.len())
+                .map_err(map_io),
         }
-        .map_err(map_io)?;
-        Ok(buf.len())
     }
 
     fn finish_to_user(&self) -> Result<bool, PlaneFault> {
@@ -416,5 +429,23 @@ impl InboundStream for Landing {
             Self::Tcp(stream) => stream.finish_write().map(|()| true).map_err(map_io),
             Self::Udp(..) => Ok(false),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn tcp_landing_reports_partial_progress_under_backpressure() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_origin, _) = listener.accept().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let landing = Landing::Tcp(Plain { socket: Arc::new(socket), bound: None });
+        let payload = vec![0; 8 * 1024 * 1024];
+        let written = landing.write_to_user(&payload).unwrap();
+        assert!(written > 0 && written < payload.len());
     }
 }

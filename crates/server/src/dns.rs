@@ -187,7 +187,6 @@ pub fn serve(
     config: Config,
     pool: Pool,
     fake: bool,
-    native: Native,
     outbound: Outbound,
 ) -> Option<SocketAddr> {
     let udp = bind_udp(addr).ok()?;
@@ -196,8 +195,8 @@ pub fn serve(
     let udp_config = config.clone();
     let udp_pool = pool.clone();
     let udp_outbound = outbound.clone();
-    thread::spawn(move || udp_loop(udp, udp_config, udp_pool, fake, native, udp_outbound));
-    thread::spawn(move || tcp_loop(tcp, config, pool, fake, native, outbound));
+    thread::spawn(move || udp_loop(udp, udp_config, udp_pool, fake, udp_outbound));
+    thread::spawn(move || tcp_loop(tcp, config, pool, fake, outbound));
     Some(bound)
 }
 
@@ -262,7 +261,6 @@ fn udp_loop(
     config: Config,
     pool: Pool,
     fake: bool,
-    native: Native,
     outbound: Outbound,
 ) {
     let mut buf = [0u8; 2048];
@@ -270,7 +268,7 @@ fn udp_loop(
         let Ok((n, peer)) = socket.recv_from(&mut buf) else {
             continue;
         };
-        if let Some(response) = reply(&buf[..n], &config, &pool, fake, native, &outbound) {
+        if let Some(response) = reply(&buf[..n], &config, &pool, fake, crate::route::local_network().0, &outbound) {
             let _ = socket.send_to(&response, peer);
         }
     }
@@ -281,7 +279,6 @@ fn tcp_loop(
     config: Config,
     pool: Pool,
     fake: bool,
-    native: Native,
     outbound: Outbound,
 ) {
     for stream in listener.incoming().flatten() {
@@ -289,7 +286,7 @@ fn tcp_loop(
         let pool = pool.clone();
         let outbound = outbound.clone();
         thread::spawn(move || {
-            let _ = tcp_one(stream, &config, &pool, fake, native, &outbound);
+            let _ = tcp_one(stream, &config, &pool, fake, &outbound);
         });
     }
 }
@@ -299,7 +296,6 @@ fn tcp_one(
     config: &Config,
     pool: &Pool,
     fake: bool,
-    native: Native,
     outbound: &Outbound,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
@@ -311,7 +307,7 @@ fn tcp_one(
     }
     let mut query = vec![0u8; len];
     stream.read_exact(&mut query)?;
-    if let Some(response) = reply(&query, config, pool, fake, native, outbound) {
+    if let Some(response) = reply(&query, config, pool, fake, crate::route::local_network().0, outbound) {
         let n = (response.len() as u16).to_be_bytes();
         stream.write_all(&n)?;
         stream.write_all(&response)?;
@@ -531,7 +527,6 @@ mod tests {
             listen: None,
         };
         let pool = Pool::new();
-        let native = Native { v4: true, v6: true };
         let outbound = Outbound::new();
         let query = message("Example.COM", 1);
         let bound = serve(
@@ -539,7 +534,6 @@ mod tests {
             config.clone(),
             pool.clone(),
             true,
-            native,
             outbound.clone(),
         )
         .unwrap();

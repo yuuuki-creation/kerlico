@@ -3,6 +3,7 @@
 //! Run with `XRAY=/path/to/xray cargo test -p kerlico-server --no-default-features
 //! --features vless,landing-vless --test vless_xray vless_xray_matrix -- --ignored --nocapture`.
 //! `VLESS_CASE` filters case/direction labels by comma-separated substrings.
+//! `VLESS_HIGH_PORTS_ONLY=1` skips cases requiring UDP ports 53 or 443.
 //! `VLESS_XRAY_CONTROL=1` adds an Xray-to-Xray run. `VLESS_RUN_DIR` holds logs and configs.
 //! The separate `vless_xray_rejections` test checks the configs Xray refuses and the flows it refuses at dispatch.
 //! `vless_xray_bridge` runs a Kerlico reverse bridge and an Xray control bridge against an Xray portal.
@@ -84,6 +85,9 @@ fn vless_xray_matrix() {
     let mut runs = 0;
     let mut failed = Vec::new();
     for case in cases::cases() {
+        if skip_privileged_udp(&case.name, case.payload.origin_port()) {
+            continue;
+        }
         let mut carriers = Vec::new();
         for &direction in &directions {
             let label = format!("{}/{}", case.name, direction.name());
@@ -316,8 +320,8 @@ fn tap_carriers(peer: u16) -> Result<(u16, CarrierHeads)> {
     thread::spawn(move || {
         let deadline = Instant::now() + TIMEOUT * 2;
         while Instant::now() < deadline {
-            let mut client = match listener.accept() {
-                Ok((socket, _)) => socket,
+            let mut client = match support::accept_blocking(&listener) {
+                Ok(socket) => socket,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(1));
                     continue;
@@ -368,8 +372,8 @@ fn count_tcp_carriers(peer: u16, lifetime: Duration) -> Result<(u16, Arc<AtomicU
     thread::spawn(move || {
         let deadline = Instant::now() + lifetime;
         while Instant::now() < deadline {
-            let mut client = match listener.accept() {
-                Ok((socket, _)) => socket,
+            let mut client = match support::accept_blocking(&listener) {
+                Ok(socket) => socket,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(1));
                     continue;
@@ -416,8 +420,8 @@ fn download_proxy(peer: u16) -> Result<(u16, Arc<AtomicBool>)> {
     thread::spawn(move || {
         let deadline = Instant::now() + TIMEOUT * 2;
         let mut client = loop {
-            match listener.accept() {
-                Ok((socket, _)) => break socket,
+            match support::accept_blocking(&listener) {
+                Ok(socket) => break socket,
                 Err(error)
                     if error.kind() == std::io::ErrorKind::WouldBlock
                         && Instant::now() < deadline =>
@@ -654,6 +658,16 @@ fn selected(filter: &str, label: &str) -> bool {
             .any(|term| !term.is_empty() && label.contains(term))
 }
 
+fn skip_privileged_udp(label: &str, port: u16) -> bool {
+    if port >= 1024 || port == 0
+        || std::env::var("VLESS_HIGH_PORTS_ONLY").as_deref() != Ok("1")
+    {
+        return false;
+    }
+    eprintln!("SKIP {label}: requires UDP/{port}");
+    true
+}
+
 fn report(label: &str, result: Result<()>, dir: &Path, failures: &mut Vec<String>) {
     match result {
         Ok(()) => eprintln!("PASS {label}"),
@@ -707,6 +721,9 @@ fn vless_xray_rejections() {
         report(&name, result, &dir, &mut failed);
     }
     for case in cases::rejected_cases() {
+        if skip_privileged_udp(&case.name, case.payload.origin_port()) {
+            continue;
+        }
         for direction in [Direction::XrayControl, Direction::KerlicoToXray] {
             let label = format!("{}/{}", case.name, direction.name());
             if !selected(&filter, &label) {
@@ -821,8 +838,8 @@ impl Tap {
         let (links, accepted, stop) = (tap.links.clone(), tap.accepted.clone(), tap.stop.clone());
         thread::spawn(move || {
             while !stop.load(Ordering::Acquire) {
-                let client = match listener.accept() {
-                    Ok((socket, _)) => socket,
+                let client = match support::accept_blocking(&listener) {
+                    Ok(socket) => socket,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(1));
                         continue;
@@ -1155,6 +1172,9 @@ fn vless_xray_udp_size() {
     let mut runs = 0;
     let mut failed = Vec::new();
     for framing in [SizeFraming::Mux, SizeFraming::Xudp, SizeFraming::Plain] {
+        if skip_privileged_udp(framing.name(), framing.udp_port()) {
+            continue;
+        }
         for direction in [Direction::XrayControl, Direction::XrayToKerlico, Direction::KerlicoToXray] {
             let label = format!("udp-size-{}/{}", framing.name(), direction.name());
             let dir = root.join(&label);
@@ -1916,8 +1936,8 @@ fn record_tcp(upstream: u16) -> Result<(u16, Recordings)> {
     thread::spawn(move || {
         let deadline = Instant::now() + TIMEOUT * 4;
         while Instant::now() < deadline {
-            let client = match listener.accept() {
-                Ok((socket, _)) => socket,
+            let client = match support::accept_blocking(&listener) {
+                Ok(socket) => socket,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(1));
                     continue;
@@ -1963,7 +1983,7 @@ impl Decoy {
                 let listener = TcpListener::bind(localhost(0))?;
                 listener.set_nonblocking(true)?;
                 let target = format!("127.0.0.1:{}", listener.local_addr()?.port());
-                (target, decoy_loop(move || listener.accept().map(|(stream, _)| stream), tls, recordings.clone(), stop.clone()))
+                (target, decoy_loop(move || support::accept_blocking(&listener), tls, recordings.clone(), stop.clone()))
             }
             #[cfg(target_os = "linux")]
             address => {
