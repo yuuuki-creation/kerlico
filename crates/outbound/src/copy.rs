@@ -14,7 +14,7 @@ use kerlico_shared::{
 use crate::Exit;
 
 #[cfg(target_os = "linux")]
-mod splice;
+pub(super) mod splice;
 
 pub(super) const BUF: usize = 1024 * 1024;
 const UDP_BUF: usize = 65_536;
@@ -172,7 +172,7 @@ fn pump_up(
                 #[cfg(target_os = "linux")]
                 if check_splice {
                     if let (Some(user), Some(target)) = (stream.raw_read(), toward_exit.native_tcp()) {
-                        match splice::forward(&user, target, pace, |n| traffic.add_uplink(n as u64)) {
+                        match splice::forward(&user, target, pace, stream.coalesce_splice_reads(), |n| traffic.add_uplink(n as u64)) {
                             Ok(splice::Outcome::Fallback) => check_splice = false,
                             Ok(splice::Outcome::Stopped) => return Ok(()),
                             Err(error) => { pace.halt(); return Err(error); }
@@ -241,7 +241,7 @@ fn pump_down(
                 #[cfg(target_os = "linux")]
                 if check_splice {
                     if let (Some(source), Some(user)) = (from_exit.native_tcp(), stream.raw_write()) {
-                        match splice::forward(source, &user, pace, |n| traffic.add_downlink(n as u64)) {
+                        match splice::forward(source, &user, pace, stream.coalesce_splice_reads(), |n| traffic.add_downlink(n as u64)) {
                             Ok(splice::Outcome::Fallback) => check_splice = false,
                             Ok(splice::Outcome::Stopped) => return Ok(()),
                             Err(error) => { pace.halt(); return Err(error); }

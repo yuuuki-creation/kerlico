@@ -1,6 +1,6 @@
 # Kerlico
 
-客户端本机 SOCKS5/HTTP 入口为 `kerlico-client <配置文件>`，按配置运行 [mieru](docs/reference/mieru.md)、[VLESS](docs/reference/vless.md)、[AnyTLS](docs/reference/anytls.md)、[Hysteria 2](docs/reference/hy2.md) 或 [Shadowsocks 2022](docs/reference/ss2022.md)。[WireGuard](docs/reference/wireguard.md) 客户端使用数据包 API 或 `kerlico-client --tun <接口名> <配置文件>`。客户端和服务端入站启用对应协议的 feature，服务端落地使用 `landing-<id>`。入口和编译规则见 [编译单元](docs/reference/crates.md)。
+客户端本机 SOCKS5/HTTP 入口为 `kerlico-client <配置文件>`，按配置运行 [mieru](docs/reference/mieru.md)、[VLESS](docs/reference/vless.md)、[AnyTLS](docs/reference/anytls.md)、[Hysteria 2](docs/reference/hy2.md)、[Shadowsocks 2022](docs/reference/ss2022.md) 或 [SOCKS5](docs/reference/socks.md)。[WireGuard](docs/reference/wireguard.md) 客户端使用数据包 API 或 `kerlico-client --tun <接口名> <配置文件>`。客户端和服务端入站启用对应协议的 feature，服务端落地使用 `landing-<id>`。入口和编译规则见 [编译单元](docs/reference/crates.md)。
 
 ## 归档边界
 

@@ -81,7 +81,7 @@ struct SettingsFile {
 
 #[derive(Deserialize)]
 struct UserFile {
-    email: String,
+    email: Option<String>,
     #[serde(flatten)]
     fields: BTreeMap<String, serde_json::Value>,
 }
@@ -192,7 +192,7 @@ fn load_prepared(text: &str, dir: Option<&std::path::Path>) -> Result<Loaded, St
         server.install_landing(&landing.protocol, landing.address.clone(), landing.port, landing_settings(&landing.settings)?)
             .map_err(|_| format!("bad landing {}", landing.protocol))?;
     }
-    for inbound in file.inbounds {
+    for mut inbound in file.inbounds {
         let tag = NodeTag::parse(&inbound.tag).map_err(|_| format!("bad tag {}", inbound.tag))?;
         let protocol = Server::compiled()
             .iter()
@@ -202,6 +202,12 @@ fn load_prepared(text: &str, dir: Option<&std::path::Path>) -> Result<Loaded, St
         let listen = parse_listen(&inbound.listen, inbound.port)?;
         let choice = parse_choice(&inbound.outbound)?;
         let rules = parse_rules(inbound.rules)?;
+        if inbound.protocol == "socks" {
+            if let Some(accounts) = inbound.settings.fields.remove("accounts") {
+                inbound.settings.users = serde_json::from_value(accounts)
+                    .map_err(|_| "bad SOCKS5 accounts".to_owned())?;
+            }
+        }
         let mut node_settings = Settings::default();
         for (key, value) in &inbound.settings.fields {
             node_settings.insert_json(key, value).map_err(|_| format!("bad settings {key}"))?;
@@ -213,9 +219,14 @@ fn load_prepared(text: &str, dir: Option<&std::path::Path>) -> Result<Loaded, St
         if let Some(kinds) = sniff_kinds(inbound.sniffing) {
             server.set_sniff(&tag, kinds);
         }
-        for user in inbound.settings.users {
-            let email = kerlico_shared::UserEmail::parse(&user.email)
-                .map_err(|_| format!("bad email {}", user.email))?;
+        for (index, user) in inbound.settings.users.into_iter().enumerate() {
+            let email = match user.email {
+                Some(email) => email,
+                None if inbound.protocol == "socks" => format!("socks-user-{}", index + 1),
+                None => return Err(format!("missing user email for {}", inbound.tag)),
+            };
+            let email = kerlico_shared::UserEmail::parse(&email)
+                .map_err(|_| format!("bad email {email}"))?;
             let mut account = Settings::default();
             for (key, value) in &user.fields {
                 account.insert_json(key, value).map_err(|_| format!("bad user field {key}"))?;

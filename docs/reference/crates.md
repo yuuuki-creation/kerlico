@@ -8,12 +8,12 @@
 crates/shared          包 kerlico-shared。两端的领域类型。没有角色 feature。
 crates/client          包 kerlico-client。客户端叶子。
 crates/server          包 kerlico-server。服务端叶子。依赖 kerlico-outbound。
-crates/outbound        包 kerlico-outbound。服务端以及 AnyTLS 独立客户端的拨号模块。
+crates/outbound        包 kerlico-outbound。服务端和独立客户端的拨号模块。
 crates/manifest        包 kerlico-manifest。构建时核对协议目录和叶子依赖。
 crates/tls             包 kerlico-tls。双方共用的传输 TLS、证书与 ClientHello 配置。
 crates/wg              包 kerlico-wg。WireGuard 角色和 WARP 共用的用户态引擎。不安装本机默认路由。
 protocols/<id>/shared  包 kerlico-<id>。这个协议两端共用的帧。
-protocols/<id>/client  包 kerlico-<id>-client。只有客户端叶子可以依赖。
+protocols/<id>/client  包 kerlico-<id>-client。供客户端叶子和服务端落地选用。
 protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依赖。
 ```
 
@@ -21,9 +21,11 @@ protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依�
 
 代码未跟上：2026-11-09 的 `cargo metadata --format-version 1 --no-deps` 显示协议的 path 依赖也被 Cargo 自动纳入工作区，共 15 个成员。本轮没有改变工作区划分；功能裁剪分别检查叶子的运行时依赖图，不用工作区包数推断角色隔离。
 
-协议目录包括 `wireguard`、`openvpn`、`mieru`、`vless`、`anytls`、`hy2` 和 `ss2022`。OpenVPN 的协议体是 `unimplemented!`。各协议的配置见各自的参考文档。
+协议目录包括 `wireguard`、`openvpn`、`mieru`、`vless`、`anytls`、`hy2`、`ss2022` 和 [`socks`](socks.md)。OpenVPN 的协议体是 `unimplemented!`。各协议的配置见各自的参考文档。
 
 本机 SOCKS5/HTTP 入口只在客户端叶子里有一份，见下文「客户端叶子和本机入口」。
+
+`protocols/socks/shared` 编解码 SOCKS5 地址和 UDP 封装。入站通过 Tokio 读取握手和 UDP 控制连接，再把流交给出站模块。客户端与 `landing-socks` 共用客户端 crate；连接代理所用的 TCP 和 UDP 套接字由出站模块打开。
 
 AnyTLS 共享 crate 使用 `ring` 认证并解开接收记录，使用工作区的 `rama-boring` 将 TLS 发送记录封装到指定缓冲区。密钥和下一记录序号由同一握手状态提供。
 

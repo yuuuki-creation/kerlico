@@ -1879,6 +1879,7 @@ dependencies = [
  "kerlico-mieru-client",
  "kerlico-openvpn-client",
  "kerlico-shared",
+ "kerlico-socks-client",
  "kerlico-ss2022-client",
  "kerlico-vless-client",
  "kerlico-wireguard-client",
@@ -2048,6 +2049,8 @@ dependencies = [
  "kerlico-openvpn-server",
  "kerlico-outbound",
  "kerlico-shared",
+ "kerlico-socks-client",
+ "kerlico-socks-server",
  "kerlico-ss2022-client",
  "kerlico-ss2022-server",
  "kerlico-vless",
@@ -2072,6 +2075,33 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "socket2 0.6.5",
+ "tokio",
+]
+
+[[package]]
+name = "kerlico-socks"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
+name = "kerlico-socks-client"
+version = "0.1.0"
+dependencies = [
+ "kerlico-outbound",
+ "kerlico-shared",
+ "kerlico-socks",
+]
+
+[[package]]
+name = "kerlico-socks-server"
+version = "0.1.0"
+dependencies = [
+ "kerlico-shared",
+ "kerlico-socks",
+ "socket2 0.5.10",
+ "subtle",
  "tokio",
 ]
 
