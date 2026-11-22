@@ -1,17 +1,38 @@
+use std::ffi::{c_int, c_short};
+#[cfg(target_os = "linux")]
+use std::ffi::c_void;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, UdpSocket};
-#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
-use std::thread;
 use std::time::Duration;
 
-use crate::{now, pattern, wait_until, STREAMS};
+#[cfg(target_os = "linux")]
+use crate::Timespec;
+use crate::{now, pattern, STREAMS};
 
 const PAYLOAD: usize = 1200;
 const HEADER: usize = 10;
 const PACKET: usize = HEADER + PAYLOAD;
 const SECOND: u64 = 1_000_000_000;
-const READ_WAIT: Duration = Duration::from_millis(25);
+const POLLIN: c_short = 1;
+const READ_BATCH: usize = 4;
+
+#[repr(C)]
+struct PollFd {
+    fd: c_int,
+    events: c_short,
+    revents: c_short,
+}
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn ppoll(fds: *mut PollFd, len: usize, timeout: *const Timespec, sigmask: *const c_void) -> c_int;
+}
+
+#[cfg(not(target_os = "linux"))]
+extern "C" {
+    fn poll(fds: *mut PollFd, len: std::ffi::c_uint, timeout: c_int) -> c_int;
+}
 
 #[cfg(target_os = "linux")]
 fn receive_buffer(socket: &UdpSocket, capacity: i32) -> io::Result<()> {
@@ -89,7 +110,7 @@ fn associate(proxy: &str, buffer_size: i32) -> io::Result<(TcpStream, UdpSocket)
         receive_buffer(&socket, buffer_size)?;
     }
     socket.connect((relay, port))?;
-    socket.set_read_timeout(Some(READ_WAIT))?;
+    socket.set_nonblocking(true)?;
     Ok((control, socket))
 }
 
@@ -120,24 +141,25 @@ pub(super) fn roundtrip(
     let stop = start + (warmup + duration) * SECOND;
     let drain = stop + SECOND / 5;
     let min_batch_spacing = (STREAMS as u64 * SECOND / packets_per_second) / 2;
-    let (verified, duplicates, max_late, tail_late) = thread::scope(|scope| -> io::Result<_> {
-        let readers: Vec<_> = sockets
-            .iter()
-            .zip(&packets)
-            .enumerate()
-            .map(|(index, ((_, socket), expected))| {
-                scope.spawn(move || receive(socket, expected, index as u64, first, total, drain))
-            })
-            .collect();
-        println!("start {start}");
-        let mut max_late = 0;
-        let mut previous_batch = 0;
-        for record in (0..total).step_by(STREAMS) {
-            let deadline = start + record * SECOND / packets_per_second;
-            // Keep the same packet count at the target rate without sending
-            // all overdue batches at once after a scheduling pause.
-            wait_until(deadline.max(previous_batch + min_batch_spacing));
-            previous_batch = now();
+    let mut poll_fds: Vec<_> = sockets
+        .iter()
+        .map(|(_, socket)| PollFd { fd: socket.as_raw_fd(), events: POLLIN, revents: 0 })
+        .collect();
+    let stride = STREAMS as u64;
+    let mut seen = vec![false; total as usize];
+    let (mut verified, mut duplicates) = (0, 0);
+    let (mut max_late, mut tail_late) = (0, 0);
+    let mut previous_batch = 0;
+    let mut record = 0;
+    let mut bytes = [0; PACKET + 1];
+    println!("start {start}");
+    loop {
+        let current = now();
+        let deadline = start + record * SECOND / packets_per_second;
+        // Keep a minimum spacing between batches when catching up after a pause.
+        let send_at = deadline.max(previous_batch + min_batch_spacing);
+        if record < total && current >= send_at {
+            previous_batch = current;
             for (index, ((_, socket), packet)) in sockets.iter().zip(&packets).enumerate() {
                 let sequence = record + index as u64;
                 if sequence >= total {
@@ -147,63 +169,93 @@ pub(super) fn roundtrip(
                 wire[HEADER..HEADER + 8].copy_from_slice(&sequence.to_be_bytes());
                 socket.send(&wire)?;
             }
-            max_late = max_late.max(now().saturating_sub(deadline));
+            let finished = now();
+            max_late = max_late.max(finished.saturating_sub(deadline));
+            record += stride;
+            if record >= total {
+                tail_late = finished.saturating_sub(stop);
+            }
+            continue;
         }
-        let tail_late = now().saturating_sub(stop);
-        let (mut verified, mut duplicates) = (0, 0);
-        for reader in readers {
-            let (received, repeated) = reader.join().expect("UDP reader panicked")?;
-            verified += received;
-            duplicates += repeated;
+        if current >= drain {
+            if record >= total {
+                break;
+            }
+            // Complete the offered count even when the send schedule already failed.
+            crate::wait_until(send_at);
+            continue;
         }
-        Ok((verified, duplicates, max_late, tail_late))
-    })?;
+        let until = if record < total { send_at.min(drain) } else { drain };
+        if !wait_readable(&mut poll_fds, until - current)? {
+            continue;
+        }
+        for (flow, ((_, socket), expected)) in sockets.iter().zip(&packets).enumerate() {
+            if poll_fds[flow].revents == 0 {
+                continue;
+            }
+            // Bound each read so one loaded association cannot starve sends or other readers.
+            for _ in 0..READ_BATCH {
+                if now() >= drain {
+                    break;
+                }
+                let Some(sequence) = receive(socket, expected, &mut bytes)? else { break };
+                if sequence % stride != flow as u64 || sequence >= total {
+                    return Err(invalid("SOCKS5 UDP reply sequence mismatch"));
+                }
+                if sequence >= first {
+                    if std::mem::replace(&mut seen[sequence as usize], true) {
+                        duplicates += 1;
+                    } else {
+                        verified += 1;
+                    }
+                }
+            }
+        }
+    }
     assert!(verified <= sent);
     println!("udp_result {sent} {verified} {duplicates} {max_late} {tail_late}");
     Ok(())
 }
 
-fn receive(
-    socket: &UdpSocket,
-    expected: &[u8; PACKET],
-    flow: u64,
-    first: u64,
-    total: u64,
-    drain: u64,
-) -> io::Result<(u64, u64)> {
-    let stride = STREAMS as u64;
-    let mut seen = vec![false; total.div_ceil(stride) as usize];
-    let mut bytes = [0; PACKET + 1];
-    let (mut verified, mut duplicates) = (0, 0);
-    while now() < drain {
-        match socket.recv(&mut bytes) {
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
-            {
-                continue
-            }
-            Ok(PACKET)
-                if bytes[..HEADER] == expected[..HEADER]
-                    && bytes[HEADER + 8..PACKET] == expected[HEADER + 8..] => {}
-            Ok(_) => return Err(invalid("SOCKS5 UDP reply mismatch")),
-            Err(error) => return Err(error),
+fn wait_readable(fds: &mut [PollFd], nanos: u64) -> io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    let result = {
+        let timeout = Timespec { sec: (nanos / SECOND) as i64, nanos: (nanos % SECOND) as i64 };
+        // SAFETY: ppoll borrows the complete fd array and the timeout for the call.
+        unsafe { ppoll(fds.as_mut_ptr(), fds.len(), &timeout, std::ptr::null()) }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let result = {
+        let millis = (nanos / 1_000_000) as c_int;
+        // SAFETY: poll borrows the complete fd array for the call.
+        let ready = unsafe { poll(fds.as_mut_ptr(), fds.len() as std::ffi::c_uint, millis) };
+        if ready == 0 && millis == 0 {
+            std::thread::sleep(Duration::from_nanos(nanos));
         }
-        let sequence = u64::from_be_bytes(bytes[HEADER..HEADER + 8].try_into().unwrap());
-        if sequence % stride != flow || sequence >= total {
-            return Err(invalid("SOCKS5 UDP reply sequence mismatch"));
-        }
-        if sequence >= first {
-            if std::mem::replace(&mut seen[(sequence / stride) as usize], true) {
-                duplicates += 1;
-            } else {
-                verified += 1;
-            }
-        }
+        ready
+    };
+    if result >= 0 {
+        return Ok(result != 0);
     }
-    Ok((verified, duplicates))
+    let error = io::Error::last_os_error();
+    match error.kind() {
+        io::ErrorKind::Interrupted => Ok(false),
+        _ => Err(error),
+    }
+}
+
+fn receive(socket: &UdpSocket, expected: &[u8; PACKET], bytes: &mut [u8]) -> io::Result<Option<u64>> {
+    match socket.recv(bytes) {
+        Ok(PACKET)
+            if bytes[..HEADER] == expected[..HEADER]
+                && bytes[HEADER + 8..PACKET] == expected[HEADER + 8..] =>
+        {
+            Ok(Some(u64::from_be_bytes(bytes[HEADER..HEADER + 8].try_into().unwrap())))
+        }
+        Ok(_) => Err(invalid("SOCKS5 UDP reply mismatch")),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn invalid(message: &'static str) -> io::Error {

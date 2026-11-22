@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
@@ -10,8 +11,8 @@ use kerlico_hy2::{auth::ReceiveRate, datagram, quic, split_address, tcp};
 use kerlico_shared::runtime::{NetworkConnection, NetworkDial, NetworkRoute};
 use kerlico_shared::dispatch;
 use kerlico_shared::{
-    Accept, DatagramSession, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError,
-    PlaneFault, Settings, Transport, UserEmail,
+    Accept, DatagramSession, DatagramUplink, Destination, DirectDatagram, Handoff, InboundStream,
+    ListenAddr, NodeTag, OpenError, PlaneFault, Settings, Transport, UserEmail,
 };
 use kerlico_tls::advanced::{advanced_quic_server_config, AdvancedTlsOptions, TlsCertificate};
 use subtle::ConstantTimeEq;
@@ -329,15 +330,46 @@ impl InboundStream for TcpFlow {
 }
 
 struct UdpFlow {
-    inbound: Mutex<mpsc::Receiver<Vec<u8>>>,
+    inbound: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    direct: Arc<Mutex<Option<Box<dyn DatagramUplink>>>>,
+    reply: Arc<UdpReply>,
+    address: String,
+}
+
+struct UdpReply {
     connection: quinn::Connection,
     session: u32,
-    address: String,
     packet: Arc<AtomicU16>,
     activity: Arc<Mutex<Instant>>,
 }
 
 impl InboundStream for UdpFlow {
+    fn direct_datagram(&self) -> Option<DirectDatagram> {
+        let queue = self.inbound.clone();
+        let direct = self.direct.clone();
+        let reply = self.reply.clone();
+        Some(DirectDatagram {
+            install: Box::new(move |uplink| {
+                let mut direct = direct.lock().expect("Hy2 UDP route");
+                let mut queue = queue.lock().expect("Hy2 UDP receive");
+                if queue.is_closed() {
+                    return Err(PlaneFault::Closed);
+                }
+                while let Ok(packet) = queue.try_recv() {
+                    match uplink.send(&packet) {
+                        Ok(()) | Err(PlaneFault::Again) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                *direct = Some(uplink);
+                Ok(())
+            }),
+            reply: Box::new(move |source, payload| {
+                reply.send(&source.to_string(), payload).map(|_| ())
+            }),
+        })
+    }
+
     fn read_from_user(&self, data: &mut [u8]) -> Result<usize, PlaneFault> {
         let mut inbound = self.inbound.lock().expect("Hy2 UDP receive");
         let packet = quic::block(POLL, async {
@@ -352,15 +384,15 @@ impl InboundStream for UdpFlow {
         Ok(out.len())
     }
     fn write_to_user(&self, data: &[u8]) -> Result<usize, PlaneFault> {
-        self.reply(&self.address, data)
+        self.reply.send(&self.address, data)
     }
     fn write_datagram_to_user(&self, data: &[u8], source: SocketAddr) -> Result<usize, PlaneFault> {
-        self.reply(&source.to_string(), data)
+        self.reply.send(&source.to_string(), data)
     }
 }
 
-impl UdpFlow {
-    fn reply(&self, source: &str, data: &[u8]) -> Result<usize, PlaneFault> {
+impl UdpReply {
+    fn send(&self, source: &str, data: &[u8]) -> Result<usize, PlaneFault> {
         *self.activity.lock().expect("Hy2 UDP activity") = Instant::now();
         quic::send_datagram(&self.connection, self.session, &self.packet, source, data)
             .map(|_| data.len())
@@ -370,7 +402,37 @@ impl UdpFlow {
 
 struct UdpPipe {
     sender: mpsc::Sender<Vec<u8>>,
+    direct: Arc<Mutex<Option<Box<dyn DatagramUplink>>>>,
     activity: Arc<Mutex<Instant>>,
+}
+
+impl UdpPipe {
+    fn is_live(&self) -> bool {
+        match self.direct.lock().expect("Hy2 UDP route").as_deref() {
+            Some(uplink) => uplink.is_live(),
+            None => !self.sender.is_closed(),
+        }
+    }
+
+    fn send<'a>(&self, payload: Cow<'a, [u8]>, now: Instant) -> Result<(), Cow<'a, [u8]>> {
+        let direct = self.direct.lock().expect("Hy2 UDP route");
+        match direct.as_deref() {
+            Some(uplink) => match uplink.send(&payload) {
+                Ok(()) | Err(PlaneFault::Again) => {}
+                Err(_) => return Err(payload),
+            },
+            None => {
+                // Skip copying a packet when the setup or fallback queue is full.
+                match self.sender.try_reserve() {
+                    Ok(permit) => permit.send(payload.into_owned()),
+                    Err(mpsc::error::TrySendError::Full(_)) => {}
+                    Err(mpsc::error::TrySendError::Closed(_)) => return Err(payload),
+                }
+            }
+        }
+        *self.activity.lock().expect("Hy2 UDP activity") = now;
+        Ok(())
+    }
 }
 
 struct UdpSession {
@@ -382,7 +444,9 @@ struct UdpSession {
 impl UdpSession {
     fn new() -> Self {
         Self {
-            group: Arc::new(DatagramSession::new(true)),
+            group: Arc::new(
+                DatagramSession::new(true).with_executor(tokio::runtime::Handle::current()),
+            ),
             packet: Arc::new(AtomicU16::new(1)),
             targets: HashMap::new(),
         }
@@ -404,7 +468,7 @@ async fn serve_udp(
         tokio::select! {
             _ = tick.tick() => sessions.retain(|_, session| {
                 let before = session.targets.len();
-                session.targets.retain(|_, flow| !flow.sender.is_closed() && flow.activity.lock().expect("Hy2 UDP activity").elapsed() < idle);
+                session.targets.retain(|_, flow| flow.is_live() && flow.activity.lock().expect("Hy2 UDP activity").elapsed() < idle);
                 flow_count -= before - session.targets.len();
                 !session.targets.is_empty()
             }),
@@ -412,28 +476,41 @@ async fn serve_udp(
                 let Ok(wire) = wire else { return; };
                 let Ok(piece) = datagram::Packet::read(&wire) else { continue; };
                 let now = Instant::now();
-                let Some(datagram::Datagram { session, address, payload }) = fragments.push(piece, now) else { continue; };
-                let existing = sessions.get(&session).and_then(|group| group.targets.get(&address));
-                if let Some(flow) = existing.filter(|flow| !flow.sender.is_closed()) {
-                    *flow.activity.lock().expect("Hy2 UDP activity") = now;
-                    let _ = flow.sender.try_send(payload);
-                    continue;
+                let (session, address, mut payload) = if piece.count == 1 {
+                    (piece.session, Cow::Borrowed(piece.address), Cow::Borrowed(piece.payload))
+                } else {
+                    let Some(packet) = fragments.push(piece, now) else { continue; };
+                    (packet.session, Cow::Owned(packet.address), Cow::Owned(packet.payload))
+                };
+                let existing = sessions.get(&session).and_then(|group| group.targets.get(address.as_ref()));
+                if let Some(flow) = existing {
+                    payload = match flow.send(payload, now) {
+                        Ok(()) => continue,
+                        Err(payload) => payload,
+                    };
                 }
                 if flow_count >= MAX_UDP_FLOWS && existing.is_none() { continue; }
                 let (host, port) = split_address(&address).expect("parsed Hy2 destination");
                 let Ok(destination) = Destination::new(host, port, Transport::Udp) else { continue; };
                 let (sender, inbound) = mpsc::channel(64);
-                let _ = sender.try_send(payload);
+                let _ = sender.try_send(payload.into_owned());
                 let activity = Arc::new(Mutex::new(now));
+                let direct = Arc::new(Mutex::new(None));
+                let address = address.into_owned();
                 let group = sessions.entry(session).or_insert_with(UdpSession::new);
                 let mut handoff = Handoff::new(tag.clone(), user.clone(), destination, Box::new(UdpFlow {
-                    inbound: Mutex::new(inbound), connection: connection.clone(), session,
-                    address: address.clone(), packet: group.packet.clone(), activity: activity.clone(),
+                    inbound: Arc::new(Mutex::new(inbound)),
+                    direct: direct.clone(),
+                    address: address.clone(),
+                    reply: Arc::new(UdpReply {
+                        connection: connection.clone(), session,
+                        packet: group.packet.clone(), activity: activity.clone(),
+                    }),
                 }));
                 handoff.set_peer(connection.remote_address());
                 handoff.set_datagram_session(group.group.clone());
                 if ready.queued(ready.sender().try_send(handoff)).is_ok() {
-                    if group.targets.insert(address, UdpPipe { sender, activity }).is_none() {
+                    if group.targets.insert(address, UdpPipe { sender, direct, activity }).is_none() {
                         flow_count += 1;
                     }
                 } else if group.targets.is_empty() {

@@ -10,6 +10,8 @@ TCP 入站选中原生出口时，在报告拨号结果后把原来的 Quinn 接
 
 UDP 分片按会话和包号区分。每片的地址和总片数必须一致；重复片不增加收到的数量；超时或超出内存上限的包被丢弃，只有收齐才交付。零长度 UDP 数据报保留。同一 QUIC 连接内，同一个 UDP 会话里的各目标独立选出口；选中原生出口的目标共享 UDP 端口，选中支持共享 UDP 的落地则共享一条落地关联。回复带数据报的实际来源。
 
+原生 UDP 出口在 Hy2 的 QUIC 执行器上安装发送器。建立路由时先交付已排队的报文，后续未分片报文直接借用已解密的数据报，已重组报文直接交给同一个发送器。下行回包由 Hy2 封装，出站持有原生套接字和流量计数。等待选路的报文和其他出口使用有界队列。
+
 客户端叶子和服务端入站使用 `hy2` feature；服务端落地使用 `landing-hy2`。客户端的 `peer` 写 `host:port` 或 `[IPv6]:port`，`settings.password` 必填；上游 `userpass` 模式的 `password` 写成 `用户名:密码`。`serverName` 指定证书名称；`tls` 接受共享 TLS 字段，例如 `pinnedPeerCertSha256`。域名解析出多个地址时，客户端错开尝试 QUIC 认证，使用先成功的地址。客户端的 SOCKS5/HTTP 入口属于客户端叶子。具有同一运行时、对端和设置的落地 TCP/UDP 流复用同一个已经认证的 QUIC 连接。若入站把多个目标标在同一个 UDP 会话上，Hy2 落地会用同一个 Hy2 会话 ID 发送这些数据报。
 
 服务端按普通节点配置，`protocol` 写 `hy2`，账号用 `users: [{"email":"用户标识","password":"凭据"}]`。证书与私钥用 `certificate` / `privateKey` 或 `certificateFile` / `privateKeyFile`；也可以通过 `tls.certificates` 配置。`udp` 默认为 `true`。`udpIdleTimeout` 为秒数，默认 60。`masquerade` 可配置 `string`、`file` 或 `proxy`；默认 HTTP/3 404。代理源站连接由服务端出站模块打开。

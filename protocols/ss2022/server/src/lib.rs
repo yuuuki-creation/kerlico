@@ -198,8 +198,10 @@ pub fn listen(
         .map_err(|_| OpenError::Transport)?;
     let udp = udp
         .then(|| {
-            open_socket(bind, socket2::Type::DGRAM, socket2::Protocol::UDP)
-                .and_then(|socket| tokio::net::UdpSocket::from_std(socket.into()))
+            let socket = open_socket(bind, socket2::Type::DGRAM, socket2::Protocol::UDP)?.into();
+            #[cfg(target_os = "linux")]
+            kerlico_shared::grow_udp_carrier_receive_buffer(&socket);
+            tokio::net::UdpSocket::from_std(socket)
         })
         .transpose()
         .map_err(|_| OpenError::Transport)?;
