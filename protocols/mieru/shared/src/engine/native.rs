@@ -314,10 +314,11 @@ impl Reader {
         if !pipe.bytes.is_empty() {
             pipe.task = None;
             std::mem::swap(&mut self.bytes, &mut pipe.bytes);
-            sess.read_space(self.bytes.len(), 0);
             if pipe.waiting != 0 {
                 sess.cv.notify_all();
             }
+            drop(pipe);
+            sess.read_space(self.bytes.len(), 0);
             return Poll::Ready(Ok(()));
         }
         if pipe.closed {
@@ -656,6 +657,32 @@ mod tests {
             Poll::Ready(Ok(()))
         ));
         assert_eq!(buf.filled(), b"reply");
+        sess.link.close();
+    }
+
+    #[test]
+    fn due_ack_stays_pending_until_send_queue_has_capacity() {
+        let (sess, peer) = session();
+        let native = sess.link.native.as_ref().unwrap();
+        native.tx.lock().unwrap().bytes = QUEUE_LIMIT;
+
+        sess.ack_at.store(0, Ordering::Release);
+        sess.tick();
+        assert_ne!(sess.ack_at.load(Ordering::Acquire), u64::MAX);
+
+        native.tx.lock().unwrap().bytes = 0;
+        sess.ack_at.store(0, Ordering::Release);
+        sess.tick();
+        assert_eq!(sess.ack_at.load(Ordering::Acquire), u64::MAX);
+
+        let mut wire = [0; 2048];
+        assert!(peer.recv(&mut wire).unwrap() >= 72);
+        let nonce = wire[..24].try_into().unwrap();
+        let header_len = Direction::from_key(sess.key)
+            .open_at_slice(&nonce, &mut wire[24..72])
+            .unwrap();
+        let header = meta::parse(&wire[24..24 + header_len]).unwrap();
+        assert!(meta::is_ack(header.kind));
         sess.link.close();
     }
 

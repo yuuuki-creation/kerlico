@@ -89,6 +89,8 @@ pub struct Stack {
     fragments: Reassembly,
     tcp_limit: usize,
     tcp_nodelay: bool,
+    tcp_congestion: tcp::CongestionControl,
+    tcp_buffers: (usize, usize),
     udp_limit: usize,
     wake: Option<StackWake>,
 }
@@ -137,6 +139,8 @@ impl Stack {
             fragments: Reassembly::default(),
             tcp_limit,
             tcp_nodelay: false,
+            tcp_congestion: tcp::CongestionControl::None,
+            tcp_buffers: (32 * 1024, 32 * 1024),
             udp_limit,
             wake: None,
         })
@@ -148,6 +152,17 @@ impl Stack {
 
     pub fn enable_tcp_nodelay(&mut self) {
         self.tcp_nodelay = true;
+    }
+
+    /// Apply congestion control to subsequently accepted TCP flows.
+    pub fn enable_tcp_cubic(&mut self) {
+        self.tcp_congestion = tcp::CongestionControl::Cubic;
+    }
+
+    /// Set the receive and send capacities of subsequently accepted TCP flows.
+    pub fn set_tcp_buffers(&mut self, receive: usize, send: usize) {
+        assert!(receive > 0 && send > 0);
+        self.tcp_buffers = (receive, send);
     }
 
     pub fn receive(
@@ -211,11 +226,12 @@ impl Stack {
                     }
                     let port = self.port()?;
                     let mut socket = tcp::Socket::new(
-                        tcp::SocketBuffer::new(vec![0; 32 * 1024]),
-                        tcp::SocketBuffer::new(vec![0; 32 * 1024]),
+                        tcp::SocketBuffer::new(vec![0; self.tcp_buffers.0]),
+                        tcp::SocketBuffer::new(vec![0; self.tcp_buffers.1]),
                     );
                     socket.set_timeout(Some(smoltcp::time::Duration::from_secs(300)));
                     socket.set_nagle_enabled(!self.tcp_nodelay);
+                    socket.set_congestion_control(self.tcp_congestion);
                     let (local, _) = aliases(ip.src);
                     socket.listen((smol(local), port)).ok()?;
                     let handle = self.sockets.add(socket);

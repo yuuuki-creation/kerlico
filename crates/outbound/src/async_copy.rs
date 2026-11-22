@@ -6,8 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use kerlico_shared::{
-    AsyncReadHalf, AsyncTcp, AsyncWriteHalf, OpenError, TrafficCounters, WriteInput,
-    MAX_WRITE_INPUT_PARTS,
+    AsyncReadHalf, AsyncTcp, AsyncWriteHalf, OpenError, TrafficCounters, MAX_WRITE_INPUT_PARTS,
 };
 use std::pin::Pin;
 use std::task::{ready, Poll};
@@ -176,15 +175,22 @@ impl Source {
     fn poll_input(
         &mut self,
         cx: &mut std::task::Context<'_>,
-        input: &mut WriteInput<'_>,
+        mut writer: Pin<&mut (dyn kerlico_shared::AsyncWriteInput + Unpin)>,
     ) -> Poll<io::Result<usize>> {
-        let mut slots =
-            std::array::from_fn::<_, MAX_WRITE_INPUT_PARTS, _>(|_| io::IoSliceMut::new(&mut []));
-        let count = input.slices(&mut slots);
-        match self {
-            Self::Tcp(read) => loop {
+        loop {
+            // An idle native connection should not allocate the encoder's
+            // record buffers just to register a socket readiness notification.
+            if let Self::Tcp(read) = self {
                 ready!(read.as_ref().poll_read_ready(cx))?;
-                match read.try_read_vectored(&mut slots[..count]) {
+            }
+            let mut input = ready!(writer.as_mut().poll_input(cx))?;
+            let mut slots =
+                std::array::from_fn::<_, MAX_WRITE_INPUT_PARTS, _>(
+                    |_| io::IoSliceMut::new(&mut []),
+                );
+            let count = input.slices(&mut slots);
+            let n = match self {
+                Self::Tcp(read) => match read.try_read_vectored(&mut slots[..count]) {
                     Err(error)
                         if matches!(
                             error.kind(),
@@ -193,16 +199,18 @@ impl Source {
                     {
                         continue
                     }
-                    result => return Poll::Ready(result),
+                    result => result?,
+                },
+                Self::Other(read) => {
+                    let mut out = ReadBuf::new(&mut slots[0]);
+                    ready!(Pin::new(read).poll_read(cx, &mut out))?;
+                    out.filled().len()
                 }
-            },
-            Self::Other(read) => {
-                // A generic AsyncRead can fill the first region. It uses the
-                // same encoder and completion contract as native vector I/O.
-                let mut out = ReadBuf::new(&mut slots[0]);
-                ready!(Pin::new(read).poll_read(cx, &mut out))?;
-                Poll::Ready(Ok(out.filled().len()))
+            };
+            if n != 0 {
+                input.commit(n);
             }
+            return Poll::Ready(Ok(n));
         }
     }
 }
@@ -260,12 +268,10 @@ impl Transfer {
                 unreachable!("input-capable writer")
             };
             if pending.is_none() {
-                let mut input = ready!(Pin::new(&mut **write).poll_input(cx))?;
-                let n = ready!(source.poll_input(cx, &mut input))?;
+                let n = ready!(source.poll_input(cx, Pin::new(&mut **write)))?;
                 if n == 0 {
                     return Poll::Ready(Ok(None));
                 }
-                input.commit(n);
                 *pending = Some(n);
             }
             let n = ready!(Pin::new(&mut **write).poll_send_input(cx))?;
@@ -371,6 +377,7 @@ async fn run_pump(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kerlico_shared::WriteInput;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, DuplexStream};
 
@@ -380,6 +387,7 @@ mod tests {
         batches: Vec<usize>,
         closed: bool,
         discarded: usize,
+        loans: usize,
     }
 
     struct InputSink {
@@ -433,6 +441,7 @@ mod tests {
             _: &mut std::task::Context<'_>,
         ) -> Poll<io::Result<WriteInput<'_>>> {
             let this = self.get_mut();
+            this.audit.lock().unwrap().loans += 1;
             Poll::Ready(Ok(WriteInput::new(
                 &mut this.storage,
                 &this.regions,
@@ -524,6 +533,31 @@ mod tests {
         for n in down {
             assert_eq!(n.load(Ordering::Relaxed), 47);
         }
+    }
+
+    #[tokio::test]
+    async fn idle_native_source_borrows_encoder_storage_only_after_readiness() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut origin, _) = listener.accept().await.unwrap();
+        let (read, _write) = target.into_split();
+        let audit = Arc::new(std::sync::Mutex::new(InputAudit::default()));
+        let sink = AsyncWriteHalf::Input(Box::new(InputSink::new(false, audit.clone())));
+        let mut transfer = Transfer::target(Source::Tcp(read), sink);
+        std::future::poll_fn(|cx| {
+            assert!(transfer.poll_transfer(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(audit.lock().unwrap().loans, 0);
+        origin.write_all(b"data").await.unwrap();
+        let count = std::future::poll_fn(|cx| transfer.poll_transfer(cx))
+            .await
+            .unwrap();
+        assert_eq!(count, Some(4));
+        assert_eq!(audit.lock().unwrap().bytes, b"data");
     }
 
     #[tokio::test]

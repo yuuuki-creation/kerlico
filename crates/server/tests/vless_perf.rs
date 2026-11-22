@@ -15,12 +15,13 @@
 //!
 //! Kerlico runs as the `kerlico-server` binary and Xray as its own process. The processes of the
 //! tunnel are pinned with `taskset`, the load generator and the echo origin to their own cores.
-//! TCP cases open `PERF_STREAMS` persistent streams that write a block and read it back, plus one
+//! TCP cases open `PERF_STREAMS` persistent streams that write a bounded flight of numbered 32 KiB blocks and verify every echo, plus one
 //! probe stream that exchanges 64 bytes every 10 ms. UDP cases keep a window of datagrams in flight.
 //!
 //! Environment: `PERF_OUT` (JSON lines), `PERF_CASE` (comma separated substrings of case names, or
 //! `=name` for one exact name), `PERF_DIRECTION` (the same for direction names),
 //! `PERF_SHARD` (`i/n`: this run takes every n-th case starting at i), `PERF_SECONDS` (window, 20),
+//! `PERF_TCP_FLIGHT_BLOCKS` (1–32 per stream, default 1),
 //! `PERF_WARMUP` (seconds of load before the window, 3), `PERF_STREAMS` (4), `PERF_ROUNDS` (1),
 //! `PERF_SERVER_CPUS`, `PERF_CLIENT_CPUS`, `PERF_LOAD_CPUS` (taskset lists), `PERF_WORKER` (label).
 
@@ -30,6 +31,8 @@ mod cases;
 mod support;
 #[path = "vless_support/xdrive_mock.rs"]
 mod xdrive_mock;
+#[path = "vless_support/study.rs"]
+mod study;
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -60,16 +63,19 @@ enum Direction {
     XrayControl,
     XrayToKerlico,
     KerlicoToXray,
+    KerlicoControl,
 }
 
 impl Direction {
     const ALL: [Self; 3] = [Self::XrayControl, Self::XrayToKerlico, Self::KerlicoToXray];
+    const BOTH_ENDS: [Self; 4] = [Self::XrayControl, Self::XrayToKerlico, Self::KerlicoToXray, Self::KerlicoControl];
 
     fn name(self) -> &'static str {
         match self {
             Self::XrayControl => "xray-control",
             Self::XrayToKerlico => "xray-to-kerlico",
             Self::KerlicoToXray => "kerlico-to-xray",
+            Self::KerlicoControl => "kerlico-control",
         }
     }
 
@@ -79,14 +85,17 @@ impl Direction {
             Self::XrayControl => ("xray", "xray"),
             Self::XrayToKerlico => ("kerlico", "xray"),
             Self::KerlicoToXray => ("xray", "kerlico"),
+            Self::KerlicoControl => ("kerlico", "kerlico"),
         }
     }
 }
 
 struct Settings {
     seconds: u64,
+    target_mbps: u64,
     warmup: u64,
     streams: usize,
+    tcp_flight_blocks: usize,
     /// Datagrams in flight per UDP flow.
     window: usize,
     server_cpus: String,
@@ -138,12 +147,6 @@ fn selected(filter: &str, name: &str) -> bool {
         })
 }
 
-fn pinned(cpus: &str, program: &Path) -> Command {
-    let mut command = Command::new("taskset");
-    command.args(["-c", cpus]).arg(program);
-    command
-}
-
 fn pin_self(cpus: &str) {
     let pid = std::process::id().to_string();
     let _ = Command::new("taskset").args(["-a", "-c", "-p", cpus, &pid]).status();
@@ -162,8 +165,9 @@ fn xray_binary() -> Result<PathBuf> {
 }
 
 fn start_xray(xray: &Path, cpus: &str, dir: &Path, name: &str, config: &Value, cone: bool) -> Result<Process> {
-    let path = write_json(dir, &format!("{name}.json"), config)?;
-    let mut command = pinned(cpus, xray);
+    let client = name.ends_with("-client");
+    let path = write_json(dir, &format!("{name}.json"), &study::config(config, client))?;
+    let mut command = study::command(cpus, xray, client);
     command.args(["run", "-c"]).arg(path);
     if !cone {
         command.env("xray.cone.disabled", "true");
@@ -174,8 +178,9 @@ fn start_xray(xray: &Path, cpus: &str, dir: &Path, name: &str, config: &Value, c
 }
 
 fn start_kerlico(kerlico: &Path, cpus: &str, dir: &Path, name: &str, config: &Value) -> Result<Process> {
-    let path = write_json(dir, &format!("{name}.json"), config)?;
-    let mut command = pinned(cpus, kerlico);
+    let client = name.ends_with("-client");
+    let path = write_json(dir, &format!("{name}.json"), &study::config(config, client))?;
+    let mut command = study::command(cpus, kerlico, client);
     command.arg(path);
     let process = Process::spawn(command, dir, name)?;
     // The binary prints the protocols it compiled in once the configuration is loaded; a debug build takes seconds.
@@ -268,7 +273,7 @@ const INGRESS_TEXT: &str = "01020304-0506-0708-090a-0b0c0d0e0f10";
 
 /// Kerlico's ingress sends the VLESS response with the first reply bytes, so the first read skips it.
 fn open_ingress(port: u16, origin: u16, udp: bool, read_timeout: Option<Duration>) -> Result<Box<dyn Duplex>> {
-    let mut stream = tcp_connect(port)?;
+    let mut stream = study::connect_front(port)?;
     if read_timeout.is_some() {
         stream.set_read_timeout(read_timeout)?;
     }
@@ -312,21 +317,37 @@ impl Counters {
     }
 }
 
-fn bulk(open: Open, stop: &AtomicBool, counters: &Counters) {
+fn bulk(open: Open, stop: &AtomicBool, counters: &Counters, settings: &Settings, rate: u64) {
     let mut stream = match open() {
         Ok(stream) => stream,
         Err(error) => return counters.fail(format!("open: {error}")),
     };
-    let out = pattern(BLOCK, 7);
+    let block = pattern(BLOCK, 7);
+    let flight = settings.tcp_flight_blocks;
+    let mut out = block.repeat(flight);
+    let mut sequence = 0_u64;
     let mut input = vec![0; BLOCK];
+    let mut pace = study::Pace::new(rate, settings.streams, out.len());
     while !stop.load(Ordering::Relaxed) {
-        if let Err(error) = stream.write_all(&out).and_then(|()| stream.flush()).and_then(|()| stream.read_exact(&mut input)) {
+        pace.wait();
+        for payload in out.chunks_exact_mut(BLOCK) {
+            payload[..8].copy_from_slice(&sequence.to_be_bytes());
+            sequence += 1;
+        }
+        if let Err(error) = stream.write_all(&out).and_then(|()| stream.flush()) {
             if !stop.load(Ordering::Relaxed) {
                 counters.fail(format!("block: {error}"));
             }
             return;
         }
-        counters.bytes.fetch_add(BLOCK as u64, Ordering::Relaxed);
+        for expected in out.chunks_exact(BLOCK) {
+            if let Err(error) = stream.read_exact(&mut input) {
+                if !stop.load(Ordering::Relaxed) { counters.fail(format!("echo: {error}")); }
+                return;
+            }
+            if input != expected { return counters.fail("TCP echo payload mismatch"); }
+            counters.bytes.fetch_add(BLOCK as u64, Ordering::Relaxed);
+        }
     }
 }
 
@@ -341,6 +362,7 @@ fn probe(open: Open, stop: &AtomicBool) -> Vec<(Instant, u64)> {
         if stream.write_all(&out).and_then(|()| stream.flush()).is_err() || stream.read_exact(&mut input).is_err() {
             break;
         }
+        if input.as_slice() != out.as_slice() { break; }
         samples.push((Instant::now(), started.elapsed().as_micros() as u64));
         thread::sleep(Duration::from_millis(10));
     }
@@ -397,7 +419,7 @@ fn read_datagram(stream: &mut dyn Duplex, body: &mut [u8]) -> std::io::Result<bo
     Ok(true)
 }
 
-fn udp_ingress(front: u16, origin: u16, window: usize, stop: &AtomicBool, counters: &Counters) {
+fn udp_ingress(front: u16, origin: u16, window: usize, stop: &AtomicBool, counters: &Counters, mut pace: study::Pace) {
     // The carrier's usual read timeout is seconds. A lost datagram must cost a batch a fraction of one.
     let mut stream = match open_ingress(front, origin, true, Some(Duration::from_millis(300))) {
         Ok(stream) => stream,
@@ -406,8 +428,13 @@ fn udp_ingress(front: u16, origin: u16, window: usize, stop: &AtomicBool, counte
     let mut frame = (DATAGRAM as u16).to_be_bytes().to_vec();
     frame.extend_from_slice(&pattern(DATAGRAM, 5));
     let mut body = vec![0; DATAGRAM];
+    let mut sequence = 0_u64;
+    let mut seen = vec![u64::MAX; 65536];
     while !stop.load(Ordering::Relaxed) {
+        pace.wait();
         for _ in 0..window {
+            frame[2..10].copy_from_slice(&sequence.to_be_bytes());
+            sequence += 1;
             if let Err(error) = stream.write_all(&frame) {
                 return counters.fail(format!("ingress write: {error}"));
             }
@@ -419,6 +446,13 @@ fn udp_ingress(front: u16, origin: u16, window: usize, stop: &AtomicBool, counte
         for _ in 0..window {
             match read_datagram(stream.as_mut(), &mut body) {
                 Ok(true) => {
+                    let id = u64::from_be_bytes(body[..8].try_into().unwrap());
+                    if body[8..] != frame[10..] || id >= sequence || sequence - id > seen.len() as u64 {
+                        return counters.fail("UDP echo sequence or payload mismatch");
+                    }
+                    let slot = id as usize % seen.len();
+                    if seen[slot] == id { return counters.fail("duplicate UDP echo"); }
+                    seen[slot] = id;
                     counters.received.fetch_add(1, Ordering::Relaxed);
                 }
                 Ok(false) => break,
@@ -444,6 +478,7 @@ fn warm_udp(rig: &Rig) -> Result<()> {
         stream.read_exact(&mut prefix)?;
         let mut body = vec![0; u16::from_be_bytes(prefix) as usize];
         stream.read_exact(&mut body)?;
+        if body != payload { return Err("unexpected UDP warmup echo".into()); }
         return Ok(());
     }
     let socket = UdpSocket::bind(localhost(0))?;
@@ -462,6 +497,10 @@ fn warm_udp(rig: &Rig) -> Result<()> {
 #[derive(Clone, Copy, Default)]
 struct Sample {
     ticks: u64,
+    user_ticks: u64,
+    system_ticks: u64,
+    minor_faults: u64,
+    major_faults: u64,
     rss_kb: u64,
     hwm_kb: u64,
     threads: u64,
@@ -471,7 +510,8 @@ struct Sample {
 fn sample(pid: u32) -> Option<Sample> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let fields: Vec<&str> = stat.rsplit_once(") ")?.1.split_whitespace().collect();
-    let ticks = fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?;
+    let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
+    let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
     let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let value = |key: &str| {
         status
@@ -480,7 +520,11 @@ fn sample(pid: u32) -> Option<Sample> {
             .and_then(|rest| rest.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
     };
     Some(Sample {
-        ticks,
+        ticks: user_ticks + system_ticks,
+        user_ticks,
+        system_ticks,
+        minor_faults: fields.get(7)?.parse().ok()?,
+        major_faults: fields.get(9)?.parse().ok()?,
         rss_kb: value("VmRSS:")?,
         hwm_kb: value("VmHWM:")?,
         threads: value("Threads:")?,
@@ -501,6 +545,10 @@ fn role(name: &str, idle: Option<Sample>, before: Option<Sample>, after: Option<
     json!({
         "implementation": name,
         "cpu_seconds": cpu,
+        "user_seconds": before.zip(after).map(|(a,b)| b.user_ticks.saturating_sub(a.user_ticks) as f64 / CLOCK_TICKS),
+        "system_seconds": before.zip(after).map(|(a,b)| b.system_ticks.saturating_sub(a.system_ticks) as f64 / CLOCK_TICKS),
+        "minor_faults": before.zip(after).map(|(a,b)| b.minor_faults.saturating_sub(a.minor_faults)),
+        "major_faults": before.zip(after).map(|(a,b)| b.major_faults.saturating_sub(a.major_faults)),
         "cpu_percent": cpu.map(|cpu| cpu / seconds * 100.0),
         "rss_idle_kb": idle.map(|sample| sample.rss_kb),
         "rss_avg_kb": (!rss.is_empty()).then(|| rss.iter().sum::<u64>() / rss.len() as u64),
@@ -566,12 +614,12 @@ fn load(rig: &Rig, settings: &Settings, pids: &[(&str, u32)]) -> Result<Value> {
         for _ in 0..settings.streams {
             if rig.udp {
                 if rig.inject {
-                    scope.spawn(|| udp_ingress(rig.front, rig.origin, settings.window, &stop, &counters));
+                    scope.spawn(|| udp_ingress(rig.front, rig.origin, settings.window, &stop, &counters, study::Pace::new(settings.target_mbps, settings.streams, settings.window * DATAGRAM)));
                 } else {
                     scope.spawn(|| udp_plain(rig.front, settings.window, &stop, &counters));
                 }
             } else {
-                scope.spawn(|| bulk(open.as_ref(), &stop, &counters));
+                scope.spawn(|| bulk(open.as_ref(), &stop, &counters, settings, settings.target_mbps));
             }
         }
         let probing = (!rig.udp).then(|| scope.spawn(|| probe(open.as_ref(), &stop)));
@@ -624,6 +672,9 @@ fn load(rig: &Rig, settings: &Settings, pids: &[(&str, u32)]) -> Result<Value> {
         .collect();
     let mut result = json!({
         "seconds": seconds,
+        "verified_bytes": if rig.udp { received * DATAGRAM as u64 } else { bytes },
+        "received_datagrams": received, "sent_datagrams": sent,
+        "rss_samples_kib": rss,
         "errors": errors,
         "error_notes": counters.notes.lock().map(|notes| notes.clone()).unwrap_or_default(),
         "server": roles[0],
@@ -636,6 +687,7 @@ fn load(rig: &Rig, settings: &Settings, pids: &[(&str, u32)]) -> Result<Value> {
         result["loss_percent"] = (sent.saturating_sub(received) as f64 / sent.max(1) as f64 * 100.0).into();
     } else {
         result["kind"] = "tcp".into();
+        result["tcp_flight_blocks"] = settings.tcp_flight_blocks.into();
         result["mbps"] = (bytes as f64 * 8.0 / seconds / 1e6).into();
         result["blocks_per_second"] = (bytes as f64 / BLOCK as f64 / seconds).into();
         result["probe_p50_us"] = percentile(&latency, 0.5).into();
@@ -668,6 +720,9 @@ fn kerlico_ingress_client(case: &Case, keys: &Keys, front: u16, peer: u16) -> Va
 
 fn measure(xray: &Path, kerlico: &Path, dir: &Path, case: &Case, direction: Direction, settings: &Settings) -> Result<Value> {
     let mut keys = Keys::generate(dir, case)?;
+    let bind = if study::veth() { std::net::SocketAddrV4::new(study::SERVER, 0) } else { localhost(0) };
+    let storage = case.mock.map(|service| xdrive_mock::Mock::start_on(bind, service, case.security, &keys.cert_pem, &keys.key_pem)).transpose()?;
+    keys.mock_addr = storage.as_ref().map(|storage| storage.addr);
     let decoy = if matches!(case.security, Security::Reality) {
         let config = kerlico_vless::server_config(&keys.cert_pem, &keys.key_pem, &["h2".into(), "http/1.1".into()]).map_err(|_| "make REALITY TLS target")?;
         let echo = Echo::tcp(Some(config))?;
@@ -697,6 +752,7 @@ fn measure(xray: &Path, kerlico: &Path, dir: &Path, case: &Case, direction: Dire
         Origins::Tcp(Origin::tcp(tls)?)
     };
     let peer = available_port()?;
+    if case.separate_download() { keys.download = peer; }
     let mut front = available_port()?;
     while front == peer || front == origin.port() || decoy.as_ref().is_some_and(|target| front == target.port) {
         front = available_port()?;
@@ -711,6 +767,10 @@ fn measure(xray: &Path, kerlico: &Path, dir: &Path, case: &Case, direction: Dire
         ),
         Direction::KerlicoToXray => (
             start_xray(xray, server_cpus, dir, "xray-server", &case.xray_server(&keys, peer, origin.port()), cone)?,
+            start_kerlico(kerlico, client_cpus, dir, "kerlico-client", &kerlico_ingress_client(case, &keys, front, peer))?,
+        ),
+        Direction::KerlicoControl => (
+            start_kerlico(kerlico, server_cpus, dir, "kerlico-server", &case.kerlico_server(&keys, peer))?,
             start_kerlico(kerlico, client_cpus, dir, "kerlico-client", &kerlico_ingress_client(case, &keys, front, peer))?,
         ),
         Direction::XrayControl => (
@@ -728,23 +788,40 @@ fn measure(xray: &Path, kerlico: &Path, dir: &Path, case: &Case, direction: Dire
     };
     let result = load(&rig, settings, &[(server_name, server.id()), (client_name, client.id())]);
     drop((server, client));
+    if result.is_ok() { if let Some(mock) = storage { mock.verify(false)?; } }
     result
 }
 
 #[test]
 #[ignore = "requires XRAY pointing to Xray 26.10.31 and a release build"]
 fn vless_perf() {
+    if let Ok(value) = std::env::var("PERF_TLS_TARGET") {
+        study::tls_target(value.parse().expect("TLS target port")).expect("local TLS target");
+        return;
+    }
+    if let Some(path) = std::env::var_os("PERF_CATALOG") {
+        let catalog: Vec<Value> = cases::cases().into_iter().chain(cases::rejected_cases()).map(|case|
+            json!({"case":case.name,"allowed":!case.rejected,"udp":case.payload.udp(),
+                   "origin_port":case.payload.origin_port(),"inner_tls":case.payload==Payload::InnerTls,
+                   "mock":case.mock.is_some(),"reconnect":case.resume,"separate_download":case.separate_download(),
+                   "legacy_benchmark":measurable(&case)})).collect();
+        fs::write(path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
+        return;
+    }
     let xray = xray_binary().expect("pinned Xray peer");
-    let kerlico = PathBuf::from(env!("CARGO_BIN_EXE_kerlico-server"));
+    let kerlico = PathBuf::from(text("PERF_KERLICO", env!("CARGO_BIN_EXE_kerlico-server")));
     let settings = Settings {
         seconds: number("PERF_SECONDS", 20),
+        target_mbps: number("PERF_TARGET_MBPS", 0),
         warmup: number("PERF_WARMUP", 3),
         streams: number("PERF_STREAMS", 4) as usize,
+        tcp_flight_blocks: number("PERF_TCP_FLIGHT_BLOCKS", 1) as usize,
         window: number("PERF_WINDOW", 16) as usize,
         server_cpus: text("PERF_SERVER_CPUS", "0-2"),
         client_cpus: text("PERF_CLIENT_CPUS", "3-5"),
         worker: text("PERF_WORKER", "worker"),
     };
+    assert!((1..=32).contains(&settings.tcp_flight_blocks));
     pin_self(&text("PERF_LOAD_CPUS", "6-7"));
     let filter = text("PERF_CASE", "");
     let directions = text("PERF_DIRECTION", "");
@@ -779,7 +856,7 @@ fn vless_perf() {
                 if udp {
                     scope.spawn(|| udp_plain(port, settings.window, &stop, &counters));
                 } else {
-                    scope.spawn(|| bulk(open.as_ref(), &stop, &counters));
+                    scope.spawn(|| bulk(open.as_ref(), &stop, &counters, &settings, 0));
                 }
             }
             thread::sleep(Duration::from_secs(5));
@@ -794,13 +871,19 @@ fn vless_perf() {
         record(json!({"case": "direct", "kind": kind, "worker": settings.worker, "mbps": value}));
     }
     let mut measured = 0;
+    let pairings: &[Direction] = if std::env::var("PERF_BOTH_ENDS").as_deref() == Ok("1") {
+        &Direction::BOTH_ENDS
+    } else {
+        &Direction::ALL
+    };
     for (index, case) in cases::cases().into_iter().enumerate() {
-        if !measurable(&case) || !selected(&filter, &case.name) || index % shards != shard {
+        let eligible = if study::veth() { !case.rejected } else { measurable(&case) };
+        if !eligible || !selected(&filter, &case.name) || index % shards != shard {
             continue;
         }
         for round in 0..rounds {
-            for step in 0..Direction::ALL.len() {
-                let direction = Direction::ALL[(step + round) % Direction::ALL.len()];
+            for step in 0..pairings.len() {
+                let direction = pairings[(step + round) % pairings.len()];
                 if !selected(&directions, direction.name()) {
                     continue;
                 }
@@ -812,6 +895,8 @@ fn vless_perf() {
                     Ok(value) => value,
                     Err(error) => json!({"error": error.to_string()}),
                 };
+                line["target_mbps"] = settings.target_mbps.into();
+                line["topology"] = (if study::veth() { "isolated-veth" } else { "loopback" }).into();
                 line["case"] = case.name.clone().into();
                 line["direction"] = direction.name().into();
                 line["round"] = round.into();

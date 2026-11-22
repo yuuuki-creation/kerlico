@@ -58,6 +58,8 @@ fn open(peer: &PeerAddr, settings: &Settings) -> Result<Session, OpenError> {
                     }
                 })
                 .ok_or(OpenError::Transport)?;
+            #[cfg(target_os = "linux")]
+            kerlico_shared::grow_udp_carrier_receive_buffer(&socket);
             Box::new(UdpCarrier::new(socket).map_err(|_| OpenError::Transport)?)
         }
         _ => return Err(OpenError::Settings),

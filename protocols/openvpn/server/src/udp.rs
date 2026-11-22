@@ -28,7 +28,7 @@ impl DatagramWait {
         #[cfg(unix)]
         {
             #[cfg(target_os = "linux")]
-            kerlico_shared::grow_udp_receive_buffer(socket);
+            kerlico_shared::grow_udp_carrier_receive_buffer(socket);
             let (socket_wake, wake) = SocketWake::new(socket)?;
             socket.set_nonblocking(true)?;
             Ok((Self { socket_wake }, wake))
@@ -96,6 +96,8 @@ pub(super) fn run(
         }
         if readable {
             let result = frames.read(&socket, |batch| {
+                #[cfg(target_os = "linux")]
+                wait.socket_wake.note_receive_batch(batch.len() >= linux::SLOTS / 2);
                 for packets in batch.chunk_by(|a, b| a.0 == b.0) {
                     let addr = packets[0].0;
                     if let Some(entry) = sessions.get_mut(&addr) {
@@ -451,7 +453,7 @@ mod linux {
 
     use super::*;
 
-    const SLOTS: usize = 16;
+    pub(super) const SLOTS: usize = 16;
     const SLOT_LEN: usize = MAX_FRAME + 1;
 
     pub(super) struct Batch {

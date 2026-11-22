@@ -15,7 +15,10 @@ pub use async_stream::{AsyncBufReadVectored, AsyncReadHalf, AsyncTcp};
 mod datagram;
 pub use datagram::{DatagramReply, DatagramUplink, DirectDatagram, InstallDatagramUplink};
 #[cfg(target_os = "linux")]
-pub use datagram::{grow_udp_receive_buffer, ConnectedDatagrams};
+pub use datagram::{
+    grow_udp_carrier_receive_buffer, grow_udp_carrier_receive_buffer_to, grow_udp_receive_buffer,
+    ConnectedDatagrams,
+};
 mod write_input;
 pub use write_input::{AsyncWriteHalf, AsyncWriteInput, WriteInput, MAX_WRITE_INPUT_PARTS};
 pub use proxy::{Association, ClientEntry, ProxyFn, Stream, TunFn, TunnelFn, Upstream};

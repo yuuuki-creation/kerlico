@@ -190,6 +190,20 @@ struct Reorder {
     next: u32,
     held: BTreeMap<u32, Vec<u8>>,
     held_bytes: usize,
+    gap_acks: u8,
+}
+
+impl Reorder {
+    fn receive_room(&self, queued: usize) -> usize {
+        PIPE_LIMIT.saturating_sub(queued.saturating_add(self.held_bytes))
+    }
+
+    fn gap_feedback(&mut self) -> u8 {
+        let evidence = self.held.len().min(3) as u8;
+        let acknowledgements = evidence.saturating_sub(self.gap_acks);
+        self.gap_acks += acknowledgements;
+        acknowledgements
+    }
 }
 
 struct Flight {
@@ -469,6 +483,8 @@ pub fn serve_udp(
     mtu: u16,
     ready: Sender<Ready>,
 ) -> io::Result<ServerHandle> {
+    #[cfg(target_os = "linux")]
+    kerlico_shared::grow_udp_carrier_receive_buffer_to(&socket, 32 * 1024 * 1024);
     let native = native::Udp::new(socket)?;
     let link = Link::new(LinkSetup {
         role: Role::Server,
@@ -553,6 +569,8 @@ fn dial_options(
         let NetworkConnection::Udp(socket) = carrier else {
             return Err(io::ErrorKind::Unsupported.into());
         };
+        #[cfg(target_os = "linux")]
+        kerlico_shared::grow_udp_carrier_receive_buffer(&socket);
         socket
             .set_read_timeout(Some(Duration::from_millis(200)))
             .ok();
@@ -805,6 +823,7 @@ impl Sess {
                 next: 0,
                 held: BTreeMap::new(),
                 held_bytes: 0,
+                gap_acks: 0,
             }),
             send_window: Mutex::new(SendWindow {
                 flights: BTreeMap::new(),
@@ -903,10 +922,12 @@ impl Sess {
             if !pipe.bytes.is_empty() {
                 let before = pipe.bytes.len();
                 let n = take(&mut pipe.bytes);
-                self.read_space(before, pipe.bytes.len());
+                let after = pipe.bytes.len();
                 if pipe.waiting != 0 {
                     self.cv.notify_all();
                 }
+                drop(pipe);
+                self.read_space(before, after);
                 return Ok(n);
             }
             if pipe.closed {
@@ -937,45 +958,65 @@ impl Sess {
     }
 
     fn read_space(&self, before: usize, after: usize) {
-        if !self.link.tcp {
+        if !self.link.tcp && after < before {
             let fragment = fragment_size(false, self.link.mtu, 0);
-            if PIPE_LIMIT.saturating_sub(before) < fragment
-                && PIPE_LIMIT.saturating_sub(after) >= fragment
-            {
+            let reorder = self.reorder.lock().expect("reorder");
+            if reorder.receive_room(before) < fragment && reorder.receive_room(after) >= fragment {
+                drop(reorder);
                 self.request_ack();
             }
         }
     }
 
-    fn window(&self) -> u16 {
-        let room = PIPE_LIMIT.saturating_sub(self.queued());
-        (room / fragment_size(self.link.tcp, self.link.mtu, 0)).min(WINDOW as usize) as u16
+    fn receive_window(&self) -> (u32, u16) {
+        let reorder = self.reorder.lock().expect("reorder");
+        let queued = self.queued();
+        let room = if self.link.tcp {
+            PIPE_LIMIT.saturating_sub(queued)
+        } else {
+            reorder.receive_room(queued)
+        };
+        let fragment = fragment_size(self.link.tcp, self.link.mtu, 0);
+        (reorder.next, (room / fragment).min(WINDOW as usize) as u16)
     }
 
     fn unack(&self) -> u32 {
         self.reorder.lock().expect("reorder").next
     }
 
-    fn push_in<'a>(&self, seq: u32, payload: Cow<'a, [u8]>) -> Cow<'a, [u8]> {
+    fn push_in<'a>(&self, seq: u32, payload: Cow<'a, [u8]>) -> (Cow<'a, [u8]>, u8) {
         let mut reorder = self.reorder.lock().expect("reorder");
+        let no_delivery = Cow::Borrowed(&[][..]);
         if seq.wrapping_sub(reorder.next) > WINDOW as u32 {
-            return Cow::Borrowed(&[]);
+            return (no_delivery, 0);
         }
-        if seq != reorder.next && reorder.held.len() >= WINDOW as usize {
-            return Cow::Borrowed(&[]);
-        }
-        if reorder.held_bytes.saturating_add(payload.len()) > PIPE_LIMIT {
-            return Cow::Borrowed(&[]);
+        if (self.link.tcp || seq != reorder.next)
+            && reorder.held_bytes.saturating_add(payload.len()) > PIPE_LIMIT
+        {
+            return (no_delivery, 0);
         }
         if seq != reorder.next {
+            if reorder.held.len() >= WINDOW as usize {
+                return (no_delivery, 0);
+            }
             if let std::collections::btree_map::Entry::Vacant(entry) = reorder.held.entry(seq) {
                 let len = payload.len();
                 entry.insert(payload.into_owned());
                 reorder.held_bytes += len;
+                if !self.link.tcp {
+                    return (no_delivery, reorder.gap_feedback());
+                }
             }
-            return Cow::Borrowed(&[]);
+            return (no_delivery, 0);
+        }
+        // Only the link's reader produces data for this session. Consumers
+        // can therefore only increase this snapshot of free delivery space.
+        let room = if self.link.tcp { PIPE_LIMIT } else { PIPE_LIMIT - self.queued() };
+        if payload.len() > room {
+            return (no_delivery, 0);
         }
         let mut out = payload;
+        reorder.gap_acks = 0;
         reorder.next = reorder.next.wrapping_add(1);
         loop {
             let next = reorder.next;
@@ -983,10 +1024,18 @@ impl Sess {
                 break;
             };
             reorder.held_bytes -= payload.len();
+            if payload.len() > room - out.len() {
+                // Leave this sequence unacknowledged. Its retransmission can
+                // resume delivery when the application has drained the pipe.
+                return (out, 0);
+            }
             out.to_mut().extend(payload);
             reorder.next = next.wrapping_add(1);
         }
-        out
+        // Packets already beyond a newly exposed gap can trigger recovery even
+        // when the peer is waiting for acknowledgements before sending again.
+        let gap_acks = if self.link.tcp { 0 } else { reorder.gap_feedback() };
+        (out, gap_acks)
     }
 
     fn on_ack(&self, unack: u32, window: u16) {
@@ -1261,12 +1310,13 @@ impl Sess {
         let plain = if meta::is_session(kind) {
             meta::session(kind, self.id, seq, payload_len as u16, suffix.len() as u8)
         } else {
+            let (unack, window) = self.receive_window();
             meta::data(&Meta {
                 kind,
                 session: self.id,
                 seq,
-                unack: self.unack(),
-                window: self.window(),
+                unack,
+                window,
                 fragment,
                 prefix: prefix.len() as u8,
                 payload_len: encoded_len,
@@ -1578,7 +1628,14 @@ impl Sess {
         if ack <= stamp && self.ack_at.compare_exchange(ack, u64::MAX, Ordering::AcqRel, Ordering::Acquire).is_ok() {
             // Clear before reading the receive sequence. Concurrent data is
             // either covered by this ACK or schedules another one.
-            let _ = self.send_ack();
+            if self.send_ack().is_err_and(|error| {
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                )
+            }) {
+                self.request_ack();
+            }
         }
         self.link.schedule(self.ack_at.load(Ordering::Acquire));
         let due = if self.retry_at.load(Ordering::Relaxed) <= stamp {
@@ -1989,7 +2046,7 @@ fn dispatch_with_wakes(
         }
         let PacketSource::Account { key, username } = incoming.source else { return };
         let sess = Sess::new(Arc::clone(link), incoming.meta.session, incoming.peer, username, key);
-        let delivered = sess.push_in(incoming.meta.seq, incoming.payload);
+        let (delivered, _) = sess.push_in(incoming.meta.seq, incoming.payload);
         sess.append(&delivered);
         if !link.insert(Arc::clone(&sess)) {
             sess.shutdown(false);
@@ -2008,7 +2065,7 @@ fn dispatch_with_wakes(
     }
     if incoming.meta.kind == OPEN_RESPONSE && link.role == Role::Client {
         if let Some(sess) = existing {
-            let delivered = sess.push_in(incoming.meta.seq, incoming.payload);
+            let (delivered, _) = sess.push_in(incoming.meta.seq, incoming.payload);
             sess.append(&delivered);
             if incoming.meta.seq == 0 && sess.unack() != 0 {
                 let _pipe = sess.pipe.lock().expect("pipe");
@@ -2029,7 +2086,7 @@ fn dispatch_with_wakes(
         if !link.tcp {
             sess.on_ack(incoming.meta.unack, incoming.meta.window);
         }
-        let delivered = sess.push_in(incoming.meta.seq, incoming.payload);
+        let (delivered, gap_acks) = sess.push_in(incoming.meta.seq, incoming.payload);
         if let Some(wakes) = wakes {
             if sess.append_with_notification(&delivered, false)
                 && !wakes.iter().any(|waiting| Arc::ptr_eq(waiting, sess))
@@ -2040,6 +2097,9 @@ fn dispatch_with_wakes(
             sess.append(&delivered);
         }
         if !link.tcp {
+            for _ in 0..gap_acks {
+                let _ = sess.send_ack();
+            }
             sess.request_ack();
         }
     }
@@ -2455,10 +2515,12 @@ fn read_record(
             if pipe.bytes.len() >= n {
                 let before = pipe.bytes.len();
                 let out = pipe.bytes.drain(..n).collect();
-                sess.read_space(before, pipe.bytes.len());
+                let after = pipe.bytes.len();
                 if pipe.waiting != 0 {
                     sess.cv.notify_all();
                 }
+                drop(pipe);
+                sess.read_space(before, after);
                 return Ok(out);
             }
         }
@@ -2930,9 +2992,9 @@ mod tests {
         peer.set_nonblocking(true).unwrap();
         assert_eq!(peer.recv(&mut packet).unwrap_err().kind(), io::ErrorKind::WouldBlock);
         sess.append(&vec![7; PIPE_LIMIT]);
-        assert_eq!(sess.window(), 0);
+        assert_eq!(sess.receive_window().1, 0);
         sess.read_with(None, &mut |q| { q.drain(..4096); 4096 }).unwrap();
-        assert!(sess.window() > 0);
+        assert!(sess.receive_window().1 > 0);
         assert_ne!(sess.ack_at.load(Ordering::Acquire), u64::MAX);
         sess.ack_at.store(sess.link.stamp(Instant::now()), Ordering::Release);
         sess.tick();
@@ -2944,6 +3006,27 @@ mod tests {
         sess.tick();
         peer.set_nonblocking(true).unwrap();
         assert_eq!(peer.recv(&mut packet).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn udp_credit_accounts_for_reordered_segments_and_reopens_after_reading() {
+        let sess = detached_session();
+        let fragment = fragment_size(false, sess.link.mtu, 0);
+        sess.append(&vec![0; PIPE_LIMIT - 2 * fragment]);
+        assert_eq!(sess.receive_window().1, 2);
+        for seq in [1, 2] {
+            let segment = vec![seq as u8; fragment];
+            assert!(sess.push_in(seq, Cow::Owned(segment)).0.is_empty());
+        }
+        assert_eq!(sess.receive_window().1, 0);
+        assert_eq!(sess.ack_at.load(Ordering::Acquire), u64::MAX);
+        sess.read_with(None, &mut |queue| {
+            queue.drain(..fragment);
+            fragment
+        })
+        .unwrap();
+        assert_eq!(sess.receive_window().1, 1);
+        assert_ne!(sess.ack_at.load(Ordering::Acquire), u64::MAX);
     }
 
     #[test]
@@ -3075,21 +3158,95 @@ mod tests {
     #[test]
     fn ordered_delivery_waits_for_the_hole() {
         let sess = detached_session();
-        assert!(sess.push_in(1, Cow::Borrowed(b"b")).is_empty());
-        assert!(sess.push_in(1, Cow::Borrowed(b"duplicate")).is_empty());
-        assert_eq!(sess.push_in(0, Cow::Borrowed(b"a")).as_ref(), b"ab");
-        assert!(sess.push_in(0, Cow::Borrowed(b"a")).is_empty());
+        assert!(sess.push_in(1, Cow::Borrowed(b"b")).0.is_empty());
+        assert!(sess.push_in(1, Cow::Borrowed(b"duplicate")).0.is_empty());
+        assert_eq!(sess.push_in(0, Cow::Borrowed(b"a")).0.as_ref(), b"ab");
+        assert!(sess.push_in(0, Cow::Borrowed(b"a")).0.is_empty());
     }
 
     #[test]
     fn ordered_delivery_crosses_the_sequence_wrap() {
         let sess = detached_session();
         sess.reorder.lock().unwrap().next = u32::MAX - 1;
-        assert!(sess.push_in(0, Cow::Borrowed(b"c")).is_empty());
-        assert!(sess.push_in(u32::MAX, Cow::Borrowed(b"b")).is_empty());
-        assert_eq!(sess.push_in(u32::MAX - 1, Cow::Borrowed(b"a")).as_ref(), b"abc");
-        assert!(sess.push_in(u32::MAX, Cow::Borrowed(b"old")).is_empty());
-        assert_eq!(sess.push_in(1, Cow::Borrowed(b"d")).as_ref(), b"d");
+        assert!(sess.push_in(0, Cow::Borrowed(b"c")).0.is_empty());
+        assert!(sess.push_in(u32::MAX, Cow::Borrowed(b"b")).0.is_empty());
+        assert_eq!(sess.push_in(u32::MAX - 1, Cow::Borrowed(b"a")).0.as_ref(), b"abc");
+        assert!(sess.push_in(u32::MAX, Cow::Borrowed(b"old")).0.is_empty());
+        assert_eq!(sess.push_in(1, Cow::Borrowed(b"d")).0.as_ref(), b"d");
+    }
+
+    #[test]
+    fn udp_backpressure_does_not_ack_or_close_on_a_full_pipe() {
+        let sess = detached_session();
+        sess.append(&vec![3; PIPE_LIMIT - 1]);
+        assert!(sess.push_in(1, Cow::Borrowed(b"b")).0.is_empty());
+        sess.append(&sess.push_in(0, Cow::Borrowed(b"a")).0);
+        assert_eq!(sess.unack(), 1);
+        assert!(sess.push_in(1, Cow::Borrowed(b"b")).0.is_empty());
+        assert!(!sess.closed.load(Ordering::Acquire));
+        sess.read_with(None, &mut |q| { let n = q.len(); q.clear(); n }).unwrap();
+        assert_eq!(sess.push_in(1, Cow::Borrowed(b"b")).0.as_ref(), b"b");
+        assert_eq!(sess.unack(), 2);
+    }
+
+    #[test]
+    fn new_out_of_order_segments_signal_each_gap_at_most_three_times() {
+        let (sess, peer) = packet_session();
+        let deliver = |seq| {
+            dispatch_with_wakes(
+                &sess.link,
+                Incoming {
+                    peer: sess.peer,
+                    meta: Meta {
+                        kind: DATA_C2S,
+                        session: sess.id,
+                        seq,
+                        unack: 0,
+                        window: WINDOW,
+                        fragment: 0,
+                        prefix: 0,
+                        payload_len: 1,
+                        suffix: 0,
+                        low_mode: 0,
+                        low_mask: 0,
+                        extracted: 0,
+                        rotation: 0,
+                    },
+                    payload: Cow::Borrowed(b"x"),
+                    source: PacketSource::Session(Arc::clone(&sess)),
+                },
+                None,
+            );
+        };
+        let read_ack = || -> io::Result<u32> {
+            let mut wire = [0; 2048];
+            assert!(peer.recv(&mut wire)? >= 72);
+            let nonce = wire[..24].try_into().unwrap();
+            let n = Direction::from_key(sess.key)
+                .open_at_slice(&nonce, &mut wire[24..72])
+                .unwrap();
+            let ack = meta::parse(&wire[24..24 + n]).unwrap();
+            assert_eq!(ack.kind, ACK_S2C);
+            Ok(ack.unack)
+        };
+        for seq in [2, 2, 3, 4, 5] {
+            deliver(seq);
+        }
+        for _ in 0..3 {
+            assert_eq!(read_ack().unwrap(), 0);
+        }
+        peer.set_nonblocking(true).unwrap();
+        assert_eq!(read_ack().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        // The second hole already has enough distinct later segments waiting.
+        deliver(0);
+        for _ in 0..3 {
+            assert_eq!(read_ack().unwrap(), 1);
+        }
+        deliver(6);
+        assert_eq!(read_ack().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        deliver(1);
+        assert_eq!((sess.unack(), sess.queued()), (7, 7));
+        sess.shutdown(false);
     }
 
     #[test]
@@ -3097,11 +3254,11 @@ mod tests {
         let sess = detached_session();
         let count = (PIPE_LIMIT / meta::MAX_PDU) as u32;
         for seq in 1..=count {
-            assert!(sess.push_in(seq, Cow::Owned(vec![7; meta::MAX_PDU])).is_empty());
+            assert!(sess.push_in(seq, Cow::Owned(vec![7; meta::MAX_PDU])).0.is_empty());
         }
-        assert_eq!(sess.push_in(0, Cow::Owned(Vec::new())), vec![7; PIPE_LIMIT]);
-        assert!(sess.push_in(count + 2, Cow::Owned(vec![8; meta::MAX_PDU])).is_empty());
-        assert_eq!(sess.push_in(count + 1, Cow::Owned(Vec::new())), vec![8; meta::MAX_PDU]);
+        assert_eq!(sess.push_in(0, Cow::Owned(Vec::new())).0, vec![7; PIPE_LIMIT]);
+        assert!(sess.push_in(count + 2, Cow::Owned(vec![8; meta::MAX_PDU])).0.is_empty());
+        assert_eq!(sess.push_in(count + 1, Cow::Owned(Vec::new())).0, vec![8; meta::MAX_PDU]);
     }
 
     #[test]

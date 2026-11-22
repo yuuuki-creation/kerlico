@@ -25,7 +25,7 @@ protocols/<id>/server  包 kerlico-<id>-server。只有服务端叶子可以依�
 
 本机 SOCKS5/HTTP 入口只在客户端叶子里有一份，见下文「客户端叶子和本机入口」。
 
-OpenVPN 的共享 crate 负责控制帧、rustls 控制通道和 AEAD 数据帧。服务端复用 `kerlico-wg` 里独立于 WireGuard 握手的 IP 流处理。客户端通过 `kerlico-outbound` 打开 TCP 或 UDP 载体，在 Unix 上通过 `tun-rs` 提供 TUN 入口。
+OpenVPN 的共享 crate 负责控制帧、rustls 控制通道和 AEAD 数据帧。服务端复用 `kerlico-wg` 里独立于 WireGuard 握手的 IP 流处理。`kerlico-wg` 使用 smoltcp 的 `socket-tcp-cubic` feature，OpenVPN 节点为其隧道内 TCP 连接选择 CUBIC。客户端通过 `kerlico-outbound` 打开 TCP 或 UDP 载体，在 Unix 上通过 `tun-rs` 提供 TUN 入口。
 
 `protocols/socks/shared` 编解码 SOCKS5 地址和 UDP 封装。入站通过 Tokio 读取握手和 UDP 控制连接，再把流交给出站模块。客户端与 `landing-socks` 共用客户端 crate；连接代理所用的 TCP 和 UDP 套接字由出站模块打开。
 

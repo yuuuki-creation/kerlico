@@ -106,6 +106,13 @@ impl Mock {
         certificate: &str,
         key: &str,
     ) -> Result<Self> {
+        Self::start_on(localhost(0), service, security, certificate, key)
+    }
+
+    pub fn start_on(
+        bind: std::net::SocketAddrV4,
+        service: Service, security: Security, certificate: &str, key: &str,
+    ) -> Result<Self> {
         let tls = match security {
             Security::Tls(alpn) => Some(
                 kerlico_vless::server_config(certificate, key, &[alpn.into()])
@@ -120,7 +127,7 @@ impl Mock {
         let h3 = matches!(security, Security::Tls("h3"));
         let (addr, worker) = if h3 {
             let listener =
-                kerlico_vless::H3Listener::bind(localhost(0).into(), tls.expect("H3 TLS"))?;
+                kerlico_vless::H3Listener::bind(bind.into(), tls.expect("H3 TLS"))?;
             let addr = listener.local_addr()?;
             let worker = thread::spawn(move || {
                 while let Ok((_, stream)) = listener.accept() {
@@ -139,7 +146,7 @@ impl Mock {
             });
             (addr, worker)
         } else if matches!(security, Security::Tls("h2")) {
-            let listener = TcpListener::bind(localhost(0))?;
+            let listener = TcpListener::bind(bind)?;
             let addr = listener.local_addr()?;
             listener.set_nonblocking(true)?;
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -151,7 +158,7 @@ impl Mock {
             });
             (addr, worker)
         } else {
-            let listener = TcpListener::bind(localhost(0))?;
+            let listener = TcpListener::bind(bind)?;
             let addr = listener.local_addr()?;
             listener.set_nonblocking(true)?;
             let worker = thread::spawn(move || {

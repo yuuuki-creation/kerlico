@@ -8,13 +8,13 @@ use std::{collections::HashMap, net::SocketAddr, time::Instant};
 use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 #[cfg(target_os = "linux")]
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
 };
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 
 use crate::invalid;
 
@@ -59,6 +59,10 @@ pub struct SocketWake {
     #[cfg(target_os = "linux")]
     last_readable: Option<Instant>,
     #[cfg(target_os = "linux")]
+    busy_receive: bool,
+    #[cfg(target_os = "linux")]
+    last_native_burst: Option<Instant>,
+    #[cfg(target_os = "linux")]
     last_native_readable: Option<Instant>,
     #[cfg(target_os = "linux")]
     last_native_reply: Option<Instant>,
@@ -76,6 +80,7 @@ struct DatagramInterests {
     pending: AtomicBool,
     native_requests: AtomicUsize,
     native_replies: AtomicUsize,
+    large_native_reply: AtomicBool,
     state: Mutex<DatagramState>,
 }
 
@@ -100,11 +105,20 @@ impl DatagramInterest {
     }
 
     pub fn note_datagram_requests(&self, count: usize) {
-        self.datagrams.native_requests.fetch_max(count, Ordering::Relaxed);
+        self.datagrams
+            .native_requests
+            .fetch_max(count, Ordering::Relaxed);
     }
 
     pub fn note_datagram_replies(&self, count: usize) {
-        self.datagrams.native_replies.fetch_max(count, Ordering::Relaxed);
+        if count >= NATIVE_BATCH_LIMIT {
+            self.datagrams
+                .large_native_reply
+                .store(true, Ordering::Relaxed);
+        }
+        self.datagrams
+            .native_replies
+            .fetch_max(count, Ordering::Relaxed);
     }
 }
 
@@ -128,7 +142,11 @@ impl SocketRegistration {
         socket: BorrowedFd<'_>,
         peer: SocketAddr,
     ) -> io::Result<DatagramInterest> {
-        let mut state = self.datagrams.state.lock().expect("OpenVPN socket interests");
+        let mut state = self
+            .datagrams
+            .state
+            .lock()
+            .expect("OpenVPN socket interests");
         let token = state.next;
         state.next = token
             .checked_add(1)
@@ -146,7 +164,11 @@ impl SocketRegistration {
     pub fn take_datagram_peers(&self, peers: &mut Vec<SocketAddr>) {
         peers.clear();
         if self.datagrams.pending.load(Ordering::Relaxed) {
-            let mut state = self.datagrams.state.lock().expect("OpenVPN socket interests");
+            let mut state = self
+                .datagrams
+                .state
+                .lock()
+                .expect("OpenVPN socket interests");
             std::mem::swap(peers, &mut state.ready);
             self.datagrams.pending.store(false, Ordering::Relaxed);
         }
@@ -156,7 +178,11 @@ impl SocketRegistration {
         let Some(first) = tokens.next() else {
             return;
         };
-        let mut state = self.datagrams.state.lock().expect("OpenVPN socket interests");
+        let mut state = self
+            .datagrams
+            .state
+            .lock()
+            .expect("OpenVPN socket interests");
         for token in std::iter::once(first).chain(tokens) {
             let Some(&(peer, ref ready)) = state.peers.get(&token) else {
                 continue;
@@ -166,7 +192,9 @@ impl SocketRegistration {
                 state.ready.push(peer);
             }
         }
-        self.datagrams.pending.store(!state.ready.is_empty(), Ordering::Relaxed);
+        self.datagrams
+            .pending
+            .store(!state.ready.is_empty(), Ordering::Relaxed);
     }
 }
 
@@ -184,6 +212,10 @@ impl SocketWake {
             #[cfg(target_os = "linux")]
             last_readable: None,
             #[cfg(target_os = "linux")]
+            busy_receive: false,
+            #[cfg(target_os = "linux")]
+            last_native_burst: None,
+            #[cfg(target_os = "linux")]
             last_native_readable: None,
             #[cfg(target_os = "linux")]
             last_native_reply: None,
@@ -198,6 +230,26 @@ impl SocketWake {
     #[cfg(target_os = "linux")]
     pub fn registration(&self) -> Option<SocketRegistration> {
         self.epoll.clone()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn note_receive_batch(&mut self, busy: bool) {
+        self.busy_receive = busy;
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recent_native_burst(&mut self, now: Instant, count: usize) -> bool {
+        let output = self.epoll.as_ref().is_some_and(|registry| {
+            registry
+                .datagrams
+                .large_native_reply
+                .swap(false, Ordering::Relaxed)
+        });
+        if output || count >= NATIVE_BATCH_LIMIT {
+            self.last_native_burst = Some(now);
+        }
+        self.last_native_burst
+            .is_some_and(|last| now.duration_since(last) < ACTIVE_RECEIVE_INTERVAL)
     }
 
     pub fn wait(&mut self, socket: &impl AsRawFd, timeout: Duration) -> io::Result<bool> {
@@ -236,23 +288,23 @@ impl SocketWake {
     fn coalesce_receive(&mut self, wake: bool) {
         let now = Instant::now();
         let count = self.take_native_requests();
+        let busy = self.recent_native_burst(now, count) || self.busy_receive;
         if count == 0 {
-            if self
-                .last_readable
-                .replace(now)
-                .is_some_and(|last| now - last < ACTIVE_RECEIVE_INTERVAL)
-            {
+            let last = self.last_readable.replace(now);
+            if !wake && !busy && last.is_some_and(|last| now - last < ACTIVE_RECEIVE_INTERVAL) {
                 std::thread::sleep(Duration::from_micros(50));
             }
             return;
         }
         let last = self.last_native_readable.replace(now);
-        let replies_ready = self.epoll.as_ref().is_some_and(|registry| {
-            registry.datagrams.pending.load(Ordering::Relaxed)
-        });
+        let replies_ready = self
+            .epoll
+            .as_ref()
+            .is_some_and(|registry| registry.datagrams.pending.load(Ordering::Relaxed));
         // Let consecutive small UDP batches accumulate. Drain immediately when
         // a larger batch or egress work shows that the loop already has work.
         if count < NATIVE_BATCH_LIMIT
+            && !busy
             && !wake
             && !replies_ready
             && last.is_some_and(|last| now - last < ACTIVE_RECEIVE_INTERVAL)
@@ -272,7 +324,9 @@ impl SocketWake {
         let count = registry.datagrams.native_replies.swap(0, Ordering::Relaxed);
         let now = Instant::now();
         let last = self.last_native_reply.replace(now);
+        let busy = self.recent_native_burst(now, count);
         if (1..NATIVE_BATCH_LIMIT).contains(&count)
+            && !busy
             && last.is_some_and(|last| now - last < ACTIVE_RECEIVE_INTERVAL)
         {
             std::thread::sleep(NATIVE_COALESCE_DELAY);
@@ -330,6 +384,7 @@ fn register(socket: &impl AsRawFd, signal: &impl AsRawFd) -> io::Result<SocketRe
             pending: AtomicBool::new(false),
             native_requests: AtomicUsize::new(0),
             native_replies: AtomicUsize::new(0),
+            large_native_reply: AtomicBool::new(false),
             state: Mutex::new(DatagramState {
                 next: 4,
                 peers: HashMap::new(),
@@ -357,13 +412,21 @@ fn epoll_wait(registration: &SocketRegistration, millis: libc::c_int) -> io::Res
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
     // The kernel writes at most the capacity of this event array.
     let count = unsafe {
-        libc::epoll_wait(registration.epoll.as_raw_fd(), events.as_mut_ptr(), events.len() as i32, millis)
+        libc::epoll_wait(
+            registration.epoll.as_raw_fd(),
+            events.as_mut_ptr(),
+            events.len() as i32,
+            millis,
+        )
     };
     if count < 0 {
         return Err(io::Error::last_os_error());
     }
     let tokens = events[..count as usize].iter().map(|event| event.u64);
-    let flags = tokens.clone().filter(|token| *token < 4).fold(0, |flags, token| flags | token);
+    let flags = tokens
+        .clone()
+        .filter(|token| *token < 4)
+        .fold(0, |flags, token| flags | token);
     registration.record_ready(tokens.filter(|token| *token >= 4));
     Ok((flags & 1 != 0, flags & 2 != 0))
 }
@@ -372,6 +435,27 @@ fn epoll_wait(registration: &SocketRegistration, millis: libc::c_int) -> io::Res
 mod tests {
     use super::*;
     use std::os::fd::AsFd;
+
+    #[test]
+    fn busy_batches_skip_coalescing_until_the_burst_has_passed() -> io::Result<()> {
+        let carrier = UdpSocket::bind("127.0.0.1:0")?;
+        let (mut wait, _wake) = SocketWake::new(&carrier)?;
+        let registration = wait.registration().expect("epoll");
+        let target = UdpSocket::bind("127.0.0.1:0")?;
+        let interest = registration.add_datagram(target.as_fd(), target.local_addr()?)?;
+        let start = Instant::now();
+        let later = start + ACTIVE_RECEIVE_INTERVAL;
+        assert!(!wait.recent_native_burst(start, 1));
+        assert!(wait.recent_native_burst(start, NATIVE_BATCH_LIMIT));
+        assert!(wait.recent_native_burst(start + Duration::from_millis(1), 1));
+        assert!(!wait.recent_native_burst(later, 1));
+        interest.note_datagram_replies(NATIVE_BATCH_LIMIT - 1);
+        assert!(!wait.recent_native_burst(later, 0));
+        interest.note_datagram_replies(NATIVE_BATCH_LIMIT);
+        assert!(wait.recent_native_burst(later, 0));
+        assert!(!wait.recent_native_burst(later + ACTIVE_RECEIVE_INTERVAL, 0));
+        Ok(())
+    }
 
     #[test]
     fn datagram_readiness_identifies_the_registered_socket_and_peer() -> io::Result<()> {
@@ -516,6 +600,10 @@ impl Carrier for TcpCarrier {
         match self.socket.read(&mut bytes) {
             Ok(0) => Err(io::ErrorKind::UnexpectedEof.into()),
             Ok(n) => {
+                #[cfg(target_os = "linux")]
+                if let Some(wake) = &mut self.wake {
+                    wake.note_receive_batch(n >= bytes.len() / 2);
+                }
                 self.pending.extend_from_slice(&bytes[..n]);
                 self.take_frame()
             }

@@ -26,6 +26,7 @@ struct Config {
     tls: Arc<rustls::ServerConfig>,
     subnet: Ipv4Net,
     mtu: u16,
+    udp_client_receive_buffer: Option<std::num::NonZeroU32>,
     users: Mutex<HashMap<UserEmail, Arc<User>>>,
     stopped: AtomicBool,
     next_peer: AtomicU32,
@@ -116,7 +117,7 @@ pub fn listen(
     if settings.keys().any(|key| {
         !matches!(
             key,
-            "ca" | "certificate" | "privateKey" | "subnet" | "transport" | "mtu"
+            "ca" | "certificate" | "privateKey" | "subnet" | "transport" | "mtu" | "udpClientReceiveBuffer"
         )
     }) {
         return Err(OpenError::Settings);
@@ -146,12 +147,21 @@ pub fn listen(
     if !(576..=1500).contains(&mtu) {
         return Err(OpenError::Settings);
     }
+    let receive_buffer: u32 = settings
+        .optional_text("udpClientReceiveBuffer")?
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| OpenError::Settings)?;
+    if receive_buffer > i32::MAX as u32 {
+        return Err(OpenError::Settings);
+    }
     let (ready, receive) = dispatch::sync_channel(256, settings.dispatch_wake());
     let config = Arc::new(Config {
         tag: tag.clone(),
         tls: Arc::new(tls),
         subnet,
         mtu,
+        udp_client_receive_buffer: std::num::NonZeroU32::new(receive_buffer),
         users: Mutex::new(HashMap::new()),
         stopped: AtomicBool::new(false),
         next_peer: AtomicU32::new(0),
@@ -314,27 +324,34 @@ impl Peer {
             config: config.clone(),
         });
         let mut user = None;
-        let session = kerlico_openvpn::server(carrier, config.tls.clone(), |certificate| {
-            let fingerprint = kerlico_openvpn::fingerprint(certificate);
-            let users = config.users.lock().expect("OpenVPN users");
-            let account = users
-                .values()
-                .find(|user| user.fingerprint == fingerprint)
-                .ok_or(io::ErrorKind::PermissionDenied)?;
-            let generation = account.generation.fetch_add(1, Ordering::AcqRel) + 1;
-            let peer_id = config.next_peer.fetch_add(1, Ordering::Relaxed) % 0xff_ffff;
-            user = Some((account.clone(), generation));
-            Ok(Tunnel {
-                address: account.address,
-                netmask: config.subnet.netmask(),
-                gateway: Some(config.subnet.addr()),
-                mtu: config.mtu,
-                peer_id,
-            })
-        })?;
+        let session = kerlico_openvpn::server_with_udp_client_receive_buffer(
+            carrier,
+            config.tls.clone(),
+            config.udp_client_receive_buffer,
+            |certificate| {
+                let fingerprint = kerlico_openvpn::fingerprint(certificate);
+                let users = config.users.lock().expect("OpenVPN users");
+                let account = users
+                    .values()
+                    .find(|user| user.fingerprint == fingerprint)
+                    .ok_or(io::ErrorKind::PermissionDenied)?;
+                let generation = account.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                let peer_id = config.next_peer.fetch_add(1, Ordering::Relaxed) % 0xff_ffff;
+                user = Some((account.clone(), generation));
+                Ok(Tunnel {
+                    address: account.address,
+                    netmask: config.subnet.netmask(),
+                    gateway: Some(config.subnet.addr()),
+                    mtu: config.mtu,
+                    peer_id,
+                })
+            },
+        )?;
         let (user, generation) = user.expect("authenticated OpenVPN account");
         let mut stack = Stack::with_limits(usize::from(config.mtu), MAX_FLOWS, MAX_FLOWS)?;
         stack.enable_tcp_nodelay();
+        stack.enable_tcp_cubic();
+        stack.set_tcp_buffers(128 * 1024, 128 * 1024);
         stack.set_wake(wake);
         Ok(Self {
             session,

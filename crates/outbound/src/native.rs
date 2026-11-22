@@ -171,6 +171,7 @@ pub fn dial_native(
                     counters: traffic.bind(user, node, exit.tag()),
                     gso: true,
                     batch_receive: true,
+                    tried_burst_buffer: false,
                 };
                 return stream.attach_datagrams(Box::new(relay)).map_err(|_| OpenError::Transport);
             }
@@ -468,11 +469,15 @@ mod vectored_tests {
 struct UdpRead(UdpSocket);
 
 #[cfg(target_os = "linux")]
+const CONNECTED_RECEIVE_BUDGET: usize = 32;
+
+#[cfg(target_os = "linux")]
 struct ConnectedUdp {
     socket: UdpSocket,
     counters: kerlico_shared::TrafficCounters,
     gso: bool,
     batch_receive: bool,
+    tried_burst_buffer: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -533,7 +538,9 @@ impl ConnectedUdp {
     ) -> std::io::Result<()> {
         use std::io::ErrorKind;
         let mut received = 0;
+        let mut packets = 0;
         let mut report = |packet: &[u8]| {
+            packets += 1;
             if reply(packet) {
                 received += packet.len() as u64;
             }
@@ -550,7 +557,7 @@ impl ConnectedUdp {
             }
         } else {
             let mut result = Ok(());
-            for _ in 0..32 {
+            for _ in 0..CONNECTED_RECEIVE_BUDGET {
                 match self.socket.recv(buf) {
                     Ok(n) => report(&buf[..n]),
                     Err(error) if error.kind() == ErrorKind::WouldBlock => break,
@@ -563,6 +570,12 @@ impl ConnectedUdp {
             }
             result
         };
+        if packets == CONNECTED_RECEIVE_BUDGET && !self.tried_burst_buffer {
+            // This flow exhausted a full read turn. Give its next burst room
+            // to queue while other ready sockets are being serviced.
+            kerlico_shared::grow_udp_carrier_receive_buffer(&self.socket);
+            self.tried_burst_buffer = true;
+        }
         if received != 0 {
             self.counters.add_downlink(received);
         }
@@ -593,7 +606,7 @@ fn receive_udp_batch(
         message.msg_hdr.msg_iov = vector;
         message.msg_hdr.msg_iovlen = 1;
     }
-    for _ in 0..(32 / COUNT) {
+    for _ in 0..(CONNECTED_RECEIVE_BUDGET / COUNT) {
         // Only initialized headers and equally sized live slots are supplied.
         let n = unsafe {
             libc::recvmmsg(

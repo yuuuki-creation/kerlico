@@ -84,6 +84,8 @@ def kerlico(args, root, folder, role, transport, port, host=SERVER):
         setup["serverName"] = "localhost"
         fixtures.write_json(path, {"protocol": "openvpn", "peer": fixtures.authority(host, port), "settings": setup})
         return [args.client, "--tun", TUN, path]
+    if transport == "udp" and getattr(args, "udp_client_receive_buffer", None) is not None:
+        setup["udpClientReceiveBuffer"] = args.udp_client_receive_buffer
     der = ssl.PEM_cert_to_DER_cert((root / "client.pem").read_text())
     setup.update(subnet=f"{GATEWAY}/24", users=[{
         "email": "client", "address": "10.73.11.2", "certificateSha256": hashlib.sha256(der).hexdigest(),
@@ -271,9 +273,12 @@ def main():
     parser.add_argument("--server", type=Path)
     parser.add_argument("--openvpn", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--udp-client-receive-buffer", type=int, help="rcvbuf byte count pushed by the Kerlico UDP server")
     parser.add_argument("--packet-probe", type=Path, help="ignored openvpn_packets test executable for macOS")
     parser.add_argument("--probe", nargs=2, type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.udp_client_receive_buffer is not None and not 0 <= args.udp_client_receive_buffer < 2**31:
+        parser.error("--udp-client-receive-buffer must be between 0 and 2147483647 bytes")
     if args.probe:
         probe(*args.probe)
         return

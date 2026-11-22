@@ -221,6 +221,16 @@ pub fn server(
     tls: Arc<ServerConfig>,
     authenticate: impl FnOnce(&[u8]) -> io::Result<Tunnel>,
 ) -> io::Result<Session> {
+    server_with_udp_client_receive_buffer(carrier, tls, None, authenticate)
+}
+
+/// Push an explicitly configured OpenVPN rcvbuf option to UDP clients.
+pub fn server_with_udp_client_receive_buffer(
+    carrier: Box<dyn Carrier>,
+    tls: Arc<ServerConfig>,
+    receive_buffer: Option<std::num::NonZeroU32>,
+    authenticate: impl FnOnce(&[u8]) -> io::Result<Tunnel>,
+) -> io::Result<Session> {
     let tls = ServerConnection::new(tls).map_err(io::Error::other)?;
     let mut link = Link::new(carrier, tls.into(), true)?;
     link.until(|link| Ok((!link.tls.is_handshaking()).then_some(())))?;
@@ -246,13 +256,13 @@ pub fn server(
     let gateway = tunnel
         .gateway
         .ok_or_else(|| invalid("missing tunnel gateway"))?;
-    let socket_flags = if link.carrier.datagrams() {
-        ""
+    let socket_options = if link.carrier.datagrams() {
+        receive_buffer.map_or_else(String::new, |bytes| format!(",rcvbuf {bytes}"))
     } else {
-        ",socket-flags TCP_NODELAY"
+        String::from(",socket-flags TCP_NODELAY")
     };
     link.send_message(format!(
-        "PUSH_REPLY,topology subnet,route-gateway {gateway},ifconfig {} {},peer-id {},cipher {CIPHER},key-derivation tls-ekm,ping 10,ping-restart 60,tun-mtu {}{socket_flags}",
+        "PUSH_REPLY,topology subnet,route-gateway {gateway},ifconfig {} {},peer-id {},cipher {CIPHER},key-derivation tls-ekm,ping 10,ping-restart 60,tun-mtu {}{socket_options}",
         tunnel.address, tunnel.netmask, tunnel.peer_id, tunnel.mtu
     ).as_bytes())?;
     let data = Data::new(&link.tls, true, tunnel.peer_id)?;

@@ -28,18 +28,93 @@ pub struct DirectDatagram {
 /// Give UDP sockets drained in a readiness loop room to absorb short bursts.
 #[cfg(target_os = "linux")]
 pub fn grow_udp_receive_buffer(socket: &UdpSocket) {
-    const REQUESTED: usize = 512 * 1024;
+    grow_receive_buffer(socket, 512 * 1024);
+}
+
+/// Give multiplexed carriers and UDP flows that exhaust a read turn a larger queue.
+/// Linux allocates packet memory on arrival, up to this per-socket limit.
+#[cfg(target_os = "linux")]
+pub fn grow_udp_carrier_receive_buffer(socket: &UdpSocket) {
+    grow_udp_carrier_receive_buffer_to(socket, 2 * 1024 * 1024);
+}
+
+/// Request a larger Linux UDP receive buffer for a shared carrier.
+#[cfg(target_os = "linux")]
+pub fn grow_udp_carrier_receive_buffer_to(socket: &UdpSocket, requested: usize) {
+    use std::os::fd::AsRawFd;
+
+    let Ok(request) = libc::c_int::try_from(requested) else {
+        return;
+    };
+    let Ok(current) = socket2::SockRef::from(socket).recv_buffer_size() else {
+        return;
+    };
+    if current >= 2 * requested {
+        return;
+    }
+    // The kernel checks CAP_NET_ADMIN. Without it, use the ordinary limit.
+    // SAFETY: the socket is live and the argument is one initialized C int.
+    let applied = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUFFORCE,
+            std::ptr::from_ref(&request).cast(),
+            std::mem::size_of_val(&request) as libc::socklen_t,
+        )
+    };
+    if applied != 0 {
+        grow_receive_buffer(socket, requested);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn grow_receive_buffer(socket: &UdpSocket, requested: usize) {
     let options = socket2::SockRef::from(socket);
-    let limit = std::fs::read_to_string("/proc/sys/net/core/rmem_max")
+    let Ok(current) = options.recv_buffer_size() else {
+        return;
+    };
+    if current >= 2 * requested {
+        return;
+    }
+    // Older kernels hide rmem_max inside child network namespaces. Measure
+    // the clamped value on a fresh socket before changing the live queue.
+    let capacity = std::fs::read_to_string("/proc/sys/net/core/rmem_max")
         .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok());
-    // Linux doubles the capped SO_RCVBUF value when accounting for packets.
-    // Preserve an administrator's larger default when rmem_max is lower.
-    if let (Some(limit), Ok(current)) = (limit, options.recv_buffer_size()) {
-        let requested = REQUESTED.min(limit);
-        if requested.saturating_mul(2) > current {
-            let _ = options.set_recv_buffer_size(requested);
-        }
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|limit| 2 * requested.min(limit))
+        .or_else(|| {
+            let domain = socket2::Domain::for_address(socket.local_addr().ok()?);
+            let probe = socket2::Socket::new(domain, socket2::Type::DGRAM, None).ok()?;
+            probe.set_recv_buffer_size(requested).ok()?;
+            probe.recv_buffer_size().ok()
+        });
+    if capacity.is_some_and(|size| size > current) {
+        let _ = options.set_recv_buffer_size(requested);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn udp_receive_tuning_preserves_larger_socket_queues() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let options = socket2::SockRef::from(&socket);
+        let default = options.recv_buffer_size().unwrap();
+        grow_udp_receive_buffer(&socket);
+        let destination = options.recv_buffer_size().unwrap();
+        assert!(destination >= default);
+        grow_udp_carrier_receive_buffer(&socket);
+        let carrier = options.recv_buffer_size().unwrap();
+        assert!(carrier >= destination);
+        grow_udp_carrier_receive_buffer_to(&socket, 8 * 1024 * 1024);
+        let larger = options.recv_buffer_size().unwrap();
+        assert!(larger >= carrier);
+        grow_udp_carrier_receive_buffer(&socket);
+        grow_udp_receive_buffer(&socket);
+        assert_eq!(options.recv_buffer_size().unwrap(), larger);
     }
 }
 

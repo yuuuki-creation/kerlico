@@ -872,12 +872,13 @@ fn open_one(
         }
         flow.lock().expect("flow").local = socket.local_endpoint().map(|endpoint| {
             let ip = match endpoint.addr {
-                IpAddress::Ipv4(ip) => IpAddr::from(ip.0),
-                IpAddress::Ipv6(ip) => IpAddr::from(ip.0),
+                IpAddress::Ipv4(ip) => IpAddr::V4(ip),
+                IpAddress::Ipv6(ip) => IpAddr::V6(ip),
             };
             SocketAddr::new(ip, endpoint.port)
         });
         socket.set_timeout(Some(smoltcp::time::Duration::from_secs(300)));
+        socket.set_congestion_control(tcp::CongestionControl::None);
         sockets.add(socket)
     };
     live.push(Live {
@@ -1017,11 +1018,11 @@ impl Device for IpDev {
 pub(crate) struct RxTok(Vec<u8>);
 
 impl RxToken for RxTok {
-    fn consume<R, F>(mut self, f: F) -> R
+    fn consume<R, F>(self, f: F) -> R
     where
-        F: FnOnce(&mut [u8]) -> R,
+        F: FnOnce(&[u8]) -> R,
     {
-        f(&mut self.0)
+        f(&self.0)
     }
 }
 

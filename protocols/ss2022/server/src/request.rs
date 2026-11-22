@@ -19,7 +19,6 @@ use tokio::net::TcpStream;
 
 const READ_AHEAD: usize = 32 * 1024;
 const RECORD_BATCH: usize = 4;
-const RECORD_SLAB: usize = RECORD_BATCH * u16::MAX as usize + 16;
 
 pub(crate) struct Stream {
     socket: TcpStream,
@@ -37,12 +36,16 @@ impl Stream {
         users: Option<Arc<ServerUserManager>>,
     ) -> io::Result<(Self, Address, Vec<u8>)> {
         let mut reader = DecryptedReader::with_user_manager(StreamType::Server, kind, key, users);
-        let mut chunk = vec![0; u16::MAX.into()];
-        let mut out = ReadBuf::new(&mut chunk);
-        std::future::poll_fn(|cx| reader.poll_read_decrypted(cx, &context, &mut socket, &mut out))
-            .await?;
-        let len = out.filled().len();
-        chunk.truncate(len);
+        let DecryptedReader::Aead2022(cipher) = &mut reader else {
+            unreachable!("SS2022 receiver uses the AEAD2022 reader");
+        };
+        let chunk = std::future::poll_fn(|cx| {
+            if ready!(cipher.poll_fill_buf_decrypted(cx, &context, &mut socket))?.is_empty() {
+                return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
+            }
+            Poll::Ready(Ok::<_, io::Error>(cipher.take_decrypted()))
+        }).await?;
+        let len = chunk.len();
         let mut header = Cursor::new(&chunk[..]);
         let target = Address::read_from(&mut header).await?;
         let padding = usize::from(header.read_u16().await?);
@@ -63,7 +66,7 @@ impl Stream {
             &nonce,
         );
         writer.set_request_nonce(Bytes::copy_from_slice(request));
-        let payload = chunk.split_off(start);
+        let payload = chunk[start..].to_vec();
         Ok((
             Self {
                 socket,
@@ -94,6 +97,7 @@ impl Stream {
                 context: self.context,
                 reader: self.reader,
                 records: Vec::with_capacity(RECORD_BATCH),
+                largest_record: 0,
                 first: 0,
                 deferred_error: None,
                 eof: false,
@@ -102,6 +106,7 @@ impl Stream {
                 socket: write,
                 writer: self.writer,
                 filled: 0,
+                input_records: 1,
             },
         )
     }
@@ -112,6 +117,7 @@ struct Receive<R = OwnedReadHalf> {
     context: SharedContext,
     reader: DecryptedReader,
     records: Vec<Bytes>,
+    largest_record: usize,
     first: usize,
     deferred_error: Option<io::Error>,
     eof: bool,
@@ -133,14 +139,17 @@ impl<R: AsyncRead + Unpin> Receive<R> {
         };
         // All previous leases have been consumed. Reclaim their slab before
         // taking more records; never concatenate authenticated payloads.
-        reader.reserve_owned_records(RECORD_SLAB);
+        reader.reserve_owned_records(self.largest_record * RECORD_BATCH + 16);
         while self.records.len() < RECORD_BATCH {
             match reader.poll_fill_buf_decrypted(cx, &self.context, &mut self.socket) {
                 Poll::Ready(Ok(bytes)) if bytes.is_empty() => {
                     self.eof = true;
                     break;
                 }
-                Poll::Ready(Ok(_)) => self.records.push(reader.take_decrypted()),
+                Poll::Ready(Ok(bytes)) => {
+                    self.largest_record = self.largest_record.max(bytes.len());
+                    self.records.push(reader.take_decrypted());
+                }
                 Poll::Pending if self.records.is_empty() => return Poll::Pending,
                 Poll::Pending => break,
                 Poll::Ready(Err(error)) => {
@@ -271,6 +280,7 @@ struct SendRecords {
     socket: OwnedWriteHalf,
     writer: EncryptedWriter,
     filled: usize,
+    input_records: usize,
 }
 
 impl AsyncWriteInput for SendRecords {
@@ -279,7 +289,7 @@ impl AsyncWriteInput for SendRecords {
         let EncryptedWriter::Aead2022(writer) = &mut this.writer else {
             unreachable!("SS2022 sender uses the AEAD2022 writer");
         };
-        let (storage, regions) = writer.prepare_input();
+        let (storage, regions) = writer.prepare_input_records(this.input_records);
         Poll::Ready(Ok(WriteInput::new(storage, regions, &mut this.filled)))
     }
 
@@ -289,6 +299,9 @@ impl AsyncWriteInput for SendRecords {
             unreachable!("SS2022 sender uses the AEAD2022 writer");
         };
         let n = ready!(writer.poll_send_input(cx, &mut this.socket, this.filled))?;
+        if n == this.input_records * usize::from(u16::MAX) {
+            this.input_records = (2 * this.input_records).min(RECORD_BATCH);
+        }
         this.filled = 0;
         Poll::Ready(Ok(n))
     }
@@ -343,10 +356,39 @@ mod tests {
             context: SsContext::new_shared(ServerType::Server),
             reader: DecryptedReader::new(StreamType::Server, kind, &vec![0x34; kind.key_len()]),
             records: Vec::with_capacity(RECORD_BATCH),
+            largest_record: 0,
             first: 0,
             deferred_error: None,
             eof: false,
         }
+    }
+
+    #[tokio::test]
+    async fn encoder_grows_from_one_record_without_losing_the_next_nonce() -> io::Result<()> {
+        let kind = method("2022-blake3-aes-128-gcm").unwrap();
+        let EncryptedWriter::Aead2022(mut writer) = EncryptedWriter::new(
+            StreamType::Client, kind, &vec![0x34; kind.key_len()], &vec![0x91; kind.salt_len()]
+        ) else { unreachable!() };
+        let mut wire = Vec::new();
+        let mut expected = Vec::new();
+        for records in [1, 2, 4, 1] {
+            let (storage, regions) = writer.prepare_input_records(records);
+            assert_eq!(regions.len(), records);
+            if expected.is_empty() {
+                assert!(storage.len() < 2 * usize::from(u16::MAX));
+            }
+            for region in regions {
+                storage[region.clone()].fill(records as u8);
+                expected.extend_from_slice(&storage[region.clone()]);
+            }
+            let size = records * usize::from(u16::MAX);
+            let sent = std::future::poll_fn(|cx| writer.poll_send_input(cx, &mut wire, size)).await?;
+            assert_eq!(sent, size);
+        }
+        let mut plain = Vec::new();
+        receive(Cursor::new(wire), kind).read_to_end(&mut plain).await?;
+        assert_eq!(plain, expected);
+        Ok(())
     }
 
     #[tokio::test]
@@ -431,7 +473,7 @@ mod tests {
         };
         let mut first_pointer = None;
         for _ in 0..3 {
-            reader.reserve_owned_records(RECORD_SLAB);
+            reader.reserve_owned_records(RECORD_BATCH * body.len() + 16);
             let mut leases = Vec::new();
             for i in 0..RECORD_BATCH {
                 let pointer = std::future::poll_fn(|cx| {

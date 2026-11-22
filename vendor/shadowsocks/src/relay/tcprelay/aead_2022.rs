@@ -723,7 +723,8 @@ impl EncryptedWriter {
         if !matches!(self.state, EncryptWriteState::Writing { .. }) {
             let plaintext = buf.len().min(4 * MAX_PACKET_SIZE);
             let mut remaining = &buf[..plaintext];
-            let (storage, regions) = self.prepare_input();
+            let records = plaintext.div_ceil(MAX_PACKET_SIZE).max(1);
+            let (storage, regions) = self.prepare_input_records(records);
             for region in regions {
                 let n = remaining.len().min(region.len());
                 storage[region.start..region.start + n].copy_from_slice(&remaining[..n]);
@@ -741,6 +742,12 @@ impl EncryptedWriter {
     /// nonce or fixes the response timestamp. Storage is initialized only when
     /// it grows, then retained unchanged in size across subsequent batches.
     pub fn prepare_input(&mut self) -> (&mut [u8], &[std::ops::Range<usize>]) {
+        self.prepare_input_records(self.input.len())
+    }
+
+    /// Offer up to the requested number of complete SIP022 records.
+    pub fn prepare_input_records(&mut self, records: usize) -> (&mut [u8], &[std::ops::Range<usize>]) {
+        assert!((1..=self.input.len()).contains(&records));
         assert!(!matches!(self.state, EncryptWriteState::Writing { .. }));
         let tag = self.cipher.tag_len();
         let first_header = match self.state {
@@ -749,7 +756,7 @@ impl EncryptedWriter {
             EncryptWriteState::Writing { .. } => unreachable!(),
         };
         let mut start = self.prefix_len;
-        for (index, region) in self.input.iter_mut().enumerate() {
+        for (index, region) in self.input[..records].iter_mut().enumerate() {
             let body = start + if index == 0 { first_header } else { 2 + tag };
             *region = body..body + MAX_PACKET_SIZE;
             start = region.end + tag;
@@ -759,7 +766,7 @@ impl EncryptedWriter {
             storage[..self.prefix_len].copy_from_slice(&self.buffer[..self.prefix_len]);
             self.buffer = storage;
         }
-        (&mut self.buffer[..], &self.input)
+        (&mut self.buffer[..], &self.input[..records])
     }
 
     /// Seal bytes previously filled in `prepare_input`, in region order, and

@@ -4,7 +4,7 @@ mod data;
 mod session;
 mod wire;
 
-pub use session::{client, server, Session, Tunnel};
+pub use session::{client, server, server_with_udp_client_receive_buffer, Session, Tunnel};
 #[cfg(unix)]
 pub use wire::SocketWake;
 #[cfg(target_os = "linux")]
