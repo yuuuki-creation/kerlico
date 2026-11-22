@@ -570,7 +570,7 @@ fn dial_options(
             return Err(io::ErrorKind::Unsupported.into());
         };
         #[cfg(target_os = "linux")]
-        kerlico_shared::grow_udp_carrier_receive_buffer(&socket);
+        kerlico_shared::grow_udp_carrier_receive_buffer_to(&socket, 8 * 1024 * 1024);
         socket
             .set_read_timeout(Some(Duration::from_millis(200)))
             .ok();

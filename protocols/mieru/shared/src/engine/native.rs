@@ -12,6 +12,24 @@ use tokio::sync::{futures::OwnedNotified, Notify};
 
 const QUEUE_LIMIT: usize = 2 * 1024 * 1024;
 const MAX_WIRE: usize = 65535;
+const SEND_RETRY: Duration = Duration::from_millis(1);
+
+enum SendWait {
+    Writable,
+    Retry,
+}
+
+fn send_wait(error: &io::Error) -> Option<SendWait> {
+    #[cfg(target_os = "linux")]
+    if error.raw_os_error() == Some(libc::ENOBUFS) {
+        return Some(SendWait::Retry);
+    }
+    match error.kind() {
+        io::ErrorKind::WouldBlock => Some(SendWait::Writable),
+        io::ErrorKind::Interrupted => Some(SendWait::Retry),
+        _ => None,
+    }
+}
 
 /// Keep a UDP socket and its native stream relays on the same reactor.
 fn udp_executor() -> io::Result<&'static tokio::runtime::Handle> {
@@ -129,7 +147,7 @@ impl Udp {
                     return Ok(tx.sent);
                 }
                 Ok(_) => return Err(io::ErrorKind::WriteZero.into()),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) if send_wait(&error).is_some() => {}
                 Err(error) => return Err(error),
             }
         }
@@ -142,19 +160,29 @@ impl Udp {
         Ok(ticket)
     }
 
-    fn flush(&self) -> io::Result<bool> {
+    fn flush(&self) -> io::Result<Option<SendWait>> {
         let transport = self.transport()?;
+        self.flush_with(|packet| transport.socket.try_send_to(&packet.wire, packet.peer))
+    }
+
+    fn flush_with(
+        &self,
+        mut send: impl FnMut(&Packet) -> io::Result<usize>,
+    ) -> io::Result<Option<SendWait>> {
         let mut tx = self.tx.lock().expect("native UDP send");
         let mut sent = 0;
+        let mut wait = SendWait::Writable;
         for _ in 0..16 {
             let Some(packet) = tx.packets.front() else {
                 break;
             };
-            match transport.socket.try_send_to(&packet.wire, packet.peer) {
+            match send(packet) {
                 Ok(n) if n == packet.wire.len() => {}
                 Ok(_) => return Err(io::ErrorKind::WriteZero.into()),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) => return Err(error),
+                Err(error) => {
+                    wait = send_wait(&error).ok_or(error)?;
+                    break;
+                }
             }
             let mut packet = tx.packets.pop_front().unwrap();
             tx.bytes -= packet.wire.len();
@@ -165,12 +193,12 @@ impl Udp {
                 tx.scratch = packet.wire;
             }
         }
-        let done = tx.packets.is_empty();
+        let pending = (!tx.packets.is_empty()).then_some(wait);
         drop(tx);
         if sent != 0 {
             self.space.notify_waiters();
         }
-        Ok(done)
+        Ok(pending)
     }
 
     pub(super) fn close(&self) {
@@ -277,11 +305,17 @@ async fn send(link: &Arc<Link>) -> io::Result<()> {
         if !link.alive.load(Ordering::Acquire) {
             return Ok(());
         }
-        if native.flush()? {
-            tokio::select! { _ = changed => {}, _ = closed => return Ok(()) }
-        } else {
-            tokio::select! { result = transport.socket.writable() => result?, _ = closed => return Ok(()) }
-            tokio::task::yield_now().await;
+        match native.flush()? {
+            None => tokio::select! { _ = changed => {}, _ = closed => return Ok(()) },
+            Some(SendWait::Writable) => {
+                tokio::select! { result = transport.socket.writable() => result?, _ = closed => return Ok(()) }
+                tokio::task::yield_now().await;
+            }
+            Some(SendWait::Retry) => {
+                // ENOBUFS can leave the socket writable. Give the device time
+                // to drain before retrying the same sealed datagram.
+                tokio::select! { _ = tokio::time::sleep(SEND_RETRY) => {}, _ = closed => return Ok(()) }
+            }
         }
     }
 }
@@ -738,6 +772,45 @@ mod tests {
         drop(rebound);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn enobufs_preserves_queued_datagram_and_its_ticket_until_sent() {
+        let (sess, peer) = session();
+        let native = sess.link.native.as_ref().unwrap();
+        let wire = b"already encoded";
+        {
+            let mut tx = native.tx.lock().unwrap();
+            tx.packets.push_back(Packet {
+                peer: sess.peer,
+                wire: wire.to_vec(),
+                ticket: 1,
+            });
+            tx.bytes = wire.len();
+            tx.appended = 1;
+        }
+
+        let pending = native
+            .flush_with(|packet| {
+                assert_eq!(packet.wire.as_slice(), wire);
+                Err(io::Error::from_raw_os_error(libc::ENOBUFS))
+            })
+            .unwrap();
+        assert!(matches!(pending, Some(SendWait::Retry)));
+        {
+            let tx = native.tx.lock().unwrap();
+            assert_eq!(tx.bytes, wire.len());
+            assert_eq!(tx.sent, 0);
+            assert_eq!(tx.packets.front().unwrap().ticket, 1);
+        }
+
+        assert!(native.flush().unwrap().is_none());
+        assert_eq!(native.tx.lock().unwrap().sent, 1);
+        let mut received = [0; 64];
+        let count = peer.recv(&mut received).unwrap();
+        assert_eq!(&received[..count], wire);
+        sess.link.close();
+    }
+
     #[test]
     fn native_udp_stream_carries_backpressured_bidirectional_bytes() {
         let account = Account {
@@ -838,7 +911,7 @@ mod tests {
         }
         assert!(Pin::new(&mut halves.write).poll_flush(&mut cx).is_pending());
         assert!(
-            !native.flush().unwrap(),
+            native.flush().unwrap().is_some(),
             "later sessions still have queued packets"
         );
         assert!(wakes.0.load(Ordering::Relaxed) > 0);

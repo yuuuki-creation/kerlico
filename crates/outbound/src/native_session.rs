@@ -118,6 +118,9 @@ impl Sessions {
             Err(_) => (UdpSocket::bind("0.0.0.0:0")?, false),
         };
         if session.executor().is_some() {
+            #[cfg(target_os = "linux")]
+            kerlico_shared::grow_udp_carrier_receive_buffer(&socket);
+            #[cfg(not(target_os = "linux"))]
             let _ = socket2::SockRef::from(&socket).set_recv_buffer_size(256 * 1024);
         }
         socket.set_write_timeout(Some(IO_WAIT))?;

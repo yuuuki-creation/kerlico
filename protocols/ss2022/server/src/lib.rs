@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use kerlico_shared::dispatch;
 use kerlico_shared::{
-    Accept, Destination, Handoff, InboundStream, ListenAddr, NodeTag, OpenError, PlaneFault,
-    Settings, Transport, UserEmail,
+    Accept, DatagramSession, DatagramUplink, Destination, DirectDatagram, Handoff, InboundStream,
+    ListenAddr, NodeTag, OpenError, PlaneFault, Settings, Transport, UserEmail,
 };
 use kerlico_ss2022::{
     address, block, config, context, key, map_io, method, relay, runtime, target, udp_wire_limit,
@@ -200,7 +200,7 @@ pub fn listen(
         .then(|| {
             let socket = open_socket(bind, socket2::Type::DGRAM, socket2::Protocol::UDP)?.into();
             #[cfg(target_os = "linux")]
-            kerlico_shared::grow_udp_carrier_receive_buffer(&socket);
+            kerlico_shared::grow_udp_carrier_receive_buffer_to(&socket, 8 * 1024 * 1024);
             tokio::net::UdpSocket::from_std(socket)
         })
         .transpose()
@@ -409,7 +409,7 @@ impl InboundStream for Tcp {
 }
 
 struct Session {
-    socket_group: Arc<kerlico_shared::DatagramSession>,
+    socket_group: Arc<DatagramSession>,
     replay: Replay,
     reply: Arc<Reply>,
     flows: HashMap<Address, Queue>,
@@ -448,7 +448,41 @@ impl UdpActivity {
 
 struct Queue {
     sender: mpsc::SyncSender<Datagram>,
-    live: Arc<AtomicBool>,
+    direct: Arc<Mutex<Option<DirectRoute>>>,
+    lease: Weak<FlowLease>,
+}
+
+struct DirectRoute {
+    uplink: Box<dyn DatagramUplink>,
+    _lease: Arc<FlowLease>,
+}
+
+struct FlowLease(Arc<AtomicUsize>);
+
+impl Drop for FlowLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl Queue {
+    fn is_live(&self) -> bool {
+        match self.direct.lock().expect("Shadowsocks UDP route").as_ref() {
+            Some(route) => route.uplink.is_live(),
+            None => self.lease.strong_count() != 0,
+        }
+    }
+
+    fn send(&self, body: &[u8], budget: &Arc<AtomicUsize>) -> bool {
+        let direct = self.direct.lock().expect("Shadowsocks UDP route");
+        if let Some(route) = direct.as_ref() {
+            return matches!(route.uplink.send(body), Ok(()) | Err(PlaneFault::Again));
+        }
+        let Some(data) = Datagram::store(body, budget) else {
+            return true;
+        };
+        !matches!(self.sender.try_send(data), Err(mpsc::TrySendError::Disconnected(_)))
+    }
 }
 
 struct Datagram {
@@ -478,6 +512,10 @@ impl Drop for Datagram {
 }
 
 struct Reply {
+    socket: Arc<tokio::net::UdpSocket>,
+    context: context::SharedContext,
+    kind: CipherKind,
+    relay: bool,
     account: Arc<Account>,
     client_id: u64,
     server_id: u64,
@@ -509,7 +547,7 @@ async fn serve_udp(
             _ = idle.tick() => {
                 let now = Instant::now();
                 sessions.retain(|_, session| session.reply.account.live.load(Ordering::Acquire) && session.reply.activity.is_recent(now));
-                for session in sessions.values_mut() { session.flows.retain(|_, flow| flow.live.load(Ordering::Acquire)); }
+                for session in sessions.values_mut() { session.flows.retain(|_, flow| flow.is_live()); }
                 continue;
             }
             result = socket.recv_from(&mut buffer) => match result { Ok(pair) => pair, Err(_) => continue },
@@ -597,10 +635,15 @@ async fn serve_udp(
                 server_id = OsRng.next_u64();
             }
             Session {
-                socket_group: Arc::new(kerlico_shared::DatagramSession::new(!config.relay)),
+                socket_group: Arc::new(DatagramSession::new(!config.relay)
+                    .with_executor(tokio::runtime::Handle::current())),
                 replay: Replay::default(),
                 flows: HashMap::new(),
                 reply: Arc::new(Reply {
+                    socket: socket.clone(),
+                    context: config.context.clone(),
+                    kind: config.kind,
+                    relay: config.relay,
                     account,
                     client_id,
                     server_id,
@@ -620,20 +663,12 @@ async fn serve_udp(
             .endpoint
             .lock()
             .expect("Shadowsocks UDP endpoint") = peer;
-        let Some(data) = Datagram::store(body, &budget) else {
-            continue;
-        };
-        let data = if let Some(flow) = session.flows.get(&addr) {
-            match flow.sender.try_send(data) {
-                Err(mpsc::TrySendError::Disconnected(data)) => {
-                    session.flows.remove(&addr);
-                    data
-                }
-                _ => continue,
+        if let Some(flow) = session.flows.get(&addr) {
+            if flow.send(body, &budget) {
+                continue;
             }
-        } else {
-            data
-        };
+            session.flows.remove(&addr);
+        }
         if session.flows.len() >= MAX_DESTINATIONS
             || flow_count.load(Ordering::Relaxed) >= MAX_UDP_FLOWS
         {
@@ -642,22 +677,23 @@ async fn serve_udp(
         let Ok(destination) = Destination::new(host, port, Transport::Udp) else {
             continue;
         };
+        let Some(data) = Datagram::store(body, &budget) else {
+            continue;
+        };
         let (tx, rx) = mpsc::sync_channel(16);
         if tx.try_send(data).is_err() {
             continue;
         }
-        let live = Arc::new(AtomicBool::new(true));
         flow_count.fetch_add(1, Ordering::Relaxed);
+        let lease = Arc::new(FlowLease(flow_count.clone()));
+        let direct = Arc::new(Mutex::new(None));
+        let queue = Queue { sender: tx, direct: direct.clone(), lease: Arc::downgrade(&lease) };
         let udp = Udp {
-            socket: socket.clone(),
-            context: config.context.clone(),
-            kind: config.kind,
-            relay: config.relay,
             address: addr.clone(),
-            inbound: Mutex::new(rx),
+            inbound: Arc::new(Mutex::new(rx)),
             reply: session.reply.clone(),
-            live: live.clone(),
-            flow_count: flow_count.clone(),
+            direct,
+            lease,
         };
         let mut handoff = Handoff::new(
             config.tag.clone(),
@@ -668,35 +704,22 @@ async fn serve_udp(
         handoff.set_peer(peer);
         handoff.set_datagram_session(session.socket_group.clone());
         if config.ready.try_send(handoff).is_ok() {
-            session.flows.insert(addr, Queue { sender: tx, live });
+            session.flows.insert(addr, queue);
         }
     }
 }
 
 struct Udp {
-    socket: Arc<tokio::net::UdpSocket>,
-    context: context::SharedContext,
-    kind: CipherKind,
-    relay: bool,
     address: Address,
-    inbound: Mutex<mpsc::Receiver<Datagram>>,
+    inbound: Arc<Mutex<mpsc::Receiver<Datagram>>>,
     reply: Arc<Reply>,
-    live: Arc<AtomicBool>,
-    flow_count: Arc<AtomicUsize>,
+    direct: Arc<Mutex<Option<DirectRoute>>>,
+    lease: Arc<FlowLease>,
 }
 
-impl Drop for Udp {
-    fn drop(&mut self) {
-        self.live.store(false, Ordering::Release);
-        self.flow_count.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-impl Udp {
+impl Reply {
     fn check(&self) -> Result<(), PlaneFault> {
-        if self.reply.active.load(Ordering::Acquire)
-            && self.reply.account.live.load(Ordering::Acquire)
-        {
+        if self.active.load(Ordering::Acquire) && self.account.live.load(Ordering::Acquire) {
             Ok(())
         } else {
             Err(PlaneFault::Closed)
@@ -705,8 +728,34 @@ impl Udp {
 }
 
 impl InboundStream for Udp {
+    fn direct_datagram(&self) -> Option<DirectDatagram> {
+        let queue = self.inbound.clone();
+        let direct = self.direct.clone();
+        let lease = self.lease.clone();
+        let session = self.reply.clone();
+        let reply = session.clone();
+        Some(DirectDatagram {
+            install: Box::new(move |uplink| {
+                let mut direct = direct.lock().expect("Shadowsocks UDP route");
+                session.check()?;
+                let queue = queue.lock().expect("Shadowsocks UDP receive");
+                while let Ok(packet) = queue.try_recv() {
+                    match uplink.send(&packet.data) {
+                        Ok(()) | Err(PlaneFault::Again) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                *direct = Some(DirectRoute { uplink, _lease: lease });
+                Ok(())
+            }),
+            reply: Box::new(move |source, payload| {
+                reply.write(payload, &Address::SocketAddress(source), false).map(|_| ())
+            }),
+        })
+    }
+
     fn read_from_user(&self, buf: &mut [u8]) -> Result<usize, PlaneFault> {
-        self.check()?;
+        self.reply.check()?;
         let data = self
             .inbound
             .lock()
@@ -723,34 +772,29 @@ impl InboundStream for Udp {
     }
 
     fn write_to_user(&self, buf: &[u8]) -> Result<usize, PlaneFault> {
-        self.reply(buf, &self.address)
+        self.reply.write(buf, &self.address, true)
     }
 
     fn write_datagram_to_user(&self, buf: &[u8], source: SocketAddr) -> Result<usize, PlaneFault> {
-        self.reply(buf, &Address::SocketAddress(source))
+        self.reply.write(buf, &Address::SocketAddress(source), true)
     }
 }
 
-impl Udp {
-    fn reply(&self, buf: &[u8], address: &Address) -> Result<usize, PlaneFault> {
+impl Reply {
+    fn write(&self, buf: &[u8], address: &Address, wait: bool) -> Result<usize, PlaneFault> {
         self.check()?;
-        let peer = *self
-            .reply
-            .endpoint
-            .lock()
-            .expect("Shadowsocks UDP endpoint");
+        let peer = *self.endpoint.lock().expect("Shadowsocks UDP endpoint");
         let limit = udp_wire_limit(peer);
         if buf.len() > limit {
             return Ok(buf.len());
         }
         if self.relay {
-            return self.send_reply(buf, peer).map(|_| buf.len());
+            return self.send_reply(buf, peer, wait).map(|_| buf.len());
         }
         let mut control = UdpSocketControlData::default();
-        control.client_session_id = self.reply.client_id;
-        control.server_session_id = self.reply.server_id;
+        control.client_session_id = self.client_id;
+        control.server_session_id = self.server_id;
         control.packet_id = self
-            .reply
             .next
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| PlaneFault::Closed)?;
@@ -758,7 +802,7 @@ impl Udp {
         crypto_io::encrypt_server_payload(
             &self.context,
             self.kind,
-            &self.reply.account.key,
+            &self.account.key,
             address,
             &control,
             buf,
@@ -767,15 +811,18 @@ impl Udp {
         if sealed.len() > limit {
             return Ok(buf.len());
         }
-        self.send_reply(&sealed, peer).map(|_| buf.len())
+        self.send_reply(&sealed, peer, wait).map(|_| buf.len())
     }
 
-    fn send_reply(&self, wire: &[u8], peer: SocketAddr) -> Result<(), PlaneFault> {
+    fn send_reply(&self, wire: &[u8], peer: SocketAddr, wait: bool) -> Result<(), PlaneFault> {
         // A valid reply from the egress is activity even when the client sends no more packets.
-        self.reply.activity.record(Instant::now());
-        block(FLOW_WAIT, self.socket.send_to(wire, peer))
-            .map(|_| ())
-            .map_err(map_io)
+        self.activity.record(Instant::now());
+        let sent = if wait {
+            block(FLOW_WAIT, self.socket.send_to(wire, peer))
+        } else {
+            self.socket.try_send_to(wire, peer)
+        };
+        sent.map(|_| ()).map_err(map_io)
     }
 }
 
